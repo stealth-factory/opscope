@@ -69,6 +69,34 @@ fn render_big(text: &str) -> Vec<String> {
     rows
 }
 
+/// The clock face: scaled text when the block fits, otherwise the five
+/// rows of blocks. Scale 1 is those blocks, so a terminal that has not
+/// answered the sizing probe draws exactly what it drew before.
+fn clock_face(time: &str, width: usize, height: usize, p: &Palette) -> Vec<String> {
+    let cols = tc::display_width(time);
+    let room = width.saturating_sub(1);
+    // The space in front of the time is ordinary text, so it is not part of
+    // the scaled block. Taking it out of the budget keeps the row inside
+    // the pane: eight columns at 2× plus that space is 17, and a 17-column
+    // pane would wrap if the space were free.
+    let scale = tc::text_scale(cols, room.saturating_sub(1), height, 4);
+    if scale == 1 {
+        return render_big(time)
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let ink = if i < 3 { p.big_top.as_str() } else { p.big_base.as_str() };
+                tc::seg(&[(ink, format!(" {line}"))], room)
+            })
+            .collect();
+    }
+    let mut rows = vec![format!("{} {}", p.big_top, tc::sized_text(time, scale))];
+    for _ in 1..scale {
+        rows.push(String::new());
+    }
+    rows
+}
+
 fn hms(seconds: i64) -> String {
     let s = seconds.max(0);
     format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
@@ -325,9 +353,38 @@ fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            for n in chars.by_ref() {
-                if n == 'm' || n.is_ascii_alphabetic() {
-                    break;
+            // OSC 66 carries the clock face when it is scaled. The flash
+            // wants that text, not the `s=2;` in front of it.
+            if chars.peek() == Some(&']') {
+                chars.next();
+                let mut body = String::new();
+                while let Some(n) = chars.next() {
+                    if n == '\x07' {
+                        break;
+                    }
+                    if n == '\x1b' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    body.push(n);
+                }
+                if let Some(rest) = body.strip_prefix("66;s=") {
+                    if let Some((scale, payload)) = rest.split_once(';') {
+                        if scale.len() == 1
+                            && scale.chars().all(|c| ('2'..='7').contains(&c))
+                            && payload.chars().all(|c| !c.is_control())
+                        {
+                            out.push_str(payload);
+                        }
+                    }
+                }
+            } else {
+                for n in chars.by_ref() {
+                    if n == 'm' || n.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
         } else {
@@ -1078,11 +1135,9 @@ impl Pomodoro {
 
     /// Nudge whoever is in front of the terminal, over SSH if need be.
     ///
-    /// BEL is universal. OSC 9 covers iTerm2, WezTerm, Windows Terminal
-    /// and Ghostty; OSC 777 covers urxvt and several others. Terminals
-    /// ignore the sequences they do not implement, so sending both costs
-    /// nothing, and a multiplexer in between decides whether to forward
-    /// them.
+    /// BEL is universal. The notification itself is `tc::notify`: OSC 99
+    /// with one stable id where Kitty answered, and OSC 9 plus OSC 777
+    /// everywhere else — the bytes this pane has always sent.
     /// The flash, the bell and the escape sequences stay per-pane: each is
     /// the pane talking to the terminal it is drawn in, and a pane that did
     /// not flash when its own timer elapsed would be the odd one out. Only
@@ -1094,10 +1149,10 @@ impl Pomodoro {
             tc::out("\x07");
         }
         if self.notify {
-            tc::out(&format!("\x1b]9;{}\x07", text));
-            tc::out(&format!("\x1b]777;notify;Pomodoro;{}\x07", text));
+            tc::notify("Pomodoro", text);
+        } else {
+            tc::flush();
         }
-        tc::flush();
         // The marker before the spawn, always. The other order would trade
         // a lost toast for duplicate ones, and duplicates are the thing
         // being removed; toast() claims each channel it can actually
@@ -1203,15 +1258,13 @@ fn main() {
         let mut rows = vec![tc::title("clocks", w, &p.head)];
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ──".into())], w - 1));
 
-        // Two colours down the digits, not one: the top three rows are
-        // bright and the base is darker, which is what gives them weight.
-        for (i, line) in render_big(&now.format("%H:%M:%S").to_string())
-            .into_iter()
-            .enumerate()
-        {
-            let ink = if i < 3 { &p.big_top } else { &p.big_base };
-            rows.push(tc::seg(&[(ink.as_str(), format!(" {}", line))], w - 1));
-        }
+        // Two colours down the block digits, not one: the top three rows
+        // are bright and the base is darker, which is what gives them
+        // weight. Kitty text sizing replaces that face with the time at
+        // the largest scale that fits; a pane too narrow or too short
+        // keeps the blocks, which scroll instead of being cut.
+        let time = now.format("%H:%M:%S").to_string();
+        rows.extend(clock_face(&time, w, h.saturating_sub(rows.len()), &p));
         rows.push(String::new());
         rows.push(tc::seg(
             &[
@@ -1942,6 +1995,29 @@ mod tests {
         let widths: Vec<usize> = rows.iter().map(|r| r.chars().count()).collect();
         assert!(widths.windows(2).all(|w| w[0] == w[1]), "{:?}", widths);
         assert!(rows[0].contains('█'));
+    }
+
+    #[test]
+    fn the_face_stays_blocks_when_a_scaled_time_does_not_fit() {
+        // HH:MM:SS is eight columns, plus the leading space the face keeps.
+        // Scale 4 needs 32 columns and 4 rows. A narrower or shorter pane
+        // stays on the block digits, which are never a cut of the time.
+        assert_eq!(tc::fitting_scale(8, 10, 24, 4), 1);
+        assert_eq!(tc::fitting_scale(8, 16, 24, 4), 2);
+        assert_eq!(tc::fitting_scale(8, 32, 24, 4), 4);
+        assert_eq!(tc::fitting_scale(8, 80, 3, 4), 3);
+        let p = palette();
+        for width in 8..80usize {
+            let face = clock_face("12:34:56", width, 24, &p);
+            assert_eq!(face.len(), 5, "width {width} left the block digits");
+            for row in &face {
+                assert!(
+                    tc::occupied_columns(row) <= width.saturating_sub(1),
+                    "width {width} drew {}",
+                    tc::occupied_columns(row)
+                );
+            }
+        }
     }
 
     #[test]

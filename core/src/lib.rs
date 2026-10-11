@@ -419,6 +419,87 @@ pub fn flush() {
     let _ = std::io::stdout().flush();
 }
 
+/// The id Kitty uses to replace a pomodoro alert instead of stacking another.
+const NOTIFICATION_ID: &str = "opscope-pomodoro";
+
+/// Announce `body` under `title`.
+///
+/// Kitty that answered the notification query gets one OSC 99 notification
+/// with a stable id, so the next alert replaces it, and `a=report` so a
+/// click focuses the pane. Every other terminal gets the OSC 9 and OSC 777
+/// bytes clocks has always sent.
+pub fn notify(title: &str, body: &str) {
+    out(&notify_bytes(
+        title,
+        body,
+        capabilities().kitty_notifications,
+    ));
+    flush();
+}
+
+fn notify_bytes(title: &str, body: &str, kitty: bool) -> String {
+    if kitty {
+        let title = escape_safe(title);
+        let body = escape_safe(body);
+        format!(
+            "\x1b]99;i={NOTIFICATION_ID}:a=report:d=0;{title}\x1b\\\x1b]99;i={NOTIFICATION_ID}:p=body;{body}\x1b\\"
+        )
+    } else {
+        format!("\x1b]9;{body}\x07\x1b]777;notify;{title};{body}\x07")
+    }
+}
+
+/// Payload text with the C0 and C1 controls taken out. Those bytes would
+/// end the OSC or move the cursor, and a notification is plain text.
+fn escape_safe(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !('\u{80}'..='\u{9f}').contains(c))
+        .collect()
+}
+
+/// Largest scale in `2..=max_scale` whose block fits, or 1 when none does.
+///
+/// A scale-`s` run occupies `s` rows and `s * text_columns` columns. Anything
+/// that does not fit is scale 1: the caller draws its ordinary text, which
+/// is the only way a narrow pane cannot wrap or clip the line.
+pub fn fitting_scale(text_columns: usize, width: usize, height: usize, max_scale: u8) -> u8 {
+    if text_columns == 0 || width == 0 || height == 0 {
+        return 1;
+    }
+    let max_scale = max_scale.clamp(2, 7);
+    (2..=max_scale)
+        .rev()
+        .find(|scale| {
+            let scale = *scale as usize;
+            scale <= height && text_columns.saturating_mul(scale) <= width
+        })
+        .unwrap_or(1)
+}
+
+/// `fitting_scale` when this terminal answered the text-sizing probe, else 1.
+pub fn text_scale(text_columns: usize, width: usize, height: usize, max_scale: u8) -> u8 {
+    if !capabilities().text_sizing {
+        return 1;
+    }
+    fitting_scale(text_columns, width, height, max_scale)
+}
+
+/// `text` at `scale`, or `text` unchanged at scale 1 and on a terminal that
+/// has not acknowledged sizing. The block is `scale` rows tall; the caller
+/// leaves the rows under it empty so drawing them does not wipe the glyph.
+pub fn sized_text(text: &str, scale: u8) -> String {
+    if scale <= 1 || !capabilities().text_sizing {
+        return text.to_string();
+    }
+    sized_sequence(text, scale)
+}
+
+fn sized_sequence(text: &str, scale: u8) -> String {
+    let scale = scale.clamp(2, 7);
+    let payload = escape_safe(text);
+    format!("\x1b]66;s={scale};{payload}\x07")
+}
+
 /// Paint `rows` from the top-left.
 ///
 /// Every row is erased before it is written, so a short row cannot leave
@@ -592,7 +673,7 @@ fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: b
             for (i, line) in lines.iter().enumerate() {
                 if last.lines.get(i) != Some(line) {
                     buf.push_str(&format!("\x1b[{}H", i + 1));
-                    put_line(&mut buf, line);
+                    put_row(&mut buf, &lines, i);
                 }
             }
             (buf, last.whole_at)
@@ -652,11 +733,12 @@ fn version_room(w: usize) -> usize {
 /// - The top row is cut to what the version leaves and the version is
 ///   appended after a reset, so neither the widget's text nor its colours
 ///   reach those cells.
-/// - Every row is made inert first. Colour escapes pass; anything else
+/// - Every row is made inert first. Colour escapes pass, and so does an
+///   OSC 66 sized-text sequence whose block fits this pane. Anything else
 ///   that can move the cursor or rewrite the screen - a CSI that is not
-///   colour, a bare ESC sequence, an OSC, a carriage return, a backspace -
-///   is dropped. Without that, a later row could carry `ESC[1;70H` and
-///   write over the version from underneath.
+///   colour, a bare ESC sequence, every other OSC, a carriage return, a
+///   backspace - is dropped. Without that, a later row could carry
+///   `ESC[1;70H` and write over the version from underneath.
 ///
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
@@ -664,7 +746,12 @@ fn version_room(w: usize) -> usize {
 fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
     (0..h)
         .map(|i| {
-            let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+            let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+            // The title row is measured as ordinary text. A sized block
+            // there would move the cursor under the version.
+            if i == 0 || occupied_columns(&line) > w {
+                line = without_sizing(&line);
+            }
             if i == 0 {
                 let line = match graphics_notice() {
                     Some(notice) => with_notice(&line, notice, w),
@@ -687,13 +774,24 @@ fn frame(rows: &[String], w: usize, h: usize) -> String {
 /// Every one of `lines`, from home.
 fn painted(lines: &[String]) -> String {
     let mut buf = String::from(HOME);
-    for (i, line) in lines.iter().enumerate() {
-        put_line(&mut buf, line);
+    for i in 0..lines.len() {
+        put_row(&mut buf, lines, i);
         if i + 1 != lines.len() {
             buf.push_str("\r\n");
         }
     }
     buf
+}
+
+/// One row of a frame. A row covered by a sized block above it is cleared
+/// around that block, not with erase-in-line from column 0: that erase
+/// deletes the whole glyph.
+fn put_row(buf: &mut String, lines: &[String], i: usize) {
+    if let Some(origin) = covering_row(lines, i) {
+        put_covered(buf, origin);
+    } else {
+        put_line(buf, &lines[i]);
+    }
 }
 
 /// One row, written where the cursor is, which is column 0.
@@ -710,10 +808,198 @@ fn put_line(buf: &mut String, line: &str) {
     buf.push_str(RST);
 }
 
-/// `row`, with every escape that is not a colour and every control
-/// character taken out.
+/// The row a sized block above `i` is drawn on, when `i` is one of the
+/// rows that block occupies under its first line.
+fn covering_row(lines: &[String], i: usize) -> Option<&str> {
+    let from = i.saturating_sub(6);
+    for origin in (from..i).rev() {
+        if let Some((scale, _)) = first_sized(&lines[origin]) {
+            if scale > 1 && i < origin + scale as usize {
+                return Some(&lines[origin]);
+            }
+        }
+    }
+    None
+}
+
+/// Clear the gaps around a sized block. Erase-in-line from column 0 would
+/// delete the glyph; erase-in-line after the last covered column does not
+/// touch it, and the gaps between blocks are spaces.
+fn put_covered(buf: &mut String, origin: &str) {
+    buf.push_str(RST);
+    let ranges = covered_ranges(origin);
+    if ranges.is_empty() {
+        buf.push_str(EL);
+        return;
+    }
+    let mut cursor = 0usize;
+    for (start, end) in ranges {
+        if start > cursor {
+            buf.push_str(&format!("\x1b[{}G", cursor + 1));
+            buf.push_str(&" ".repeat(start - cursor));
+        }
+        cursor = end;
+    }
+    buf.push_str(&format!("\x1b[{}G", cursor + 1));
+    buf.push_str(EL);
+}
+
+/// Columns a drawn row occupies. Colour costs nothing. A sized block
+/// occupies `scale` times the width of its text.
+pub fn occupied_columns(row: &str) -> usize {
+    let chars: Vec<char> = row.chars().collect();
+    let mut i = 0usize;
+    let mut columns = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\x1b' {
+            if let Some((end, _, width)) = sized_span(&chars, i) {
+                columns += width;
+                i = end;
+                continue;
+            }
+            if chars.get(i + 1) == Some(&'[') {
+                let mut j = i + 2;
+                while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
+                    j += 1;
+                }
+                i = (j + 1).min(chars.len());
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if chars[i] == '\t' {
+            columns += 1;
+        } else if !chars[i].is_control() {
+            let ch = chars[i];
+            columns += display_width(&ch.to_string());
+        }
+        i += 1;
+    }
+    columns
+}
+
+/// Scale of the first sized span in `row`, if it has one.
+pub fn row_scale(row: &str) -> Option<u8> {
+    first_sized(row).map(|(scale, _)| scale)
+}
+
+fn first_sized(row: &str) -> Option<(u8, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some((_, scale, width)) = sized_span(&chars, i) {
+            return Some((scale, width));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn covered_ranges(row: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    let mut i = 0usize;
+    let mut column = 0usize;
+    let mut ranges = Vec::new();
+    while i < chars.len() {
+        if chars[i] == '\x1b' {
+            if let Some((end, scale, width)) = sized_span(&chars, i) {
+                if scale > 1 && width > 0 {
+                    ranges.push((column, column + width));
+                }
+                column += width;
+                i = end;
+                continue;
+            }
+            if chars.get(i + 1) == Some(&'[') {
+                let mut j = i + 2;
+                while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
+                    j += 1;
+                }
+                i = (j + 1).min(chars.len());
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if chars[i] == '\t' {
+            column += 1;
+        } else if !chars[i].is_control() {
+            column += display_width(&chars[i].to_string());
+        }
+        i += 1;
+    }
+    ranges
+}
+
+/// OSC 66 `s=N` with a plain payload. `N` is 2..=7. Anything else is not
+/// sized text and is dropped with the other strings.
+fn sized_span(chars: &[char], i: usize) -> Option<(usize, u8, usize)> {
+    if chars.get(i) != Some(&'\x1b') || chars.get(i + 1) != Some(&']') {
+        return None;
+    }
+    let marker = ['6', '6', ';', 's', '='];
+    if chars.get(i + 2..i + 7) != Some(&marker) {
+        return None;
+    }
+    let scale = chars.get(i + 7)?.to_digit(10)? as u8;
+    if !(2..=7).contains(&scale) || chars.get(i + 8) != Some(&';') {
+        return None;
+    }
+    let mut j = i + 9;
+    let payload_at = j;
+    while j < chars.len() {
+        let c = chars[j];
+        if c == '\x07' {
+            return span_end(chars, payload_at, j, j + 1, scale);
+        }
+        if c == '\x1b' && chars.get(j + 1) == Some(&'\\') {
+            return span_end(chars, payload_at, j, j + 2, scale);
+        }
+        if c.is_control() {
+            return None;
+        }
+        j += 1;
+    }
+    None
+}
+
+fn span_end(chars: &[char], from: usize, to: usize, end: usize, scale: u8) -> Option<(usize, u8, usize)> {
+    let payload: String = chars[from..to].iter().collect();
+    let columns = (scale as usize).saturating_mul(display_width(&payload));
+    Some((end, scale, columns))
+}
+
+/// Sized spans replaced by the text they carry, for a row that must stay
+/// ordinary: the title, or a block that would be wider than the pane.
+fn without_sizing(row: &str) -> String {
+    let chars: Vec<char> = row.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some((end, _, _)) = sized_span(&chars, i) {
+            // Payload starts after `ESC ] 66 ; s = N ;`.
+            let payload: String = chars[i + 9..end]
+                .iter()
+                .copied()
+                .take_while(|c| *c != '\x07' && *c != '\x1b')
+                .collect();
+            out.push_str(&payload);
+            i = end;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `row`, with every escape that is not a colour or sized text, and every
+/// control character, taken out.
 ///
-/// Colour is `ESC [` then digits, `;` and `:`, then `m`. A tab becomes a
+/// Colour is `ESC [` then digits, `;` and `:`, then `m`. OSC 66 sized text
+/// is kept; `lines` drops it again when the block is wider than the pane
+/// or the row is the title. A tab becomes a
 /// space rather than vanishing, since it was meant as a gap; everything
 /// else - C0, DEL, and C1, which includes the one-byte CSI `\u{9b}` - goes.
 fn inert(row: &str) -> String {
@@ -741,6 +1027,13 @@ fn inert(row: &str) -> String {
                     i = j + 1;
                 }
                 Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                    // OSC 66 sized text stays. `lines` drops it when the
+                    // block is wider than the pane or the row is the title.
+                    if let Some((end, _, _)) = sized_span(&chars, i) {
+                        out.extend(&chars[i..end]);
+                        i = end;
+                        continue;
+                    }
                     // A string: runs to BEL or to ST (`ESC \\`).
                     let mut j = i + 2;
                     while j < chars.len() {
@@ -4515,6 +4808,52 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn a_notification_keeps_todays_bytes_until_kitty_answers() {
+        let plain = super::notify_bytes("Pomodoro", "Focus elapsed", false);
+        assert_eq!(
+            plain,
+            "\x1b]9;Focus elapsed\x07\x1b]777;notify;Pomodoro;Focus elapsed\x07"
+        );
+        let first = super::notify_bytes("Pomodoro", "Focus elapsed", true);
+        let second = super::notify_bytes("Pomodoro", "Focus elapsed, 0:01:00 over", true);
+        assert!(first.contains("\x1b]99;i=opscope-pomodoro:a=report:d=0;Pomodoro\x1b\\"));
+        assert!(first.contains("\x1b]99;i=opscope-pomodoro:p=body;Focus elapsed\x1b\\"));
+        assert!(second.contains("i=opscope-pomodoro"));
+        assert!(!first.contains("\x1b]9;"));
+        assert!(!second.contains("\x1b]777;"));
+    }
+
+    #[test]
+    fn sized_text_is_used_only_when_the_block_fits_the_pane() {
+        // 12:34:56 is eight columns. Scale 4 needs 32 columns and 4 rows.
+        assert_eq!(super::fitting_scale(8, 10, 24, 4), 1);
+        assert_eq!(super::fitting_scale(8, 16, 24, 4), 2);
+        assert_eq!(super::fitting_scale(8, 24, 24, 4), 3);
+        assert_eq!(super::fitting_scale(8, 32, 24, 4), 4);
+        assert_eq!(super::fitting_scale(8, 80, 3, 4), 3);
+        assert_eq!(super::fitting_scale(8, 80, 1, 4), 1);
+        let face = super::sized_sequence("12:34:56", 2);
+        assert_eq!(super::occupied_columns(&face), 16);
+        let lines = super::lines(&["title".into(), face, String::new()], 40, 3);
+        assert!(lines[1].contains("\x1b]66;s=2;12:34:56\x07"), "{:?}", lines[1]);
+        assert!(!lines[0].contains("\x1b]66"));
+        let bytes = super::painted(&lines);
+        let after = bytes.split("12:34:56").nth(1).expect("the sized face");
+        assert!(
+            !after.contains("\r\n\x1b[0m\x1b[K"),
+            "the row under the face erased it: {after:?}"
+        );
+        // Wider than the pane: the sequence is dropped rather than wrapped.
+        let too_wide = super::lines(
+            &["title".into(), super::sized_sequence("12:34:56", 4)],
+            20,
+            2,
+        );
+        assert!(!too_wide[1].contains("\x1b]66"), "{:?}", too_wide[1]);
+        assert!(too_wide[1].contains("12:34:56"));
     }
 
     #[test]

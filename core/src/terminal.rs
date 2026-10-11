@@ -13,6 +13,13 @@ const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?202
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
+/// Ask whether OSC 99 notifications exist. The device-attributes query that
+/// follows is the deadline: a DA reply with no answer means they do not.
+const NOTIFY_QUERY: &str = "\x1b]99;i=opscope:p=?;\x1b\\";
+/// OSC 66 support is a cursor-position round trip, not a flag in DA.
+/// CR, report, a two-cell space, report, a 2×2 space, report. Three equal
+/// positions means the terminal ignored it.
+const SIZE_PROBE: &str = "\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n";
 const TIMEOUT: Duration = Duration::from_millis(800);
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 /// True after flag 1 was pushed, so every cleanup path pops exactly once.
@@ -26,6 +33,10 @@ pub struct Capabilities {
     pub styled_underlines: bool,
     /// Kitty `Setulc`: an underline colour distinct from the foreground.
     pub underline_colour: bool,
+    /// OSC 99, so a repeat can replace one notification instead of stacking.
+    pub kitty_notifications: bool,
+    /// OSC 66 scale (`s=`), from the cursor moving on the sizing probe.
+    pub text_sizing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,6 +67,9 @@ struct Session {
     probe_settled: bool,
     /// Later images go out as `t=s`. A failure clears this and stays on `t=d`.
     use_shm: bool,
+    /// Columns from the three sizing-probe reports, in the order they arrive.
+    size_columns: [Option<usize>; 3],
+    size_reports: u8,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
@@ -64,6 +78,8 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
         synchronized_updates: false,
         styled_underlines: false,
         underline_colour: false,
+        kitty_notifications: false,
+        text_sizing: false,
     },
     deadline: None,
     mode: GraphicsMode::Auto,
@@ -74,6 +90,8 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     keyboard_disambiguate: false,
     probe_settled: true,
     use_shm: false,
+    size_columns: [None, None, None],
+    size_reports: 0,
 });
 
 /// Query only after cbreak is active, so replies are never echoed as text.
@@ -115,18 +133,23 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    let mut bytes = format!(
-        "{}{UNDERLINE_QUERY}",
-        if mode == GraphicsMode::Text {
-            TEXT_QUERY
-        } else {
-            QUERY
-        }
-    );
-    if let Some(probe) = probe {
-        bytes.push_str(&probe);
+    // Notifications and text sizing are negotiated either way: they are not
+    // graphics, and they go out before device attributes, which is their
+    // deadline too. The shared-memory probe, when there is one, follows.
+    let mut query = if mode == GraphicsMode::Text {
+        TEXT_QUERY.to_string()
+    } else {
+        QUERY.to_string()
+    };
+    let da = "\x1b[c";
+    if let Some(prefix) = query.strip_suffix(da) {
+        query = format!("{prefix}{NOTIFY_QUERY}{SIZE_PROBE}{da}");
     }
-    super::out(&bytes);
+    query.push_str(UNDERLINE_QUERY);
+    if let Some(probe) = probe {
+        query.push_str(&probe);
+    }
+    super::out(&query);
     super::flush();
 }
 
@@ -277,10 +300,48 @@ impl Session {
             // the window is support.
             self.graphics_answered = true;
             false
+        } else if let Some(column) = cursor_column(sequence) {
+            if self.size_reports < 3 {
+                self.size_columns[self.size_reports as usize] = Some(column);
+                self.size_reports += 1;
+                if self.size_reports == 3 {
+                    self.capabilities.text_sizing = scale_supported(self.size_columns);
+                }
+            }
+            false
+        } else if notification_query_answer(sequence) {
+            self.capabilities.kitty_notifications = true;
+            false
         } else {
             false
         }
     }
+}
+
+/// `CSI row ; column R` from the sizing probe. The row is not needed:
+/// support is the column advancing by two cells, twice.
+fn cursor_column(sequence: &str) -> Option<usize> {
+    let rest = sequence.strip_prefix("\x1b[")?.strip_suffix('R')?;
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == ';') {
+        return None;
+    }
+    rest.split_once(';')?.1.parse().ok()
+}
+
+/// The width probe moved two cells and the scale probe moved two more.
+fn scale_supported(columns: [Option<usize>; 3]) -> bool {
+    let (Some(first), Some(second), Some(third)) = (columns[0], columns[1], columns[2]) else {
+        return false;
+    };
+    second.saturating_sub(first) == 2 && third.saturating_sub(second) == 2
+}
+
+/// The answer to our OSC 99 query, not a click report and not some other id.
+fn notification_query_answer(sequence: &str) -> bool {
+    let Some(body) = sequence.strip_prefix("\x1b]99;") else {
+        return false;
+    };
+    body.contains("i=opscope") && body.contains("p=?") && !body.contains("i=opscope-")
 }
 
 pub(crate) fn reply(sequence: &str) {
@@ -559,6 +620,49 @@ mod tests {
         late.reply("\x1bP1+r536d756c78=1b\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!late.underline_answered);
         assert!(!late.capabilities.styled_underlines);
+    }
+
+    #[test]
+    fn text_sizing_needs_both_probe_steps_and_notifications_need_our_query() {
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b[1;1R", now);
+        s.reply("\x1b[1;3R", now);
+        assert!(!s.capabilities.text_sizing);
+        s.reply("\x1b[1;5R", now);
+        assert!(s.capabilities.text_sizing);
+        // A width-only terminal never moves on the scale probe.
+        let mut width_only = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        for column in ["\x1b[1;1R", "\x1b[1;3R", "\x1b[1;3R"] {
+            width_only.reply(column, now);
+        }
+        assert!(!width_only.capabilities.text_sizing);
+        s.reply("\x1b]99;i=opscope:p=?;a=report,focus\x1b\\", now);
+        assert!(s.capabilities.kitty_notifications);
+        // A click report for the pomodoro id is not the query answer.
+        let mut other = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        other.reply("\x1b]99;i=opscope-pomodoro;\x1b\\", now);
+        assert!(!other.capabilities.kitty_notifications);
+        // Late, like the graphics replies.
+        let mut late = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        late.reply("\x1b[1;1R", now + TIMEOUT + TIMEOUT);
+        late.reply("\x1b[1;3R", now + TIMEOUT + TIMEOUT);
+        late.reply("\x1b[1;5R", now + TIMEOUT + TIMEOUT);
+        late.reply("\x1b]99;i=opscope:p=?;a=report\x1b\\", now + TIMEOUT + TIMEOUT);
+        assert!(!late.capabilities.text_sizing);
+        assert!(!late.capabilities.kitty_notifications);
     }
 
     #[test]

@@ -378,12 +378,21 @@ fn block(
     today: NaiveDate,
     gutter: bool,
     p: &Palette,
+    scale: u8,
 ) -> Vec<Vec<(String, String)>> {
     let width = block_width(gutter);
     let blank = |n: usize| (tc::NOBG.to_string(), " ".repeat(n));
     let mut rows: Vec<Vec<(String, String)>> = Vec::new();
 
-    rows.push(vec![(p.lbl.clone(), tc::pad(&month.heading(), width))]);
+    let heading = month.heading();
+    let text = if scale > 1 {
+        let occupied = tc::display_width(&heading).saturating_mul(scale as usize);
+        let pad = width.saturating_sub(occupied);
+        format!("{}{}", tc::sized_text(&heading, scale), " ".repeat(pad))
+    } else {
+        tc::pad(&heading, width)
+    };
+    rows.push(vec![(p.lbl.clone(), text)]);
 
     let mut header: Vec<(String, String)> = Vec::new();
     if gutter {
@@ -447,6 +456,28 @@ fn block(
     rows
 }
 
+/// One scale for the whole band, so the grids stay aligned. The shortest
+/// fit wins: a heading that does not fit at 2× keeps every heading in the
+/// band at normal size rather than letting one overlap the next month.
+///
+/// `height` is the rows the body window can show. A block taller than that
+/// would be skipped rather than drawn, which reads as a month with no name.
+fn band_scale(months: &[Month], width: usize, height: usize) -> u8 {
+    months
+        .iter()
+        .map(|month| tc::text_scale(tc::display_width(&month.heading()), width, height, 4))
+        .min()
+        .unwrap_or(1)
+}
+
+/// Rows under the title, after the footer. That is the window a heading has
+/// to fit in; the terminal's full height counts rows the footer already owns.
+fn pane_room(w: usize, neighbours: bool, p: &Palette) -> usize {
+    let (_, h) = tc::size();
+    let foot = footer(w, neighbours, p).0.lines.len();
+    h.saturating_sub(foot).saturating_sub(1).max(1)
+}
+
 /// Every month on show, side by side, as rows of segments.
 ///
 /// The grid area is `GRID_ROWS` tall whatever the months in it need, so the
@@ -460,11 +491,13 @@ fn strip(
     today: NaiveDate,
     l: Layout,
     p: &Palette,
+    height: usize,
 ) -> Vec<Vec<(String, String)>> {
     let width = block_width(l.gutter);
+    let scale = band_scale(months, width, height);
     let blocks: Vec<Vec<Vec<(String, String)>>> = months
         .iter()
-        .map(|m| block(*m, start, today, l.gutter, p))
+        .map(|m| block(*m, start, today, l.gutter, p, scale))
         .collect();
     let tall = blocks
         .iter()
@@ -610,6 +643,68 @@ fn footer(w: usize, neighbours: bool, p: &Palette) -> (tc::Footer, usize) {
     (packed, indent)
 }
 
+/// Where a window of `room` rows starts and ends in `rest`.
+///
+/// The same arithmetic as a plain scroll when nothing is scaled. A sized
+/// heading and the blank rows under it stay together: a window that would
+/// cut the glyph either backs up to its first row or, when the block is
+/// taller than the window, skips it and shows the rows after it.
+fn view_bounds(rest: &[String], scroll: usize, room: usize) -> (usize, usize) {
+    if room == 0 || rest.is_empty() {
+        return (0, 0);
+    }
+    let mut start = scroll.min(rest.len().saturating_sub(room.min(rest.len())));
+    // A handful of attempts. Each one moves the start forward, and the
+    // last attempt keeps a plain window so a block taller than the pane
+    // cannot leave the screen empty or spin.
+    for _ in 0..8 {
+        if let Some(origin) = span_origin(rest, start) {
+            let scale = tc::row_scale(&rest[origin]).unwrap_or(1) as usize;
+            let past = origin + scale;
+            if past > start && origin + scale > start + room && past < rest.len() {
+                start = past.min(rest.len().saturating_sub(room.min(rest.len())));
+                continue;
+            }
+            if past <= start + room {
+                start = origin;
+            }
+        } else if let Some(scale) = tc::row_scale(rest.get(start).map(String::as_str).unwrap_or("")) {
+            let scale = scale as usize;
+            let past = start + scale;
+            if scale > 1 && past > start + room && past < rest.len() {
+                start = past.min(rest.len().saturating_sub(room.min(rest.len())));
+                continue;
+            }
+        }
+        break;
+    }
+    let mut end = (start + room).min(rest.len());
+    if let Some(origin) = span_origin(rest, end) {
+        if origin >= start && origin < end {
+            let scale = tc::row_scale(&rest[origin]).unwrap_or(1) as usize;
+            if origin + scale > end && origin > start {
+                end = origin;
+            }
+        }
+    }
+    (start, end.max(start))
+}
+
+fn span_origin(rows: &[String], index: usize) -> Option<usize> {
+    if index == 0 || index > rows.len() {
+        return None;
+    }
+    let from = index.saturating_sub(6);
+    for origin in (from..index).rev() {
+        if let Some(scale) = tc::row_scale(&rows[origin]) {
+            if scale > 1 && index < origin + scale as usize {
+                return Some(origin);
+            }
+        }
+    }
+    None
+}
+
 /// The whole frame at width `w`, title first, at whatever height it needs.
 ///
 /// Built as tall as it wants to be and windowed by the caller, so nothing is
@@ -693,14 +788,31 @@ fn frame(
             // reach the rest, which is the rule the rest of this collection
             // follows: a pane too short is a pane you scroll, not a pane
             // that hides things.
+            let room = pane_room(w, neighbours, p);
             for (n, band) in months.chunks(l.columns.max(1)).enumerate() {
                 if n > 0 {
                     body.push(String::new());
                 }
-                for row in strip(band, start, today, l, p) {
-                    let refs: Vec<(&str, String)> =
-                        row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-                    body.push(tc::seg(&refs, w.saturating_sub(1)));
+                for (i, row) in strip(band, start, today, l, p, room).iter().enumerate() {
+                    let sized = i == 0 && row.iter().any(|(_, text)| text.contains("\x1b]66;"));
+                    if sized {
+                        let mut line = String::new();
+                        for (colour, text) in row {
+                            line.push_str(colour);
+                            line.push_str(text);
+                        }
+                        let scale = tc::row_scale(&line).unwrap_or(1);
+                        body.push(line);
+                        // The rows the scaled heading occupies under its
+                        // first line. Left empty so the glyph is not erased.
+                        for _ in 1..scale {
+                            body.push(String::new());
+                        }
+                    } else {
+                        let refs: Vec<(&str, String)> =
+                            row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                        body.push(tc::seg(&refs, w.saturating_sub(1)));
+                    }
                 }
             }
         }
@@ -783,10 +895,10 @@ fn main() {
         let room = h.saturating_sub(foot.len());
         let (head, rest) = body.split_at(1.min(body.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
-        scroll = scroll.min(rest.len().saturating_sub(room_below));
-        let last = (scroll + room_below).min(rest.len());
+        let (start, last) = view_bounds(rest, scroll, room_below);
+        scroll = start;
         let mut rows: Vec<String> = head.to_vec();
-        rows.extend_from_slice(&rest[scroll..last]);
+        rows.extend_from_slice(&rest[start..last]);
         while rows.len() < room {
             rows.push(String::new());
         }
@@ -1186,7 +1298,7 @@ mod tests {
             let months: Vec<Month> = (0..l.columns)
                 .filter_map(|i| Month { year: 2026, month: 8 }.shift(i as i64))
                 .collect();
-            let rows = strip(&months, WeekStart::Sunday, today, l, &p);
+            let rows = strip(&months, WeekStart::Sunday, today, l, &p, 24);
             let widths: Vec<usize> = rows
                 .iter()
                 .map(|r| r.iter().map(|(_, t)| t.chars().count()).sum())
@@ -1215,7 +1327,7 @@ mod tests {
             let months: Vec<Month> = (0..l.columns)
                 .filter_map(|i| view.shift(i as i64))
                 .collect();
-            heights.push(strip(&months, WeekStart::Sunday, today, l, &p).len());
+            heights.push(strip(&months, WeekStart::Sunday, today, l, &p, 24).len());
         }
         assert!(heights.iter().all(|n| *n == 2 + GRID_ROWS), "{:?}", heights);
     }
@@ -1224,7 +1336,7 @@ mod tests {
     fn today_is_marked_and_the_days_around_it_are_not() {
         let p = palette();
         let today = day(2026, 8, 29);
-        let rows = block(Month { year: 2026, month: 8 }, WeekStart::Sunday, today, true, &p);
+        let rows = block(Month { year: 2026, month: 8 }, WeekStart::Sunday, today, true, &p, 1);
         let tinted: Vec<&(String, String)> = rows
             .iter()
             .flatten()
@@ -1259,7 +1371,7 @@ mod tests {
             let m = Month { year: 2026, month };
             for start in [WeekStart::Sunday, WeekStart::Monday] {
                 let rows = weeks(m, start, Some(today));
-                let drawn = block(m, start, today, true, &p);
+                let drawn = block(m, start, today, true, &p, 1);
                 for (i, row) in rows.iter().enumerate() {
                     // Row 0 is the heading, row 1 the weekday names, and the
                     // first cell of a grid row is the week-number gutter.
@@ -1361,6 +1473,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_scaled_heading_fits_its_block_or_stays_the_full_name() {
+        // The heading is never cut to make a bigger size fit. SEPTEMBER is
+        // the long name: 14 columns, and 2× of that is wider than a month
+        // even with the week-number gutter. MAY is short enough for 2×.
+        let september = tc::display_width("SEPTEMBER 2026");
+        let may = tc::display_width("MAY 2026");
+        assert_eq!(tc::fitting_scale(september, block_width(true), 24, 4), 1);
+        assert_eq!(tc::fitting_scale(may, block_width(false), 24, 4), 2);
+        for width in 23..120usize {
+            let Some(l) = layout(width, true) else {
+                continue;
+            };
+            let block = block_width(l.gutter);
+            for month in 1..=12u32 {
+                let heading = Month { year: 2026, month }.heading();
+                let cols = tc::display_width(&heading);
+                for height in [1usize, 2, 3, 4, 24] {
+                    let scale = tc::fitting_scale(cols, block, height, 4);
+                    if scale == 1 {
+                        assert_eq!(heading, Month { year: 2026, month }.heading());
+                    } else {
+                        let occupied = cols * scale as usize;
+                        assert!(occupied <= block, "{heading} scale {scale} in {block}");
+                        assert!(scale as usize <= height);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_does_not_split_a_scaled_heading() {
+        let sized = "\x1b]66;s=2;MAY 2026\x07".to_string();
+        let rows = vec![
+            "date".into(),
+            sized,
+            String::new(),
+            "weekdays".into(),
+            "grid".into(),
+        ];
+        assert_eq!(view_bounds(&rows, 2, 2), (1, 3));
+        assert_eq!(view_bounds(&rows, 0, 2), (0, 1));
+        let plain: Vec<String> = (0..10).map(|i| format!("row {i}")).collect();
+        assert_eq!(view_bounds(&plain, 3, 4), (3, 7));
+        assert_eq!(view_bounds(&plain, 100, 4), (6, 10));
     }
 
     #[test]

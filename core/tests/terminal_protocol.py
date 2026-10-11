@@ -65,7 +65,7 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if self.reply == "kitty" or self.reply == "keyboard":
+                if self.reply in ("kitty", "sized", "notify", "keyboard"):
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
                     response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
@@ -76,6 +76,10 @@ class Terminal:
                 response += b"\x1b[?62;c"
                 if self.reply == "keyboard":
                     response += b"\x1b[?0u"
+                if self.reply == "notify":
+                    response += b"\x1b]99;i=opscope:p=?;a=report,focus\x1b\\"
+                if self.reply == "sized":
+                    response += b"\x1b[1;1R\x1b[1;3R\x1b[1;5R"
                 # Deliberately split strings/CSI across reads.
                 for part in [response[:4], response[4:17], response[17:]]:
                     self.send(part)
@@ -406,6 +410,38 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+def notifications(t):
+    t.read(0.45)
+    t.send(b"n")
+    t.read(0.45)
+    ids = re.findall(rb"i=opscope-pomodoro", t.output)
+    assert len(ids) >= 4, "a repeat did not reuse the notification id"
+    assert b"a=report" in t.output
+    assert b"\x1b]9;" not in t.output
+    assert b"\x1b]777;notify;" not in t.output
+
+
+def notifications_today(t):
+    t.read(0.45)
+    t.send(b"n")
+    t.read(0.45)
+    assert b"\x1b]9;Focus elapsed\x07" in t.output
+    assert b"\x1b]777;notify;Pomodoro;Focus elapsed\x07" in t.output
+    assert b"\x1b]9;Focus elapsed, 0:01:00 over\x07" in t.output
+    assert b"\x1b]777;notify;Pomodoro;Focus elapsed, 0:01:00 over\x07" in t.output
+    assert b"i=opscope-pomodoro" not in t.output
+
+
+def sized_text(t):
+    t.read(0.6)
+    assert re.search(rb"\x1b\]66;s=[2-4];12:34:56\x07", t.output), "sized face was not sent"
+    before = len(t.output)
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 12, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.6)
+    assert b"\x1b]66;s=" not in t.output[before:], "narrow pane still sent sized text"
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -493,7 +529,9 @@ if __name__ == "__main__":
                                ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
-                               ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
+                               ("text", "sync", underlines), ("text", "sync", plain_underlines),
+                               ("auto", "notify", notifications), ("auto", "kitty", notifications_today),
+                               ("auto", "sized", sized_text)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
     for ending in ["signal", "panic"]:
