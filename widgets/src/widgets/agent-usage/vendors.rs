@@ -291,11 +291,6 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
 /// used to walk every name in ORDER instead, so a quiet agent the reader
 /// never enabled still landed in a roll-call at the bottom, and a quiet
 /// agent they *did* enable got only that roll-call rather than a section.
-#[cfg(test)]
-fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> {
-    summary_with_plots(s, w, p, names, &mut Vec::new())
-}
-
 fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut groups: Vec<(String, Vec<Lane>)> = Vec::new();
     let mut quiet: Vec<(String, String)> = Vec::new();
@@ -583,19 +578,6 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
     rows
 }
 
-#[cfg(test)]
-pub fn tab_body(
-    name: &str,
-    s: &State,
-    w: usize,
-    h: usize,
-    cfg: &Config,
-    p: &Palette,
-    tabs: &[String],
-) -> Vec<String> {
-    tab_body_with_plots(name, s, w, h, cfg, p, tabs, &mut Vec::new())
-}
-
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     match name {
         SUMMARY_TAB => {
@@ -618,14 +600,14 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
             crate::claude::tab_with_plots(claude_of(s, name).unwrap_or(&fallback), w, h, cfg, p, plots)
         }
         "codex" => crate::codex::tab_with_plots(&s.codex, w, h, cfg, p, plots),
-        "cursor" => crate::cursor::tab(&s.cursor, w, h, cfg, p),
+        "cursor" => crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots),
         "grok" => crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots),
-        "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
-        "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
-        "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
-        "notion" => crate::notion::tab(&s.notion, w, h, cfg, p),
-        "devin" => crate::devin::tab(&s.devin, w, h, cfg, p),
-        "droid" => crate::droid::tab(&s.droid, w, h, cfg, p),
+        "copilot" => crate::copilot::tab_with_plots(&s.copilot, w, h, cfg, p, plots),
+        "antigravity" => crate::antigravity::tab_with_plots(&s.antigravity, w, h, cfg, p, plots),
+        "coderabbit" => crate::coderabbit::tab_with_plots(&s.coderabbit, w, h, cfg, p, plots),
+        "notion" => crate::notion::tab_with_plots(&s.notion, w, h, cfg, p, plots),
+        "devin" => crate::devin::tab_with_plots(&s.devin, w, h, cfg, p, plots),
+        "droid" => crate::droid::tab_with_plots(&s.droid, w, h, cfg, p, plots),
         other => unknown(other, &s.installed, w, p),
     }
 }
@@ -1007,6 +989,30 @@ mod tests {
     }
 
     #[test]
+    fn vendor_detail_meters_cover_only_quota_cells() {
+        let state = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit","billingPeriodWindow":{"used":18,"limit":100}}"#,
+            ),
+            ..State::default()
+        };
+        for width in [40, 60, 120] {
+            let mut plots = Vec::new();
+            let rows = plain(&crate::notion::tab_with_plots(
+                &state.notion, width, 40, &Config::default(), &palette(), &mut plots,
+            ));
+            assert_eq!(plots.len(), 1);
+            for plot in plots {
+                assert_eq!(plot.height, 1);
+                assert!(plot.x > 0);
+                for glyph in rows[plot.y].chars().skip(plot.x).take(plot.width) {
+                    assert!(['█', '░', '┃'].contains(&glyph), "covered label: {glyph}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn summary_meter_rectangles_cover_only_the_bar() {
         let state = State {
             notion: crate::notion::Data::answered(
@@ -1354,4 +1360,22 @@ mod tests {
         };
         assert_eq!(claude_of(&one, "claude").expect("lone tab").label, "work");
     }
+}
+
+#[cfg(test)]
+fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> {
+    summary_with_plots(s, w, p, names, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab_body(
+    name: &str,
+    s: &State,
+    w: usize,
+    h: usize,
+    cfg: &Config,
+    p: &Palette,
+    tabs: &[String],
+) -> Vec<String> {
+    tab_body_with_plots(name, s, w, h, cfg, p, tabs, &mut Vec::new())
 }

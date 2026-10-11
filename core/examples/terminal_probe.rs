@@ -21,7 +21,10 @@ fn main() {
                     return;
                 }
                 "c" => hidden = !hidden,
-                "down" => { scroll = 2; selected += 1; },
+                "down" => {
+                    scroll = 2;
+                    selected += 1;
+                }
                 "g" => gallery = !gallery,
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
@@ -92,6 +95,12 @@ fn main() {
                     tc::Plot::bars(13, 9, &columns, 3, 1.0, true),
                     tc::Plot::heatmap_levels(3, 14, &cells, &grey),
                     tc::Plot::meter(3, 18, 20, 0.375, Some(0.65), &green, &grey, &blue),
+                    tc::Plot::stacked_bar(
+                        3,
+                        13,
+                        20,
+                        &[(0.375, green.clone()), (0.625, blue.clone())],
+                    ),
                 ]
                 .into_iter()
                 .filter_map(|p| p.in_viewport(scroll, 1, h.saturating_sub(2))),

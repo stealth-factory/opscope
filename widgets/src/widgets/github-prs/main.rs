@@ -2279,6 +2279,7 @@ fn main() {
         // "github" in the name, like the two beside it on the wall. Three
         // panes headed GITHUB OPS, GITHUB PRS and GITHUB ACTIONS say what
         // they have in common; PR WATCH read as a fourth unrelated thing.
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("github prs", w, &p.accent)];
         // Two rows, in the order the other GitHub widgets use them. The
         // first is the chrome every polling widget draws and is meant to
@@ -2407,7 +2408,7 @@ fn main() {
             if show_stats {
                 // Every open PR, not `shown`: the filter is a search of the
                 // board, not a redefinition of it.
-                rows.extend(stats_view(
+                tc::append_plot_rows(&mut rows, &mut plots, |plots| stats_view_with_plots(
                     &sort_prs(&prs, SORTS[sort_at], newest_first),
                     total,
                     capped,
@@ -2418,6 +2419,7 @@ fn main() {
                     w,
                     tick,
                     &p,
+                    plots,
                 ));
             }
             let top = rows.len();
@@ -2527,7 +2529,8 @@ fn main() {
         // under the pointer.
         let foot_top = frame.len();
         frame.extend(footer);
-        tc::draw(&frame, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(off, head.len(), room_below)).collect();
+        tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(300));
     }
@@ -2734,7 +2737,7 @@ fn figure_block(
 /// behind it have not arrived: the bar area shimmers rather than drawing
 /// thirty zeros, because thirty zeros is a claim.
 #[allow(clippy::too_many_arguments)]
-fn day_chart(
+fn day_chart_with_plots(
     heading: &str,
     caption: Vec<(String, String)>,
     series: Option<&[(String, i64)]>,
@@ -2745,6 +2748,7 @@ fn day_chart(
     w: usize,
     tick: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let (left, right) = split_halves(w);
     let mut rows = vec![String::new()];
@@ -2799,6 +2803,11 @@ fn day_chart(
                     cols.extend(std::iter::repeat_n((0.0, bar_colour.to_string()), gap));
                 }
             }
+            let peak = cols.iter().map(|(v, _)| *v).fold(0.0, f64::max);
+            // The text layout clips the left chart before the figure gutter.
+            // Clip pixels at the same boundary without rescaling the readings.
+            let visible = cols.len().min(left.saturating_sub(1));
+            plots.push(tc::Plot::bars(1, rows.len(), &cols[..visible], 3, peak, false));
             for line in tc::vbars(&cols, 3, 0.0) {
                 let mut parts: Vec<(String, String)> =
                     vec![(tc::RST.to_string(), " ".to_string())];
@@ -2918,7 +2927,7 @@ fn count_caption(
 /// and, worse, made them look like statements about the whole board when
 /// they described three matching rows.
 #[allow(clippy::too_many_arguments)]
-fn stats_view(
+fn stats_view_with_plots(
     prs: &[serde_json::Value],
     total: usize,
     capped: bool,
@@ -2929,6 +2938,7 @@ fn stats_view(
     w: usize,
     tick: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let mut rows = vec![String::new()];
     // Both large figures are the merge request's two rolling windows, so
@@ -3034,6 +3044,7 @@ fn stats_view(
                 Some((got as f64 / n as f64, c.to_string()))
             })
             .collect();
+        plots.push(tc::Plot::stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &parts));
         let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
         let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
         for (colour, txt) in &bar {
@@ -3089,7 +3100,7 @@ fn stats_view(
         // read as this minute's.
         opened_cap.push((p.warn.clone(), " \u{b7} 24h count stale".to_string()));
     }
-    rows.extend(day_chart(
+    tc::append_plot_rows(&mut rows, plots, |plots| day_chart_with_plots(
         "OPENED / DAY",
         opened_cap,
         opened.as_deref(),
@@ -3100,8 +3111,9 @@ fn stats_view(
         w,
         tick,
         p,
+        plots,
     ));
-    rows.extend(day_chart(
+    tc::append_plot_rows(&mut rows, plots, |plots| day_chart_with_plots(
         "MERGED / DAY",
         count_caption(
             merged.as_deref(),
@@ -3118,6 +3130,7 @@ fn stats_view(
         w,
         tick,
         p,
+        plots,
     ));
 
     if prs.is_empty() {
@@ -4991,7 +5004,8 @@ mod tests {
             let (left, right) = split_halves(w);
             for figure in [Some(0), Some(7), Some(184), Some(123456), None] {
                 for series in [Some(series.as_slice()), None] {
-                    let rows = day_chart(
+                    let mut plots = Vec::new();
+                    let rows = day_chart_with_plots(
                         "MERGED / DAY",
                         vec![(
                             p.dim.clone(),
@@ -5005,7 +5019,13 @@ mod tests {
                         w,
                         4,
                         &p,
+                        &mut plots,
                     );
+                    assert_eq!(plots.len(), usize::from(series.is_some()));
+                    for plot in &plots {
+                        assert!(plot.x + plot.width <= left + 1);
+                        assert!(plot.y + plot.height <= rows.len());
+                    }
                     // A row wider than the pane wraps, and a wrapped row
                     // costs the frame a line and scrolls the pinned title
                     // off the top.
@@ -5615,4 +5635,36 @@ mod tests {
             g.counts_err
         );
     }
+}
+
+#[cfg(test)]
+fn day_chart(
+    heading: &str,
+    caption: Vec<(String, String)>,
+    series: Option<&[(String, i64)]>,
+    bar_colour: &str,
+    figure: Option<i64>,
+    stalled: bool,
+    label: &str,
+    w: usize,
+    tick: usize,
+    p: &Palette,
+) -> Vec<String> {
+    day_chart_with_plots(heading, caption, series, bar_colour, figure, stalled, label, w, tick, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+fn stats_view(
+    prs: &[serde_json::Value],
+    total: usize,
+    capped: bool,
+    counts: Option<&Counts>,
+    counts_err: &str,
+    created: Option<&Created>,
+    created_err: &str,
+    w: usize,
+    tick: usize,
+    p: &Palette,
+) -> Vec<String> {
+    stats_view_with_plots(prs, total, capped, counts, counts_err, created, created_err, w, tick, p, &mut Vec::new())
 }

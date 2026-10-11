@@ -21,9 +21,12 @@ same. Higher resolution does not imply more samples or faster polling.
 
 `ports` adds pixel traffic bars; `github`, `github-actions`,
 `vercel-deployments`, and `linear` add discrete pixel bar charts.
-`github` and `agent-usage` use separated calendar cells, and `linear` and
-`agent-usage` use fractional progress/quota meters. These fall back to ordinary
-block characters, squares, dots and reference marks in text sessions.
+`github` and `agent-usage` use gapless calendar tiles, and `linear` and
+all `agent-usage` vendor quota views use fractional progress/quota meters.
+`github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
+`herdr-panes` and `luvus-panes` show measured agent-state distributions,
+and `clocks` adds countdown and pomodoro meters. These use shared text fallbacks:
+block bars, Braille traces and reference marks.
 
 ## Choosing a renderer
 
@@ -113,6 +116,8 @@ let downward = tc::Plot::bars(x, y + 4, &other_columns, 3, peak, true);
 let calendar = tc::Plot::heatmap_levels(x, y, &days, &missing_colour);
 // Fractions, with an optional elapsed-window marker. Keep exact values in text.
 let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
+// Measured category shares; keep their counts and legend in ordinary text.
+let states = tc::Plot::stacked_bar(x, y, width, &shares);
 ```
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
@@ -131,6 +136,11 @@ Collect plots in the same coordinate system as the body, then call
 `in_viewport` after the scroll offset is clamped. Clip to the body room above
 the footer. If a guarded body fails, discard its pending plots together with
 its rows, so graphics cannot cover the error message.
+For nested sections, `append_plot_rows(&mut rows, &mut plots, |local_plots| ...)`
+appends returned text and offsets section-local plots by the existing row count.
+It publishes neither if the section panics. Apply the viewport transform once,
+after all sections are assembled. Stacked bars take normalized fractions that
+sum to one; pixel edges preserve subcell shares and text uses whole-cell shares.
 
 The widget owns its axis transform, sample aggregation, labels and colors.
 For timed traces, set `Trace::positions` to horizontal fractions in `0..=1`,
@@ -172,8 +182,8 @@ poll rates, so this change does not promise 30 fps for those views.
 ## Widget review
 
 All entries below receive capability-gated synchronized updates. Pixel charts
-are implemented only where noted; the opportunities column is future work, not
-a claim of shipped behavior.
+are implemented where useful below. The remaining column records validation
+and intentional text presentation, not unimplemented widget migrations.
 
 | Widget | Implemented in this change | Further useful visual work / reason to retain text |
 | --- | --- | --- |
@@ -182,17 +192,17 @@ a claim of shipped behavior.
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
 | `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
-| `linear` | Pixel created/completed bars and board cycle/project meters; elapsed-time loading motion | Detail-screen meters and state breakdowns remain text; preserve scope and exact percentage labels |
-| `github-prs` | Elapsed-time spinners and loading shimmer | Keep review text and tables selectable; enhance shared figures only if it improves legibility |
+| `linear` | Pixel created/completed bars, cycle burnup, board/detail progress and milestone meters, and state distributions | Preserve exact scope/percentage labels; validate dense project details |
+| `github-prs` | Pixel opened/merged daily charts and PR-state distribution; elapsed-time loading indicators | Keep review text, counts and tables selectable; unavailable series remain placeholders |
 | `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
 | `vercel-deployments` | Pixel deployment activity and recent-build-duration bars; elapsed-time build indicators | Preserve scrolling and text logs; a spinner does not imply measured build progress |
-| `agent-usage` | Pixel quota meters on summary; Claude/Codex/Grok daily heatmaps; elapsed-time loading indicators | Individual vendor quota rows remain text; preserve missing days, freshness, overages and pace labels |
-| `herdr-panes` | Elapsed-time working indicators | Keep status, selection and navigation as text; decorative motion must not imply extra agent activity |
-| `luvus-panes` | Elapsed-time working indicators | Same principle for coordination/evidence tables; verify pane protocol support end to end |
-| `clocks` | Synchronized text presentation | Native scaled text needs its own capability and fallback; keep current block digits until that exists |
+| `agent-usage` | Pixel quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
+| `herdr-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Keep status, selection and navigation as text; no invented progress |
+| `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
+| `clocks` | Pixel countdown and pomodoro progress/overtime bars | Keep clock digits as text; native scaled text needs separate capability negotiation |
 | `months` | Synchronized text presentation | Date cells are discrete and benefit from stable text; no reason to animate static dates |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels | Keep the server table and unmeasured-history dots as text |
-| `tailnet` | Synchronized text presentation | Larger history plots could adopt `LineChart`; compact per-row sparklines remain efficient text |
+| `tailnet` | Shared pixel/Braille receive/send history in machine details | Compact board sparklines remain efficient text; exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## Verification and compatibility limits
@@ -211,7 +221,7 @@ terminals, fragmented/late replies, image errors, cached frames, scrolling,
 resize, screen changes, suspend/resume, quit, panic and signal cleanup. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
-The fixture's `g` key shows synthetic bars, a calendar and a quota meter; the
+The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
 PTY checks exercise both its pixel and text paths. These tests verify emitted
 bytes and state, not a terminal
 emulator's implementation of them.

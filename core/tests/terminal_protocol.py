@@ -160,7 +160,7 @@ def filled_graphics(t):
     t.send(b"g")
     t.read()
     added = t.images()[count:]
-    assert len(added) == 4, "bars, calendar and meter did not reach the compositor"
+    assert len(added) == 5, "bars, calendar, meter and state distribution did not reach the compositor"
     for n, (keys, payload) in enumerate(added):
         assert keys[b"m"] == b"0", "small gallery fixture unexpectedly chunked"
         decoded = zlib.decompress(base64.b64decode(payload))

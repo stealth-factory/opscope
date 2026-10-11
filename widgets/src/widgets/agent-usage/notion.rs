@@ -319,7 +319,7 @@ pub fn why_no_lane(d: &Data) -> String {
     "no quota · no reading from Notion yet.".into()
 }
 
-fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<String> {
+fn allowance_rows_with_plots(d: &Data, a: &NotionAllowance, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── NOTION AI ── ".into()),
@@ -335,7 +335,7 @@ fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<S
         let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
-        line.extend(paced_bar(used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
         line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
         line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
@@ -442,10 +442,10 @@ fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     match d.allowance.as_ref() {
         Some(a) if !a.not_applicable() => {
-            let mut rows = allowance_rows(d, a, w, p);
+            let mut rows = allowance_rows_with_plots(d, a, w, p, plots);
             rows.extend(token_warning(d, w, p));
             add_section(rows, account_rows(d, w, p))
         }
@@ -711,4 +711,9 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, _cfg, p, &mut Vec::new())
 }

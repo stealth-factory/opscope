@@ -296,7 +296,7 @@ pub fn why_no_lane(data: &Data) -> String {
     "no quota · no reading from Devin yet.".into()
 }
 
-fn quota_rows(data: &Data, quota: &DevinQuota, w: usize, p: &Palette) -> Vec<String> {
+fn quota_rows_with_plots(data: &Data, quota: &DevinQuota, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
@@ -314,7 +314,7 @@ fn quota_rows(data: &Data, quota: &DevinQuota, w: usize, p: &Palette) -> Vec<Str
         .unwrap_or(6)
         .max(6);
     for lane in &drawn {
-        rows.extend(bar_row(lane, label_w, hue, w, p));
+        tc::append_plot_rows(&mut rows, plots, |plots| bar_row_with_plots(lane, label_w, hue, w, p, plots));
     }
     if quota.daily_hidden {
         rows.extend(note("Daily quota is hidden.", &p.dim, w));
@@ -351,12 +351,13 @@ fn quota_rows(data: &Data, quota: &DevinQuota, w: usize, p: &Palette) -> Vec<Str
     rows
 }
 
-fn bar_row(
+fn bar_row_with_plots(
     lane: &Lane,
     label_w: usize,
     hue: Option<(u8, u8, u8)>,
     w: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let used = (lane.pct / 100.0).clamp(0.0, 1.0);
     let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
@@ -364,7 +365,7 @@ fn bar_row(
         p.dim.clone(),
         format!(" {} ", tc::pad(&lane.label, label_w)),
     )];
-    line.extend(paced_bar(
+    line.extend(paced_bar_with_plot(plots, 0, &line,
         used,
         elapsed_of(lane.window_secs, lane.reset),
         room,
@@ -413,10 +414,10 @@ fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     match data.quota.as_ref() {
         Some(quota) => {
-            let mut rows = quota_rows(data, quota, w, p);
+            let mut rows = quota_rows_with_plots(data, quota, w, p, plots);
             rows.extend(token_warning(data, w, p));
             add_section(rows, account_rows(quota, w, p))
         }
@@ -599,4 +600,9 @@ mod tests {
         assert!(caches.live.keys().all(|key| !key.starts_with("devin")));
         assert!(why_no_lane(&data).contains("devin_org"));
     }
+}
+
+#[cfg(test)]
+pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(data, w, _h, _cfg, p, &mut Vec::new())
 }

@@ -1050,7 +1050,7 @@ pub fn scope_phrase(w: usize, used: usize) -> &'static str {
 /// the response carries a dozen null pools that /usage does not render
 /// either. Each entry names itself, so a model-scoped weekly limit arrives
 /// labelled without this having to know the name.
-pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(u) = c.quota.as_ref() else {
         return Vec::new();
     };
@@ -1150,7 +1150,7 @@ pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
             },
             format!(" {} ", tc::pad(label, label_w)),
         )];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(window, reset),
             w.saturating_sub(35 + label_w).max(8),
@@ -1737,13 +1737,8 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     )
 }
 
-#[cfg(test)]
-pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
-    claude_tab_with_plots(c, w, p, &mut Vec::new())
-}
-
 fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    let mut rows = claude_quota(c, w, p);
+    let mut rows = claude_quota_with_plots(c, w, p, plots);
     if rows.is_empty() {
         // Two facts have to survive a quota block that drew nothing: why the
         // bars are missing, and the extra-usage line, which lives inside that
@@ -3820,4 +3815,14 @@ mod tests {
         assert_eq!(num(&got[1].stats, "totalSessions") as i64, 9);
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+#[cfg(test)]
+pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    claude_quota_with_plots(c, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    claude_tab_with_plots(c, w, p, &mut Vec::new())
 }

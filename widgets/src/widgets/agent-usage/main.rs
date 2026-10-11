@@ -846,6 +846,22 @@ fn pace_cell_of(value: Option<f64>, guessed: bool, p: &Palette) -> (String, Stri
 /// left from one 71% spent with three days left, and colour alone cannot
 /// either - both are the same red. The mark is the window's own progress,
 /// so a fill short of it is spending slower than the clock.
+fn paced_bar_with_plot(
+    plots: &mut Vec<tc::Plot>,
+    row: usize,
+    prefix: &[(String, String)],
+    used: f64,
+    elapsed: Option<f64>,
+    room: usize,
+    hue: Option<(u8, u8, u8)>,
+    p: &Palette,
+) -> Vec<(String, String)> {
+    let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
+    let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
+    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.pace_mark));
+    paced_bar(used, elapsed, room, hue, p)
+}
+
 fn paced_bar(
     used: f64,
     elapsed: Option<f64>,

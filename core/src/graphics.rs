@@ -219,6 +219,44 @@ impl Plot {
         Self::filled(x, y, width, cells.len(), fill.rects, fill.text)
     }
 
+    /// Adjacent measured fractions on one shared scale, with fractional
+    /// pixel boundaries and the existing block-character fallback.
+    pub fn stacked_bar(x: usize, y: usize, width: usize, parts: &[(f64, String)]) -> Self {
+        let mut left = 0.0;
+        let mut rects = Vec::new();
+        for (i, (fraction, colour)) in parts.iter().enumerate() {
+            let fraction = if fraction.is_finite() {
+                fraction.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let right = if i + 1 == parts.len() {
+                1.0
+            } else {
+                (left + fraction).min(1.0)
+            };
+            if right > left {
+                rects.push(Rect {
+                    x: left * width as f64,
+                    y: 0.0,
+                    width: (right - left) * width as f64,
+                    height: 1.0,
+                    colour: colour.clone(),
+                });
+            }
+            left = right;
+        }
+        let text = super::stacked_bar(parts, width)
+            .into_iter()
+            .flat_map(|(colour, text)| {
+                text.chars()
+                    .map(move |ch| (colour.clone(), ch.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        Self::filled(x, y, width, 1, rects, vec![text])
+    }
+
     /// A measured fraction plus an optional reference position (e.g. elapsed
     /// quota window). Labels and percentages remain ordinary terminal text.
     pub fn meter(
@@ -854,6 +892,28 @@ mod tests {
                 assert_eq!(bytes[(y * 48 + x) * 4 + 3], if x < 8 { 0 } else { 255 });
             }
         }
+    }
+
+    #[test]
+    fn stacked_bars_preserve_subcell_shares_and_labels_when_cropped() {
+        let red = super::super::rgb(240, 0, 0);
+        let blue = super::super::rgb(0, 0, 240);
+        let plot = Plot::stacked_bar(1, 2, 2, &[(0.2, red), (0.8, blue)]);
+        let bytes = pixels(&plot);
+        // 20% of 16 pixels is 3.2: a boundary pixel contains both shares.
+        assert_eq!(&bytes[0..4], &[240, 0, 0, 255]);
+        assert!(bytes[12] > 0 && bytes[14] > 0);
+        assert_eq!(&bytes[16..20], &[0, 0, 240, 255]);
+        let text = replace_cells(
+            " XX exact counts",
+            plot.x,
+            plot.width,
+            &plot.fill.as_ref().unwrap().row(0, plot.width),
+        );
+        assert!(text.ends_with(" exact counts"));
+        let clipped = plot.in_viewport(1, 1, 1).unwrap();
+        assert_eq!(clipped.y, 1);
+        assert_eq!(pixels(&clipped), bytes);
     }
 
     #[test]

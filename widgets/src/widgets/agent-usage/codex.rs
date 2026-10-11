@@ -648,7 +648,7 @@ struct Win {
 ///
 /// The one genuine quota figure any of these agents publishes: the server
 /// sends it back with each response, and the rollout records it.
-fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn codex_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut wins: Vec<Win> = Vec::new();
     let mut plan = String::new();
     if let Some(live) = d.live.as_ref() {
@@ -772,7 +772,7 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let (pace_colour, pace_txt) = pace_cell(lead(win.pct, secs, win.reset), p);
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(label, label_w)))];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(secs, win.reset),
             w.saturating_sub(34 + label_w).max(8),
@@ -1301,13 +1301,8 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 
 /// The whole tab: the quota, what this machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
-#[cfg(test)]
-pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    tab_with_plots(d, w, _h, cfg, p, &mut Vec::new())
-}
-
 pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    let mut rows = codex_quota(d, w, p);
+    let mut rows = codex_quota_with_plots(d, w, p, plots);
     if rows.is_empty() {
         let note = why_no_lane(d);
         if !note.is_empty() {
@@ -2185,4 +2180,14 @@ mod tests {
 
         assert!(live_payload(None, None).is_none(), "neither call answered");
     }
+}
+
+#[cfg(test)]
+fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    codex_quota_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, cfg, p, &mut Vec::new())
 }

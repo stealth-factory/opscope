@@ -1353,6 +1353,20 @@ fn main() {
 
         // ---- the body, built at whatever height it needs ----
         let mut body: Vec<String> = Vec::new();
+        let mut plots = Vec::new();
+        let total: usize = counts.values().sum();
+        if total > 0 {
+            let mut states: Vec<_> = counts.iter().collect();
+            states.sort_by_key(|(state, _)| **state);
+            let parts: Vec<_> = states.into_iter().map(|(state, n)|
+                (*n as f64 / total as f64, colour_of(state, &p).to_string())).collect();
+            let width = w.saturating_sub(2);
+            plots.push(tc::Plot::stacked_bar(1, body.len(), width, &parts));
+            let bar = tc::stacked_bar(&parts, width);
+            let mut line = vec![(tc::RST, " ".into())];
+            line.extend(bar.iter().map(|(c, t)| (c.as_str(), t.clone())));
+            body.push(tc::seg(&line, w.saturating_sub(1)));
+        }
         // Where each entry's rows sit in `body`, so the window can hold the
         // selected one without counting rows a second time and disagreeing.
         let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
@@ -2368,7 +2382,11 @@ fn main() {
         // under the pointer.
         let foot_top = rows.len();
         rows.extend(footer);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|mut p| {
+            p.y += head_len;
+            p.in_viewport(start, head_len, room)
+        }).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
     }

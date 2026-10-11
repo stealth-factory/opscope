@@ -849,11 +849,12 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// red means the same here as on every other tab. Every plan reports every
 /// family it covers, so a Gemini-only account still gets a Claude/GPT pair
 /// sitting at 0% - they are real limits, not padding, and are left in.
-fn antigravity_quota_rows(
+fn antigravity_quota_rows_with_plots(
     groups: &[serde_json::Value],
     from: From,
     w: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     if groups.is_empty() {
         return Vec::new();
@@ -937,7 +938,7 @@ fn antigravity_quota_rows(
                 p.dim.clone(),
                 format!("   {} ", tc::pad(window, label_w)),
             )];
-            line.extend(paced_bar(
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line,
                 used,
                 elapsed_of(secs, reset),
                 room.max(8) as usize,
@@ -1074,8 +1075,8 @@ fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     rows
 }
 
-fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = antigravity_quota_rows(&d.quota, d.quota_from, w, p);
+fn antigravity_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let mut rows = antigravity_quota_rows_with_plots(&d.quota, d.quota_from, w, p, plots);
     if d.live.is_none() {
         rows.extend(
             wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
@@ -1122,8 +1123,8 @@ fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 /// The whole tab: what is left of the limits, what this machine did, and
 /// which subscription the percentages are percentages of.
-pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
-    add_section(antigravity_body(d, w, p), antigravity_plan_rows(d, w, p))
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    add_section(antigravity_body_with_plots(d, w, p, plots), antigravity_plan_rows(d, w, p))
 }
 
 #[cfg(test)]
@@ -1585,4 +1586,24 @@ mod tests {
         assert_eq!(window_secs("monthly"), None);
         assert_eq!(window_secs("?"), None);
     }
+}
+
+#[cfg(test)]
+fn antigravity_quota_rows(
+    groups: &[serde_json::Value],
+    from: From,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    antigravity_quota_rows_with_plots(groups, from, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    antigravity_body_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, _cfg, p, &mut Vec::new())
 }

@@ -352,8 +352,23 @@ pub fn draw(rows: &[String], w: usize, h: usize) {
     draw_plots(rows, w, h, &[]);
 }
 
-/// Draw text and structured chart regions in one transaction. The terminal
-/// backend is core's choice; widgets supply the same chart in every session.
+/// Append a section and shift its local plot coordinates with its text rows.
+/// A section publishes plots only after rendering completes successfully.
+pub fn append_plot_rows(
+    rows: &mut Vec<String>,
+    plots: &mut Vec<Plot>,
+    render: impl FnOnce(&mut Vec<Plot>) -> Vec<String>,
+) {
+    let mut local = Vec::new();
+    let body = render(&mut local);
+    for mut plot in local {
+        plot.y += rows.len();
+        plots.push(plot);
+    }
+    rows.extend(body);
+}
+
+/// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let lost = SCREEN_LOST.swap(false, Ordering::AcqRel) | due(&shown, Instant::now());
@@ -3704,6 +3719,23 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_plot_sections_follow_their_text_offsets() {
+        let mut rows = vec!["title".into(), "heading".into()];
+        let mut plots = Vec::new();
+        super::append_plot_rows(&mut rows, &mut plots, |plots| {
+            let mut section = vec!["caption".into()];
+            super::append_plot_rows(&mut section, plots, |plots| {
+                plots.push(super::Plot::stacked_bar(1, 0, 2, &[(1.0, super::rgb(20, 220, 150))]));
+                vec![" ██".into()]
+            });
+            section
+        });
+        assert_eq!(plots[0].y, 3);
+        assert_eq!(rows[plots[0].y], " ██");
+        let clipped = plots.pop().unwrap().in_viewport(2, 1, 1).unwrap();
+        assert_eq!(clipped.y, 1);
+    }
     #[test]
     fn terminal_replies_never_become_keys_even_when_fragmented_or_late() {
         for response in [
