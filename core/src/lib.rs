@@ -3807,6 +3807,9 @@ fn raise_legacy_signals(signals: &[libc::c_int]) {
 /// order of the checks is what decides whether an unknown key is silently
 /// ignored or arrives as a handful of characters that other keys are bound
 /// to.
+/// Key names only. Signal chords are not names; [`settle`] raises them.
+/// Tests read this. The live poll goes through [`decode_reporting`].
+#[cfg(test)]
 fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
     let mut signals = Vec::new();
     decode_reporting(buf, lone_esc, &mut signals)
