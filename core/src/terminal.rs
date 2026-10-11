@@ -41,6 +41,9 @@ static CELL_REPORT_GEN: AtomicU64 = AtomicU64::new(u64::MAX);
 static CELL_SENT_GEN: AtomicU64 = AtomicU64::new(0);
 /// Sent generation to put back if the frame write fails.
 static CELL_SENT_PREV: AtomicU64 = AtomicU64::new(0);
+/// `CSI 16 t` has no id. Replies arrive in order, so a reply answers the
+/// latest query only when it is the only one still outstanding.
+static CELL_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 static CELL_STALE: AtomicBool = AtomicBool::new(false);
 /// Set from the SIGWINCH handler. The next complete frame sends the query;
 /// the handler itself does not write, so `CSI 16 t` cannot land inside an
@@ -152,6 +155,8 @@ pub(crate) fn start() {
     // reply before the deadline leaves the legacy decoder in place.
     let query_cells = mode != GraphicsMode::Text;
     QUERY_CELLS.store(query_cells, Ordering::Release);
+    // A new negotiation replaces any query the previous session left in flight.
+    CELL_OUTSTANDING.store(0, Ordering::Release);
     if query_cells {
         CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
         note_cell_query_sent();
@@ -330,11 +335,12 @@ pub(crate) fn reply(sequence: &str) {
     // Outside the 800 ms capability window on purpose: a font change asks
     // again on SIGWINCH, long after startup, and the reply is still a cell size.
     if let Some(report) = cell_report(sequence) {
+        let outstanding = consume_cell_reply();
         let sent = CELL_SENT_GEN.load(Ordering::Acquire);
         let query = CELL_QUERY_GEN.load(Ordering::Acquire);
-        // A resize after the query went out has a newer generation. This
-        // reply belongs to the older one and must not mark the new one reported.
-        if cell_reply_matches(sent, query) {
+        // A newer resize, or an older query still in flight, means this
+        // reply does not answer the query we are waiting on.
+        if cell_reply_matches(sent, query, outstanding) {
             let ioctl = if report.is_some() {
                 None
             } else {
@@ -498,17 +504,43 @@ pub(crate) fn restore_cell_query() {
     CELL_NEED_SEND.store(true, Ordering::Release);
     // The bytes did not go out, so a reply still belongs to the previous query.
     CELL_SENT_GEN.store(CELL_SENT_PREV.load(Ordering::Acquire), Ordering::Release);
+    let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+    if outstanding > 0 {
+        CELL_OUTSTANDING.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn note_cell_query_sent() {
     let query_gen = CELL_QUERY_GEN.load(Ordering::Acquire);
     CELL_SENT_PREV.store(CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel), Ordering::Release);
+    CELL_OUTSTANDING.fetch_add(1, Ordering::AcqRel);
 }
 
-/// A cell-size reply answers the query that was sent, and only that one.
-/// `sent_gen` is zero until a query has gone out.
-pub(crate) fn cell_reply_matches(sent_gen: u64, query_gen: u64) -> bool {
-    sent_gen != 0 && sent_gen == query_gen
+/// Count before this reply is consumed. Zero means nothing was in flight.
+fn consume_cell_reply() -> u64 {
+    loop {
+        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        if outstanding == 0 {
+            return 0;
+        }
+        if CELL_OUTSTANDING
+            .compare_exchange(
+                outstanding,
+                outstanding - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return outstanding;
+        }
+    }
+}
+
+/// A cell-size reply answers the latest query only when that query is the
+/// only one still unanswered. `sent_gen` is zero until a query has gone out.
+pub(crate) fn cell_reply_matches(sent_gen: u64, query_gen: u64, outstanding: u64) -> bool {
+    sent_gen != 0 && sent_gen == query_gen && outstanding == 1
 }
 
 pub(crate) fn claim_terminal() {
@@ -520,6 +552,7 @@ pub(crate) fn claim_terminal() {
 pub(crate) fn release_terminal() {
     OWNS_TERMINAL.store(false, Ordering::Release);
     CELL_NEED_SEND.store(false, Ordering::Release);
+    CELL_OUTSTANDING.store(0, Ordering::Release);
 }
 
 /// Cell to publish for a resize that does not already have a reply.
@@ -1099,18 +1132,31 @@ mod tests {
     fn a_late_cell_reply_does_not_mark_a_newer_resize_as_reported() {
         let previous = (20, 40);
         // Query 4 was sent. A second resize is generation 5 before the reply.
-        assert!(!cell_reply_matches(4, 5));
+        assert!(!cell_reply_matches(4, 5, 1));
         assert_eq!(
-            cell_after_resize(previous, cell_reply_matches(4, 5), None),
+            cell_after_resize(previous, cell_reply_matches(4, 5, 1), None),
             (8, 16)
         );
-        // The reply that matches the query just sent does mark that resize.
-        assert!(cell_reply_matches(5, 5));
+        // The reply that matches the only query in flight does mark that resize.
+        assert!(cell_reply_matches(5, 5, 1));
         assert_eq!(
-            cell_after_resize(previous, cell_reply_matches(5, 5), None),
+            cell_after_resize(previous, cell_reply_matches(5, 5, 1), None),
             previous
         );
-        assert!(!cell_reply_matches(0, 1));
+        assert!(!cell_reply_matches(0, 1, 1));
+    }
+
+    #[test]
+    fn a_reply_does_not_answer_a_query_sent_while_it_was_still_in_flight() {
+        let previous = (20, 40);
+        // Query 5 went out before the reply to query 4. The generations now
+        // match, but two replies are still owed, so this one is the older.
+        assert!(!cell_reply_matches(5, 5, 2));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(5, 5, 2), None),
+            (8, 16)
+        );
+        assert!(cell_reply_matches(5, 5, 1));
     }
 
     #[test]
