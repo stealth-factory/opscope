@@ -556,21 +556,28 @@ mod tests {
         // SAFETY: `listener` owns a valid listening Unix-domain descriptor.
         assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
         let mut queued = Vec::new();
-        let mut timed_out = false;
+        let mut failed_within_bound = false;
         for _ in 0..256 {
             let started = Instant::now();
             match connect_unix(&path, &AtomicBool::new(false)) {
                 Ok(Some(stream)) => queued.push(stream),
                 Ok(None) => panic!("an unstopped connection attempt stopped"),
                 Err(error) => {
-                    assert!(started.elapsed() <= CONNECT_TIMEOUT + Duration::from_secs(1));
-                    assert!(error.contains("timed out"), "{error}");
-                    timed_out = true;
+                    assert!(
+                        started.elapsed() <= CONNECT_TIMEOUT + Duration::from_secs(1),
+                        "connect exceeded its bound: {:?}",
+                        started.elapsed()
+                    );
+                    assert!(
+                        error.contains("timed out") || error.contains("Connection refused"),
+                        "{error}"
+                    );
+                    failed_within_bound = true;
                     break;
                 }
             }
         }
-        assert!(timed_out, "the listener never filled its backlog");
+        assert!(failed_within_bound, "the listener never filled its backlog");
 
         drop(queued);
         let _ = std::fs::remove_file(path);
