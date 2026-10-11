@@ -65,13 +65,30 @@ uses synchronized updates when supported.
 
 ## Image transport and lifecycle
 
-No Kitty executable, image conversion command, shared file, shared memory or
-system graphics library is needed. Images are RGBA, zlib compressed in pure Rust,
-base64 encoded and sent in chunks of at most 4096 payload bytes. They can travel
-over SSH. Stable charts reuse terminal images; changed regions replace their
+No Kitty executable, image conversion command, shared file or system graphics
+library is needed. Images are RGBA, zlib compressed in pure Rust. The direct
+path base64-encodes that payload and sends it in chunks of at most 4096 bytes
+(`t=d`). That path works over SSH.
+
+On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
+reply requested) beside the graphics query. The object is created with
+`shm_open`, `ftruncate` and `mmap` from libc, which is already linked. The
+name is what the escape carries. The terminal reads the object and unlinks
+it. If the probe is acknowledged, later images are published the same way.
+The probe-result parser is ordinary code, compiled and tested on every
+target. Acquisition is limited to Linux and macOS. Anywhere else, and
+whenever the probe is rejected, times out, or a later image reports an
+error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
+failure does not turn graphics off.
+
+An object the terminal does not take is unlinked on that error. Anything
+still open is unlinked on exit, suspend and panic, on the same cleanup that
+deletes placements. A process cannot catch SIGKILL.
+
+Stable charts reuse terminal images; changed regions replace their
 owned image IDs. Scrolling crops the chart instead of changing its axes. Core
 cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
-resume. A process cannot catch SIGKILL.
+resume.
 
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
@@ -232,12 +249,13 @@ PTY checks receive, for looking at by eye.
 
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
-terminals, fragmented/late replies, image errors, cached frames, scrolling,
-resize, screen changes, suspend/resume, quit, panic and signal cleanup. They
-also answer the keyboard-protocol query and check that flag 1 is pushed on
-start, popped on exit, suspend, panic and a typed Ctrl-C, Ctrl-Z or Ctrl-\,
-and pushed again after resume.
-Unit tests
+terminals, fragmented/late replies, image errors, a shared-memory probe that
+fails (the following image stays `t=d`) and one that succeeds (the following
+image is `t=s`, and the object is gone after quit, panic and SIGTERM), cached
+frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
+signal cleanup. They also answer the keyboard-protocol query and check that
+flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
+Ctrl-Z or Ctrl-\, and pushed again after resume. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the

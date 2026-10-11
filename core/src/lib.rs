@@ -25,6 +25,7 @@ mod dependencies;
 mod settings;
 mod terminal;
 mod graphics;
+mod shm;
 
 pub use terminal::{capabilities, graphics_notice, Capabilities};
 pub use graphics::{braille, LineChart, Plot, Trace};
@@ -472,6 +473,10 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let caps = capabilities();
     let (rows, before, after) =
         graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
+    // The probe expires here, before this frame's images are published, so a
+    // terminal that never answers does not stay on the shared-memory path.
+    terminal::on_frame();
+    let after = shm::deliver(&before, after);
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
@@ -941,6 +946,11 @@ fn forget_termios() {
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
 fn restore_terminal_signal() {
+    // Suspend and a signalled exit both come through here. Drop any
+    // shared-memory object first and stay on the direct path until the
+    // resume probe: a draw that lands before that probe would otherwise
+    // name an object this handler is about to unlink.
+    shm::force_direct();
     graphics::cleanup_signal();
     terminal::cleanup_signal();
     if HAS_TERMIOS.load(Ordering::Acquire) {

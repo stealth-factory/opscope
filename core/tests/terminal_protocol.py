@@ -4,6 +4,7 @@ First build: cargo build -p opscope-core --example terminal_probe
 Emulates terminal replies; real Kitty/multiplexer visual checks remain separate.
 """
 import base64
+import ctypes
 import fcntl
 import os
 from pathlib import Path
@@ -16,6 +17,12 @@ import subprocess
 import termios
 import time
 import zlib
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+LIBC.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+LIBC.shm_open.restype = ctypes.c_int
+LIBC.shm_unlink.argtypes = [ctypes.c_char_p]
+LIBC.shm_unlink.restype = ctypes.c_int
 
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = ROOT / "target/debug/examples/terminal_probe"
@@ -78,17 +85,51 @@ class Terminal:
         return [(keys, payload) for keys, payload in self.commands() if keys.get(b"a") == b"T"]
 
     def quit(self):
+        names = shm_names(self.commands())
         self.send(b"q")
         self.read(0.2)
         assert self.proc.wait(timeout=3) == 0
         assert b"KEYS:\r\n" in self.output, "terminal replies became user keys"
+        left = [name for name in names if shm_exists(name)]
+        assert not left, f"exit left shared memory {left!r}"
 
     def close(self):
+        for name in shm_names(self.commands()):
+            LIBC.shm_unlink(name)
         if self.proc.poll() is None:
             os.kill(self.proc.pid, signal.SIGCONT)
             self.proc.kill()
             self.proc.wait(timeout=3)
         os.close(self.master)
+
+
+def shm_names(commands):
+    names = []
+    for keys, payload in commands:
+        if keys.get(b"t") == b"s" and payload:
+            try:
+                names.append(base64.b64decode(payload))
+            except Exception:
+                continue
+    return names
+
+
+def shm_exists(name):
+    fd = LIBC.shm_open(name, os.O_RDONLY, 0)
+    if fd < 0:
+        return False
+    os.close(fd)
+    return True
+
+
+def shm_read(name):
+    fd = LIBC.shm_open(name, os.O_RDONLY, 0)
+    if fd < 0:
+        return None
+    try:
+        return os.read(fd, os.fstat(fd).st_size)
+    finally:
+        os.close(fd)
 
 
 def run(mode, reply, check):
@@ -240,6 +281,40 @@ def plain_underlines(t):
     assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
 
 
+def shm_rejected(t):
+    probes = [c for c in t.commands() if c[0].get(b"a") == b"t" and c[0].get(b"t") == b"s"]
+    assert probes, "no shared-memory probe"
+    name = base64.b64decode(probes[0][1])
+    t.send(b"\x1b_Gi=2147483645;EBADF:fixture\x1b\\")
+    t.read(0.3)
+    assert not shm_exists(name), "rejected probe was not unlinked"
+    before = len(t.images())
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    assert len(t.images()) > before, "resize did not resend the chart"
+    assert all(keys.get(b"t") == b"d" for keys, _ in t.images())
+    assert b"Kitty image rejected" not in t.output
+
+
+def shm_accepted(t):
+    t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+    t.read(0.25)
+    before = len(t.images())
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    added = t.images()[before:]
+    assert added, "accepted probe did not resend an image"
+    keys, payload = added[-1]
+    assert keys[b"t"] == b"s" and keys[b"m"] == b"0" and keys[b"o"] == b"z"
+    data = shm_read(base64.b64decode(payload))
+    assert data, "shared image was not readable"
+    decoded = zlib.decompress(data)
+    assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
+    assert any(decoded[3::4]), "empty graphic"
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -258,6 +333,7 @@ if __name__ == "__main__":
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
+                               ("auto", "kitty", shm_rejected), ("auto", "kitty", shm_accepted),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
@@ -275,6 +351,8 @@ if __name__ == "__main__":
             t.read(0.2)
             assert t.proc.wait(timeout=3) != 0
             assert t.commands()[-1][0].get(b"a") == b"d", f"{ending} left an image"
+            left = [name for name in shm_names(t.commands()) if shm_exists(name)]
+            assert not left, f"{ending} left shared memory {left!r}"
             assert t.output.rfind(b"\x1b[?2026l") > t.output.rfind(b"\x1b[?2026h")
             print(f"PASS cleanup/{ending}")
         finally:

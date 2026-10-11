@@ -626,7 +626,10 @@ fn delete(slot: usize) -> String {
 
 /// Also called by the signal handler: only atomics and write(2), no locks,
 /// formatting, allocation or shared references to a mutating image cache.
+/// Shared-memory names are the same kind of table; `shm_unlink` is the one
+/// extra syscall and it does not allocate.
 pub(crate) fn cleanup_signal() {
+    super::shm::release_signal();
     let live = LIVE.swap(0, Ordering::AcqRel);
     for slot in 0..MAX_PLOTS {
         if live & (1 << slot) == 0 {
@@ -975,6 +978,24 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
         out.push_str("\x1b\\");
     }
     out
+}
+
+/// The direct frame `image()` emits, so the shared-memory rewrite can be
+/// checked against a real chart without a second rasteriser.
+#[cfg(test)]
+pub(crate) fn direct_chart_command(cols: usize, rows: usize) -> String {
+    let values: Vec<_> = (0..48).map(|i| Some(i as f64 / 47.0)).collect();
+    let chart = LineChart {
+        slots: values.len(),
+        traces: vec![Trace {
+            positions: None,
+            values,
+            colour: super::rgb(50, 220, 170),
+            baseline: None,
+        }],
+        focus: None,
+    };
+    image(&Plot::new(2, 1, cols, rows, chart), 3, cols + 4)
 }
 
 #[cfg(test)]
