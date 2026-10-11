@@ -36,6 +36,11 @@ static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 static QUERY_CELLS: AtomicBool = AtomicBool::new(false);
 static CELL_QUERY_GEN: AtomicU64 = AtomicU64::new(0);
 static CELL_REPORT_GEN: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Generation of the `CSI 16 t` whose bytes were last handed to the terminal.
+/// A reply answers that query only. A newer resize leaves this behind.
+static CELL_SENT_GEN: AtomicU64 = AtomicU64::new(0);
+/// Sent generation to put back if the frame write fails.
+static CELL_SENT_PREV: AtomicU64 = AtomicU64::new(0);
 static CELL_STALE: AtomicBool = AtomicBool::new(false);
 /// Set from the SIGWINCH handler. The next complete frame sends the query;
 /// the handler itself does not write, so `CSI 16 t` cannot land inside an
@@ -149,6 +154,7 @@ pub(crate) fn start() {
     QUERY_CELLS.store(query_cells, Ordering::Release);
     if query_cells {
         CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+        note_cell_query_sent();
         let (w, h) = cell_from_winsize().unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
         publish_cell(w, h);
     }
@@ -324,14 +330,20 @@ pub(crate) fn reply(sequence: &str) {
     // Outside the 800 ms capability window on purpose: a font change asks
     // again on SIGWINCH, long after startup, and the reply is still a cell size.
     if let Some(report) = cell_report(sequence) {
-        let ioctl = if report.is_some() {
-            None
-        } else {
-            cell_from_winsize()
-        };
-        let (w, h) = resolve_cell(report, ioctl);
-        CELL_REPORT_GEN.store(CELL_QUERY_GEN.load(Ordering::Acquire), Ordering::Release);
-        publish_cell(w, h);
+        let sent = CELL_SENT_GEN.load(Ordering::Acquire);
+        let query = CELL_QUERY_GEN.load(Ordering::Acquire);
+        // A resize after the query went out has a newer generation. This
+        // reply belongs to the older one and must not mark the new one reported.
+        if cell_reply_matches(sent, query) {
+            let ioctl = if report.is_some() {
+                None
+            } else {
+                cell_from_winsize()
+            };
+            let (w, h) = resolve_cell(report, ioctl);
+            CELL_REPORT_GEN.store(sent, Ordering::Release);
+            publish_cell(w, h);
+        }
     }
     let push = {
         let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
@@ -475,11 +487,28 @@ pub(crate) fn take_cell_query() -> &'static str {
     // Do not consume the flag while a child has the terminal. The next
     // frame after we claim it again still asks.
     let pending = owns && CELL_NEED_SEND.swap(false, Ordering::AcqRel);
-    cell_query_to_send(owns, pending)
+    let query = cell_query_to_send(owns, pending);
+    if !query.is_empty() {
+        note_cell_query_sent();
+    }
+    query
 }
 
 pub(crate) fn restore_cell_query() {
     CELL_NEED_SEND.store(true, Ordering::Release);
+    // The bytes did not go out, so a reply still belongs to the previous query.
+    CELL_SENT_GEN.store(CELL_SENT_PREV.load(Ordering::Acquire), Ordering::Release);
+}
+
+fn note_cell_query_sent() {
+    let query_gen = CELL_QUERY_GEN.load(Ordering::Acquire);
+    CELL_SENT_PREV.store(CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel), Ordering::Release);
+}
+
+/// A cell-size reply answers the query that was sent, and only that one.
+/// `sent_gen` is zero until a query has gone out.
+pub(crate) fn cell_reply_matches(sent_gen: u64, query_gen: u64) -> bool {
+    sent_gen != 0 && sent_gen == query_gen
 }
 
 pub(crate) fn claim_terminal() {
@@ -1064,6 +1093,24 @@ mod tests {
             cell_after_resize(reported, false, Some((10, 22))),
             (10, 22)
         );
+    }
+
+    #[test]
+    fn a_late_cell_reply_does_not_mark_a_newer_resize_as_reported() {
+        let previous = (20, 40);
+        // Query 4 was sent. A second resize is generation 5 before the reply.
+        assert!(!cell_reply_matches(4, 5));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(4, 5), None),
+            (8, 16)
+        );
+        // The reply that matches the query just sent does mark that resize.
+        assert!(cell_reply_matches(5, 5));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(5, 5), None),
+            previous
+        );
+        assert!(!cell_reply_matches(0, 1));
     }
 
     #[test]
