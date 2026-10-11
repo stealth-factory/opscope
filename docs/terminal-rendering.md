@@ -165,8 +165,8 @@ let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
 Claude, Codex and Grok calendars all use the same gapless core heatmap renderer:
-solid tiles fill each entire cell (8×16 pixels when the terminal does not
-report a size), matching the solid text blocks.
+solid tiles fill each entire cell (8×16 pixels only when neither a cell-size
+reply nor valid window pixel fields supply a size), matching the solid text blocks.
 Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
