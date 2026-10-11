@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.0.1] - 2026-10-11
+
+### Bug Fixes
+
+- **ci**: Pack only widget directories in the release tarball (#367)
+
 ## [1.0.0] - 2026-10-11
 
 ### Features
