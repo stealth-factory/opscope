@@ -266,6 +266,12 @@ jobs:
           cp widgets/src/launcher/README.md widgets/src/launcher/help.txt \
             "dist/$name/widgets/src/launcher/"
           for widget in widgets/src/widgets/*; do
+            # The glob is every entry. refresh_wake.rs sits here and is a
+            # source file, not a widget. Copying docs out of it is
+            # `cannot stat .../README.md` and the publish stops. A widget
+            # is a directory. A directory with no CONFIGURE.md still fails
+            # this copy, as it did before.
+            [ -d "$widget" ] || continue
             stem="$(basename "$widget")"
             mkdir -p "dist/$name/widgets/src/widgets/$stem"
             cp "$widget/README.md" "$widget/CONFIGURE.md" \
