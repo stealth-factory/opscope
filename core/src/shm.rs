@@ -450,6 +450,9 @@ mod tests {
         true
     }
 
+    /// Darwin shm descriptors use `fo_no_read`, so `read` fails there. The
+    /// bytes are only visible through `mmap`, which is how the terminal
+    /// reads them. `fstat` reports the exact `ftruncate` length.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn read_object(name: &str) -> Option<Vec<u8>> {
         let c_name = std::ffi::CString::new(name).ok()?;
@@ -459,18 +462,43 @@ mod tests {
         }
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let ok = unsafe { libc::fstat(fd, &mut stat) } == 0;
-        let len = stat.st_size as usize;
-        let mut buf = vec![0u8; len];
-        let mut got = 0;
-        while ok && got < len {
-            let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), len - got) };
-            if n <= 0 {
-                break;
-            }
-            got += n as usize;
+        let len = usize::try_from(stat.st_size).unwrap_or(0);
+        if !ok || len == 0 {
+            unsafe { libc::close(fd) };
+            return None;
         }
-        unsafe { libc::close(fd) };
-        (ok && got == len).then_some(buf)
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        let buf = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }.to_vec();
+        unsafe {
+            libc::munmap(ptr, len);
+            libc::close(fd);
+        }
+        Some(buf)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_object(name: &str, expected: &[u8]) {
+        let got = read_object(name).unwrap_or_else(|| panic!("{name} could not be mapped"));
+        assert_eq!(got.len(), expected.len(), "{name} length");
+        if let Some(i) = got.iter().zip(expected).position(|(a, b)| a != b) {
+            panic!(
+                "{name} differs at byte {i}: got {:#x} want {:#x}",
+                got[i], expected[i]
+            );
+        }
     }
 
     fn payload_of(command: &str) -> String {
@@ -543,7 +571,7 @@ mod tests {
         .unwrap();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            assert_eq!(read_object(&name).as_deref(), Some(raw.as_slice()));
+            assert_object(&name, &raw);
             let again = rewrite(&command).expect("replacement");
             let name2 = String::from_utf8(
                 base64::engine::general_purpose::STANDARD
@@ -553,7 +581,7 @@ mod tests {
             .unwrap();
             assert_ne!(name, name2);
             assert!(!exists(&name), "the replaced object was left behind");
-            assert_eq!(read_object(&name2).as_deref(), Some(raw.as_slice()));
+            assert_object(&name2, &raw);
         }
         release_signal();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -576,7 +604,7 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(read_object(&name).as_deref(), Some(compressed.as_slice()));
+            assert_object(&name, &compressed);
             release_signal();
             assert!(!exists(&name));
         }

@@ -6,6 +6,7 @@ Emulates terminal replies; real Kitty/multiplexer visual checks remain separate.
 import base64
 import ctypes
 import fcntl
+import mmap
 import os
 from pathlib import Path
 import pty
@@ -123,11 +124,17 @@ def shm_exists(name):
 
 
 def shm_read(name):
+    # Darwin shm descriptors reject read(); the bytes are mapped, which is
+    # also how the terminal reads the object. fstat is the exact length.
     fd = LIBC.shm_open(name, os.O_RDONLY, 0)
     if fd < 0:
         return None
     try:
-        return os.read(fd, os.fstat(fd).st_size)
+        size = os.fstat(fd).st_size
+        if size <= 0:
+            return b""
+        with mmap.mmap(fd, size, access=mmap.ACCESS_READ) as mapped:
+            return bytes(mapped)
     finally:
         os.close(fd)
 
