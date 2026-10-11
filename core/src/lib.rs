@@ -396,8 +396,11 @@ pub fn link(url: &str, text: &str) -> String {
 ///
 /// Width is measured on each whole prefix because emoji and script ligatures
 /// can occupy fewer columns than the sum of their individual characters.
-/// The boolean says that some suffix did not fit.
-fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
+/// The boolean says that some suffix did not fit. The last number is how
+/// many source bytes that prefix took. The returned string can be longer:
+/// a clip that opens an OSC 8 link appends the closer, and those bytes are
+/// not part of `s`.
+fn clip_width(s: &str, width: usize) -> (String, usize, bool, usize) {
     let mut end = 0usize;
     let mut used = 0usize;
     for (at, ch) in s.char_indices() {
@@ -409,7 +412,7 @@ fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
         }
     }
     let cut = close_dangling_link(&s[..end]);
-    (cut, used, end < s.len())
+    (cut, used, end < s.len(), end)
 }
 
 /// Break a word that is itself wider than the pane, rather than dropping it.
@@ -420,14 +423,17 @@ fn hard_wrap(t: &str, width: usize) -> Vec<String> {
     let mut rest = t;
     let mut out = Vec::new();
     while !rest.is_empty() {
-        let (chunk, _, _) = clip_width(rest, width);
-        if chunk.is_empty() {
+        let (chunk, _, _, end) = clip_width(rest, width);
+        // `end` is a source offset. `chunk.len()` counts a closer this
+        // function invented, and using that as the offset skips text or
+        // slices a code point in half.
+        if end == 0 {
             let ch = rest.chars().next().unwrap();
             out.push(ch.to_string());
             rest = &rest[ch.len_utf8()..];
             continue;
         }
-        rest = &rest[chunk.len()..];
+        rest = &rest[end..];
         out.push(chunk);
     }
     out
@@ -472,7 +478,7 @@ pub fn wrap_words(t: &str, width: usize) -> Vec<String> {
 
 /// Truncate or pad a plain string to exactly `n` cells.
 pub fn pad(s: &str, n: usize) -> String {
-    let (mut out, used, _) = clip_width(s, n);
+    let (mut out, used, _, _) = clip_width(s, n);
     out.extend(std::iter::repeat(' ').take(n - used));
     out
 }
@@ -495,7 +501,7 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
             break;
         }
         let room = width - n;
-        let (cut, used, clipped) = clip_width(text, room);
+        let (cut, used, clipped, _) = clip_width(text, room);
         out.push_str(colour);
         if opens_underline(colour) {
             let content = cut.trim_matches(char::is_whitespace);
@@ -541,12 +547,12 @@ pub fn title(text: &str, w: usize, colour: &str) -> String {
     let chrome = display_width(left) + 1;
     if w <= chrome {
         let deco = format!("{left}╸");
-        let (cut, _, _) = clip_width(&deco, w);
+        let (cut, _, _, _) = clip_width(&deco, w);
         return format!("{colour}{cut}{RST}");
     }
     let room = w - chrome;
     let wanted = format!(" {} ", text.to_uppercase());
-    let (t, t_w, _) = clip_width(&wanted, room);
+    let (t, t_w, _, _) = clip_width(&wanted, room);
     let fill = "━".repeat(room.saturating_sub(t_w));
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
@@ -5093,6 +5099,20 @@ mod tests {
         let lines = super::wrap_words("supercalifragilistic", 8);
         assert!(lines.iter().all(|l| super::display_width(l) <= 8), "{lines:?}");
         assert_eq!(lines.concat(), "supercalifragilistic");
+    }
+
+    #[test]
+    fn a_hard_break_of_a_linked_word_keeps_a_multibyte_glyph() {
+        // Width 1 cuts before `é`. The closer appended to that chunk is
+        // seven bytes, which is enough to land inside `é` if the wrap
+        // advances by the chunk's length instead of the source it read.
+        let word = "X123456éY";
+        let linked = super::link("https://example.com/opscope", word);
+        let lines = super::wrap_words(&linked, 1);
+        let shown: String = lines.iter().map(|l| super::strip_escapes(l)).collect();
+        assert_eq!(shown, word);
+        assert!(lines.iter().all(|l| super::display_width(l) <= 1), "{lines:?}");
+        assert!(lines.iter().any(|l| super::strip_escapes(l) == "é"));
     }
 
     #[test]
