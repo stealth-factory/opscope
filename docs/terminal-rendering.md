@@ -259,9 +259,11 @@ updates, before the primary device-attributes query, and it does this in text
 mode too. A reply of `CSI ? <flags> u` inside the 800 ms window means the
 terminal speaks the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
 Those flags are the mode currently in force, which is 0 until something
-pushes, so any well-formed reply is enough. Core then pushes disambiguation
-only (`CSI > 1 u`, flag 1). A device-attributes reply with no keyboard reply,
-a late reply, or no reply at all leaves the legacy decoder in place. Widgets
+pushes, so any well-formed reply is enough. The two replies are independent:
+device attributes do not answer the keyboard query, and a flags reply that
+arrives after them, still inside the window, is support. Core then pushes
+disambiguation only (`CSI > 1 u`, flag 1). A late reply, or a window that
+ends with no keyboard reply, leaves the legacy decoder in place. Widgets
 do not branch on this.
 
 Flag 1 sends the Escape key as `CSI 27 u`. That sequence is finished, so the
@@ -279,12 +281,23 @@ same legacy names (`enter`, `0`-`9`, the arrows, `home`, `end`, `pgup`,
 does not bind. Match arms in the widgets are unchanged, and so are text and
 Braille.
 
-Flag 1 reports Ctrl-C, Ctrl-Z and Ctrl-\ as `CSI 99;5u`, `CSI 122;5u` and
-`CSI 92;5u` instead of the bytes the terminal driver would turn into signals.
-Those chords raise SIGINT, SIGTSTP and SIGQUIT, so interrupt, suspend and quit
-still run. SIGQUIT uses the same restore path as SIGINT. The handler then
-calls `_exit(128 + SIGQUIT)`, status 131. That is a normal exit, not a death
-by signal: a waiter does not see `WIFSIGNALED`.
+Flag 1 reports Ctrl chords as `CSI … u` instead of the bytes the terminal
+driver would have interpreted. Interrupt, quit and suspend follow the termios
+saved when the keyboard was taken: they raise SIGINT, SIGQUIT and SIGTSTP
+only when `ISIG` is set and the reconstructed byte is `VINTR`, `VQUIT` or
+`VSUSP`. A disabled character (`_POSIX_VDISABLE`) or a remap such as
+`intr = ^X` is honoured. With the usual defaults that is still Ctrl-C,
+Ctrl-\ and Ctrl-Z (`CSI 99;5u`, `CSI 92;5u`, `CSI 122;5u`). SIGQUIT uses the
+same restore path as SIGINT. The handler then calls `_exit(128 + SIGQUIT)`,
+status 131. That is a normal exit, not a death by signal: a waiter does not
+see `WIFSIGNALED`.
+
+Software flow control follows that same saved termios. When `IXON` is set, a
+report whose byte is `VSTOP` or `VSTART` stops or restarts output and is not
+handed to the widget as a key. `IXON` is checked before `ISIG`, which is the
+order the line discipline uses when one byte is configured as both. With the
+usual defaults those keys are Ctrl-S and Ctrl-Q. When `IXON` is clear, the
+same reports are ordinary keys.
 
 `CSI < u` pops the mode on the same paths that already delete images: normal
 exit, panic (dropping `Keyboard`), handing the terminal to another program,

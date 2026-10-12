@@ -45,7 +45,9 @@ struct Session {
     image_rejected: bool,
     /// An XTGETTCAP reply for the underline query arrived inside the window.
     underline_answered: bool,
-    /// `CSI ? u` was answered, or a device-attributes reply arrived without one.
+    /// A `CSI ? u` reply arrived inside the negotiation window.
+    /// Device attributes do not set this: that reply can arrive first, and
+    /// the keyboard reply is still support until the deadline.
     keyboard_answered: bool,
     /// Flag 1 is the mode we pushed. Current flags in the query reply are
     /// usually 0 until that push; the reply itself is what shows support.
@@ -92,8 +94,9 @@ pub(crate) fn start() {
     pop_keyboard();
     // Text mode still benefits from synchronized updates, but sends no image query.
     // The keyboard query is sent either way: it is independent of graphics.
-    // It goes out before device attributes, so a DA reply with no keyboard
-    // reply is a terminal that does not speak the protocol.
+    // It goes out before device attributes. A flags reply inside the window
+    // is support even when device attributes arrived first. No keyboard
+    // reply before the deadline leaves the legacy decoder in place.
     super::out(&format!(
         "{}{UNDERLINE_QUERY}",
         if mode == GraphicsMode::Text {
@@ -109,8 +112,8 @@ pub(crate) fn start() {
 ///
 /// The number is the mode currently in force, not a capability bitmask.
 /// At startup that is 0 on a terminal that implements the protocol, so any
-/// well-formed reply is support. Absence, followed by device attributes,
-/// is a terminal that does not.
+/// well-formed reply inside the window is support. Device attributes are a
+/// different query and do not answer this one.
 fn keyboard_answer(sequence: &str) -> Option<u32> {
     let rest = sequence.strip_prefix("\x1b[?")?.strip_suffix('u')?;
     if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
@@ -188,11 +191,10 @@ impl Session {
         } else if sequence.starts_with("\x1b[?") && sequence.ends_with('c') {
             // The DA reply follows the other queries. No earlier graphics
             // response means this path does not support it, even if TERM says kitty.
-            // No earlier keyboard reply means the same for the keyboard protocol.
+            // It does not answer the keyboard query. Terminals send these
+            // two replies in either order, and a flags reply still inside
+            // the window is support.
             self.graphics_answered = true;
-            if !self.keyboard_answered {
-                self.keyboard_answered = true;
-            }
             false
         } else {
             false
@@ -508,14 +510,28 @@ mod tests {
         assert!(!late.reply("\x1b[?1u", now + TIMEOUT + TIMEOUT));
         assert!(!late.keyboard_disambiguate);
 
-        // Device attributes with no keyboard reply is a terminal that does not.
-        let mut legacy = Session {
+        // Device attributes do not close the keyboard question. A flags
+        // reply that is still inside the window is support, whichever
+        // arrived first. Graphics keeps its own answer.
+        let mut after_da = Session {
             deadline: Some(now + TIMEOUT),
             ..Session::default()
         };
-        assert!(!legacy.reply("\x1b[?62;c", now));
-        assert!(!legacy.reply("\x1b[?1u", now));
-        assert!(!legacy.keyboard_disambiguate);
+        assert!(!after_da.reply("\x1b[?62;c", now));
+        assert!(after_da.graphics_answered);
+        assert!(!after_da.keyboard_answered);
+        assert!(after_da.reply("\x1b[?0u", now));
+        assert!(after_da.keyboard_disambiguate);
+
+        // The same flags reply after the deadline is still not support.
+        let mut late_after_da = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        assert!(!late_after_da.reply("\x1b[?62;c", now));
+        assert!(!late_after_da.reply("\x1b[?0u", now + TIMEOUT + TIMEOUT));
+        assert!(!late_after_da.keyboard_answered);
+        assert!(!late_after_da.keyboard_disambiguate);
     }
 
     #[test]

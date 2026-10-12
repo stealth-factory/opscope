@@ -58,11 +58,12 @@ class Terminal:
                 elif self.reply == "reject":
                     response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
                 response += b"\x1b[?2026;2$y"
-                # Current flags are 0 until we push. The reply is the support signal,
-                # and it has to arrive before device attributes or the query is missed.
+                # Device attributes often arrive before the keyboard flags.
+                # Current flags are 0 until we push; the flags reply is still
+                # the support signal when it comes second, inside the window.
+                response += b"\x1b[?62;c"
                 if self.reply == "keyboard":
                     response += b"\x1b[?0u"
-                response += b"\x1b[?62;c"
                 # Deliberately split strings/CSI across reads.
                 for part in [response[:4], response[4:17], response[17:]]:
                     self.send(part)
