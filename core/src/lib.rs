@@ -455,6 +455,12 @@ pub fn append_plot_rows(
 
 /// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
+    // A stopped tty would block this write, and this is the thread that
+    // reads keys. Hold the frame; the next draw after the start character
+    // paints it. `SCREEN_LOST` stays set until that draw.
+    if output_held() {
+        return;
+    }
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
@@ -3524,8 +3530,10 @@ fn settle(
         &mut flow,
         &tty,
     ));
-    // Stop or start output before a signal runs. A suspend resumes with
-    // this read already consumed; SIGINT and SIGQUIT do not return.
+    // Hold or release frames before a signal runs. A stop must not
+    // `tcflow` the tty: the next draw would block this thread, and on
+    // Linux a typed start character does not clear a programmatic stop.
+    // SIGINT and SIGQUIT do not return.
     apply_output_flow(&flow);
     raise_legacy_signals(&signals);
     keys
@@ -3792,20 +3800,29 @@ enum OutputFlow {
     Start,
 }
 
-fn apply_output_flow(actions: &[OutputFlow]) {
-    apply_output_flow_on(TERM_FD.load(Ordering::Acquire), actions);
+/// Set while frames are held. `draw` checks it and returns without writing.
+/// The keyboard poll keeps running, so the start character and Ctrl-C still
+/// arrive. `TCOOFF` is the wrong tool: it stops the tty this thread writes,
+/// and the read never happens.
+static OUTPUT_HELD: AtomicBool = AtomicBool::new(false);
+
+fn output_held() -> bool {
+    OUTPUT_HELD.load(Ordering::Acquire)
 }
 
-fn apply_output_flow_on(fd: i32, actions: &[OutputFlow]) {
-    if fd < 0 {
-        return;
-    }
+fn apply_output_flow(actions: &[OutputFlow]) {
     for action in actions {
-        let cmd = match action {
-            OutputFlow::Stop => libc::TCOOFF,
-            OutputFlow::Start => libc::TCOON,
-        };
-        unsafe { libc::tcflow(fd, cmd) };
+        match action {
+            OutputFlow::Stop => OUTPUT_HELD.store(true, Ordering::Release),
+            OutputFlow::Start => {
+                // Only a real resume forgets the frame. A start character
+                // while output is already running must not repaint.
+                if OUTPUT_HELD.swap(false, Ordering::AcqRel) {
+                    forget_frame();
+                    screen_lost();
+                }
+            }
+        }
     }
 }
 
@@ -6269,265 +6286,6 @@ mod tests {
         assert_eq!(flow, vec![super::OutputFlow::Stop]);
     }
 
-    /// `TCOOFF` holds pty output until `TCOON`, which is what IXON did with
-    /// the start and stop characters. A child session owns the pty and is
-    /// the only caller of `tcflow`, so the stop applies to that tty. Apple
-    /// accepts the held byte into the queue; Linux returns `EAGAIN`. The
-    /// master reads it only after the start.
-    #[test]
-    fn software_flow_control_stops_and_restarts_output() {
-        let mut master = -1;
-        let mut slave = -1;
-        let opened = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
-        let mut parent_to_child = [-1; 2];
-        let mut child_to_parent = [-1; 2];
-        assert_eq!(
-            unsafe { libc::pipe(parent_to_child.as_mut_ptr()) },
-            0,
-            "pipe: {}",
-            std::io::Error::last_os_error()
-        );
-        assert_eq!(
-            unsafe { libc::pipe(child_to_parent.as_mut_ptr()) },
-            0,
-            "pipe: {}",
-            std::io::Error::last_os_error()
-        );
-
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
-        if pid == 0 {
-            unsafe {
-                libc::close(master);
-                libc::close(parent_to_child[1]);
-                libc::close(child_to_parent[0]);
-                let code = drive_stopped_pty(slave, child_to_parent[1], parent_to_child[0]);
-                libc::_exit(code);
-            }
-        }
-
-        let mut child = Reap(pid);
-        unsafe {
-            libc::close(slave);
-            libc::close(parent_to_child[0]);
-            libc::close(child_to_parent[1]);
-        }
-        let _master = Fd(master);
-        let parent_write = Fd(parent_to_child[1]);
-        let parent_read = Fd(child_to_parent[0]);
-        set_nonblock(master);
-        set_nonblock(parent_read.0);
-
-        assert_eq!(
-            read_byte(parent_read.0, std::time::Duration::from_secs(2)),
-            Some(b'A'),
-            "child did not start"
-        );
-        assert_eq!(
-            read_byte(master, std::time::Duration::from_millis(200)),
-            Some(b'A'),
-            "output was not running"
-        );
-        write_byte(parent_write.0, b'g');
-
-        let mark = read_byte(parent_read.0, std::time::Duration::from_secs(2));
-        assert!(
-            mark == Some(b'Q') || mark == Some(b'N'),
-            "child mark {mark:?}"
-        );
-        assert!(
-            read_byte(master, std::time::Duration::from_millis(150)).is_none(),
-            "stopped output reached the master"
-        );
-        write_byte(parent_write.0, b'c');
-
-        let got = read_byte(master, std::time::Duration::from_secs(2));
-        // The child still holds the slave until it reads this, so the pty
-        // queue cannot vanish on close. A closed pipe means it already exited.
-        match write_byte_result(parent_write.0, b'e') {
-            Ok(()) => {}
-            Err(err) if err.raw_os_error() == Some(libc::EPIPE) => {}
-            Err(err) => panic!("write: {err}"),
-        }
-        let status = child.wait();
-        assert_eq!(
-            got,
-            Some(b'Z'),
-            "restart did not deliver the held byte ({})",
-            exit_note(status)
-        );
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "child {}",
-            exit_note(status)
-        );
-    }
-
-    /// Child side of `software_flow_control_stops_and_restarts_output`.
-    /// Only async-signal-safe libc: the parent is multithreaded. Exit codes:
-    /// 10 setsid, 11 TIOCSCTTY, 16 dup2, 17 fcntl, 2 write A, 12 pipe A,
-    /// 13 read go, 3 TCOOFF, 14 pipe mark, 15 read continue, 4 TCOON,
-    /// 5 write Z after start, 18 read end. The child stays alive until the
-    /// parent has read the released byte, so closing the slave cannot drop it.
-    fn drive_stopped_pty(slave: i32, write_fd: i32, read_fd: i32) -> i32 {
-        unsafe {
-            if libc::setsid() < 0 {
-                return 10;
-            }
-            // `TIOCSCTTY` is `c_uint` on Apple and `Ioctl` on Linux.
-            if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
-                return 11;
-            }
-            if libc::dup2(slave, libc::STDOUT_FILENO) < 0 {
-                return 16;
-            }
-            let flags = libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFL);
-            if flags < 0
-                || libc::fcntl(
-                    libc::STDOUT_FILENO,
-                    libc::F_SETFL,
-                    flags | libc::O_NONBLOCK,
-                ) < 0
-            {
-                return 17;
-            }
-            let running = [b'A'];
-            if libc::write(libc::STDOUT_FILENO, running.as_ptr() as *const libc::c_void, 1) != 1 {
-                return 2;
-            }
-            if libc::write(write_fd, running.as_ptr() as *const libc::c_void, 1) != 1 {
-                return 12;
-            }
-            let mut go = [0u8; 1];
-            if libc::read(read_fd, go.as_mut_ptr() as *mut libc::c_void, 1) != 1 || go[0] != b'g' {
-                return 13;
-            }
-            if libc::tcflow(libc::STDOUT_FILENO, libc::TCOOFF) < 0 {
-                return 3;
-            }
-            let held = [b'Z'];
-            let wrote = libc::write(libc::STDOUT_FILENO, held.as_ptr() as *const libc::c_void, 1);
-            let mark = [if wrote == 1 { b'Q' } else { b'N' }];
-            if libc::write(write_fd, mark.as_ptr() as *const libc::c_void, 1) != 1 {
-                return 14;
-            }
-            if libc::read(read_fd, go.as_mut_ptr() as *mut libc::c_void, 1) != 1 || go[0] != b'c' {
-                return 15;
-            }
-            if libc::tcflow(libc::STDOUT_FILENO, libc::TCOON) < 0 {
-                return 4;
-            }
-            if wrote != 1
-                && libc::write(libc::STDOUT_FILENO, held.as_ptr() as *const libc::c_void, 1) != 1
-            {
-                return 5;
-            }
-            let mut end = [0u8; 1];
-            if libc::read(read_fd, end.as_mut_ptr() as *mut libc::c_void, 1) != 1 || end[0] != b'e' {
-                return 18;
-            }
-            0
-        }
-    }
-
-    /// Kills the pty child if an assertion fires before `wait`.
-    struct Reap(i32);
-
-    impl Reap {
-        fn wait(&mut self) -> i32 {
-            let mut status = 0;
-            loop {
-                let got = unsafe { libc::waitpid(self.0, &mut status, 0) };
-                if got == self.0 {
-                    self.0 = 0;
-                    return status;
-                }
-                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                    panic!("waitpid: {}", std::io::Error::last_os_error());
-                }
-            }
-        }
-    }
-
-    impl Drop for Reap {
-        fn drop(&mut self) {
-            if self.0 <= 0 {
-                return;
-            }
-            unsafe {
-                libc::kill(self.0, libc::SIGKILL);
-                let mut status = 0;
-                loop {
-                    let got = libc::waitpid(self.0, &mut status, 0);
-                    if got == self.0
-                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-                    {
-                        break;
-                    }
-                }
-            }
-            self.0 = 0;
-        }
-    }
-
-    fn exit_note(status: i32) -> String {
-        if libc::WIFEXITED(status) {
-            let code = libc::WEXITSTATUS(status);
-            let why = match code {
-                0 => "ok",
-                2 => "write A",
-                3 => "TCOOFF",
-                4 => "TCOON",
-                5 => "write Z after start",
-                10 => "setsid",
-                11 => "TIOCSCTTY",
-                12 => "pipe A",
-                13 => "read go",
-                14 => "pipe mark",
-                15 => "read continue",
-                16 => "dup2",
-                17 => "fcntl",
-                18 => "read end",
-                _ => "unknown",
-            };
-            format!("exit {code} ({why})")
-        } else if libc::WIFSIGNALED(status) {
-            format!("signal {}", libc::WTERMSIG(status))
-        } else {
-            format!("status {status:#x}")
-        }
-    }
-
-    fn write_byte(fd: i32, byte: u8) {
-        if let Err(err) = write_byte_result(fd, byte) {
-            panic!("write: {err}");
-        }
-    }
-
-    fn write_byte_result(fd: i32, byte: u8) -> Result<(), std::io::Error> {
-        let buf = [byte];
-        loop {
-            let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, 1) };
-            if n == 1 {
-                return Ok(());
-            }
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(err);
-        }
-    }
-
     /// Keypad numbers flag 1 sends are the legacy non-keypad names.
     #[test]
     fn keypad_reports_use_the_legacy_names() {
@@ -6629,36 +6387,6 @@ mod tests {
         ios.c_cc[libc::VSTART] = start;
         ios.c_cc[libc::VSTOP] = stop;
         super::LineDiscipline::from_termios(&ios)
-    }
-
-    struct Fd(i32);
-    impl Drop for Fd {
-        fn drop(&mut self) {
-            unsafe { libc::close(self.0) };
-        }
-    }
-
-    fn set_nonblock(fd: i32) {
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            assert!(flags >= 0);
-            assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
-        }
-    }
-
-    fn read_byte(fd: i32, wait: std::time::Duration) -> Option<u8> {
-        let deadline = std::time::Instant::now() + wait;
-        let mut buf = [0u8; 1];
-        loop {
-            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-            if n == 1 {
-                return Some(buf[0]);
-            }
-            if std::time::Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
     }
 
     #[test]

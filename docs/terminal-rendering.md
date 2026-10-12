@@ -293,11 +293,15 @@ status 131. That is a normal exit, not a death by signal: a waiter does not
 see `WIFSIGNALED`.
 
 Software flow control follows that same saved termios. When `IXON` is set, a
-report whose byte is `VSTOP` or `VSTART` stops or restarts output and is not
-handed to the widget as a key. `IXON` is checked before `ISIG`, which is the
-order the line discipline uses when one byte is configured as both. With the
-usual defaults those keys are Ctrl-S and Ctrl-Q. When `IXON` is clear, the
-same reports are ordinary keys.
+report whose byte is `VSTOP` or `VSTART` is not handed to the widget as a key.
+Core holds frames instead of stopping the tty: `draw` returns without writing,
+and the same thread keeps reading. `VSTART` releases the hold and the next
+draw paints the current frame. `VINTR` still raises SIGINT while output is
+held. `tcflow` is not used. It would block the next redraw on this thread, and
+on Linux a typed start character does not undo a programmatic stop. `IXON` is
+checked before `ISIG`, which is the order the line discipline uses when one
+byte is configured as both. With the usual defaults those keys are Ctrl-S and
+Ctrl-Q. When `IXON` is clear, the same reports are ordinary keys.
 
 `CSI < u` pops the mode on the same paths that already delete images: normal
 exit, panic (dropping `Keyboard`), handing the terminal to another program,

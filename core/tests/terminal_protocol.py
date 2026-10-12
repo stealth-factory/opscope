@@ -365,3 +365,28 @@ if __name__ == "__main__":
         print("PASS keyboard/typed-suspend")
     finally:
         t.close()
+
+    # Ctrl-S holds frames inside the probe. The redraw goes through poll and
+    # draw_plots; a stopped tty would block that draw and never read Ctrl-Q.
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        assert b"SELECTED:0" in t.output
+        t.send(b"\x1b[115;5u")
+        t.read(0.3)
+        t.send(b"\x1b[B")
+        t.read(0.5)
+        assert t.proc.poll() is None, "Ctrl-S wedged the probe"
+        assert b"SELECTED:1" not in t.output, "stopped output reached the terminal"
+        t.send(b"\x1b[113;5u")
+        t.read(0.8)
+        assert b"SELECTED:1" in t.output, "Ctrl-Q did not resume output"
+        t.send(b"\x1b[99;5u")
+        t.read(0.4)
+        status = t.proc.wait(timeout=3)
+        assert status == 128 + signal.SIGINT, f"flow-control: exit {status}"
+        left_in_legacy(t.output, "flow-control")
+        print("PASS keyboard/flow-control")
+    finally:
+        t.close()
