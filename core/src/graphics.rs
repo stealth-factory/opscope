@@ -91,6 +91,9 @@ struct Rect {
 struct Fill {
     rects: Vec<Rect>,
     text: Vec<Vec<(String, String)>>,
+    // Rectangle index and its bright end. Ordinary fills remain solid;
+    // gradient fills interpolate at pixel resolution inside that rectangle.
+    gradients: Vec<(usize, [u8; 3])>,
 }
 
 impl Fill {
@@ -99,7 +102,14 @@ impl Fill {
             .iter()
             .map(|(c, t)| (c.as_str(), t.clone()))
             .collect();
-        super::seg(&parts, cols)
+        let mut text = super::seg(&parts, cols);
+        if let Some((colour, trailer)) = self.text[row].last().filter(|(_, t)| t.is_empty()) {
+            // seg clips at the cell budget, including zero-width resets.
+            // A marker on the last cell must still reset before the label.
+            text.push_str(colour);
+            debug_assert!(trailer.is_empty());
+        }
+        text
     }
 }
 
@@ -195,6 +205,7 @@ impl Plot {
         let mut fill = Fill {
             rects: Vec::new(),
             text: Vec::new(),
+            gradients: Vec::new(),
         };
         for (r, row) in cells.iter().enumerate() {
             let mut line = Vec::new();
@@ -378,6 +389,79 @@ impl Plot {
         )
     }
 
+    /// A smooth horizontal fill in its own hue. Core chooses readable
+    /// colour stops and samples them per text cell or per Kitty pixel.
+    /// Progress and marker geometry are the same as `meter`.
+    pub fn gradient_meter(
+        x: usize,
+        y: usize,
+        width: usize,
+        fraction: f64,
+        marker: Option<f64>,
+        colour: &str,
+        track: &str,
+        mark: &str,
+    ) -> Self {
+        let fraction = finite_fraction(fraction);
+        let (start, end) = gradient_stops(rgb(colour).unwrap_or([180, 200, 220]));
+        let filled = (fraction * width as f64).round() as usize;
+        let cells: Vec<_> = (0..filled.max(usize::from(fraction > 0.0)).min(width))
+            .map(|i| colour_at(start, end, i as f64 / filled.saturating_sub(1).max(1) as f64))
+            .collect();
+        let mut plot = Self::ramped_meter(x, y, width, fraction, marker, &cells, track, mark);
+        if width > 0 && marker.is_some_and(|v| v.is_finite()) && mark.starts_with("\x1b[48;2;") {
+            // The marker can occupy the last cell, with labels immediately
+            // after the bar. End its surround even when no next cell did.
+            plot.fill.as_mut().unwrap().text[0].push((super::NOBG.into(), String::new()));
+        }
+        if width > 0 && fraction > 0.0 {
+            let fill = plot.fill.as_mut().unwrap();
+            let count = (fraction * width as f64).ceil() as usize;
+            // Replace cell-sized fill rectangles with one measured region.
+            // Marker rectangles stay after the fill and paint over it.
+            fill.rects.drain(1..1 + count);
+            fill.rects.insert(1, Rect {
+                x: 0.0,
+                y: 0.0625,
+                width: width as f64 * fraction,
+                height: 0.875,
+                colour: colour_at(start, end, 0.0),
+            });
+            fill.gradients.push((1, end));
+        }
+        plot
+    }
+
+    /// Smooth within each measured category, keeping its own hue and the
+    /// fractional boundaries of `stacked_bar`. The last category takes the
+    /// rounding remainder in text, so the bar always occupies its width.
+    pub fn gradient_stacked_bar(x: usize, y: usize, width: usize, parts: &[(f64, String)]) -> Self {
+        let mut plot = Self::stacked_bar(x, y, width, parts);
+        let fill = plot.fill.as_mut().unwrap();
+        for (i, rect) in fill.rects.iter_mut().enumerate() {
+            let (start, end) = gradient_stops(rgb(&rect.colour).unwrap_or([180, 200, 220]));
+            rect.colour = colour_at(start, end, 0.0);
+            fill.gradients.push((i, end));
+        }
+        fill.text[0] = super::stacked_bar(parts, width).into_iter().flat_map(|(colour, text)| {
+            let (start, end) = gradient_stops(rgb(&colour).unwrap_or([180, 200, 220]));
+            let count = text.chars().count();
+            (0..count).map(move |i| (
+                colour_at(start, end, i as f64 / count.saturating_sub(1).max(1) as f64),
+                "█".into(),
+            ))
+        }).collect();
+        plot
+    }
+
+    /// The same fallback cells `draw_plots` uses. A widget can compose
+    /// labels or an alert frame without reimplementing the bar's colours,
+    /// marker or background resets. Line charts have no stored text row.
+    pub fn text_row(&self, row: usize) -> &[(String, String)] {
+        self.fill.as_ref().and_then(|fill| fill.text.get(row))
+            .map(Vec::as_slice).unwrap_or(&[])
+    }
+
     fn filled(
         x: usize,
         y: usize,
@@ -397,7 +481,7 @@ impl Plot {
                 focus: None,
             },
         );
-        plot.fill = Some(Fill { rects, text });
+        plot.fill = Some(Fill { rects, text, gradients: Vec::new() });
         plot
     }
 
@@ -520,15 +604,16 @@ fn raster(a: (usize, usize), b: (usize, usize), mut dot: impl FnMut(usize, usize
     }
 }
 
-const MAX_PLOTS: usize = 16;
+const MAX_PLOTS: usize = 32;
 const CELL_W: usize = 8;
 const CELL_H: usize = 16;
 static LIVE: AtomicU32 = AtomicU32::new(0);
 static CACHE: Mutex<Vec<Plot>> = Mutex::new(Vec::new());
 
-fn image_id(slot: usize) -> u32 {
-    // Avoid collisions with a sibling process after a shell/launcher handoff.
-    0x40000000 | (((unsafe { libc::getpid() } as u32) & 0x1fffff) << 4) | slot as u32
+pub(crate) fn image_id(slot: usize) -> u32 {
+    // Five slot bits support a dense quota overview. A separate prefix
+    // keeps these IDs clear of older 16-slot widgets in the same mux.
+    0x60000000 | (((unsafe { libc::getpid() } as u32) & 0x1fffff) << 5) | slot as u32
 }
 
 pub(crate) fn owns_image(id: u32) -> bool {
@@ -723,12 +808,45 @@ fn rgb(colour: &str) -> Option<[u8; 3]> {
     values.next().is_none().then_some(colour)
 }
 
+fn finite_fraction(fraction: f64) -> f64 {
+    if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+fn mix_rgb(start: [u8; 3], end: [u8; 3], t: f64) -> [u8; 3] {
+    std::array::from_fn(|i| (start[i] as f64 + (end[i] as f64 - start[i] as f64) * t.clamp(0.0, 1.0)).round() as u8)
+}
+
+fn colour_at(start: [u8; 3], end: [u8; 3], t: f64) -> String {
+    let [r, g, b] = mix_rgb(start, end, t);
+    super::rgb(r, g, b)
+}
+
+fn luminance(colour: [u8; 3]) -> f64 {
+    colour.into_iter().zip([0.2126, 0.7152, 0.0722]).map(|(c, weight)| {
+        let c = c as f64 / 255.0;
+        weight * if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }).sum()
+}
+
+fn gradient_stops(hue: [u8; 3]) -> ([u8; 3], [u8; 3]) {
+    // Clocks' brighter ramp, shared by every horizontal bar. Lift a darker
+    // provider/category hue just enough for AA on the selected-row tint;
+    // the terminal background is darker and clears the same threshold.
+    let minimum = 4.5 * (luminance([38, 56, 76]) + 0.05) - 0.05;
+    let mut t = 0.15;
+    while luminance(mix_rgb(hue, [255; 3], t)) < minimum {
+        t = (t + 0.01_f64).min(1.0);
+    }
+    (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
+}
+
 fn pixels(plot: &Plot) -> Vec<u8> {
     let (w, h) = (plot.width * CELL_W, plot.height * CELL_H);
     let mut pixels = vec![0u8; w * h * 4];
     if let Some(fill) = &plot.fill {
-        for rect in &fill.rects {
+        for (index, rect) in fill.rects.iter().enumerate() {
             let colour = rgb(&rect.colour).unwrap_or([180, 200, 220]);
+            let end = fill.gradients.iter().find(|(i, _)| *i == index).map(|(_, end)| *end);
             let left = rect.x * CELL_W as f64;
             let top = rect.y * CELL_H as f64;
             let right = left + rect.width * CELL_W as f64;
@@ -738,6 +856,9 @@ fn pixels(plot: &Plot) -> Vec<u8> {
                     let area = (right.min(x as f64 + 1.0) - left.max(x as f64)).max(0.0)
                         * (bottom.min(y as f64 + 1.0) - top.max(y as f64)).max(0.0);
                     let at = (y * w + x) * 4;
+                    let colour = end.map(|end| mix_rgb(colour, end,
+                        (x as f64 - left) / (right - left - 1.0).max(1.0)))
+                        .unwrap_or(colour);
                     blend(
                         &mut pixels[at..at + 4],
                         colour,
@@ -1087,6 +1208,93 @@ mod tests {
     }
 
     #[test]
+    fn gradient_meters_are_smooth_at_pixel_resolution_and_share_text_stops() {
+        let hue = super::super::rgb(120, 196, 250);
+        let track = super::super::rgb(60, 70, 80);
+        let plot = Plot::gradient_meter(0, 1, 10, 0.5, None, &hue, &track, &hue);
+        let bytes = pixels(&plot);
+        let pixel = |x: usize| &bytes[(8 * 80 + x) * 4..(8 * 80 + x + 1) * 4];
+        let text = plot.text_row(0);
+        assert_eq!(&pixel(0)[..3], rgb(&text[0].0).unwrap());
+        assert_eq!(&pixel(39)[..3], rgb(&text[4].0).unwrap());
+        assert_eq!(pixel(40), &[60, 70, 80, 255]);
+        // Pixels inside one text cell change too: Kitty is not painting
+        // a column of identical pixels for each terminal character.
+        assert_ne!(pixel(0), pixel(3));
+        for x in 1..40 {
+            for c in 0..3 { assert!(pixel(x)[c] >= pixel(x - 1)[c]); }
+        }
+        let solid = Plot::meter(0, 1, 10, 0.5, None, &hue, &track, &hue);
+        let bytes = pixels(&solid);
+        assert!(bytes.chunks_exact(4).filter(|p| p[3] == 255)
+            .all(|p| p[..3] == [120, 196, 250] || p[..3] == [60, 70, 80]));
+    }
+
+    #[test]
+    fn gradient_meters_preserve_fractional_fill_empty_tracks_and_markers() {
+        let hue = super::super::rgb(175, 130, 255);
+        let track = super::super::rgb(60, 70, 80);
+        let mark = format!("{}{}", super::super::bg(10, 12, 18), super::super::rgb(238, 244, 252));
+        for width in [0, 1, 8] {
+            for fraction in [-1.0, 0.0, 0.01, 0.5, 1.0, 2.0, f64::NAN, f64::INFINITY] {
+                let plot = Plot::gradient_meter(0, 1, width, fraction, None, &hue, &track, &mark);
+                let text = plot.text_row(0);
+                assert_eq!(text.iter().map(|(_, t)| t.chars().count()).sum::<usize>(), width);
+                assert_eq!(text.iter().filter(|(_, t)| t == "█").count(),
+                    (finite_fraction(fraction) * width as f64).round() as usize);
+                let bytes = pixels(&plot);
+                assert_eq!(bytes.len(), width * CELL_W * CELL_H * 4);
+                if width > 0 && fraction == 0.01 {
+                    let blank = pixels(&Plot::gradient_meter(0, 1, width, 0.0, None, &hue, &track, &mark));
+                    assert_ne!(bytes, blank, "lost a measured sub-cell fill");
+                }
+            }
+        }
+        let plot = Plot::gradient_meter(0, 1, 8, 1.0, Some(1.0), &hue, &track, &mark);
+        assert_eq!(plot.text_row(0)[7], (mark, "┃".into()));
+        let row = plot.fill.as_ref().unwrap().row(0, 8);
+        assert!(row.ends_with(super::super::NOBG), "last-cell marker leaked a background");
+        let bytes = pixels(&plot);
+        assert_eq!(&bytes[(8 * 64 + 62) * 4..(8 * 64 + 63) * 4], &[238, 244, 252, 255]);
+    }
+
+    #[test]
+    fn stacked_gradients_preserve_categories_and_their_measured_boundaries() {
+        let parts = [(0.3, super::super::rgb(126, 208, 176)), (0.7, super::super::rgb(127, 147, 172))];
+        let solid = Plot::stacked_bar(0, 1, 10, &parts);
+        let gradient = Plot::gradient_stacked_bar(0, 1, 10, &parts);
+        let a = solid.fill.as_ref().unwrap();
+        let b = gradient.fill.as_ref().unwrap();
+        assert_eq!(b.text[0].len(), 10);
+        for (left, right) in a.rects.iter().zip(&b.rects) {
+            assert_eq!((left.x, left.width), (right.x, right.width));
+        }
+        let text = gradient.text_row(0);
+        assert_ne!(text[0].0, text[2].0);
+        assert_ne!(text[3].0, text[9].0);
+        let bytes = pixels(&gradient);
+        assert_eq!(&bytes[(8 * 80 + 23) * 4..(8 * 80 + 23) * 4 + 3], &rgb(&text[2].0).unwrap());
+        assert_eq!(&bytes[(8 * 80 + 24) * 4..(8 * 80 + 24) * 4 + 3], &rgb(&text[3].0).unwrap());
+    }
+
+    #[test]
+    fn gradient_fill_colours_clear_aa_for_every_provider_and_countdown_hue() {
+        for hue in [[90,220,255], [255,200,90], [175,130,255], [255,130,120], [120,235,170],
+            [160,172,190], [240,132,84], [206,214,228], [126,208,176], [120,196,250],
+            [186,166,255], [232,158,200], [255,112,72], [232,226,212], [148,214,255],
+            [196,214,140], [127,147,172], [0,0,0]] {
+            let (start, end) = gradient_stops(hue);
+            for i in 0..=1000 {
+                let colour = mix_rgb(start, end, i as f64 / 1000.0);
+                for background in [[0,0,0], [18,24,34], [38,56,76]] {
+                    let ratio = (luminance(colour) + 0.05) / (luminance(background) + 0.05);
+                    assert!(ratio >= 4.5, "{hue:?} on {background:?}: {ratio:.2}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_ramped_meter_paints_each_filled_cell_its_own_colour() {
         let a = super::super::rgb(10, 20, 30);
         let b = super::super::rgb(200, 210, 220);
@@ -1271,6 +1479,23 @@ mod tests {
         compose(&rows, &[p], 40, 8, true, false, false);
         let (_, before, after) = compose(&rows, &[], 40, 8, true, false, false);
         assert!(before.contains("a=d") && after.is_empty());
+        // A quota overview can have more than sixteen visible bars. Keep
+        // every one in Kitty and clean up the highest slot as well.
+        let colour = super::super::rgb(120, 196, 250);
+        let plots: Vec<_> = (0..32).map(|i| Plot::gradient_meter(
+            2, i + 1, 4, 0.5, None, &colour, &colour, &colour,
+        )).collect();
+        let rows = vec!["          ".into(); 34];
+        let (text, _, after) = compose(&rows, &plots, 10, 34, true, true, false);
+        assert_eq!(after.matches("a=T").count(), 32);
+        assert!(!text.iter().any(|row| row.contains('█') || row.contains('░')));
+        let ids: std::collections::HashSet<_> = (0..32).map(image_id).collect();
+        assert_eq!(ids.len(), 32);
+        assert_eq!(LIVE.load(Ordering::Acquire), u32::MAX);
+        let (_, before, after) = compose(&rows, &[], 10, 34, true, false, false);
+        assert_eq!(before.matches("a=d").count(), 32);
+        assert!(after.is_empty());
+        assert_eq!(LIVE.load(Ordering::Acquire), 0);
     }
 
     #[test]

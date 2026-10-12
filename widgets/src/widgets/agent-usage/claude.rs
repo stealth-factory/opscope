@@ -1926,20 +1926,14 @@ fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
     if let Some((_, top)) = ranked.first() {
         let top = top.max(1.0);
         for (name, tok) in ranked.iter().take(5) {
-            let bar = tc::meter(tok / top, w.saturating_sub(34).max(6));
-            let filled = bar.chars().filter(|c| *c == '█').count();
-            rows.push(tc::seg(
-                &[
-                    (
-                        p.txt.as_str(),
-                        format!("  {}", tc::pad(&name.replace("claude-", ""), 20)),
-                    ),
-                    (p.agent.as_str(), format!("{:>7} ", big_num(*tok))),
-                    (p.agent.as_str(), bar.chars().take(filled).collect::<String>()),
-                    (p.grid.as_str(), bar.chars().skip(filled).collect::<String>()),
-                ],
-                w - 1,
-            ));
+            let mut line = vec![
+                (p.txt.clone(), format!("  {}", tc::pad(&name.replace("claude-", ""), 20))),
+                (p.agent.clone(), format!("{:>7} ", big_num(*tok))),
+            ];
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line, tok / top,
+                None, w.saturating_sub(34).max(6), agent_hue("claude"), p));
+            let parts: Vec<_> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            rows.push(tc::seg(&parts, w - 1));
         }
     }
 
@@ -2317,6 +2311,28 @@ pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_model_bars_publish_gradient_plots_with_their_labels_intact() {
+        let c = Data {
+            ok: true,
+            stats: serde_json::json!({"modelUsage": {
+                "claude-model-a": {"outputTokens": 1000},
+                "claude-model-b": {"outputTokens": 400}
+            }}),
+            ..Data::default()
+        };
+        let mut plots = Vec::new();
+        let rows = claude_tab_with_plots(&c, 120, &palette(), &mut plots);
+        assert_eq!(plots.len(), 2);
+        for plot in &plots {
+            let row = &rows[plot.y];
+            assert!(row.contains("model-"));
+            let colours: std::collections::HashSet<_> = plot.text_row(0).iter()
+                .filter(|(_, t)| t == "█").map(|(c, _)| c).collect();
+            assert!(colours.len() > 1, "model bar is still solid");
+        }
+    }
 
     impl Data {
         pub(crate) fn with_reset_grants(label: &str, pct: Option<i64>, grants: serde_json::Value, live: bool) -> Self {
