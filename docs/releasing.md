@@ -39,13 +39,16 @@ merge the release PR
                               │                 install this exact
                               │                 version from npm
                               │
+                              ├─► homebrew      test the Mac formula,
+                              │                 update the shared tap
+                              │
                               └─► smoke-module  the Luvus module's
                                                 build step fetches
                                                 this release's assets
 
-           Neither smoke job is a gate. They run after the release is
-           out, so they report on it rather than deciding it; a red
-           one is a release to fix forward, not a release held back.
+           These jobs run after publication. The smoke jobs report on
+           the release rather than deciding it; a red one is a release
+           to fix forward, not a release held back.
 ```
 
 ## What decides the version
@@ -113,9 +116,9 @@ before offering it — the one thing that step can get wrong is leaving the
 lock disagreeing with the manifests. Editing an existing bot PR does not
 change its author: close it so the next run opens a new one.
 
-**`GH_TOKEN` / `RELEASE_TOKEN` are optional.** Either is a user PAT; if
-neither is set, the workflow falls back to `GITHUB_TOKEN`. Nothing else
-depends on the PAT: a tag pushed with `GITHUB_TOKEN` triggers no workflow,
+**`GH_TOKEN` / `RELEASE_TOKEN` are optional for release preparation.** Either
+is a user PAT; if neither is set, the workflow falls back to `GITHUB_TOKEN`.
+A tag pushed with `GITHUB_TOKEN` triggers no workflow,
 so `tag-release.yml` starts the build with an explicit `workflow_dispatch`
 at the tag — the documented exception to that rule — rather than relying
 on the push to do it.
@@ -212,6 +215,54 @@ repository. Apple's toolchain cross-compiles `x86_64` natively at no cost.
 What it cannot do is *run* the result, so that leg builds and packages but
 does not execute its tests — the same sources are tested on the native arm64
 leg in the same run.
+
+## Homebrew
+
+After `publish` has created the public GitHub release, the `homebrew` job
+downloads both Mac archives and their checksum files. `homebrew/formula.js`
+verifies the hashes and checks every binary against the tagged
+`widgets/Cargo.toml`, then generates `Formula/opscope.rb`. The job installs
+and tests that candidate on an Apple Silicon runner before updating the
+shared [tap](https://github.com/stealth-factory/homebrew-tap).
+
+The formula carries the native release binaries with no Node or Rust
+dependency. All binaries live in `libexec`; only the `opscope` launcher is
+started through an executable wrapper on PATH. A symlink is insufficient
+on macOS: the launcher resolves widgets relative to the invoked executable
+path, so it would search `bin` instead of `libexec`. Documentation and
+example configuration live in
+`share/opscope`. User configuration stays outside the Cellar, so upgrading
+does not replace settings or tokens. Intel uses its separately checksummed
+archive; Intel execution is not covered by the Apple Silicon smoke test.
+
+Like gh-manager-cli's tap update, this needs **`GH_TOKEN` with Contents
+read/write access to `stealth-factory/homebrew-tap`**, or `RELEASE_TOKEN`
+with the same access. The default `GITHUB_TOKEN` cannot write a different
+repository. An organisation secret must be made available to opscope;
+otherwise set a repository secret. The job fails clearly if neither exists.
+
+`homebrew/update-tap.sh` updates only `Formula/opscope.rb` through GitHub's
+Contents API, preserving other applications' formulae. It compares the file
+SHA on each write, retries a concurrent update, skips an identical formula,
+and refuses a downgrade. A retry of the same version with different bytes
+is an error. Tokens stay in the environment, never in clone URLs or files.
+
+Merge the tap's initial formula before releasing this workflow. To generate
+an initial formula or inspect one locally, use a checkout whose binary
+manifest matches that release (normally the tag that carries these scripts):
+
+```sh
+gh release download v1.1.0 --repo stealth-factory/opscope \
+  --pattern '*apple-darwin.tar.gz*' --dir homebrew-artifacts
+node homebrew/formula.js 1.1.0 homebrew-artifacts /tmp/opscope.rb
+node --test homebrew/test.js
+```
+
+A failed Homebrew job leaves the GitHub/npm release published and the tap
+at its previous version. Fix the credential or packaging failure and
+re-dispatch that tag's release workflow; published npm versions and the
+GitHub release are already handled as retries. The release job cannot pick
+up script fixes that exist only on main: those require a new release.
 
 ## If something goes wrong
 

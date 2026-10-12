@@ -121,8 +121,25 @@ the coreutils command of that name.
 Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
-There is no Homebrew formula yet. You can also download three files, or
-build all seventeen binaries. Both take about a minute.
+### Homebrew on macOS
+
+```sh
+brew install stealth-factory/tap/opscope
+opscope                     # the menu
+opscope clocks              # any widget name works
+opscope doctor              # check optional external tools
+```
+
+Apple Silicon and Intel Macs use the same release binaries as npm and the
+tarball download. Only `opscope` goes on `PATH`; all seventeen binaries
+ship together, with the widgets kept private beside the launcher.
+No Node or Rust installation is needed.
+
+Upgrade with `brew update && brew upgrade opscope`. Settings stay in
+`~/.config/opscope/config.json` (or the location selected by `OPSCOPE_CONFIG`
+or `XDG_CONFIG_HOME`), outside Homebrew's versioned installation.
+
+You can also download a release or build all seventeen binaries below.
 
 ### Inside Luvus
 

@@ -76,6 +76,9 @@ jobs:
         # or an unsupported platform still fail with a sentence.
         run: node --test npm/test.js
 
+      - name: Homebrew formula generation and stale release protection
+        run: node --test homebrew/test.js
+
   macos:
     # Parser modules and their tests deliberately compile on both operating
     # systems even when only acquisition differs. A Linux-only CI job can
