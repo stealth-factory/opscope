@@ -1616,10 +1616,12 @@ unrelated hues. They are still categories, not a ramp, so they stay
 distinguishable — but they now read as Cursor's, which three borrowed colours
 never did.
 
-Both ends of that ramp are measured rather than chosen, so the dimmest filled
-cell is still legible against the terminal background for even the darkest
-agent hue, and the empty track stays at least as visible as the flat grey it
-replaced.
+All horizontal data bars use opscope-core's smooth gradient: quota lanes in
+the overview and provider tabs, model/token/spend bars, and each category of
+the human/AI split. The same colour stops brighten across text cells and
+Kitty pixels. Core lifts darker hues to keep every filled colour above AA
+4.5 against the dark terminal background and selected-row tint. Empty tracks
+remain separate from the fill; the pace mark keeps its dark surround.
 
 **Red still means something is wrong, and nothing else** — it just stopped
 being a gradient. The percentage is written in its agent's colour like the bar

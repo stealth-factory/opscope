@@ -1272,7 +1272,7 @@ fn spend_bar_width(w: usize, tok_w: usize, tokens: bool) -> usize {
 }
 
 /// Where the money went, per model, over the last 30 days.
-fn cursor_spend_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn cursor_spend_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(spend) = d.spend.as_ref() else {
         return Vec::new();
     };
@@ -1324,22 +1324,21 @@ fn cursor_spend_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let bar_w = spend_bar_width(w, tok_w, show_tokens);
     for a in shown {
         let cents = cents_of(a);
-        let bar = tc::meter(cents / top, bar_w);
-        let filled = bar.chars().filter(|c| *c == '█').count();
         let name = match text(a, "modelIntent") {
             s if s.is_empty() => "?".to_string(),
             s => s,
         };
         let mut parts = vec![
-            (p.txt.as_str(), format!("  {}", tc::pad(&name, 26))),
-            (p.agent.as_str(), format!("{:>9} ", format!("${:.2}", cents / 100.0))),
+            (p.txt.clone(), format!("  {}", tc::pad(&name, 26))),
+            (p.agent.clone(), format!("{:>9} ", format!("${:.2}", cents / 100.0))),
         ];
         if show_tokens {
-            parts.push((p.dim.as_str(), format!("{:>1$}  ", tokens_cell(a), tok_w)));
+            parts.push((p.dim.clone(), format!("{:>1$}  ", tokens_cell(a), tok_w)));
         }
-        parts.push((p.agent.as_str(), bar.chars().take(filled).collect::<String>()));
-        parts.push((p.grid.as_str(), bar.chars().skip(filled).collect::<String>()));
-        rows.push(tc::seg(&parts, w - 1));
+        parts.extend(paced_bar_with_plot(plots, rows.len(), &parts, cents / top,
+            None, bar_w, agent_hue("cursor"), p));
+        let refs: Vec<_> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        rows.push(tc::seg(&refs, w - 1));
     }
     rows.push(String::new());
     rows
@@ -1380,7 +1379,7 @@ fn cursor_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
         }
     }
     rows.extend(cursor_daily(d, w, p));
-    rows.extend(cursor_spend_rows(d, w, p));
+    tc::append_plot_rows(&mut rows, plots, |local| cursor_spend_with_plots(d, w, p, local));
     if !d.ok {
         // An unreadable database makes the counts unknown, not zero, and
         // which kind of unreadable matters: absent means run the agent,
@@ -1445,11 +1444,10 @@ fn cursor_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
             (human as f64 / total as f64, p.dim.clone()),
         ];
         let mut bar: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
-        let segs = tc::stacked_bar(&split, w.saturating_sub(3).max(10));
-        for (colour, run) in &segs {
-            bar.push((colour.as_str(), run.clone()));
-        }
+        let plot = tc::Plot::gradient_stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &split);
+        bar.extend(plot.text_row(0).iter().map(|(c, t)| (c.as_str(), t.clone())));
         rows.push(tc::seg(&bar, w - 1));
+        plots.push(plot);
         rows.push(tc::seg(
             &[
                 (
@@ -1479,17 +1477,14 @@ fn cursor_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
         ));
         let top = d.by_model[0].1.max(1);
         for (name, n) in d.by_model.iter().take(5) {
-            let bar = tc::meter(*n as f64 / top as f64, w.saturating_sub(36).max(6));
-            let filled = bar.chars().filter(|c| *c == '█').count();
-            rows.push(tc::seg(
-                &[
-                    (p.txt.as_str(), format!("  {}", tc::pad(name, 22))),
-                    (p.agent.as_str(), format!("{:>7} ", commas(*n))),
-                    (p.agent.as_str(), bar.chars().take(filled).collect::<String>()),
-                    (p.grid.as_str(), bar.chars().skip(filled).collect::<String>()),
-                ],
-                w - 1,
-            ));
+            let mut line = vec![
+                (p.txt.clone(), format!("  {}", tc::pad(name, 22))),
+                (p.agent.clone(), format!("{:>7} ", commas(*n))),
+            ];
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line, *n as f64 / top as f64,
+                None, w.saturating_sub(36).max(6), agent_hue("cursor"), p));
+            let parts: Vec<_> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            rows.push(tc::seg(&parts, w - 1));
         }
     }
     rows.push(String::new());
@@ -1521,6 +1516,45 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spend_models_and_authorship_publish_gradient_plots_at_their_text_rows() {
+        let d = Data {
+            ok: true,
+            lines: 30,
+            human_lines: 70,
+            by_model: vec![("model-a".into(), 100), ("model-b".into(), 40)],
+            spend: Some(serde_json::json!({
+                "totalCostCents": 14000,
+                "aggregations": [
+                    {"modelIntent": "model-a", "totalCents": 10000},
+                    {"modelIntent": "model-b", "totalCents": 4000}
+                ]
+            })),
+            ..Data::default()
+        };
+        for width in [60, 120] {
+            let mut plots = Vec::new();
+            let rows = cursor_tab_with_plots(&d, width, &palette(), &mut plots);
+            let bars: Vec<_> = rows.iter().enumerate().filter(|(_, row)| {
+                row.contains('█') || row.contains('░')
+            }).collect();
+            assert_eq!(bars.len(), 5, "two spend, two model and one authorship bar");
+            assert_eq!(plots.len(), bars.len(), "a horizontal bar missed the pixel renderer");
+            for (y, row) in bars {
+                let plot = plots.iter().find(|plot| plot.y == y).expect("plot row drifted");
+                let plain = strip(row);
+                let at = plain.chars().position(|c| c == '█' || c == '░').unwrap();
+                assert_eq!(plot.x, at, "plot covered a label: {plain}");
+                let expected: String = plot.text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+                let shown: String = plain.chars().skip(at).take(plot.width).collect();
+                assert_eq!(shown, expected);
+                let colours: std::collections::HashSet<_> = plot.text_row(0).iter()
+                    .filter(|(_, t)| t == "█").map(|(c, _)| c).collect();
+                assert!(colours.len() > 1, "solid bar: {plain}");
+            }
+        }
+    }
 
     fn empty_schema() -> Connection {
         let con = Connection::open_in_memory().unwrap();
@@ -2358,6 +2392,11 @@ mod tests {
         assert!(!narrow.contains("resets"), "a date was clipped rather than dropped: {}", narrow);
         assert!(narrow.contains("$40.36 left"), "the money stood down first: {}", narrow);
     }
+}
+
+#[cfg(test)]
+fn cursor_spend_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    cursor_spend_with_plots(d, w, p, &mut Vec::new())
 }
 
 #[cfg(test)]
