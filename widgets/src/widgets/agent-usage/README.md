@@ -1335,11 +1335,13 @@ These are the same two requests CodexBar makes for its Notion AI provider.
 ### Devin asks app.devin.ai with a bearer token and an organization
 
 Devin publishes a daily percent, a weekly percent, the reset instant for each,
-and an extra-usage balance. `[+]` draws the two percents. Neither row has a
-pace mark: the body has a reset and no window length, and a 24-hour or 7-day
-length would be one this widget made up. The balance is a number with no bar
-and no currency symbol, because the body names neither a cap nor a currency.
-It is not a lane on `[+]`.
+and an extra-usage balance. `[+]` draws the two percents. Both rows carry a
+pace mark against the length their key names — a day for `daily_*`, seven
+for `weekly_*` — the same reading the Droid section below gives `fiveHour`.
+The body sends the reset and not the length, so a reset that sits further
+out than the named length draws no pace rather than a wrong one. The balance
+is a number with no bar and no currency symbol, because the body names
+neither a cap nor a currency. It is not a lane on `[+]`.
 
 - **Daily disappears when `hide_daily_quota` is boolean true.** The percent
   may still be in the body. It is not drawn as 0%. A missing weekly field is
@@ -1614,10 +1616,12 @@ unrelated hues. They are still categories, not a ramp, so they stay
 distinguishable — but they now read as Cursor's, which three borrowed colours
 never did.
 
-Both ends of that ramp are measured rather than chosen, so the dimmest filled
-cell is still legible against the terminal background for even the darkest
-agent hue, and the empty track stays at least as visible as the flat grey it
-replaced.
+All horizontal data bars use opscope-core's smooth gradient: quota lanes in
+the overview and provider tabs, model/token/spend bars, and each category of
+the human/AI split. The same colour stops brighten across text cells and
+Kitty pixels. Core lifts darker hues to keep every filled colour above AA
+4.5 against the dark terminal background and selected-row tint. Empty tracks
+remain separate from the fill; the pace mark keeps its dark surround.
 
 **Red still means something is wrong, and nothing else** — it just stopped
 being a gradient. The percentage is written in its agent's colour like the bar

@@ -45,6 +45,11 @@ offset instead of following the system.
   to Monday 09:00, not Saturday.
 - **End of day** — how much of today is gone.
 
+The filled portion brightens from left to right in each countdown's own
+colour: cyan for the hour, amber for office hours, purple for the day.
+Kitty pixel bars and the text fallback use the same gradient. The length
+shows elapsed time; the digits show time remaining.
+
 **Pomodoro** — see below. Off until you press `p`.
 
 **World clock** — each configured city in its own timezone, west to east by
@@ -61,6 +66,8 @@ level with it in summer.
 
 Standard 25 / 5 / 15 — 25 minutes of focus, a 5-minute break, and a 15-minute
 long break every fourth session.
+
+Its progress bar uses the same gradient, in focus, break or paused colour.
 
 **A phase never ends itself.** When the time is up the counter flips to `+MM:SS`
 and keeps climbing, and the bar rescales to `duration + overtime` so a growing

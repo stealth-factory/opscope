@@ -468,16 +468,8 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                 p.dim.clone(),
                 format!("   {} ", tc::pad(&lane.label, label_w)),
             )];
-            let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-            plots.push(tc::Plot::meter(4 + label_w, rows.len(), bar_room, used,
-                elapsed_of(lane.window_secs, lane.reset), &fill, &p.grid, &p.pace_mark));
-            line.extend(paced_bar(
-                used,
-                elapsed_of(lane.window_secs, lane.reset),
-                bar_room,
-                hue,
-                p,
-            ));
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line, used,
+                elapsed_of(lane.window_secs, lane.reset), bar_room, hue, p));
             if any_stale {
                 // Held for every lane, so the percentages stay in one
                 // column whether the row beside them is cached or not.

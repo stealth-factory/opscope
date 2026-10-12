@@ -118,6 +118,9 @@ let calendar = tc::Plot::heatmap_levels(x, y, &days, &missing_colour);
 let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
 // Measured category shares; keep their counts and legend in ordinary text.
 let states = tc::Plot::stacked_bar(x, y, width, &shares);
+// Smooth horizontal fills, keeping the same fractions and marker geometry.
+let smooth_quota = tc::Plot::gradient_meter(x, y, width, used, elapsed, &fill, &track, &marker);
+let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
 ```
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
@@ -130,7 +133,16 @@ colour-only convenience wrapper using the same renderer with solid tiles.
 Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
 and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
-change the measured fill. No primitive animates a value between API polls.
+change the measured fill. `Plot::ramped_meter` takes a colour per filled
+cell, so a ramp the text bar draws is painted in pixels too rather than
+flattened to one fill. `gradient_meter` and `gradient_stacked_bar` instead
+let core own a smooth ramp: one colour per text cell, continuous interpolation
+per Kitty pixel, with the same readable colour stops. Stacked gradients restart
+inside each category and retain the measured boundaries. The original `meter`
+and `stacked_bar` remain solid for widgets that need that treatment.
+`Plot::text_row(0)` exposes the exact fallback cells for composing labels or
+alert frames without duplicating gradient or marker logic. No primitive
+animates a value between API polls.
 
 Collect plots in the same coordinate system as the body, then call
 `in_viewport` after the scroll offset is clamped. Clip to the body room above

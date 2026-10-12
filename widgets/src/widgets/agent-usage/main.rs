@@ -725,10 +725,8 @@ fn work_days_between<Tz: TimeZone>(tz: &Tz, from: f64, to: f64, days: u8) -> Opt
     Some(total)
 }
 
-/// The dark end of every agent ramp. The two stops above it are measured,
-/// not picked: 0.51 keeps the dimmest filled cell at 3:1 against the
-/// background for the darkest agent hue, and 0.34 leaves the empty track at
-/// least as visible as the flat grid it replaces.
+/// Keep Cursor's quota categories as distinct tints of its provider hue.
+/// This chooses category colours; core owns the gradient within each bar.
 const BAR_FLOOR: (u8, u8, u8) = (30, 38, 52);
 
 fn blend(hue: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
@@ -738,15 +736,6 @@ fn blend(hue: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
         step(BAR_FLOOR.1, hue.1),
         step(BAR_FLOOR.2, hue.2),
     )
-}
-
-/// A tint of an agent's colour, t running dark to full.
-///
-/// Not `shade` - that name is taken by the calendars' four-step ramp, and
-/// two functions of the same name meant the heatmaps drew with this one.
-fn tint(hue: (u8, u8, u8), t: f64) -> String {
-    let (r, g, b) = blend(hue, t);
-    tc::rgb(r, g, b)
 }
 
 /// Which of the four steps a day falls in.
@@ -771,8 +760,6 @@ struct Palette {
     /// foreground colour: plain white manages 1.2:1 against a full bar, so
     /// it disappears exactly where it matters.
     pace_mark: String,
-    /// Default background again, and only that.
-    nobg: String,
 }
 
 fn palette() -> Palette {
@@ -788,7 +775,6 @@ fn palette() -> Palette {
         agent: tc::rgb(180, 160, 255),
         empty_cell: tc::rgb(58, 66, 80),
         pace_mark: format!("{}{}", tc::bg(10, 12, 18), tc::rgb(238, 244, 252)),
-        nobg: tc::NOBG.to_string(),
     }
 }
 
@@ -857,67 +843,10 @@ fn paced_bar_with_plot(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
-    let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.pace_mark));
-    paced_bar(used, elapsed, room, hue, p)
-}
-
-fn paced_bar(
-    used: f64,
-    elapsed: Option<f64>,
-    room: usize,
-    hue: Option<(u8, u8, u8)>,
-    p: &Palette,
-) -> Vec<(String, String)> {
-    let bar = tc::meter(used, room);
-    let filled = bar.chars().filter(|c| *c == '█').count();
-    let at = elapsed.map(|e| ((e * room as f64).round() as usize).min(room.saturating_sub(1)));
-    let mut parts: Vec<(String, String)> = Vec::new();
-    for (i, ch) in bar.chars().enumerate() {
-        let (colour, glyph) = if Some(i) == at {
-            // One colour for the mark on every bar. It is a reference line -
-            // where an even burn would have reached - and a line that
-            // changes colour looks like it has a state of its own, when the
-            // state being reported is the fill's position relative to it.
-            (p.pace_mark.clone(), '┃')
-        } else if i < filled {
-            // Filled cells run dark to full across the fill, so the bar is
-            // recognisably its agent's colour and still reads as a quantity
-            // without counting cells.
-            let t = 0.51 + 0.49 * (i as f64 / filled.saturating_sub(1).max(1) as f64);
-            (
-                format!(
-                    "{}{}",
-                    p.nobg,
-                    match hue {
-                        Some(hue) => tint(hue, t),
-                        None => tc::heat(used),
-                    }
-                ),
-                ch,
-            )
-        } else {
-            (
-                format!(
-                    "{}{}",
-                    p.nobg,
-                    match hue {
-                        Some(hue) => tint(hue, 0.34),
-                        None => p.grid.clone(),
-                    }
-                ),
-                ch,
-            )
-        };
-        match parts.last_mut() {
-            Some((had, run)) if *had == colour => run.push(glyph),
-            _ => parts.push((colour, glyph.to_string())),
-        }
-    }
-    // The mark is the one thing here that sets a background, so the run ends
-    // by putting it back. Without this the dark cell bled through everything
-    // drawn after it on the row.
-    parts.push((p.nobg.clone(), String::new()));
+    let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
+    let plot = tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark);
+    let parts = plot.text_row(0).to_vec();
+    plots.push(plot);
     parts
 }
 
@@ -2740,6 +2669,16 @@ mod vendors;
 #[cfg(test)]
 mod tests {
 
+    fn paced_bar(
+        used: f64,
+        elapsed: Option<f64>,
+        room: usize,
+        hue: Option<(u8, u8, u8)>,
+        p: &Palette,
+    ) -> Vec<(String, String)> {
+        paced_bar_with_plot(&mut Vec::new(), 0, &[], used, elapsed, room, hue, p)
+    }
+
     /// Under a day, say the hours. The quota headings used to render this
     /// span three different ways - "~0.9 days", a truncated "0d", and
     /// "resets today" - and all three round away the part a reader is
@@ -4052,6 +3991,21 @@ mod tests {
         let bare = plain(&paced_bar(0.5, None, 10, None, &p));
         assert!(!bare.contains('┃'));
         assert_eq!(bare.chars().count(), 10);
+    }
+
+    #[test]
+    fn the_pixel_fill_is_the_same_ramp_the_text_bar_draws() {
+        let p = palette();
+        for hue in [Some((240, 132, 84)), None] {
+            let mut plots = Vec::new();
+            let parts = paced_bar_with_plot(&mut plots, 3, &[(p.txt.clone(), "prefix ".into())],
+                0.5, None, 10, hue, &p);
+            assert_eq!(parts, plots[0].text_row(0));
+            assert_eq!((plots[0].x, plots[0].y), (7, 3));
+            let colours: std::collections::HashSet<_> = parts.iter()
+                .filter(|(_, glyph)| glyph == "█").map(|(c, _)| c).collect();
+            assert_eq!(colours.len(), 5, "solid or coarse gradient: {parts:?}");
+        }
     }
 
     #[test]

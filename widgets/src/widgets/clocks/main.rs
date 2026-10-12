@@ -91,12 +91,26 @@ where
     }
 }
 
-/// A progress bar of the given width, filled to `frac`.
-fn bar(frac: f64, width: usize) -> String {
-    let filled = ((frac.clamp(0.0, 1.0)) * width as f64).round() as usize;
-    let mut out = "█".repeat(filled);
-    out.push_str(&"░".repeat(width.saturating_sub(filled)));
-    out
+const FOCUS_HUE: (u8, u8, u8) = (255, 130, 120);
+const REST_HUE: (u8, u8, u8) = (120, 235, 170);
+const PAUSED_HUE: (u8, u8, u8) = (160, 172, 190);
+
+fn bar(
+    plots: &mut Vec<tc::Plot>,
+    row: usize,
+    frac: f64,
+    width: usize,
+    hue: (u8, u8, u8),
+    p: &Palette,
+) -> String {
+    let colour = tc::rgb(hue.0, hue.1, hue.2);
+    let plot = tc::Plot::gradient_meter(1, row, width, frac, None, &colour, &p.dim, &p.txt);
+    let parts: Vec<_> = plot.text_row(0).iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+    // Also keep the text row for the pomodoro's flash, which draws without
+    // plots. The ordinary text fallback is owned by the shared meter.
+    let text = format!(" {}", tc::seg(&parts, width));
+    plots.push(plot);
+    text
 }
 
 struct Countdown {
@@ -106,7 +120,7 @@ struct Countdown {
     /// Its own colour: the three are different clocks, not three readings
     /// of one, and a single hue makes them look like a stack of the same
     /// thing.
-    ink: String,
+    hue: (u8, u8, u8),
 }
 
 /// Which days are working days, and between which hours.
@@ -203,7 +217,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: "Next Hour".into(),
         left: 3600 - into_hour,
         frac: into_hour as f64 / 3600.0,
-        ink: tc::rgb(90, 220, 255),
+        hue: (90, 220, 255),
     });
 
     // Inside working hours this counts to the close; outside them, to the
@@ -229,7 +243,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: label.into(),
         left,
         frac: 1.0 - (left as f64 / span as f64),
-        ink: tc::rgb(255, 200, 90),
+        hue: (255, 200, 90),
     });
 
     let (into_day, day_len) = day_bounds(&now);
@@ -237,7 +251,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: "End of Day".into(),
         left: day_len - into_day,
         frac: into_day as f64 / day_len as f64,
-        ink: tc::rgb(175, 130, 255),
+        hue: (175, 130, 255),
     });
     out
 }
@@ -1231,12 +1245,12 @@ fn main() {
             let frac = 1.0 - (left / pomo.duration().max(1.0));
             // Paused takes its own ink: a stopped timer showing focus red
             // reads as one that is running.
-            let ink = if !pomo.running {
-                &p.paused
+            let (ink, hue) = if !pomo.running {
+                (&p.paused, PAUSED_HUE)
             } else if pomo.phase == Phase::Focus {
-                &p.focus
+                (&p.focus, FOCUS_HUE)
             } else {
-                &p.rest
+                (&p.rest, REST_HUE)
             };
             rows.push(tc::seg(
                 &[
@@ -1269,21 +1283,13 @@ fn main() {
                 // share grows the longer the phase is ignored - the point
                 // being that it keeps getting harder to miss.
                 let total = pomo.duration() + over;
-                let base = ((bar_w as f64 * pomo.duration() / total).round() as usize).max(1);
-                plots.push(tc::Plot::stacked_bar(1, rows.len(), bar_w, &[(pomo.duration() / total, ink.clone()), (over / total, p.over.clone())]));
-                rows.push(tc::seg(
-                    &[
-                        (ink.as_str(), format!(" {}", "█".repeat(base))),
-                        (p.over.as_str(), "█".repeat(bar_w.saturating_sub(base))),
-                    ],
-                    w - 1,
-                ));
+                let plot = tc::Plot::gradient_stacked_bar(1, rows.len(), bar_w,
+                    &[(pomo.duration() / total, ink.clone()), (over / total, p.over.clone())]);
+                let parts: Vec<_> = plot.text_row(0).iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                rows.push(format!(" {}", tc::seg(&parts, bar_w)));
+                plots.push(plot);
             } else {
-                plots.push(tc::Plot::meter(1, rows.len(), bar_w, frac, None, &ink, &p.dim, &p.txt));
-                rows.push(tc::seg(
-                    &[(ink.as_str(), format!(" {}", bar(frac, bar_w)))],
-                    w - 1,
-                ));
+                rows.push(bar(&mut plots, rows.len(), frac, bar_w, hue, &p));
             }
         }
         for item in countdowns(now, &office) {
@@ -1294,11 +1300,7 @@ fn main() {
                 ],
                 w - 1,
             ));
-            plots.push(tc::Plot::meter(1, rows.len(), bar_w, item.frac, None, &item.ink, &p.dim, &p.txt));
-            rows.push(tc::seg(
-                &[(item.ink.as_str(), format!(" {}", bar(item.frac, bar_w)))],
-                w - 1,
-            ));
+            rows.push(bar(&mut plots, rows.len(), item.frac, bar_w, item.hue, &p));
         }
         rows.push(String::new());
 
@@ -1591,9 +1593,9 @@ fn palette() -> Palette {
     // rather than the blue-grey the other widgets use, and the difference
     // is visible the moment the two sit side by side.
     Palette {
-        focus: tc::rgb(255, 130, 120),
-        rest: tc::rgb(120, 235, 170),
-        paused: tc::rgb(160, 172, 190),
+        focus: tc::rgb(FOCUS_HUE.0, FOCUS_HUE.1, FOCUS_HUE.2),
+        rest: tc::rgb(REST_HUE.0, REST_HUE.1, REST_HUE.2),
+        paused: tc::rgb(PAUSED_HUE.0, PAUSED_HUE.1, PAUSED_HUE.2),
         over: tc::rgb(255, 80, 90),
         work: tc::rgb(130, 255, 180),
         eve: tc::rgb(255, 200, 90),
@@ -1902,8 +1904,8 @@ mod tests {
     fn each_countdown_gets_its_own_colour() {
         let now = Local.with_ymd_and_hms(2026, 8, 22, 14, 30, 0).unwrap();
         let items = countdowns(now, &Office::from_config(&serde_json::json!({})));
-        let inks: std::collections::HashSet<String> =
-            items.iter().map(|c| c.ink.clone()).collect();
+        let inks: std::collections::HashSet<(u8, u8, u8)> =
+            items.iter().map(|c| c.hue).collect();
         assert_eq!(inks.len(), 3, "three clocks, three colours");
     }
 
@@ -2146,11 +2148,36 @@ mod tests {
 
     #[test]
     fn a_bar_is_exactly_its_width() {
-        for frac in [0.0, 0.25, 0.5, 1.0, 1.5, -0.2] {
-            assert_eq!(bar(frac, 20).chars().count(), 20, "frac {}", frac);
+        let p = palette();
+        for width in [0, 1, 2, 20, 90] {
+            for frac in [0.0, 0.01, 0.25, 0.5, 1.0, 1.5, -0.2, f64::NAN] {
+                let mut plots = Vec::new();
+                let text = bar(&mut plots, 7, frac, width, FOCUS_HUE, &p);
+                let cells = text.chars().filter(|c| matches!(c, ' ' | '█' | '░')).count();
+                assert_eq!(cells, width + 1, "frac {frac}, width {width}");
+                assert_eq!((plots[0].x, plots[0].y, plots[0].width), (1, 7, width));
+                let filled = text.chars().filter(|c| *c == '█').count();
+                let expected = if frac.is_finite() {
+                    (frac.clamp(0.0, 1.0) * width as f64).round() as usize
+                } else { 0 };
+                assert_eq!(filled, expected, "frac {frac}, width {width}");
+            }
         }
-        assert!(bar(0.0, 10).starts_with('░'));
-        assert!(bar(1.0, 10).starts_with('█'));
+    }
+
+    #[test]
+    fn the_gradient_spans_the_fill_in_each_countdowns_hue() {
+        for hue in [(90, 220, 255), (255, 200, 90), (175, 130, 255), FOCUS_HUE, REST_HUE, PAUSED_HUE] {
+            let mut plots = Vec::new();
+            let text = bar(&mut plots, 0, 0.5, 20, hue, &palette());
+            let ramp: Vec<_> = plots[0].text_row(0).iter()
+                .filter(|(_, glyph)| glyph == "█").map(|(c, _)| c).collect();
+            assert_eq!(ramp.len(), 10);
+            assert!(ramp.windows(2).all(|pair| pair[0] != pair[1]));
+            for colour in ramp {
+                assert!(text.contains(colour), "the flash row lost a gradient cell");
+            }
+        }
     }
 
     #[test]
