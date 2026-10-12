@@ -1139,7 +1139,15 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
             .find(|(g, _)| *g == text(l, "group"))
             .map(|(_, s)| *s);
         let cushion = lead(pct, window, reset);
-        let (pace_colour, pace_txt) = pace_cell(cushion, p);
+        // Age, not `quota_live`. A cache thirty-five seconds old is current,
+        // and a live flag on a nine-day-old reading is not. The same rule
+        // the summary's star uses, so the two screens agree about whether
+        // this cushion is a live threshold.
+        let (pace_colour, pace_txt) = pace_cell(
+            cushion,
+            pace_guessed(reading_is_old(c.quota_at), false, reset),
+            p,
+        );
         // is_active marks the limit currently doing the binding - the one
         // that will stop you first - so it is the one worth reading brightly.
         let mut line: Vec<(String, String)> = vec![(
@@ -2483,6 +2491,41 @@ mod tests {
             "calling a nine-day-old reading live does not make it current"
         );
         assert!(with(false, now() - 9.6 * 86400.0));
+    }
+
+    #[test]
+    fn a_stale_cache_marks_the_pace_as_estimated() {
+        // Halfway through a five-hour window, 80% spent: behind the clock.
+        // Only a stale reading takes the estimated-pace tilde.
+        let reset = chrono::DateTime::from_timestamp((now() + 2.0 * 3600.0) as i64, 0)
+            .expect("a reset")
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string();
+        let quota = serde_json::json!({
+            "limits": [{
+                "group": "session",
+                "kind": "session",
+                "percent": 80,
+                "resets_at": reset,
+            }]
+        });
+        let draw = |live: bool, taken: f64| {
+            let c = Data {
+                quota: Some(quota.clone()),
+                quota_live: live,
+                quota_at: taken,
+                ..Data::default()
+            };
+            claude_quota_with_plots(&c, 120, &palette(), &mut Vec::new()).join("\n")
+        };
+        let stale = draw(false, now() - (CLAUDE_FRESH_FOR + 60.0));
+        assert!(stale.contains('~'), "{stale}");
+        // A cache a moment old is current, same as the star. Source alone
+        // is not freshness.
+        let fresh = draw(false, now() - 35.0);
+        assert!(!fresh.contains('~'), "{fresh}");
+        let live = draw(true, now());
+        assert!(!live.contains('~'), "{live}");
     }
 
     #[test]

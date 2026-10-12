@@ -200,6 +200,32 @@ def filled_text(t):
 
 
 
+def underlines(t):
+    # Inside the negotiation window the fixture keeps today's colour-only text.
+    assert b"\x1bP+q536d756c78;536574756c63\x1b\\" in t.output
+    assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
+    assert b"\x1b[4:3m" not in t.output
+    assert b"\x1b[4:5m" not in t.output
+    assert b"\x1b[58;2;" not in t.output
+    t.send(b"\x1bP1+r536d756c78=1b5b343a25703125646d;536574756c63=1b5b3538\x1b\\")
+    t.read(0.45)
+    assert b"\x1b[4:3m" in t.output
+    assert b"\x1b[4:5m" in t.output
+    assert b"\x1b[58;2;255;214;140m" in t.output
+    assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
+
+
+def plain_underlines(t):
+    assert b"\x1bP+q536d756c78;536574756c63\x1b\\" in t.output
+    t.send(b"\x1bP0+r536d756c78;536574756c63\x1b\\")
+    t.read(0.45)
+    assert b"\x1b[4m" in t.output
+    assert b"\x1b[4:3m" not in t.output
+    assert b"\x1b[4:5m" not in t.output
+    assert b"\x1b[58;2;" not in t.output
+    assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -219,7 +245,8 @@ if __name__ == "__main__":
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
-                               ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection)]:
+                               ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
+                               ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
     for ending in ["signal", "panic"]:

@@ -998,7 +998,8 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
         // allowance spent. Positive is a cushion, negative means the lane
         // runs out before the cycle does. Pure arithmetic on the cycle
         // dates - nothing new is fetched for it.
-        let (pace_colour, pace_txt) = pace_cell(lead(pct, cycle_secs, reset_ts), p);
+        let (pace_colour, pace_txt) =
+            pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {}", tc::pad(name, label_w)))];
         line.extend(paced_bar_with_plot(plots, rows.len(), &line,
@@ -1034,7 +1035,8 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
         let used = (pct / 100.0).clamp(0.0, 1.0);
         let hue = base;
         rows.push(String::new());
-        let (pace_colour, pace_txt) = pace_cell(lead(pct, secs, reset), p);
+        let (pace_colour, pace_txt) =
+            pace_cell(lead(pct, secs, reset), pace_guessed(false, false, reset), p);
         let resets = match reset.map(|e| e - now()) {
             Some(left) if left > 0.0 => format!("  {}", left_span(left)),
             Some(_) => "  resetting".to_string(),

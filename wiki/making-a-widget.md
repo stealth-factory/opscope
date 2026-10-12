@@ -509,6 +509,26 @@ duplication has already caused drift.
 Use `seg()` and `pad()` rather than `len()` — `len()` counts escape bytes and
 produces ragged borders.
 
+Underlines are opt-in through `marked()` and `Marks`. Pass the marked
+foreground as a `seg()` colour prefix, keeping the value in the text half:
+
+```rust
+let ink = tc::marked(&tc::rgb(225, 235, 245), tc::Marks {
+    stale: true,
+    ..tc::Marks::default()
+});
+let row = tc::seg(&[(&ink, "  35%  ".into())], width);
+```
+
+Core negotiates curly underlines for stale readings, dashed underlines for
+partial windows, and a coloured underline for a crossed threshold. A terminal
+that refuses or misses the probe gets a plain underline. `seg()` marks only
+the content: leading and trailing whitespace remains alignment padding, and
+the next segment is never underlined by the preceding one. Internal spaces
+in a phrase still take the mark. Document the meaning in the widget's README
+when opting in. Agent-usage keeps its colour and textual freshness signals
+and does not use these helpers.
+
 Braille line charts are **not** in core. `latency` and `link` each keep their
 own `braille_canvas` and the two differ: latency's series carries the gaps a
 ping can leave, link's is told how many slots the axis holds.

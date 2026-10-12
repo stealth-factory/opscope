@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 pub(crate) const SYNC_BEGIN: &str = "\x1b[?2026h";
 pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[c";
+/// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
+const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 
@@ -13,6 +15,10 @@ static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 pub struct Capabilities {
     pub kitty_graphics: bool,
     pub synchronized_updates: bool,
+    /// Kitty `Smulx`: curly and dashed underlines.
+    pub styled_underlines: bool,
+    /// Kitty `Setulc`: an underline colour distinct from the foreground.
+    pub underline_colour: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,17 +36,22 @@ struct Session {
     mode: GraphicsMode,
     graphics_answered: bool,
     image_rejected: bool,
+    /// An XTGETTCAP reply for the underline query arrived inside the window.
+    underline_answered: bool,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
     capabilities: Capabilities {
         kitty_graphics: false,
         synchronized_updates: false,
+        styled_underlines: false,
+        underline_colour: false,
     },
     deadline: None,
     mode: GraphicsMode::Auto,
     graphics_answered: false,
     image_rejected: false,
+    underline_answered: false,
 });
 
 /// Query only after cbreak is active, so replies are never echoed as text.
@@ -63,11 +74,14 @@ pub(crate) fn start() {
     session.deadline = Some(Instant::now() + TIMEOUT);
     drop(session);
     // Text mode still benefits from synchronized updates, but sends no image query.
-    super::out(if mode == GraphicsMode::Text {
-        "\x1b[?2026$p\x1b[c"
-    } else {
-        QUERY
-    });
+    super::out(&format!(
+        "{}{UNDERLINE_QUERY}",
+        if mode == GraphicsMode::Text {
+            "\x1b[?2026$p\x1b[c"
+        } else {
+            QUERY
+        }
+    ));
     super::flush();
 }
 
@@ -104,6 +118,28 @@ impl Session {
             }
         } else if sequence == "\x1b[?2026;1$y" || sequence == "\x1b[?2026;2$y" {
             self.capabilities.synchronized_updates = true;
+        } else if let Some(body) = sequence
+            .strip_prefix("\x1bP")
+            .and_then(|s| s.strip_suffix("\x1b\\"))
+        {
+            // `1+r` lists capabilities the terminal has; `0+r` lists those
+            // it does not. Either one answers the query. A late reply is
+            // already excluded by the deadline check above this arm.
+            let acknowledged = body.strip_prefix("1+r");
+            let declined = body.strip_prefix("0+r");
+            if acknowledged.is_some() || declined.is_some() {
+                self.underline_answered = true;
+            }
+            if let Some(rest) = acknowledged {
+                for part in rest.split(';') {
+                    let name = part.split('=').next().unwrap_or("").to_ascii_lowercase();
+                    match name.as_str() {
+                        "536d756c78" => self.capabilities.styled_underlines = true,
+                        "536574756c63" => self.capabilities.underline_colour = true,
+                        _ => {}
+                    }
+                }
+            }
         } else if sequence.starts_with("\x1b[?") && sequence.ends_with('c') {
             // The DA reply follows the graphics query. No earlier graphics
             // response means this path does not support it, even if TERM says kitty.
@@ -135,6 +171,39 @@ pub fn capabilities() -> Capabilities {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .capabilities
+}
+
+/// How far underline styles may go on this terminal right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnderlineSupport {
+    /// Still inside the negotiation window. Keep today's colour-only text.
+    Unknown,
+    /// `Smulx` was acknowledged: curly and dashed are safe.
+    Styled,
+    /// The terminal declined, or the window closed without an answer.
+    /// A plain underline is the legible fallback.
+    Plain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnderlineCaps {
+    pub support: UnderlineSupport,
+    pub colour: bool,
+}
+
+pub(crate) fn underline_caps() -> UnderlineCaps {
+    let session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let support = if session.capabilities.styled_underlines {
+        UnderlineSupport::Styled
+    } else if session.underline_answered || session.deadline.is_some_and(|d| Instant::now() > d) {
+        UnderlineSupport::Plain
+    } else {
+        UnderlineSupport::Unknown
+    };
+    UnderlineCaps {
+        support,
+        colour: session.capabilities.underline_colour,
+    }
 }
 
 /// Explicit requests are still negotiated; never force image bytes into a
@@ -230,6 +299,40 @@ mod tests {
         };
         s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         assert!(!s.capabilities.kitty_graphics);
+    }
+
+    #[test]
+    fn underline_replies_count_only_inside_the_window() {
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply(
+            "\x1bP1+r536d756c78=1b5b343a25703125646d;536574756c63=1b5b3538\x1b\\",
+            now,
+        );
+        assert!(s.capabilities.styled_underlines);
+        assert!(s.capabilities.underline_colour);
+        assert!(s.underline_answered);
+        assert!(!s.capabilities.kitty_graphics);
+
+        let mut declined = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        declined.reply("\x1bP0+r536d756c78;536574756c63\x1b\\", now);
+        assert!(declined.underline_answered);
+        assert!(!declined.capabilities.styled_underlines);
+        assert!(!declined.capabilities.underline_colour);
+
+        let mut late = Session {
+            deadline: Some(now),
+            ..Session::default()
+        };
+        late.reply("\x1bP1+r536d756c78=1b\x1b\\", now + TIMEOUT + TIMEOUT);
+        assert!(!late.underline_answered);
+        assert!(!late.capabilities.styled_underlines);
     }
 
     #[test]

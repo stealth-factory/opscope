@@ -539,7 +539,11 @@ fn copilot_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::P
             let mut line: Vec<(String, String)> = vec![(p.dim.clone(), format!(" {} ", name))];
             line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, elapsed_of(span_secs, stamp), room, hue, p));
             line.push((pct_colour(pct, hue, p), pct_text(pct)));
-            line.push(pace_cell(lead(pct, span_secs, stamp), p));
+            line.push(pace_cell(
+                lead(pct, span_secs, stamp),
+                pace_guessed(false, false, stamp),
+                p,
+            ));
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));

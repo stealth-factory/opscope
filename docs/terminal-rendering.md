@@ -251,6 +251,28 @@ check; the managed test workspace has no attached graphical terminal.
 The independent Kitty keyboard and text-sizing protocols are not enabled by this
 graphics implementation. Legacy keyboard bindings remain the input contract.
 
+## Underlines
+
+Tracked in [OPS-151](https://linear.app/stealth-company/issue/OPS-151/use-styled-and-coloured-underlines-to-mark-stale-partial-and-over), part of [OPS-147](https://linear.app/stealth-company/issue/OPS-147/build-the-next-round-of-kitty-terminal-improvements).
+
+A value can carry an underline as a second signal beside its colour. Widgets call `tc::marked` and do not write the SGR themselves.
+
+| Mark | Meaning | When the terminal acknowledges it |
+|---|---|---|
+| curly | the last poll is older than its interval | `CSI 4:3` |
+| dashed | a window that has not completed, or a figure carried forward | `CSI 4:5` |
+| coloured | a threshold this value has crossed | `CSI 58;2;255;214;140` on top of the underline |
+
+`(255, 214, 140)` clears WCAG AA 4.5 against black and against the selected-row tints. The digits and labels do not change.
+
+Startup sends an XTGETTCAP query for `Smulx` and `Setulc` with the graphics and synchronized-update queries. The same 800 ms window applies, and a late reply does not enable the styles. Until the terminal answers, the text stays as it was. A refusal, or a window that closes with no answer, falls back to a plain underline (`CSI 4`), which is what a terminal without underline styles already draws and which stays legible. Underline colour is sent only after `Setulc` is acknowledged; otherwise the plain underline keeps the existing foreground.
+
+`latency`, `link` and `github-actions` use the marks. Each widget's README says which of its numbers takes which one. Agent-usage keeps its colour and textual freshness signals and does not use underlines in text or Kitty mode. The reusable `marked()` / `Marks` API is opt-in for future widgets; the contributor guide shows how to use it.
+
+`seg()` underlines the content of a marked segment, leaving its leading and trailing whitespace unmarked without removing any alignment cells. For ` -35% `, only `-35%` takes the mark. Internal spaces in a phrase remain underlined, and the following segment never inherits the mark. The core regression test checks the SGR state at each character, including clipped values, all-padding segments and Unicode whitespace.
+
+The PTY fixture checks the query, a positive reply (curly, dashed, and the coloured underline around the same three words) and a negative reply (a plain underline, same words). That is a byte check, not a Kitty window. Visual confirmation in Kitty, SSH, Herdr, Luvus and tmux is still outstanding.
+
 ### Input responsiveness
 
 Interactive widget loops use `Keyboard::wait(timeout)` between frames. It waits

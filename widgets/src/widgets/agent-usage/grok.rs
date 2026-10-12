@@ -1242,7 +1242,11 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                     p,
                 ));
                 line.push((p.dim.clone(), "  credits used".into()));
-                line.push(pace_cell(lead(pct, span, reset), p));
+                line.push(pace_cell(
+                    lead(pct, span, reset),
+                    pace_guessed(reading_is_old(q.taken), rolled, reset),
+                    p,
+                ));
                 rows.push(seg_of(&line, w));
             }
             None => rows.push(tc::seg(
@@ -1276,7 +1280,11 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                     p,
                 ));
                 line.push((p.dim.clone(), tail));
-                line.push(pace_cell(lead(pct, span, reset), p));
+                line.push(pace_cell(
+                    lead(pct, span, reset),
+                    pace_guessed(reading_is_old(q.taken), rolled, reset),
+                    p,
+                ));
                 rows.push(seg_of(&line, w));
             }
             None => rows.push(tc::seg(
@@ -1739,6 +1747,57 @@ mod tests {
             ..Default::default()
         };
         assert!(lanes(&d)[0].stale, "an undateable reading passed as current");
+    }
+
+    #[test]
+    fn an_old_log_pace_is_not_a_live_threshold() {
+        // Two hours left of a five-hour window, 80% spent. The window is
+        // still open, so there is a cushion, and the log is old enough to
+        // be stale. A fresh log of the same window is current whatever its
+        // source, so it keeps the live figure.
+        let start = now() - 3.0 * 3600.0;
+        let end = now() + 2.0 * 3600.0;
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp(at as i64, 0)
+                .expect("a stamp")
+                .format("%Y-%m-%dT%H:%M:%S+00:00")
+                .to_string()
+        };
+        let quota = Quota {
+            pct: Some(80.0),
+            products: Vec::new(),
+            taken: Some(now() - (GROK_FRESH_FOR + 60.0)),
+            kind: "USAGE_PERIOD_TYPE_WEEKLY".into(),
+            start: stamp(start),
+            end: stamp(end),
+            tier: String::new(),
+            on_demand_used: None,
+            on_demand_cap: None,
+            prepaid: None,
+        };
+        let p = palette();
+        let old = grok_tab(
+            &Data { quota: Some(quota.clone()), quota_live: false, ..Data::default() },
+            120,
+            &p,
+        )
+        .join("\n");
+        // `~/` is the log path, so the tilde has to be the one on the figure.
+        assert!(old.contains("~-20%"), "{old}");
+        let threshold = "\x1b[58;2;255;214;140m";
+        assert!(!old.contains(threshold), "{old:?}");
+        let fresh = grok_tab(
+            &Data {
+                quota: Some(Quota { taken: Some(now()), ..quota }),
+                quota_live: false,
+                ..Data::default()
+            },
+            120,
+            &p,
+        )
+        .join("\n");
+        assert!(fresh.contains("-20%"), "{fresh}");
+        assert!(!fresh.contains("~-20%"), "{fresh}");
     }
 
     #[test]

@@ -2069,13 +2069,33 @@ fn main() {
             ),
         )];
         let tail = tc::polled(fetched, rate, &p.dim, &p.ok, &p.run);
-        for (colour, txt) in &tail {
+        let poll_stale = fetched > 0.0 && tc::now() - fetched > refresh;
+        let mut marked_tail = Vec::new();
+        for (i, (colour, txt)) in tail.iter().enumerate() {
+            let marks = if i == 0 {
+                tc::Marks { stale: poll_stale, ..tc::Marks::default() }
+            } else if txt.contains(" api") && colour == &p.run {
+                // Under a thousand remaining, `polled` already turns this amber.
+                tc::Marks { threshold: true, ..tc::Marks::default() }
+            } else {
+                tc::Marks::default()
+            };
+            marked_tail.push((tc::marked(colour, marks), txt.clone()));
+        }
+        for (colour, txt) in &marked_tail {
             meta.push((colour.as_str(), txt.clone()));
         }
         rows.push(tc::seg(&meta, w - 1));
         let (running, queued, failed, ok) = counts(&runs);
+        let partial_window = runs.iter().any(|r| {
+            r["repo_total"].as_i64().unwrap_or(0) > r["repo_fetched"].as_i64().unwrap_or(0)
+        });
+        let runs_ink = tc::marked(
+            p.dim.as_str(),
+            tc::Marks { partial: partial_window, ..tc::Marks::default() },
+        );
         let mut head = vec![
-            (p.dim.as_str(), format!(" {} runs", runs.len())),
+            (runs_ink.as_str(), format!(" {} runs", runs.len())),
             (p.dim.as_str(), format!(" · {} repos", n_repos)),
         ];
         if ok > 0 || !runs.is_empty() {

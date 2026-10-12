@@ -573,7 +573,11 @@ fn allowance_rows_with_plots(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palett
         vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
     line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
     line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
-    line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
+    line.push(pace_cell(
+        lead(lane.pct, lane.window_secs, lane.reset),
+        pace_guessed(lane.stale, lane.projected, lane.reset),
+        p,
+    ));
     let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     rows.push(tc::seg(&refs, w - 1));
     let when = match lane.reset.map(|r| r - now()) {

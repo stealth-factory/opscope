@@ -372,6 +372,46 @@ struct State {
     names: HashMap<String, Vec<(String, String)>>,
     history: HashMap<String, Vec<f64>>,
     err: String,
+    /// When the last poll stored a reading. Zero until the first one lands.
+    read_at: f64,
+}
+
+/// One successful look: the sessions found, and the logins named against them.
+struct Reading {
+    rows: Vec<Session>,
+    names: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Fold one poll into the state the pane draws.
+///
+/// A failed read records why and leaves the last successful rows, the names
+/// on them, their history, and their timestamp alone. Replacing the rows
+/// with an empty list would skip the table and close the detail view, so
+/// the stale underline would have nothing left to mark, and the pane would
+/// read as a machine with nothing listening. The timestamp moves only when
+/// a reading actually landed, which is what lets those kept numbers go stale.
+fn store_poll(state: &mut State, reading: Result<Reading, String>, history_len: usize, now: f64) {
+    let reading = match reading {
+        Err(why) => {
+            state.err = why;
+            return;
+        }
+        Ok(reading) => reading,
+    };
+    for row in &reading.rows {
+        if let Some(rtt) = row.rtt {
+            let series = state.history.entry(session_id(row)).or_default();
+            series.push(rtt);
+            if series.len() > history_len {
+                let drop = series.len() - history_len;
+                series.drain(..drop);
+            }
+        }
+    }
+    state.rows = reading.rows;
+    state.names = reading.names;
+    state.err.clear();
+    state.read_at = now;
 }
 
 fn main() {
@@ -413,6 +453,7 @@ fn main() {
         names: HashMap::new(),
         history: HashMap::new(),
         err: String::new(),
+        read_at: 0.0,
     }));
     // [r] asks for a reading now rather than at the end of the interval, so
     // the poller sleeps on a condition it can be woken out of.
@@ -433,42 +474,24 @@ fn main() {
         };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
-            let mut found = match sessions() {
-                Ok(rows) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = String::new();
-                    }
-                    rows
+            // Not fatal: ss can fail for a moment. Reported and retried
+            // rather than ending the thread. The last good rows stay, with
+            // the failure as a line above them, so a missed poll is not an
+            // empty table.
+            let reading = match sessions() {
+                Ok(mut rows) => {
+                    let names = who();
+                    apply_loss(&mut rows, &mut last);
+                    Ok(Reading { rows, names })
                 }
-                // Not fatal: ss can fail for a moment. Reported and retried
-                // rather than ending the thread, but never silently - an empty
-                // list and a failed read look identical on screen otherwise.
-                Err(why) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = why;
-                    }
-                    Vec::new()
-                }
+                Err(why) => Err(why),
             };
-            let names = who();
-            apply_loss(&mut found, &mut last);
             {
                 let mut guard = match poller.lock() {
                     Ok(g) => g,
                     Err(_) => return,
                 };
-                for row in &found {
-                    if let Some(rtt) = row.rtt {
-                        let series = guard.history.entry(session_id(row)).or_default();
-                        series.push(rtt);
-                        if series.len() > history_len {
-                            let drop = series.len() - history_len;
-                            series.drain(..drop);
-                        }
-                    }
-                }
-                guard.rows = found;
-                guard.names = names;
+                store_poll(&mut guard, reading, history_len, tc::now());
             }
             let (lock, cond) = &*poller_wake;
             let mut asked = match lock.lock() {
@@ -779,7 +802,8 @@ fn main() {
             // Recorded rather than recomputed at the click, because by then
             // the body has been windowed and the heading's row is gone.
             rows_at = (0..shown.len()).map(|at| (rows.len() + 1 + at, at)).collect();
-            rows.extend(table(&shown, &guard, w, selected, &p));
+            let poll_stale = guard.read_at > 0.0 && tc::now() - guard.read_at > refresh;
+            rows.extend(table(&shown, &guard, w, selected, &p, poll_stale));
             rows.push(String::new());
             // The chart takes MIN_CHART rows whatever the table has already
             // spent, and the screen scrolls to reach what will not fit -
@@ -814,10 +838,14 @@ fn main() {
                 w - 1,
             ));
             let covered = plotted_span(&shown, &guard.history, window, refresh, w);
+            let span_ink = tc::marked(
+                p.dim.as_str(),
+                tc::Marks { partial: covered < window, ..tc::Marks::default() },
+            );
             rows.push(tc::seg(
                 &[
                     (
-                        p.dim.as_str(),
+                        span_ink.as_str(),
                         format!("        {} ago", span(Some(covered * 1000.0))),
                     ),
                     (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
@@ -926,6 +954,7 @@ fn table(
     w: usize,
     selected: Option<usize>,
     p: &Palette,
+    poll_stale: bool,
 ) -> Vec<String> {
     // The Python's header, column for column: the two have to sit side by
     // side in a wall and read as the same widget.
@@ -1000,18 +1029,25 @@ fn table(
 
         let label = label_of(row, state, wide);
         let loss = row.recent_loss;
-        let tone = format!("{}{}", tint, colour_for(quality(row), loss, p));
+        let tone_fg = colour_for(quality(row), loss, p);
+        let tone = tc::marked(
+            &format!("{tint}{tone_fg}"),
+            tc::Marks {
+                stale: poll_stale,
+                threshold: tone_fg == p.bad.as_str() || tone_fg == p.warn.as_str(),
+                ..tc::Marks::default()
+            },
+        );
         let name_c = format!("{}{}", tint, hue);
         let label_c = format!("{}{}", tint, if here { &p.txt } else { &p.dim });
         let dim_c = format!("{}{}", tint, p.dim);
-        let loss_c = format!(
-            "{}{}",
-            tint,
-            if loss.unwrap_or(0.0) >= 0.5 {
-                &p.bad
-            } else {
-                &p.dim
-            }
+        let loss_fg = if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.dim };
+        let loss_c = tc::marked(
+            &format!("{tint}{loss_fg}"),
+            tc::Marks {
+                threshold: loss.unwrap_or(0.0) >= 0.5,
+                ..tc::Marks::default()
+            },
         );
         let idle = [row.lastsnd, row.lastrcv]
             .into_iter()
@@ -1177,11 +1213,21 @@ fn detail_view(
     }
 
     let ratio = quality(row);
+    let poll_stale = state.read_at > 0.0 && tc::now() - state.read_at > refresh;
     let live = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| ms(Some(x)));
+    let rtt_fg = colour_for(ratio, row.recent_loss, p);
+    let rtt_ink = tc::marked(
+        rtt_fg,
+        tc::Marks {
+            stale: poll_stale,
+            threshold: rtt_fg == p.bad.as_str() || rtt_fg == p.warn.as_str(),
+            ..tc::Marks::default()
+        },
+    );
     field!(
         "round trip",
         live(row.rtt),
-        colour_for(ratio, row.recent_loss, p),
+        rtt_ink.as_str(),
         &ratio.map_or(String::new(), |r| format!("{:.1}x this path's best", r)),
     );
     field!(
@@ -1227,14 +1273,15 @@ fn detail_view(
             0.0
         };
         let loss = row.recent_loss;
+        let loss_over = loss.unwrap_or(0.0) >= 0.5;
+        let loss_ink = tc::marked(
+            if loss_over { &p.bad } else { &p.txt },
+            tc::Marks { threshold: loss_over, ..tc::Marks::default() },
+        );
         field!(
             "loss just now",
             loss.map(|v| format!("{:.2}%", v)),
-            if loss.unwrap_or(0.0) >= 0.5 {
-                &p.bad
-            } else {
-                &p.txt
-            },
+            loss_ink.as_str(),
             "resent since the last look",
         );
         field!(
@@ -1337,10 +1384,14 @@ fn detail_view(
             w - 1,
         ));
         let covered = plotted_span(&one, &state.history, window, refresh, w);
+        let span_ink = tc::marked(
+            p.dim.as_str(),
+            tc::Marks { partial: covered < window, ..tc::Marks::default() },
+        );
         rows.push(tc::seg(
             &[
                 (
-                    p.dim.as_str(),
+                    span_ink.as_str(),
                     format!("        {} ago", span(Some(covered * 1000.0))),
                 ),
                 (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
@@ -1639,9 +1690,10 @@ mod tests {
             )]),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
         // Nothing selected, so no row carries the highlight.
-        let drawn = table(&[row], &state, 86, None, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette(), false);
         assert_eq!(plain(&drawn[1]), want);
     }
 
@@ -1661,8 +1713,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = table(&[row.clone()], &state, 140, None, &palette());
+        let drawn = table(&[row.clone()], &state, 140, None, &palette(), false);
         assert!(plain(&drawn[1]).contains(peer), "{}", plain(&drawn[1]));
         // The numbers still line up under their heading: the port ends
         // where PORT does.
@@ -1671,7 +1724,7 @@ mod tests {
         let end = |s: &str, word: &str| s.find(word).map(|b| s[..b].chars().count() + word.len());
         assert_eq!(end(&head, "PORT"), end(&line, " 22 ").map(|c| c - 1));
         for w in 82..=200 {
-            let drawn = table(&[row.clone()], &state, w, None, &palette());
+            let drawn = table(&[row.clone()], &state, w, None, &palette(), false);
             assert!(tc::display_width(&plain(&drawn[1])) <= w - 1, "row at {}", w);
         }
     }
@@ -1692,8 +1745,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = table(&[row], &state, 86, None, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette(), false);
         assert_eq!(
             plain(&drawn[1]),
             "▐ 203.0.113.9:22                22     --      --      --     --        --     --"
@@ -1717,8 +1771,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let list = plain(&table(&[row.clone()], &state, 100, None, &palette())[1]);
+        let list = plain(&table(&[row.clone()], &state, 100, None, &palette(), false)[1]);
         assert!(list.contains("macOS n/a"), "{list}");
         let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
             .iter()
@@ -1751,8 +1806,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let list = plain(&table(&[row.clone()], &state, 86, None, &palette())[1]);
+        let list = plain(&table(&[row.clone()], &state, 86, None, &palette(), false)[1]);
         assert!(list.contains("n/a"), "{list}");
         assert!(!list.contains("0.00%"), "{list}");
         let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
@@ -1834,6 +1890,80 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_poll_keeps_the_last_rows_and_their_stamp() {
+        // A missed `ss` used to store an empty list and leave the old
+        // timestamp. The table then stood down and the detail view closed,
+        // so the stale underline had no reading left to mark.
+        let kept = Session {
+            peer: "203.0.113.9:51000".into(),
+            ip: "203.0.113.9".into(),
+            port: 22,
+            rtt: Some(12.0),
+            ..Default::default()
+        };
+        let id = session_id(&kept);
+        let mut state = State {
+            rows: vec![kept],
+            names: HashMap::from([(
+                "203.0.113.9".to_string(),
+                vec![("ada".to_string(), "pts/0".to_string())],
+            )]),
+            history: HashMap::from([(id.clone(), vec![12.0])]),
+            err: String::new(),
+            read_at: 100.0,
+        };
+        store_poll(&mut state, Err("ss did not answer in 5s".into()), 8, 110.0);
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].peer, "203.0.113.9:51000");
+        assert_eq!(state.read_at, 100.0);
+        assert_eq!(state.err, "ss did not answer in 5s");
+        assert_eq!(state.history.get(&id).map(Vec::as_slice), Some(&[12.0][..]));
+        assert_eq!(
+            state.names.get("203.0.113.9").map(|n| n[0].0.as_str()),
+            Some("ada")
+        );
+
+        // The next successful look replaces the rows and moves the stamp.
+        let next = Session {
+            peer: "203.0.113.10:51000".into(),
+            ip: "203.0.113.10".into(),
+            port: 22,
+            rtt: Some(20.0),
+            ..Default::default()
+        };
+        store_poll(
+            &mut state,
+            Ok(Reading {
+                rows: vec![next.clone()],
+                names: HashMap::new(),
+            }),
+            8,
+            120.0,
+        );
+        assert_eq!(state.rows[0].peer, "203.0.113.10:51000");
+        assert_eq!(state.read_at, 120.0);
+        assert!(state.err.is_empty());
+        assert_eq!(
+            state.history.get(&session_id(&next)).map(Vec::as_slice),
+            Some(&[20.0][..])
+        );
+
+        // An empty success is a real reading of nothing, so the rows do go.
+        store_poll(
+            &mut state,
+            Ok(Reading {
+                rows: Vec::new(),
+                names: HashMap::new(),
+            }),
+            8,
+            130.0,
+        );
+        assert!(state.rows.is_empty());
+        assert_eq!(state.read_at, 130.0);
+        assert!(state.err.is_empty());
+    }
+
+    #[test]
     fn the_port_column_is_ours_and_not_theirs() {
         // Both layout fixtures above happen to describe a socket whose peer
         // port is also 22, so either number would satisfy them - they would
@@ -1851,8 +1981,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = plain(&table(&[row], &state, 86, None, &palette())[1]);
+        let drawn = plain(&table(&[row], &state, 86, None, &palette(), false)[1]);
         let (_, after) = drawn.split_once("54321").expect("the peer's own port");
         // By word rather than by column, so padding is free to change and
         // only the number has to be right.

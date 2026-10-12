@@ -150,6 +150,70 @@ pub fn rgb(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[38;2;{};{};{}m", r, g, b)
 }
 
+/// An underline colour, Kitty `Setulc`. Costs no columns.
+pub fn underline(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[58;2;{};{};{}m", r, g, b)
+}
+
+/// Why a value is underlined. Widgets pass the meaning; core chooses the SGR.
+///
+/// A cell can carry more than one. The style is curly when the poll is
+/// stale, dashed when the window is partial, and a plain underline when
+/// only a threshold was crossed. The threshold colour is added on top of
+/// whichever style is in force.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// The last poll is older than its interval.
+    pub stale: bool,
+    /// A window that has not completed, or a figure carried forward.
+    pub partial: bool,
+    /// A threshold this value has crossed.
+    pub threshold: bool,
+}
+
+const UNDERLINE_OFF: &str = "\x1b[24m\x1b[59m";
+
+fn opens_underline(colour: &str) -> bool {
+    colour.contains("\x1b[4m") || colour.contains("\x1b[4:") || colour.contains("\x1b[58;")
+}
+
+/// Foreground `colour` plus the underline for `marks`.
+///
+/// The result is a colour prefix for [`seg`]: it costs no columns. While
+/// the terminal has not answered the underline query, and the negotiation
+/// window is still open, this is `colour` unchanged. After a refusal or a
+/// missed window it is a plain underline. After `Smulx` it is curly for a
+/// stale poll and dashed for a partial window. The threshold colour is
+/// sent only once `Setulc` has been acknowledged. [`seg`] leaves leading
+/// and trailing whitespace unmarked and closes the mark before the next
+/// segment. Widgets opt in by passing this prefix; no mark is automatic.
+pub fn marked(colour: &str, marks: Marks) -> String {
+    apply_mark(colour, marks, terminal::underline_caps())
+}
+
+fn apply_mark(colour: &str, marks: Marks, caps: terminal::UnderlineCaps) -> String {
+    if !marks.stale && !marks.partial && !marks.threshold {
+        return colour.to_string();
+    }
+    if caps.support == terminal::UnderlineSupport::Unknown {
+        return colour.to_string();
+    }
+    let mut out = String::from(UNDERLINE_OFF);
+    out.push_str(colour);
+    match caps.support {
+        terminal::UnderlineSupport::Styled if marks.stale => out.push_str("\x1b[4:3m"),
+        terminal::UnderlineSupport::Styled if marks.partial => out.push_str("\x1b[4:5m"),
+        _ => out.push_str("\x1b[4m"),
+    }
+    if marks.threshold && caps.colour {
+        // (255, 214, 140) clears AA 4.5 on black and on the selected-row tints.
+        // A darker red at (80, 30, 30) measures about 1.55 on black and 1.13
+        // on bg(38, 56, 76), which is how the contrast check can fail.
+        out.push_str(&underline(255, 214, 140));
+    }
+    out
+}
+
 /// A background colour. Needs an explicit reset afterwards, or it bleeds
 /// along the rest of the row - the same trap as in the Python.
 pub fn bg(r: u8, g: u8, b: u8) -> String {
@@ -250,7 +314,8 @@ pub fn pad(s: &str, n: usize) -> String {
 /// The colour of each segment is a prefix that costs nothing on screen, so
 /// only the text counts toward the width. Every widget's layout arithmetic
 /// depends on that, which is why escapes have to live in the colour half of
-/// the pair and never in the text.
+/// the pair and never in the text. Underlines mark content, skipping its
+/// leading and trailing alignment whitespace while retaining every cell.
 pub fn seg(parts: &[(&str, String)], width: usize) -> String {
     let mut out = String::new();
     let mut n = 0usize;
@@ -261,7 +326,27 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
         let room = width - n;
         let (cut, used, clipped) = clip_width(text, room);
         out.push_str(colour);
-        out.push_str(&cut);
+        if opens_underline(colour) {
+            let content = cut.trim_matches(char::is_whitespace);
+            if content.is_empty() {
+                out.push_str(UNDERLINE_OFF);
+                out.push_str(&cut);
+            } else {
+                let start = cut.len() - cut.trim_start_matches(char::is_whitespace).len();
+                let end = cut.trim_end_matches(char::is_whitespace).len();
+                if start > 0 {
+                    out.push_str(UNDERLINE_OFF);
+                    out.push_str(&cut[..start]);
+                    out.push_str(colour);
+                }
+                out.push_str(content);
+                out.push_str(UNDERLINE_OFF);
+                out.push_str(&cut[end..]);
+            }
+        } else {
+            // A row with no mark stays byte-for-byte what it was.
+            out.push_str(&cut);
+        }
         n += used;
         if clipped {
             // A double-width glyph cannot be drawn in one remaining column.
@@ -4935,6 +5020,122 @@ mod tests {
         // and the new one wins; set only the old one and it is still read.
         assert_eq!(LEGACY_ENV, "TERMINAL_TOYS_CONFIG");
         assert_eq!(LEGACY_DIR, "terminal-toys");
+    }
+
+    #[test]
+    fn a_mark_keeps_the_text_and_names_the_style() {
+        let ink = "\x1b[38;2;1;2;3m";
+        let caps = |support, colour| terminal::UnderlineCaps { support, colour };
+        let stale = apply_mark(
+            ink,
+            Marks { stale: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, false),
+        );
+        assert!(stale.contains("\x1b[4:3m"), "{stale:?}");
+        assert!(!stale.contains("\x1b[4:5m"), "{stale:?}");
+        let partial = apply_mark(
+            ink,
+            Marks { partial: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(partial.contains("\x1b[4:5m"), "{partial:?}");
+        assert!(!partial.contains("\x1b[58;"), "{partial:?}");
+        let over = apply_mark(
+            ink,
+            Marks { threshold: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(over.contains("\x1b[4m"), "{over:?}");
+        assert!(over.contains("\x1b[58;2;255;214;140m"), "{over:?}");
+        assert!(!over.contains("\x1b[4:3m") && !over.contains("\x1b[4:5m"), "{over:?}");
+        // Stale wins the style; the threshold colour still rides on it.
+        let both = apply_mark(
+            ink,
+            Marks { stale: true, threshold: true, partial: true },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(both.contains("\x1b[4:3m") && both.contains("\x1b[58;2;255;214;140m"));
+        assert!(!both.contains("\x1b[4:5m"));
+        let plain = apply_mark(
+            ink,
+            Marks { stale: true, partial: true, threshold: true },
+            caps(terminal::UnderlineSupport::Plain, false),
+        );
+        assert!(plain.contains("\x1b[4m"), "{plain:?}");
+        assert!(!plain.contains("\x1b[4:"), "{plain:?}");
+        assert!(!plain.contains("\x1b[58;"), "{plain:?}");
+        let held = apply_mark(
+            ink,
+            Marks { stale: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Unknown, false),
+        );
+        assert_eq!(held, ink);
+        // The colour prefix already starts with the reset. A following
+        // segment is what shows that `seg` turns the underline off after
+        // the marked text, rather than leaving it to run into the next one.
+        let line = seg(&[(plain.as_str(), "12".into()), (ink, "34".into())], 8);
+        let after = line.split_once("12").expect("marked text").1;
+        let next = after.find("34").expect("unmarked text");
+        assert!(
+            after[..next].contains(UNDERLINE_OFF),
+            "the reset has to follow the marked text: {line:?}"
+        );
+        let bare = seg(&[(ink, "12".into()), (ink, "34".into())], 8);
+        assert!(!bare.contains(UNDERLINE_OFF));
+        assert!(bare.contains("12") && bare.contains("34"));
+    }
+
+    #[test]
+    fn seg_underlines_content_without_alignment_padding() {
+        // Read the SGR state at each printable character, as a terminal
+        // does: finding a reset anywhere cannot prove padding is unmarked.
+        let rendered = |line: &str| {
+            let mut chars = line.chars();
+            let mut underlined = false;
+            let mut visible = String::new();
+            let mut marked = String::new();
+            while let Some(ch) = chars.next() {
+                if ch == '\x1b' {
+                    assert_eq!(chars.next(), Some('['));
+                    let sgr: String = chars.by_ref().take_while(|&ch| ch != 'm').collect();
+                    match sgr.as_str() {
+                        "4" | "4:3" | "4:5" => underlined = true,
+                        "0" | "24" => underlined = false,
+                        _ => {}
+                    }
+                } else {
+                    visible.push(ch);
+                    if underlined {
+                        marked.push(ch);
+                    }
+                }
+            }
+            (visible, marked)
+        };
+        for (support, marks) in [
+            (terminal::UnderlineSupport::Plain, Marks { stale: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { stale: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { partial: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { threshold: true, ..Marks::default() }),
+        ] {
+            let ink = rgb(225, 235, 245);
+            let marked = apply_mark(&ink, marks, terminal::UnderlineCaps { support, colour: true });
+            for (text, width, visible, underlined) in [
+                (" -35% ", 10, " -35% next", "-35%"),
+                (" -35% ", 2, " -", "-"),
+                (" -35% ", 1, " ", ""),
+                (" -35% ", 0, "", ""),
+                ("   ", 7, "   next", ""),
+                ("  high load  ", 17, "  high load  next", "high load"),
+                ("\u{3000}字 ", 9, "\u{3000}字 next", "字"),
+                ("\u{3000}字 ", 2, "\u{3000}", ""),
+            ] {
+                let line = seg(&[(&marked, text.into()), (&ink, "next".into())], width);
+                let shown = rendered(&line);
+                assert!(display_width(&shown.0) <= width, "{line:?}");
+                assert_eq!(shown, (visible.into(), underlined.into()), "{line:?}");
+            }
+        }
     }
 
     #[test]
