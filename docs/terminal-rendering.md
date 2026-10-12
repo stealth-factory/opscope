@@ -118,6 +118,9 @@ let calendar = tc::Plot::heatmap_levels(x, y, &days, &missing_colour);
 let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
 // Measured category shares; keep their counts and legend in ordinary text.
 let states = tc::Plot::stacked_bar(x, y, width, &shares);
+// Smooth horizontal fills, keeping the same fractions and marker geometry.
+let smooth_quota = tc::Plot::gradient_meter(x, y, width, used, elapsed, &fill, &track, &marker);
+let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
 ```
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
@@ -130,7 +133,16 @@ colour-only convenience wrapper using the same renderer with solid tiles.
 Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
 and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
-change the measured fill. No primitive animates a value between API polls.
+change the measured fill. `Plot::ramped_meter` takes a colour per filled
+cell, so a ramp the text bar draws is painted in pixels too rather than
+flattened to one fill. `gradient_meter` and `gradient_stacked_bar` instead
+let core own a smooth ramp: one colour per text cell, continuous interpolation
+per Kitty pixel, with the same readable colour stops. Stacked gradients restart
+inside each category and retain the measured boundaries. The original `meter`
+and `stacked_bar` remain solid for widgets that need that treatment.
+`Plot::text_row(0)` exposes the exact fallback cells for composing labels or
+alert frames without duplicating gradient or marker logic. No primitive
+animates a value between API polls.
 
 Collect plots in the same coordinate system as the body, then call
 `in_viewport` after the scroll offset is clamped. Clip to the body room above
@@ -255,7 +267,9 @@ A value can carry an underline as a second signal beside its colour. Widgets cal
 
 Startup sends an XTGETTCAP query for `Smulx` and `Setulc` with the graphics and synchronized-update queries. The same 800 ms window applies, and a late reply does not enable the styles. Until the terminal answers, the text stays as it was. A refusal, or a window that closes with no answer, falls back to a plain underline (`CSI 4`), which is what a terminal without underline styles already draws and which stays legible. Underline colour is sent only after `Setulc` is acknowledged; otherwise the plain underline keeps the existing foreground.
 
-`agent-usage`, `latency`, `link` and `github-actions` use the marks. Each widget's README says which of its numbers takes which one.
+`latency`, `link` and `github-actions` use the marks. Each widget's README says which of its numbers takes which one. Agent-usage keeps its colour and textual freshness signals and does not use underlines in text or Kitty mode. The reusable `marked()` / `Marks` API is opt-in for future widgets; the contributor guide shows how to use it.
+
+`seg()` underlines the content of a marked segment, leaving its leading and trailing whitespace unmarked without removing any alignment cells. For ` -35% `, only `-35%` takes the mark. Internal spaces in a phrase remain underlined, and the following segment never inherits the mark. The core regression test checks the SGR state at each character, including clipped values, all-padding segments and Unicode whitespace.
 
 The PTY fixture checks the query, a positive reply (curly, dashed, and the coloured underline around the same three words) and a negative reply (a plain underline, same words). That is a byte check, not a Kitty window. Visual confirmation in Kitty, SSH, Herdr, Luvus and tmux is still outstanding.
 

@@ -184,7 +184,9 @@ fn opens_underline(colour: &str) -> bool {
 /// window is still open, this is `colour` unchanged. After a refusal or a
 /// missed window it is a plain underline. After `Smulx` it is curly for a
 /// stale poll and dashed for a partial window. The threshold colour is
-/// sent only once `Setulc` has been acknowledged.
+/// sent only once `Setulc` has been acknowledged. [`seg`] leaves leading
+/// and trailing whitespace unmarked and closes the mark before the next
+/// segment. Widgets opt in by passing this prefix; no mark is automatic.
 pub fn marked(colour: &str, marks: Marks) -> String {
     apply_mark(colour, marks, terminal::underline_caps())
 }
@@ -312,7 +314,8 @@ pub fn pad(s: &str, n: usize) -> String {
 /// The colour of each segment is a prefix that costs nothing on screen, so
 /// only the text counts toward the width. Every widget's layout arithmetic
 /// depends on that, which is why escapes have to live in the colour half of
-/// the pair and never in the text.
+/// the pair and never in the text. Underlines mark content, skipping its
+/// leading and trailing alignment whitespace while retaining every cell.
 pub fn seg(parts: &[(&str, String)], width: usize) -> String {
     let mut out = String::new();
     let mut n = 0usize;
@@ -323,12 +326,26 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
         let room = width - n;
         let (cut, used, clipped) = clip_width(text, room);
         out.push_str(colour);
-        out.push_str(&cut);
-        // A mark must not run on into the next segment. The reset is
-        // zero-width and only follows a colour that turned an underline on,
-        // so a row with no mark is byte-for-byte what it was.
         if opens_underline(colour) {
-            out.push_str(UNDERLINE_OFF);
+            let content = cut.trim_matches(char::is_whitespace);
+            if content.is_empty() {
+                out.push_str(UNDERLINE_OFF);
+                out.push_str(&cut);
+            } else {
+                let start = cut.len() - cut.trim_start_matches(char::is_whitespace).len();
+                let end = cut.trim_end_matches(char::is_whitespace).len();
+                if start > 0 {
+                    out.push_str(UNDERLINE_OFF);
+                    out.push_str(&cut[..start]);
+                    out.push_str(colour);
+                }
+                out.push_str(content);
+                out.push_str(UNDERLINE_OFF);
+                out.push_str(&cut[end..]);
+            }
+        } else {
+            // A row with no mark stays byte-for-byte what it was.
+            out.push_str(&cut);
         }
         n += used;
         if clipped {
@@ -5066,6 +5083,59 @@ mod tests {
         let bare = seg(&[(ink, "12".into()), (ink, "34".into())], 8);
         assert!(!bare.contains(UNDERLINE_OFF));
         assert!(bare.contains("12") && bare.contains("34"));
+    }
+
+    #[test]
+    fn seg_underlines_content_without_alignment_padding() {
+        // Read the SGR state at each printable character, as a terminal
+        // does: finding a reset anywhere cannot prove padding is unmarked.
+        let rendered = |line: &str| {
+            let mut chars = line.chars();
+            let mut underlined = false;
+            let mut visible = String::new();
+            let mut marked = String::new();
+            while let Some(ch) = chars.next() {
+                if ch == '\x1b' {
+                    assert_eq!(chars.next(), Some('['));
+                    let sgr: String = chars.by_ref().take_while(|&ch| ch != 'm').collect();
+                    match sgr.as_str() {
+                        "4" | "4:3" | "4:5" => underlined = true,
+                        "0" | "24" => underlined = false,
+                        _ => {}
+                    }
+                } else {
+                    visible.push(ch);
+                    if underlined {
+                        marked.push(ch);
+                    }
+                }
+            }
+            (visible, marked)
+        };
+        for (support, marks) in [
+            (terminal::UnderlineSupport::Plain, Marks { stale: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { stale: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { partial: true, ..Marks::default() }),
+            (terminal::UnderlineSupport::Styled, Marks { threshold: true, ..Marks::default() }),
+        ] {
+            let ink = rgb(225, 235, 245);
+            let marked = apply_mark(&ink, marks, terminal::UnderlineCaps { support, colour: true });
+            for (text, width, visible, underlined) in [
+                (" -35% ", 10, " -35% next", "-35%"),
+                (" -35% ", 2, " -", "-"),
+                (" -35% ", 1, " ", ""),
+                (" -35% ", 0, "", ""),
+                ("   ", 7, "   next", ""),
+                ("  high load  ", 17, "  high load  next", "high load"),
+                ("\u{3000}字 ", 9, "\u{3000}字 next", "字"),
+                ("\u{3000}字 ", 2, "\u{3000}", ""),
+            ] {
+                let line = seg(&[(&marked, text.into()), (&ink, "next".into())], width);
+                let shown = rendered(&line);
+                assert!(display_width(&shown.0) <= width, "{line:?}");
+                assert_eq!(shown, (visible.into(), underlined.into()), "{line:?}");
+            }
+        }
     }
 
     #[test]

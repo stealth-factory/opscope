@@ -3,6 +3,28 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.1.0] - 2026-10-12
+
+### Bug Fixes
+
+- **agent-usage**: Restore pace marker padding (OPS-159) (#372)
+
+### Features
+
+- **agent-usage**: Pace Devin's lanes and restore the bar gradient on Kitty (#370)
+
+## [1.0.1] - 2026-10-11
+
+### Bug Fixes
+
+- **ci**: Pack only widget directories in the release tarball (#367)
+
+## [1.0.0] - 2026-10-11
+
+### Features
+
+- **core**: Add Kitty graphics with automatic text fallback (#332)
+
 ## [0.40.0] - 2026-10-11
 
 ### CI

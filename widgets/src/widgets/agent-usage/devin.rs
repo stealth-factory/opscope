@@ -327,30 +327,37 @@ fn reset_passed(got: &serde_json::Value) -> bool {
         .any(|lane| lane.reset.is_some_and(|reset| reset > at && reset <= now()))
 }
 
-/// Daily and weekly, each with the reset that was sent and no window
-/// length. The balance is not a lane: a bar needs a ceiling, and the body
-/// has none.
+/// A day and a week, which is what the `daily_*` and `weekly_*` keys are.
+/// The body carries each window's reset and not its length, but the length
+/// is the key's own name - the same reading Droid's `fiveHour` gets - so
+/// the pace is drawn against it. `progress_at` still refuses a reset that
+/// sits further out than the length, so a body that named a day and sent
+/// a reset a month away draws no pace rather than a wrong one.
+const DAY: f64 = 86_400.0;
+const WEEK: f64 = 7.0 * DAY;
+
+/// Daily and weekly, each with the reset that was sent and the length its
+/// key names. The balance is not a lane: a bar needs a ceiling, and the
+/// body has none.
 pub fn lanes(data: &Data) -> Vec<Lane> {
     let Some(quota) = data.quota.as_ref() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     if let Some(window) = &quota.daily {
-        out.push(lane("daily", window));
+        out.push(lane("daily", window, DAY));
     }
     if let Some(window) = &quota.weekly {
-        out.push(lane("weekly", window));
+        out.push(lane("weekly", window, WEEK));
     }
     out
 }
 
-fn lane(label: &str, window: &DevinWindow) -> Lane {
+fn lane(label: &str, window: &DevinWindow, window_secs: f64) -> Lane {
     Lane {
         label: label.into(),
         pct: window.pct,
-        // The body has a reset instant and no length. A 24h or 7-day pace
-        // would be a length this response did not carry.
-        window_secs: None,
+        window_secs: Some(window_secs),
         reset: window.reset,
         stale: window.reset.is_some_and(|reset| reset <= now()),
         projected: false,
@@ -410,13 +417,6 @@ fn quota_rows_with_plots(data: &Data, quota: &DevinQuota, w: usize, p: &Palette,
             w,
         ));
     }
-    if drawn.iter().any(|lane| lane.window_secs.is_none()) {
-        rows.extend(note(
-            "Devin did not send a window length, so these rows have a reset and no pace.",
-            &p.dim,
-            w,
-        ));
-    }
     if let Some(balance) = quota.balance {
         rows.push(tc::seg(
             &[
@@ -450,7 +450,7 @@ fn bar_row_with_plots(
         hue,
         p,
     ));
-    line.push((quota_mark(lane.pct, hue, p, lane.stale, lane.projected), pct_text(lane.pct)));
+    line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
     line.push(pace_cell(
         lead(lane.pct, lane.window_secs, lane.reset),
         pace_guessed(lane.stale, lane.projected, lane.reset),
@@ -616,7 +616,7 @@ mod tests {
         let lanes = lanes(&data);
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].label, "weekly");
-        assert!(lanes[0].window_secs.is_none());
+        assert_eq!(lanes[0].window_secs, Some(WEEK));
         assert!(why_no_lane(&data).is_empty());
         let rows = plain(&tab(&data, 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("daily"), "{rows}");
@@ -627,6 +627,44 @@ mod tests {
         assert!(!rows.contains('+'), "{rows}");
         assert!(rows.contains("pro_plus"), "{rows}");
         assert!(rows.contains("Daily quota is hidden"), "{rows}");
+    }
+
+    #[test]
+    fn a_reset_inside_the_window_gives_each_lane_a_pace() {
+        // Half a day gone on the daily, half a week on the weekly: both
+        // resets sit inside the length their key names, so `lead` has a
+        // window to measure against and the pace cell is drawn.
+        let at = now();
+        let body = format!(
+            r#"{{"daily_percentage":10,"daily_reset_at":{},"weekly_percentage":20,"weekly_reset_at":{}}}"#,
+            at + DAY / 2.0,
+            at + WEEK / 2.0
+        );
+        let data = reading(&body);
+        let lanes = lanes(&data);
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0].window_secs, Some(DAY));
+        assert_eq!(lanes[1].window_secs, Some(WEEK));
+        let daily = lead(lanes[0].pct, lanes[0].window_secs, lanes[0].reset).unwrap();
+        let weekly = lead(lanes[1].pct, lanes[1].window_secs, lanes[1].reset).unwrap();
+        assert!((daily - 40.0).abs() < 1.0, "{daily}");
+        assert!((weekly - 30.0).abs() < 1.0, "{weekly}");
+        let rows = tab(&data, 100, 30, &Config::default(), &palette());
+        let bars: Vec<String> = rows
+            .iter()
+            .map(|row| plain(std::slice::from_ref(row)))
+            .filter(|row| row.contains('┃'))
+            .collect();
+        assert_eq!(bars.len(), 2, "{}", plain(&rows));
+        assert!(
+            bars[0].contains("daily") && bars[0].contains(&format!("{:+.0}%", daily)),
+            "{bars:?}"
+        );
+        assert!(
+            bars[1].contains("weekly") && bars[1].contains(&format!("{:+.0}%", weekly)),
+            "{bars:?}"
+        );
+        assert!(!plain(&rows).contains("window length"));
     }
 
     #[test]

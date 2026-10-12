@@ -725,10 +725,8 @@ fn work_days_between<Tz: TimeZone>(tz: &Tz, from: f64, to: f64, days: u8) -> Opt
     Some(total)
 }
 
-/// The dark end of every agent ramp. The two stops above it are measured,
-/// not picked: 0.51 keeps the dimmest filled cell at 3:1 against the
-/// background for the darkest agent hue, and 0.34 leaves the empty track at
-/// least as visible as the flat grid it replaces.
+/// Keep Cursor's quota categories as distinct tints of its provider hue.
+/// This chooses category colours; core owns the gradient within each bar.
 const BAR_FLOOR: (u8, u8, u8) = (30, 38, 52);
 
 fn blend(hue: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
@@ -738,15 +736,6 @@ fn blend(hue: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
         step(BAR_FLOOR.1, hue.1),
         step(BAR_FLOOR.2, hue.2),
     )
-}
-
-/// A tint of an agent's colour, t running dark to full.
-///
-/// Not `shade` - that name is taken by the calendars' four-step ramp, and
-/// two functions of the same name meant the heatmaps drew with this one.
-fn tint(hue: (u8, u8, u8), t: f64) -> String {
-    let (r, g, b) = blend(hue, t);
-    tc::rgb(r, g, b)
 }
 
 /// Which of the four steps a day falls in.
@@ -771,8 +760,6 @@ struct Palette {
     /// foreground colour: plain white manages 1.2:1 against a full bar, so
     /// it disappears exactly where it matters.
     pace_mark: String,
-    /// Default background again, and only that.
-    nobg: String,
 }
 
 fn palette() -> Palette {
@@ -788,7 +775,6 @@ fn palette() -> Palette {
         agent: tc::rgb(180, 160, 255),
         empty_cell: tc::rgb(58, 66, 80),
         pace_mark: format!("{}{}", tc::bg(10, 12, 18), tc::rgb(238, 244, 252)),
-        nobg: tc::NOBG.to_string(),
     }
 }
 
@@ -800,46 +786,22 @@ fn palette() -> Palette {
 /// the pace cell beside it is already amber for exactly that, and a number
 /// and its own explanation both turning yellow reads as two problems.
 fn pct_colour(pct: f64, hue: Option<(u8, u8, u8)>, p: &Palette) -> String {
-    quota_mark(pct, hue, p, false, false)
-}
-
-/// The percentage's foreground, plus an underline when the reading is stale,
-/// the window is estimated, or the 90% line has been crossed.
-///
-/// The digits are the same either way. The underline is a second signal on
-/// top of the colour that was already there.
-fn quota_mark(
-    pct: f64,
-    hue: Option<(u8, u8, u8)>,
-    p: &Palette,
-    stale: bool,
-    partial: bool,
-) -> String {
-    let fg = if pct >= 90.0 {
+    if pct >= 90.0 {
         p.bad.clone()
     } else {
         match hue {
             Some((r, g, b)) => tc::rgb(r, g, b),
             None => tc::heat(pct / 100.0),
         }
-    };
-    tc::marked(
-        &fg,
-        tc::Marks {
-            stale,
-            partial,
-            threshold: pct >= 90.0,
-        },
-    )
+    }
 }
 
 /// Whether a pace is an estimate rather than a live reading.
 ///
 /// The same three the summary already uses. A stale cache, a reset this
 /// widget rolled forward, or a window that has already closed. A negative
-/// cushion on any of those is not the live threshold: it wears `~` and a
-/// dashed underline. The coloured threshold is only for a pace fetched
-/// just now, of the window we are actually in.
+/// cushion on any of those wears `~` and stays dim rather than taking the
+/// amber of a live pace falling behind the clock.
 fn pace_guessed(stale: bool, projected: bool, reset: Option<f64>) -> bool {
     let closed = reset.is_some_and(|at| at <= now());
     stale || projected || closed
@@ -856,8 +818,8 @@ fn pace_guessed(stale: bool, projected: bool, reset: Option<f64>) -> bool {
 /// the `~` is the only thing saying so. The star beside the bar says the
 /// reading is cached; the agent's own tab says how old.
 ///
-/// `guessed` is the caller's freshness. Hardcoding it false is what put the
-/// live threshold underline on a number the heading had already called cached.
+/// `guessed` is the caller's freshness, so a cached reading cannot take
+/// the warning colour of a live pace falling behind the clock.
 fn pace_cell(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String) {
     match value {
         None => (p.dim.clone(), String::new()),
@@ -870,16 +832,7 @@ fn pace_cell(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String)
                 p.warn.clone()
             };
             (
-                // `~` is a window we rolled forward or a cached percentage.
-                // A live negative cushion is the pace falling behind the clock.
-                tc::marked(
-                    &fg,
-                    tc::Marks {
-                        partial: guessed,
-                        threshold: !guessed && v < 0.0,
-                        ..tc::Marks::default()
-                    },
-                ),
+                fg,
                 format!("  {}{:+.0}%", if guessed { "~" } else { "" }, v),
             )
         }
@@ -903,70 +856,10 @@ fn paced_bar_with_plot(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
-    let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-    // The notch needs a lone foreground colour to be drawn as pixels;
-    // `pace_mark` carries a background for the text bar and would send the
-    // whole meter back to text.
-    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.txt));
-    paced_bar(used, elapsed, room, hue, p)
-}
-
-fn paced_bar(
-    used: f64,
-    elapsed: Option<f64>,
-    room: usize,
-    hue: Option<(u8, u8, u8)>,
-    p: &Palette,
-) -> Vec<(String, String)> {
-    let bar = tc::meter(used, room);
-    let filled = bar.chars().filter(|c| *c == '█').count();
-    let at = elapsed.map(|e| ((e * room as f64).round() as usize).min(room.saturating_sub(1)));
-    let mut parts: Vec<(String, String)> = Vec::new();
-    for (i, ch) in bar.chars().enumerate() {
-        let (colour, glyph) = if Some(i) == at {
-            // One colour for the mark on every bar. It is a reference line -
-            // where an even burn would have reached - and a line that
-            // changes colour looks like it has a state of its own, when the
-            // state being reported is the fill's position relative to it.
-            (p.pace_mark.clone(), '┃')
-        } else if i < filled {
-            // Filled cells run dark to full across the fill, so the bar is
-            // recognisably its agent's colour and still reads as a quantity
-            // without counting cells.
-            let t = 0.51 + 0.49 * (i as f64 / filled.saturating_sub(1).max(1) as f64);
-            (
-                format!(
-                    "{}{}",
-                    p.nobg,
-                    match hue {
-                        Some(hue) => tint(hue, t),
-                        None => tc::heat(used),
-                    }
-                ),
-                ch,
-            )
-        } else {
-            (
-                format!(
-                    "{}{}",
-                    p.nobg,
-                    match hue {
-                        Some(hue) => tint(hue, 0.34),
-                        None => p.grid.clone(),
-                    }
-                ),
-                ch,
-            )
-        };
-        match parts.last_mut() {
-            Some((had, run)) if *had == colour => run.push(glyph),
-            _ => parts.push((colour, glyph.to_string())),
-        }
-    }
-    // The mark is the one thing here that sets a background, so the run ends
-    // by putting it back. Without this the dark cell bled through everything
-    // drawn after it on the row.
-    parts.push((p.nobg.clone(), String::new()));
+    let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
+    let plot = tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark);
+    let parts = plot.text_row(0).to_vec();
+    plots.push(plot);
     parts
 }
 
@@ -2789,6 +2682,16 @@ mod vendors;
 #[cfg(test)]
 mod tests {
 
+    fn paced_bar(
+        used: f64,
+        elapsed: Option<f64>,
+        room: usize,
+        hue: Option<(u8, u8, u8)>,
+        p: &Palette,
+    ) -> Vec<(String, String)> {
+        paced_bar_with_plot(&mut Vec::new(), 0, &[], used, elapsed, room, hue, p)
+    }
+
     /// Under a day, say the hours. The quota headings used to render this
     /// span three different ways - "~0.9 days", a truncated "0d", and
     /// "resets today" - and all three round away the part a reader is
@@ -3910,7 +3813,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_pace_does_not_wear_the_live_threshold() {
+    fn a_cached_pace_stays_dim_and_estimated() {
         // The three the summary already treats as an estimate.
         let open = Some(now() + 3600.0);
         assert!(pace_guessed(true, false, open));
@@ -3924,24 +3827,12 @@ mod tests {
         let (cached, cached_txt) = pace_cell(Some(-12.0), true, &p);
         assert_eq!(live_txt.trim(), "-12%");
         assert_eq!(cached_txt.trim(), "~-12%");
-        // The threshold colour is the live underline. A cached figure must
-        // not carry it, whether or not this terminal has answered the probe.
-        let threshold = "\x1b[58;2;255;214;140m";
-        assert!(!cached.contains(threshold), "{cached:?}");
-        assert!(!cached.contains("\x1b[4:3m"), "{cached:?}");
-        if live.contains(threshold) {
-            assert!(
-                cached.contains("\x1b[4:5m") || cached.contains("\x1b[4m"),
-                "{cached:?}"
-            );
-        } else {
-            assert_eq!(live, p.warn);
-            assert_eq!(cached, p.dim);
-        }
+        assert_eq!(live, p.warn);
+        assert_eq!(cached, p.dim);
         // A cushion is not a threshold. Only falling behind is.
         let (ahead, ahead_txt) = pace_cell(Some(12.0), false, &p);
         assert_eq!(ahead_txt.trim(), "+12%");
-        assert!(!ahead.contains(threshold), "{ahead:?}");
+        assert_eq!(ahead, p.ok);
     }
 
     /// Local noon on a date, as the epoch seconds the pace works in.
@@ -4136,6 +4027,21 @@ mod tests {
         let bare = plain(&paced_bar(0.5, None, 10, None, &p));
         assert!(!bare.contains('┃'));
         assert_eq!(bare.chars().count(), 10);
+    }
+
+    #[test]
+    fn the_pixel_fill_is_the_same_ramp_the_text_bar_draws() {
+        let p = palette();
+        for hue in [Some((240, 132, 84)), None] {
+            let mut plots = Vec::new();
+            let parts = paced_bar_with_plot(&mut plots, 3, &[(p.txt.clone(), "prefix ".into())],
+                0.5, None, 10, hue, &p);
+            assert_eq!(parts, plots[0].text_row(0));
+            assert_eq!((plots[0].x, plots[0].y), (7, 3));
+            let colours: std::collections::HashSet<_> = parts.iter()
+                .filter(|(_, glyph)| glyph == "█").map(|(c, _)| c).collect();
+            assert_eq!(colours.len(), 5, "solid or coarse gradient: {parts:?}");
+        }
     }
 
     #[test]

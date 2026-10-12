@@ -265,16 +265,18 @@ mod tests {
     #[test]
     fn a_dropped_image_is_resent_rather_than_ending_graphics() {
         let now = Instant::now();
-        let mut s = Session {
-            deadline: Some(now + TIMEOUT),
-            ..Session::default()
-        };
-        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
-        let ours = 0x40000000 | (((unsafe { libc::getpid() } as u32) & 0x1fffff) << 4);
-        s.reply(&format!("\x1b_Gi={ours};ENOENT:no such image\x1b\\"), now);
-        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
-        s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
-        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+        for slot in [0, 31] {
+            let mut s = Session {
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+            let ours = crate::graphics::image_id(slot);
+            s.reply(&format!("\x1b_Gi={ours};ENOENT:no such image\x1b\\"), now);
+            assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+            s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
+            assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+        }
     }
 
     #[test]

@@ -427,7 +427,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             // countdown there to keep, and no burn either: what has been
             // spent in the current window is exactly what nobody knows.
             let ahead = lane.reset.map(|r| r - now());
-            let (when, tone_fg) = if !show_reset {
+            let (when, tone) = if !show_reset {
                 (String::new(), p.dim.clone())
             } else {
                 match ahead {
@@ -447,14 +447,6 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                     None => (String::new(), p.dim.clone()),
                 }
             };
-            let tone = tc::marked(
-                &tone_fg,
-                tc::Marks {
-                    stale: lane.stale,
-                    partial: lane.projected,
-                    ..tc::Marks::default()
-                },
-            );
             // A projected window is one we rolled forward because the
             // agent's own reading had expired - so the percentage beside it
             // was measured in a window that has since closed and reset.
@@ -475,26 +467,13 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                 p.dim.clone(),
                 format!("   {} ", tc::pad(&lane.label, label_w)),
             )];
-            let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-            plots.push(tc::Plot::meter(4 + label_w, rows.len(), bar_room, used,
-                elapsed_of(lane.window_secs, lane.reset), &fill, &p.grid, &p.txt));
-            line.extend(paced_bar(
-                used,
-                elapsed_of(lane.window_secs, lane.reset),
-                bar_room,
-                hue,
-                p,
-            ));
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line, used,
+                elapsed_of(lane.window_secs, lane.reset), bar_room, hue, p));
             if any_stale {
                 // Held for every lane, so the percentages stay in one
                 // column whether the row beside them is cached or not.
-                let star = if lane.stale {
-                    tc::marked(&p.warn, tc::Marks { stale: true, ..tc::Marks::default() })
-                } else {
-                    p.warn.clone()
-                };
                 line.push((
-                    star,
+                    p.warn.clone(),
                     if lane.stale {
                         " *".into()
                     } else {
@@ -503,7 +482,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                 ));
             }
             line.push((
-                quota_mark(lane.pct, hue, p, lane.stale, lane.projected),
+                pct_colour(lane.pct, hue, p),
                 pct_text(lane.pct),
             ));
             line.push((pace_colour, pace_txt));
@@ -556,12 +535,8 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                     tc::wrap_words(&said, w.saturating_sub(6).max(1))
                         .into_iter()
                         .map(|line| {
-                            let ink = tc::marked(
-                                p.warn.as_str(),
-                                tc::Marks { partial: true, ..tc::Marks::default() },
-                            );
                             tc::seg(
-                                &[(ink.as_str(), format!("     {line}"))],
+                                &[(p.warn.as_str(), format!("     {line}"))],
                                 w.saturating_sub(1).max(1),
                             )
                         }),
@@ -1005,6 +980,38 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn overview_and_provider_plots_keep_the_pace_marker_background() {
+        let state = State {
+            notion: crate::notion::Data::answered(&serde_json::json!({
+                "status": "within_limit",
+                "billingPeriodWindow": { "used": 50, "limit": 100, "periodEndMs": (now() + 86400.0) * 1000.0 }
+            }).to_string()),
+            ..State::default()
+        };
+        for width in [30, 60, 120] {
+            let p = palette();
+            for overview in [true, false] {
+                let render = |palette: &Palette| {
+                    let mut plots = Vec::new();
+                    if overview {
+                        summary_with_plots(&state, width, palette, &["notion"], &mut plots);
+                    } else {
+                        crate::notion::tab_with_plots(&state.notion, width, 40, &Config::default(), palette, &mut plots);
+                    }
+                    plots
+                };
+                let plots = render(&p);
+                assert!(!plots.is_empty());
+                // Plot's cells are private to core. Inspect the recorded style,
+                // not whole-plot inequality: time advances between two renders
+                // and can move the reference even when its style is unchanged.
+                assert!(format!("{plots:?}").contains(&format!("{:?}", p.pace_mark)),
+                    "marker background lost: width={width}, overview={overview}");
+            }
+        }
     }
 
     #[test]
