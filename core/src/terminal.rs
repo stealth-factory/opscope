@@ -379,6 +379,31 @@ mod tests {
     }
 
     #[test]
+    fn underline_and_keyboard_replies_enable_independently() {
+        let now = Instant::now();
+        let underline = "\x1bP1+r536d756c78=1b5b343a25703125646d;536574756c63=1b5b3538\x1b\\";
+        let keyboard = "\x1b[?0u";
+        for mode in [GraphicsMode::Auto, GraphicsMode::Text] {
+            for replies in [[underline, keyboard], [keyboard, underline]] {
+                let mut s = Session {
+                    mode,
+                    deadline: Some(now + TIMEOUT),
+                    ..Session::default()
+                };
+                for reply in replies {
+                    assert_eq!(s.reply(reply, now), reply == keyboard);
+                }
+                assert!(s.capabilities.styled_underlines);
+                assert!(s.capabilities.underline_colour);
+                assert!(s.keyboard_disambiguate);
+                assert!(!s.capabilities.kitty_graphics);
+                assert!(!s.reply("\x1b[?62;c", now));
+                assert!(s.keyboard_disambiguate);
+            }
+        }
+    }
+
+    #[test]
     fn a_dropped_image_is_resent_rather_than_ending_graphics() {
         let now = Instant::now();
         for slot in [0, 31] {
