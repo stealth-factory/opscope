@@ -132,9 +132,10 @@ jobs:
           node debian/package.js "$version" target/debug debian-dist
           (cd debian-dist && sha256sum -c *.deb.sha256)
           dpkg-deb --info "debian-dist/opscope_${version}_amd64.deb"
+          node -e 'console.log(require("./npm/platform").binsFromManifest(process.cwd()).join("\n"))' > /tmp/opscope-expected-binaries
           for image in ubuntu:22.04 debian:12 debian:11; do
             mode=supported
             if [ "$image" = debian:11 ]; then mode=old-glibc; fi
-            docker run --rm -v "$PWD:/work:ro" "$image" \
-              bash /work/debian/lifecycle.sh "/work/debian-dist/opscope_${version}_amd64.deb" "$mode"
+            docker run --rm -v "$PWD:/work:ro" -v /tmp/opscope-expected-binaries:/expected-binaries:ro "$image" \
+              bash /work/debian/lifecycle.sh "/work/debian-dist/opscope_${version}_amd64.deb" "$mode" /expected-binaries
           done

@@ -282,11 +282,18 @@ before `publish` can run. macOS skips packaging. Pull-request release builds
 skip the tagged package step; ordinary CI separately exercises the packer with
 the manifest version in a disposable test artifact, never a `dev` version.
 
-The shared [APT repository](https://github.com/stealth-factory/apt-repo) pulls
-stable public releases hourly after its owner-approved activation. It verifies
-the `.deb` checksum and metadata, retains immutable versions, rejects stale
-updates, creates signed indexes, tests signed APT installation, and publishes
-a complete Pages snapshot. No new Opscope token or publishing grant is needed.
+After `publish` succeeds, the gated `apt-repository` job sends the exact source,
+release tag and commit to the shared [APT repository](https://github.com/stealth-factory/apt-repo)
+through `repository_dispatch`. It reuses `secrets.GH_TOKEN || secrets.RELEASE_TOKEN`,
+the Homebrew bot credential already configured here. The endpoint needs Contents
+write in the destination for a fine-grained token, not Actions write. No secret
+travels in the event and no new credential or account grant is configured.
+
+The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
+immutable versions, rejects stale updates, signs indexes, tests APT installation,
+and publishes a complete Pages snapshot. A twice-weekly job refreshes metadata
+for existing packages before its 14-day expiry; it never polls for new releases.
+Enable `APT_PUBLISH_ENABLED` in both repositories only with activation approval.
 Signing credentials and Pages activation are managed in that repository and
 were not configured by these changes. Its operations guide documents the exact
 approval requirements, scoped key trust, expiration, rotation, and recovery.

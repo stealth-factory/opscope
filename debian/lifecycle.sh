@@ -3,6 +3,7 @@
 set -euo pipefail
 package=$(readlink -f "$1")
 mode=${2:-supported}
+expected=${3:?Pass the manifest-derived expected binary list from the source checkout}
 version=$(dpkg-deb -f "$package" Version)
 test "$(dpkg-deb -f "$package" Architecture)" = amd64
 test "$(dpkg-deb -f "$package" Depends)" = 'libc6 (>= 2.35), libgcc-s1'
@@ -21,6 +22,8 @@ trap 'rm -rf "$work"' EXIT
 # Minimal distro images may deliberately exclude /usr/share/doc at install.
 # Read the manifest from the package itself, not optional installed docs.
 dpkg-deb --fsys-tarfile "$package" | tar -xOf - ./usr/share/doc/opscope/binaries > "$work/binaries"
+diff -u "$expected" "$work/binaries"
+test -s "$expected"
 dpkg-deb -R "$package" "$work/old"
 sed -i 's/^Version:.*/Version: 0.0.0/' "$work/old/DEBIAN/control"
 printf '#!/bin/sh\nexit 0\n' > "$work/old/usr/libexec/opscope/retired-widget"
@@ -40,7 +43,7 @@ stamp=$(opscope --version)
 case "$stamp" in "opscope $version ("*) ;; *) exit 1;; esac
 while read -r binary; do
   test "$(/usr/libexec/opscope/"$binary" --version)" = "$binary ${stamp#opscope }"
-done < "$work/binaries"
+done < "$expected"
 opscope clocks --help > "$work/help"
 grep -qi clocks "$work/help"
 dpkg -V opscope
