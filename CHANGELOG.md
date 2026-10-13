@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.4.0] - 2026-10-13
+
+### Features
+
+- **packaging**: Ship Debian packages and signed APT integration (OPS-67) (#392)
+
 ## [1.3.0] - 2026-10-13
 
 ### Bug Fixes
