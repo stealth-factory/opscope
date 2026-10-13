@@ -463,12 +463,28 @@ product's own detail under its own name.
   usage limit     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
                   $0.00 of $100.00 this month · $100.00 left · resets 12 Nov
 
- ▍CURSOR
-  SPEND / DAY · SPEND · AI-WRITTEN CODE · METERED · SUBSCRIPTION
+ ── ACTIVITY ── profile tokens / day · peak 937.0M on Sep 16
+  streak 2 days · longest 33
+     Nov Dec Jan Feb Mar Apr May Jun Jul Aug  Sep
+ Mon               █ █    █ ██ ███ █     █████████ █
+  …
+  Less ████ More
 
- ▍GROK
-  TOTALS · TOKENS / DAY
+ SPEND / DAY · SPEND · AI-WRITTEN CODE · METERED · SUBSCRIPTION
+ GROK BUILD (sessions) · TOKENS / DAY
 ```
+
+The merged tab is one report, with no Cursor or Grok headings — the plan is one
+product — and Grok's session totals are headed `GROK BUILD` so they are not read
+as Cursor's. SpaceXSI is drawn in greyscale: the brand is monochrome, its black
+is unreadable on a dark pane, and a mid grey leaves the bars a ramp to draw.
+
+**Activity** is the heatmap cursor.com/@handle shows, and on the unified plan
+grok.com shows the same one: daily token counts and streaks from the account's
+own profile (`GetViewableProfileByHandle`, by the handle `GetUserProfile`
+returns). It is headed as the *profile's* tokens because whether it counts
+Grok's side of the plan as well as Cursor's is not settled — on the day of the
+merge it was still empty while the pool had moved.
 
 The pool bar is drawn in one segment per product, each product on a line of
 its own beneath it in its segment's colour. The split is Grok's: its credits

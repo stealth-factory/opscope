@@ -137,6 +137,10 @@ pub struct Data {
     /// resets on. Asked only on a unified plan, where the usage call's own
     /// cycle has stopped being monthly and become the weekly included pool.
     month: Option<serde_json::Value>,
+    /// The profile's activity summary - the daily token counts behind the
+    /// heatmap cursor.com/@handle and grok.com both show. Asked only on a
+    /// unified plan.
+    activity: Option<serde_json::Value>,
     /// Where this account stands relative to the unified plan, once both
     /// vendors have been read. Set by `vendors::link_spacexsi`.
     pub spacexsi: Spacexsi,
@@ -867,6 +871,8 @@ fn spacexsi_quota_with_plots(
     rows.push(String::new());
     tc::append_plot_rows(&mut rows, plots, |local| extra_report(d, live, w, p, local));
     rows.push(String::new());
+    tc::append_plot_rows(&mut rows, plots, |local| activity_rows(d, w, p, local));
+    rows.push(String::new());
     rows
 }
 
@@ -1158,6 +1164,100 @@ fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     tc::seg(&refs, w - 1)
 }
 
+/// The account's activity summary, from its own profile.
+///
+/// Two calls: the handle is not on disk, and the summary is keyed by it.
+/// The same summary cursor.com/@handle draws its heatmap from, and on the
+/// unified plan grok.com shows the same heatmap. The handle is the
+/// account's public one, so asking by it reveals nothing the profile page
+/// does not.
+fn cursor_activity() -> Option<serde_json::Value> {
+    let me = cursor_rpc("GetUserProfile", &serde_json::json!({}))?;
+    let handle = text(&me["profile"], "handle");
+    if handle.is_empty() {
+        return None;
+    }
+    let got = cursor_rpc("GetViewableProfileByHandle", &serde_json::json!({ "handle": handle }))?;
+    got.get("activitySummary").cloned()
+}
+
+/// The activity summary's daily counts, by date. A count is read as a
+/// number or a string - Connect writes int64 as strings - and a day the
+/// summary lists with no count is proto3 omitting a nought.
+fn activity_days(summary: &serde_json::Value) -> HashMap<NaiveDate, f64> {
+    summary["activityCounts"]
+        .as_array()
+        .map(|days| {
+            days.iter()
+                .filter_map(|day| {
+                    let date = NaiveDate::parse_from_str(&text(day, "date"), "%Y-%m-%d").ok()?;
+                    let n = loose(&day["count"]).or_else(|| loose(&day["value"])).unwrap_or(0.0);
+                    Some((date, n))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The activity heatmap: tokens per day from the account's profile, its
+/// peak, and its streaks.
+///
+/// Labelled as the profile's figures, because that is what they are: when
+/// the plans merged, the day of the merge was still empty here while the
+/// pool had moved, so whether this counts Grok's side of the plan as well
+/// as Cursor's is not yet settled, and the heading does not claim it.
+fn activity_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let Some(summary) = d.activity.as_ref() else {
+        return vec![tc::seg(
+            &[(p.lbl.as_str(), " ── ACTIVITY ── ".into()), (p.warn.as_str(), "not reported".into())],
+            w - 1,
+        )];
+    };
+    let days = activity_days(summary);
+    let Some(cal) = day_calendar(&days, w, SPACEXSI_STEPS, None, p) else {
+        return vec![tc::seg(
+            &[(p.lbl.as_str(), " ── ACTIVITY ── ".into()), (p.dim.as_str(), "no active days on the profile".into())],
+            w - 1,
+        )];
+    };
+    let peak = days.values().cloned().fold(0.0f64, f64::max);
+    let best = cal
+        .best
+        .map(|b| format!(" on {} {}", MONTHS[b.month0() as usize], b.day()))
+        .unwrap_or_default();
+    // The heading gives up its parts whole, the peak's date first: "peak
+    // 937.0M on" with no date after it is a sentence that stops.
+    let mut head: Vec<(String, String)> = vec![
+        (p.lbl.clone(), " ── ACTIVITY ── ".into()),
+        (p.dim.clone(), "profile tokens / day · peak ".into()),
+        (p.txt.clone(), big_num(peak)),
+    ];
+    let used: usize = head.iter().map(|(_, t)| t.chars().count()).sum();
+    if used + best.chars().count() <= w.saturating_sub(1) {
+        head.push((p.dim.clone(), best));
+    }
+    let mut rows = vec![seg_owned(&head, w)];
+    // The streaks as the profile states them, where it does; the calendar's
+    // own count otherwise.
+    let current = loose(&summary["currentStreak"]).map(|v| v as usize).unwrap_or(cal.current);
+    let longest = loose(&summary["longestStreak"]).map(|v| v as usize).unwrap_or(cal.longest);
+    rows.push(tc::seg(
+        &[(p.dim.as_str(), format!("  streak {} days · longest {}", current, longest))],
+        w - 1,
+    ));
+    let mut plot = cal.plot.clone();
+    plot.y += rows.len();
+    plots.push(plot);
+    for line in &cal.rows {
+        rows.push(seg_owned(line, w));
+    }
+    let mut legend: Vec<(String, String)> = vec![(p.dim.clone(), "  Less ".into())];
+    legend.extend(SPACEXSI_STEPS.iter().map(|(r, g, b)| (tc::rgb(*r, *g, *b), "█".to_string())));
+    legend.push((p.dim.clone(), " More".into()));
+    rows.push(seg_owned(&legend, w));
+    rows
+}
+
 /// Per-model tokens and real cost over a window.
 ///
 /// This is what the plan percentages are made of: which model spent the
@@ -1396,6 +1496,8 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         d.month = cached(caches, "cursor-month", PLAN_TTL, || {
             cursor_rpc("GetMonthlyBillingCycle", &serde_json::json!({}))
         });
+        // Daily figures, so the plan's hour is plenty.
+        d.activity = cached(caches, "cursor-activity", PLAN_TTL, cursor_activity);
     }
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
@@ -3176,8 +3278,23 @@ mod tests {
             sand: Some(serde_json::json!({
                 "hasNonZeroIncludedLimit": true, "usagePercent": 4.969027, "isUnified": true
             })),
+            activity: Some(unified_activity()),
             ..Data::default()
         }
+    }
+
+    /// GetViewableProfileByHandle's activitySummary, in the measured shape:
+    /// counts as numbers with a string twin, and the streaks beside them.
+    fn unified_activity() -> serde_json::Value {
+        let day = |back: i64| (Local::now().date_naive() - Days::days(back)).format("%Y-%m-%d").to_string();
+        serde_json::json!({
+            "longestStreak": 33, "currentStreak": 2,
+            "activityCounts": [
+                {"date": day(2), "count": 568088972, "value": "568088972"},
+                {"date": day(1), "count": 179410954, "value": "179410954"},
+                {"date": day(9), "value": "25164817"},
+            ]
+        })
     }
 
     #[test]
@@ -3423,6 +3540,33 @@ mod tests {
             let text = report(&d, w);
             assert!(text.contains("no payment method to charge"), "the warning was dropped at {w}: {text}");
         }
+    }
+
+    #[test]
+    fn the_activity_heatmap_draws_the_profiles_days_and_streaks() {
+        let d = unified_data(true);
+        let days = activity_days(d.activity.as_ref().unwrap());
+        assert_eq!(days.len(), 3);
+        assert!(days.values().any(|v| *v == 25164817.0), "a count stated only as a string");
+        let text = report(&d, 120);
+        assert!(squeeze(&text).contains("ACTIVITY ── profile tokens / day · peak"), "{text}");
+        assert!(squeeze(&text).contains("streak 2 days · longest 33"), "{text}");
+        for w in [40usize, 57, 58] {
+            let head = report(&d, w).lines().find(|l| l.contains("ACTIVITY")).unwrap().trim_end().to_string();
+            assert!(!head.ends_with(" on") && !head.ends_with(" o"), "a cut date at {w}: {head:?}");
+        }
+        assert!(text.contains("Less") && text.contains("More"), "{text}");
+        // Its plot is published at its own row.
+        let mut plots = Vec::new();
+        let rows = cursor_quota_with_plots(&d, 120, &palette(), &mut plots);
+        let head = rows.iter().position(|r| strip(r).contains("ACTIVITY")).unwrap();
+        assert!(plots.iter().any(|pl| pl.y > head), "no calendar plot under the heading");
+        // A failed call says so; a profile with no days says that.
+        let mut d = unified_data(true);
+        d.activity = None;
+        assert!(squeeze(&report(&d, 120)).contains("ACTIVITY ── not reported"));
+        d.activity = Some(serde_json::json!({}));
+        assert!(squeeze(&report(&d, 120)).contains("no active days on the profile"));
     }
 
     #[test]

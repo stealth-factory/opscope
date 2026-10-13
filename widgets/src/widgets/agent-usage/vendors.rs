@@ -530,10 +530,18 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
     // Three more when anything is cached: two for the star's column and one
     // for the tilde the pace figure grows. Counted rather than guessed - the
     // pace cell is four wide for "+40%" and five for "~+40%".
-    let fixed = 15 + label_w + usize::from(any_stale) * 3;
-    let show_reset = (w - 1).saturating_sub(fixed + 8) >= 16;
-    let tail = if show_reset { 16 } else { 0 };
-    let bar_room = (w - 1).saturating_sub(fixed + tail).max(8);
+    // 3 lead + label + 1 + pct(6) + pace(7: "  -100%", the widest it
+    // draws). The pace was counted as five, which only ever fitted because
+    // the labels left a spare cell - a fifteen-cell label took it and cut
+    // `-30%` to `-30`.
+    let fixed = 17 + label_w + usize::from(any_stale) * 3;
+    // The countdown at its widest is `  resetting` or `  ~29d 23h`: eleven.
+    // Sixteen was reserved for it, which dropped it on panes it fitted.
+    let show_reset = (w - 1).saturating_sub(fixed + 8) >= 11;
+    let tail = if show_reset { 11 } else { 0 };
+    // A short bar is still a bar; the figures after it are the reading, and
+    // an eight-cell floor pushed them off the edge of a narrow pane.
+    let bar_room = (w - 1).saturating_sub(fixed + tail).max(3);
     for (i, (name, lanes)) in groups.iter().enumerate() {
         if i > 0 {
             rows.push(String::new());
@@ -1776,6 +1784,36 @@ mod tests {
                 assert!(row.chars().count() <= w - 1, "{} wide at {w}: {row:?}", row.chars().count());
             }
         }
+    }
+
+    #[test]
+    fn no_summary_row_cuts_its_pace_or_countdown() {
+        // The pace figure was budgeted at five cells and draws up to seven,
+        // so the widest label left it one short and `-30%` became `-30`.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::own_plan_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Alone;
+        for w in [40usize, 50, 57, 58, 64, 80, 120] {
+            for row in plain(&summary_for(&s, w, &palette(), &["cursor", "grok"])) {
+                let n = row.chars().count();
+                assert!(n <= w - 1, "{n} wide at {w}: {row:?}");
+                // A lane row ends in its percentage, its pace, or its
+                // countdown - never in a figure cut short.
+                if row.starts_with("   ") && row.contains('%') {
+                    let end = row.trim_end();
+                    assert!(
+                        end.ends_with('%') || end.ends_with('h') || end.ends_with('m') || end.ends_with("resetting"),
+                        "a cut row at {w}: {row:?}"
+                    );
+                }
+            }
+        }
+        // And at the width these panes sit at, the countdown still fits.
+        let rows = plain(&summary_for(&s, 57, &palette(), &["cursor", "grok"])).join("\n");
+        assert!(rows.lines().any(|l| l.contains("weekly pool") && l.trim_end().ends_with('h')), "{rows}");
     }
 
     #[test]

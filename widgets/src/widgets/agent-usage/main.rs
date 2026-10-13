@@ -382,6 +382,8 @@ const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
 #[allow(dead_code)]
 const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
+/// SpaceXSI's activity calendar, in the plan's greyscale.
+const SPACEXSI_STEPS: [(u8, u8, u8); 4] = [(62, 62, 62), (110, 110, 110), (165, 165, 165), (225, 225, 225)];
 #[allow(dead_code)]
 const CURSOR_STEPS: [(u8, u8, u8); 4] =
     [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
