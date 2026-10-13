@@ -303,7 +303,7 @@ impl TeamDiscovery {
                 if self.scopes.iter().any(|scope| !scope.is_empty())
                     && !note.starts_with("the Vercel token is not valid")
                 {
-                    note.push_str(" - previously discovered teams are still included; other teams may be missing");
+                    note.push_str(" - discovered teams are still included; other teams may be missing");
                 }
             }
         } else {
@@ -2262,7 +2262,7 @@ mod tests {
             .to_vec();
         assert_eq!(scopes, vec!["", "team_a"]);
         assert_eq!(discovery.note(), Some(
-            "team list stopped early - previously discovered teams are still included; other teams may be missing"
+            "team list stopped early - discovered teams are still included; other teams may be missing"
         ));
 
         let scopes = discovery
@@ -2302,7 +2302,7 @@ mod tests {
             ["", "team_a", "team_b", "team_c"],
         );
         assert_eq!(discovery.note(), Some(
-            "team discovery failed - previously discovered teams are still included; other teams may be missing"
+            "team discovery failed - discovered teams are still included; other teams may be missing"
         ));
         assert_eq!(
             discovery.resolve(|| (vec!["team_b".into()], None)),
@@ -2331,12 +2331,12 @@ mod tests {
         assert_eq!(discovery.scopes, ["", "team_a"]);
         let note = discovery.note().unwrap();
         assert!(note.contains("HTTP 403"), "{note}");
-        assert!(note.contains("previously discovered teams are still included"), "{note}");
+        assert!(note.contains("discovered teams are still included"), "{note}");
         assert!(!note.contains("showing your personal account only"), "{note}");
         assert!(note.contains("vercel_deployments.teams"), "{note}");
 
         discovery.resolve(|| panic!("transient discovery failure"));
-        assert!(discovery.note().unwrap().contains("previously discovered teams are still included"));
+        assert!(discovery.note().unwrap().contains("discovered teams are still included"));
         discovery.resolve(|| walk_teams(|_| {
             Err(vercel_refusal(403, r#"{"error":{"invalidToken":true}}"#))
         }));
