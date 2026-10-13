@@ -533,10 +533,11 @@ const CLAUDE_LIVE_TTL: f64 = 300.0;
 /// cycle"; it is noise when it means "another process fetched it".
 const CLAUDE_FRESH_FOR: f64 = 1800.0;
 
-/// True when the reading is old enough to be worth flagging, whatever its
-/// source. `quota_at` is when it was taken, not when it was read.
+/// True when the reading is older than the freshness window or its age is
+/// invalid (for example, a timestamp from the future), whatever its source.
+/// `quota_at` is when it was taken, not when it was read.
 fn reading_is_old(taken_at: f64) -> bool {
-    now() - taken_at > CLAUDE_FRESH_FOR
+    !(0.0..=CLAUDE_FRESH_FOR).contains(&(now() - taken_at))
 }
 
 /// Where our own last good reading lives.
@@ -2363,6 +2364,7 @@ mod tests {
                 (taken_now - 35.0, false),
                 (taken_now - (CLAUDE_FRESH_FOR - 30.0), false),
                 (taken_now - (CLAUDE_FRESH_FOR + 30.0), true),
+                (taken_now + 60.0, true),
                 (0.0, true),
             ] {
                 let mut data = Data::with_reset_grants(
@@ -2573,6 +2575,10 @@ mod tests {
         assert!(
             reading_is_old(now() - (CLAUDE_FRESH_FOR + 30.0)),
             "past twice the fetch interval it has to say so"
+        );
+        assert!(
+            reading_is_old(now() + 60.0),
+            "a future timestamp has an invalid age"
         );
         // The one this all started with.
         assert!(reading_is_old(now() - 9.6 * 86400.0));
