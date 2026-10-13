@@ -1976,6 +1976,9 @@ mod tests {
 
     #[test]
     fn under_text_keeps_cell_text_in_pixel_mode_and_matches_braille() {
+        // compose() writes the shared image cache. Without the guard this
+        // races the other cache tests and fails most of the time.
+        let _transport = super::super::shm::guard();
         let rows = vec![
             "title".into(),
             "ab12.3ms later".into(),

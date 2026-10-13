@@ -772,15 +772,6 @@ fn bucketed_trace(
     (values, positions)
 }
 
-/// The chart label is the latest sample, which is what the table calls NOW.
-///
-/// The last non-empty bucket is a median or a mean, and it stays at the
-/// right edge after later replies are lost. Neither of those is the
-/// current round trip.
-fn latest_reply(samples: &[(f64, Option<f64>)]) -> Option<f64> {
-    samples.last().and_then(|(_, rtt)| *rtt)
-}
-
 /// Log-scale plot of every target's round trip. The log axis keeps both
 /// nearby and distant targets readable across orders of magnitude.
 fn graph(
@@ -861,16 +852,18 @@ fn graph(
         }).collect(),
     };
     plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
-    // The focused target's latest reply, the same reading the table calls
-    // NOW. A bucket median is the trace, and a loss must not leave an older
-    // success looking current. The row is the stroke's pixel row for that
-    // reply. Pixel mode leaves the number on the chart; Braille paints over
-    // these cells, so text mode still shows the axis and the trace alone.
-    // One trace can be labelled without a selection. Several traces share
-    // the canvas, so the number is the focused line only: any other choice
-    // would name a host the pane is not pointing at.
-    let current_idx = focus.or_else(|| (targets.len() == 1).then_some(0));
-    let current = current_idx.and_then(|idx| targets.get(idx).and_then(|t| latest_reply(&t.samples)));
+    // The number is the bucket the stroke ends on, so it sits on the line.
+    // A raw reply inside that bucket is not what was plotted. Pixel mode
+    // leaves it on the chart; Braille paints over these cells, so text mode
+    // still shows the axis and the trace alone. One trace can be labelled
+    // without a selection. Several traces share the canvas, so the number
+    // is the focused line only.
+    let current_idx = focus.or_else(|| (series.len() == 1).then_some(series[0].0));
+    let current = current_idx.and_then(|idx| {
+        series.iter().find(|(i, _, _)| *i == idx).and_then(|(_, values, _)| {
+            values.iter().copied().rev().find_map(|v| v)
+        })
+    });
     let current_row = current.map(|v| {
         let frac = (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9);
         tc::line_row(frac, gh)
@@ -1913,9 +1906,9 @@ mod tests {
     }
 
     #[test]
-    fn the_chart_label_is_the_latest_reply_not_the_bucket() {
+    fn the_chart_label_is_the_bucket_the_line_plots() {
         // Three replies in one bucket. The trace is their median, 10ms.
-        // The label is the latest reply, 40ms, which is what NOW says.
+        // The label is that same 10ms, not the latest raw reply of 40ms.
         let now = tc::now();
         let mut focused = Target::default();
         focused.record(now, Some(10.0), 600);
@@ -1925,26 +1918,27 @@ mod tests {
         other.record(now, Some(80.0), 600);
         let targets = [focused, other];
         let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(0), &palette(), &mut Vec::new(), 1);
-        assert_eq!(rows.iter().filter(|row| bare(row).ends_with("40.00ms")).count(), 1);
+        assert_eq!(rows.iter().filter(|row| bare(row).ends_with("10.00ms")).count(), 1);
+        assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
         assert!(!rows.iter().any(|row| bare(row).ends_with("80.00ms")));
-        assert!(!rows.iter().any(|row| bare(row).ends_with("10.00ms")));
         let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(1), &palette(), &mut Vec::new(), 1);
         assert!(rows.iter().any(|row| bare(row).ends_with("80.00ms")));
         assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
+        assert!(!rows.iter().any(|row| bare(row).ends_with("10.00ms")));
     }
 
     #[test]
-    fn a_loss_does_not_leave_the_previous_reply_on_the_chart() {
-        // The reply is still the right-hand point of the trace. The latest
-        // sample is the loss after it, so the label must not repeat 40ms.
+    fn a_later_loss_keeps_the_label_on_the_last_plotted_bucket() {
+        // NOW in the table is empty: the newest sample is a loss. The
+        // stroke still ends on the last bucket that had a reply, and the
+        // label is that bucket.
         let now = tc::now();
         let mut target = Target::default();
         target.record(now - 2.0, Some(40.0), 600);
         target.record(now, None, 600);
-        assert_eq!(latest_reply(&target.samples), None);
         assert_eq!(target.stats().now, None);
         let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut Vec::new(), 1);
-        assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
+        assert!(rows.iter().any(|row| bare(row).ends_with("40.00ms")));
     }
 
     #[test]

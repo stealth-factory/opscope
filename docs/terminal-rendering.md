@@ -317,7 +317,7 @@ and intentional text presentation, not unimplemented widget migrations.
 
 | Widget | Implemented in this change | Further useful visual work / reason to retain text |
 | --- | --- | --- |
-| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved. The focused target's latest reply, or the only target's, sits at the end of its line in pixel mode | Measure real-terminal readability with many overlapping targets |
+| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved. The focused target's last plotted bucket, or the only target's, sits at the end of its line in pixel mode | Measure real-terminal readability with many overlapping targets |
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
