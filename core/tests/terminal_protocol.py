@@ -290,7 +290,7 @@ def plain_underlines(t):
 
 
 def shm_rejected(t):
-    probes = [c for c in t.commands() if c[0].get(b"a") == b"t" and c[0].get(b"t") == b"s"]
+    probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
     assert probes, "no shared-memory probe"
     name = base64.b64decode(probes[0][1])
     t.send(b"\x1b_Gi=2147483645;EBADF:fixture\x1b\\")

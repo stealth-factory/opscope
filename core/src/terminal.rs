@@ -188,18 +188,25 @@ impl Session {
             if let Some(id) = id.filter(|id| super::graphics::owns_image(*id)) {
                 // ENOENT means the terminal dropped the placement. Only a
                 // replaced object is collected; the current one reused the id.
+                // It is not the reply to a transmission, so the generation
+                // that is still owed stays owed.
                 if message.starts_with("ENOENT") {
                     super::shm::unlink_retired(id);
                     super::screen_lost();
                     return false;
                 }
+                let generation = super::shm::take_reply(id);
                 if message != "OK\x1b\\" {
-                    // Every reply from the shared frame stays a transport
-                    // failure, including ones that arrive after the first
-                    // error has already cleared `use_shm`. A later direct
-                    // frame clears that mark, and only then is an error a
-                    // graphics rejection.
-                    if self.use_shm || super::shm::shared_pending(id) {
+                    // A shared reply stays a transport failure even when the
+                    // fallback frame has already been sent. That frame pushed
+                    // its own generation behind this one. Only an error from
+                    // the direct generation turns graphics off.
+                    let shared_failure = match generation {
+                        Some(true) => true,
+                        Some(false) => false,
+                        None => self.use_shm,
+                    };
+                    if shared_failure {
                         self.use_shm = false;
                         super::shm::transport_failed();
                         super::screen_lost();
@@ -687,6 +694,34 @@ mod tests {
         );
         crate::shm::mark_direct(id0);
         s.reply(&format!("\x1b_Gi={id0};EINVAL:bad\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn a_late_shared_memory_error_after_fallback_keeps_graphics() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(s.use_shm && s.capabilities.kitty_graphics);
+        let id = crate::graphics::image_id(0);
+        crate::shm::mark_shared(id);
+        crate::shm::mark_direct(id);
+        assert!(
+            crate::shm::shared_pending(id),
+            "the fallback frame cleared the shared generation"
+        );
+        s.reply(&format!("\x1b_Gi={id};EBADF:shared memory\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a late shared-memory error disabled graphics"
+        );
+        assert!(!crate::shm::shared_pending(id));
+        s.reply(&format!("\x1b_Gi={id};EINVAL:bad\x1b\\"), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 

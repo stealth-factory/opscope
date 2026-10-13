@@ -71,15 +71,18 @@ path base64-encodes that payload and sends it in chunks of at most 4096 bytes
 (`t=d`). That path works over SSH.
 
 On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
-reply requested) beside the graphics query. The object is created with
+`a=q`, reply requested) beside the graphics query. The object is created with
 `shm_open`, `ftruncate` and `mmap` from libc, which is already linked. The
 name is what the escape carries. The terminal reads the object and unlinks
-it. If the probe is acknowledged, later images are published the same way.
+it. `a=q` does not store the image, so the probe id cannot replace another
+image. If the probe is acknowledged, later images are published the same way.
 The probe-result parser is ordinary code, compiled and tested on every
 target. Acquisition is limited to Linux and macOS. Anywhere else, and
 whenever the probe is rejected, times out, or a later image reports an
 error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
-failure does not turn graphics off.
+failure does not turn graphics off. A cleanup table with no free slot sends
+that one frame directly and leaves shared memory on; only an object the
+operating system refuses turns the session back to `t=d`.
 
 An object the terminal does not take is retired, then unlinked once a short
 read window has passed, so a replacement that reuses the image id is not

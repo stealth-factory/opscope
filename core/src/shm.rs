@@ -3,8 +3,10 @@
 //! The direct path (`t=d`) base64-encodes every image into the escape.
 //! Kitty can instead read a POSIX shared-memory object (`t=s`) and unlink
 //! it. That only works when the terminal and this process share a host —
-//! over SSH the terminal answers `EBADF` — so one probe decides, and any
-//! later failure drops back to `t=d` without turning graphics off.
+//! over SSH the terminal answers `EBADF` — so one probe decides, and a
+//! later transport failure drops back to `t=d` without turning graphics
+//! off. A full cleanup table is not that failure: that frame stays direct
+//! and the next one may use shared memory again.
 //!
 //! `image()` still builds the direct frame. It belongs to the crop work.
 //! This module rewrites that frame after the fact, when the probe has
@@ -30,10 +32,15 @@ use base64::Engine;
 pub(crate) const PROBE_ID: u32 = 2_147_483_645;
 
 const NAME_CAP: usize = 31;
-const SLOTS: usize = 48;
+/// One generation of plots, the generation it replaced, and the probe.
+const SLOTS: usize = 2 * super::graphics::MAX_PLOTS + 1;
 /// How long a replaced object stays after a newer one is published for the
 /// same image. The terminal may still be reading the previous name.
 const RETIRE_MS: u64 = 1_000;
+/// A transmission's reply is no longer matched after this. The queue would
+/// otherwise treat a later frame's error as the one that already left.
+const REPLY_MS: u64 = 8_000;
+const PENDING_CAP: usize = 8;
 const UNPROBED: u8 = 0;
 const SHARED: u8 = 1;
 const DIRECT: u8 = 2;
@@ -92,11 +99,31 @@ const fn empty_slot() -> Slot {
 static TABLE: Mutex<[Slot; SLOTS]> = Mutex::new([empty_slot(); SLOTS]);
 static TRANSPORT: AtomicU8 = AtomicU8::new(DIRECT);
 static NAME_SEQ: AtomicU32 = AtomicU32::new(1);
-/// Plot slots whose latest transmission was `t=s` and has not been replaced
-/// by a `t=d` frame. A queued error for one of these stays a transport
-/// failure after the first error clears `use_shm`.
-static SHARED_PENDING: AtomicU32 = AtomicU32::new(0);
+/// Outstanding replies, oldest first, one queue per owned image. A fallback
+/// frame pushes behind a shared send; it does not erase it.
+static PENDING: Mutex<[Pending; super::graphics::MAX_PLOTS]> =
+    Mutex::new([Pending::new(); super::graphics::MAX_PLOTS]);
 static STARTED: OnceLock<Instant> = OnceLock::new();
+/// Test seam: the next `create` fails the way `shm_open` does.
+#[cfg(test)]
+static FAIL_OS: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy)]
+struct Pending {
+    len: u8,
+    shared: [bool; PENDING_CAP],
+    at_ms: [u64; PENDING_CAP],
+}
+
+impl Pending {
+    const fn new() -> Self {
+        Self {
+            len: 0,
+            shared: [false; PENDING_CAP],
+            at_ms: [0; PENDING_CAP],
+        }
+    }
+}
 
 fn mono_ms() -> u64 {
     STARTED
@@ -128,15 +155,17 @@ pub(crate) fn force_direct() {
     release();
 }
 
-/// A 1×1 image, transmitted and not placed, with a reply requested (`q=0`).
-/// `None` on an OS without the calls, or when the object cannot be created:
-/// the session then never leaves `t=d`.
+/// A 1×1 query (`a=q`), not a stored transmit. `q=0` asks for the reply.
+/// The terminal checks that it can read the object and does not keep the
+/// image, so this id cannot replace another one. `None` on an OS without
+/// the calls, or when the object cannot be created: the session then never
+/// leaves `t=d`.
 pub(crate) fn begin_probe() -> Option<String> {
-    let name = create(&[0, 0, 0, 0], PROBE_ID)?;
+    let name = create(&[0, 0, 0, 0], PROBE_ID).ok()?;
     TRANSPORT.store(UNPROBED, Ordering::Release);
     let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
     Some(format!(
-        "\x1b_Ga=t,f=32,t=s,s=1,v=1,i={PROBE_ID},q=0,S=4;{payload}\x1b\\"
+        "\x1b_Ga=q,f=32,t=s,s=1,v=1,i={PROBE_ID},q=0,S=4;{payload}\x1b\\"
     ))
 }
 
@@ -170,39 +199,98 @@ pub(crate) fn transport_failed() {
     });
 }
 
-/// Ids whose latest send was shared memory. Cleared when a later frame
-/// transmits that id directly.
+/// The oldest reply still owed for `id` is a shared-memory send.
 pub(crate) fn shared_pending(id: u32) -> bool {
-    plot_bit(id).is_some_and(|bit| SHARED_PENDING.load(Ordering::Acquire) & bit != 0)
+    let Some(slot) = plot_slot(id) else {
+        return false;
+    };
+    with_pending(|rows| {
+        expire_pending(&mut rows[slot], mono_ms());
+        rows[slot].len > 0 && rows[slot].shared[0]
+    })
 }
 
 pub(crate) fn mark_shared(id: u32) {
-    if let Some(bit) = plot_bit(id) {
-        SHARED_PENDING.fetch_or(bit, Ordering::Release);
-    }
+    push_pending(id, true);
 }
 
+/// Record a direct send behind any shared reply that has not arrived yet.
 pub(crate) fn mark_direct(id: u32) {
-    if let Some(bit) = plot_bit(id) {
-        SHARED_PENDING.fetch_and(!bit, Ordering::Release);
-    }
+    push_pending(id, false);
 }
 
-fn plot_bit(id: u32) -> Option<u32> {
-    // Main owns the id layout (five slot bits, prefix 0x60000000). Matching
-    // it here is what lets a queued shared-memory error stay a transport
-    // failure instead of a graphics rejection.
+/// The reply that just arrived. `Some(true)` is a shared transmission.
+pub(crate) fn take_reply(id: u32) -> Option<bool> {
+    let slot = plot_slot(id)?;
+    with_pending(|rows| {
+        expire_pending(&mut rows[slot], mono_ms());
+        let row = &mut rows[slot];
+        if row.len == 0 {
+            return None;
+        }
+        let shared = row.shared[0];
+        shift_pending(row);
+        Some(shared)
+    })
+}
+
+fn plot_slot(id: u32) -> Option<usize> {
     let slot = (id & 0x1f) as usize;
-    if slot >= 32 {
+    if slot >= super::graphics::MAX_PLOTS {
         return None;
     }
-    (id == super::graphics::image_id(slot)).then_some(1u32 << slot)
+    (id == super::graphics::image_id(slot)).then_some(slot)
+}
+
+fn with_pending<T>(body: impl FnOnce(&mut [Pending; super::graphics::MAX_PLOTS]) -> T) -> T {
+    let mut rows = PENDING.lock().unwrap_or_else(|err| err.into_inner());
+    body(&mut rows)
+}
+
+fn push_pending(id: u32, shared: bool) {
+    let Some(slot) = plot_slot(id) else {
+        return;
+    };
+    with_pending(|rows| {
+        let row = &mut rows[slot];
+        expire_pending(row, mono_ms());
+        if row.len as usize == PENDING_CAP {
+            shift_pending(row);
+        }
+        let at = row.len as usize;
+        row.shared[at] = shared;
+        row.at_ms[at] = mono_ms();
+        row.len += 1;
+    });
+}
+
+fn expire_pending(row: &mut Pending, now: u64) {
+    while row.len > 0 && now.saturating_sub(row.at_ms[0]) >= REPLY_MS {
+        shift_pending(row);
+    }
+}
+
+fn shift_pending(row: &mut Pending) {
+    if row.len == 0 {
+        return;
+    }
+    let n = row.len as usize;
+    for i in 1..n {
+        row.shared[i - 1] = row.shared[i];
+        row.at_ms[i - 1] = row.at_ms[i];
+    }
+    row.len -= 1;
+}
+
+fn clear_pending() {
+    with_pending(|rows| *rows = [Pending::new(); super::graphics::MAX_PLOTS]);
 }
 
 /// Rewrite direct transmissions when the probe succeeded. Deletes in
 /// `before` retire the name they replaced; they do not unlink it while the
-/// terminal may still be reading. A failure to publish puts the original
-/// direct bytes back and leaves shared memory off.
+/// terminal may still be reading. A full cleanup table sends this frame
+/// directly and leaves shared memory on. An object the OS refuses puts the
+/// original bytes back and leaves shared memory off.
 pub(crate) fn deliver(before: &str, after: String) -> String {
     reap_expired();
     if !is_shared() {
@@ -217,7 +305,11 @@ pub(crate) fn deliver(before: &str, after: String) -> String {
             note_transport(&rewritten, true);
             rewritten
         }
-        Err(()) => {
+        Err(Publish::Busy) => {
+            note_transport(&after, false);
+            after
+        }
+        Err(Publish::Failed) => {
             transport_failed();
             note_transport(&after, false);
             after
@@ -248,11 +340,17 @@ pub(crate) fn release() {
             unlink_slot(slot);
         }
     });
+    clear_pending();
 }
 
 pub(crate) fn reap_expired() {
     let now = mono_ms();
     with_table(|slots| reap_in(slots, now));
+    with_pending(|rows| {
+        for row in rows.iter_mut() {
+            expire_pending(row, now);
+        }
+    });
 }
 
 fn command_ids(bytes: &str, action: &str) -> Vec<u32> {
@@ -269,8 +367,18 @@ fn command_ids(bytes: &str, action: &str) -> Vec<u32> {
     ids
 }
 
-fn rewrite(input: &str) -> Result<String, ()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Publish {
+    /// No free cleanup slot, or this frame cannot be rewritten. Shared
+    /// memory still works for a later frame.
+    Busy,
+    /// `shm_open`, `ftruncate` or `mmap` refused the object.
+    Failed,
+}
+
+fn rewrite(input: &str) -> Result<String, Publish> {
     let mut out = String::new();
+    let mut created = Vec::new();
     let mut pos = 0;
     while let Some((start, end, keys, payload)) = next_apc(input, pos) {
         if !is_direct_transmit(keys) {
@@ -294,11 +402,24 @@ fn rewrite(input: &str) -> Result<String, ()> {
             scan = next_end;
             more = is_more(next_keys);
         }
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(encoded.as_bytes())
-            .map_err(|_| ())?;
+        let raw = match base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()) {
+            Ok(raw) => raw,
+            Err(_) => {
+                retire_created(&created);
+                return Err(Publish::Busy);
+            }
+        };
         let id = image_id_of(keys).unwrap_or(0);
-        let name = create(&raw, id).ok_or(())?;
+        let name = match create(&raw, id) {
+            Ok(name) => {
+                created.push(id);
+                name
+            }
+            Err(err) => {
+                retire_created(&created);
+                return Err(err);
+            }
+        };
         let wire = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
         out.push_str(&input[pos..start]);
         out.push_str("\x1b_G");
@@ -424,6 +545,12 @@ fn retire_id(id: u32) {
     });
 }
 
+fn retire_created(ids: &[u32]) {
+    for id in ids {
+        retire_id(*id);
+    }
+}
+
 pub(crate) fn unlink_id(id: u32) {
     with_table(|slots| {
         for slot in slots.iter_mut() {
@@ -490,18 +617,25 @@ fn unlink_cstr(buf: &[u8]) {
 fn unlink_cstr(_buf: &[u8]) {}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn create(bytes: &[u8], id: u32) -> Option<String> {
+fn create(bytes: &[u8], id: u32) -> Result<String, Publish> {
+    #[cfg(test)]
+    if FAIL_OS.swap(0, Ordering::AcqRel) == 1 {
+        return Err(Publish::Failed);
+    }
     if bytes.is_empty() {
-        return None;
+        return Err(Publish::Failed);
     }
     for _ in 0..8 {
         let n = NAME_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = unsafe { libc::getpid() } as u32;
         let name = format!("/o{pid:x}-{n:x}");
         if name.len() > NAME_CAP {
-            return None;
+            return Err(Publish::Failed);
         }
-        let c_name = std::ffi::CString::new(name.clone()).ok()?;
+        let c_name = match std::ffi::CString::new(name.clone()) {
+            Ok(c_name) => c_name,
+            Err(_) => return Err(Publish::Failed),
+        };
         let fd = unsafe {
             libc::shm_open(
                 c_name.as_ptr(),
@@ -514,7 +648,7 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
             if err == libc::EEXIST {
                 continue;
             }
-            return None;
+            return Err(Publish::Failed);
         }
         // The cleanup table learns the name before truncate, map or copy.
         // A panic while filling the object can still unlink it.
@@ -523,7 +657,7 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
                 libc::close(fd);
                 libc::shm_unlink(c_name.as_ptr());
             }
-            return None;
+            return Err(Publish::Busy);
         }
         let map_len = bytes.len();
         let failed = unsafe { libc::ftruncate(fd, map_len as libc::off_t) } != 0;
@@ -544,7 +678,7 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
         if ptr == libc::MAP_FAILED {
             unsafe { libc::close(fd) };
             drop_named(&name);
-            return None;
+            return Err(Publish::Failed);
         }
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast(), map_len);
@@ -552,17 +686,17 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
             libc::close(fd);
             if unmapped != 0 {
                 drop_named(&name);
-                return None;
+                return Err(Publish::Failed);
             }
         }
-        return Some(name);
+        return Ok(name);
     }
-    None
+    Err(Publish::Failed)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn create(_bytes: &[u8], _id: u32) -> Option<String> {
-    None
+fn create(_bytes: &[u8], _id: u32) -> Result<String, Publish> {
+    Err(Publish::Failed)
 }
 
 #[cfg(test)]
@@ -737,6 +871,92 @@ mod tests {
         assert_eq!(parse_shm_probe("not a reply"), ProbeFate::Unrelated);
     }
 
+    fn direct_transmit(id: u32) -> String {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
+        format!("\x1b_Ga=T,f=32,t=d,o=z,s=1,v=1,i={id},q=1,m=0;{encoded}\x1b\\")
+    }
+
+    fn has_current(id: u32) -> bool {
+        with_table(|slots| {
+            slots
+                .iter()
+                .any(|slot| slot.live && slot.id == id && slot.retire_ms == 0)
+        })
+    }
+
+    fn live_names(id: u32) -> Vec<String> {
+        with_table(|slots| {
+            slots
+                .iter()
+                .filter(|slot| slot.live && slot.id == id)
+                .map(|slot| {
+                    let len = slot.name_len as usize;
+                    String::from_utf8_lossy(&slot.name[..len]).into_owned()
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn the_probe_is_a_query_so_the_terminal_does_not_store_it() {
+        let _guard = guard();
+        let Some(probe) = begin_probe() else {
+            return;
+        };
+        assert!(
+            probe.contains("a=q,"),
+            "the probe transmits an image the terminal would store"
+        );
+        assert!(!probe.contains("a=t"));
+        assert!(probe.contains("t=s"));
+    }
+
+    #[test]
+    fn a_full_cleanup_table_sends_the_frame_direct_and_stays_shared() {
+        let _guard = guard();
+        assert!(SLOTS >= 2 * super::super::graphics::MAX_PLOTS + 1);
+        let Some(_) = begin_probe() else {
+            return;
+        };
+        apply_accepted();
+        assert!(is_shared());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            for i in 0..SLOTS - 1 {
+                create(&[1, 2, 3, 4], 100_000 + i as u32).expect("fill");
+            }
+            let frame = format!("{}{}", direct_transmit(42), direct_transmit(43));
+            let out = deliver("", frame.clone());
+            assert_eq!(out, frame, "a full table rewrote the frame anyway");
+            assert!(is_shared(), "a full table turned shared memory off");
+            assert!(
+                !has_current(42),
+                "an object from the unsent frame stayed current"
+            );
+            let names = live_names(42);
+            assert_eq!(names.len(), 1, "the unsent object was unlinked immediately");
+            assert!(live_names(43).is_empty(), "the refused image left an object");
+            expire_retired();
+            assert!(live_names(42).is_empty(), "the unsent object was not retired");
+            assert!(!exists(&names[0]));
+        }
+    }
+
+    #[test]
+    fn an_os_refusal_turns_shared_memory_off() {
+        let _guard = guard();
+        let Some(_) = begin_probe() else {
+            return;
+        };
+        apply_accepted();
+        assert!(is_shared());
+        FAIL_OS.store(1, Ordering::Release);
+        let frame = direct_transmit(7);
+        let out = deliver("", frame.clone());
+        assert_eq!(out, frame);
+        assert!(!is_shared(), "an OS refusal left shared memory on");
+    }
+
     #[test]
     fn multi_chunk_direct_frame_round_trips_through_one_object() {
         let _guard = guard();
@@ -832,7 +1052,7 @@ mod tests {
     fn the_payload_is_mapped_because_read_is_not_required() {
         let _guard = guard();
         let raw: Vec<u8> = (0..100).collect();
-        let Some(name) = create(&raw, 5) else {
+        let Ok(name) = create(&raw, 5) else {
             return;
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -859,7 +1079,7 @@ mod tests {
     #[test]
     fn release_unlinks_after_unwind_the_way_exit_and_suspend_do() {
         let _guard = guard();
-        let Some(name) = create(b"still-here", 99) else {
+        let Ok(name) = create(b"still-here", 99) else {
             return;
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]

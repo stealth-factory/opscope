@@ -604,7 +604,7 @@ fn raster(a: (usize, usize), b: (usize, usize), mut dot: impl FnMut(usize, usize
     }
 }
 
-const MAX_PLOTS: usize = 32;
+pub(crate) const MAX_PLOTS: usize = 32;
 const CELL_W: usize = 8;
 const CELL_H: usize = 16;
 static LIVE: AtomicU32 = AtomicU32::new(0);
