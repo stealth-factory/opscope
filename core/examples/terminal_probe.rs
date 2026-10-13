@@ -12,7 +12,7 @@ fn main() {
     let mut gallery = false;
     let mut moving_meter = false;
     let mut tick = 0_u64;
-    let mut selected = 0;
+    let mut selected = 0_usize;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -26,6 +26,10 @@ fn main() {
                 "down" => {
                     scroll = 2;
                     selected += 1;
+                }
+                "up" => {
+                    scroll = 0;
+                    selected = selected.saturating_sub(1);
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,

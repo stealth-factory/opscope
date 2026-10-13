@@ -203,6 +203,40 @@ def moving_meter_keeps_unchanged_pixels():
                 t.close()
 
 
+def scroll_clears_previous_image_region():
+    # Multiplexers may keep the old placement while replacing an upload.
+    # A moved/cropped image must be explicitly cleared before text redraw.
+    for cell_w, cell_h in ((8, 16), (20, 40)):
+        for shared in (False, True):
+            t = Terminal()
+            try:
+                t.read(0.3)
+                t.send(f"\x1b[6;{cell_h};{cell_w}t".encode())
+                t.send(b"\x1b_Gi=2147483645;" + (b"OK" if shared else b"EBADF") + b"\x1b\\")
+                t.read(0.2)
+                for key in (b"\x1b[B", b"\x1b[A") * 3:
+                    old = t.images()[-1][0]
+                    start = len(t.commands())
+                    t.send(key)
+                    t.read(0.2)
+                    added = t.commands()[start:]
+                    upload = next(i for i, (k, _) in enumerate(added) if k.get(b"a") == b"T")
+                    new = added[upload][0]
+                    assert old[b"r"] != new[b"r"], "fixture did not change the visible crop"
+                    assert new[b"p"] != old[b"p"], "reply generation was reused"
+                    assert new[b"t"] == (b"s" if shared else b"d")
+                    assert any(k.get(b"a") == b"d" and k.get(b"d") == b"I"
+                               and k.get(b"i") == old[b"i"] for k, _ in added[:upload]), \
+                        "scroll replaced a cropped chart without clearing its previous placement"
+                    count = len(t.images())
+                    t.read(0.15)
+                    assert len(t.images()) == count, "unchanged chart entered a redraw loop"
+                t.quit()
+                print(f"PASS scroll-cleanup/{cell_w}x{cell_h}/{'shared' if shared else 'direct'}")
+            finally:
+                t.close()
+
+
 def supported(t):
     assert t.images(), "acknowledged Kitty did not receive images"
     assert b"\x1b[?2026h" in t.output
@@ -645,6 +679,7 @@ def missing_and_late_replies_keep_their_upload_keys():
 
 
 if __name__ == "__main__":
+    scroll_clears_previous_image_region()
     moving_meter_keeps_unchanged_pixels()
     successful_upload_before_shared_failure()
     print("PASS shared-memory/success-before-failure")

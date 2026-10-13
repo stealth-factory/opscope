@@ -623,12 +623,17 @@ struct CachedPlot {
 }
 
 impl CachedPlot {
-    fn same_pixels(&self, plot: &Plot, cols: usize, cell_size: (usize, usize), rgba: &[u8]) -> bool {
+    fn same_region(&self, plot: &Plot, cols: usize, cell_size: (usize, usize)) -> bool {
         self.plot.x == plot.x
             && self.plot.y == plot.y
             && self.cols == cols
             && self.cell_size == cell_size
+            && self.plot.first_row == plot.first_row
             && self.plot.visible_rows == plot.visible_rows
+    }
+
+    fn same_pixels(&self, plot: &Plot, cols: usize, cell_size: (usize, usize), rgba: &[u8]) -> bool {
+        self.same_region(plot, cols, cell_size)
             && match &self.rgba {
                 Some(previous) => previous == rgba,
                 None => raster_pixels(&self.plot, self.cols, cell_size.0, cell_size.1) == rgba,
@@ -800,10 +805,12 @@ pub(crate) fn compose(
                 }
             }
         }
-        if cache.get(slot).is_some() {
-            // a=T replaces this image ID itself. Deleting it first exposes a
-            // blank interval while the replacement pixels are transmitted.
-            if lost || plot.is_none() {
+        if let Some(cached) = cache.get(slot) {
+            // Clear the old region before text is repainted when scrolling
+            // moves/crops it. Some multiplexers retain old placements on a=T.
+            // Updates inside the same region still replace without a blank
+            // interval, and identical pixels never reach this path.
+            if lost || plot.is_none_or(|p| !cached.same_region(p, cols, (cell_w, cell_h))) {
                 before.push_str(&delete(slot));
             }
             super::shm::retire_id(image_id(slot));
@@ -1701,10 +1708,33 @@ mod tests {
             let mut moved = meter(0.75);
             moved.x += 1;
             let (_, before, after) = compose(&rows, &[moved], width, 8, true, false, false);
-            assert!(before.is_empty() && after.contains("a=T"));
+            assert!(before.contains("a=d") && after.contains("a=T"));
             let (text, _, _) = compose(&rows, &[next], width, 8, false, false, false);
             let (same_text, _, _) = compose(&rows, &[meter(0.501)], width, 8, false, false, false);
             assert_eq!(text, same_text);
+        }
+        cleanup();
+    }
+
+    #[test]
+    fn image_scroll_crops_clear_the_previous_region_before_replacement() {
+        let _transport = super::super::shm::guard();
+        let base = Plot::new(2, 3, 12, 8, chart(vec![Some(0.2), Some(0.8)]));
+        let rows = vec!["protected title".into()];
+        for scroll in [0, 1, 3, 4, 6, 0] {
+            let original = base.clone().in_viewport(0, 1, 10).unwrap();
+            compose(&rows, &[original], 40, 12, true, true, false);
+            let next = base.clone().in_viewport(scroll, 1, 10).unwrap();
+            let (_, before, after) = compose(&rows, std::slice::from_ref(&next), 40, 12, true, false, false);
+            if scroll == 0 {
+                assert!(before.is_empty() && after.is_empty());
+            } else {
+                assert!(before.contains("a=d,d=I"), "scroll {scroll} left the old region alive");
+                assert!(after.contains("a=T"));
+            }
+            // A steady frame does not delete or upload anything.
+            let (_, before, after) = compose(&rows, &[next], 40, 12, true, false, false);
+            assert!(before.is_empty() && after.is_empty());
         }
         cleanup();
     }
