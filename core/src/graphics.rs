@@ -772,18 +772,19 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
     let mut out = String::new();
     let mut column = 0;
     let mut inserted = false;
-    let mut chars = row.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            out.push(c);
-            for c in chars.by_ref() {
-                out.push(c);
-                if c == 'm' {
-                    break;
-                }
-            }
+    let mut rest = row.as_str();
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            // An https OSC 8 has no `m` of its own; stopping at the first
+            // one cuts the URL and counts the rest as columns. `markup_len`
+            // is the same scan `inert` uses, and it consumes the whole
+            // sequence.
+            let n = super::markup_len(rest).unwrap_or(1);
+            out.push_str(&rest[..n]);
+            rest = &rest[n..];
             continue;
         }
+        let c = rest.chars().next().unwrap();
         let size = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if column >= x && !inserted {
             out.push_str(replacement);
@@ -794,6 +795,7 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
             out.push(c);
         }
         column += size;
+        rest = &rest[c.len_utf8()..];
     }
     if !inserted {
         out.push_str(&" ".repeat(x.saturating_sub(column)));
@@ -1575,6 +1577,22 @@ mod tests {
         assert!(replaced.contains("axis│plot"));
         assert!(replaced.ends_with("│unit"));
         assert!(!replaced.contains("\x1b[2J"));
+    }
+
+    #[test]
+    fn an_https_link_does_not_move_the_cells_a_plot_replaces() {
+        // The URL contains `m`. A scan that stops there treats the rest of
+        // the target as columns, so the plot lands early and splits the
+        // escape. The four dots are still the cells that get replaced.
+        let visible = "axis│....│unit";
+        let linked = super::super::link("https://example.com/opscope", visible);
+        let replaced = replace_cells(&linked, 5, 4, "plot");
+        assert_eq!(super::super::strip_escapes(&replaced), "axis│plot│unit");
+        assert!(
+            replaced.contains("\x1b]8;;https://example.com/opscope\x1b\\"),
+            "the opener was split: {replaced:?}"
+        );
+        assert!(replaced.contains("\x1b]8;;\x1b\\"), "{replaced:?}");
     }
 
     #[test]
