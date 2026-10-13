@@ -927,10 +927,14 @@ fn unified_markers(cfg: &serde_json::Value) -> bool {
 }
 
 /// Whether the reading on hand is the server's, and recent: asked just now
-/// rather than read back from the log, and not older than the window that
-/// judges a reading current.
+/// rather than read back from the log, not older than the window that
+/// judges a reading current, and of a week that has not yet ended - a
+/// cached answer can outlive its reset, and its split is last week's.
 pub fn reading_is_current(d: &Data) -> bool {
-    d.quota_live && d.quota.as_ref().is_some_and(|q| !reading_is_old(q.taken))
+    d.quota_live
+        && d.quota.as_ref().is_some_and(|q| {
+            !reading_is_old(q.taken) && iso_epoch(&q.end).is_none_or(|end| end > now())
+        })
 }
 
 /// Whether this reading says the account is on the unified plan.
@@ -2783,6 +2787,11 @@ mod tests {
         let mut old = unified_grok(Spacexsi::Shared);
         old.quota.as_mut().unwrap().taken = Some(now() - GROK_FRESH_FOR - 60.0);
         assert!(!reading_is_current(&old), "an old reading");
+        // Review: a fresh answer held in the cache past its week's reset.
+        let mut ended = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        ended.quota.as_mut().unwrap().end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        assert!(!reading_is_current(&ended), "a week that has ended");
     }
 
     #[test]
