@@ -51,7 +51,7 @@ sudo apt upgrade
 After release asset publication, Opscope notifies the shared repository using
 the existing Homebrew bot token (`GH_TOKEN` / `RELEASE_TOKEN`), carrying only the
 exact source, tag and commit. The importer verifies that release and its `.deb`
-checksum. No new credential is created. A separate twice-weekly job refreshes
+checksum. No new credential is created. A separate monthly job refreshes
 signed metadata for already imported packages before expiry. The repository retains immutable versions,
 refuses downgrades/changed bytes, and publishes signed metadata as a complete
 snapshot. See its operations guide for removal of the source, key trust,

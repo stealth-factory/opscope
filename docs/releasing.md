@@ -291,8 +291,8 @@ travels in the event and no new credential or account grant is configured.
 
 The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
 immutable versions, rejects stale updates, signs indexes, tests APT installation,
-and publishes a complete Pages snapshot. A twice-weekly job refreshes metadata
-for existing packages before its 14-day expiry; it never polls for new releases.
+and publishes a complete Pages snapshot. A monthly job refreshes metadata
+for existing packages before its 60-day expiry; it never polls for new releases.
 Enable `APT_PUBLISH_ENABLED` in both repositories only with activation approval.
 Signing credentials and Pages activation are managed in that repository and
 were not configured by these changes. Its operations guide documents the exact
