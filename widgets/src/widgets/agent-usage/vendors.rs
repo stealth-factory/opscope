@@ -136,8 +136,13 @@ fn place_spacexsi(
     grok_window: Option<(f64, f64)>,
 ) -> (Spacexsi, Spacexsi) {
     let same = cursor_unified && same_window(cursor_window, grok_window);
+    // Both unified but a window missing - a transient failure on either
+    // side - is not evidence of two accounts, and splitting one account
+    // into two sections on a dropped request is worse than keeping it one
+    // until the windows can be compared.
+    let unknown = cursor_unified && grok_unified && (cursor_window.is_none() || grok_window.is_none());
     match (cursor_unified, grok_unified || same) {
-        (true, true) if same => (Spacexsi::Shared, Spacexsi::Shared),
+        (true, true) if same || unknown => (Spacexsi::Shared, Spacexsi::Shared),
         (true, true) => (Spacexsi::Separate, Spacexsi::Separate),
         (true, false) => (Spacexsi::Alone, Spacexsi::No),
         (false, true) => (Spacexsi::No, Spacexsi::Alone),
@@ -157,7 +162,14 @@ fn link_spacexsi(s: &mut State) {
     s.grok.spacexsi = grok;
     // The pool's split by product is Grok's to state; on the same account
     // it is the same pool Cursor's section draws.
-    s.cursor.pool_split = if cursor == Spacexsi::Shared { crate::grok::pool_split(&s.grok) } else { Vec::new() };
+    // Only a current reading: Grok's split is drawn under Cursor's `live`
+    // heading, and a share from a request that has since failed, or a log
+    // line, would read as live there when it is not.
+    s.cursor.pool_split = if cursor == Spacexsi::Shared && crate::grok::reading_is_current(&s.grok) {
+        crate::grok::pool_split(&s.grok)
+    } else {
+        Vec::new()
+    };
 }
 
 /// The tab strip with the unified plan folded in, on the same rules as the
@@ -195,6 +207,21 @@ pub fn spacexsi_tabs(tabs: &[String], s: &State) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where a selection lands when the strip changes under it: the same tab
+/// if it is still there, otherwise the tab its vendor folded into or out
+/// of. None when nothing corresponds, and the position stands.
+pub fn retarget_tab(was: &str, tabs: &[String]) -> Option<usize> {
+    let at = |name: &str| tabs.iter().position(|t| t == name);
+    if let Some(i) = at(was) {
+        return Some(i);
+    }
+    match was {
+        "cursor" | "grok" => at(&format!("spacexsi:{was}")).or_else(|| at("spacexsi")),
+        "spacexsi" => at("cursor").or_else(|| at("grok")),
+        other => other.strip_prefix("spacexsi:").and_then(|v| at(v).or_else(|| at("spacexsi"))),
+    }
 }
 
 /// The merged SpaceXSI tab: the shared pool, the credits and the limit
@@ -740,6 +767,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
 }
 
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let listed = |vendor: &str| tabs.iter().any(|t| t == vendor);
     match name {
         SUMMARY_TAB => {
             let shown: Vec<&str> = ORDER
@@ -761,10 +789,12 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
             crate::claude::tab_with_plots(claude_of(s, name).unwrap_or(&fallback), w, h, cfg, p, plots)
         }
         "codex" => crate::codex::tab_with_plots(&s.codex, w, h, cfg, p, plots),
-        "spacexsi" if s.cursor.spacexsi == Spacexsi::Shared && s.grok.spacexsi == Spacexsi::Shared => {
+        // The merged body only when the reader kept both vendors; a vendor
+        // they hid stays hidden, and the tab is then the visible one's.
+        "spacexsi" if s.cursor.spacexsi == Spacexsi::Shared && listed("cursor") && listed("grok") => {
             spacexsi_tab_with_plots(s, w, p, plots)
         }
-        "spacexsi" | "spacexsi:cursor" if s.cursor.spacexsi.unified() => {
+        "spacexsi" | "spacexsi:cursor" if s.cursor.spacexsi.unified() && listed("cursor") => {
             crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots)
         }
         "spacexsi" | "spacexsi:grok" => crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots),
@@ -1607,6 +1637,9 @@ mod tests {
             // Grok's log carries no marker; the window is what joins it.
             ((true, false, w, w), (Shared, Shared)),
             ((true, true, w, other), (Separate, Separate)),
+            // A missing window is unknown, not a second account.
+            ((true, true, w, None), (Shared, Shared)),
+            ((true, true, None, w), (Shared, Shared)),
             ((true, false, w, other), (Alone, No)),
             ((true, false, w, None), (Alone, No)),
             ((false, true, None, w), (No, Alone)),
@@ -1808,6 +1841,49 @@ mod tests {
         // And at the width these panes sit at, the countdown still fits.
         let rows = plain(&summary_for(&s, 57, &palette(), &["cursor", "grok"])).join("\n");
         assert!(rows.lines().any(|l| l.contains("weekly pool") && l.trim_end().ends_with('h')), "{rows}");
+    }
+
+    #[test]
+    fn a_hidden_vendor_stays_hidden_on_the_spacexsi_tab() {
+        // Review: with one vendor excluded, the folded tab still drew the
+        // merged body - and with it the hidden vendor.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let body = |listed: &[&str]| {
+            let tabs: Vec<String> = listed.iter().map(|t| t.to_string()).collect();
+            plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n")
+        };
+        // Grok hidden: Cursor's own tab, no Grok-only product split.
+        let cursor_only = body(&["+", "cursor"]);
+        assert!(cursor_only.contains("SpaceXSI") && cursor_only.contains("EXTRA USAGE"), "{cursor_only}");
+        // Cursor hidden: Grok's own tab, none of Cursor's spend or plan.
+        let grok_only = body(&["+", "grok"]);
+        assert!(grok_only.contains("SpaceXSI"), "{grok_only}");
+        for cursor_part in ["SPEND", "EXTRA USAGE", "ACTIVITY", "METERED"] {
+            assert!(!grok_only.contains(cursor_part), "hidden Cursor's {cursor_part:?}: {grok_only}");
+        }
+    }
+
+    #[test]
+    fn a_selection_follows_its_vendor_when_the_strip_folds() {
+        // Review: folding [+, cursor, grok, copilot] into [+, spacexsi,
+        // copilot] moved a selection on GROK to COPILOT.
+        let strip = |t: &[&str]| t.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let folded = strip(&["+", "spacexsi", "copilot"]);
+        assert_eq!(retarget_tab("grok", &folded), Some(1));
+        assert_eq!(retarget_tab("cursor", &folded), Some(1));
+        assert_eq!(retarget_tab("copilot", &folded), Some(2));
+        let unfolded = strip(&["+", "cursor", "grok", "copilot"]);
+        assert_eq!(retarget_tab("spacexsi", &unfolded), Some(1));
+        let separate = strip(&["+", "spacexsi:cursor", "spacexsi:grok"]);
+        assert_eq!(retarget_tab("grok", &separate), Some(2));
+        assert_eq!(retarget_tab("spacexsi:grok", &unfolded), Some(2));
+        assert_eq!(retarget_tab("devin", &folded), None);
     }
 
     #[test]

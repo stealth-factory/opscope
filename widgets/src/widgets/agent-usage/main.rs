@@ -423,6 +423,11 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
 /// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
 /// only the directory's basename, uppercased like every other tab.
 fn tab_title(name: &str) -> String {
+    // Two unified accounts each get a tab, named for the product that
+    // reported it - the internal `spacexsi:cursor` is for dispatch only.
+    if let Some(product) = name.strip_prefix("spacexsi:") {
+        return format!("SPACEXSI·{}", product.to_uppercase());
+    }
     match name.strip_prefix("claude:") {
         Some(label) => label.to_uppercase(),
         None => name.to_uppercase(),
@@ -2443,6 +2448,10 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let mut active = 0i64;
+    // The strip the selection was made on. When the unified plan folds or
+    // unfolds tabs between frames, the selection is carried by name rather
+    // than position, or a read landing could move it to another agent.
+    let mut last_tabs: Vec<String> = Vec::new();
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
     let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
@@ -2529,6 +2538,13 @@ fn main() {
         // lanes still belong on [+].
         let listed = visible_agents(&snapshot.installed, &cfg);
         let tabs = vendors::spacexsi_tabs(&listed, &snapshot);
+        if !last_tabs.is_empty() && last_tabs != tabs {
+            let was = &last_tabs[step_tab(active, 0, last_tabs.len())];
+            if let Some(i) = vendors::retarget_tab(was, &tabs) {
+                active = i as i64;
+            }
+        }
+        last_tabs = tabs.clone();
         let at = step_tab(active, 0, tabs.len());
         active = at as i64;
         let name = tabs[at].clone();
@@ -4480,6 +4496,10 @@ mod tests {
         assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
         assert_eq!(tab_title("claude"), "CLAUDE");
         assert_eq!(tab_title("claude:bbi"), "BBI");
+        // Two unified accounts' tabs read as SpaceXSI per product, not as
+        // their internal ids.
+        assert_eq!(tab_title("spacexsi"), "SPACEXSI");
+        assert_eq!(tab_title("spacexsi:cursor"), "SPACEXSI·CURSOR");
         // The default profile's group keeps the plain heading rather than
         // stuttering `claude - CLAUDE`.
         let headings: Vec<String> = cfg

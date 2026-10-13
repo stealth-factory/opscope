@@ -782,9 +782,14 @@ fn spacexsi_quota_with_plots(
     let label_w = report_label_w();
     // The bar takes whatever the row has left once the label, the
     // percentage and the pace are placed, so it runs to the pane's edge.
+    // At the narrowest the bar shrinks to a few cells rather than push the
+    // percentage off the row; the pace stands down whole before that.
     let fill_w = |label_w: usize, pct: &str, pace: &str| {
         let fixed = 2 + label_w + 1 + pct.chars().count() + pace.chars().count();
-        w.saturating_sub(1).saturating_sub(fixed).max(8)
+        w.saturating_sub(1).saturating_sub(fixed).max(1)
+    };
+    let fits_pace = |label_w: usize, pct: &str, pace: &str| {
+        2 + label_w + 1 + 3 + pct.chars().count() + pace.chars().count() <= w.saturating_sub(1)
     };
     match pool_pct(live) {
         // Grok's split is there: the pool bar in one segment per product,
@@ -792,6 +797,7 @@ fn spacexsi_quota_with_plots(
         Some(pct) if !d.pool_split.is_empty() => {
             let (pace_colour, pace_txt) =
                 pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let pace_txt = if fits_pace(label_w, &pct_text(pct), &pace_txt) { pace_txt } else { String::new() };
             let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
             // One colour per filled cell, each product's run as long as its
             // share of the bar; the track and the pace marker are the meter's
@@ -849,6 +855,7 @@ fn spacexsi_quota_with_plots(
         Some(pct) => {
             let (pace_colour, pace_txt) =
                 pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let pace_txt = if fits_pace(label_w, &pct_text(pct), &pace_txt) { pace_txt } else { String::new() };
             let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
             let mut line: Vec<(String, String)> =
                 vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
@@ -910,7 +917,12 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
     // the rule that refills them - sits under it, indented to the bar.
     let indent = " ".repeat(label_w + 3);
     let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> String {
-        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), indent.clone())];
+        // The figures are the reading, so they keep the row: where the
+        // bar's column leaves too little room for them, they move left
+        // to a short indent rather than be cut.
+        let need: usize = parts.iter().map(|(_, t)| t.chars().count()).sum();
+        let lead = if indent.chars().count() + need <= w.saturating_sub(1) { indent.clone() } else { "    ".to_string() };
+        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lead)];
         line.extend(parts);
         // The tails are the parts a narrow pane can do without, and each
         // goes whole or not at all.
@@ -3591,6 +3603,23 @@ mod tests {
         own.ok = true;
         own.hashes = 46_404;
         assert!(cursor_tab(&own, 120, &palette()).join("\n").contains("AI-WRITTEN CODE"));
+    }
+
+    #[test]
+    fn narrow_panes_keep_whole_figures_and_the_pool_percentage() {
+        // Review: money in the report was clipped (`$0.00 of $1`) and the
+        // pool's percentage pushed off the row on narrow panes.
+        let d = unified_data(true);
+        for w in [26usize, 30, 40, 50] {
+            let text = report(&d, w);
+            let pool = text.lines().find(|l| l.trim_start().starts_with("weekly pool")).unwrap();
+            assert!(pool.contains("5.1%"), "the pool's percentage was cut at {w}: {pool:?}");
+            assert!(text.contains("$0.00 of $100.00"), "the limit was cut at {w}: {text}");
+            assert!(text.contains("$20.00 left"), "the balance was cut at {w}: {text}");
+            for row in text.lines() {
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
     }
 
     #[test]

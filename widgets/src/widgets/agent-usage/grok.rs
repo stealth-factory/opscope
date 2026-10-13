@@ -214,7 +214,13 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
         // Unified-billing accounts omit `creditUsagePercent` entirely, so
         // the paid-allowance keys have to count on their own or a valid
         // on-demand lane never leaves the log.
-        if !line.contains("creditUsagePercent") && !line.contains("onDemandCap") {
+        // Unified-plan lines can carry neither - nought usage is omitted,
+        // and the plan has no x.ai cap - so its own keys admit a line too.
+        if !line.contains("creditUsagePercent")
+            && !line.contains("onDemandCap")
+            && !line.contains("prepaidBalance")
+            && !line.contains("isUnifiedBillingUser")
+        {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -907,6 +913,13 @@ fn unified_markers(cfg: &serde_json::Value) -> bool {
         || cfg["productUsage"]
             .as_array()
             .is_some_and(|list| list.iter().any(|e| text(e, "product") == "GrokBot"))
+}
+
+/// Whether the reading on hand is the server's, and recent: asked just now
+/// rather than read back from the log, and not older than the window that
+/// judges a reading current.
+pub fn reading_is_current(d: &Data) -> bool {
+    d.quota_live && d.quota.as_ref().is_some_and(|q| !reading_is_old(q.taken))
 }
 
 /// Whether this reading says the account is on the unified plan.
@@ -2717,6 +2730,34 @@ mod tests {
         d.spacexsi = Spacexsi::No;
         let own = tab(&d, 120, 24, &Config::default(), &palette()).join("\n");
         assert!(own.contains("TOTALS") && own.contains("TOKENS / DAY"), "{own}");
+    }
+
+    #[test]
+    fn a_just_reset_unified_log_line_still_reaches_the_reader() {
+        // Review: nought usage omits creditUsagePercent and the unified plan
+        // has no onDemandCap, so the line was skipped before it was parsed.
+        let line = concat!(
+            r#"{"ts":"2026-10-13T02:40:00.000Z","ctx":{"config":{"#,
+            r#""currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-13T02:39:23.429+00:00","end":"2026-10-20T02:39:23.429+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"prepaidBalance":{"val":2000}}}}"#
+        );
+        let q = newest_quota([line].into_iter()).expect("the line was skipped");
+        assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
+        assert_eq!(q.prepaid, Some(20.0));
+    }
+
+    #[test]
+    fn only_a_live_recent_reading_is_current() {
+        // Review: a split from a request that has since failed was drawn
+        // under Cursor's `live` heading.
+        let d = unified_grok(Spacexsi::Shared);
+        assert!(reading_is_current(&d));
+        let log = Data { quota_live: false, ..unified_grok(Spacexsi::Shared) };
+        assert!(!reading_is_current(&log), "a log reading");
+        let mut old = unified_grok(Spacexsi::Shared);
+        old.quota.as_mut().unwrap().taken = Some(now() - GROK_FRESH_FOR - 60.0);
+        assert!(!reading_is_current(&old), "an old reading");
     }
 
     #[test]
