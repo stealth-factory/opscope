@@ -34,7 +34,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-/// Five rows per digit, as clocks.py draws them.
+/// Five rows per digit.
 const BIG: &[(char, [&str; 5])] = &[
     ('0', ["███", "█ █", "█ █", "█ █", "███"]),
     ('1', ["  █", "  █", "  █", "  █", "  █"]),
@@ -576,9 +576,8 @@ struct Pomodoro {
     /// same file - under "hints" - so the panel comes back looking how it
     /// was left.
     hints: bool,
-    /// pomodoro_notify: announce a phase change to the terminal and to
-    /// Herdr. clocks.py reads this and the port did not, so setting it did
-    /// nothing here.
+    /// pomodoro_notify: announce a phase change to the terminal and, where
+    /// one is listening, to Herdr.
     notify: bool,
     /// The state file's `seq` as this instance last saw it.
     ///
@@ -596,11 +595,12 @@ struct Pomodoro {
     swept_seq: Option<u64>,
 }
 
-/// Where the pomodoro's state lives, shared with clocks.py.
+/// Where the pomodoro's state lives.
 ///
-/// The same path and the same keys, so a session started under one
-/// implementation is picked up by the other rather than each keeping a
-/// private tally of the same afternoon.
+/// One path and one set of keys, so another pane picks up the tally
+/// already written rather than keeping a private count of the same
+/// afternoon. The keys are the ones an existing file uses, including a
+/// file written before this widget.
 fn state_file() -> String {
     let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
         format!(
@@ -639,10 +639,10 @@ impl Pomodoro {
         let mut it = Pomodoro {
             phase: Phase::Focus,
             running: false,
-            // Off until [p], which is what clocks.py does and what the doc
-            // promises: pomodoro_enabled is its visibility flag and it
-            // defaults to false. Hardcoding this true put an optional
-            // panel on screen for everyone who had turned it off.
+            // Off until [p], which is what the doc promises:
+            // pomodoro_enabled is the visibility flag and it defaults to
+            // false. Hardcoding this true put an optional panel on screen
+            // for everyone who had turned it off.
             shown: cfg
                 .get("pomodoro_enabled")
                 .and_then(|v| v.as_bool())
@@ -660,16 +660,15 @@ impl Pomodoro {
                 .unwrap_or(true),
             rang_at: -1,
             day: today(),
-            // Visible by default, as clocks.py has it: the hints are how
-            // the keys are found in the first place, and starting hidden
-            // means a reader has to already know the key that reveals them.
+            // Visible by default: the hints are how the keys are found in
+            // the first place, and starting hidden means a reader has to
+            // already know the key that reveals them.
             hints: cfg
                 .get("show_hints")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            // True, as clocks.py has it: a break ending is worth saying
-            // out loud, and a machine with no config should behave the
-            // same under either implementation.
+            // On by default: a break ending is worth saying out loud when
+            // a machine has no config.
             notify: cfg
                 .get("pomodoro_notify")
                 .and_then(|v| v.as_bool())
@@ -770,8 +769,8 @@ impl Pomodoro {
             self.left = v;
         }
         // Resume mid-phase. If it elapsed while the panel was away the
-        // timer simply shows how far over it has run, which is what the
-        // Python does rather than pretending it ended on time. A deadline
+        // timer shows how far over it has run rather than pretending it
+        // ended on time. A deadline
         // already passed is therefore loaded as passed, and the first tick
         // alerts on it - which is what makes the next instance to start the
         // one that toasts when every instance was killed.
@@ -1229,7 +1228,7 @@ fn main() {
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
         let bar_w = w.saturating_sub(3).min(90);
 
-        // The pomodoro leads the section, as it does in the Python.
+        // The pomodoro leads the countdown section.
         let stamp = seconds();
         // Before anything reads the tally: a panel left running over
         // midnight must zero rather than keep adding to yesterday.
@@ -1479,7 +1478,8 @@ fn phase_of(there: &chrono::DateTime<Tz>, p: &Palette) -> (String, &'static str)
     (p.eve.clone(), "☀")
 }
 
-/// The configured cities, or the four the Python ships with.
+/// The configured cities, or San Francisco, London, Singapore and Tokyo
+/// when the key is absent.
 ///
 /// A zone the database does not know is dropped rather than defaulted to
 /// UTC: a clock quietly showing the wrong city is worse than one absent.
@@ -1629,8 +1629,8 @@ mod tests {
 
     /// Take the lock and point the state file at an empty directory.
     ///
-    /// The real file holds a running pomodoro that clocks.py shares, so a
-    /// careless test zeroes an actual afternoon.
+    /// The real file holds a running pomodoro, so a careless test zeroes
+    /// an actual afternoon.
     fn sandbox(name: &str) -> std::sync::MutexGuard<'static, ()> {
         let held = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = format!("/tmp/toys-clocks-test-{}-{}", std::process::id(), name);
@@ -1661,9 +1661,8 @@ mod tests {
     #[test]
     fn the_tally_survives_a_restart_and_the_file_is_the_pythons() {
         // The help text promises the pomodoro persists across restarts,
-        // and the port wrote nothing at all. The file is clocks.py's, key
-        // for key, so a session started under one is picked up by the
-        // other rather than each keeping a private tally.
+        // and an early port wrote nothing at all. The keys stay, so a
+        // second pane picks up the tally the first one wrote.
         let _held = sandbox("save");
         let mut p = Pomodoro::new(&serde_json::json!({}));
         p.done = 3;
@@ -1676,7 +1675,7 @@ mod tests {
             "day", "phase", "completed", "focus", "enabled", "running",
             "was_running", "hints", "left", "deadline",
         ] {
-            assert!(d.get(key).is_some(), "clocks.py reads {} and we omit it", key);
+            assert!(d.get(key).is_some(), "state file omits {}", key);
         }
         assert_eq!(d["completed"], 3);
         assert_eq!(d["phase"], "short");
@@ -1719,8 +1718,8 @@ mod tests {
         // The config numbers are starting values, not fixed ones: ± moves
         // whichever block is running and leaves the other two alone, so a
         // 25/5/15 day can become 30/5/15 without touching the breaks.
-        // adjust() saves, and the real state file is a running pomodoro
-        // that clocks.py shares - send the writes somewhere disposable.
+        // adjust() saves, and the real state file is a running pomodoro.
+        // Send the writes somewhere disposable.
         let _held = sandbox("adjust");
         let mut pomo = Pomodoro {
             phase: Phase::Focus,
@@ -1927,8 +1926,8 @@ mod tests {
 
     #[test]
     fn the_clock_is_two_colours_down_its_height() {
-        // The Python paints the top three rows bright and the base dark;
-        // one flat colour loses the weight of the digits entirely.
+        // The top three rows are bright and the base is dark; one flat
+        // colour loses the weight of the digits entirely.
         let p = palette();
         assert_ne!(p.big_top, p.big_base);
         assert_eq!(p.big_top, tc::rgb(120, 255, 200));

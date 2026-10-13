@@ -260,6 +260,43 @@ pub struct Lane {
     pub apart: bool,
 }
 
+/// The heading the unified Cursor and Grok plan is drawn under.
+///
+/// One plan sold through two products: a weekly included pool both of them
+/// draw on, one prepaid credit balance, and one monthly limit on additional
+/// usage. A fixed name rather than one read from either API, because each
+/// vendor names the plan after itself - `cursorPlanName`, `grokPlanLabel` -
+/// and a heading taken from whichever answered first would rename the
+/// section depending on which tab was refreshed last.
+pub const SPACEXSI: &str = "SpaceXSI";
+
+/// Where an agent stands relative to the unified plan.
+///
+/// Decided once per poll in `vendors::link_spacexsi`, because it needs both
+/// vendors' readings and each vendor's reader sees only its own. An agent
+/// still on its own plan stays `No` and draws exactly what it always drew.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Spacexsi {
+    /// Not on the unified plan, or not known to be.
+    #[default]
+    No,
+    /// On the unified plan, and the other vendor is not on the same account
+    /// here - absent, still on its own plan, or not signed in.
+    Alone,
+    /// On the unified plan with the other vendor on the same account: one
+    /// pool, one balance, one limit, drawn once.
+    Shared,
+    /// Both vendors are unified but on different accounts, so each keeps a
+    /// section of its own and nothing is merged.
+    Separate,
+}
+
+impl Spacexsi {
+    pub fn unified(self) -> bool {
+        self != Spacexsi::No
+    }
+}
+
 /// How much of a lane label the cap after it may take.
 ///
 /// The summary's label column is shared by every agent and capped at 16

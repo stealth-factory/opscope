@@ -374,9 +374,9 @@ const LIST_RATES: tc::Catalogue = &[
 /// heat() runs green to amber to red, which reads as a change of *kind*
 /// rather than of amount - wrong for "more of the same thing".
 const HEAT_STEPS: [(u8, u8, u8); 4] = [(74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84)];
-// Carried with Claude's because they are the Python's own four-step ramps
-// and the vendors that use them are the next thing to be ported. Kept here
-// rather than reinvented later, where the numbers would drift.
+// Codex and Grok draw these four-step ramps. The numbers stay here so a
+// vendor file does not carry a second copy. Cursor has no day calendar,
+// so its copy is unused.
 #[allow(dead_code)]
 const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
@@ -406,6 +406,11 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "notion" => (232, 226, 212),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
+        // The unified Cursor and Grok plan. The brand is monochrome, and
+        // its black is unreadable on a dark pane (1.0 to 1.75 against the
+        // backgrounds here), so this is its white: neutral, with none of
+        // Codex's blue in it. 10.14 on the selected-row tint, 17.78 on black.
+        "spacexsi" => (236, 236, 236),
         _ => return None,
     })
 }
@@ -2244,7 +2249,13 @@ fn tab_bar(
     };
     for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
-        let have = installed.get(name).is_some_and(|x| x.present);
+        let present = |n: &str| installed.get(n).is_some_and(|x| x.present);
+        // A SpaceXSI tab is detected when a product behind it is.
+        let have = match name.strip_prefix("spacexsi") {
+            Some("") => present("cursor") || present("grok"),
+            Some(rest) => present(rest.trim_start_matches(':')),
+            None => present(name),
+        };
         // Both forms are the name plus two columns - `[NAME]` and ` NAME `
         // - which is what lets the brackets mark the open tab without the
         // strip shifting under them.
@@ -2507,7 +2518,12 @@ fn main() {
             Err(_) => return,
         };
         let mut rows = vec![tc::title("agent usage", w, &p.agent)];
-        let tabs = visible_agents(&snapshot.installed, &cfg);
+        // What discovery and config chose, and the strip drawn from it with
+        // the unified plan folded in. The summary and the hidden count read
+        // the first: a Cursor folded into SPACEXSI is not hidden, and its
+        // lanes still belong on [+].
+        let listed = visible_agents(&snapshot.installed, &cfg);
+        let tabs = vendors::spacexsi_tabs(&listed, &snapshot);
         let at = step_tab(active, 0, tabs.len());
         active = at as i64;
         let name = tabs[at].clone();
@@ -2515,7 +2531,7 @@ fn main() {
             .iter()
             .filter(|n| {
                 snapshot.installed.get(**n).is_some_and(|x| x.present)
-                    && !tabs.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
+                    && !listed.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
             })
             .count();
 
@@ -2553,7 +2569,7 @@ fn main() {
             // quits.
             tc::guard_rows(&name, w, || {
                 let mut pending = Vec::new();
-                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &tabs, &mut pending);
+                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &listed, &mut pending);
                 plots = pending;
                 body
             })

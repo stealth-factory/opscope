@@ -14,20 +14,19 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! check.py, for the Rust side.
+//! The checks the compiler cannot make.
 //!
-//! Every check in check.py exists because something shipped broken, and
-//! each is a fault that looks on screen exactly like "there is no data".
-//! check.py reads only `*.py`, so none of them has ever run against these
-//! fourteen binaries - and two of them fail today.
+//! Each one exists because something shipped broken, and each is a fault
+//! that looks on screen exactly like "there is no data". They run on every
+//! `cargo test` rather than as a binary of their own, for two reasons: a
+//! checker would otherwise wait to be remembered, and every widget folder
+//! has to be on `opscope`'s menu, so a checker binary would have to be
+//! listed as a widget it is not.
 //!
-//! These are tests rather than a fifteenth binary for two reasons: they
-//! then run on every `cargo test` instead of waiting to be remembered, and
-//! every widget folder has to be on `opscope`'s menu, so a checker binary
-//! would have to be listed as a widget it is not.
-//!
-//! One of check.py's five does not need porting and is recorded here rather
-//! than silently dropped:
+//! `check.py` did this for the Python and went with it. It read only
+//! `*.py`. When these checks were first pointed at the Rust there were
+//! fourteen binaries, and two of the checks failed. One of its five was
+//! not carried over, and is recorded here rather than silently dropped:
 //!
 //! - **unbound names**: a compile error in Rust. The fault it was written
 //!   for - deployments.py losing an import and its poll thread dying for a
@@ -1292,11 +1291,11 @@ fn every_footer_hint_is_in_the_widgets_doc() {
 
 #[test]
 fn every_key_a_widget_reads_is_in_the_example() {
-    // The direction check.py does NOT check, in either language. All
-    // eleven pomodoro_* keys were read by clocks.py and absent from
-    // config.example.json since before the port, so breaks were
-    // configurable the whole time and undiscoverable. CLAUDE.md asks for
-    // new keys to be added in the same commit; nothing was watching.
+    // The direction check.py did not check. All eleven pomodoro_* keys
+    // were read by clocks.py and absent from config.example.json since
+    // before the port, so breaks were configurable the whole time and
+    // undiscoverable. CLAUDE.md asks for new keys to be added in the same
+    // commit; nothing was watching until this test.
     let example = example();
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
@@ -1602,9 +1601,8 @@ fn a_message_that_names_a_config_key_names_the_settings_key() {
 
 #[test]
 fn every_widget_has_a_readme_row() {
-    // check.py used to hold this, and the launcher's doc still says it does.
-    // A rename that updates the source stem and forgets the table is how a
-    // widget ships without a way to find it.
+    // check.py used to hold this. A rename that updates the source stem
+    // and forgets the table is how a widget ships without a way to find it.
     let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
     let mut wrong = Vec::new();
     for name in widgets().keys() {

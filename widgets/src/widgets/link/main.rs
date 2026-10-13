@@ -956,8 +956,6 @@ fn table(
     p: &Palette,
     poll_stale: bool,
 ) -> Vec<String> {
-    // The Python's header, column for column: the two have to sit side by
-    // side in a wall and read as the same widget.
     // 82 rather than 74, which was two short of the row it turned on: the
     // wide row measures 81 and `seg` clips to `w - 1`, so at 74 the IDLE
     // column arrived already truncated. Widening the row by the TO column
@@ -1578,8 +1576,7 @@ mod tests {
     #[test]
     fn rates_read_as_a_person_would_say_them() {
         assert_eq!(rate(Some(6_287_464.0)), "6.3Mbps");
-        // Lower-case k, as link.py writes it: the two sit side by side on a
-        // wall and a capital there reads as a different widget.
+        // Lower-case k: the column writes `kbps`, not `Kbps`.
         assert_eq!(rate(Some(1_500.0)), "1.5kbps");
         assert_eq!(rate(Some(45_000_000_000.0)), "45.0Gbps");
         assert_eq!(rate(None), "--");

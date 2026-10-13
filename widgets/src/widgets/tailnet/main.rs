@@ -2142,7 +2142,7 @@ mod tests {
     fn a_byte_count_is_always_five_cells() {
         // Up to petabytes, which is well past anything a WireGuard counter
         // reaches before tailscaled restarts. Beyond that the number itself
-        // is wider than the column, and so is the Python's.
+        // is wider than the column.
         for n in [0u64, 9, 10, 1023, 1024, 15_000, 3_000_000_000, 900_000_000_000_000] {
             assert_eq!(human(n).chars().count(), 5, "{}", n);
         }

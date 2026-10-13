@@ -426,6 +426,117 @@ shape not recognised says `not reported` rather than being drawn as one of the
 others. Asking about the cap is best-effort: a refusal there leaves every
 other line exactly as it was.
 
+When no limit is set, Cursor's hard-limit call answers `2147483647` — INT32_MAX,
+its way of saying *no limit*. That is read as the unlimited state and is never
+drawn as a cap of two billion dollars.
+
+### SpaceXSI (the unified Cursor and Grok plan)
+
+Cursor and Grok now sell one plan between them, and an account moved onto it
+reads differently from either product's own plan:
+
+- **One weekly included pool**, shared by Cursor, Grok Bot and the Grok CLI.
+  The usage call's billing cycle becomes that week.
+- **Third-party models bill at API list price** against prepaid credits rather
+  than drawing on the pool, so `other models` would sit at nought for ever and
+  `cursor models` is the same number as the pool.
+- **Prepaid credits** — a balance you top up, with optional auto top-up.
+- **A monthly limit on additional usage**, on the monthly cycle, not the week.
+
+Whichever vendor is on this plan is drawn under one heading, **SpaceXSI**, on
+`[+]` and in the tab strip. On the same account, CURSOR and GROK fold into one
+**SPACEXSI** tab: the pool once, then an extra-usage report, then each
+product's own detail under its own name.
+
+```
+ ── SpaceXSI ── live · weekly · resets in 6d 22h
+  14% of the week gone
+  weekly pool     ███▓▓▓░░░░░░░░░░░░░░░░░░░░░░░   10%  +9%
+                  ■ Cursor    ~5%
+                  ■ Grok Bot  ~5%
+
+ ── EXTRA USAGE ── month 13 Oct → 12 Nov
+  prepaid credits ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+                  $20.00 left of $20.00 paid · $0.00 used
+                  auto top-up $10.00 when below $2.00 · payment method saved
+                  top-ups 13 Oct $20.00 manual
+  usage limit     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+                  $0.00 of $100.00 this month · $100.00 left · resets 12 Nov
+
+ ▍CURSOR
+  SPEND / DAY · SPEND · AI-WRITTEN CODE · METERED · SUBSCRIPTION
+
+ ▍GROK
+  TOTALS · TOKENS / DAY
+```
+
+The pool bar is drawn in one segment per product, each product on a line of
+its own beneath it in its segment's colour. The split is Grok's: its credits
+endpoint states each product's share of the week in whole percents, leaves
+Cursor's share unnamed, and omits any product that rounds to nought — so the
+shares are marked `~`, and a sliver of the pool the whole percents do not
+account for is drawn dim rather than handed to a product. Matched against
+x.ai's own usage dashboard on 2026-10-13: Cursor and Grok Bot at about 134M
+and 138M tokens came back as 5% and 5% of a 10% week, and Grok Chat and Grok
+Build, under 1% of it, did not come back at all. Token counts per product are
+on that dashboard only, behind a browser sign-in, so they are not shown here.
+
+The report says everything the prepaid and limit calls state that is about
+usage: what is left of what was paid and how much has been drawn, this month
+against its limit on the monthly clock, the refill rule and whether it has a
+payment method to charge, and the last five top-ups — a failed one in the
+warning colour, since that is the rule firing and the money not arriving. The
+same calls also carry cursor.com's minimum, maximum and recommended limits;
+they are settings-page hints rather than usage, and on the measured account
+the limit sat below the stated minimum, so they are left out.
+
+On `[+]` the SpaceXSI group has up to three bars, named the same way on the tab,
+as **percentages only** — the dollars and the refill rule are the tab's:
+
+- `weekly pool` — the shared included allowance, on its weekly clock.
+- `usage limit` — this month's additional usage against what cursor.com calls
+  the *Monthly additional usage limit*, on the monthly clock.
+- `prepaid credits` — what has been drawn from the prepaid balance against what
+  was paid in; X calls this balance *Additional usage credits*. No countdown
+  and no pace, since a balance has no clock.
+
+A bar shows only when its feature is in use: no `prepaid credits` for an
+account that has paid nothing in, and no `usage limit` without a limit. With
+no limit but money spent this month, the tab still states the spend, with no
+bar. A prepaid call that failed says `not reported` on the tab, because a
+failure is not the same as an unused balance.
+
+Each vendor is read on its own terms, every refresh:
+
+| Cursor | Grok | what is drawn |
+|---|---|---|
+| unified | unified, same account | one SPACEXSI tab and one SpaceXSI group on `[+]`: the pool, the credits and the limit once |
+| unified | unified, a different account | two sections and two tabs, `SpaceXSI · via Cursor` and `SpaceXSI · via Grok`, nothing merged |
+| unified | its own plan, or absent | Cursor's tab and lanes under SpaceXSI; Grok keeps its own tab, heading and lanes |
+| its own plan | unified | Grok's tab and lanes under SpaceXSI; Cursor keeps its own tab, heading and three lanes |
+| its own plan | its own plan | exactly what each drew before — no SpaceXSI heading |
+
+**How each one is told.** Cursor's plan says so outright — `isMerged`, or an
+`includedUsagePeriod` an account's own plan does not carry — and the credits
+and monthly cycle are asked for only then. Grok's credits answer carries a
+top-up method and a `GrokBot` product that only the unified plan sends; its
+`isUnifiedBillingUser` flag does not count, because the log shows it set on
+readings from before the plans merged. Grok's log never carries a marker, so
+**the same account** is recognised by the weekly window: Cursor's and Grok's
+matched to the millisecond on the measured account, and two separate accounts
+sharing a window that precisely is not a coincidence worth planning for.
+
+Shared, Cursor's reading of the pool is the one drawn, because its usage call
+is asked every two minutes where Grok's may be a log line; Grok's half of the
+tab keeps what only Grok says — its sessions here, and how much of the pool
+Grok Bot spent. Grok's `prepaidBalance` arrives in cents — the
+measured `2000` is the $20 Cursor states as `availableCents: "2000"` — and is
+read that way.
+
+**Still open:** Cursor's monthly cycle call and its plan's own monthly end
+disagreed by a day on the measured account. The monthly cycle call is the one
+used, and the plan's end is the fallback.
+
 Cursor supplies a **spend** section too: per-model input, output and cache
 tokens with Cursor's own money figure — not an estimate — over the last 30
 days. It is what the plan percentages are made of, and answers which model
