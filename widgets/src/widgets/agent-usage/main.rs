@@ -382,6 +382,8 @@ const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
 #[allow(dead_code)]
 const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
+/// SpaceXSI's activity calendar, in the plan's greyscale.
+const SPACEXSI_STEPS: [(u8, u8, u8); 4] = [(62, 62, 62), (110, 110, 110), (165, 165, 165), (225, 225, 225)];
 #[allow(dead_code)]
 const CURSOR_STEPS: [(u8, u8, u8); 4] =
     [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
@@ -406,6 +408,14 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "notion" => (232, 226, 212),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
+        // The unified Cursor and Grok plan, in greyscale: the brand is
+        // monochrome, and its black is unreadable on a dark pane (1.0 to
+        // 1.75 against the backgrounds here). A mid grey rather than white,
+        // because bars ramp this hue toward white - from white there is
+        // nothing left to ramp and the bar draws flat. From here it runs
+        // about 174 to 217. Neutral, with none of Codex's blue in it; 4.6 on
+        // the selected-row tint and 8.03 on black as text.
+        "spacexsi" => (160, 160, 160),
         _ => return None,
     })
 }
@@ -413,6 +423,11 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
 /// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
 /// only the directory's basename, uppercased like every other tab.
 fn tab_title(name: &str) -> String {
+    // Two unified accounts each get a tab, named for the product that
+    // reported it - the internal `spacexsi:cursor` is for dispatch only.
+    if let Some(product) = name.strip_prefix("spacexsi:") {
+        return format!("SPACEXSI·{}", product.to_uppercase());
+    }
     match name.strip_prefix("claude:") {
         Some(label) => label.to_uppercase(),
         None => name.to_uppercase(),
@@ -2244,7 +2259,13 @@ fn tab_bar(
     };
     for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
-        let have = installed.get(name).is_some_and(|x| x.present);
+        let present = |n: &str| installed.get(n).is_some_and(|x| x.present);
+        // A SpaceXSI tab is detected when a product behind it is.
+        let have = match name.strip_prefix("spacexsi") {
+            Some("") => present("cursor") || present("grok"),
+            Some(rest) => present(rest.trim_start_matches(':')),
+            None => present(name),
+        };
         // Both forms are the name plus two columns - `[NAME]` and ` NAME `
         // - which is what lets the brackets mark the open tab without the
         // strip shifting under them.
@@ -2427,6 +2448,10 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let mut active = 0i64;
+    // The strip the selection was made on. When the unified plan folds or
+    // unfolds tabs between frames, the selection is carried by name rather
+    // than position, or a read landing could move it to another agent.
+    let mut last_tabs: Vec<String> = Vec::new();
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
     let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
@@ -2507,7 +2532,19 @@ fn main() {
             Err(_) => return,
         };
         let mut rows = vec![tc::title("agent usage", w, &p.agent)];
-        let tabs = visible_agents(&snapshot.installed, &cfg);
+        // What discovery and config chose, and the strip drawn from it with
+        // the unified plan folded in. The summary and the hidden count read
+        // the first: a Cursor folded into SPACEXSI is not hidden, and its
+        // lanes still belong on [+].
+        let listed = visible_agents(&snapshot.installed, &cfg);
+        let tabs = vendors::spacexsi_tabs(&listed, &snapshot);
+        if !last_tabs.is_empty() && last_tabs != tabs {
+            let was = &last_tabs[step_tab(active, 0, last_tabs.len())];
+            if let Some(i) = vendors::retarget_tab(was, &tabs) {
+                active = i as i64;
+            }
+        }
+        last_tabs = tabs.clone();
         let at = step_tab(active, 0, tabs.len());
         active = at as i64;
         let name = tabs[at].clone();
@@ -2515,7 +2552,7 @@ fn main() {
             .iter()
             .filter(|n| {
                 snapshot.installed.get(**n).is_some_and(|x| x.present)
-                    && !tabs.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
+                    && !listed.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
             })
             .count();
 
@@ -2553,7 +2590,7 @@ fn main() {
             // quits.
             tc::guard_rows(&name, w, || {
                 let mut pending = Vec::new();
-                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &tabs, &mut pending);
+                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &listed, &mut pending);
                 plots = pending;
                 body
             })
@@ -4459,6 +4496,10 @@ mod tests {
         assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
         assert_eq!(tab_title("claude"), "CLAUDE");
         assert_eq!(tab_title("claude:bbi"), "BBI");
+        // Two unified accounts' tabs read as SpaceXSI per product, not as
+        // their internal ids.
+        assert_eq!(tab_title("spacexsi"), "SPACEXSI");
+        assert_eq!(tab_title("spacexsi:cursor"), "SPACEXSI·CURSOR");
         // The default profile's group keeps the plain heading rather than
         // stuttering `claude - CLAUDE`.
         let headings: Vec<String> = cfg
