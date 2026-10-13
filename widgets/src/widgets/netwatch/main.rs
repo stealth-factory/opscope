@@ -1685,8 +1685,7 @@ fn main() {
                 i += 1;
             }
             // Refused rather than ignored: a typo that silently does
-            // nothing is worse than one that says so, and the Python has
-            // always said so.
+            // nothing is worse than one that says so.
             other => {
                 eprintln!("unknown option {:?} - try --help", other);
                 std::process::exit(2);

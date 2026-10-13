@@ -566,18 +566,17 @@ const KINDS: &[(&str, &str)] = &[
 /// The two that are runtimes rather than programs, and so have to be the
 /// command being run rather than a word anywhere in its path.
 ///
-/// The Python anchors these - `[/ ]node(\s|$)` and `[/ ]python[0-9.]*(\s|$)`
-/// - and the port flattened both to a plain substring. Every binary that
-/// lives under a directory with `node` or `python` in it then answered to
-/// the wrong name: a standalone tool installed into `node_modules` was
-/// listed as "Node", which is the runtime it is not written in.
+/// A plain substring named every binary under a directory with `node` or
+/// `python` in it: a tool in `node_modules` was listed as "Node", which is
+/// the runtime it is not written in. `runs_command` keeps the old anchor,
+/// the name at the start of a path segment, with a trailing version allowed.
 const RUNTIMES: &[(&str, &str)] = &[("python", "Python"), ("node", "Node")];
 
 /// Whether a command line actually runs `name`, rather than merely passing
 /// through a directory called that.
 ///
-/// A trailing version is part of the name - `python3`, `python3.11` - which
-/// is what the `[0-9.]*` in the Python's pattern is for.
+/// A trailing version is part of the name - `python3`, `python3.11` -
+/// which is what the old `[0-9.]*` pattern was for.
 fn runs_command(cmdline: &str, name: &str) -> bool {
     cmdline.split_whitespace().any(|word| {
         let base = word.rsplit('/').next().unwrap_or(word);
@@ -3389,7 +3388,7 @@ mod tests {
 
     #[test]
     fn a_proxy_target_names_a_whole_port() {
-        // The Python matches `:3000` or `:3000/` and not `:30001`. A plain
+        // `:3000` and `:3000/` match, and `:30001` does not. A plain
         // substring search would report a served port that is not served,
         // and the detail screen would offer a URL that answers nothing.
         assert!(proxies_port("http://127.0.0.1:3000", 3000));

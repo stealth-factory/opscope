@@ -374,9 +374,9 @@ const LIST_RATES: tc::Catalogue = &[
 /// heat() runs green to amber to red, which reads as a change of *kind*
 /// rather than of amount - wrong for "more of the same thing".
 const HEAT_STEPS: [(u8, u8, u8); 4] = [(74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84)];
-// Carried with Claude's because they are the Python's own four-step ramps
-// and the vendors that use them are the next thing to be ported. Kept here
-// rather than reinvented later, where the numbers would drift.
+// Codex and Grok draw these four-step ramps. The numbers stay here so a
+// vendor file does not carry a second copy. Cursor has no day calendar,
+// so its copy is unused.
 #[allow(dead_code)]
 const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
