@@ -77,6 +77,29 @@ const SAND_KEY: &str = "cursor:sand";
 /// The allowance is weekly, so this need not be brisk.
 const SAND_TTL: f64 = 900.0;
 
+/// The weekly included allowance's name, on `[+]` and on the tab alike.
+/// Shared by Cursor, Grok Bot and the Grok CLI, so `included` alone left
+/// out the part a reader most needs: that it is one allowance, by the week.
+pub const POOL_LABEL: &str = "weekly pool";
+
+/// The prepaid balance's bar: what has been drawn from it against what was
+/// paid in. X calls the same balance "Additional usage credits".
+const PREPAID_LABEL: &str = "prepaid credits";
+
+/// This month's additional usage against the monthly limit set on
+/// cursor.com - its "Monthly additional usage limit". The summary adds the
+/// limit's size, since a percentage of an unnamed ceiling is not a number
+/// anyone can act on.
+const LIMIT_LABEL: &str = "usage limit";
+
+/// What GetHardLimit answers when no limit is set: INT32_MAX dollars.
+///
+/// Measured, not guessed. The same account answered `{"hardLimit":
+/// 2147483647}` before a monthly limit was set on cursor.com and
+/// `{"hardLimit": 100}` a minute after it was set to $100. Read as a cap it
+/// drew `$0.00 of $2147483647.00 limit`, which is a sentinel shown as money.
+const NO_LIMIT: f64 = 2_147_483_647.0;
+
 /// The events RPC's own ceiling per request.
 const EVENT_PAGE: usize = 1000;
 /// Enough pages to reach past any sane window.
@@ -105,6 +128,23 @@ pub struct Data {
     /// allowed at all. The second opinion that tells an absent cap from a
     /// forbidden one.
     hard: Option<serde_json::Value>,
+    /// GetUserPrepaidBilling: the prepaid credit balance a unified plan
+    /// bills additional usage against. Asked only on a unified plan - an
+    /// account on its own plan has no balance, and asking would spend a
+    /// request on every refresh to be told so.
+    prepaid: Option<serde_json::Value>,
+    /// GetMonthlyBillingCycle: the monthly cycle the additional-usage limit
+    /// resets on. Asked only on a unified plan, where the usage call's own
+    /// cycle has stopped being monthly and become the weekly included pool.
+    month: Option<serde_json::Value>,
+    /// Where this account stands relative to the unified plan, once both
+    /// vendors have been read. Set by `vendors::link_spacexsi`.
+    pub spacexsi: Spacexsi,
+    /// The pool's split by product - display name and whole percent of the
+    /// week - from Grok, when Grok is on the same account. Cursor's own calls
+    /// split it only into auto and API, and API is nought on this plan.
+    /// Set with `spacexsi`.
+    pub pool_split: Vec<(String, f64)>,
     /// The per-day summary folded out of GetFilteredUsageEvents.
     events: Option<serde_json::Value>,
     /// GetAggregatedUsageEvents: per-model cents over the window.
@@ -352,13 +392,16 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     if hard["noUsageBasedAllowed"].as_bool() == Some(true) {
         return ExtraState::Disabled { used: used.unwrap_or(0.0) };
     }
+    // INT32_MAX is how GetHardLimit says no limit is set, so it is the
+    // answer to "is there a cap" rather than the size of one.
+    let no_limit = loose(&hard["hardLimit"]).is_some_and(|d| d >= NO_LIMIT);
     // Cents in the usage block, dollars in the hard limit. The two agreed
     // at $50 on the measured account, and confusing them is a hundredfold
     // error in a figure about money.
     let capped = loose(&blk["individualLimit"]).filter(|l| *l > 0.0).or_else(|| {
         loose(&hard["hardLimit"])
             .or_else(|| loose(&hard["hardLimitPerUser"]))
-            .filter(|d| *d > 0.0)
+            .filter(|d| *d > 0.0 && *d < NO_LIMIT)
             .map(|d| d * 100.0)
     });
     if let Some(limit) = capped {
@@ -369,6 +412,11 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
             limit,
             shared,
         };
+    }
+    // Cursor said outright that no limit is set. No spend beside it is
+    // proto3 omitting a zero, the same reading a stated cap gets above.
+    if no_limit {
+        return ExtraState::Unlimited { used: used.unwrap_or(0.0) };
     }
     match used {
         // A spend, no cap from either call, and nothing saying extra usage
@@ -455,7 +503,8 @@ fn spend_rows(live: &serde_json::Value, hard: Option<&serde_json::Value>, w: usi
             w - 1,
         ));
     }
-    rows.push(extra_row(&state, live, label_w, amt_w, w, p));
+    let ends = loose(&live["billingCycleEnd"]);
+    rows.push(extra_row(&state, "extra usage", ends, label_w, amt_w, w, p));
     rows
 }
 
@@ -465,15 +514,21 @@ fn spend_rows(live: &serde_json::Value, hard: Option<&serde_json::Value>, w: usi
 /// allowed. An absent limit is not zero and a forbidden limit is not an
 /// absent one, so the four read differently on purpose - `$0.00 of $0.00`
 /// for any of them would be a cap of nothing rather than no cap.
+///
+/// `ends` is when the limit resets, in epoch milliseconds. On an account's
+/// own plan that is the usage call's billing cycle; on the unified plan the
+/// usage call's cycle is the weekly included pool, and the limit resets
+/// monthly, so the caller has to say which clock it is on.
 fn extra_row(
     state: &ExtraState,
-    live: &serde_json::Value,
+    label: &str,
+    ends: Option<f64>,
     label_w: usize,
     amt_w: usize,
     w: usize,
     p: &Palette,
 ) -> String {
-    let lbl = format!("  {} ", tc::pad("extra usage", label_w));
+    let lbl = format!("  {} ", tc::pad(label, label_w));
     let amt = |cents: f64| format!("{:>1$}", money(cents), amt_w);
     let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lbl)];
     // What the row can do without on a narrow pane, in the order it gives
@@ -527,7 +582,7 @@ fn extra_row(
     // The cycle end belongs to every state that carries a figure, and is
     // the first thing dropped when the pane is too narrow for all of it -
     // a date is worth less than the money it is a date for.
-    let when = loose(&live["billingCycleEnd"]).map(day_month).unwrap_or_default();
+    let when = ends.map(day_month).unwrap_or_default();
     if !when.is_empty() && !matches!(state, ExtraState::NotReported { .. }) {
         tails.push(format!(" · resets {}", when));
     }
@@ -541,6 +596,565 @@ fn extra_row(
         }
     }
     let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+    tc::seg(&refs, w - 1)
+}
+
+/// Whether GetPlanInfo says this account is on the unified plan.
+///
+/// Read from the plan rather than from the usage call, because the usage
+/// call's shape barely moved: the same three percentages and the same
+/// cycle fields, with the cycle silently shortened to a week. GetPlanInfo
+/// states it twice - `isMerged` beside the plan, and an
+/// `includedUsagePeriod` an account on its own plan does not carry - and
+/// either is enough, so one being dropped later does not put a unified
+/// account back on the monthly drawing.
+fn is_unified(plan: Option<&serde_json::Value>) -> bool {
+    let Some(info) = plan else {
+        return false;
+    };
+    info["isMerged"].as_bool() == Some(true)
+        || !text(&info["planInfo"], "includedUsagePeriod").is_empty()
+}
+
+/// Whether this account is on the unified Cursor and Grok plan.
+pub fn unified(d: &Data) -> bool {
+    is_unified(d.plan.as_ref())
+}
+
+/// The weekly included window, as (start, end) in epoch milliseconds.
+///
+/// The fingerprint `vendors::link_spacexsi` matches against Grok's window
+/// to tell one account seen from both products from two accounts that
+/// happen to share a machine. Milliseconds, because that is the precision
+/// both vendors state it to, and the precision is what makes the match
+/// worth trusting.
+pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
+    let live = d.live.as_ref()?;
+    match (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
+        (Some(s), Some(e)) if e > s => Some((s, e)),
+        _ => None,
+    }
+}
+
+/// The monthly cycle additional usage resets on, as (start, end) epoch
+/// milliseconds, each where stated.
+///
+/// GetMonthlyBillingCycle first, because it is the call that exists to say
+/// this. GetPlanInfo's own `billingCycleEnd` is the fallback, and the two
+/// disagreed by a day on the measured account - 12 Nov against 13 Nov - so
+/// the fallback carries no start, and with no start there is no window to
+/// pace a lane against.
+fn month_of(d: &Data) -> (Option<f64>, Option<f64>) {
+    if let Some(m) = d.month.as_ref() {
+        let (s, e) = (loose(&m["startDateEpochMillis"]), loose(&m["endDateEpochMillis"]));
+        if e.is_some() {
+            return (s, e);
+        }
+    }
+    let plan_end = d.plan.as_ref().and_then(|v| loose(&v["planInfo"]["billingCycleEnd"]));
+    (None, plan_end)
+}
+
+/// Monthly additional usage against its limit, on the unified plan.
+///
+/// The limit is read exactly as on an account's own plan - the spend-limit
+/// block and GetHardLimit did not change shape - but the spend comes from
+/// the prepaid balance's `spentThisMonthCents`, which is the figure
+/// cursor.com prints beside the limit. The spend-limit block omits its
+/// spend at zero, so it agrees today, and the prepaid call is the one that
+/// states it outright.
+fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
+    let mut state = extra_state(live, d.hard.as_ref());
+    let spent = d.prepaid.as_ref().and_then(|v| loose(&v["spentThisMonthCents"]));
+    if let Some(spent) = spent {
+        match &mut state {
+            ExtraState::Fixed { used, .. }
+            | ExtraState::Unlimited { used }
+            | ExtraState::Disabled { used } => *used = spent,
+            ExtraState::NotReported { .. } => {}
+        }
+    }
+    state
+}
+
+/// The prepaid balance as a lane: spent against paid, labelled with what
+/// was paid. Nothing where the account is not on prepaid billing or has
+/// paid nothing in - a percentage of nought is not a reading.
+fn credits_lane(d: &Data) -> Option<Lane> {
+    let prepaid = d.prepaid.as_ref()?;
+    let paid = loose(&prepaid["fundedCents"]).filter(|v| *v > 0.0)?;
+    // On a prepaid account an absent balance is proto3 omitting a zero.
+    let left = loose(&prepaid["availableCents"]).unwrap_or(0.0);
+    Some(Lane {
+        label: PREPAID_LABEL.into(),
+        pct: (100.0 * (paid - left) / paid).max(0.0),
+        window_secs: None,
+        reset: None,
+        stale: false,
+        projected: false,
+        apart: false,
+    })
+}
+
+
+/// Each product's colour in the pool bar and on its line under it.
+///
+/// Cursor and Grok Bot take their own agents' hues, so the split reads as
+/// the same two products the rest of the widget colours that way; the
+/// others are the existing palette's spare hues, each above AA on the
+/// background and on the selected-row tint.
+fn product_hue(name: &str) -> (u8, u8, u8) {
+    match name {
+        "Cursor" => agent_hue("cursor").unwrap(),
+        "Grok Bot" => agent_hue("grok").unwrap(),
+        "Grok Build" => (186, 166, 255),
+        "Grok Chat" => (240, 200, 110),
+        "Grok Imagine" => (232, 158, 200),
+        _ => (206, 214, 228),
+    }
+}
+
+/// The pool's percentage: the share of the weekly included allowance used.
+///
+/// `totalPercentUsed`, with the auto figure as its fallback. On the unified
+/// plan the two are the same number - third-party models no longer draw on
+/// the pool, so `apiPercentUsed` sits at nought and auto is the whole of it.
+fn pool_pct(live: &serde_json::Value) -> Option<f64> {
+    let plan = &live["planUsage"];
+    loose(&plan["totalPercentUsed"]).or_else(|| loose(&plan["autoPercentUsed"]))
+}
+
+/// The SpaceXSI section of the Cursor tab: the weekly pool once, then the
+/// two kinds of money beside it.
+///
+/// Replaces the QUOTA section only on the unified plan. One bar rather
+/// than three: `cursor models` is the same number as the pool, and `other
+/// models` is an included API allowance the plan no longer has - those
+/// models bill to credits at list price - so it would sit at nought for
+/// ever and read as an allowance nobody has touched. Grok Bot's allowance
+/// is the same pool seen from Grok, and drawing it here as a second bar is
+/// the triple count this section exists to end.
+fn spacexsi_quota_with_plots(
+    d: &Data,
+    live: &serde_json::Value,
+    w: usize,
+    p: &Palette,
+    plots: &mut Vec<tc::Plot>,
+) -> Vec<String> {
+    let (cycle_secs, reset_ts) = cycle_of(live);
+    let when = match reset_ts.map(|e| e - now()) {
+        Some(left) if left > 0.0 => format!(" · resets in {}", left_span(left)),
+        Some(_) => " · resetting".to_string(),
+        None => String::new(),
+    };
+    let via = if d.spacexsi == Spacexsi::Separate { "via Cursor · " } else { "" };
+    // The countdown stands down whole when it does not fit: "resets " with
+    // nothing after it is a sentence that stops.
+    let head = format!(" ── {} ── ", SPACEXSI);
+    let fixed = head.chars().count() + via.chars().count() + "live · weekly".chars().count();
+    let when = if fixed + when.chars().count() <= w.saturating_sub(1) { when } else { String::new() };
+    let mut rows = vec![tc::seg(
+        &[
+            (p.lbl.as_str(), head),
+            (p.dim.as_str(), via.into()),
+            (p.ok.as_str(), "live".into()),
+            (p.dim.as_str(), format!(" · weekly{}", when)),
+        ],
+        w - 1,
+    )];
+    // Calendar time, as the QUOTA section's "of the cycle gone" is; the
+    // pace cell beside the bar is the one that counts only work days.
+    if let (Some(s), Some(e)) = (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
+        if e > s {
+            let gone = (100.0 * (now() * 1000.0 - s) / (e - s)).clamp(0.0, 100.0);
+            rows.push(tc::seg(
+                &[(p.dim.as_str(), format!("  {:.0}% of the week gone", gone))],
+                w - 1,
+            ));
+        }
+    }
+    let base = agent_hue("spacexsi").unwrap();
+    let label = POOL_LABEL;
+    let label_w = report_label_w();
+    // The bar takes whatever the row has left once the label, the
+    // percentage and the pace are placed, so it runs to the pane's edge.
+    let fill_w = |label_w: usize, pct: &str, pace: &str| {
+        let fixed = 2 + label_w + 1 + pct.chars().count() + pace.chars().count();
+        w.saturating_sub(1).saturating_sub(fixed).max(8)
+    };
+    match pool_pct(live) {
+        // Grok's split is there: the pool bar in one segment per product,
+        // then each product on a line of its own in its segment's colour.
+        Some(pct) if !d.pool_split.is_empty() => {
+            let (pace_colour, pace_txt) =
+                pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
+            // One colour per filled cell, each product's run as long as its
+            // share of the bar; the track and the pace marker are the meter's
+            // own, so the pool reads exactly as the plain bar does.
+            let fill = ((pct / 100.0).clamp(0.0, 1.0) * bar_w as f64).round() as usize;
+            let mut cells: Vec<String> = Vec::new();
+            let mut upto = 0.0;
+            for (name, share) in &d.pool_split {
+                let (r, g, b) = product_hue(name);
+                upto += share;
+                let end = ((upto / 100.0) * bar_w as f64).round() as usize;
+                while cells.len() < end.min(fill) {
+                    cells.push(tc::rgb(r, g, b));
+                }
+            }
+            // Cursor's figure is finer than Grok's whole percents, so a
+            // sliver of the pool belongs to no product on the list. It is
+            // drawn, dim, rather than handed to one of them.
+            while cells.len() < fill {
+                cells.push(p.dim.clone());
+            }
+            let mut line: Vec<(String, String)> =
+                vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
+            let x = line.iter().map(|(_, t)| tc::display_width(t)).sum();
+            let plot = tc::Plot::ramped_meter(
+                x,
+                rows.len(),
+                bar_w,
+                (pct / 100.0).clamp(0.0, 1.0),
+                elapsed_of(cycle_secs, reset_ts),
+                &cells,
+                &p.grid,
+                &p.pace_mark,
+            );
+            line.extend(plot.text_row(0).iter().cloned());
+            plots.push(plot);
+            line.push((pct_colour(pct, Some(base), p), pct_text(pct)));
+            line.push((pace_colour, pace_txt));
+            rows.push(seg_owned(&line, w));
+            let name_w = d.pool_split.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+            for (name, share) in &d.pool_split {
+                let (r, g, b) = product_hue(name);
+                let hue = tc::rgb(r, g, b);
+                rows.push(seg_owned(
+                    &[
+                        (p.dim.clone(), " ".repeat(label_w + 3)),
+                        (hue.clone(), "■ ".into()),
+                        (hue, tc::pad(name, name_w)),
+                        (p.txt.clone(), format!("  ~{:.0}%", share)),
+                    ],
+                    w,
+                ));
+            }
+        }
+        Some(pct) => {
+            let (pace_colour, pace_txt) =
+                pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
+            let mut line: Vec<(String, String)> =
+                vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line,
+                (pct / 100.0).clamp(0.0, 1.0),
+                elapsed_of(cycle_secs, reset_ts),
+                bar_w,
+                Some(base),
+                p,
+            ));
+            line.push((pct_colour(pct, Some(base), p), pct_text(pct)));
+            line.push((pace_colour, pace_txt));
+            rows.push(seg_owned(&line, w));
+        }
+        None => rows.push(tc::seg(
+            &[(p.dim.as_str(), "  no pool figure for this week".into())],
+            w - 1,
+        )),
+    }
+    rows.push(String::new());
+    tc::append_plot_rows(&mut rows, plots, |local| extra_report(d, live, w, p, local));
+    rows.push(String::new());
+    rows
+}
+
+/// How many top-ups the report lists before it says how many more there are.
+const TOPUPS_SHOWN: usize = 5;
+
+/// Extra usage on the unified plan, as one report: the balance, this
+/// month's spend against its limit, the rule that refills the balance, and
+/// the refills themselves.
+///
+/// Everything past the weekly pool lands here - third-party models at list
+/// price, and anything once the pool is spent - so this is where the money
+/// is, and every figure on it is one Cursor states: GetUserPrepaidBilling
+/// for the balance, the rule and the history, the spend-limit block and
+/// GetHardLimit for the limit, GetMonthlyBillingCycle for the month. Two
+/// things the same calls carry are left out on purpose: the min, max and
+/// recommended limits are cursor.com's settings-page hints rather than
+/// usage, and on the measured account the current limit sat below the
+/// stated minimum, so drawing them would invite a reading nobody can trust.
+fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let (month_start, month_end) = month_of(d);
+    let window = match (month_start, month_end) {
+        (Some(s), Some(e)) => format!("month {} → {}", day_month(s), day_month(e)),
+        (None, Some(e)) => format!("month ends {}", day_month(e)),
+        _ => String::new(),
+    };
+    // The heading gives up its window whole: a month cut to "13 Oct → 1" is
+    // a date that does not exist.
+    let head = " ── EXTRA USAGE ── ";
+    let room = w.saturating_sub(1).saturating_sub(head.chars().count());
+    let window = if window.chars().count() <= room { window } else { String::new() };
+    let mut rows = vec![tc::seg(&[(p.lbl.as_str(), head.into()), (p.dim.as_str(), window)], w - 1)];
+    let label_w = report_label_w();
+    // Each bar leads its block, and what it is a bar of - the dollars, and
+    // the rule that refills them - sits under it, indented to the bar.
+    let indent = " ".repeat(label_w + 3);
+    let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> String {
+        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), indent.clone())];
+        line.extend(parts);
+        // The tails are the parts a narrow pane can do without, and each
+        // goes whole or not at all.
+        let mut room = w.saturating_sub(1);
+        room = room.saturating_sub(line.iter().map(|(_, t)| t.chars().count()).sum::<usize>());
+        for tail in tails {
+            let n = tail.chars().count();
+            if n <= room {
+                room -= n;
+                line.push((p.dim.clone(), tail));
+            }
+        }
+        seg_owned(&line, w)
+    };
+    let prepaid = d.prepaid.as_ref();
+    let left = prepaid.and_then(|v| loose(&v["availableCents"]));
+    let on_prepaid = prepaid.is_some_and(|v| left.is_some() || text(v, "billingMode").contains("PREPAID"));
+    let top = prepaid.map(|v| &v["autoTopUp"]);
+    let topping = top.is_some_and(|t| t["enabled"].as_bool() == Some(true));
+
+    // Prepaid credits: the bar, then the balance, the refill rule, and the
+    // refills themselves - only for an account that has paid something in.
+    // One that never has is not using them, and a block of zeros would read
+    // as a balance it has run down.
+    let credit_lane = if on_prepaid { credits_lane(d) } else { None };
+    if let Some(lane) = credit_lane {
+        rows.push(report_bar(&lane, PREPAID_LABEL, label_w, w, p, plots, rows.len()));
+        let left = left.unwrap_or(0.0);
+        let paid = prepaid.and_then(|v| loose(&v["fundedCents"])).filter(|v| *v > 0.0);
+        let mut parts: Vec<(String, String)> = vec![
+            (p.txt.clone(), money(left)),
+            (p.dim.clone(), " left".into()),
+        ];
+        // Empty with nothing to refill it stops work, so it is never dropped.
+        if left <= 0.0 && !topping {
+            parts.push((p.warn.clone(), " · empty".into()));
+        }
+        // What was paid in, then what has been drawn - the subtraction of
+        // two figures - are the parts a narrow pane stands down, whole.
+        let mut tails: Vec<String> = Vec::new();
+        if let Some(paid) = paid {
+            tails.push(format!(" of {} paid", money(paid)));
+            if paid >= left {
+                tails.push(format!(" · {} used", money(paid - left)));
+            }
+        }
+        rows.push(detail(parts, tails));
+        // The rule that refills the balance, and whether it can run.
+        let mut parts: Vec<(String, String)> = vec![(p.dim.clone(), "auto top-up ".into())];
+        let mut tails: Vec<String> = Vec::new();
+        let mut below: Option<String> = None;
+        match top {
+            Some(t) if topping => {
+                match (loose(&t["topUpAmountCents"]), loose(&t["thresholdCents"])) {
+                    (Some(a), Some(b)) => {
+                        parts.push((p.txt.clone(), money(a)));
+                        parts.push((p.dim.clone(), " when below ".into()));
+                        parts.push((p.txt.clone(), money(b)));
+                    }
+                    _ => parts.push((p.txt.clone(), "on".into())),
+                }
+                match prepaid.and_then(|v| v["hasPaymentMethod"].as_bool()) {
+                    // Saved is reassurance and stands down whole; missing is
+                    // the rule unable to run, and takes a line of its own
+                    // rather than be dropped.
+                    Some(true) => tails.push(" · payment method saved".into()),
+                    Some(false) => below = Some("no payment method to charge".into()),
+                    None => {}
+                }
+            }
+            _ => parts.push((p.dim.clone(), "off".into())),
+        }
+        rows.push(detail(parts, tails));
+        if let Some(said) = below {
+            let budget = w.saturating_sub(1).saturating_sub(indent.chars().count());
+            if said.chars().count() <= budget {
+                rows.push(tc::seg(&[(p.dim.as_str(), indent.clone()), (p.warn.as_str(), said)], w - 1));
+            } else {
+                for part in tc::wrap_words(&said, w.saturating_sub(3).max(1)) {
+                    rows.push(tc::seg(&[(p.warn.as_str(), format!("  {part}"))], w - 1));
+                }
+            }
+        }
+        // The refills, newest first. A failed one is the rule firing and the
+        // money not arriving, so it is said in the warning colour.
+        if let Some(list) = prepaid.and_then(|v| v["topUps"].as_array()).filter(|l| !l.is_empty()) {
+            let at = |v: &serde_json::Value| loose(&v["succeededAtMs"]).or_else(|| loose(&v["createdAtMs"]));
+            let mut sorted: Vec<&serde_json::Value> = list.iter().collect();
+            sorted.sort_by(|a, b| at(b).unwrap_or(0.0).total_cmp(&at(a).unwrap_or(0.0)));
+            let amt_col = sorted
+                .iter()
+                .filter_map(|v| loose(&v["amountCents"]))
+                .map(|c| money(c).chars().count())
+                .max()
+                .unwrap_or(0);
+            let shown: Vec<&&serde_json::Value> = sorted.iter().take(TOPUPS_SHOWN).collect();
+            for (i, t) in shown.iter().enumerate() {
+                let Some(amount) = loose(&t["amountCents"]) else {
+                    continue;
+                };
+                // A refill with no time on it is still a refill; it just has
+                // no date to print, and a `?` would read as a corrupt one.
+                let when = at(t).map(day_month).unwrap_or_default();
+                let how = match text(t, "origin").as_str() {
+                    o if o.contains("MANUAL") => "manual",
+                    o if o.contains("AUTO") => "auto",
+                    _ => "",
+                };
+                let status = text(t, "status");
+                let failed = !status.is_empty() && !status.contains("SUCCEEDED");
+                let mut parts: Vec<(String, String)> = vec![
+                    (p.dim.clone(), if i == 0 { "top-ups ".into() } else { "        ".to_string() }),
+                    (p.dim.clone(), format!("{:<6} ", when)),
+                    (p.txt.clone(), format!("{:>1$}", money(amount), amt_col)),
+                ];
+                if !how.is_empty() {
+                    parts.push((p.dim.clone(), format!(" {how}")));
+                }
+                if failed {
+                    parts.push((p.warn.clone(), format!(" {}", status.to_lowercase().replace('_', " "))));
+                }
+                rows.push(detail(parts, Vec::new()));
+            }
+            if sorted.len() > TOPUPS_SHOWN {
+                rows.push(detail(
+                    vec![(p.dim.clone(), format!("        +{} earlier", sorted.len() - TOPUPS_SHOWN))],
+                    Vec::new(),
+                ));
+            }
+        }
+    } else if prepaid.is_none() {
+        // The call failed, which is not the same as nothing paid in.
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {} ", tc::pad(PREPAID_LABEL, label_w))),
+                (p.warn.as_str(), "not reported".into()),
+            ],
+            w - 1,
+        ));
+    }
+
+    // The monthly limit: a bar only where a limit is set, since a bar needs
+    // a ceiling; then this month's spend against it, on the monthly clock.
+    let state = additional_state(d, live);
+    let when = month_end.map(|e| format!(" · resets {}", day_month(e)));
+    match &state {
+        ExtraState::Fixed { used, limit, shared } => {
+            let secs = match (month_start, month_end) {
+                (Some(s), Some(e)) if e > s => Some((e - s) / 1000.0),
+                _ => None,
+            };
+            let lane = Lane {
+                label: String::new(),
+                pct: extra_lane_pct(&state).unwrap_or(0.0),
+                window_secs: secs,
+                reset: month_end.map(|e| e / 1000.0),
+                stale: false,
+                projected: false,
+                apart: false,
+            };
+            rows.push(report_bar(&lane, LIMIT_LABEL, label_w, w, p, plots, rows.len()));
+            let mut parts: Vec<(String, String)> = vec![
+                (p.txt.clone(), money(*used)),
+                (p.dim.clone(), " of ".into()),
+                (p.txt.clone(), money(*limit)),
+            ];
+            // A team pool's scope is the fact the reader needs; "this month"
+            // is the bar's own clock and stands down first.
+            let mut tails: Vec<String> = Vec::new();
+            if *shared {
+                parts.push((p.dim.clone(), " team pool".into()));
+            } else {
+                tails.push(" this month".into());
+            }
+            // Over the limit states the overage, never a negative remainder,
+            // and the overage is the one part of this line that is news.
+            if used > limit {
+                parts.push((p.bad.clone(), format!(" · {} over", money(used - limit))));
+            } else {
+                tails.push(format!(" · {} left", money(limit - used)));
+            }
+            tails.extend(when.clone());
+            rows.push(detail(parts, tails));
+        }
+        // No limit set and nothing spent: the account is not using it.
+        ExtraState::Unlimited { used } | ExtraState::Disabled { used } if *used <= 0.0 => {}
+        ExtraState::Unlimited { used } => {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "no limit set".into())], w - 1));
+            rows.push(detail(
+                vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month".into())],
+                when.into_iter().collect(),
+            ));
+        }
+        ExtraState::Disabled { used } => {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "disabled".into())], w - 1));
+            if *used > 0.0 {
+                rows.push(detail(
+                    vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month, before it was disabled".into())],
+                    Vec::new(),
+                ));
+            }
+        }
+        ExtraState::NotReported { keys } => {
+            let mut line: Vec<(String, String)> = vec![
+                (p.dim.clone(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))),
+                (p.warn.clone(), "not reported".into()),
+            ];
+            if !keys.is_empty() {
+                line.push((p.dim.clone(), format!(" · keys: {}", keys.join(", "))));
+            }
+            rows.push(seg_owned(&line, w));
+        }
+    }
+    rows
+}
+
+/// The label column the SpaceXSI section and its extra-usage report share,
+/// so every bar on the tab starts in one column.
+fn report_label_w() -> usize {
+    [POOL_LABEL, PREPAID_LABEL, LIMIT_LABEL].iter().map(|l| l.chars().count()).max().unwrap()
+}
+
+/// A bar under a figure in the extra-usage report, named the way `[+]`
+/// names the same bar, so the tab and the summary share one vocabulary and
+/// a bar can be read without the row above it. Then the percentage, and the
+/// pace where the lane has a clock to pace against.
+fn report_bar(lane: &Lane, label: &str, label_w: usize, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, row: usize) -> String {
+    let hue = agent_hue("spacexsi").unwrap();
+    let mut line: Vec<(String, String)> = vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
+    line.extend(paced_bar_with_plot(plots, row, &line,
+        (lane.pct / 100.0).clamp(0.0, 1.0),
+        elapsed_of(lane.window_secs, lane.reset),
+        w.saturating_sub(20 + label_w).max(8),
+        Some(hue),
+        p,
+    ));
+    line.push((pct_colour(lane.pct, Some(hue), p), pct_text(lane.pct)));
+    if lane.window_secs.is_some() {
+        line.push(pace_cell(
+            lead(lane.pct, lane.window_secs, lane.reset),
+            pace_guessed(false, false, lane.reset),
+            p,
+        ));
+    }
+    seg_owned(&line, w)
+}
+
+/// A row from owned pairs.
+fn seg_owned(parts: &[(String, String)], w: usize) -> String {
+    let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     tc::seg(&refs, w - 1)
 }
 
@@ -771,6 +1385,18 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // `noUsageBasedAllowed` would draw the old state for the rest of that
     // hour. One small POST on the same schedule as the reading it qualifies.
     d.hard = cached(caches, "cursor-hard", LIVE_TTL, cursor_hard_limit);
+    // The unified plan's money lives in two calls an account on its own
+    // plan has no use for, so they are asked only once the plan says it is
+    // unified. Best-effort like the hard limit: the pool bar stands without
+    // either, and the rows they feed say nothing rather than a guess.
+    if is_unified(d.plan.as_ref()) {
+        d.prepaid = cached(caches, "cursor-prepaid", LIVE_TTL, || {
+            cursor_rpc("GetUserPrepaidBilling", &serde_json::json!({}))
+        });
+        d.month = cached(caches, "cursor-month", PLAN_TTL, || {
+            cursor_rpc("GetMonthlyBillingCycle", &serde_json::json!({}))
+        });
+    }
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
     // Deliberately last of the four and deliberately unable to affect them:
@@ -853,6 +1479,49 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     let plan = &live["planUsage"];
     let (secs, reset) = cycle_of(live);
     let mut out = Vec::new();
+    if unified(d) {
+        // The pool once, on its weekly window - the usage call's cycle is
+        // that window on this plan.
+        if let Some(pct) = pool_pct(live) {
+            out.push(Lane {
+                label: POOL_LABEL.into(),
+                pct,
+                window_secs: secs,
+                reset,
+                stale: false,
+                projected: false,
+                apart: false,
+            });
+        }
+        // Additional usage resets with the month, not the week, so it takes
+        // the monthly cycle - the weekly reset beside a monthly limit is the
+        // wrong day, which is what this lane drew before.
+        let state = additional_state(d, live);
+        if let Some(pct) = extra_lane_pct(&state) {
+            let (start, end) = month_of(d);
+            let month_secs = match (start, end) {
+                (Some(s), Some(e)) if e > s => Some((e - s) / 1000.0),
+                _ => None,
+            };
+            out.push(Lane {
+                label: LIMIT_LABEL.into(),
+                pct,
+                window_secs: month_secs,
+                reset: end.map(|e| e / 1000.0),
+                stale: false,
+                projected: false,
+                apart: true,
+            });
+        }
+        // What has been drawn from the prepaid balance, as a share of what
+        // was paid into it. Money on the account rather than an allowance
+        // on a clock, so it has no window: no reset to count down to and no
+        // pace to judge, and the summary draws neither for it.
+        if let Some(lane) = credits_lane(d) {
+            out.push(lane);
+        }
+        return out;
+    }
     for (label, key, _) in CURSOR_LANES {
         let Some(pct) = loose(&plan[*key]) else {
             continue;
@@ -921,6 +1590,9 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
     let plan = &live["planUsage"];
     if plan.as_object().is_none_or(|o| o.is_empty()) {
         return Vec::new();
+    }
+    if unified(d) {
+        return spacexsi_quota_with_plots(d, live, w, p, plots);
     }
     let when = match loose(&live["billingCycleEnd"]) {
         Some(ends) => {
@@ -1366,14 +2038,31 @@ fn cursor_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     if !owner.is_empty() {
         pairs.push(("billing".into(), owner));
     }
-    plan_rows(&text(plan, "planName"), &pairs, w, "", None, "", p)
+    // Only the unified plan carries this, so an account on its own plan
+    // draws the same pairs it always did.
+    let period = text(plan, "includedUsagePeriod");
+    if !period.is_empty() {
+        let every = period.replace("INCLUDED_USAGE_PERIOD_", "").to_lowercase();
+        pairs.push(("included".into(), format!("{} pool, shared with Grok", every)));
+    }
+    let note = if unified(d) { SPACEXSI } else { "" };
+    plan_rows(&text(plan, "planName"), &pairs, w, note, None, "", p)
 }
 
 /// The tab's own body: the lanes, the spend charts, and the authorship
 /// counts from the tracking database.
 fn cursor_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    let mut rows = cursor_quota_with_plots(d, w, p, plots);
-    if rows.is_empty() {
+    cursor_body_with_plots(d, w, p, plots, true)
+}
+
+/// The tab's body, with or without the quota section at its head.
+///
+/// Without it is the merged SpaceXSI tab's half for Cursor: the pool, the
+/// credits and the limit are drawn once above both products there, and
+/// repeating them here would be the second copy that tab exists to avoid.
+fn cursor_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, quota: bool) -> Vec<String> {
+    let mut rows = if quota { cursor_quota_with_plots(d, w, p, plots) } else { Vec::new() };
+    if rows.is_empty() && quota {
         let note = why_no_lane(d);
         if !note.is_empty() {
             rows.extend(no_local(&note, "", w, p));
@@ -1512,6 +2201,19 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
     // in the same place as everyone else's rather than floating up beside
     // its quota.
     let body = add_section(cursor_tab_with_plots(d, w, p, plots), cursor_metered(d, w, p));
+    add_section(body, cursor_plan_rows(d, w, p))
+}
+
+/// The SpaceXSI section on its own: the shared pool, the credits and the
+/// limit, as the merged SpaceXSI tab draws them once above both products.
+pub fn spacexsi_block_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    cursor_quota_with_plots(d, w, p, plots)
+}
+
+/// Everything on the tab except the quota section: the spend, the
+/// authorship, what Cursor metered, and the plan.
+pub fn details_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let body = add_section(cursor_body_with_plots(d, w, p, plots, false), cursor_metered(d, w, p));
     add_section(body, cursor_plan_rows(d, w, p))
 }
 
@@ -1916,6 +2618,12 @@ mod tests {
             .join("\n");
         assert!(joined.contains("$0.00 of $400.00 included"), "{}", joined);
         assert!(!joined.contains("$1792.80"), "bonus spend filled the gap: {}", joined);
+    }
+
+    /// A drawn row with runs of spaces folded to one, so a check reads the
+    /// words and not the width of the label column.
+    fn squeeze(text: &str) -> String {
+        text.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
     }
 
     /// A drawn row without its colour escapes, so a column index means
@@ -2393,6 +3101,399 @@ mod tests {
         let narrow = spend_rows(d.live.as_ref().unwrap(), d.hard.as_ref(), 58, &p).join("\n");
         assert!(!narrow.contains("resets"), "a date was clipped rather than dropped: {}", narrow);
         assert!(narrow.contains("$40.36 left"), "the money stood down first: {}", narrow);
+    }
+
+    // The unified Cursor and Grok plan, as measured on 2026-10-13: the same
+    // three calls in their merged shape, and the two the plan added. Field
+    // shapes and figures only - nothing here names the account.
+
+    /// GetCurrentPeriodUsage on the unified plan, around now: the cycle is a
+    /// week, the spend fields are gone, and `apiPercentUsed` sits at nought
+    /// because third-party models bill to credits instead.
+    fn unified_live(limit_set: bool) -> serde_json::Value {
+        let start = ((now() - 86400.0) * 1000.0) as i64;
+        let end = ((now() + 6.0 * 86400.0) * 1000.0) as i64;
+        let spend = if limit_set {
+            serde_json::json!({"individualLimit": 10000, "individualRemaining": 10000, "limitType": "user"})
+        } else {
+            serde_json::json!({"limitType": "user"})
+        };
+        serde_json::json!({
+            "billingCycleStart": start.to_string(),
+            "billingCycleEnd": end.to_string(),
+            "planUsage": {
+                "remainingBonus": false,
+                "autoPercentUsed": 5.052802599512591,
+                "apiPercentUsed": 0,
+                "totalPercentUsed": 5.052802599512591
+            },
+            "spendLimitUsage": spend,
+            "displayThreshold": 200,
+            "enabled": true,
+            "displayMessage": "You've used 5% of your included usage",
+        })
+    }
+
+    fn unified_plan() -> serde_json::Value {
+        let month_end = ((now() + 30.0 * 86400.0) * 1000.0) as i64;
+        serde_json::json!({
+            "planInfo": {
+                "planName": "Ultra", "price": "",
+                "billingCycleEnd": month_end.to_string(),
+                "includedUsagePeriod": "INCLUDED_USAGE_PERIOD_WEEKLY",
+                "includedUsageResetsAt": "0"
+            },
+            "isMerged": true
+        })
+    }
+
+    fn unified_prepaid() -> serde_json::Value {
+        serde_json::json!({
+            "billingMode": "PREPAID_BILLING_MODE_PREPAID",
+            "eligible": true,
+            "availableCents": "2000",
+            "fundedCents": "2000",
+            "autoTopUp": {"enabled": true, "thresholdCents": "200", "topUpAmountCents": "1000"},
+            "topUps": [{"origin": "TOPUP_MANUAL", "amountCents": "2000", "status": "SUCCEEDED"}],
+            "hasPaymentMethod": true,
+            "spentThisMonthCents": "0"
+        })
+    }
+
+    fn unified_month() -> serde_json::Value {
+        let start = ((now() - 86400.0) * 1000.0) as i64;
+        let end = ((now() + 29.0 * 86400.0) * 1000.0) as i64;
+        serde_json::json!({"startDateEpochMillis": start.to_string(), "endDateEpochMillis": end.to_string()})
+    }
+
+    pub(super) fn unified_data(limit_set: bool) -> Data {
+        Data {
+            live: Some(unified_live(limit_set)),
+            plan: Some(unified_plan()),
+            hard: Some(serde_json::json!({"hardLimit": if limit_set { 100 } else { 2147483647i64 }})),
+            prepaid: Some(unified_prepaid()),
+            month: Some(unified_month()),
+            sand: Some(serde_json::json!({
+                "hasNonZeroIncludedLimit": true, "usagePercent": 4.969027, "isUnified": true
+            })),
+            ..Data::default()
+        }
+    }
+
+    #[test]
+    fn the_plan_says_whether_it_is_unified_and_either_marker_is_enough() {
+        assert!(is_unified(Some(&unified_plan())));
+        let mut merged_only = unified_plan();
+        merged_only["planInfo"].as_object_mut().unwrap().remove("includedUsagePeriod");
+        assert!(is_unified(Some(&merged_only)), "isMerged alone");
+        let mut period_only = unified_plan();
+        period_only.as_object_mut().unwrap().remove("isMerged");
+        assert!(is_unified(Some(&period_only)), "includedUsagePeriod alone");
+        // An account on its own plan carries neither.
+        let own = serde_json::json!({"planInfo": {"planName": "Ultra", "includedAmountCents": 40000}});
+        assert!(!is_unified(Some(&own)));
+        assert!(!is_unified(None), "no plan read is not a unified plan");
+    }
+
+    /// The SpaceXSI section as plain text, at width `w`.
+    fn report(d: &Data, w: usize) -> String {
+        cursor_quota(d, w, &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Whether the row starting with `label` carries a bar.
+    fn has_bar(text: &str, label: &str) -> bool {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(label))
+            .is_some_and(|l| l.contains('░') || l.contains('█'))
+    }
+
+    #[test]
+    fn the_no_limit_sentinel_is_no_limit_and_never_money() {
+        // INT32_MAX was drawn as a cap of $2,147,483,647. It is GetHardLimit
+        // saying no limit is set - on either plan.
+        let state = extra_state(&unified_live(false), Some(&serde_json::json!({"hardLimit": 2147483647i64})));
+        assert_eq!(state, ExtraState::Unlimited { used: 0.0 });
+        assert_eq!(extra_lane_pct(&state), None, "a percentage of no limit");
+        let mut own = measured();
+        own["spendLimitUsage"] = serde_json::json!({"limitType": "user"});
+        assert_eq!(
+            extra_state(&own, Some(&serde_json::json!({"hardLimit": "2147483647"}))),
+            ExtraState::Unlimited { used: 0.0 },
+            "the sentinel on an account's own plan, as a string"
+        );
+        for w in [40usize, 80, 120] {
+            let rows = cursor_tab(&unified_data(false), w, &palette()).join("\n");
+            assert!(!rows.contains("21474836"), "the sentinel reached the screen at {w}: {rows}");
+        }
+        // No limit and nothing spent: the account is not using one, so the
+        // report says nothing about it at all.
+        let text = report(&unified_data(false), 120);
+        assert!(!text.contains("usage limit"), "{text}");
+        // No limit with money spent: the spend, with no bar.
+        let mut d = unified_data(false);
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        let text = report(&d, 120);
+        assert!(squeeze(&text).contains("usage limit no limit set"), "{text}");
+        assert!(squeeze(&text).contains("$3.50 this month"), "{text}");
+        assert!(!has_bar(&text, "usage limit"), "a bar of no limit: {text}");
+    }
+
+    #[test]
+    fn the_unified_tab_draws_one_pool_under_spacexsi_and_each_bar_leads_its_money() {
+        let d = unified_data(true);
+        let text = report(&d, 120);
+        for want in [
+            "SpaceXSI", "weekly", "resets in", "of the week gone", "weekly pool",
+            "EXTRA USAGE", "month",
+            "$20.00 left of $20.00 paid · $0.00 used",
+            "auto top-up $10.00 when below $2.00 · payment method saved",
+            "top-ups", "$20.00 manual",
+            "$0.00 of $100.00 this month · $100.00 left · resets",
+        ] {
+            assert!(squeeze(&text).contains(want), "missing {want:?}: {text}");
+        }
+        // Each bar leads its block, and its dollars and refill rule sit
+        // under it rather than above.
+        assert!(has_bar(&text, "prepaid credits") && has_bar(&text, "usage limit"), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).expect(needle);
+        assert!(at("prepaid credits") < at("left of $20.00 paid"), "{text}");
+        assert!(at("left of $20.00 paid") < at("auto top-up"), "{text}");
+        assert!(at("auto top-up") < at("usage limit"), "{text}");
+        assert!(at("usage limit") < at("of $100.00 this month"), "{text}");
+        for gone in ["cursor models", "other models", "grok bot", "── QUOTA", "extra usage "] {
+            assert!(!text.contains(gone), "{gone:?} drawn on the unified plan: {text}");
+        }
+    }
+
+    #[test]
+    fn a_bar_shows_only_when_its_feature_is_in_use() {
+        // Nothing paid in and no limit set: neither bar, neither block.
+        let mut d = unified_data(false);
+        d.prepaid = Some(serde_json::json!({"billingMode": "PREPAID_BILLING_MODE_PREPAID", "eligible": true}));
+        let text = report(&d, 120);
+        assert!(!text.contains("prepaid credits") && !text.contains("usage limit"), "{text}");
+        assert!(!text.contains("auto top-up"), "a refill rule for credits nobody bought: {text}");
+        let labels: Vec<String> = lanes(&d).into_iter().map(|l| l.label).collect();
+        assert_eq!(labels, ["weekly pool"]);
+    }
+
+    #[test]
+    fn additional_usage_resets_with_the_month_not_the_week() {
+        let d = unified_data(true);
+        let text = report(&d, 120);
+        let month_end = loose(&d.month.as_ref().unwrap()["endDateEpochMillis"]).unwrap();
+        let week_end = loose(&d.live.as_ref().unwrap()["billingCycleEnd"]).unwrap();
+        let line = text.lines().find(|l| l.contains("this month")).expect("a this-month line");
+        assert!(line.contains(&format!("resets {}", day_month(month_end))), "{line}");
+        assert!(!line.contains(&format!("resets {}", day_month(week_end))), "the weekly reset: {line}");
+        // And the summary lane is on the same monthly clock.
+        let extra = lanes(&d).into_iter().find(|l| l.label == "usage limit").expect("a usage limit lane");
+        assert_eq!(extra.reset, Some(month_end / 1000.0));
+    }
+
+    #[test]
+    fn the_unified_summary_has_the_pool_and_only_the_bars_in_use_with_no_dollars() {
+        let got = lanes(&unified_data(true));
+        let labels: Vec<&str> = got.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["weekly pool", "usage limit", "prepaid credits"], "{labels:?}");
+        assert!(labels.iter().all(|l| !l.contains('$')), "a dollar figure on [+]: {labels:?}");
+        let pool = &got[0];
+        assert!((pool.pct - 5.052802599512591).abs() < 1e-9);
+        assert_eq!(pool.window_secs, Some(7.0 * 86400.0), "the pool is weekly");
+        let credits = &got[2];
+        assert_eq!(credits.pct, 0.0, "nothing drawn from $20 of $20");
+        assert_eq!((credits.window_secs, credits.reset), (None, None), "a balance has no clock");
+        // No limit set: no limit bar.
+        let labels: Vec<String> = lanes(&unified_data(false)).into_iter().map(|l| l.label).collect();
+        assert_eq!(labels, ["weekly pool", "prepaid credits"]);
+        // Half the balance spent is half the bar.
+        let mut d = unified_data(true);
+        d.prepaid.as_mut().unwrap()["availableCents"] = serde_json::json!("1000");
+        let credits = lanes(&d).into_iter().find(|l| l.label == "prepaid credits").unwrap();
+        assert_eq!(credits.pct, 50.0);
+    }
+
+    /// The measured pre-merge account: no unified marker anywhere.
+    pub(super) fn own_plan_data() -> Data {
+        Data {
+            live: Some(measured()),
+            hard: Some(hard_fifty()),
+            plan: Some(serde_json::json!({"planInfo": {"planName": "Ultra", "includedAmountCents": 40000}})),
+            ..Data::default()
+        }
+    }
+
+    #[test]
+    fn an_account_on_its_own_plan_still_draws_all_three_lanes() {
+        // Nothing on its tab or its summary moves.
+        let d = own_plan_data();
+        let labels: Vec<String> = lanes(&d).into_iter().map(|l| l.label).collect();
+        assert_eq!(labels, ["total", "cursor models", "other models", "extra $50"]);
+        let joined = cursor_quota(&d, 120, &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("QUOTA") && !joined.contains("SpaceXSI"), "{joined}");
+        assert!(joined.contains("extra usage"), "{joined}");
+    }
+
+    #[test]
+    fn a_unified_plan_whose_money_calls_failed_keeps_the_pool_and_guesses_no_balance() {
+        let mut d = unified_data(true);
+        d.prepaid = None;
+        d.month = None;
+        let text = report(&d, 120);
+        assert!(text.contains("weekly pool"), "{text}");
+        assert!(squeeze(&text).contains("prepaid credits not reported"), "a failed call is not 'unused': {text}");
+        assert!(!text.contains("$20.00"), "a balance nobody read: {text}");
+        // The limit still stands on the usage block, and its reset falls
+        // back to the plan's own monthly end rather than the week.
+        let line = text.lines().find(|l| l.contains("this month")).expect("a this-month line");
+        let plan_end = loose(&d.plan.as_ref().unwrap()["planInfo"]["billingCycleEnd"]).unwrap();
+        assert!(line.contains(&format!("resets {}", day_month(plan_end))), "{line}");
+    }
+
+    #[test]
+    fn an_empty_balance_with_no_top_up_says_so() {
+        let mut d = unified_data(true);
+        d.prepaid = Some(serde_json::json!({
+            "billingMode": "PREPAID_BILLING_MODE_PREPAID",
+            "fundedCents": "2000",
+            "autoTopUp": {"enabled": false},
+        }));
+        let text = report(&d, 120);
+        assert!(text.contains("$0.00 left"), "an omitted balance is nought on a prepaid account: {text}");
+        assert!(text.contains("· empty"), "{text}");
+        assert!(squeeze(&text).contains("auto top-up off"), "{text}");
+    }
+
+    #[test]
+    fn the_top_ups_and_a_rule_that_cannot_run_are_on_the_tab() {
+        let mut d = unified_data(true);
+        d.prepaid = Some(serde_json::json!({
+            "billingMode": "PREPAID_BILLING_MODE_PREPAID",
+            "availableCents": "150", "fundedCents": "2000",
+            "autoTopUp": {"enabled": true, "thresholdCents": "200", "topUpAmountCents": "1000"},
+            "hasPaymentMethod": false,
+            "topUps": [
+                {"origin": "TOPUP_MANUAL", "amountCents": "2000", "status": "SUCCEEDED", "createdAtMs": "1000"},
+                {"origin": "TOPUP_AUTO", "amountCents": "1000", "status": "FAILED", "createdAtMs": "2000"}
+            ]
+        }));
+        let text = report(&d, 160);
+        assert!(text.contains("no payment method to charge"), "{text}");
+        let lines: Vec<String> = text.lines().skip_while(|l| !l.contains("top-ups")).take(2).map(squeeze).collect();
+        assert!(lines[0].contains("$10.00 auto failed"), "the newest first: {lines:?}");
+        assert!(lines[1].contains("$20.00 manual"), "{lines:?}");
+        assert!(squeeze(&text).contains("$1.50 left of $20.00 paid · $18.50 used"), "{text}");
+        assert!(!text.contains(" ? "), "a refill with no time printed a corrupt date: {text}");
+    }
+
+    #[test]
+    fn the_report_drops_whole_parts_rather_than_cutting_them() {
+        // `seg` keeps every row inside its pane by clipping, which passes a
+        // width check and still leaves "13 Oct → 1" and "payment metho" on
+        // screen. Each part has to fit whole or stand down.
+        let d = unified_data(true);
+        let end = day_month(loose(&d.month.as_ref().unwrap()["endDateEpochMillis"]).unwrap());
+        for w in [40usize, 50, 58, 64, 80, 120] {
+            let rows: Vec<String> = cursor_quota(&d, w, &palette()).iter().map(|r| strip(r)).collect();
+            let top = &rows[0];
+            assert!(!top.trim_end().ends_with("resets") && !top.trim_end().ends_with("resets in"), "a cut countdown at {w}: {top:?}");
+            let head = rows.iter().find(|r| r.contains("EXTRA USAGE")).expect("a heading");
+            if head.contains('→') {
+                assert!(head.contains(&end), "a cut month at {w}: {head:?}");
+            }
+            let balance = rows.iter().find(|r| r.contains("$20.00 left")).expect("a balance line");
+            let b = balance.trim_end();
+            assert!(b.ends_with("left") || b.ends_with("paid") || b.ends_with("used") || b.ends_with("empty"), "a cut tail at {w}: {balance:?}");
+            let rule = rows.iter().find(|r| r.contains("auto top-up")).expect("a rule line");
+            if rule.contains("payment") {
+                assert!(rule.contains("payment method saved"), "a cut phrase at {w}: {rule:?}");
+            }
+            let month = rows.iter().find(|r| r.contains("of $100.00")).expect("a month line");
+            let m = month.trim_end();
+            assert!(
+                m.ends_with("$100.00") || m.ends_with("this month") || m.ends_with("left") || m.chars().rev().take(4).all(|c| c.is_ascii_alphanumeric() || c == ' '),
+                "a cut tail at {w}: {month:?}"
+            );
+            assert!(!m.ends_with("this mon") && !m.ends_with("lef") && !m.ends_with("rese"), "a cut tail at {w}: {month:?}");
+        }
+        let mut d = unified_data(true);
+        d.prepaid.as_mut().unwrap()["hasPaymentMethod"] = serde_json::json!(false);
+        for w in [40usize, 58, 120] {
+            let text = report(&d, w);
+            assert!(text.contains("no payment method to charge"), "the warning was dropped at {w}: {text}");
+        }
+    }
+
+    #[test]
+    fn every_unified_row_fits_its_pane() {
+        for limit_set in [true, false] {
+            for place in [Spacexsi::Alone, Spacexsi::Shared, Spacexsi::Separate] {
+                let mut d = unified_data(limit_set);
+                d.spacexsi = place;
+                for w in [26usize, 30, 40, 58, 80, 120] {
+                    for row in cursor_tab(&d, w, &palette()) {
+                        let n = strip(&row).chars().count();
+                        assert!(n <= w - 1, "{n} wide at {w} ({place:?}): {:?}", strip(&row));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_pool_bar_splits_by_product_and_the_separate_heading_says_via_cursor() {
+        let mut d = unified_data(true);
+        d.spacexsi = Spacexsi::Shared;
+        d.pool_split = vec![("Cursor".into(), 3.0), ("Grok Bot".into(), 2.0)];
+        let text = report(&d, 120);
+        let lines: Vec<String> = text.lines().map(squeeze).collect();
+        let bar = lines.iter().position(|l| l.starts_with("weekly pool")).expect("a pool bar");
+        // Five of a hundred is a twentieth of the bar; the rest is track.
+        let raw = text.lines().find(|l| l.trim_start().starts_with("weekly pool")).unwrap();
+        let (solid, track) = (raw.matches('█').count(), raw.matches('░').count());
+        assert!(track > solid, "the unused week drawn solid: {raw:?}");
+        // And the row runs to the pane's edge.
+        assert_eq!(raw.trim_end().chars().count(), raw.chars().count());
+        assert!(raw.chars().count() >= 115, "the bar did not fill the row: {} of 119", raw.chars().count());
+        assert_eq!(lines[bar + 1], "■ Cursor ~3%", "{text}");
+        assert_eq!(lines[bar + 2], "■ Grok Bot ~2%", "{text}");
+        // Text mode redraws a bar from its plot's own cells over the row, so
+        // those must carry the track too - the row alone passed while the
+        // pane drew the whole week solid.
+        let mut plots = Vec::new();
+        let rows = cursor_quota_with_plots(&d, 120, &palette(), &mut plots);
+        let at = rows.iter().position(|r| strip(r).trim_start().starts_with("weekly pool")).unwrap();
+        let plot = plots.iter().find(|pl| pl.y == at).expect("the pool bar's plot");
+        let cells: String = plot.text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+        assert!(cells.matches('░').count() > cells.matches('█').count(), "{cells:?}");
+        // No split to hand: the plain paced bar, and no product lines.
+        d.pool_split.clear();
+        assert!(!report(&d, 120).contains('■'));
+        d.spacexsi = Spacexsi::Separate;
+        assert!(report(&d, 160).contains("SpaceXSI ── via Cursor"));
+        // Every product line fits a narrow pane whole.
+        let mut d = unified_data(true);
+        d.pool_split = vec![("Cursor".into(), 5.0), ("Grok Bot".into(), 5.0), ("Grok Imagine".into(), 1.0)];
+        for w in [30usize, 40, 58] {
+            for row in cursor_quota(&d, w, &palette()) {
+                assert!(strip(&row).chars().count() <= w - 1, "{w}: {:?}", strip(&row));
+            }
+        }
+    }
+}
+
+/// Readings for tests outside this module, which cannot reach the private
+/// fields: the measured unified account, and the measured account on its
+/// own plan.
+#[cfg(test)]
+impl Data {
+    pub fn unified_fixture(limit_set: bool) -> Data {
+        tests::unified_data(limit_set)
+    }
+
+    pub fn own_plan_fixture() -> Data {
+        tests::own_plan_data()
     }
 }
 
