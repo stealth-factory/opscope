@@ -40,7 +40,7 @@ test('uses both verified Mac archives and includes a newly added widget', t => {
   assert.doesNotMatch(formula, /bin.install BINARY_NAMES/);
 });
 
-function updateFixture(t) {
+function updateFixture(t, { failRead = false } = {}) {
   const root = fixture(t, undefined, binsFromManifest(path.resolve(__dirname, '..')));
   const formula = generateFormula('1.2.3', root);
   const previous = path.join(root, 'current.rb');
@@ -52,6 +52,7 @@ const root = process.env.BREW_TEST_ROOT;
 const args = process.argv.slice(2);
 fs.appendFileSync(root + '/calls', args.includes('PUT') ? 'PUT\\n' : 'GET\\n');
 if (!args.includes('PUT')) {
+  if (${failRead}) process.exit(1);
   console.log(JSON.stringify({sha: 'file-sha', content: fs.readFileSync(root + '/current.rb').toString('base64')}));
 } else {
   const payload = JSON.parse(fs.readFileSync(args[args.indexOf('--input') + 1]));
@@ -76,11 +77,11 @@ function runUpdater(root, conflict = false) {
 }
 
 test('an unreadable initial formula fails with bootstrap guidance and no write', t => {
-  const { root } = updateFixture(t);
-  fs.writeFileSync(path.join(root, 'gh'), '#!/bin/sh\nexit 1\n');
+  const { root } = updateFixture(t, { failRead: true });
   const run = runUpdater(root);
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /Merge the initial formula PR/);
+  assert.equal(fs.readFileSync(path.join(root, 'calls'), 'utf8'), 'GET\n');
   assert.equal(fs.existsSync(path.join(root, 'payload.rb')), false);
 });
 
