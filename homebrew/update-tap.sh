@@ -13,7 +13,11 @@ endpoint=repos/stealth-factory/homebrew-tap/contents/Formula/opscope.rb
 # is preserved. The file SHA provides compare-and-swap protection; retry by
 # reading the latest file, including its version, rather than force-pushing.
 for attempt in 1 2 3; do
-  gh api "$endpoint?ref=main" > "$work/current.json"
+  if ! gh api "$endpoint?ref=main" > "$work/current.json"; then
+    echo "Cannot read Formula/opscope.rb on the tap's main branch." >&2
+    echo "Merge the initial formula PR before running release updates; also verify the existing bot can access the tap." >&2
+    exit 1
+  fi
   jq -r .content "$work/current.json" | base64 --decode > "$work/current.rb"
   rm -f "$work/opscope.rb"
   node "$script_dir/formula.js" "$version" "$artifacts" "$work/opscope.rb" "$work/current.rb"

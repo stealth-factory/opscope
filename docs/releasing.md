@@ -247,7 +247,16 @@ SHA on each write, retries a concurrent update, skips an identical formula,
 and refuses a downgrade. A retry of the same version with different bytes
 is an error. Tokens stay in the environment, never in clone URLs or files.
 
-Merge the tap's initial formula before releasing this workflow. To generate
+Merge the tap's initial formula before releasing this workflow. If the first
+Contents API read returns 404, check that `Formula/opscope.rb` exists on the tap's
+`main` branch before investigating the existing bot's access; do not create a
+new credential just to bypass a missing bootstrap formula.
+
+Keep changes to the formula's tests in `homebrew/formula.js` as well as the tap,
+so the next generated update preserves them. If a bootstrap formula includes
+new tests absent from the already released tag's generator, do not rerun that
+old tag to overwrite it: the same-version byte check will correctly reject it.
+The next release containing the aligned generator resumes normal updates. To generate
 an initial formula or inspect one locally, use a checkout whose binary
 manifest matches that release (normally the tag that carries these scripts):
 
