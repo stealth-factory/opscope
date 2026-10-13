@@ -105,9 +105,11 @@ impl Drop for RefreshGuard {
 }
 
 const REFRESH_COLOUR: (u8, u8, u8) = (120, 220, 255);
-/// The three-row spinner moved down one dot, into Braille rows 2–4,
-/// to align with the capital text in the title.
-const REFRESH_SPINNER: &[char] = &['⠖', '⠲', '⢲', '⢰', '⣰', '⣠', '⣄', '⣆', '⡆', '⡖'];
+/// A 2×2 spinner in Braille rows 2–3, aligned with the title text.
+/// Three lit corners rotate around the four dot positions.
+const REFRESH_SPINNER: &[char] = &['⠖', '⠲', '⠴', '⠦'];
+/// Keep a full turn at one second despite using only four distinct frames.
+const REFRESH_CYCLE_TICKS: usize = 10;
 
 /// Animation time is independent of data polling and the number of input events.
 /// Only use this for decoration/loading indicators, never to invent measurements.
@@ -416,7 +418,8 @@ pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> St
     let spinner = tick.filter(|_| display_width(&wanted) + 2 <= room);
     let fill = if let Some(tick) = spinner {
         let (r, g, b) = REFRESH_COLOUR;
-        format!("{}{} {}{colour}{}", rgb(r, g, b), REFRESH_SPINNER[tick % REFRESH_SPINNER.len()], RST,
+        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+        format!("{}{} {}{colour}{}", rgb(r, g, b), REFRESH_SPINNER[frame], RST,
             "━".repeat(fill_room - 2))
     } else {
         "━".repeat(fill_room)
@@ -5711,11 +5714,12 @@ mod tests {
                 assert_eq!(title_busy(text, w, &colour, None), idle);
                 let wanted = format!(" {} ", text.to_uppercase());
                 let fits = display_width(&wanted) + 5 <= w - version_room(w);
-                for tick in 0..=REFRESH_SPINNER.len() {
+                for tick in 0..=REFRESH_CYCLE_TICKS {
                     let busy = title_busy(text, w, &colour, Some(tick));
                     assert_eq!(display_width(&strip(&busy)) + version_room(w), w);
                     if fits {
-                        assert!(strip(&busy).contains(&format!("{wanted}{} ", REFRESH_SPINNER[tick % REFRESH_SPINNER.len()])));
+                        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+                        assert!(strip(&busy).contains(&format!("{wanted}{} ", REFRESH_SPINNER[frame])));
                     } else {
                         assert_eq!(busy, idle, "spinner displaced title at {w}");
                     }
@@ -5743,7 +5747,7 @@ mod tests {
             1,
         ))[0]);
         assert!(wide.contains("NETWORK LATENCY MONITOR"));
-        assert!(wide.contains(REFRESH_SPINNER[2]));
+        assert!(wide.contains(REFRESH_SPINNER[0]));
         assert!(wide.ends_with(&tag));
     }
 
