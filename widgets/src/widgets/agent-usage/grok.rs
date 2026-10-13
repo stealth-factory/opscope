@@ -41,15 +41,19 @@ const AUTH: &str = ".grok/auth.json";
 const QUOTA_TIMEOUT: u64 = 6;
 /// The CLI, whose only job here is to refresh the token it owns.
 const CLI: &str = ".grok/bin/grok";
-/// Cache key for the billing reading.
-const PING_KEY: &str = "grok:billing";
+/// Cache key for the billing reading, per signed-in account: a reading
+/// held for one account must not answer for another, whose plan markers
+/// and window would then decide where SpaceXSI is drawn.
+fn ping_key(account: Option<&str>) -> String {
+    format!("grok:billing:{}", account.unwrap_or_default())
+}
 /// Cache key for the last session-end refresh, so one ending refreshes once.
 const SEEN_KEY: &str = "grok:session-seen";
 /// Cache key for the last expiry a refresh was attempted against, and
 /// whether that attempt was made before or after the lapse.
 const EXPIRY_KEY: &str = "grok:token-expiry";
 /// Cache key for the last reading the server actually gave, kept apart
-/// from `PING_KEY` because that slot is overwritten by every refusal and
+/// from `ping_key` because that slot is overwritten by every refusal and
 /// emptied by every token refresh. This one only ever holds a success,
 /// tagged with the token's account so a sign-in as someone else does not
 /// keep showing the previous account's figure.
@@ -283,6 +287,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
     let account = token_account();
+    let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
     let key = match usable_token() {
@@ -298,22 +303,22 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                 why
             };
             // "polled x.ai" is when we last asked, not when a success
-            // last landed. A failed poll still updates PING_KEY; a
+            // last landed. A failed poll still updates the ping slot; a
             // refresh that has just run clears it, and then the last
             // live reading's time is what remains.
             let at = caches
                 .live
-                .get(PING_KEY)
+                .get(&ping)
                 .map(|(when, _, _)| *when)
                 .unwrap_or(held_at);
             return (fresher(held, from_log()), false, at, why);
         }
     };
     let ttl = ping_ttl(cfg.grok_ping_minutes);
-    let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
+    let got = cached(caches, &ping, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
-    let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
+    let at = caches.live.get(&ping).map(|(when, _, _)| *when).unwrap_or(0.0);
     match got.as_ref() {
         None => (
             fresher(held, from_log()),
@@ -541,7 +546,7 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
             f64::MAX,
         ),
     );
-    caches.live.remove(PING_KEY);
+    caches.live.remove(&ping_key(token_account().as_deref()));
 }
 
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
@@ -632,7 +637,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             );
             // The token is new, so the reading held from before it is not
             // the best one available any more.
-            caches.live.remove(PING_KEY);
+            caches.live.remove(&ping_key(token_account().as_deref()));
         }
     }
     // One read, one spawn. The expiry helper re-reads auth.json, so a

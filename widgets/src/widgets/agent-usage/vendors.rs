@@ -865,7 +865,16 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
             spacexsi_tab_with_plots(s, w, p, plots)
         }
         "spacexsi" | "spacexsi:cursor" if s.cursor.spacexsi.unified() && listed("cursor") => {
-            crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots)
+            // Grok hidden: nothing of Grok's on the tab either - neither
+            // its product split nor its figure for the pool.
+            if listed("grok") {
+                crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots)
+            } else {
+                let mut cursor = s.cursor.clone();
+                cursor.pool_split.clear();
+                cursor.pool_from_grok = None;
+                crate::cursor::tab_with_plots(&cursor, w, h, cfg, p, plots)
+            }
         }
         "spacexsi" | "spacexsi:grok" => {
             // With Cursor hidden there is no CURSOR tab to point at, so the
@@ -1969,6 +1978,27 @@ mod tests {
         for cursor_part in ["SPEND", "EXTRA USAGE", "ACTIVITY", "METERED"] {
             assert!(!grok_only.contains(cursor_part), "hidden Cursor's {cursor_part:?}: {grok_only}");
         }
+    }
+
+    #[test]
+    fn a_cursor_tab_with_grok_hidden_shows_nothing_of_grok_s() {
+        // Review: with Grok excluded, the folded tab still drew Grok's
+        // product rows and Grok's figure for the pool, copied over by
+        // link_spacexsi before the tab knew Grok was hidden.
+        let mut s = State {
+            cursor: crate::cursor::Data::without_pool_figure(crate::cursor::Data::unified_fixture(true)),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        s.cursor.pool_split = vec![("Cursor".into(), 3.0), ("Grok Bot".into(), 2.0)];
+        s.cursor.pool_from_grok = Some(5.0);
+        let tabs: Vec<String> = ["+", "cursor"].iter().map(|t| t.to_string()).collect();
+        let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+        assert!(!body.contains("Grok Bot"), "hidden Grok's product split: {body}");
+        assert!(!body.contains("from Grok"), "hidden Grok's pool figure: {body}");
+        assert!(body.contains("no pool figure"), "{body}");
     }
 
     #[test]
