@@ -1764,6 +1764,23 @@ mod tests {
         // A vendor the reader hid stays hidden: shared, but only Grok has a
         // tab, so Grok's tab is the SpaceXSI one.
         assert_eq!(strip_of(Shared, Shared, &["+", "grok"]), ["+", "spacexsi"]);
+        // Review: and the body of each single-vendor strip draws only the
+        // vendor that is listed.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Shared;
+        s.grok.spacexsi = Shared;
+        for (listed, own, other) in [(["+", "cursor"], "EXTRA USAGE", "of the weekly pool"), (["+", "grok"], "of the weekly pool", "EXTRA USAGE")] {
+            let tabs: Vec<String> = listed.iter().map(|t| t.to_string()).collect();
+            let folded = spacexsi_tabs(&tabs, &s);
+            assert_eq!(folded, ["+", "spacexsi"]);
+            let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+            assert!(body.contains(own), "{listed:?} lost its own body: {body}");
+            assert!(!body.contains(other), "{listed:?} drew the hidden vendor: {body}");
+        }
     }
 
     #[test]

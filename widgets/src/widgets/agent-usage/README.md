@@ -478,7 +478,7 @@ product — and it draws **cloud figures only**. SpaceXSI is an account, so this
 machine's share of it is left out: no AI-written-code counts from Cursor's local
 tracking database, and no Grok Build session totals or second heatmap from
 `~/.grok/sessions`. A vendor still on its own plan keeps those sections. SpaceXSI is drawn in greyscale: the brand is monochrome, its black
-is unreadable on a dark pane, and a mid grey leaves the bars a ramp to draw.
+is unreadable on a dark pane, and a mid-grey leaves the bars a ramp to draw.
 
 **Activity** is the heatmap cursor.com/@handle shows, and on the unified plan
 grok.com shows the same one: daily token counts and streaks from the account's

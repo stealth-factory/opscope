@@ -1024,9 +1024,18 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         // token.
         //
         // So nought is the real reading and not a guess, which is the only
-        // reason it may be drawn. A period this cannot parse is still
-        // unknown, and still refused above.
-        pct: Some(val_of(&cfg["creditUsagePercent"]).unwrap_or(0.0)),
+        // reason it may be drawn - and only while nothing in the same answer
+        // says otherwise. An omitted total beside a product that reports
+        // use is not nought: it is a total the answer did not give, and
+        // drawing 0% there invents a reading against the evidence in the
+        // same response. That is unknown, the same as a total never sent.
+        // A period this cannot parse is still unknown, and still refused
+        // above.
+        pct: match val_of(&cfg["creditUsagePercent"]) {
+            Some(v) => Some(v),
+            None if products_of(cfg).iter().any(|(_, used)| *used > 0.0) => None,
+            None => Some(0.0),
+        },
         products: products_of(cfg),
         taken: Some(now()),
         kind: text(period, "type"),
@@ -2162,13 +2171,24 @@ mod tests {
             },
             "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
             "productUsage": [
-                {"product": "GrokBuild", "usagePercent": 1.0},
+                {"product": "GrokBuild"},
                 {"product": "GrokChat"},
                 {"product": "GrokImagine"}
             ],
         }});
         let q = quota_from(&body).expect("a named period is a reading");
         assert_eq!(q.pct, Some(0.0), "an omitted default read as unknown");
+
+        // But not when the same answer shows use. This fixture once had
+        // GrokBuild at 1.0 beside the omitted total and called the total
+        // nought - a total of 0% over a product at 1% contradicts itself,
+        // and the endpoint has not been seen to send it (it answers 10.0
+        // beside 5.0 and 5.0). Review flagged the 0% as fabricated; it is
+        // unknown, the same as a total never sent.
+        let mut used = body.clone();
+        used["config"]["productUsage"][0] = serde_json::json!({"product": "GrokBuild", "usagePercent": 1.0});
+        let q = quota_from(&used).expect("still a reading of the period");
+        assert_eq!(q.pct, None, "a total invented against the product beside it");
         assert_eq!(q.start, "2026-08-26T02:09:41.289406+00:00");
         assert!(q.taken.is_some(), "a live reading knows when it was taken");
 
@@ -2758,6 +2778,30 @@ mod tests {
         let mut old = unified_grok(Spacexsi::Shared);
         old.quota.as_mut().unwrap().taken = Some(now() - GROK_FRESH_FOR - 60.0);
         assert!(!reading_is_current(&old), "an old reading");
+    }
+
+    #[test]
+    fn an_omitted_total_beside_a_product_in_use_is_unknown_not_nought() {
+        // Review (P1): proto3 omits a total at nought, but a total omitted
+        // while a product reports use is a total the answer did not give.
+        let period = serde_json::json!({
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-10-13T02:39:23.429+00:00", "end": "2026-10-20T02:39:23.429+00:00"
+        });
+        let used = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild", "usagePercent": 1.0}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&used).unwrap().pct, None, "a fabricated 0%");
+        // Nothing reports use: nought is the real reading, as before.
+        let idle = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild"}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&idle).unwrap().pct, Some(0.0));
+        // And no lane is drawn for an unknown total.
+        let d = Data { quota: quota_from(&used), quota_live: true, spacexsi: Spacexsi::Alone, ..Data::default() };
+        assert!(lanes(&d).is_empty(), "a lane for an unknown total");
     }
 
     #[test]
