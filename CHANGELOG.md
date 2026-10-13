@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.5.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Say "reading usage" on first load, spinner after the text (OPS-169) (#399)
+- **core**: Remove the replaced Kitty placement so old chart frames do not linger (OPS-168) (#397)
+
+### Features
+
+- **core**: Show refresh activity in widget titles (#390)
+
 ## [1.4.0] - 2026-10-13
 
 ### Features
