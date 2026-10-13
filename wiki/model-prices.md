@@ -12,7 +12,7 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 14 Oct 2026 the two agree — see
+As of 1 Oct 2026 the two agree — see
 [what this collection changed](#what-this-collection-changed) for what moved.
 
 ## The two rules that shape every table here
@@ -190,7 +190,6 @@ record which was taken, so both are carried.
 
 | model | input | output | cache_read |
 |---|--:|--:|--:|
-| `gemini-4-argon` | 2 | 10 | 0.10 |
 | `gemini-3.8-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.7-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.6-flash` | 0.75 | 3.75 | 0.075 |
@@ -203,13 +202,8 @@ record which was taken, so both are carried.
 | `gemini-2.5-flash` | 0.30 | 2.50 | 0.03 |
 | `gemini-2.5-flash-lite` | 0.10 | 0.40 | 0.01 |
 
-- **`gemini-4-argon` is an introductory price through 30 Nov 2026**, doubling
-  on 1 Dec 2026 to 4 / 20 / 0.20. Implicit caching only, at 0.05× input
-  (95% discount) with no explicit cache storage fee, and the full 1M context
-  window bills at these rates with no long-context tier.
-- **3.8, 3.7 and 3.6 Flash are introductory prices through 31 Dec 2026**,
-  doubling on 1 Jan 2027 to 1.50 / 7.50 / 0.15. This page goes stale on that
-  date.
+- **3.7 and 3.6 Flash are introductory prices through 31 Dec 2026**, doubling
+  on 1 Jan 2027 to 1.50 / 7.50 / 0.15. This page goes stale on that date.
 - **Context caching is billed by storage — $/1M tokens per *hour*** — which is
   not a per-request `cache_write` and is deliberately not carried. Pricing it
   as one would be inventing a number.
@@ -245,43 +239,6 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
-
-### 14 Oct 2026
-
-**Added `gemini-4-argon`,** at 2 / 10 / 0.10 (input, output including thinking
-tokens, cached input). Confirmed 14 Oct 2026 on Google's
-[pricing page](https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon)
-and [model page](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon).
-
-`rate_for` matches by longest substring, and no existing key in `LIST_RATES` is
-a substring of `gemini-4-argon`, so without this row the model resolves to no
-price and its tokens cost zero.
-
-**These are introductory prices through 30 November 2026.** From **1 December
-2026** all three double:
-
-| model | input | output | cached input | from |
-| --- | --- | --- | --- | --- |
-| `gemini-4-argon` | 4.00 | 20.00 | 0.20 | 1 Dec 2026 |
-
-Recorded here rather than in the code for the same reason `gemini-3.8-flash`
-and `gpt-5.6-sol` are: `LIST_RATES` carries what the meter bills today, and the
-successor figures sit here so the row can be moved on the day rather than
-rediscovered after a month of half-price totals.
-
-**Implicit caching only, at 0.05× input.** Explicit context caching
-(`cachedContents` / `caches.create`) and its hourly storage charge are not
-supported on `gemini-4-argon`. Implicit caching is enabled by default for
-prompts of at least 4,096 tokens and discounts cached input by 95% ($0.10
-through 30 Nov 2026, $0.20 from 1 Dec 2026), with no `cache_write` or storage
-fee.
-
-**Flat 1M context window, and no sibling variants.** The full 1,048,576-token
-unified input+output window bills at the standard rate (no >200k doubling).
-Batch and Flex ($1 / $5 / $0.05 introductory; $2 / $10 / $0.10 from 1 Dec
-2026) and Priority ($3.60 / $18 / $0.18 introductory; $7.20 / $36 / $0.36 from
-1 Dec 2026) are consumption modes rather than model ids and stay off the card.
-Not available on the Free tier or on Google AI Pro.
 
 ### 1 Oct 2026
 

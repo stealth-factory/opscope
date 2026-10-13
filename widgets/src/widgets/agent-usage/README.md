@@ -780,7 +780,7 @@ with its money, its tokens, and the models underneath, and every model row
 carrying both: what it cost and what it ran.
 
 ```
- ── METERED ── this machine · at list prices · 14 Oct 2026
+ ── METERED ── this machine · at list prices · 1 Oct 2026
   Counted from transcripts, which are written where the agent ran. Claude used
   on another machine, or on claude.ai, is not in here.
   today    $172.64    74.3M tokens
@@ -815,7 +815,7 @@ off a list whose absence would read as *nothing here is unpriced*.
 And the window's money then says **at least**:
 
 ```
- ── METERED ── this machine · at list prices · 14 Oct 2026
+ ── METERED ── this machine · at list prices · 1 Oct 2026
   CLI rollouts only. Codex bills Cloud, Web, Desktop and the rest to the same
   account, and none of those leave anything on this disk to count.
   today    at least $9.79     27.3M tokens
@@ -868,13 +868,10 @@ model charges. Fable 5.1 and Mythos 5.1 read cache at a quarter of what Fable 5
 and Mythos 5 charge, a smaller multiplier than every other Anthropic model.
 `gpt-5.6-sol` is a **promotional** price, dated by OpenAI as running at least
 through 21 Nov 2026, and is carried because it is the only price published and
-the one the meter bills at. `gemini-4-argon` and `gemini-3.8-flash` are
-**introductory**: `gemini-4-argon` is 2 / 10 / 0.10 through 30 November 2026
-(with implicit-only caching at 0.05× input and no explicit cache storage) and
-doubles to 4 / 20 / 0.20 on 1 December 2026, while `gemini-3.8-flash` doubles
-on 1 January 2027, and the successor figures are already written down so each
-row moves on the day rather than being rediscovered after a month of
-half-price totals. `grok-4.7` carries the same
+the one the meter bills at. `gemini-3.8-flash` is **introductory**: input,
+output and cached input all double on 1 January 2027, and the successor figures
+are already written down, so the row moves on the day rather than being
+rediscovered after a month of half-price totals. `grok-4.7` carries the same
 below-200k rates as `grok-4.6` — 2 / 6 / 0.50 — and still needs its own row:
 no existing key is a substring of `grok-4.7`, so without one the model costs
 nothing. `gpt-6-sol` and `gpt-6-luna` are the same shape of gap against the
