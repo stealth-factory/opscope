@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -965,6 +966,103 @@ struct Net {
     ips: Vec<String>,
     funnel: bool,
     operator: bool,
+}
+
+struct NetSnapshot {
+    self_node: Net,
+    serve_config: serde_json::Value,
+}
+
+struct SnapshotMessage<T> {
+    generation: u64,
+    result: Result<T, String>,
+    _work: tc::RefreshGuard,
+}
+
+struct AsyncSnapshot<T> {
+    generation: u64,
+    value: Option<T>,
+    error: Option<String>,
+    receiver: Option<Receiver<SnapshotMessage<T>>>,
+}
+
+impl<T> Default for AsyncSnapshot<T> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            value: None,
+            error: None,
+            receiver: None,
+        }
+    }
+}
+
+impl<T: Send + 'static> AsyncSnapshot<T> {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.value = None;
+        self.error = None;
+        self.receiver = None;
+    }
+
+    fn start(
+        &mut self,
+        activity: tc::Refresh,
+        acquire: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) {
+        if self.receiver.is_some() || self.value.is_some() || self.error.is_some() {
+            return;
+        }
+
+        let generation = self.generation;
+        let (sender, receiver) = mpsc::channel();
+        self.receiver = Some(receiver);
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let work = activity.start();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(acquire))
+                .unwrap_or_else(|_| Err("detail snapshot acquisition failed".into()));
+            let message = SnapshotMessage {
+                generation,
+                result,
+                _work: work,
+            };
+            let _ = sender.send(message);
+        });
+        if let Err(error) = spawned {
+            self.receiver = None;
+            self.error = Some(format!("detail snapshot worker failed: {}", error));
+        }
+    }
+
+    fn poll(&mut self) {
+        let received = self.receiver.as_ref().map(Receiver::try_recv);
+        match received {
+            Some(Ok(message)) => {
+                self.receiver = None;
+                let SnapshotMessage {
+                    generation,
+                    result,
+                    _work,
+                } = message;
+                if generation == self.generation {
+                    match result {
+                        Ok(value) => self.value = Some(value),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+                drop(_work);
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.receiver = None;
+                self.error = Some("detail snapshot worker stopped unexpectedly".into());
+            }
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.receiver.is_some()
+    }
 }
 
 /// This node's tailnet name and addresses, and whether it may Funnel.
@@ -2257,13 +2355,11 @@ fn main() {
     // detail, the row cursor on the list. The wheel never sets either, so
     // neither view chases a selection the moment it is turned.
     let (mut dmoved, mut moved) = (false, false);
-    // Tailscale is asked once per visit to the second screen rather than
-    // once per frame: two subprocesses at 3Hz would cost more than the
-    // whole rest of the widget. Any change made there clears them.
-    let mut net: Option<(Net, serde_json::Value)> = None;
+    let mut net_snapshot = AsyncSnapshot::<NetSnapshot>::default();
 
     loop {
         let (w, h) = tc::size();
+        net_snapshot.poll();
 
         // A SIGTERM is given a moment to work before the harder question is
         // asked, because most things do stop.
@@ -2291,7 +2387,7 @@ fn main() {
             if let Some(said) = done {
                 notice = Some(said);
                 working = None;
-                net = None;
+                net_snapshot.invalidate();
                 store.wake();
             }
         }
@@ -2452,7 +2548,7 @@ fn main() {
                         }
                     }
                     "r" | "R" => {
-                        net = None;
+                        net_snapshot.invalidate();
                         store.wake();
                     }
                     _ => {}
@@ -2506,7 +2602,7 @@ fn main() {
                                 links: Vec::new(),
                                 tunnel: None,
                             });
-                            net = None;
+                            net_snapshot.invalidate();
                         } else {
                             notice = Some((
                                 "nothing more to show - /proc will not name \
@@ -2570,10 +2666,58 @@ fn main() {
         }
 
         if let Some(view) = detail.as_mut() {
-            if net.is_none() {
-                net = Some((tailnet_self(), serve_config()));
+            if net_snapshot.value.is_none()
+                && net_snapshot.error.is_none()
+                && !net_snapshot.is_pending()
+            {
+                net_snapshot.start(activity.clone(), || {
+                    Ok(NetSnapshot {
+                        self_node: tailnet_self(),
+                        serve_config: serve_config(),
+                    })
+                });
             }
-            let (self_node, cfg) = net.as_ref().expect("just filled");
+            let Some(snapshot) = net_snapshot.value.as_ref() else {
+                let title = format!(":{}", view.port);
+                let mut rows = vec![tc::title_busy(
+                    &title,
+                    w,
+                    &ok.port,
+                    activity.tick(tc::animation_tick()),
+                )];
+                if let Some(error) = net_snapshot.error.as_ref() {
+                    rows.push(tc::seg(
+                        &[(ok.bad.as_str(), format!(" ! {}", error))],
+                        w - 1,
+                    ));
+                } else {
+                    rows.push(tc::seg(
+                        &[(ok.dim.as_str(), " loading network details…".into())],
+                        w - 1,
+                    ));
+                }
+                rows.extend(footer(
+                    &confirm,
+                    &watch,
+                    &working,
+                    &notice,
+                    w,
+                    &[
+                        vec![(ok.accent.clone(), "[r]".into()), (ok.dim.clone(), "etry".into())],
+                        vec![
+                            (ok.accent.clone(), "←".into()),
+                            (ok.dim.clone(), "/esc back".into()),
+                        ],
+                        vec![(ok.dim.clone(), "[q]uit".into())],
+                    ],
+                    &ok,
+                ));
+                tc::draw(&rows, w, h);
+                keyboard.wait(Duration::from_millis(100));
+                continue;
+            };
+            let self_node = &snapshot.self_node;
+            let cfg = &snapshot.serve_config;
             match all.iter().find(|r| r.port == view.port) {
                 Some(live) => view.row = live.clone(),
                 None => {
@@ -3056,6 +3200,96 @@ fn bind_note(row: &Row, p: &Palette) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_snapshot<T: Send + 'static>(snapshot: &mut AsyncSnapshot<T>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while snapshot.is_pending() && std::time::Instant::now() < deadline {
+            snapshot.poll();
+            std::thread::yield_now();
+        }
+        snapshot.poll();
+    }
+
+    #[test]
+    fn detail_snapshot_returns_while_loading_and_publishes_on_completion() {
+        let activity = tc::Refresh::default();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut snapshot = AsyncSnapshot::default();
+        snapshot.start(activity.clone(), move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(42)
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(snapshot.is_pending());
+        assert!(snapshot.value.is_none());
+        assert!(activity.tick(0).is_some());
+
+        release_tx.send(()).unwrap();
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(snapshot.value, Some(42));
+        assert_eq!(snapshot.error, None);
+        assert_eq!(activity.tick(0), None);
+    }
+
+    #[test]
+    fn detail_snapshot_ignores_a_completion_after_invalidation() {
+        let activity = tc::Refresh::default();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut snapshot = AsyncSnapshot::default();
+        snapshot.start(activity.clone(), move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(1)
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        snapshot.invalidate();
+        assert!(!snapshot.is_pending());
+
+        snapshot.start(activity.clone(), || Ok(2));
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(snapshot.value, Some(2));
+
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while activity.tick(0).is_some() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(activity.tick(0), None);
+        snapshot.poll();
+        assert_eq!(snapshot.value, Some(2));
+    }
+
+    #[test]
+    fn detail_snapshot_surfaces_panics_and_can_be_retried() {
+        let activity = tc::Refresh::default();
+        let mut snapshot = AsyncSnapshot::default();
+        snapshot.start(activity.clone(), || Err("tailnet unavailable".into()));
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(snapshot.error.as_deref(), Some("tailnet unavailable"));
+        assert_eq!(activity.tick(0), None);
+
+        snapshot.invalidate();
+        snapshot.start(activity.clone(), || -> Result<(), String> {
+            panic!("acquisition failed")
+        });
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("detail snapshot acquisition failed")
+        );
+        assert_eq!(activity.tick(0), None);
+
+        snapshot.invalidate();
+        snapshot.start(activity.clone(), || Ok(()));
+        wait_for_snapshot(&mut snapshot);
+        assert!(snapshot.error.is_none());
+        assert!(snapshot.value.is_some());
+        assert_eq!(activity.tick(0), None);
+    }
 
     /// Two sockets in the shape `ss -tine` prints them: the addresses and
     /// the inode on one line, the counters on an indented continuation.

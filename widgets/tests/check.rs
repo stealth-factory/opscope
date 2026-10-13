@@ -44,10 +44,12 @@
 //! an `opscope.rs` that the port had already replaced.
 
 use std::collections::{BTreeMap, BTreeSet};
+use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 /// The repo root, from this crate's own location.
 fn root() -> PathBuf {
@@ -250,180 +252,273 @@ fn widgets() -> BTreeMap<String, String> {
     found
 }
 
-fn without_comments(src: &str) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    while i < chars.len() {
-        let ch = chars[i];
-        if quoted {
-            out.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-            out.push(ch);
-            i += 1;
-        } else if ch == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-        } else if ch == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            let mut depth = 1usize;
-            while i < chars.len() && depth > 0 {
-                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
-                    depth += 1;
-                    i += 2;
-                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    if chars[i] == '\n' {
-                        out.push('\n');
-                    }
-                    i += 1;
+fn rust_tokens(src: &str, context: &str) -> Vec<TokenTree> {
+    TokenStream::from_str(src)
+        .unwrap_or_else(|error| panic!("refresh checker could not lex {context}: {error}"))
+        .into_iter()
+        .collect()
+}
+
+fn rust_tokens_without_tests(src: &str, context: &str) -> Vec<TokenTree> {
+    let production = without_tests(src);
+    match TokenStream::from_str(&production) {
+        Ok(tokens) => tokens.into_iter().collect(),
+        Err(_) => without_test_items(&rust_tokens(src, context)),
+    }
+}
+
+fn without_test_items(tokens: &[TokenTree]) -> Vec<TokenTree> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_punct(tokens.get(index), '#')
+            && matches!(
+                tokens.get(index + 1),
+                Some(TokenTree::Group(group))
+                    if group.delimiter() == Delimiter::Bracket && is_test_cfg(group)
+            )
+        {
+            index += 2;
+            while index < tokens.len() {
+                let token = &tokens[index];
+                index += 1;
+                if matches!(token, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace)
+                    || is_punct(Some(token), ';')
+                    || is_punct(Some(token), ',')
+                {
+                    break;
                 }
             }
-        } else {
-            out.push(ch);
-            i += 1;
+            continue;
         }
+        match &tokens[index] {
+            TokenTree::Group(group) => {
+                let nested: Vec<TokenTree> = group.stream().into_iter().collect();
+                let mut rebuilt = Group::new(
+                    group.delimiter(),
+                    TokenStream::from_iter(without_test_items(&nested)),
+                );
+                rebuilt.set_span(group.span());
+                out.push(TokenTree::Group(rebuilt));
+            }
+            token => out.push(token.clone()),
+        }
+        index += 1;
     }
     out
 }
 
-fn call_arguments(src: &str, name: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut search = 0;
-    while let Some(at) = src[search..].find(name) {
-        let open = search + at + name.len() - 1;
-        let mut depth = 0usize;
-        let mut quoted = false;
-        let mut escaped = false;
-        let mut close = None;
-        for (offset, ch) in src[open..].char_indices() {
-            if quoted {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    quoted = false;
-                }
-                continue;
-            }
-            if ch == '"' {
-                quoted = true;
-            } else if ch == '(' {
-                depth += 1;
-            } else if ch == ')' {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    close = Some(open + offset);
-                    break;
-                }
-            }
-        }
-        let Some(close) = close else {
-            break;
-        };
-        found.push(src[open + 1..close].to_string());
-        search = close + 1;
-    }
-    found
+fn is_test_cfg(group: &Group) -> bool {
+    let tokens: Vec<TokenTree> = group.stream().into_iter().collect();
+    matches!(
+        tokens.as_slice(),
+        [TokenTree::Ident(cfg), TokenTree::Group(args)]
+            if cfg == "cfg"
+                && args.delimiter() == Delimiter::Parenthesis
+                && matches!(
+                    args.stream().into_iter().collect::<Vec<_>>().as_slice(),
+                    [TokenTree::Ident(test)] if test == "test"
+                )
+    )
 }
 
-fn split_arguments(args: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut parens = 0usize;
-    let mut brackets = 0usize;
-    let mut braces = 0usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (at, ch) in args.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
+fn path_end(tokens: &[TokenTree], at: usize, segments: &[&str]) -> Option<usize> {
+    let mut index = at;
+    for (segment_index, segment) in segments.iter().enumerate() {
+        match tokens.get(index) {
+            Some(TokenTree::Ident(ident)) if ident == *segment => index += 1,
+            _ => return None,
         }
-        match ch {
-            '"' => quoted = true,
-            '(' => parens += 1,
-            ')' => parens = parens.saturating_sub(1),
-            '[' => brackets += 1,
-            ']' => brackets = brackets.saturating_sub(1),
-            '{' => braces += 1,
-            '}' => braces = braces.saturating_sub(1),
-            ',' if parens == 0 && brackets == 0 && braces == 0 => {
-                parts.push(args[start..at].trim().to_string());
-                start = at + 1;
+        if segment_index + 1 < segments.len() {
+            if !is_punct(tokens.get(index), ':') || !is_punct(tokens.get(index + 1), ':') {
+                return None;
             }
-            _ => {}
+            index += 2;
         }
     }
-    parts.push(args[start..].trim().to_string());
+    Some(index)
+}
+
+fn is_punct(token: Option<&TokenTree>, expected: char) -> bool {
+    matches!(token, Some(TokenTree::Punct(punct)) if punct.as_char() == expected)
+}
+
+fn visit_token_groups(tokens: &[TokenTree], visit: &mut impl FnMut(&[TokenTree])) {
+    visit(tokens);
+    for token in tokens {
+        if let TokenTree::Group(group) = token {
+            let nested: Vec<TokenTree> = group.stream().into_iter().collect();
+            visit_token_groups(&nested, visit);
+        }
+    }
+}
+
+fn split_arguments(group: &Group) -> Vec<Vec<TokenTree>> {
+    let mut parts = vec![Vec::new()];
+    for token in group.stream() {
+        if matches!(&token, TokenTree::Punct(punct) if punct.as_char() == ',') {
+            parts.push(Vec::new());
+        } else {
+            parts.last_mut().expect("one argument slot").push(token);
+        }
+    }
     parts
 }
 
+fn is_none_argument(tokens: &[TokenTree]) -> bool {
+    match tokens {
+        [TokenTree::Ident(ident)] => ident == "None",
+        [TokenTree::Group(group)] if group.delimiter() == Delimiter::Parenthesis => {
+            let nested: Vec<TokenTree> = group.stream().into_iter().collect();
+            is_none_argument(&nested)
+        }
+        _ => false,
+    }
+}
+
 fn refresh_wiring_is_present(src: &str) -> bool {
-    let src = without_comments(&without_tests(src));
-    let titles = call_arguments(&src, "tc::title_busy(");
-    src.contains("tc::Refresh")
-        && src.contains(".start()")
-        && !src.contains("tc::title(")
+    let tokens = rust_tokens_without_tests(src, "refresh wiring source");
+    refresh_wiring_tokens(&tokens)
+}
+
+fn refresh_wiring_tokens(tokens: &[TokenTree]) -> bool {
+    let mut has_refresh = false;
+    let mut has_start = false;
+    let mut uses_plain_title = false;
+    let mut titles = Vec::new();
+
+    visit_token_groups(tokens, &mut |scope| {
+        for index in 0..scope.len() {
+            if path_end(scope, index, &["tc", "Refresh"]).is_some() {
+                has_refresh = true;
+            }
+            if path_end(scope, index, &["tc", "title"]).is_some() {
+                uses_plain_title = true;
+            }
+            if is_punct(scope.get(index), '.') && matches!(
+                scope.get(index + 1),
+                Some(TokenTree::Ident(ident)) if ident == "start"
+            ) && matches!(
+                scope.get(index + 2),
+                Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis
+            ) {
+                has_start = true;
+            }
+            if let Some(end) = path_end(scope, index, &["tc", "title_busy"]) {
+                if let Some(TokenTree::Group(group)) = scope.get(end) {
+                    if group.delimiter() == Delimiter::Parenthesis {
+                        titles.push(split_arguments(group));
+                    }
+                }
+            }
+        }
+    });
+
+    has_refresh
+        && has_start
+        && !uses_plain_title
         && !titles.is_empty()
-        && titles.iter().all(|call| {
-            split_arguments(call)
-                .get(3)
-                .is_some_and(|busy| busy != "None" && !busy.is_empty())
+        && titles.iter().all(|args| {
+            args.get(3)
+                .is_some_and(|busy| !busy.is_empty() && !is_none_argument(busy))
+        })
+}
+
+fn has_builder_spawn(tokens: &[TokenTree], after_builder: usize) -> bool {
+    let end = tokens
+        .iter()
+        .enumerate()
+        .skip(after_builder)
+        .find(|(_, token)| is_punct(Some(token), ';'))
+        .map_or(tokens.len(), |(index, _)| index);
+    tokens[after_builder..end].windows(3).any(|window| {
+        is_punct(window.first(), '.')
+            && matches!(
+                window.get(1),
+                Some(TokenTree::Ident(ident)) if ident == "spawn"
+            )
+            && matches!(
+                window.get(2),
+                Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis
+            )
     })
 }
 
+fn has_thread_spawn(tokens: &[TokenTree]) -> bool {
+    let mut found = false;
+    visit_token_groups(tokens, &mut |scope| {
+        for index in 0..scope.len() {
+            if path_end(scope, index, &["thread", "spawn"]).is_some() {
+                found = true;
+            }
+            if let Some(end) = path_end(scope, index, &["thread", "Builder"]) {
+                if has_builder_spawn(scope, end) {
+                    found = true;
+                }
+            }
+        }
+    });
+    found
+}
+
 /// A production worker is presumed to acquire data unless it is clocks'
-/// notification thread. This is a shape check: it cannot prove guard
-/// lifetime or that a particular fetch is inside the guarded scope.
+/// notification thread. Token shape cannot prove guard lifetime or
+/// dataflow, so the checker stays intentionally narrow.
 fn needs_refresh_wiring(name: &str, src: &str) -> bool {
-    name != "clocks"
-        && without_comments(&without_tests(src)).contains("thread::spawn")
+    let tokens = rust_tokens_without_tests(src, &format!("widget {name}"));
+    needs_refresh_tokens(name, &tokens)
+}
+
+fn needs_refresh_tokens(name: &str, tokens: &[TokenTree]) -> bool {
+    name != "clocks" && has_thread_spawn(tokens)
+}
+
+fn refresh_widget_sources() -> BTreeMap<String, Vec<TokenTree>> {
+    let dir = root().join("widgets/src/widgets");
+    let mut found = BTreeMap::new();
+    for entry in std::fs::read_dir(&dir).expect("the bin directory").flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let mut tokens = Vec::new();
+        for part in std::fs::read_dir(&path).expect("a widget directory").flatten() {
+            if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                let source = std::fs::read_to_string(part.path()).expect("widget Rust source");
+                tokens.extend(rust_tokens_without_tests(
+                    &source,
+                    &format!("widget {stem} source"),
+                ));
+            }
+        }
+        found.insert(stem, tokens);
+    }
+    found
 }
 
 #[test]
 fn refresh_wiring_shape_rejects_missing_guard_or_busy_title() {
     let good = r#"let refresh = tc::Refresh::default();
         let _guard = refresh.start();
-        tc::title_busy("widget", w, colour, refresh.tick(tick));"#;
+        tc::title_busy(label.replace(')', ""), w, colour, refresh.tick(tick));"#;
     assert!(refresh_wiring_is_present(good));
     assert!(!refresh_wiring_is_present(&good.replace(".start()", "")));
     assert!(!refresh_wiring_is_present(
         &good.replace("refresh.tick(tick)", "None")
     ));
-    assert!(!refresh_wiring_is_present(&format!("// {good}\n")));
+    let pseudo = r#"// tc::Refresh refresh.start() tc::title_busy("fake", w, c, tick)
+        let text = "tc::Refresh refresh.start() tc::title_busy(...); tc::title(";
+    "#;
+    assert!(!refresh_wiring_is_present(pseudo));
 }
 
 #[test]
 fn every_polling_widget_tracks_refresh_activity_in_its_title() {
-    let missing: Vec<String> = widgets()
+    let missing: Vec<String> = refresh_widget_sources()
         .into_iter()
-        .filter(|(name, src)| needs_refresh_wiring(name, src))
-        .filter(|(_, src)| !refresh_wiring_is_present(src))
+        .filter(|(name, tokens)| needs_refresh_tokens(name, tokens))
+        .filter(|(_, tokens)| !refresh_wiring_tokens(tokens))
         .map(|(name, _)| name)
         .collect();
     assert!(
@@ -439,6 +534,15 @@ fn refresh_checker_discovers_new_pollers_and_exempts_clocks() {
     assert!(needs_refresh_wiring("future-widget", future_poller));
     assert!(!refresh_wiring_is_present(future_poller));
     assert!(!needs_refresh_wiring("clocks", future_poller));
+
+    let builder_poller = "std::thread::Builder::new().spawn(move || acquire());";
+    assert!(needs_refresh_wiring("future-builder-widget", builder_poller));
+    assert!(!refresh_wiring_is_present(builder_poller));
+
+    let pseudo = r#"// thread::spawn(move || acquire());
+        let text = "std::thread::Builder::new().spawn(...)";
+    "#;
+    assert!(!needs_refresh_wiring("future-widget", pseudo));
 }
 
 #[test]

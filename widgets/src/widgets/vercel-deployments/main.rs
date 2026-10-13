@@ -249,6 +249,55 @@ fn scopes_for(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+struct TeamDiscovery {
+    configured: Vec<String>,
+    scopes: Vec<String>,
+    note: Option<String>,
+    ready: bool,
+}
+
+impl TeamDiscovery {
+    fn new(configured: Vec<String>) -> Self {
+        Self {
+            configured,
+            scopes: Vec::new(),
+            note: None,
+            ready: false,
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        discover: impl FnOnce() -> (Vec<String>, Option<String>),
+    ) -> &[String] {
+        if self.ready {
+            return &self.scopes;
+        }
+        if self.configured.is_empty() {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover)) {
+                Ok((found, note)) => {
+                    self.scopes = scopes_for(Vec::new(), found);
+                    self.ready = note.is_none();
+                    self.note = note;
+                }
+                Err(_) => {
+                    self.scopes = scopes_for(Vec::new(), Vec::new());
+                    self.note = Some("team discovery failed".into());
+                }
+            }
+        } else {
+            self.scopes = scopes_for(self.configured.clone(), Vec::new());
+            self.note = None;
+            self.ready = true;
+        }
+        &self.scopes
+    }
+
+    fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+}
+
 /// One row per deployment, however many scopes returned it.
 ///
 /// The personal scope is a request with no `teamId`, and Vercel answers
@@ -1185,13 +1234,11 @@ fn main() {
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
-    let mut poll_teams = teams;
+    let mut team_discovery = TeamDiscovery::new(teams);
     let poll_projects = projects.clone();
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
     let poller_activity = refresh_activity.clone();
-    let mut poll_scope: Option<String> = None;
-    let mut scopes_ready = false;
     // Teams that turned the token away for want of a SAML session, by id,
     // and the names to show for them. A token does not gain a SAML session
     // by being asked again, so they are not asked again.
@@ -1207,26 +1254,10 @@ fn main() {
             }
         } else {
             let work = poller_activity.start();
-            if !scopes_ready {
-                let discovered = if poll_teams.is_empty() {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        discover_teams(&poll_token)
-                    })) {
-                        Ok((found, stopped)) => {
-                            poll_scope = stopped;
-                            found
-                        }
-                        Err(_) => {
-                            poll_scope = Some("team discovery failed".into());
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-                poll_teams = scopes_for(std::mem::take(&mut poll_teams), discovered);
-                scopes_ready = true;
-            }
+            let poll_teams = team_discovery
+                .resolve(|| discover_teams(&poll_token))
+                .to_vec();
+            let poll_scope = team_discovery.note().map(str::to_owned);
             let mut out: Vec<serde_json::Value> = Vec::new();
             // Whether any scope answered this round, deployments or not.
             let mut any_loaded = false;
@@ -2183,6 +2214,56 @@ mod tests {
     #[test]
     fn a_zero_width_pane_keeps_the_text() {
         assert_eq!(wrap_words("hello", 0), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn failed_team_discovery_retries_until_a_complete_result() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        let mut calls = 0;
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                panic!("temporary discovery failure");
+            })
+            .to_vec();
+        assert_eq!(scopes, vec![""]);
+        assert_eq!(discovery.note(), Some("team discovery failed"));
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                (
+                    vec!["team_a".into()],
+                    Some("team list stopped early".into()),
+                )
+            })
+            .to_vec();
+        assert_eq!(scopes, vec!["", "team_a"]);
+        assert_eq!(discovery.note(), Some("team list stopped early"));
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                (vec!["team_a".into(), "team_b".into()], None)
+            })
+            .to_vec();
+        assert_eq!(scopes, vec!["", "team_a", "team_b"]);
+        assert_eq!(discovery.note(), None);
+        assert_eq!(calls, 3);
+
+        let cached = discovery.resolve(|| panic!("complete discovery is cached"));
+        assert_eq!(cached, ["", "team_a", "team_b"]);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn explicit_team_scopes_bypass_discovery() {
+        let configured = vec!["team_named".into()];
+        let mut discovery = TeamDiscovery::new(configured.clone());
+        let scopes = discovery.resolve(|| panic!("explicit scopes do not discover"));
+        assert_eq!(scopes, configured);
+        assert_eq!(discovery.note(), None);
     }
 
 
