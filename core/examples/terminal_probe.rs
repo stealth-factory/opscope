@@ -15,7 +15,7 @@ fn main() {
     let mut selected = 0;
     // Four slots on an 80-column fixture: the chart is 74 cells wide, and
     // (74 * 8 - 1) is divisible by 3, so one new sample is a whole-pixel shift.
-    let mut samples = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
+    let mut series = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -33,10 +33,10 @@ fn main() {
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
                 "t" => {
-                    samples.remove(0);
-                    samples.push(Some(0.9));
+                    series.remove(0);
+                    series.push(Some(0.9));
                 }
-                "s" => samples[1] = Some(0.05),
+                "s" => series[1] = Some(0.05),
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
@@ -76,7 +76,7 @@ fn main() {
         );
         // Row 2 is the chart. These words sit on the first row under it,
         // which the chart does not paint over.
-        let samples = tc::seg(
+        let marks = tc::seg(
             &[
                 (stale.as_str(), " stale".into()),
                 (partial.as_str(), " partial".into()),
@@ -85,11 +85,11 @@ fn main() {
             w.saturating_sub(1),
         );
         let chart = tc::LineChart {
-            slots: samples.len(),
+            slots: series.len(),
             focus: None,
             traces: vec![tc::Trace {
                 positions: None,
-                values: samples.clone(),
+                values: series.clone(),
                 colour: tc::rgb(50, 220, 170),
                 baseline: None,
             }],
@@ -155,7 +155,7 @@ fn main() {
         }
         rows.resize(h, String::new());
         if h > 9 {
-            rows[8] = samples;
+            rows[8] = marks;
         }
         rows[h - 1] = format!("SELECTED:{selected}");
         tc::draw_plots(&rows, w, h, &plots);
