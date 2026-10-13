@@ -961,26 +961,45 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
     // Each bar leads its block, and what it is a bar of - the dollars, and
     // the rule that refills them - sits under it, indented to the bar.
     let indent = " ".repeat(label_w + 3);
-    let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> String {
+    let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> Vec<String> {
         // The figures are the reading, so they keep the row: where the
         // bar's column leaves too little room for them, they move left
-        // to a short indent rather than be cut.
+        // to a short indent rather than be cut, and where even that is too
+        // narrow they carry on to the next row a whole part at a time.
+        let room_for = |lead: &str| w.saturating_sub(1).saturating_sub(lead.chars().count());
         let need: usize = parts.iter().map(|(_, t)| t.chars().count()).sum();
-        let lead = if indent.chars().count() + need <= w.saturating_sub(1) { indent.clone() } else { "    ".to_string() };
-        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lead)];
-        line.extend(parts);
+        let lead = if need <= room_for(&indent) { indent.clone() } else { "    ".to_string() };
+        let mut lines: Vec<Vec<(String, String)>> = vec![Vec::new()];
+        let mut used = 0;
+        for (colour, part) in parts {
+            let n = part.chars().count();
+            if used > 0 && used + n > room_for(&lead) {
+                lines.push(Vec::new());
+                used = 0;
+            }
+            // A part opening its own row drops the space that joined it on.
+            let part = if used == 0 { part.trim_start().to_string() } else { part };
+            used += part.chars().count();
+            lines.last_mut().unwrap().push((colour, part));
+        }
         // The tails are the parts a narrow pane can do without, and each
-        // goes whole or not at all.
-        let mut room = w.saturating_sub(1);
-        room = room.saturating_sub(line.iter().map(|(_, t)| t.chars().count()).sum::<usize>());
+        // goes whole or not at all, on the last row.
+        let mut room = room_for(&lead).saturating_sub(used);
         for tail in tails {
             let n = tail.chars().count();
             if n <= room {
                 room -= n;
-                line.push((p.dim.clone(), tail));
+                lines.last_mut().unwrap().push((p.dim.clone(), tail));
             }
         }
-        seg_owned(&line, w)
+        lines
+            .into_iter()
+            .map(|parts| {
+                let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lead.clone())];
+                line.extend(parts);
+                seg_owned(&line, w)
+            })
+            .collect()
     };
     let prepaid = d.prepaid.as_ref();
     let left = prepaid.and_then(|v| loose(&v["availableCents"]));
@@ -1014,7 +1033,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 tails.push(format!(" · {} used", money(paid - left)));
             }
         }
-        rows.push(detail(parts, tails));
+        rows.extend(detail(parts, tails));
         // The rule that refills the balance, and whether it can run.
         let mut parts: Vec<(String, String)> = vec![(p.dim.clone(), "auto top-up ".into())];
         let mut tails: Vec<String> = Vec::new();
@@ -1040,7 +1059,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
             }
             _ => parts.push((p.dim.clone(), "off".into())),
         }
-        rows.push(detail(parts, tails));
+        rows.extend(detail(parts, tails));
         if let Some(said) = below {
             let budget = w.saturating_sub(1).saturating_sub(indent.chars().count());
             if said.chars().count() <= budget {
@@ -1089,10 +1108,10 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 if failed {
                     parts.push((p.warn.clone(), format!(" {}", status.to_lowercase().replace('_', " "))));
                 }
-                rows.push(detail(parts, Vec::new()));
+                rows.extend(detail(parts, Vec::new()));
             }
             if sorted.len() > TOPUPS_SHOWN {
-                rows.push(detail(
+                rows.extend(detail(
                     vec![(p.dim.clone(), format!("        +{} earlier", sorted.len() - TOPUPS_SHOWN))],
                     Vec::new(),
                 ));
@@ -1150,13 +1169,13 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 tails.push(format!(" · {} left", money(limit - used)));
             }
             tails.extend(when.clone());
-            rows.push(detail(parts, tails));
+            rows.extend(detail(parts, tails));
         }
         // No limit set and nothing spent: the account is not using it.
         ExtraState::Unlimited { used } | ExtraState::Disabled { used } if *used <= 0.0 => {}
         ExtraState::Unlimited { used } => {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "no limit set".into())], w - 1));
-            rows.push(detail(
+            rows.extend(detail(
                 vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month".into())],
                 when.into_iter().collect(),
             ));
@@ -1164,7 +1183,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
         ExtraState::Disabled { used } => {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "disabled".into())], w - 1));
             if *used > 0.0 {
-                rows.push(detail(
+                rows.extend(detail(
                     vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month, before it was disabled".into())],
                     Vec::new(),
                 ));
@@ -3688,6 +3707,11 @@ mod tests {
             assert!(pool.contains("5.1%"), "the pool's percentage was cut at {w}: {pool:?}");
             assert!(text.contains("$0.00 of $100.00"), "the limit was cut at {w}: {text}");
             assert!(text.contains("$20.00 left"), "the balance was cut at {w}: {text}");
+            // Review: the refill rule is money too, and wraps whole parts
+            // onto the next row rather than end in `when be`.
+            for part in ["auto top-up", "$10.00", "when below", "$2.00"] {
+                assert!(text.contains(part), "the refill rule's {part:?} was cut at {w}: {text}");
+            }
             for row in text.lines() {
                 assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
             }

@@ -962,6 +962,33 @@ pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     }
 }
 
+/// The week split by product, one `name ~pct` entry after another, each
+/// entry whole: an entry that does not fit carries on to the next row,
+/// under the first, rather than be cut and lose its percentage.
+fn by_product_rows(entries: Vec<String>, w: usize, p: &Palette) -> Vec<String> {
+    // Later rows sit under the first entry, or at a short indent where an
+    // entry would not fit even there.
+    let head = "  by product ";
+    let under = " ".repeat(head.chars().count());
+    let short = "    ";
+    let room = |lead: &str| w.saturating_sub(1).saturating_sub(lead.chars().count()).max(1);
+    let mut lines: Vec<(String, String)> = vec![(head.to_string(), String::new())];
+    for entry in entries {
+        let (lead, last) = lines.last_mut().unwrap();
+        let joined = if last.is_empty() { entry.clone() } else { format!("{last} · {entry}") };
+        if last.is_empty() || joined.chars().count() <= room(lead) {
+            *last = joined;
+        } else {
+            let lead = if entry.chars().count() <= room(&under) { under.clone() } else { short.to_string() };
+            lines.push((lead, entry));
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(lead, text)| tc::seg(&[(p.dim.as_str(), lead), (p.txt.as_str(), text)], w - 1))
+        .collect()
+}
+
 /// A product as the split names it on screen.
 ///
 /// On the unified plan the entry the server leaves unnamed is Cursor. Not a
@@ -1108,8 +1135,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
     // A live reading is of the window we are in, so there is nothing to roll
-    // forward and nothing to qualify. Only the log needs either.
-    let (reset, projected) = if d.quota_live {
+    // forward and nothing to qualify - until that window ends while the
+    // answer is still held in the poll cache, when it is last week's figure
+    // as much as a log line is, and is rolled and qualified the same way.
+    let (reset, projected) = if d.quota_live && end.is_none_or(|e| e > now()) {
         (end, false)
     } else {
         window_now(begin, end, now())
@@ -1522,30 +1551,16 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
             // unnamed; named and said for what it is.
             let split = pool_split(d);
             if !split.is_empty() {
-                let text = split
-                    .iter()
-                    .map(|(name, pct)| format!("{} ~{:.0}%", name, pct))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                rows.push(tc::seg(
-                    &[(p.dim.as_str(), "  by product ".into()), (p.txt.as_str(), text)],
-                    w - 1,
-                ));
+                let entries = split.iter().map(|(name, pct)| format!("{} ~{:.0}%", name, pct)).collect();
+                rows.extend(by_product_rows(entries, w, p));
             }
         } else if !q.products.is_empty() {
-            let split = q
+            let entries = q
                 .products
                 .iter()
                 .map(|(name, pct)| format!("{} {}", product_name(name, false), pct_text(*pct).trim()))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            rows.push(tc::seg(
-                &[
-                    (p.dim.as_str(), "  by product ".into()),
-                    (p.txt.as_str(), split),
-                ],
-                w - 1,
-            ));
+                .collect();
+            rows.extend(by_product_rows(entries, w, p));
         }
         rows.push(String::new());
     } else {
@@ -1916,10 +1931,18 @@ mod tests {
         // being discarded and an eleven-day-old log line shown instead.
         let base = newest_quota([LOG_LINE].into_iter()).expect("a reading");
 
-        // Taken a minute ago: current, and its window is the one we are in.
+        // Taken a minute ago: current, and its window is the one we are in -
+        // a live answer is of the week it was asked in, so the log line's
+        // week is moved to end after now.
+        let live_end = "2099-08-17T00:00:00.000000+00:00";
         let d = Data {
             ok: true,
-            quota: Some(Quota { taken: Some(now() - 60.0), ..base.clone() }),
+            quota: Some(Quota {
+                taken: Some(now() - 60.0),
+                start: "2099-08-10T00:00:00.000000+00:00".into(),
+                end: live_end.into(),
+                ..base.clone()
+            }),
             quota_live: true,
             ..Default::default()
         };
@@ -1931,7 +1954,7 @@ mod tests {
         assert!(got.iter().all(|l| !l.projected), "a live window was read, not worked out");
         assert_eq!(
             got[0].reset,
-            iso_epoch("2026-08-17T00:00:00.000000+00:00"),
+            iso_epoch(live_end),
             "a live window is reported as the server gave it, not rolled"
         );
 
@@ -2774,6 +2797,41 @@ mod tests {
         let q = newest_quota([line].into_iter()).expect("the line was skipped");
         assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
         assert_eq!(q.prepaid, Some(20.0));
+    }
+
+    #[test]
+    fn the_product_split_wraps_whole_entries_on_a_narrow_pane() {
+        // Review: one joined row let `seg` clip `Grok Bot ~2%` off a
+        // 26-column pane.
+        let entries = vec!["Cursor ~3%".to_string(), "Grok Bot ~2%".to_string(), "Grok Imagine ~1%".to_string()];
+        for w in [26usize, 40, 120] {
+            let rows: Vec<String> = by_product_rows(entries.clone(), w, &palette()).iter().map(|r| strip(r)).collect();
+            let text = rows.join("\n");
+            for entry in &entries {
+                assert!(text.contains(entry.as_str()), "{entry:?} cut at {w}: {text}");
+            }
+            for row in &rows {
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+        assert_eq!(by_product_rows(entries, 120, &palette()).len(), 1, "a wide pane keeps one row");
+    }
+
+    #[test]
+    fn a_cached_live_answer_past_its_reset_is_projected_like_a_log_line() {
+        // Review: a live answer held across the weekly reset kept last
+        // week's figure as an unqualified current lane in [+].
+        let mut d = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        let begun = chrono::DateTime::from_timestamp((now() - 60.0 - 7.0 * 86400.0) as i64, 0).unwrap();
+        let q = d.quota.as_mut().unwrap();
+        q.start = begun.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        q.end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        let lane = lanes(&d).into_iter().next().expect("a lane");
+        assert!(lane.projected, "last week's figure drawn as this week's");
+        assert!(lane.reset.unwrap() > now(), "the reset left in the past");
+        // A live answer of the week we are in is taken as sent.
+        assert!(!lanes(&unified_grok(Spacexsi::Shared))[0].projected);
     }
 
     #[test]
