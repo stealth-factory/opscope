@@ -176,6 +176,31 @@ def artifact(name, data):
         (Path(directory) / name).write_bytes(data)
 
 
+def moving_meter_keeps_unchanged_pixels():
+    for width in (57, 120):
+        for shared in (False, True):
+            t = Terminal()
+            try:
+                t.read(0.3)
+                t.send(b"\x1b_Gi=2147483645;" + (b"OK" if shared else b"EBADF") + b"\x1b\\")
+                fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, width, 0, 0))
+                os.kill(t.proc.pid, signal.SIGWINCH)
+                t.read(0.2)
+                t.send(b"m")
+                t.read(0.3)
+                assert t.images()[-1][0][b"r"] == b"1"
+                assert t.images()[-1][0][b"t"] == (b"s" if shared else b"d")
+                count = len(t.images())
+                start = len(t.commands())
+                t.read(1.0)
+                assert len(t.images()) == count, "subpixel marker changes triggered an upload/reply loop"
+                assert not any(k.get(b"a") == b"d" for k, _ in t.commands()[start:]), "unchanged pixels were deleted"
+                t.quit()
+                print(f"PASS moving-meter/{width}/{'shared' if shared else 'direct'}")
+            finally:
+                t.close()
+
+
 def supported(t):
     assert t.images(), "acknowledged Kitty did not receive images"
     assert b"\x1b[?2026h" in t.output
@@ -456,6 +481,7 @@ def missing_and_late_replies_keep_their_upload_keys():
 
 
 if __name__ == "__main__":
+    moving_meter_keeps_unchanged_pixels()
     successful_upload_before_shared_failure()
     print("PASS shared-memory/success-before-failure")
     missing_and_late_replies_keep_their_upload_keys()
