@@ -161,6 +161,8 @@ def run(mode, reply, check):
     terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
     try:
         terminal.read(0.3)
+        if mode == "text":
+            assert b"\x1b[16t" not in terminal.output, "text mode queried pixel dimensions"
         check(terminal)
         terminal.quit()
     finally:
@@ -473,6 +475,22 @@ def cell_raster_drops_a_barren_resize(t):
     cell_queries_stay_outside_images(t.output)
 
 
+def lost_startup_cell_reply_does_not_block_resize(t):
+    # No reply to startup's CSI 16 t. Once its timeout passes, the next
+    # resize query must stand alone and accept the new cell dimensions.
+    t.read(1.8)
+    before = t.output.count(b"\x1b[16t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    assert t.output.count(b"\x1b[16t") > before
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.4)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "lost startup reply blocked the resize report"
+    assert int(keys[b"v"]) == int(keys[b"r"]) * 40
+    cell_queries_stay_outside_images(t.output)
+
+
 def shm_rejected(t):
     probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
     assert probes, "no shared-memory probe"
@@ -616,6 +634,7 @@ if __name__ == "__main__":
                                ("auto", "kitty", cell_raster_rejects_absurd_and_zero),
                                ("auto", "kitty", cell_raster_follows_winsize_pixels),
                                ("auto", "kitty", cell_raster_drops_a_barren_resize),
+                               ("auto", "kitty", lost_startup_cell_reply_does_not_block_resize),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

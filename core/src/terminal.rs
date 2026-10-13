@@ -546,7 +546,11 @@ fn note_cell_query_sent() {
 
 fn cell_clock_ms() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+    // Zero means no query is being timed. The first send must have a real
+    // timestamp too, or a lost startup reply never expires.
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 /// Previous count, or zero when there was nothing to release. The
