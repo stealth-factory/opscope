@@ -1800,9 +1800,9 @@ fn merge_label<'a>(state: &str, p: &'a Palette) -> (&'static str, &'a str) {
         "BEHIND" => ("behind", &p.warn),
         "UNSTABLE" => ("checks failing", &p.warn),
         // HAS_HOOKS means a merge queue or a required hook stands between
-        // this and the button - the PR itself is mergeable. pr.py has always
-        // called it ready; the port called it "checking", which reads as
-        // "not finished yet" and is the opposite of what it means.
+        // this and the button - the PR itself is mergeable. Calling it
+        // "checking" reads as "not finished yet", which is the opposite
+        // of what the state means.
         "HAS_HOOKS" => ("ready", &p.ok),
         // Drafts had no case and fell to the em-dash, so a draft was
         // indistinguishable from a PR whose state GitHub had not sent.

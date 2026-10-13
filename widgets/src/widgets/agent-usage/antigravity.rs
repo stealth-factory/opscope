@@ -292,9 +292,8 @@ pub struct Data {
 
 /// Whether a command line belongs to Antigravity's language server.
 ///
-/// The same match the Python makes with a regex, written out: `agy` or
-/// `antigravity` at the very start of the line or straight after a path
-/// separator, or `language_server` anywhere. Anchoring to the executable
+/// `agy` or `antigravity` at the very start of the line or straight after a
+/// path separator, or `language_server` anywhere. Anchoring to the executable
 /// keeps a process that merely names Antigravity in an argument - a grep,
 /// an editor with the file open - from having its sockets probed.
 fn is_language_server(cmd: &str) -> bool {

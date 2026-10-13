@@ -757,10 +757,9 @@ fn state_colour<'a>(state: &str, p: &'a Palette) -> &'a str {
     match state {
         "READY" => &p.ready,
         "BUILDING" => &p.build,
-        // Initializing is before the build starts, which is why
-        // deployments.py groups it with the queue rather than the build.
-        // Grouping it with BUILDING put the two panes on different colours
-        // for the same state.
+        // Initializing is before the build starts, so it takes the queue
+        // colour. Grouping it with BUILDING paints a deploy that has not
+        // started as if the build were already running.
         "INITIALIZING" => &p.queue,
         "ERROR" => &p.error,
         "QUEUED" => &p.queue,
@@ -769,7 +768,7 @@ fn state_colour<'a>(state: &str, p: &'a Palette) -> &'a str {
     }
 }
 
-/// Title case, which is all the Python's `.title()` is doing to a state.
+/// Title case of a state: the first letter upper, the rest lower.
 fn titled(state: &str) -> String {
     let mut chars = state.chars();
     match chars.next() {
@@ -2315,7 +2314,7 @@ mod tests {
         assert_eq!(dur(Some(45.0)), "   45s");
         assert_eq!(dur(Some(45.0)).chars().count(), 6);
         assert_eq!(dur(None).chars().count(), 6);
-        // Past a minute it changes shape, as the Python does.
+        // Past a minute the shape changes to minutes and seconds.
         assert_eq!(dur(Some(125.0)), "2m05s");
     }
 

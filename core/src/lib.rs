@@ -16,10 +16,9 @@
 
 //! What every widget shares: the terminal, the keyboard, and the drawing.
 //!
-//! A port of `common.py`, kept deliberately close to it. The widgets are
-//! being translated one at a time and the two versions have to sit side by
-//! side and agree on screen, so where a choice existed this keeps the
-//! Python behaviour rather than the more idiomatic Rust one.
+//! It began as a port of `common.py`. The widgets were translated one at
+//! a time, and while both versions ran they had to agree on screen, so
+//! where a choice existed this kept the earlier behaviour.
 
 mod dependencies;
 mod settings;

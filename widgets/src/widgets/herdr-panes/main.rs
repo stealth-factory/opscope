@@ -751,9 +751,9 @@ fn ago(seconds: f64) -> String {
 
 /// Resident memory in five cells, whatever there is to say.
 ///
-/// herdr-panes.py returns five characters for a reading and six for an
-/// absent one, so a process /proc would not name pushes the workspace
-/// column one cell right of every other row. The header allots five.
+/// Five for a reading and five for an absent one. A six-wide dash pushed
+/// the workspace column one cell right of every other row. The header
+/// allots five.
 fn mem(bytes: Option<u64>) -> String {
     let Some(bytes) = bytes else {
         return "   --".to_string();
@@ -2040,8 +2040,8 @@ mod tests {
 
     #[test]
     fn memory_keeps_its_column_width() {
-        // Five, matching the header - the Python gives six to the absent
-        // case, which is what this caught.
+        // Five, matching the header. An absent reading used to take six,
+        // which is what this caught.
         for value in [Some(0), Some(4096), Some(1_600_000_000), None] {
             assert_eq!(mem(value).chars().count(), 5, "{:?}", value);
         }

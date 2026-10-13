@@ -1850,7 +1850,7 @@ fn first_of(c: &serde_json::Value, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// A number as the Python's %g writes it: no trailing zeros on a whole one.
+/// No trailing zeros on a whole number. Anything else is printed as it is.
 fn tidy(v: f64) -> String {
     if v.fract().abs() < 1e-9 {
         format!("{}", v as i64)
