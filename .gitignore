@@ -24,3 +24,8 @@ config.json.*
 .env.*
 *.token
 *.secret
+
+# Debian packaging output.
+debian-dist/
+opscope_*_amd64.deb
+opscope_*_amd64.deb.sha256
