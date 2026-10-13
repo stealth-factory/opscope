@@ -10,6 +10,8 @@ fn main() {
     let mut hidden = false;
     let mut scroll = 0;
     let mut gallery = false;
+    let mut moving_meter = false;
+    let mut tick = 0_u64;
     let mut selected = 0;
     loop {
         for key in keyboard.poll() {
@@ -26,6 +28,7 @@ fn main() {
                     selected += 1;
                 }
                 "g" => gallery = !gallery,
+                "m" => moving_meter = !moving_meter,
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
@@ -147,6 +150,13 @@ fn main() {
                 .into_iter()
                 .filter_map(|p| p.in_viewport(scroll, 1, h.saturating_sub(2))),
             );
+        }
+        if moving_meter && !hidden {
+            tick += 1;
+            plots = vec![tc::Plot::gradient_meter(
+                3, 2, w.saturating_sub(6), 0.4, Some(0.501 + tick as f64 * 1e-12),
+                &tc::rgb(80, 210, 160), &tc::rgb(70, 80, 90), &ink,
+            )];
         }
         rows.resize(h, String::new());
         if h > 9 {
