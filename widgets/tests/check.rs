@@ -3971,6 +3971,12 @@ fn raw_string_end(src: &str, i: usize) -> Option<usize> {
 
 fn skip_tick(src: &str, i: usize) -> usize {
     let b = src.as_bytes();
+    // 'x' is a character, not a lifetime. Leaving the closing quote for a
+    // second scan treats the next byte as the character and can swallow a
+    // `}` that closes the function.
+    if i + 2 < b.len() && b[i + 1] != b'\\' && b[i + 2] == b'\'' {
+        return i + 3;
+    }
     if i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_') {
         let mut j = i + 1;
         while j < b.len() && is_ident_cont(b[j]) {
@@ -4365,6 +4371,20 @@ fn row() {
         "{:?}",
         links_missing_a_copied_url(blocks)
     );
+}
+
+#[test]
+fn a_character_literal_does_not_swallow_the_brace_after_it() {
+    assert_eq!(skip_tick("'x'}", 0), 3);
+    assert_eq!(&"'x'}"[3..], "}");
+    // A lifetime has no closing quote on the next byte. An escape still
+    // consumes the escaped byte and its own closing quote.
+    assert_eq!(skip_tick("'a>", 0), 2);
+    assert_eq!(skip_tick("'\\n'}", 0), 4);
+    assert_eq!(skip_tick("'\\''}", 0), 4);
+    let src = "fn row() { 'x'}\nfn next() { tc::clipboard(&u); }";
+    let names: Vec<_> = function_bodies(src).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["row", "next"]);
 }
 
 #[test]
