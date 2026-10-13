@@ -1311,4 +1311,5 @@ mod tests {
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!s.use_shm && s.probe_settled);
     }
+
 }
