@@ -1375,7 +1375,9 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // The window we are in, not the one the reading came from - the
         // heading used the raw end, so a rolled window lost its countdown
         // here while the summary still had one. Two screens, one answer.
-        let (current, rolled) = if d.quota_live {
+        // A live answer still held after its week ended is rolled too, as
+        // the summary rolls it.
+        let (current, rolled) = if d.quota_live && end.is_none_or(|e| e > now()) {
             (end, false)
         } else {
             window_now(begin, end, now())
@@ -2830,6 +2832,14 @@ mod tests {
         let lane = lanes(&d).into_iter().next().expect("a lane");
         assert!(lane.projected, "last week's figure drawn as this week's");
         assert!(lane.reset.unwrap() > now(), "the reset left in the past");
+        // Review: the tab's heading rolls it the same way, so its countdown
+        // is to the reset coming rather than gone.
+        let tab = tab_with_plots(&d, 120, 40, &Config::default(), &palette(), &mut Vec::new())
+            .iter()
+            .map(|r| strip(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tab.contains("resets in ~"), "{tab}");
         // A live answer of the week we are in is taken as sent.
         assert!(!lanes(&unified_grok(Spacexsi::Shared))[0].projected);
     }

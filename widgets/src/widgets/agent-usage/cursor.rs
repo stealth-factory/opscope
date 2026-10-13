@@ -660,12 +660,22 @@ pub fn unified(d: &Data) -> bool {
 /// happen to share a machine. Milliseconds, because that is the precision
 /// both vendors state it to, and the precision is what makes the match
 /// worth trusting.
+///
+/// A response still held in the cache when its week ends is rolled onto
+/// the week now running, as Grok's is, or for those minutes the same
+/// account's two windows would not match.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     let live = d.live.as_ref()?;
-    match (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
-        (Some(s), Some(e)) if e > s => Some((s, e)),
-        _ => None,
+    let (s, e) = match (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return None,
+    };
+    let at = now() * 1000.0;
+    if e > at {
+        return Some((s, e));
     }
+    let weeks = ((at - e) / (e - s)).floor() + 1.0;
+    Some((s + weeks * (e - s), e + weeks * (e - s)))
 }
 
 /// The monthly cycle additional usage resets on, as (start, end) epoch
@@ -3694,6 +3704,26 @@ mod tests {
         own.ok = true;
         own.hashes = 46_404;
         assert!(cursor_tab(&own, 120, &palette()).join("\n").contains("AI-WRITTEN CODE"));
+    }
+
+    #[test]
+    fn a_cached_window_past_its_reset_is_rolled_before_it_is_matched() {
+        // Review: Grok's ended window was rolled and Cursor's was not, so a
+        // cached Cursor response across the reset split one account in two.
+        let mut d = unified_data(true);
+        let week = 7.0 * 86_400_000.0;
+        let end = now() * 1000.0 - 60_000.0;
+        d.live.as_mut().unwrap()["billingCycleStart"] = serde_json::json!((end - week).to_string());
+        d.live.as_mut().unwrap()["billingCycleEnd"] = serde_json::json!(end.to_string());
+        let (s, e) = pool_window(&d).unwrap();
+        assert_eq!((s, e), (end, end + week));
+        // A window still running is taken as sent.
+        let d = unified_data(true);
+        let live = d.live.as_ref().unwrap();
+        let sent = (loose(&live["billingCycleStart"]).unwrap(), loose(&live["billingCycleEnd"]).unwrap());
+        if sent.1 > now() * 1000.0 {
+            assert_eq!(pool_window(&d), Some(sent));
+        }
     }
 
     #[test]
