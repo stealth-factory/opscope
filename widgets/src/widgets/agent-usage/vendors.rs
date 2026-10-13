@@ -134,15 +134,23 @@ fn place_spacexsi(
     grok_unified: bool,
     cursor_window: Option<(f64, f64)>,
     grok_window: Option<(f64, f64)>,
+    last: Option<(Spacexsi, Spacexsi)>,
 ) -> (Spacexsi, Spacexsi) {
     let same = cursor_unified && same_window(cursor_window, grok_window);
-    // Both unified but a window missing - a transient failure on either
-    // side - is not evidence of two accounts, and splitting one account
-    // into two sections on a dropped request is worse than keeping it one
-    // until the windows can be compared.
+    // Both unified but a window missing - a dropped request on either
+    // side - is evidence of neither one account nor two. The relationship
+    // last seen holds until the windows can be compared again; with none
+    // seen, nothing is merged, because merging two accounts hides one of
+    // them, where keeping one account apart for a pass only draws it twice.
     let unknown = cursor_unified && grok_unified && (cursor_window.is_none() || grok_window.is_none());
+    if unknown {
+        return match last {
+            Some(seen @ (c, g)) if c.unified() && g.unified() => seen,
+            _ => (Spacexsi::Separate, Spacexsi::Separate),
+        };
+    }
     match (cursor_unified, grok_unified || same) {
-        (true, true) if same || unknown => (Spacexsi::Shared, Spacexsi::Shared),
+        (true, true) if same => (Spacexsi::Shared, Spacexsi::Shared),
         (true, true) => (Spacexsi::Separate, Spacexsi::Separate),
         (true, false) => (Spacexsi::Alone, Spacexsi::No),
         (false, true) => (Spacexsi::No, Spacexsi::Alone),
@@ -151,13 +159,20 @@ fn place_spacexsi(
 }
 
 /// Tell each vendor where it stands, once both have been read.
+/// The relationship the last poll settled on, for a pass that cannot
+/// compare the two windows.
+static LAST_PLACED: std::sync::Mutex<Option<(Spacexsi, Spacexsi)>> = std::sync::Mutex::new(None);
+
 fn link_spacexsi(s: &mut State) {
+    let mut last = LAST_PLACED.lock().unwrap_or_else(|e| e.into_inner());
     let (cursor, grok) = place_spacexsi(
         crate::cursor::unified(&s.cursor),
         crate::grok::unified(&s.grok),
         crate::cursor::pool_window(&s.cursor),
         crate::grok::pool_window(&s.grok),
+        *last,
     );
+    *last = Some((cursor, grok));
     s.cursor.spacexsi = cursor;
     s.grok.spacexsi = grok;
     // The pool's split by product is Grok's to state; on the same account
@@ -235,10 +250,19 @@ pub fn retarget_tab(was: &str, tabs: &[String]) -> Option<usize> {
 /// two minutes, where Grok's may be a log line.
 fn spacexsi_tab_with_plots(s: &State, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
-    tc::append_plot_rows(&mut rows, plots, |local| {
-        crate::cursor::spacexsi_block_with_plots(&s.cursor, w, p, local)
-    });
-    if rows.is_empty() {
+    if crate::cursor::has_live(&s.cursor) {
+        tc::append_plot_rows(&mut rows, plots, |local| {
+            crate::cursor::spacexsi_block_with_plots(&s.cursor, w, p, local)
+        });
+    } else {
+        // Cursor's usage call did not answer, and Grok holds a reading of
+        // the same pool: that is drawn, as the summary already does, with
+        // Cursor's reason beside it - not Cursor's empty block alone.
+        let mut grok = s.grok.clone();
+        grok.spacexsi = Spacexsi::Alone;
+        tc::append_plot_rows(&mut rows, plots, |local| {
+            crate::grok::tab_with_plots(&grok, w, 0, &Config::default(), p, local)
+        });
         rows.extend(no_local(&crate::cursor::why_no_lane(&s.cursor), "", w, p));
     }
     while rows.last().is_some_and(|r| r.is_empty()) {
@@ -499,6 +523,17 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         {
             continue;
         }
+        // The mirror of that: Cursor quiet and Grok carrying the shared
+        // pool. One SpaceXSI group, from Grok, with Cursor's reason under
+        // it - not a second SpaceXSI heading saying the account has no quota.
+        if name == "cursor"
+            && place == Spacexsi::Shared
+            && names.contains(&"grok")
+            && lanes_of("cursor", s).is_empty()
+            && !lanes_of("grok", s).is_empty()
+        {
+            continue;
+        }
         let heading = spacexsi_heading(name, place);
         let got = lanes_of(name, s);
         if got.is_empty() {
@@ -685,6 +720,15 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         // the five above it. Said here only while nothing is asking on
         // their behalf - once it is, the tab reports the interval and this
         // line would be repeating a setting back at them.
+        if group_agent(name) == "spacexsi"
+            && s.cursor.spacexsi == Spacexsi::Shared
+            && lanes_of("cursor", s).is_empty()
+        {
+            let why = crate::cursor::why_no_lane(&s.cursor);
+            rows.extend(tc::wrap_words(&format!("Cursor {why}"), w.saturating_sub(6).max(1)).into_iter().map(|line| {
+                tc::seg(&[(p.dim.as_str(), format!("     {line}"))], w.saturating_sub(1).max(1))
+            }));
+        }
         // The same note for a SpaceXSI section Grok is the one reading.
         let grok_reads = group_agent(name) == "grok"
             || (group_agent(name) == "spacexsi"
@@ -797,7 +841,17 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
         "spacexsi" | "spacexsi:cursor" if s.cursor.spacexsi.unified() && listed("cursor") => {
             crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots)
         }
-        "spacexsi" | "spacexsi:grok" => crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots),
+        "spacexsi" | "spacexsi:grok" => {
+            // With Cursor hidden there is no CURSOR tab to point at, so the
+            // shared reading is drawn as Grok's own.
+            if s.grok.spacexsi == Spacexsi::Shared && !listed("cursor") {
+                let mut grok = s.grok.clone();
+                grok.spacexsi = Spacexsi::Alone;
+                crate::grok::tab_with_plots(&grok, w, h, cfg, p, plots)
+            } else {
+                crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots)
+            }
+        }
         "cursor" => crate::cursor::tab_with_plots(&s.cursor, w, h, cfg, p, plots),
         "grok" => crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots),
         "copilot" => crate::copilot::tab_with_plots(&s.copilot, w, h, cfg, p, plots),
@@ -1637,9 +1691,9 @@ mod tests {
             // Grok's log carries no marker; the window is what joins it.
             ((true, false, w, w), (Shared, Shared)),
             ((true, true, w, other), (Separate, Separate)),
-            // A missing window is unknown, not a second account.
-            ((true, true, w, None), (Shared, Shared)),
-            ((true, true, None, w), (Shared, Shared)),
+            // A missing window with nothing seen before: never merged.
+            ((true, true, w, None), (Separate, Separate)),
+            ((true, true, None, w), (Separate, Separate)),
             ((true, false, w, other), (Alone, No)),
             ((true, false, w, None), (Alone, No)),
             ((false, true, None, w), (No, Alone)),
@@ -1648,11 +1702,16 @@ mod tests {
             ((false, false, None, None), (No, No)),
         ];
         for ((cu, gu, cw, gw), want) in cases {
-            assert_eq!(place_spacexsi(cu, gu, cw, gw), want, "{cu} {gu} {cw:?} {gw:?}");
+            assert_eq!(place_spacexsi(cu, gu, cw, gw, None), want, "{cu} {gu} {cw:?} {gw:?}");
         }
         // Milliseconds, not seconds: a window a second off is a different one.
         let nudged = Some((1_791_859_164_429.0, 1_792_463_964_429.0));
-        assert_eq!(place_spacexsi(true, false, w, nudged), (Alone, No));
+        assert_eq!(place_spacexsi(true, false, w, nudged, None), (Alone, No));
+        // A missing window holds the relationship last seen.
+        assert_eq!(place_spacexsi(true, true, w, None, Some((Shared, Shared))), (Shared, Shared));
+        assert_eq!(place_spacexsi(true, true, None, w, Some((Separate, Separate))), (Separate, Separate));
+        // And with none seen, two accounts are never merged on a guess.
+        assert_eq!(place_spacexsi(true, true, w, None, Some((Alone, No))), (Separate, Separate));
     }
 
     fn summary_text(s: &State) -> String {
@@ -1901,6 +1960,40 @@ mod tests {
         assert_eq!(retarget_tab("grok", &separate), Some(2));
         assert_eq!(retarget_tab("spacexsi:grok", &unfolded), Some(2));
         assert_eq!(retarget_tab("devin", &folded), None);
+    }
+
+    #[test]
+    fn with_cursor_quiet_the_shared_pool_comes_from_grok_once() {
+        // Review: Cursor's usage call failing left the merged tab with only
+        // Cursor's empty block, and [+] with a second, quota-less SpaceXSI.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor = crate::cursor::Data::without_live(s.cursor.clone());
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let tabs: Vec<String> = ["+", "cursor", "grok"].iter().map(|t| t.to_string()).collect();
+        let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+        assert!(body.contains("of the weekly pool"), "Grok's pool not drawn: {body}");
+        assert!(!body.contains("CURSOR tab"), "pointing at a tab with nothing on it: {body}");
+        let summary = summary_text(&s);
+        assert_eq!(summary.matches("SpaceXSI").count(), 1, "two SpaceXSI groups: {summary}");
+        assert!(summary.contains("Cursor no quota"), "Cursor's reason lost: {summary}");
+    }
+
+    #[test]
+    fn a_grok_tab_with_cursor_hidden_does_not_point_at_cursor() {
+        // Review: with Cursor excluded, the shared Grok tab still said its
+        // credits were on the CURSOR tab.
+        let mut s = State { grok: crate::grok::Data::unified_fixture(), ..State::default() };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let tabs: Vec<String> = ["+", "grok"].iter().map(|t| t.to_string()).collect();
+        let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+        assert!(!body.contains("CURSOR tab"), "{body}");
+        assert!(body.contains("prepaid $20"), "Grok's own balance hidden: {body}");
     }
 
     #[test]

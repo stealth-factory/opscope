@@ -215,6 +215,29 @@ fn commas(n: i64) -> String {
     }
 }
 
+/// Which account the token on disk belongs to, as a short key for the
+/// caches holding that account's money and plan.
+///
+/// The refresh token, hashed: it changes when someone signs in as another
+/// account, so a balance read for one account is never served for another,
+/// and it is never written anywhere itself. A refresh that rotates it only
+/// costs one early re-read.
+fn account_key() -> String {
+    use std::hash::{Hash, Hasher};
+    let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match text(&auth, "refreshToken") {
+        t if !t.is_empty() => t.hash(&mut h),
+        _ => text(&auth, "accessToken").hash(&mut h),
+    }
+    format!("{:x}", h.finish())
+}
+
+/// Whether Cursor's usage call answered this pass - the pool's live figure.
+pub fn has_live(d: &Data) -> bool {
+    d.live.is_some()
+}
+
 fn cursor_token() -> Option<String> {
     let auth = read_json(&under_home(".config/cursor/auth.json"))?;
     let tok = text(&auth, "accessToken");
@@ -670,12 +693,15 @@ fn month_of(d: &Data) -> (Option<f64>, Option<f64>) {
 fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
     let mut state = extra_state(live, d.hard.as_ref());
     let spent = d.prepaid.as_ref().and_then(|v| loose(&v["spentThisMonthCents"]));
+    // The account's own spend, so a user limit only: against a team pool
+    // the pool's total is the figure, and one member's share of it would be
+    // a partial presented as the whole.
     if let Some(spent) = spent {
         match &mut state {
-            ExtraState::Fixed { used, .. }
+            ExtraState::Fixed { used, shared: false, .. }
             | ExtraState::Unlimited { used }
             | ExtraState::Disabled { used } => *used = spent,
-            ExtraState::NotReported { .. } => {}
+            ExtraState::Fixed { shared: true, .. } | ExtraState::NotReported { .. } => {}
         }
     }
     state
@@ -1151,21 +1177,28 @@ fn report_label_w() -> usize {
 /// pace where the lane has a clock to pace against.
 fn report_bar(lane: &Lane, label: &str, label_w: usize, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, row: usize) -> String {
     let hue = agent_hue("spacexsi").unwrap();
+    // The same sizing as the pool row: the percentage is the reading and
+    // keeps its cells; the pace stands down whole when it does not fit, and
+    // the bar takes what is left, down to a single cell.
+    let pct = pct_text(lane.pct);
+    let lead_w = 2 + label_w + 1;
+    let pace = lane
+        .window_secs
+        .map(|_| pace_cell(lead(lane.pct, lane.window_secs, lane.reset), pace_guessed(false, false, lane.reset), p))
+        .filter(|(_, t)| lead_w + 3 + pct.chars().count() + t.chars().count() <= w.saturating_sub(1));
+    let tail = pct.chars().count() + pace.as_ref().map(|(_, t)| t.chars().count()).unwrap_or(0);
+    let bar_w = w.saturating_sub(1).saturating_sub(lead_w + tail).max(1);
     let mut line: Vec<(String, String)> = vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
     line.extend(paced_bar_with_plot(plots, row, &line,
         (lane.pct / 100.0).clamp(0.0, 1.0),
         elapsed_of(lane.window_secs, lane.reset),
-        w.saturating_sub(20 + label_w).max(8),
+        bar_w,
         Some(hue),
         p,
     ));
-    line.push((pct_colour(lane.pct, Some(hue), p), pct_text(lane.pct)));
-    if lane.window_secs.is_some() {
-        line.push(pace_cell(
-            lead(lane.pct, lane.window_secs, lane.reset),
-            pace_guessed(false, false, lane.reset),
-            p,
-        ));
+    line.push((pct_colour(lane.pct, Some(hue), p), pct));
+    if let Some(pace) = pace {
+        line.push(pace);
     }
     seg_owned(&line, w)
 }
@@ -1487,6 +1520,19 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         remember_refusal(caches, "cursor", &refuse);
     }
     d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
+    // The plan decides which drawing the live figures get, so a failed
+    // plan read keeps the last good one for this account rather than draw
+    // a unified account's week as an old plan's three lanes.
+    let me = account_key();
+    let last_plan = format!("cursor-plan-last:{me}");
+    match d.plan.as_ref() {
+        Some(plan) => {
+            caches.live.insert(last_plan, (now(), Some(plan.clone()), f64::INFINITY));
+        }
+        None => {
+            d.plan = caches.live.get(&last_plan).and_then(|(_, v, _)| v.clone());
+        }
+    }
     // Best-effort beside the usage call, and never able to take it down:
     // the cap in the usage block answers the state this account is in, and
     // this only tells an absent cap from a forbidden one.
@@ -1502,14 +1548,14 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // unified. Best-effort like the hard limit: the pool bar stands without
     // either, and the rows they feed say nothing rather than a guess.
     if is_unified(d.plan.as_ref()) {
-        d.prepaid = cached(caches, "cursor-prepaid", LIVE_TTL, || {
+        d.prepaid = cached(caches, &format!("cursor-prepaid:{me}"), LIVE_TTL, || {
             cursor_rpc("GetUserPrepaidBilling", &serde_json::json!({}))
         });
-        d.month = cached(caches, "cursor-month", PLAN_TTL, || {
+        d.month = cached(caches, &format!("cursor-month:{me}"), PLAN_TTL, || {
             cursor_rpc("GetMonthlyBillingCycle", &serde_json::json!({}))
         });
         // Daily figures, so the plan's hour is plenty.
-        d.activity = cached(caches, "cursor-activity", PLAN_TTL, cursor_activity);
+        d.activity = cached(caches, &format!("cursor-activity:{me}"), PLAN_TTL, cursor_activity);
     }
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
@@ -3623,6 +3669,40 @@ mod tests {
     }
 
     #[test]
+    fn a_team_pool_keeps_the_pools_spend() {
+        // Review: on a team limit the account's own spentThisMonthCents
+        // replaced the pool's total - one member's share shown as the whole.
+        let mut d = unified_data(true);
+        d.live.as_mut().unwrap()["spendLimitUsage"] =
+            serde_json::json!({"individualLimit": 10000, "totalSpend": 5000, "limitType": "team"});
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("100");
+        let state = additional_state(&d, d.live.as_ref().unwrap());
+        assert_eq!(state, ExtraState::Fixed { used: 5000.0, limit: 10000.0, shared: true });
+        // A user limit still takes the account's own figure.
+        let mut d = unified_data(true);
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        assert_eq!(
+            additional_state(&d, d.live.as_ref().unwrap()),
+            ExtraState::Fixed { used: 350.0, limit: 10000.0, shared: false }
+        );
+    }
+
+    #[test]
+    fn the_report_bars_keep_their_percentage_on_narrow_panes() {
+        // Review: the report bars kept an eight-cell floor and clipped
+        // their own percentage at 26 to 40 columns.
+        let d = unified_data(true);
+        for w in [26usize, 30, 34, 40] {
+            let text = report(&d, w);
+            for label in ["prepaid credits", "usage limit"] {
+                let row = text.lines().find(|l| l.trim_start().starts_with(label)).unwrap_or_else(|| panic!("{label} at {w}: {text}"));
+                assert!(row.trim_end().ends_with('%'), "{label}'s percentage cut at {w}: {row:?}");
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
     fn every_unified_row_fits_its_pane() {
         for limit_set in [true, false] {
             for place in [Spacexsi::Alone, Spacexsi::Shared, Spacexsi::Separate] {
@@ -3691,6 +3771,13 @@ impl Data {
 
     pub fn own_plan_fixture() -> Data {
         tests::own_plan_data()
+    }
+
+    /// The same reading with the usage call unanswered.
+    pub fn without_live(mut d: Data) -> Data {
+        d.live = None;
+        d.live_why = "Cursor's usage endpoint did not answer".into();
+        d
     }
 }
 

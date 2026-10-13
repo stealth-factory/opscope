@@ -445,8 +445,8 @@ reads differently from either product's own plan:
 
 Whichever vendor is on this plan is drawn under one heading, **SpaceXSI**, on
 `[+]` and in the tab strip. On the same account, CURSOR and GROK fold into one
-**SPACEXSI** tab: the pool once, then an extra-usage report, then each
-product's own detail under its own name.
+**SPACEXSI** tab: the pool once, split by product, then an extra-usage
+report, the profile's activity, and the account's spend and plan.
 
 ```
  ── SpaceXSI ── live · weekly · resets in 6d 22h
@@ -544,9 +544,9 @@ matched to the millisecond on the measured account, and two separate accounts
 sharing a window that precisely is not a coincidence worth planning for.
 
 Shared, Cursor's reading of the pool is the one drawn, because its usage call
-is asked every two minutes where Grok's may be a log line; Grok's half of the
-tab keeps what only Grok says — its sessions here, and how much of the pool
-Grok Bot spent. Grok's `prepaidBalance` arrives in cents — the
+is asked every two minutes where Grok's may be a log line; Grok contributes the
+pool's split by product beneath the bar, and its own pool reading when
+Cursor's usage call has not answered. Grok's `prepaidBalance` arrives in cents — the
 measured `2000` is the $20 Cursor states as `availableCents: "2000"` — and is
 read that way.
 

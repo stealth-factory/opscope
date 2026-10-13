@@ -929,11 +929,22 @@ pub fn unified(d: &Data) -> bool {
 
 /// The credit window, as (start, end) in epoch milliseconds - the
 /// fingerprint `vendors::link_spacexsi` matches against Cursor's pool.
+///
+/// A reading that is not live may describe a week that has since rolled
+/// over; it is projected onto the current week the way the lanes project
+/// it, or the same account's two windows could never match after a reset.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     let q = d.quota.as_ref()?;
-    match (iso_epoch(&q.start), iso_epoch(&q.end)) {
-        (Some(s), Some(e)) if e > s => Some((s * 1000.0, e * 1000.0)),
-        _ => None,
+    let (s, e) = match (iso_epoch(&q.start), iso_epoch(&q.end)) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return None,
+    };
+    if d.quota_live {
+        return Some((s * 1000.0, e * 1000.0));
+    }
+    match window_now(Some(s), Some(e), now()) {
+        (Some(end), true) => Some(((end - (e - s)) * 1000.0, end * 1000.0)),
+        _ => Some((s * 1000.0, e * 1000.0)),
     }
 }
 
@@ -1305,10 +1316,6 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
 }
 
 fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    grok_body_with_plots(d, w, p, plots, true)
-}
-
-fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, quota: bool) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
     // Not filtered on the percentage any more. A reading that names the
@@ -1317,9 +1324,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // goes blank and a reader cannot tell an account with no quota from a
     // widget that has stopped working. The window, the countdown and the
     // reason are all still true; only the bar needs a number.
-    if !quota {
-        // Drawn above both products on the merged tab.
-    } else if let Some(q) = d.quota.as_ref() {
+    if let Some(q) = d.quota.as_ref() {
         // The one real remaining-quota figure in this widget: everything
         // else here counts what was spent. It leads the tab for that
         // reason.
@@ -1548,7 +1553,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // drawn, because it is a fact about the account rather than the disk.
     if !d.ok {
         rows.extend(no_local(
-            if quota { "No Grok sessions on this machine." } else { "No Grok Build sessions on this machine." },
+            "No Grok sessions on this machine.",
             run_hint("grok"),
             w,
             p,
@@ -1558,13 +1563,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
 
     rows.push(tc::seg(
         &[
-            // On the merged SpaceXSI tab these sit among Cursor's sections
-            // with no vendor heading above them, so the heading says whose
-            // sessions they are.
-            (
-                p.lbl.as_str(),
-                if quota { " ── TOTALS ── " } else { " ── GROK BUILD ── " }.into(),
-            ),
+            (p.lbl.as_str(), " ── TOTALS ── ".into()),
             (
                 p.dim.as_str(),
                 format!("{} sessions · newest {} ago", d.sessions, ago(d.last)),
@@ -1584,11 +1583,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
         w - 1,
     ));
 
-    // Not on the merged SpaceXSI tab: it draws the account's own activity
-    // heatmap above, and a second calendar of this machine's Grok Build
-    // sessions beside it read as the same thing twice when it is not.
-    let calendar = if quota { day_calendar(&d.daily, w, GROK_STEPS, None, p) } else { None };
-    if let Some(cal) = calendar {
+    if let Some(cal) = day_calendar(&d.daily, w, GROK_STEPS, None, p) {
         let peak = d.daily.values().cloned().fold(0.0f64, f64::max);
         rows.push(String::new());
         rows.push(tc::seg(
@@ -1636,7 +1631,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // which of the two routes it took is a different sentence, and the note
     // named only the log for as long as the log was the only route that
     // ever produced one.
-    if d.quota.is_some() && quota {
+    if d.quota.is_some() {
         note.push_str(if d.quota_live {
             " The quota above is the server's own figure, asked for directly - not inferred."
         } else {
@@ -2802,6 +2797,32 @@ mod tests {
         // And no lane is drawn for an unknown total.
         let d = Data { quota: quota_from(&used), quota_live: true, spacexsi: Spacexsi::Alone, ..Data::default() };
         assert!(lanes(&d).is_empty(), "a lane for an unknown total");
+    }
+
+    #[test]
+    fn a_stale_window_is_rolled_onto_this_week_before_it_is_matched() {
+        // Review: an old reading's window was compared as recorded, so it
+        // could never match the same account's current Cursor window.
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp_millis((at * 1000.0) as i64)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+                .to_string()
+        };
+        let week = 7.0 * 86400.0;
+        let (start, end) = (now() - 2.5 * week, now() - 1.5 * week);
+        let mut d = unified_grok(Spacexsi::Shared);
+        d.quota_live = false;
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(start);
+        q.end = stamp(end);
+        let (s, e) = pool_window(&d).expect("a window");
+        assert!((e - s - week * 1000.0).abs() < 1.0, "the week's length kept");
+        assert!(s / 1000.0 <= now() && now() < e / 1000.0, "rolled onto the week we are in");
+        assert!(((e / 1000.0 - end) / week - 2.0).abs() < 1e-6, "rolled by whole weeks");
+        // A live reading is taken as sent.
+        d.quota_live = true;
+        assert!((pool_window(&d).unwrap().1 / 1000.0 - end).abs() < 0.01);
     }
 
     #[test]
