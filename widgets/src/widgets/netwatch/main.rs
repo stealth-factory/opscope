@@ -2048,6 +2048,7 @@ fn main() {
                 Some(r) => r,
                 None => {
                     detail = None;
+                    details.clear();
                     continue;
                 }
             };

@@ -274,15 +274,36 @@ impl TeamDiscovery {
             return &self.scopes;
         }
         if self.configured.is_empty() {
+            if self.scopes.is_empty() {
+                self.scopes.push(String::new());
+            }
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover)) {
                 Ok((found, note)) => {
-                    self.scopes = scopes_for(Vec::new(), found);
                     self.ready = note.is_none();
+                    if self.ready {
+                        self.scopes = scopes_for(Vec::new(), found);
+                    } else {
+                        // A partial page is not an authoritative account list.
+                        // Keep earlier teams until a complete walk replaces it.
+                        for scope in found {
+                            if !scope.is_empty() && !self.scopes.contains(&scope) {
+                                self.scopes.push(scope);
+                            }
+                        }
+                    }
                     self.note = note;
                 }
                 Err(_) => {
-                    self.scopes = scopes_for(Vec::new(), Vec::new());
                     self.note = Some("team discovery failed".into());
+                }
+            }
+            if let Some(note) = self.note.as_mut() {
+                // The latest walk cannot describe coverage retained from an
+                // earlier attempt. Token refusal remains its own explanation.
+                if self.scopes.iter().any(|scope| !scope.is_empty())
+                    && !note.starts_with("the Vercel token is not valid")
+                {
+                    note.push_str(" - previously discovered teams are still included; other teams may be missing");
                 }
             }
         } else {
@@ -380,8 +401,8 @@ fn walk_teams(
                     said.clone()
                 } else if ids.is_empty() {
                     tc::missing_config(&format!(
-                        "could not list teams ({}) - showing your personal account \
-                         only. A token that cannot list teams can still read a \
+                        "could not list teams ({}) - team discovery is incomplete. \
+                         A token that cannot list teams can still read a \
                          team's deployments: name the team ids under \
                          vercel_deployments.teams to include them.",
                         said
@@ -2240,7 +2261,9 @@ mod tests {
             })
             .to_vec();
         assert_eq!(scopes, vec!["", "team_a"]);
-        assert_eq!(discovery.note(), Some("team list stopped early"));
+        assert_eq!(discovery.note(), Some(
+            "team list stopped early - previously discovered teams are still included; other teams may be missing"
+        ));
 
         let scopes = discovery
             .resolve(|| {
@@ -2255,6 +2278,74 @@ mod tests {
         let cached = discovery.resolve(|| panic!("complete discovery is cached"));
         assert_eq!(cached, ["", "team_a", "team_b"]);
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn partial_discovery_keeps_known_scopes_until_an_authoritative_result() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        let partial = || Some("team list stopped early".to_string());
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_a".into(), "team_b".into()], partial())),
+            ["", "team_a", "team_b"],
+        );
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into(), "team_c".into()], partial())),
+            ["", "team_a", "team_b", "team_c"],
+            "partial discovery discarded a known team or duplicated an ID",
+        );
+        assert_eq!(
+            discovery.resolve(|| (Vec::new(), partial())),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(
+            discovery.resolve(|| panic!("transient discovery failure")),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(discovery.note(), Some(
+            "team discovery failed - previously discovered teams are still included; other teams may be missing"
+        ));
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into()], None)),
+            ["", "team_b"],
+            "complete discovery did not remove teams no longer in the account",
+        );
+        assert_eq!(discovery.note(), None);
+        assert_eq!(discovery.resolve(|| panic!("complete discovery is cached")), ["", "team_b"]);
+    }
+
+    #[test]
+    fn failed_discovery_warning_matches_retained_team_coverage() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        discovery.resolve(|| walk_teams(|_| Err("HTTP 403".into())));
+        assert_eq!(discovery.scopes, [""]);
+        assert!(discovery.note().unwrap().contains("HTTP 403"));
+        assert!(!discovery.note().unwrap().contains("teams are still included"));
+
+        discovery.resolve(|| walk_teams(|until| match until {
+            None => Ok(serde_json::json!({
+                "teams": [{"id": "team_a"}], "pagination": {"next": 300}
+            })),
+            _ => Err("curl exited 28".into()),
+        }));
+        discovery.resolve(|| walk_teams(|_| Err("HTTP 403".into())));
+        assert_eq!(discovery.scopes, ["", "team_a"]);
+        let note = discovery.note().unwrap();
+        assert!(note.contains("HTTP 403"), "{note}");
+        assert!(note.contains("previously discovered teams are still included"), "{note}");
+        assert!(!note.contains("showing your personal account only"), "{note}");
+        assert!(note.contains("vercel_deployments.teams"), "{note}");
+
+        discovery.resolve(|| panic!("transient discovery failure"));
+        assert!(discovery.note().unwrap().contains("previously discovered teams are still included"));
+        discovery.resolve(|| walk_teams(|_| {
+            Err(vercel_refusal(403, r#"{"error":{"invalidToken":true}}"#))
+        }));
+        let note = discovery.note().unwrap();
+        assert!(note.starts_with("the Vercel token is not valid"), "{note}");
+        assert!(!note.contains("teams are still included"), "{note}");
+
+        discovery.resolve(|| (vec!["team_a".into()], None));
+        assert_eq!(discovery.note(), None);
     }
 
     #[test]
