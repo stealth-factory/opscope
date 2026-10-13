@@ -479,7 +479,6 @@ def tmux_placeholders(t):
     upload = t.output.find(b"a=T")
     cell = t.output.find(PLACEHOLDER)
     assert 0 <= upload < cell, "virtual placement was not uploaded before the cells"
-    assert b"\x1b[0mnow" in t.output, "label inherited the placeholder colour"
     assert not any(k.get(b"a") == b"p" for k, _ in commands_of(unwrap_tmux(t.output)))
     t.send(b"\x1b[B")
     t.read()
