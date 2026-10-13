@@ -715,6 +715,12 @@ fn parse_token_account(raw: &str) -> Option<String> {
     })
 }
 
+/// Which Grok account is signed in here, for scoping what is remembered
+/// about it between polls.
+pub fn account_id() -> Option<String> {
+    token_account()
+}
+
 fn token_account() -> Option<String> {
     parse_token_account(&std::fs::read_to_string(under_home(AUTH)).ok()?)
 }

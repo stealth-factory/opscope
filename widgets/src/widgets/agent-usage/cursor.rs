@@ -222,7 +222,7 @@ fn commas(n: i64) -> String {
 /// account, so a balance read for one account is never served for another,
 /// and it is never written anywhere itself. A refresh that rotates it only
 /// costs one early re-read.
-fn account_key() -> String {
+pub fn account_key() -> String {
     use std::hash::{Hash, Hasher};
     let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -864,12 +864,16 @@ fn spacexsi_quota_with_plots(
             line.push((pace_colour, pace_txt));
             rows.push(seg_owned(&line, w));
             let name_w = d.pool_split.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+            // Under the bar where it fits; at a short indent where the bar's
+            // column would push the share off the row.
+            let need = 2 + name_w + 2 + "~100%".len();
+            let indent = if label_w + 3 + need <= w.saturating_sub(1) { label_w + 3 } else { 4 };
             for (name, share) in &d.pool_split {
                 let (r, g, b) = product_hue(name);
                 let hue = tc::rgb(r, g, b);
                 rows.push(seg_owned(
                     &[
-                        (p.dim.clone(), " ".repeat(label_w + 3)),
+                        (p.dim.clone(), " ".repeat(indent)),
                         (hue.clone(), "■ ".into()),
                         (hue, tc::pad(name, name_w)),
                         (p.txt.clone(), format!("  ~{:.0}%", share)),
@@ -1519,11 +1523,13 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         d.live_why = refuse.clone();
         remember_refusal(caches, "cursor", &refuse);
     }
-    d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
+    // Keyed by account, like everything held for the plan below: a plan
+    // cached for one account must never classify another.
+    let me = account_key();
+    d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
     // The plan decides which drawing the live figures get, so a failed
     // plan read keeps the last good one for this account rather than draw
     // a unified account's week as an old plan's three lanes.
-    let me = account_key();
     let last_plan = format!("cursor-plan-last:{me}");
     match d.plan.as_ref() {
         Some(plan) => {
@@ -3749,6 +3755,14 @@ mod tests {
         assert!(!report(&d, 120).contains('■'));
         d.spacexsi = Spacexsi::Separate;
         assert!(report(&d, 160).contains("SpaceXSI ── via Cursor"));
+        // Every product line keeps its share on a narrow pane.
+        let mut narrow = unified_data(true);
+        narrow.pool_split = vec![("Cursor".into(), 5.0), ("Grok Bot".into(), 5.0)];
+        for w in [26usize, 30] {
+            let text = report(&narrow, w);
+            assert!(text.contains("Cursor ~5%") || squeeze(&text).contains("■ Cursor ~5%"), "share cut at {w}: {text}");
+            assert!(squeeze(&text).contains("■ Grok Bot ~5%"), "share cut at {w}: {text}");
+        }
         // Every product line fits a narrow pane whole.
         let mut d = unified_data(true);
         d.pool_split = vec![("Cursor".into(), 5.0), ("Grok Bot".into(), 5.0), ("Grok Imagine".into(), 1.0)];

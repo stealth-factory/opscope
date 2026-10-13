@@ -160,19 +160,31 @@ fn place_spacexsi(
 
 /// Tell each vendor where it stands, once both have been read.
 /// The relationship the last poll settled on, for a pass that cannot
-/// compare the two windows.
-static LAST_PLACED: std::sync::Mutex<Option<(Spacexsi, Spacexsi)>> = std::sync::Mutex::new(None);
+/// compare the two windows - with the pair of accounts it was settled for,
+/// so a sign-in as someone else on either side never inherits it.
+static LAST_PLACED: std::sync::Mutex<Option<(String, (Spacexsi, Spacexsi))>> = std::sync::Mutex::new(None);
+
+/// The remembered relationship, only for the same pair of accounts.
+fn remembered(last: Option<&(String, (Spacexsi, Spacexsi))>, who: &str) -> Option<(Spacexsi, Spacexsi)> {
+    last.filter(|(pair, _)| pair == who).map(|(_, placed)| *placed)
+}
 
 fn link_spacexsi(s: &mut State) {
+    let who = format!(
+        "{}|{}",
+        crate::cursor::account_key(),
+        crate::grok::account_id().unwrap_or_default()
+    );
     let mut last = LAST_PLACED.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = remembered(last.as_ref(), &who);
     let (cursor, grok) = place_spacexsi(
         crate::cursor::unified(&s.cursor),
         crate::grok::unified(&s.grok),
         crate::cursor::pool_window(&s.cursor),
         crate::grok::pool_window(&s.grok),
-        *last,
+        seen,
     );
-    *last = Some((cursor, grok));
+    *last = Some((who, (cursor, grok)));
     s.cursor.spacexsi = cursor;
     s.grok.spacexsi = grok;
     // The pool's split by product is Grok's to state; on the same account
@@ -1943,6 +1955,17 @@ mod tests {
         for cursor_part in ["SPEND", "EXTRA USAGE", "ACTIVITY", "METERED"] {
             assert!(!grok_only.contains(cursor_part), "hidden Cursor's {cursor_part:?}: {grok_only}");
         }
+    }
+
+    #[test]
+    fn a_remembered_relationship_belongs_to_the_accounts_it_was_seen_for() {
+        // Review: after signing in as someone else on either side, the
+        // remembered Shared could fold two unrelated accounts together.
+        let last = ("cursor-a|grok-a".to_string(), (Spacexsi::Shared, Spacexsi::Shared));
+        assert_eq!(remembered(Some(&last), "cursor-a|grok-a"), Some((Spacexsi::Shared, Spacexsi::Shared)));
+        assert_eq!(remembered(Some(&last), "cursor-b|grok-a"), None);
+        assert_eq!(remembered(Some(&last), "cursor-a|grok-b"), None);
+        assert_eq!(remembered(None, "cursor-a|grok-a"), None);
     }
 
     #[test]
