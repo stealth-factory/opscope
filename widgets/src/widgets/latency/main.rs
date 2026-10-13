@@ -490,6 +490,7 @@ fn watch(
     events: Arc<Mutex<Vec<Event>>>,
     hue: String,
     label: String,
+    activity: tc::Refresh,
 ) {
     loop {
         let (interval, spike_factor) = match settings.lock() {
@@ -514,6 +515,7 @@ fn watch(
                 continue;
             }
         };
+        let work = activity.start();
         // It started, so whatever stopped it last time is over.
         if let Ok(mut guard) = shared.lock() {
             guard[index].err.clear();
@@ -523,7 +525,15 @@ fn watch(
         }
         let stdout = match child.stdout.take() {
             Some(s) => s,
-            None => continue,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Ok(mut guard) = shared.lock() {
+                    guard[index].pid = None;
+                }
+                drop(work);
+                continue;
+            }
         };
         // Reading stdout directly would block forever when BSD ping loses
         // every packet: unlike iputils with `-O`, it prints no loss line.
@@ -645,6 +655,7 @@ fn watch(
             }
             Err(_) => return,
         };
+        drop(work);
         // We killed it ourselves to apply a new interval; not an outage, and
         // it starts again immediately rather than after the retry pause.
         if ours {
@@ -951,6 +962,7 @@ fn main() {
         })
         .collect();
     let labels: Vec<String> = targets.iter().map(|t| t.label.clone()).collect();
+    let activity = tc::Refresh::default();
     // Fixed for the life of the run: one poll thread per host, and the
     // list never grows or shrinks, so the cursor can be reasoned about
     // without holding the lock to count rows.
@@ -962,12 +974,13 @@ fn main() {
         let shared = Arc::clone(&shared);
         let settings = Arc::clone(&settings);
         let events = Arc::clone(&events);
+        let activity = activity.clone();
         let host = host.clone();
         let hue = p.hues[index % p.hues.len()].clone();
         let label = labels[index].clone();
         std::thread::spawn(move || {
             watch(
-                host, index, window, dialect, shared, settings, events, hue, label,
+                host, index, window, dialect, shared, settings, events, hue, label, activity,
             )
         });
     }
@@ -1111,7 +1124,12 @@ fn main() {
             interval
         };
 
-        let mut rows = vec![tc::title("network latency monitor", w, &p.head)];
+        let mut rows = vec![tc::title_busy(
+            "network latency monitor",
+            w,
+            &p.head,
+            activity.tick(tc::animation_tick()),
+        )];
         rows.push(tc::seg(
             &[
                 (

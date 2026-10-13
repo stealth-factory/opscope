@@ -272,6 +272,7 @@ dependencies = [
  "chrono-tz",
  "libc",
  "opscope-core",
+ "proc-macro2",
  "rusqlite",
  "serde",
  "serde_json",

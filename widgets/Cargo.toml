@@ -24,6 +24,7 @@ chrono-tz = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
+proc-macro2 = "1"
 # check.rs generates config.example.json and needs a JSON value that
 # keeps its key order, which means writing a Deserialize by hand -
 # serde_json alone exposes no way to ask for one.

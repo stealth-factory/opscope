@@ -554,6 +554,29 @@ Three rules the tests measure:
 
 ## Keys, scroll and the mouse
 
+### Refresh activity in the title
+
+Polling widgets share a `tc::Refresh` between their acquisition workers and
+renderer. Hold `let work = refresh.start()` through each read and publication,
+then `drop(work)` **before** sleeping or waiting for the next poll. The guard
+also clears on an error, early return or panic; overlapping requests are
+counted, so one finishing cannot hide another. Do not hold it for an idle event
+watcher. A continuously running ping is active acquisition until it exits,
+not during its retry delay.
+
+Draw `tc::title_busy(text, w, colour, refresh.tick(tc::animation_tick()))`
+on both the list and detail screens. This includes initial reads, manual
+refreshes and on-demand detail requests. Static widgets keep `tc::title()`.
+The spinner spends two cells of rule fill only when the complete title fits;
+the title and core's version stamp always have priority.
+
+The shared spinner uses RGB `(120, 220, 255)`. WCAG contrast is **11.86:1**
+against the reference terminal backdrop `(16, 20, 26)`, **9.11:1** against
+`(28, 44, 62)`, **7.69:1** against `(38, 56, 76)`, **10.51:1** against
+`(46, 26, 30)`, and **9.31:1** against `(22, 46, 34)`. The title does not
+use a selected-row tint, but all four current tints are tested as well.
+User-chosen terminal backgrounds may differ from the reference backdrop.
+
 **The mouse scrolls the whole widget. Selection is keys.**
 
 The wheel never moves a selection, changes a tab or picks a row — it scrolls

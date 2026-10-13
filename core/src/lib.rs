@@ -78,6 +78,39 @@ pub const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x
 /// A consistent animation for work that has not finished yet.
 pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Shared by a widget's readers and renderer. Count work, not sleeping threads.
+#[derive(Clone, Default)]
+pub struct Refresh(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Refresh {
+    /// Hold the guard through acquisition and publication, but not the poll wait.
+    pub fn start(&self) -> RefreshGuard {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        RefreshGuard(self.clone())
+    }
+
+    pub fn tick(&self, tick: usize) -> Option<usize> {
+        (self.0.load(Ordering::Acquire) > 0).then_some(tick)
+    }
+}
+
+/// Ending one request must not hide another; unwinding also ends the request.
+#[must_use = "keep the guard alive until the refresh has finished"]
+pub struct RefreshGuard(Refresh);
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+const REFRESH_COLOUR: (u8, u8, u8) = (120, 220, 255);
+/// A 2×2 spinner in Braille rows 2–3, aligned with the title text.
+/// Three lit corners rotate around the four dot positions.
+const REFRESH_SPINNER: &[char] = &['⠖', '⠲', '⠴', '⠦'];
+/// Keep a full turn at one second despite using only four distinct frames.
+const REFRESH_CYCLE_TICKS: usize = 10;
+
 /// Animation time is independent of data polling and the number of input events.
 /// Only use this for decoration/loading indicators, never to invent measurements.
 pub fn animation_tick() -> usize {
@@ -365,6 +398,11 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 /// `draw` puts the version on the end of every frame's top row and a rule
 /// filled to the edge would lose its `╸` under it.
 pub fn title(text: &str, w: usize, colour: &str) -> String {
+    title_busy(text, w, colour, None)
+}
+
+/// Spend only rule fill on a refresh spinner; the title and version take priority.
+pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> String {
     let w = w - version_room(w);
     let left = "╺━";
     let chrome = display_width(left) + 1;
@@ -376,7 +414,16 @@ pub fn title(text: &str, w: usize, colour: &str) -> String {
     let room = w - chrome;
     let wanted = format!(" {} ", text.to_uppercase());
     let (t, t_w, _) = clip_width(&wanted, room);
-    let fill = "━".repeat(room.saturating_sub(t_w));
+    let fill_room = room.saturating_sub(t_w);
+    let spinner = tick.filter(|_| display_width(&wanted) + 2 <= room);
+    let fill = if let Some(tick) = spinner {
+        let (r, g, b) = REFRESH_COLOUR;
+        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+        format!("{}{} {}{colour}{}", rgb(r, g, b), REFRESH_SPINNER[frame], RST,
+            "━".repeat(fill_room - 2))
+    } else {
+        "━".repeat(fill_room)
+    };
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
         colour,
@@ -5631,6 +5678,94 @@ mod tests {
         assert_eq!(display_width(&pad("🙂", 3)), 3);
         assert_eq!(pad("👩‍💻", 4), "👩‍💻  ");
         assert_eq!(pad("لا", 2), "لا ");
+    }
+
+    #[test]
+    fn refresh_tracks_overlapping_work_and_unwinding() {
+        let refresh = Refresh::default();
+        assert_eq!(refresh.tick(0), None);
+        let first = refresh.start();
+        let second = refresh.clone().start();
+        assert_eq!(refresh.tick(3), Some(3));
+        drop(first);
+        assert_eq!(refresh.tick(4), Some(4));
+        drop(second);
+        assert_eq!(refresh.tick(5), None);
+        let failed: Result<(), ()> = (|| {
+            let _work = refresh.start();
+            Err(())
+        })();
+        assert!(failed.is_err());
+        assert_eq!(refresh.tick(6), None);
+        let worker = refresh.clone();
+        assert!(std::thread::spawn(move || {
+            let _work = worker.start();
+            panic!("failed acquisition");
+        }).join().is_err());
+        assert_eq!(refresh.tick(7), None);
+    }
+
+    #[test]
+    fn busy_title_preserves_text_width_and_version_room() {
+        let colour = rgb(0, 255, 170);
+        for text in ["agent usage", "network latency monitor", "月界", ""] {
+            for w in 0..=160 {
+                let idle = title(text, w, &colour);
+                assert_eq!(title_busy(text, w, &colour, None), idle);
+                let wanted = format!(" {} ", text.to_uppercase());
+                let fits = display_width(&wanted) + 5 <= w - version_room(w);
+                for tick in 0..=REFRESH_CYCLE_TICKS {
+                    let busy = title_busy(text, w, &colour, Some(tick));
+                    assert_eq!(display_width(&strip(&busy)) + version_room(w), w);
+                    if fits {
+                        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+                        assert!(strip(&busy).contains(&format!("{wanted}{} ", REFRESH_SPINNER[frame])));
+                    } else {
+                        assert_eq!(busy, idle, "spinner displaced title at {w}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn busy_title_frame_keeps_the_version_and_spends_only_rule_fill() {
+        let colour = rgb(0, 255, 170);
+        let tag = format!("v{}", super::version_number());
+        for w in 26usize..=160 {
+            let top = shown(&frame_rows(&super::frame(
+                &[super::title_busy("network latency monitor", w, &colour, Some(2))],
+                w,
+                1,
+            ))[0]);
+            assert_eq!(super::display_width(&top), w, "the busy row is not {w} wide");
+            assert!(top.ends_with(&tag), "the version was cut at {w}: {top:?}");
+        }
+        let wide = shown(&frame_rows(&super::frame(
+            &[super::title_busy("network latency monitor", 80, &colour, Some(2))],
+            80,
+            1,
+        ))[0]);
+        assert!(wide.contains("NETWORK LATENCY MONITOR"));
+        assert!(wide.contains(REFRESH_SPINNER[0]));
+        assert!(wide.ends_with(&tag));
+    }
+
+    #[test]
+    fn refresh_colour_clears_aa_on_backdrop_and_selection_tints() {
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let fg = luminance(REFRESH_COLOUR);
+        for bg in [(16, 20, 26), (28, 44, 62), (38, 56, 76), (46, 26, 30), (22, 46, 34)] {
+            let bg_lum = luminance(bg);
+            let contrast = (fg.max(bg_lum) + 0.05) / (fg.min(bg_lum) + 0.05);
+            assert!(contrast >= 4.5, "refresh colour on {bg:?}: {contrast:.2}");
+        }
     }
 
     #[test]
