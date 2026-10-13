@@ -200,6 +200,7 @@ pub(crate) fn transport_failed() {
 }
 
 /// The oldest reply still owed for `id` is a shared-memory send.
+#[cfg(test)]
 pub(crate) fn shared_pending(id: u32) -> bool {
     let Some(slot) = plot_slot(id) else {
         return false;

@@ -31,7 +31,7 @@ COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty"):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok"):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
         env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
@@ -41,6 +41,9 @@ class Terminal:
         self.output = b""
         self.reply = reply
         self.answered = 0
+        self.image_reply = image_reply
+        self.ack_commands = 0
+        self.chunk_reply = None
 
     def send(self, value):
         os.write(self.master, value)
@@ -57,6 +60,7 @@ class Terminal:
             if not data:
                 break
             self.output += data
+            self.acknowledge_images()
             count = self.output.count(b"\x1b[?2026$p")
             if count > self.answered and self.reply != "silent":
                 self.answered = count
@@ -77,6 +81,19 @@ class Terminal:
                     self.send(part)
                     time.sleep(0.01)
         return self.output
+
+    def acknowledge_images(self):
+        # q=0 owes one response after the complete upload. Placements and
+        # deletions keep their quiet modes and do not advance the FIFO.
+        commands = self.commands()
+        for keys, _ in commands[self.ack_commands:]:
+            if keys.get(b"a") == b"T":
+                self.chunk_reply = keys.get(b"i") if keys.get(b"q", b"0") == b"0" else None
+            if keys.get(b"m") == b"0" and self.chunk_reply is not None:
+                if self.image_reply == "ok":
+                    self.send(b"\x1b_Gi=" + self.chunk_reply + b";OK\x1b\\")
+                self.chunk_reply = None
+        self.ack_commands = len(commands)
 
     def commands(self):
         return [(dict(field.split(b"=", 1) for field in keys.split(b",") if b"=" in field), payload or b"")
@@ -339,7 +356,38 @@ def responsive_selection(t):
     assert b"SELECTED:3" in t.output
     assert len(t.images()) == after_scroll, "selection retransmitted unchanged images"
 
+def successful_upload_before_shared_failure():
+    t = Terminal(reply="kitty", image_reply="manual")
+    try:
+        t.read(0.3)
+        direct = t.images()[-1][0]
+        assert direct[b"t"] == b"d" and direct[b"q"] == b"0", "tracked sends need replies"
+        t.send(b"\x1b_Gi=" + direct[b"i"] + b";OK\x1b\\")
+        t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+        t.read(0.2)
+        # Scrolling preserves the reply queue; resizing would clear it and
+        # hide a stale successful send ahead of this shared-memory failure.
+        before = len(t.images())
+        t.send(b"\x1b[B")
+        t.read(0.2)
+        shared = t.images()[-1][0]
+        assert len(t.images()) > before and shared[b"t"] == b"s"
+        assert shared[b"i"] == direct[b"i"] and shared[b"q"] == b"0"
+        t.send(b"\x1b_Gi=" + shared[b"i"] + b";EBADF:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" not in t.output, "shared failure disabled graphics"
+        fallback = t.images()[-1][0]
+        assert fallback[b"t"] == b"d" and fallback[b"q"] == b"0"
+        t.send(b"\x1b_Gi=" + fallback[b"i"] + b";EINVAL:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" in t.output, "direct failure was mistaken for shared"
+        t.quit()
+    finally:
+        t.close()
+
 if __name__ == "__main__":
+    successful_upload_before_shared_failure()
+    print("PASS shared-memory/success-before-failure")
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),

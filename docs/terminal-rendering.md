@@ -81,8 +81,12 @@ target. Acquisition is limited to Linux and macOS. Anywhere else, and
 whenever the probe is rejected, times out, or a later image reports an
 error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
 failure does not turn graphics off. A cleanup table with no free slot sends
-that one frame directly and leaves shared memory on; only an object the
-operating system refuses turns the session back to `t=d`.
+that one frame directly and leaves shared memory on. An OS publication failure
+or a shared-upload error reported by the terminal returns the session to `t=d`.
+
+Owned image uploads request a reply (`q=0`) so every pending transmission has
+one success or error response. Successes advance the same queue as failures;
+placements and deletions stay quiet and do not consume transmission replies.
 
 An object the terminal does not take is retired, then unlinked once a short
 read window has passed, so a replacement that reuses the image id is not

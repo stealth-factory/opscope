@@ -967,7 +967,7 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f=32,t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={},C=1,q=1,m={more};",
+                "\x1b_Ga=T,f=32,t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={},C=1,q=0,m={more};",
                 image_id(slot),
                 plot.visible_rows
             ));
@@ -1436,7 +1436,7 @@ mod tests {
         let p = Plot::new(8, 1, 20, 5, chart(vec![Some(0.0), Some(1.0)]));
         let command = image(&p, 0, 80);
         assert!(command.contains("f=32,t=d,o=z,s=160,v=80"));
-        assert!(command.contains("c=20,r=5,C=1,q=1"));
+        assert!(command.contains("c=20,r=5,C=1,q=0"));
         let payload = command.split_once(';').unwrap().1;
         // Locate the graphics header (the cursor sequence also has a semicolon).
         let payload = payload
