@@ -274,14 +274,26 @@ impl TeamDiscovery {
             return &self.scopes;
         }
         if self.configured.is_empty() {
+            if self.scopes.is_empty() {
+                self.scopes.push(String::new());
+            }
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover)) {
                 Ok((found, note)) => {
-                    self.scopes = scopes_for(Vec::new(), found);
                     self.ready = note.is_none();
+                    if self.ready {
+                        self.scopes = scopes_for(Vec::new(), found);
+                    } else {
+                        // A partial page is not an authoritative account list.
+                        // Keep earlier teams until a complete walk replaces it.
+                        for scope in found {
+                            if !scope.is_empty() && !self.scopes.contains(&scope) {
+                                self.scopes.push(scope);
+                            }
+                        }
+                    }
                     self.note = note;
                 }
                 Err(_) => {
-                    self.scopes = scopes_for(Vec::new(), Vec::new());
                     self.note = Some("team discovery failed".into());
                 }
             }
@@ -2255,6 +2267,37 @@ mod tests {
         let cached = discovery.resolve(|| panic!("complete discovery is cached"));
         assert_eq!(cached, ["", "team_a", "team_b"]);
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn partial_discovery_keeps_known_scopes_until_an_authoritative_result() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        let partial = || Some("team list stopped early".to_string());
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_a".into(), "team_b".into()], partial())),
+            ["", "team_a", "team_b"],
+        );
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into(), "team_c".into()], partial())),
+            ["", "team_a", "team_b", "team_c"],
+            "partial discovery discarded a known team or duplicated an ID",
+        );
+        assert_eq!(
+            discovery.resolve(|| (Vec::new(), partial())),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(
+            discovery.resolve(|| panic!("transient discovery failure")),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(discovery.note(), Some("team discovery failed"));
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into()], None)),
+            ["", "team_b"],
+            "complete discovery did not remove teams no longer in the account",
+        );
+        assert_eq!(discovery.note(), None);
+        assert_eq!(discovery.resolve(|| panic!("complete discovery is cached")), ["", "team_b"]);
     }
 
     #[test]

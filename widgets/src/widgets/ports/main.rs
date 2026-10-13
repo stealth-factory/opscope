@@ -998,6 +998,14 @@ impl<T> Default for AsyncSnapshot<T> {
 }
 
 impl<T: Send + 'static> AsyncSnapshot<T> {
+    fn retry(&mut self) {
+        // Dropping the receiver cannot cancel its acquisition worker.
+        // Repeated refresh keys must retain that work instead of spawning more.
+        if !self.is_pending() {
+            self.invalidate();
+        }
+    }
+
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.value = None;
@@ -2548,7 +2556,7 @@ fn main() {
                         }
                     }
                     "r" | "R" => {
-                        net_snapshot.invalidate();
+                        net_snapshot.retry();
                         store.wake();
                     }
                     _ => {}
@@ -2602,7 +2610,7 @@ fn main() {
                                 links: Vec::new(),
                                 tunnel: None,
                             });
-                            net_snapshot.invalidate();
+                            net_snapshot.retry();
                         } else {
                             notice = Some((
                                 "nothing more to show - /proc will not name \
@@ -3231,6 +3239,50 @@ mod tests {
         wait_for_snapshot(&mut snapshot);
         assert_eq!(snapshot.value, Some(42));
         assert_eq!(snapshot.error, None);
+        assert_eq!(activity.tick(0), None);
+    }
+
+    #[test]
+    fn detail_snapshot_retry_preserves_pending_work_and_refreshes_completed_work() {
+        let activity = tc::Refresh::default();
+        let acquisitions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&acquisitions);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut snapshot = AsyncSnapshot::default();
+        snapshot.start(activity.clone(), move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(42)
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        for _ in 0..5 {
+            snapshot.retry();
+            assert!(snapshot.is_pending(), "retry abandoned the pending receiver");
+            let counter = Arc::clone(&acquisitions);
+            snapshot.start(activity.clone(), move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(99)
+            });
+        }
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+        assert!(activity.tick(0).is_some());
+        release_tx.send(()).unwrap();
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(snapshot.value, Some(42));
+        assert_eq!(activity.tick(0), None);
+
+        snapshot.retry();
+        let counter = Arc::clone(&acquisitions);
+        snapshot.start(activity.clone(), move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(84)
+        });
+        wait_for_snapshot(&mut snapshot);
+        assert_eq!(snapshot.value, Some(84));
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 2);
         assert_eq!(activity.tick(0), None);
     }
 
