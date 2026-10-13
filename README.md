@@ -123,6 +123,27 @@ the coreutils command of that name.
 Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
+### Debian / Ubuntu
+
+Linux amd64 packages require glibc 2.35 or newer (Ubuntu 22.04 / Debian 12).
+After a release containing Debian packaging is published, download its `.deb`
+and `.sha256`, verify the checksum, and install locally:
+
+```sh
+sha256sum -c opscope_X.Y.Z_amd64.deb.sha256
+sudo apt install ./opscope_X.Y.Z_amd64.deb
+opscope clocks
+```
+
+Replace `X.Y.Z` with the downloaded release version. Only `opscope` goes on
+PATH; all widget binaries remain private and coreutils `link` is untouched.
+No Node or Rust installation is needed. npm/npx remains recommended.
+
+[Debian installation and upgrades](docs/debian.md) also covers the shared
+[signed APT repository](https://github.com/stealth-factory/apt-repo), whose
+signing and hosting activation is pending owner approval. Once configured,
+that source supplies updates through `apt update` and `apt upgrade`.
+
 ### Homebrew on macOS
 
 Homebrew is an alternative for Mac users who prefer a package-managed

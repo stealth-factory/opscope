@@ -29,6 +29,8 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'homebrew/**'
+      - 'debian/**'
+      - 'npm/platform.js'
 
 permissions:
   contents: write
@@ -286,16 +288,51 @@ jobs:
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           ls -la "$name.tar.gz"
 
+      - name: Debian package from the tagged Linux build
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && startsWith(github.ref, 'refs/tags/v')
+        run: node debian/package.js "${GITHUB_REF_NAME#v}" target/x86_64-unknown-linux-gnu/release .
+
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ matrix.target }}
           path: |
             opscope-*.tar.gz
             opscope-*.tar.gz.sha256
+            opscope_*_amd64.deb
+            opscope_*_amd64.deb.sha256
           if-no-files-found: error
 
-  publish:
+  debian-lifecycle:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'debian:12', 'debian:11']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: artifacts
+      - name: Verify and install the release package
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          (cd artifacts && sha256sum -c opscope_*_amd64.deb.sha256)
+          mode=supported
+          if [ "$IMAGE" = debian:11 ]; then mode=old-glibc; fi
+          docker run --rm -v "$PWD:/work:ro" "$IMAGE" \
+            bash /work/debian/lifecycle.sh "/work/artifacts/opscope_${GITHUB_REF_NAME#v}_amd64.deb" "$mode"
+
+  publish:
+    needs: [build, debian-lifecycle]
     runs-on: ubuntu-22.04
     # A tag, and only a tag - whatever started the run. Dispatching at a
     # branch exercises the whole build and stops here, so the workflow can
@@ -522,7 +559,8 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file CHANGELOG-release.md \
-            artifacts/*.tar.gz artifacts/*.tar.gz.sha256
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+            artifacts/*_amd64.deb artifacts/*_amd64.deb.sha256
 
   homebrew:
     needs: publish
