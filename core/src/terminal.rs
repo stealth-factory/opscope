@@ -675,7 +675,7 @@ mod tests {
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
         assert!(s.use_shm && s.capabilities.kitty_graphics);
         let id0 = crate::graphics::image_id(0);
-        let id1 = crate::graphics::image_id(1);
+        let id1 = crate::graphics::image_id(31);
         crate::shm::mark_shared(id0);
         crate::shm::mark_shared(id1);
         s.reply(&format!("\x1b_Gi={id0};EBADF:shared memory\x1b\\"), now);
