@@ -3,6 +3,33 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.3.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Compress reset timestamps (#384)
+- **core**: Stop Kitty upload feedback loops for unchanged pixels (#391)
+- **agent-usage**: Align Claude reset cache freshness (#394)
+
+### Documentation
+
+- Recommend npm as the default installation method (#380)
+- Retire present-tense Python port narration (#385)
+
+### Features
+
+- **core**: Send local chart images through shared memory (OPS-154) (#362)
+- **agent-usage**: Support Cursor and Grok's unified SpaceXSI plan beside their own plans (OPS-162)
+- **agent-usage**: Support the unified SpaceXSI plan for Cursor and Grok (OPS-162) (#387)
+
+### Performance
+
+- **core**: Rasterise only the visible chart crop (OPS-148) (#358)
+
+### Reverted
+
+- Feat(agent-usage): support Cursor and Grok's unified SpaceXSI plan (OPS-162) (#386)
+
 ## [1.2.0] - 2026-10-13
 
 ### Features

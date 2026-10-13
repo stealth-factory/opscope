@@ -264,6 +264,51 @@ re-dispatch that tag's release workflow; published npm versions and the
 GitHub release are already handled as retries. The release job cannot pick
 up script fixes that exist only on main: those require a new release.
 
+## Debian and the shared APT repository
+
+On a `vX.Y.Z` tag, the Linux build runs `debian/package.js` against the same
+manifest-declared binaries that go into the tarball. It verifies ELF amd64
+headers and identical version/commit/date stamps, keeps all binaries under
+`/usr/libexec/opscope`, and adds a single exec wrapper at `/usr/bin/opscope`.
+`dpkg-deb --root-owner-group` produces `opscope_X.Y.Z_amd64.deb`; a SHA-256
+file is generated alongside it. Ownership is root, permissions are fixed,
+and the commit timestamp supplies `SOURCE_DATE_EPOCH`.
+
+The control metadata declares amd64, `libc6 (>= 2.35)` and `libgcc-s1`.
+The artifact upload and GitHub release asset list explicitly include both
+`.deb` and `.deb.sha256`. The tagged `debian-lifecycle` job verifies their
+checksum and tests Ubuntu 22.04, Debian 12, and dependency refusal on Debian 11
+before `publish` can run. macOS skips packaging. Pull-request release builds
+skip the tagged package step; ordinary CI separately exercises the packer with
+the manifest version in a disposable test artifact, never a `dev` version.
+
+After `publish` succeeds, the gated `apt-repository` job sends the exact source,
+release tag and commit to the shared [APT repository](https://github.com/stealth-factory/apt-repo)
+through `repository_dispatch`. It reuses `secrets.GH_TOKEN || secrets.RELEASE_TOKEN`,
+the Homebrew bot credential already configured here. The endpoint needs Contents
+write in the destination for a fine-grained token, not Actions write. No secret
+travels in the event and no new credential or account grant is configured.
+
+The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
+immutable versions, rejects stale updates, signs indexes, tests APT installation,
+and publishes a complete Pages snapshot. A monthly job refreshes metadata
+for existing packages before its 90-day expiry; it never polls for new releases.
+Enable `APT_PUBLISH_ENABLED` in both repositories only with activation approval.
+Signing credentials and Pages activation are managed in that repository and
+were not configured by these changes. Its operations guide documents the exact
+approval requirements, scoped key trust, expiration, rotation, and recovery.
+
+A failed APT import leaves GitHub/npm and the downloadable `.deb` available,
+with the APT site on its previous snapshot. Fix the repository problem and
+retry its workflow on main. If the package itself is wrong, cut a new Opscope
+version; do not replace an existing version's bytes. A published old release
+without Debian assets is not backfilled automatically. The existing release
+retry behavior still skips an already published GitHub release.
+
+See [Debian installation](debian.md) for direct package use. Public tagged
+asset delivery and signed repository installation remain acceptance checks
+for the first approved activation/release, not claims made by PR-only tests.
+
 ## If something goes wrong
 
 **A tag exists but has no release.** The build failed after tagging. Read
