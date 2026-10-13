@@ -87,9 +87,11 @@ failure does not turn graphics off. A cleanup table with no free slot sends
 that one image directly and leaves shared memory on. An OS publication failure
 or a shared-upload error reported by the terminal returns the session to `t=d`.
 
-Owned image uploads request a reply (`q=0`) so every pending transmission has
-one success or error response. Successes advance the same queue as failures;
-placements and deletions stay quiet and do not consume transmission replies.
+Owned image uploads request a reply (`q=0`) and carry a unique placement ID
+(`p=`), which the terminal echoes. Replies match that ID rather than queue
+position, so a missing, late or out-of-order reply cannot be attributed to a
+newer upload. Expired/evicted keys are ignored; `EBADF` still identifies a
+shared-memory read failure. Placements and deletions stay quiet.
 
 An object the terminal does not take is retired, then unlinked once a short
 read window has passed, so a replacement that reuses the image id is not

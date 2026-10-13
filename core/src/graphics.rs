@@ -609,6 +609,8 @@ const CELL_W: usize = 8;
 const CELL_H: usize = 16;
 static LIVE: AtomicU32 = AtomicU32::new(0);
 static CACHE: Mutex<Vec<Plot>> = Mutex::new(Vec::new());
+static PLACEMENT_SEQ: AtomicU32 = AtomicU32::new(1);
+static PLACEMENTS: [AtomicU32; MAX_PLOTS] = [const { AtomicU32::new(1) }; MAX_PLOTS];
 
 pub(crate) fn image_id(slot: usize) -> u32 {
     // Five slot bits support a dense quota overview. A separate prefix
@@ -942,10 +944,11 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=1\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1\x1b\\",
         plot.y + 1,
         plot.x + 1,
         image_id(slot),
+        PLACEMENTS[slot].load(Ordering::Acquire),
         plot.width.min(pane_width - plot.x),
         plot.visible_rows
     )
@@ -962,11 +965,16 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
     }
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
     let id = image_id(slot);
+    let placement = loop {
+        let n = PLACEMENT_SEQ.fetch_add(1, Ordering::Relaxed);
+        if n != 0 { break n; }
+    };
+    PLACEMENTS[slot].store(placement, Ordering::Release);
     let keys = format!(
-        "s={w},v={h},i={id},p=1,c={cols},r={},C=1,q=0",
+        "s={w},v={h},i={id},p={placement},c={cols},r={},C=1,q=0",
         plot.visible_rows
     );
-    out.push_str(&transmit_pixels(&clipped, &keys, id));
+    out.push_str(&transmit_pixels(&clipped, &keys, id, placement));
     out
 }
 
@@ -974,18 +982,18 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
 // images avoid zlib/base64 work on both sides when the local probe succeeded.
 const MIN_SHARED_BYTES: usize = 16 * 1024;
 
-pub(crate) fn transmit_pixels(pixels: &[u8], keys: &str, id: u32) -> String {
+pub(crate) fn transmit_pixels(pixels: &[u8], keys: &str, id: u32, placement: u32) -> String {
     // A local terminal can map these pixels directly. Choose the transport
     // before compression and base64 framing, rather than decoding a direct
     // escape back into another buffer only to put it in shared memory.
     if pixels.len() >= MIN_SHARED_BYTES {
-        if let Some(command) = super::shm::publish_pixels(keys, pixels, id) {
+        if let Some(command) = super::shm::publish_pixels(keys, pixels, id, placement) {
             return command;
         }
     }
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(pixels, 3);
     let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
-    super::shm::mark_direct(id);
+    super::shm::mark_direct(id, placement);
     let mut out = String::new();
     let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
     for (i, chunk) in chunks.iter().enumerate() {

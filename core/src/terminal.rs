@@ -195,16 +195,23 @@ impl Session {
                     super::screen_lost();
                     return false;
                 }
-                let generation = super::shm::take_reply(id);
+                let placement = keys.split(',').find_map(|key| key.strip_prefix("p=")?.parse::<u32>().ok());
+                let generation = placement.and_then(|p| super::shm::take_reply(id, p));
                 if message != "OK\x1b\\" {
                     // A shared reply stays a transport failure even when the
-                    // fallback frame has already been sent. That frame pushed
-                    // its own generation behind this one. Only an error from
-                    // the direct generation turns graphics off.
-                    let shared_failure = match generation {
-                        Some(true) => true,
-                        Some(false) => false,
-                        None => self.use_shm,
+                    // fallback frame has already been sent. That frame has
+                    // a different placement key. Only a matched direct error
+                    // turns graphics off.
+                    // EBADF is the protocol's file/shared-memory read
+                    // failure, even if its keyed entry has already expired.
+                    // Other uncorrelated replies cannot reject newer images.
+                    let shared_failure = if message.starts_with("EBADF") {
+                        true
+                    } else {
+                        match generation {
+                            Some(shared) => shared,
+                            None => return false,
+                        }
                     };
                     if shared_failure {
                         self.use_shm = false;
@@ -481,6 +488,7 @@ mod tests {
 
     #[test]
     fn a_dropped_image_is_resent_rather_than_ending_graphics() {
+        let _guard = crate::shm::guard();
         let now = Instant::now();
         for slot in [0, 31] {
             let mut s = Session {
@@ -491,7 +499,8 @@ mod tests {
             let ours = crate::graphics::image_id(slot);
             s.reply(&format!("\x1b_Gi={ours};ENOENT:no such image\x1b\\"), now);
             assert!(s.capabilities.kitty_graphics && !s.image_rejected);
-            s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
+            crate::shm::mark_direct(ours, 1);
+            s.reply(&format!("\x1b_Gi={ours},p=1;EINVAL:bad\x1b\\"), now);
             assert!(!s.capabilities.kitty_graphics && s.image_rejected);
         }
     }
@@ -683,17 +692,17 @@ mod tests {
         assert!(s.use_shm && s.capabilities.kitty_graphics);
         let id0 = crate::graphics::image_id(0);
         let id1 = crate::graphics::image_id(31);
-        crate::shm::mark_shared(id0);
-        crate::shm::mark_shared(id1);
-        s.reply(&format!("\x1b_Gi={id0};EBADF:shared memory\x1b\\"), now);
+        crate::shm::mark_shared(id0, 1);
+        crate::shm::mark_shared(id1, 1);
+        s.reply(&format!("\x1b_Gi={id0},p=1;EBADF:shared memory\x1b\\"), now);
         assert!(s.capabilities.kitty_graphics && !s.image_rejected && !s.use_shm);
-        s.reply(&format!("\x1b_Gi={id1};EBADF:shared memory\x1b\\"), now);
+        s.reply(&format!("\x1b_Gi={id1},p=1;EBADF:shared memory\x1b\\"), now);
         assert!(
             s.capabilities.kitty_graphics && !s.image_rejected,
             "a second queued shared-memory error turned graphics off"
         );
-        crate::shm::mark_direct(id0);
-        s.reply(&format!("\x1b_Gi={id0};EINVAL:bad\x1b\\"), now);
+        crate::shm::mark_direct(id0, 2);
+        s.reply(&format!("\x1b_Gi={id0},p=2;EINVAL:bad\x1b\\"), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 
@@ -709,19 +718,31 @@ mod tests {
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
         assert!(s.use_shm && s.capabilities.kitty_graphics);
         let id = crate::graphics::image_id(0);
-        crate::shm::mark_shared(id);
-        crate::shm::mark_direct(id);
-        assert!(
-            crate::shm::shared_pending(id),
-            "the fallback frame cleared the shared generation"
-        );
-        s.reply(&format!("\x1b_Gi={id};EBADF:shared memory\x1b\\"), now);
+        crate::shm::mark_shared(id, 1);
+        crate::shm::mark_direct(id, 2);
+        s.reply(&format!("\x1b_Gi={id},p=1;EBADF:shared memory\x1b\\"), now);
         assert!(
             s.capabilities.kitty_graphics && !s.image_rejected,
             "a late shared-memory error disabled graphics"
         );
-        assert!(!crate::shm::shared_pending(id));
-        s.reply(&format!("\x1b_Gi={id};EINVAL:bad\x1b\\"), now);
+        s.reply(&format!("\x1b_Gi={id},p=2;EINVAL:bad\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn uncorrelated_late_errors_never_reject_a_newer_direct_upload() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session::default();
+        s.capabilities.kitty_graphics = true;
+        let id = crate::graphics::image_id(0);
+        crate::shm::mark_shared(id, 1);
+        for p in 2..=9 { crate::shm::mark_direct(id, p); }
+        s.reply(&format!("\x1b_Gi={id},p=1;ENOMEM:late shared\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        s.reply(&format!("\x1b_Gi={id},p=1;EBADF:late shared\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        s.reply(&format!("\x1b_Gi={id},p=9;EINVAL:direct\x1b\\"), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 

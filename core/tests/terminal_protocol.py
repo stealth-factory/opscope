@@ -88,7 +88,7 @@ class Terminal:
         commands = self.commands()
         for keys, _ in commands[self.ack_commands:]:
             if keys.get(b"a") == b"T":
-                self.chunk_reply = keys.get(b"i") if keys.get(b"q", b"0") == b"0" else None
+                self.chunk_reply = (keys[b"i"] + b",p=" + keys[b"p"]) if keys.get(b"q", b"0") == b"0" else None
             if keys.get(b"m") == b"0" and self.chunk_reply is not None:
                 if self.image_reply == "ok":
                     self.send(b"\x1b_Gi=" + self.chunk_reply + b";OK\x1b\\")
@@ -158,7 +158,7 @@ def shm_read(name):
 
 
 def run(mode, reply, check):
-    terminal = Terminal(mode, reply)
+    terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
     try:
         terminal.read(0.3)
         check(terminal)
@@ -234,7 +234,7 @@ def timeout(t):
 
 def rejected_image(t):
     keys, _ = t.images()[0]
-    t.send(b"\x1b_Gi=" + keys[b"i"] + b",p=1;ENOMEM:fixture\x1b\\")
+    t.send(b"\x1b_Gi=" + keys[b"i"] + b",p=" + keys[b"p"] + b";ENOMEM:fixture\x1b\\")
     t.read()
     assert b"Kitty image rejected" in t.output
     assert t.commands()[-1][0].get(b"a") == b"d"
@@ -362,7 +362,7 @@ def successful_upload_before_shared_failure():
         t.read(0.3)
         direct = t.images()[-1][0]
         assert direct[b"t"] == b"d" and direct[b"q"] == b"0", "tracked sends need replies"
-        t.send(b"\x1b_Gi=" + direct[b"i"] + b";OK\x1b\\")
+        t.send(b"\x1b_Gi=" + direct[b"i"] + b",p=" + direct[b"p"] + b";OK\x1b\\")
         t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
         t.read(0.2)
         # Scrolling preserves the reply queue; resizing would clear it and
@@ -373,21 +373,54 @@ def successful_upload_before_shared_failure():
         shared = t.images()[-1][0]
         assert len(t.images()) > before and shared[b"t"] == b"s"
         assert shared[b"i"] == direct[b"i"] and shared[b"q"] == b"0"
-        t.send(b"\x1b_Gi=" + shared[b"i"] + b";EBADF:fixture\x1b\\")
+        assert shared[b"p"] != direct[b"p"], "upload placement key was reused"
+        t.send(b"\x1b_Gi=" + shared[b"i"] + b",p=" + shared[b"p"] + b";EBADF:fixture\x1b\\")
         t.read(0.3)
         assert b"Kitty image rejected" not in t.output, "shared failure disabled graphics"
         fallback = t.images()[-1][0]
         assert fallback[b"t"] == b"d" and fallback[b"q"] == b"0"
-        t.send(b"\x1b_Gi=" + fallback[b"i"] + b";EINVAL:fixture\x1b\\")
+        t.send(b"\x1b_Gi=" + fallback[b"i"] + b",p=" + fallback[b"p"] + b";EINVAL:fixture\x1b\\")
         t.read(0.3)
         assert b"Kitty image rejected" in t.output, "direct failure was mistaken for shared"
         t.quit()
     finally:
         t.close()
 
+def missing_and_late_replies_keep_their_upload_keys():
+    t = Terminal(reply="kitty", image_reply="manual")
+    try:
+        t.read(0.3)
+        old = t.images()[-1][0]
+        # Leave this direct success unanswered. It must not consume a later
+        # shared upload's error, even when replies arrive out of order.
+        t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+        t.read(0.2)
+        t.send(b"\x1b[B")
+        t.read(0.2)
+        shared = t.images()[-1][0]
+        assert shared[b"t"] == b"s" and shared[b"p"] != old[b"p"]
+        t.send(b"\x1b_Gi=" + shared[b"i"] + b",p=" + shared[b"p"] + b";ENOMEM:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" not in t.output
+        direct = t.images()[-1][0]
+        assert direct[b"t"] == b"d"
+        t.send(b"\x1b_Gi=" + old[b"i"] + b",p=" + old[b"p"] + b";OK\x1b\\")
+        t.send(b"\x1b_Gi=" + old[b"i"] + b",p=4294967295;EINVAL:unknown\x1b\\")
+        t.read(0.2)
+        assert b"Kitty image rejected" not in t.output, "late reply rejected a newer upload"
+        t.send(b"\x1b_Gi=" + direct[b"i"] + b",p=" + direct[b"p"] + b";EINVAL:current\x1b\\")
+        t.read(0.2)
+        assert b"Kitty image rejected" in t.output, "late reply consumed the current key"
+        t.quit()
+    finally:
+        t.close()
+
+
 if __name__ == "__main__":
     successful_upload_before_shared_failure()
     print("PASS shared-memory/success-before-failure")
+    missing_and_late_replies_keep_their_upload_keys()
+    print("PASS shared-memory/missing-and-late-replies")
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),

@@ -98,8 +98,8 @@ const fn empty_slot() -> Slot {
 static TABLE: Mutex<[Slot; SLOTS]> = Mutex::new([empty_slot(); SLOTS]);
 static TRANSPORT: AtomicU8 = AtomicU8::new(DIRECT);
 static NAME_SEQ: AtomicU32 = AtomicU32::new(1);
-/// Outstanding replies, oldest first, one queue per owned image. A fallback
-/// frame pushes behind a shared send; it does not erase it.
+/// Outstanding replies keyed by placement, one bounded table per owned image.
+/// Dropping an old entry never changes which upload another reply matches.
 static PENDING: Mutex<[Pending; super::graphics::MAX_PLOTS]> =
     Mutex::new([Pending::new(); super::graphics::MAX_PLOTS]);
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -111,6 +111,7 @@ static FAIL_OS: AtomicU8 = AtomicU8::new(0);
 struct Pending {
     len: u8,
     shared: [bool; PENDING_CAP],
+    placement: [u32; PENDING_CAP],
     at_ms: [u64; PENDING_CAP],
 }
 
@@ -119,6 +120,7 @@ impl Pending {
         Self {
             len: 0,
             shared: [false; PENDING_CAP],
+            placement: [0; PENDING_CAP],
             at_ms: [0; PENDING_CAP],
         }
     }
@@ -198,38 +200,24 @@ pub(crate) fn transport_failed() {
     });
 }
 
-/// The oldest reply still owed for `id` is a shared-memory send.
-#[cfg(test)]
-pub(crate) fn shared_pending(id: u32) -> bool {
-    let Some(slot) = plot_slot(id) else {
-        return false;
-    };
-    with_pending(|rows| {
-        expire_pending(&mut rows[slot], mono_ms());
-        rows[slot].len > 0 && rows[slot].shared[0]
-    })
+pub(crate) fn mark_shared(id: u32, placement: u32) {
+    push_pending(id, placement, true);
 }
 
-pub(crate) fn mark_shared(id: u32) {
-    push_pending(id, true);
+pub(crate) fn mark_direct(id: u32, placement: u32) {
+    push_pending(id, placement, false);
 }
 
-/// Record a direct send behind any shared reply that has not arrived yet.
-pub(crate) fn mark_direct(id: u32) {
-    push_pending(id, false);
-}
-
-/// The reply that just arrived. `Some(true)` is a shared transmission.
-pub(crate) fn take_reply(id: u32) -> Option<bool> {
+/// Match exactly the placement echoed by an upload response. A late reply
+/// to an expired/evicted upload never consumes a newer upload's entry.
+pub(crate) fn take_reply(id: u32, placement: u32) -> Option<bool> {
     let slot = plot_slot(id)?;
     with_pending(|rows| {
         expire_pending(&mut rows[slot], mono_ms());
         let row = &mut rows[slot];
-        if row.len == 0 {
-            return None;
-        }
-        let shared = row.shared[0];
-        shift_pending(row);
+        let at = row.placement[..row.len as usize].iter().position(|p| *p == placement)?;
+        let shared = row.shared[at];
+        remove_pending(row, at);
         Some(shared)
     })
 }
@@ -247,7 +235,7 @@ fn with_pending<T>(body: impl FnOnce(&mut [Pending; super::graphics::MAX_PLOTS])
     body(&mut rows)
 }
 
-fn push_pending(id: u32, shared: bool) {
+fn push_pending(id: u32, placement: u32, shared: bool) {
     let Some(slot) = plot_slot(id) else {
         return;
     };
@@ -255,10 +243,11 @@ fn push_pending(id: u32, shared: bool) {
         let row = &mut rows[slot];
         expire_pending(row, mono_ms());
         if row.len as usize == PENDING_CAP {
-            shift_pending(row);
+            remove_pending(row, 0);
         }
         let at = row.len as usize;
         row.shared[at] = shared;
+        row.placement[at] = placement;
         row.at_ms[at] = mono_ms();
         row.len += 1;
     });
@@ -266,17 +255,18 @@ fn push_pending(id: u32, shared: bool) {
 
 fn expire_pending(row: &mut Pending, now: u64) {
     while row.len > 0 && now.saturating_sub(row.at_ms[0]) >= REPLY_MS {
-        shift_pending(row);
+        remove_pending(row, 0);
     }
 }
 
-fn shift_pending(row: &mut Pending) {
+fn remove_pending(row: &mut Pending, at: usize) {
     if row.len == 0 {
         return;
     }
     let n = row.len as usize;
-    for i in 1..n {
+    for i in at + 1..n {
         row.shared[i - 1] = row.shared[i];
+        row.placement[i - 1] = row.placement[i];
         row.at_ms[i - 1] = row.at_ms[i];
     }
     row.len -= 1;
@@ -289,7 +279,7 @@ fn clear_pending() {
 /// Publish raw RGBA pixels before the direct path does compression or framing.
 /// A full table falls back for this image only. An OS refusal turns the
 /// transport off; neither case disables graphics.
-pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32) -> Option<String> {
+pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32) -> Option<String> {
     if !is_shared() {
         return None;
     }
@@ -301,7 +291,7 @@ pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32) -> Option<Strin
             return None;
         }
     };
-    mark_shared(id);
+    mark_shared(id, placement);
     let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
     // Darwin rounds fstat's object size to a page; S is the exact RGBA size.
     Some(format!(
@@ -777,18 +767,18 @@ mod tests {
             }
             let id = super::super::graphics::image_id(0);
             let id2 = super::super::graphics::image_id(1);
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id).is_some());
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2).is_none());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1).is_some());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1).is_none());
             assert!(is_shared(), "a full table turned shared memory off");
             assert_eq!(live_names(id).len(), 1, "the sent image lost its object");
             assert!(
                 live_names(id2).is_empty(),
                 "the refused image left an object"
             );
-            assert_eq!(take_reply(id), Some(true));
-            assert_eq!(take_reply(id2), None, "unsent image queued a reply");
+            assert_eq!(take_reply(id, 1), Some(true));
+            assert_eq!(take_reply(id2, 1), None, "unsent image queued a reply");
             unlink_id(id);
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2).is_some());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1).is_some());
         }
     }
 
@@ -800,7 +790,7 @@ mod tests {
         };
         apply_accepted();
         FAIL_OS.store(1, Ordering::Release);
-        assert!(publish_pixels("q=0", &[1, 2, 3, 4], 7).is_none());
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], 7, 1).is_none());
         assert!(!is_shared(), "an OS refusal left shared memory on");
     }
 
@@ -813,10 +803,10 @@ mod tests {
         let sequence = NAME_SEQ.load(Ordering::Acquire);
         let name = format!("/o{:x}-{sequence:x}", unsafe { libc::getpid() });
         FAIL_OS.store(2, Ordering::Release);
-        assert!(publish_pixels("q=0", &[1, 2, 3, 4], id).is_none());
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1).is_none());
         assert!(!is_shared());
         assert!(live_names(id).is_empty());
-        assert_eq!(take_reply(id), None);
+        assert_eq!(take_reply(id, 1), None);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(!exists(&name), "failed allocation left a shared-memory object");
     }
@@ -829,7 +819,7 @@ mod tests {
         };
         apply_accepted();
         let raw: Vec<u8> = (0..9000).map(|i| (i * 17 + 3) as u8).collect();
-        let command = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42).expect("object");
+        let command = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1).expect("object");
         assert!(command.contains("t=s") && !command.contains("o=z"));
         assert!(command.contains("m=0") && !command.contains("m=1"));
         assert!(command.contains(&format!("S={}", raw.len())));
@@ -837,7 +827,7 @@ mod tests {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_object(&name, &raw);
-            let again = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42).expect("replacement");
+            let again = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1).expect("replacement");
             let name2 = shared_name(&again);
             assert_ne!(name, name2);
             assert!(exists(&name), "an object still being read was unlinked");
@@ -851,6 +841,10 @@ mod tests {
         release();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(!exists(&name), "release left an object");
+    }
+
+    fn placement_of(command: &str) -> u32 {
+        command.split(",p=").nth(1).unwrap().split(',').next().unwrap().parse().unwrap()
     }
 
     fn shared_name(command: &str) -> String {
@@ -888,11 +882,26 @@ mod tests {
         let id = super::super::graphics::image_id(3);
         let small = super::super::graphics::direct_chart_command(16, 1);
         assert!(small.contains("t=d"));
-        assert_eq!(take_reply(id), Some(false));
+        assert_eq!(take_reply(id, placement_of(&small)), Some(false));
         let large = super::super::graphics::direct_chart_command(32, 1);
         assert!(large.contains("t=s"));
-        assert_eq!(take_reply(id), Some(true));
+        assert_eq!(take_reply(id, placement_of(&large)), Some(true));
         assert!(is_shared());
+    }
+
+    #[test]
+    fn replies_match_their_placement_even_after_eviction_expiry_or_reordering() {
+        let _guard = guard();
+        let id = super::super::graphics::image_id(0);
+        mark_shared(id, 1);
+        for p in 2..=9 { mark_direct(id, p); }
+        assert_eq!(take_reply(id, 1), None, "evicted upload matched a newer entry");
+        assert_eq!(take_reply(id, 9), Some(false));
+        assert_eq!(take_reply(id, 2), Some(false), "out-of-order reply consumed another entry");
+        with_pending(|rows| expire_pending(&mut rows[0], mono_ms() + REPLY_MS));
+        mark_shared(id, 10);
+        assert_eq!(take_reply(id, 3), None, "expired reply matched a newer entry");
+        assert_eq!(take_reply(id, 10), Some(true));
     }
 
     #[test]
@@ -1033,14 +1042,14 @@ mod tests {
         force_direct();
         let direct = cpu_for(|| {
             for _ in 0..rounds {
-                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id));
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id, 1));
             }
         });
         let Some(_) = begin_probe() else { return; };
         apply_accepted();
         let shared = cpu_for(|| {
             for _ in 0..rounds {
-                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id));
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id, 1));
                 unlink_id(id);
             }
         });
