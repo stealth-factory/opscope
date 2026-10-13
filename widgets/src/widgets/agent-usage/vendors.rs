@@ -534,10 +534,11 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             "grok" => s.grok.spacexsi,
             _ => Spacexsi::No,
         };
+        // Both quiet is still one account: Cursor's entry says why, once.
         if name == "grok"
             && place == Spacexsi::Shared
             && names.contains(&"cursor")
-            && !lanes_of("cursor", s).is_empty()
+            && (!lanes_of("cursor", s).is_empty() || lanes_of("grok", s).is_empty())
         {
             continue;
         }
@@ -2103,6 +2104,42 @@ mod tests {
         assert!(!body.contains("no pool figure"), "Grok's figure not used: {body}");
         assert!(body.contains("pool figure from Grok"), "the figure's source unsaid: {body}");
         assert!(body.contains("EXTRA USAGE"), "Cursor's money lost: {body}");
+    }
+
+    #[test]
+    fn a_cursor_pool_cached_from_an_ended_week_gives_way_to_grok_s() {
+        // Review: a two-minute cache spanning the weekly reset kept last
+        // week's Cursor pool on screen, labelled live, beside this week's
+        // Grok split.
+        let mut s = State {
+            cursor: crate::cursor::Data::from_an_ended_week(crate::cursor::Data::unified_fixture(true)),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let grok_pool = pool_lane(&crate::grok::lanes(&s.grok)).expect("Grok's fixture has a pool").pct;
+        let summary = summary_text(&s);
+        assert_eq!(summary.matches("SpaceXSI").count(), 1, "two SpaceXSI groups: {summary}");
+        assert!(summary.contains("weekly pool"), "Grok's pool dropped: {summary}");
+        s.cursor.pool_from_grok = Some(grok_pool);
+        let tabs: Vec<String> = ["+", "cursor", "grok"].iter().map(|t| t.to_string()).collect();
+        let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+        assert!(body.contains("pool figure from Grok"), "last week's Cursor figure still drawn: {body}");
+    }
+
+    #[test]
+    fn a_shared_account_quiet_on_both_sides_is_listed_once() {
+        // Review: with neither vendor publishing a lane, [+] listed the
+        // same SpaceXSI account twice, each with its own reason.
+        let mut s = State {
+            cursor: crate::cursor::Data::without_live(crate::cursor::Data::unified_fixture(true)),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let summary = summary_text(&s);
+        assert_eq!(summary.matches("SpaceXSI").count(), 1, "the account listed twice: {summary}");
     }
 
     #[test]

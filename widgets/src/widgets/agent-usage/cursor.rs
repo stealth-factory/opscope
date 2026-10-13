@@ -765,6 +765,11 @@ fn product_hue(name: &str) -> (u8, u8, u8) {
 /// plan the two are the same number - third-party models no longer draw on
 /// the pool, so `apiPercentUsed` sits at nought and auto is the whole of it.
 fn pool_pct(live: &serde_json::Value) -> Option<f64> {
+    // A cached answer whose week has ended describes last week's pool: it
+    // is not this week's figure, so it is withheld rather than drawn live.
+    if loose(&live["billingCycleEnd"]).is_some_and(|e| e <= now() * 1000.0) {
+        return None;
+    }
     let plan = &live["planUsage"];
     loose(&plan["totalPercentUsed"]).or_else(|| loose(&plan["autoPercentUsed"]))
 }
@@ -3872,6 +3877,16 @@ impl Data {
     }
 
     /// The same reading with the usage call unanswered.
+    /// The same reading cached from a week that has since ended.
+    pub fn from_an_ended_week(mut d: Data) -> Data {
+        if let Some(live) = d.live.as_mut() {
+            let end = now() * 1000.0 - 60_000.0;
+            live["billingCycleStart"] = serde_json::json!((end - 7.0 * 86_400_000.0).to_string());
+            live["billingCycleEnd"] = serde_json::json!(end.to_string());
+        }
+        d
+    }
+
     pub fn without_live(mut d: Data) -> Data {
         d.live = None;
         d.live_why = "Cursor's usage endpoint did not answer".into();
