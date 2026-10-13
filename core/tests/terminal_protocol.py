@@ -537,7 +537,9 @@ def shared_rgb_gallery(t):
              if keys.get(b"f") == b"24" and keys.get(b"t") == b"s"]
     assert tiles, "opaque RGB tile did not use shared memory"
     keys, payload = tiles[-1]
-    data = shm_read(base64.b64decode(payload))[:int(keys[b"S"])]
+    data = shm_read(base64.b64decode(payload))
+    assert data is not None, "shared image object cannot be mapped"
+    data = data[:int(keys[b"S"])]
     assert len(data) == int(keys[b"s"]) * int(keys[b"v"]) * 3
     assert data == bytes([50, 220, 170]) * (len(data) // 3), "RGB shared pixels changed"
     assert b"o" not in keys and keys[b"q"] == b"0"
