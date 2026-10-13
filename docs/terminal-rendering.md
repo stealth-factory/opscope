@@ -90,8 +90,13 @@ or a shared-upload error reported by the terminal returns the session to `t=d`.
 Owned image uploads request a reply (`q=0`) and carry a unique placement ID
 (`p=`), which the terminal echoes. Replies match that ID rather than queue
 position, so a missing, late or out-of-order reply cannot be attributed to a
-newer upload. Expired/evicted keys are ignored; `EBADF` still identifies a
-shared-memory read failure. Placements and deletions stay quiet.
+newer upload. A table of eight owed uploads does not discard one to make
+room: that frame is sent directly and shared memory stays available. The cap
+removes a slot only when that upload is superseded. Expired keys, and a
+reply that arrives after resume has cleared the table, are ignored. `EBADF`
+still identifies a shared-memory read failure even when its upload is no
+longer in the table, and it does not turn graphics off. Placements and
+deletions stay quiet.
 
 An object the terminal does not take is retired, then unlinked once a short
 read window has passed, so a replacement that reuses the image id is not

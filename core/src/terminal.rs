@@ -737,12 +737,41 @@ mod tests {
         s.capabilities.kitty_graphics = true;
         let id = crate::graphics::image_id(0);
         crate::shm::mark_shared(id, 1);
-        for p in 2..=9 { crate::shm::mark_direct(id, p); }
+        crate::shm::supersede(id);
+        assert!(crate::shm::mark_direct(id, 2));
         s.reply(&format!("\x1b_Gi={id},p=1;ENOMEM:late shared\x1b\\"), now);
         assert!(s.capabilities.kitty_graphics && !s.image_rejected);
         s.reply(&format!("\x1b_Gi={id},p=1;EBADF:late shared\x1b\\"), now);
         assert!(s.capabilities.kitty_graphics && !s.image_rejected);
-        s.reply(&format!("\x1b_Gi={id},p=9;EINVAL:direct\x1b\\"), now);
+        s.reply(&format!("\x1b_Gi={id},p=2;EINVAL:direct\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn a_reply_after_resume_is_dropped() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(s.use_shm && s.capabilities.kitty_graphics);
+        let id = crate::graphics::image_id(0);
+        assert!(crate::shm::mark_direct(id, 4));
+        // SIGCONT runs cleanup and start, which clears PENDING and leaves
+        // the new session on direct transport before the buffered reply is read.
+        crate::shm::force_direct();
+        s.use_shm = false;
+        s.probe_settled = true;
+        s.reply(&format!("\x1b_Gi={id},p=4;EINVAL:stale session\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a reply from the previous session was treated as a direct failure"
+        );
+        assert!(crate::shm::mark_direct(id, 5));
+        s.reply(&format!("\x1b_Gi={id},p=5;EINVAL:current\x1b\\"), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 

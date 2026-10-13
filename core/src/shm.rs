@@ -99,7 +99,8 @@ static TABLE: Mutex<[Slot; SLOTS]> = Mutex::new([empty_slot(); SLOTS]);
 static TRANSPORT: AtomicU8 = AtomicU8::new(DIRECT);
 static NAME_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Outstanding replies keyed by placement, one bounded table per owned image.
-/// Dropping an old entry never changes which upload another reply matches.
+/// A full table does not drop an upload that is still owed a reply: that
+/// frame falls back, and only a superseded entry may be removed to make room.
 static PENDING: Mutex<[Pending; super::graphics::MAX_PLOTS]> =
     Mutex::new([Pending::new(); super::graphics::MAX_PLOTS]);
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -111,6 +112,9 @@ static FAIL_OS: AtomicU8 = AtomicU8::new(0);
 struct Pending {
     len: u8,
     shared: [bool; PENDING_CAP],
+    /// Not owed. Its reply is dropped, and the cap may reuse the slot.
+    /// A newer transmit does not set this: that reply can still arrive.
+    superseded: [bool; PENDING_CAP],
     placement: [u32; PENDING_CAP],
     at_ms: [u64; PENDING_CAP],
 }
@@ -120,6 +124,7 @@ impl Pending {
         Self {
             len: 0,
             shared: [false; PENDING_CAP],
+            superseded: [false; PENDING_CAP],
             placement: [0; PENDING_CAP],
             at_ms: [0; PENDING_CAP],
         }
@@ -200,25 +205,43 @@ pub(crate) fn transport_failed() {
     });
 }
 
-pub(crate) fn mark_shared(id: u32, placement: u32) {
-    push_pending(id, placement, true);
+pub(crate) fn mark_shared(id: u32, placement: u32) -> bool {
+    push_pending(id, placement, true)
 }
 
-pub(crate) fn mark_direct(id: u32, placement: u32) {
-    push_pending(id, placement, false);
+pub(crate) fn mark_direct(id: u32, placement: u32) -> bool {
+    push_pending(id, placement, false)
 }
 
-/// Match exactly the placement echoed by an upload response. A late reply
-/// to an expired/evicted upload never consumes a newer upload's entry.
+/// Drop uploads that are no longer owed. A reply for one is ignored, and
+/// the cap may reuse the slot. Transmit does not call this.
+#[cfg(test)]
+pub(crate) fn supersede(id: u32) {
+    let Some(slot) = plot_slot(id) else {
+        return;
+    };
+    with_pending(|rows| {
+        let row = &mut rows[slot];
+        for i in 0..row.len as usize {
+            row.superseded[i] = true;
+        }
+    });
+}
+
+/// Match exactly the placement echoed by an upload response. An unknown or
+/// superseded placement is dropped and does not consume a newer upload.
 pub(crate) fn take_reply(id: u32, placement: u32) -> Option<bool> {
     let slot = plot_slot(id)?;
     with_pending(|rows| {
         expire_pending(&mut rows[slot], mono_ms());
         let row = &mut rows[slot];
-        let at = row.placement[..row.len as usize].iter().position(|p| *p == placement)?;
+        let at = row.placement[..row.len as usize]
+            .iter()
+            .position(|p| *p == placement)?;
+        let superseded = row.superseded[at];
         let shared = row.shared[at];
         remove_pending(row, at);
-        Some(shared)
+        if superseded { None } else { Some(shared) }
     })
 }
 
@@ -235,22 +258,44 @@ fn with_pending<T>(body: impl FnOnce(&mut [Pending; super::graphics::MAX_PLOTS])
     body(&mut rows)
 }
 
-fn push_pending(id: u32, placement: u32, shared: bool) {
+/// Room for one more owed upload. An id this process does not own is not
+/// tracked, so it does not consume a slot.
+fn pending_room(id: u32) -> bool {
     let Some(slot) = plot_slot(id) else {
-        return;
+        return true;
+    };
+    with_pending(|rows| {
+        let row = &mut rows[slot];
+        expire_pending(row, mono_ms());
+        (row.len as usize) < PENDING_CAP || row_has_superseded(row)
+    })
+}
+
+fn row_has_superseded(row: &Pending) -> bool {
+    row.superseded[..row.len as usize].contains(&true)
+}
+
+fn push_pending(id: u32, placement: u32, shared: bool) -> bool {
+    let Some(slot) = plot_slot(id) else {
+        return true;
     };
     with_pending(|rows| {
         let row = &mut rows[slot];
         expire_pending(row, mono_ms());
         if row.len as usize == PENDING_CAP {
-            remove_pending(row, 0);
+            let Some(at) = (0..row.len as usize).find(|&i| row.superseded[i]) else {
+                return false;
+            };
+            remove_pending(row, at);
         }
         let at = row.len as usize;
         row.shared[at] = shared;
+        row.superseded[at] = false;
         row.placement[at] = placement;
         row.at_ms[at] = mono_ms();
         row.len += 1;
-    });
+        true
+    })
 }
 
 fn expire_pending(row: &mut Pending, now: u64) {
@@ -266,6 +311,7 @@ fn remove_pending(row: &mut Pending, at: usize) {
     let n = row.len as usize;
     for i in at + 1..n {
         row.shared[i - 1] = row.shared[i];
+        row.superseded[i - 1] = row.superseded[i];
         row.placement[i - 1] = row.placement[i];
         row.at_ms[i - 1] = row.at_ms[i];
     }
@@ -283,6 +329,11 @@ pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32)
     if !is_shared() {
         return None;
     }
+    // Check before creating the object. A full reply table must not retire
+    // the upload the terminal may still be reading.
+    if !pending_room(id) {
+        return None;
+    }
     let name = match create(pixels, id) {
         Ok(name) => name,
         Err(Publish::Busy) => return None,
@@ -291,7 +342,10 @@ pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32)
             return None;
         }
     };
-    mark_shared(id, placement);
+    if !mark_shared(id, placement) {
+        drop_named(&name);
+        return None;
+    }
     let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
     // Darwin rounds fstat's object size to a page; S is the exact RGBA size.
     Some(format!(
@@ -893,15 +947,55 @@ mod tests {
     fn replies_match_their_placement_even_after_eviction_expiry_or_reordering() {
         let _guard = guard();
         let id = super::super::graphics::image_id(0);
-        mark_shared(id, 1);
-        for p in 2..=9 { mark_direct(id, p); }
-        assert_eq!(take_reply(id, 1), None, "evicted upload matched a newer entry");
-        assert_eq!(take_reply(id, 9), Some(false));
-        assert_eq!(take_reply(id, 2), Some(false), "out-of-order reply consumed another entry");
+        assert!(mark_shared(id, 1));
+        assert!(mark_direct(id, 2));
+        assert!(mark_direct(id, 3));
+        // The first reply never arrives. The later one still matches itself.
+        assert_eq!(
+            take_reply(id, 3),
+            Some(false),
+            "out-of-order reply consumed another entry"
+        );
+        assert_eq!(
+            take_reply(id, 1),
+            Some(true),
+            "a dropped reply was attributed to a later upload"
+        );
         with_pending(|rows| expire_pending(&mut rows[0], mono_ms() + REPLY_MS));
-        mark_shared(id, 10);
-        assert_eq!(take_reply(id, 3), None, "expired reply matched a newer entry");
+        assert!(mark_shared(id, 10));
+        assert_eq!(take_reply(id, 2), None, "expired reply matched a newer entry");
         assert_eq!(take_reply(id, 10), Some(true));
+    }
+
+    #[test]
+    fn a_full_pending_cap_keeps_owed_replies_and_evicts_only_superseded() {
+        let _guard = guard();
+        let id = super::super::graphics::image_id(0);
+        assert!(mark_shared(id, 1));
+        for p in 2..=PENDING_CAP as u32 {
+            assert!(mark_direct(id, p), "upload {p} was refused before the table filled");
+        }
+        assert!(
+            !mark_direct(id, 9),
+            "the ninth upload discarded an owed reply"
+        );
+        assert_eq!(take_reply(id, 1), Some(true), "cap dropped an owed shared reply");
+        assert_eq!(take_reply(id, 9), None, "an unrecorded upload was matched");
+        assert_eq!(take_reply(id, 2), Some(false));
+
+        release();
+        assert!(mark_shared(id, 1));
+        supersede(id);
+        for p in 2..=PENDING_CAP as u32 {
+            assert!(mark_direct(id, p));
+        }
+        assert!(
+            mark_shared(id, 9),
+            "a superseded slot was not reused"
+        );
+        assert_eq!(take_reply(id, 1), None, "a superseded reply was applied");
+        assert_eq!(take_reply(id, 2), Some(false), "an owed reply was evicted");
+        assert_eq!(take_reply(id, 9), Some(true));
     }
 
     #[test]
