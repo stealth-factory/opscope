@@ -567,8 +567,7 @@ mod tests {
             ..Session::default()
         };
         s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
-        let pid = unsafe { libc::getpid() } as u32;
-        let slot = |n: u32| 0x40000000 | ((pid & 0x1fffff) << 4) | n;
+        let slot = |n: usize| crate::graphics::image_id(n);
         // An image error that was not a frame edit still ends graphics.
         s.reply(
             &format!("\x1b_Gi={};ENOSPC:animation storage exhausted\x1b\\", slot(0)),

@@ -679,16 +679,16 @@ fn frames_ready() -> bool {
 }
 
 fn note_frame(slot: usize) {
-    FRAME_SLOTS.fetch_or(1 << slot, Ordering::Release);
+    FRAME_SLOTS.fetch_or(1u32 << slot, Ordering::Release);
 }
 
 fn note_full(slot: usize) {
-    FRAME_SLOTS.fetch_and(!(1 << slot), Ordering::Release);
+    FRAME_SLOTS.fetch_and(!(1u32 << slot), Ordering::Release);
 }
 
 pub(crate) fn frame_edit_pending(id: u32) -> bool {
     let slots = FRAME_SLOTS.load(Ordering::Acquire);
-    (0..MAX_PLOTS).any(|slot| image_id(slot) == id && slots & (1 << slot) != 0)
+    (0..MAX_PLOTS).any(|slot| image_id(slot) == id && slots & (1u32 << slot) != 0)
 }
 
 #[cfg(test)]
