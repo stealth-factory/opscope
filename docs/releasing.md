@@ -282,7 +282,7 @@ before `publish` can run. macOS skips packaging. Pull-request release builds
 skip the tagged package step; ordinary CI separately exercises the packer with
 the manifest version in a disposable test artifact, never a `dev` version.
 
-After `publish` succeeds, the gated `apt-repository` job sends the exact source,
+After tagged `publish` succeeds, the `apt-repository` job sends the exact source,
 release tag and commit to the shared [APT repository](https://github.com/stealth-factory/apt-repo)
 through `repository_dispatch`. It reuses `secrets.GH_TOKEN || secrets.RELEASE_TOKEN`,
 the Homebrew bot credential already configured here. The endpoint needs Contents
@@ -291,9 +291,14 @@ travels in the event and no new credential or account grant is configured.
 
 The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
 immutable versions, rejects stale updates, signs indexes, tests APT installation,
-and publishes a complete Pages snapshot. A monthly job refreshes metadata
+and publishes a complete Pages snapshot. A scheduled job refreshes metadata
 for existing packages before its 90-day expiry; it never polls for new releases.
-Enable `APT_PUBLISH_ENABLED` in both repositories only with activation approval.
+The current test schedule is daily at 19:30 Asia/Taipei; the intended steady
+schedule is monthly after live refresh validation.
+Every successful tagged release sends the notification without an enable flag.
+The receiver runs on main and retains its publishing environment and signing
+checks. Missing signing or hosting configuration fails visibly instead of
+silently skipping publication.
 Signing credentials and Pages activation are managed in that repository and
 were not configured by these changes. Its operations guide documents the exact
 approval requirements, scoped key trust, expiration, rotation, and recovery.
