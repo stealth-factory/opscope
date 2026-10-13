@@ -1136,7 +1136,7 @@ mod tests {
                     let (count, cached) = if heading == "CLAUDE" {
                         (2, false)
                     } else {
-                        (3, true)
+                        (3, false)
                     };
                     assert!(
                         row.starts_with(&format!("     {count} reset available ")),

@@ -93,7 +93,7 @@ impl Data {
             Some(stamp) => format!("{} reset available {stamp}", bank.left),
             None => format!("{} reset available", bank.left),
         };
-        if !self.quota_live {
+        if reading_is_old(self.quota_at) {
             line.push_str(&format!(" · cached {} ago", ago(self.quota_at)));
         }
         Some(line)
@@ -2352,6 +2352,37 @@ mod tests {
             quota["cedar_ember"] = serde_json::json!({"eligible": true, "grants": grants});
             data.quota_live = live;
             data
+        }
+    }
+
+    #[test]
+    fn reset_summary_cache_labels_follow_quota_freshness_not_source() {
+        let taken_now = now();
+        for live in [true, false] {
+            for (taken_at, old) in [
+                (taken_now - 35.0, false),
+                (taken_now - (CLAUDE_FRESH_FOR - 30.0), false),
+                (taken_now - (CLAUDE_FRESH_FOR + 30.0), true),
+                (0.0, true),
+            ] {
+                let mut data = Data::with_reset_grants(
+                    "",
+                    Some(25),
+                    serde_json::json!([{
+                        "resets_left": 2, "usable_now": true,
+                        "ends_at": "2126-01-02T00:00:00Z"
+                    }]),
+                    live,
+                );
+                data.quota_at = taken_at;
+                let line = data.reset_summary_line().expect("available resets");
+                assert!(line.starts_with("2 reset available "), "{line}");
+                assert_eq!(line.contains(" · cached "), old, "live={live}: {line}");
+                assert_eq!(lanes(&data)[0].stale, old);
+                if old {
+                    assert!(line.ends_with(&format!("cached {} ago", ago(taken_at))), "{line}");
+                }
+            }
         }
     }
 
