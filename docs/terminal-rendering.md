@@ -139,6 +139,14 @@ Level 9 saves little more and triples the time. A one-trace chart and the meter
 are a few dozen bytes larger at level 6 than at level 3; the filled plots more
 than make that up.
 
+A captured latency chart from actual localhost ping measurements (568×64
+RGBA pixels, 145,408 raw bytes) also checks the direct-path choice. In this
+release build, 20 compressions averaged 0.680 ms / 896 bytes at level 3,
+0.690 ms / 743 bytes at level 6, and 1.078 ms / 744 bytes at level 9. That
+frame saves 17% at level 6 for similar time. The multi-trace table above
+shows the larger CPU tradeoff; these results do not promise the same saving
+for every chart. Shared-memory uploads bypass compression entirely.
+
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
 does not depend on potentially unavailable cell-pixel-size reports. Up to 32
