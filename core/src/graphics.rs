@@ -2449,6 +2449,7 @@ mod tests {
 
     #[test]
     fn an_ambiguous_chart_is_uploaded_whole_and_a_constant_trace_may_slide() {
+        let _transport = super::super::shm::guard();
         let _cache = compose_lock();
         let _frames = FramesOn::new();
         let rows = vec!["protected title".into(), "axis".into()];
@@ -2530,6 +2531,7 @@ mod tests {
 
     #[test]
     fn a_sample_tick_sends_a_frame_edit_and_a_rescale_sends_the_image() {
+        let _transport = super::super::shm::guard();
         let _cache = compose_lock();
         let _frames = FramesOn::new();
         let rows = vec!["protected title".into(), "axis".into()];
@@ -2598,6 +2600,7 @@ mod tests {
 
     #[test]
     fn netwatch_bytes_drop_only_when_the_slot_pitch_is_whole_pixels() {
+        let _transport = super::super::shm::guard();
         let _cache = compose_lock();
         let _frames = FramesOn::new();
         let rows = vec!["title".into()];

@@ -560,6 +560,7 @@ mod tests {
     #[test]
     fn repeated_frame_errors_keep_graphics() {
         let _slots = crate::graphics::test_lock();
+        let _transport = crate::shm::guard();
         crate::graphics::clear_frame_edits();
         let now = Instant::now();
         let mut s = Session {
@@ -568,9 +569,11 @@ mod tests {
         };
         s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         let slot = |n: usize| crate::graphics::image_id(n);
-        // An image error that was not a frame edit still ends graphics.
+        // A direct image error that was not a frame edit still ends graphics.
+        // The reply has to name the placement: an unmatched one is ignored.
+        crate::shm::mark_direct(slot(0), 1);
         s.reply(
-            &format!("\x1b_Gi={};ENOSPC:animation storage exhausted\x1b\\", slot(0)),
+            &format!("\x1b_Gi={},p=1;ENOSPC:animation storage exhausted\x1b\\", slot(0)),
             now,
         );
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
@@ -596,7 +599,8 @@ mod tests {
         assert!(!crate::graphics::animation_ready());
         // Once the fallback upload clears the bits, a real image error still ends graphics.
         crate::graphics::clear_frame_edits();
-        s.reply(&format!("\x1b_Gi={};EINVAL:bad\x1b\\", slot(0)), now);
+        crate::shm::mark_direct(slot(0), 2);
+        s.reply(&format!("\x1b_Gi={},p=2;EINVAL:bad\x1b\\", slot(0)), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
         crate::graphics::reset_animation();
         crate::graphics::clear_frame_edits();
