@@ -3,6 +3,20 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.6.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Order Antigravity windows by model (#410)
+
+### Features
+
+- **agent-usage**: Price gemini-4-argon on its own row (OPS-170)
+
+### Reverted
+
+- Feat(agent-usage): price gemini-4-argon on its own row (OPS-170) (#408)
+
 ## [1.5.1] - 2026-10-13
 
 ### Bug Fixes
