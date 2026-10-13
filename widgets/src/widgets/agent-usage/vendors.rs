@@ -755,11 +755,16 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                 tc::seg(&[(p.dim.as_str(), format!("     {line}"))], w.saturating_sub(1).max(1))
             }));
         }
-        // The same note for a SpaceXSI section Grok is the one reading.
+        // The same note for a SpaceXSI section Grok is the one reading -
+        // including a shared one whose pool came from Grok, because Cursor
+        // is hidden or sent no pool figure of its own.
+        let grok_supplies_shared = s.cursor.spacexsi == Spacexsi::Shared
+            && names.contains(&"grok")
+            && (!names.contains(&"cursor") || pool_lane(&lanes_of("cursor", s)).is_none());
         let grok_reads = group_agent(name) == "grok"
             || (group_agent(name) == "spacexsi"
                 && s.grok.spacexsi.unified()
-                && (s.cursor.spacexsi == Spacexsi::No || name.ends_with("via Grok")));
+                && (s.cursor.spacexsi == Spacexsi::No || name.ends_with("via Grok") || grok_supplies_shared));
         if grok_reads && crate::grok::asks_nobody(&s.grok) {
             // Two lines because both halves are worth having and neither
             // fits beside the other at the widths these panes are dragged
@@ -1978,6 +1983,31 @@ mod tests {
         for cursor_part in ["SPEND", "EXTRA USAGE", "ACTIVITY", "METERED"] {
             assert!(!grok_only.contains(cursor_part), "hidden Cursor's {cursor_part:?}: {grok_only}");
         }
+    }
+
+    #[test]
+    fn a_shared_pool_read_from_grok_s_log_says_it_is_not_live() {
+        // Review: with Cursor quiet or hidden, the SpaceXSI group's pool is
+        // Grok's, and with nothing polling x.ai it is a log figure - shown
+        // without the note saying only local sessions move it.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::polling_nobody(crate::grok::Data::unified_fixture()),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let text = |s: &State, names: &[&str]| plain(&summary_for(s, 120, &palette(), names)).join("\n");
+        // Cursor's live pool leads: no note.
+        assert!(!text(&s, &["cursor", "grok"]).contains("not live"));
+        // Cursor hidden: the pool is Grok's.
+        assert!(text(&s, &["grok"]).contains("not live"));
+        // Cursor answered without a pool figure: the pool is Grok's.
+        s.cursor = crate::cursor::Data::without_pool_figure(s.cursor.clone());
+        assert!(text(&s, &["cursor", "grok"]).contains("not live"));
+        // Cursor quiet altogether: the pool is Grok's.
+        s.cursor = crate::cursor::Data::without_live(s.cursor.clone());
+        assert!(text(&s, &["cursor", "grok"]).contains("not live"));
     }
 
     #[test]

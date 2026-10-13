@@ -2889,6 +2889,13 @@ impl Data {
         }
     }
 
+    /// The same reading with nothing polling x.ai - a log figure.
+    pub fn polling_nobody(mut d: Data) -> Data {
+        d.quota_every = 0.0;
+        d.quota_live = false;
+        d
+    }
+
     pub fn own_plan_fixture() -> Data {
         Data {
             quota: newest_quota([tests::LOG_LINE].into_iter()),
