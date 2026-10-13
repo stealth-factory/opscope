@@ -491,6 +491,16 @@ where
     true
 }
 
+fn poll_refresh<F>(state: &Arc<Mutex<State>>, activity: &tc::Refresh, acquire_one: F) -> bool
+where
+    F: FnOnce() -> Reading,
+{
+    let work = activity.start();
+    let completed = poll_once(state, acquire_one);
+    drop(work);
+    completed
+}
+
 /// Fold one reading into the running totals.
 ///
 /// Split from `sample` so the arithmetic can be exercised without a machine
@@ -1716,10 +1726,8 @@ fn main() {
     std::thread::spawn(move || loop {
         // A poller that dies takes its explanation with it, and an empty
         // table looks exactly like a machine with no sockets on it.
-        let work = poller_activity.start();
         let began = tc::now();
-        let completed = poll_once(&poller, || acquire(external));
-        drop(work);
+        let completed = poll_refresh(&poller, &poller_activity, || acquire(external));
         if !completed {
             return;
         }
@@ -2704,6 +2712,74 @@ mod tests {
                 errors: Vec::new(),
             }
         }));
+    }
+
+    #[test]
+    fn refresh_activity_covers_blocked_success_failures_and_rewake() {
+        let state = Arc::new(Mutex::new(State::default()));
+        let activity = tc::Refresh::default();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_activity = activity.clone();
+        let worker = std::thread::spawn(move || {
+            poll_refresh(&worker_state, &worker_activity, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Reading {
+                    stamp: 1.0,
+                    counters: None,
+                    traffic: Ok(TrafficSample::Processes(Vec::new())),
+                    owners: HashMap::new(),
+                    errors: Vec::new(),
+                }
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker entered acquisition");
+        assert_eq!(activity.tick(1), Some(1));
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert_eq!(activity.tick(2), None);
+
+        assert!(poll_refresh(&state, &activity, || Reading {
+            stamp: 2.0,
+            counters: None,
+            traffic: Err("test acquisition".into()),
+            owners: HashMap::new(),
+            errors: Vec::new(),
+        }));
+        assert_eq!(activity.tick(3), None);
+        assert!(!poll_refresh(&state, &activity, || -> Reading {
+            panic!("test acquisition panic")
+        }));
+        assert_eq!(activity.tick(4), None);
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_activity = activity.clone();
+        let worker = std::thread::spawn(move || {
+            poll_refresh(&worker_state, &worker_activity, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Reading {
+                    stamp: 5.0,
+                    counters: None,
+                    traffic: Ok(TrafficSample::Processes(Vec::new())),
+                    owners: HashMap::new(),
+                    errors: Vec::new(),
+                }
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker re-entered acquisition");
+        assert_eq!(activity.tick(5), Some(5));
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert_eq!(activity.tick(6), None);
     }
 
     #[test]

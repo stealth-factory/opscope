@@ -5722,6 +5722,29 @@ mod tests {
     }
 
     #[test]
+    fn busy_title_frame_keeps_the_version_and_spends_only_rule_fill() {
+        let colour = rgb(0, 255, 170);
+        let tag = format!("v{}", super::version_number());
+        for w in 26usize..=160 {
+            let top = shown(&frame_rows(&super::frame(
+                &[super::title_busy("network latency monitor", w, &colour, Some(2))],
+                w,
+                1,
+            ))[0]);
+            assert_eq!(super::display_width(&top), w, "the busy row is not {w} wide");
+            assert!(top.ends_with(&tag), "the version was cut at {w}: {top:?}");
+        }
+        let wide = shown(&frame_rows(&super::frame(
+            &[super::title_busy("network latency monitor", 80, &colour, Some(2))],
+            80,
+            1,
+        ))[0]);
+        assert!(wide.contains("NETWORK LATENCY MONITOR"));
+        assert!(wide.contains(SPINNER[2]));
+        assert!(wide.ends_with(&tag));
+    }
+
+    #[test]
     fn refresh_colour_clears_aa_on_backdrop_and_selection_tints() {
         let luminance = |(r, g, b): (u8, u8, u8)| {
             let channel = |v: u8| {

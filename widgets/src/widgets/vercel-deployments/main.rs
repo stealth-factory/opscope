@@ -1180,30 +1180,18 @@ fn main() {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
         if name.is_empty() { "VERCEL_TOKEN".to_string() } else { name }
     };
-    // Why the discovered scope is not everything, when it is not. Kept for
-    // the poller rather than said once: `err` is rebuilt every round, and a
-    // board that is missing a team goes on missing it every round too.
-    let mut scope_note: Option<String> = None;
-    let discovered = if !tok.is_empty() && teams.is_empty() {
-        let (found, stopped) = discover_teams(&tok);
-        scope_note = stopped;
-        found
-    } else {
-        Vec::new()
-    };
-    teams = scopes_for(teams, discovered);
-
     let state = Arc::new(Mutex::new(State::default()));
     let refresh_activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
-    let poll_teams = teams.clone();
+    let mut poll_teams = teams;
     let poll_projects = projects.clone();
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
-    let poll_scope = scope_note.clone();
     let poller_activity = refresh_activity.clone();
+    let mut poll_scope: Option<String> = None;
+    let mut scopes_ready = false;
     // Teams that turned the token away for want of a SAML session, by id,
     // and the names to show for them. A token does not gain a SAML session
     // by being asked again, so they are not asked again.
@@ -1219,6 +1207,26 @@ fn main() {
             }
         } else {
             let work = poller_activity.start();
+            if !scopes_ready {
+                let discovered = if poll_teams.is_empty() {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        discover_teams(&poll_token)
+                    })) {
+                        Ok((found, stopped)) => {
+                            poll_scope = stopped;
+                            found
+                        }
+                        Err(_) => {
+                            poll_scope = Some("team discovery failed".into());
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                poll_teams = scopes_for(std::mem::take(&mut poll_teams), discovered);
+                scopes_ready = true;
+            }
             let mut out: Vec<serde_json::Value> = Vec::new();
             // Whether any scope answered this round, deployments or not.
             let mut any_loaded = false;

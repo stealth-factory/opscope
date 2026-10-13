@@ -250,22 +250,6 @@ fn widgets() -> BTreeMap<String, String> {
     found
 }
 
-const FETCHING_WIDGETS: [&str; 13] = [
-    "agent-usage",
-    "github",
-    "github-prs",
-    "github-actions",
-    "vercel-deployments",
-    "linear",
-    "herdr-panes",
-    "luvus-panes",
-    "link",
-    "tailnet",
-    "ports",
-    "netwatch",
-    "latency",
-];
-
 fn without_comments(src: &str) -> String {
     let chars: Vec<char> = src.chars().collect();
     let mut out = String::new();
@@ -410,7 +394,15 @@ fn refresh_wiring_is_present(src: &str) -> bool {
             split_arguments(call)
                 .get(3)
                 .is_some_and(|busy| busy != "None" && !busy.is_empty())
-        })
+    })
+}
+
+/// A production worker is presumed to acquire data unless it is clocks'
+/// notification thread. This is a shape check: it cannot prove guard
+/// lifetime or that a particular fetch is inside the guarded scope.
+fn needs_refresh_wiring(name: &str, src: &str) -> bool {
+    name != "clocks"
+        && without_comments(&without_tests(src)).contains("thread::spawn")
 }
 
 #[test]
@@ -427,22 +419,26 @@ fn refresh_wiring_shape_rejects_missing_guard_or_busy_title() {
 }
 
 #[test]
-fn every_fetching_widget_tracks_refresh_activity_in_its_title() {
-    let sources = widgets();
-    let missing: Vec<&str> = FETCHING_WIDGETS
-        .iter()
-        .copied()
-        .filter(|name| {
-            sources
-                .get(*name)
-                .is_none_or(|src| !refresh_wiring_is_present(src))
-        })
+fn every_polling_widget_tracks_refresh_activity_in_its_title() {
+    let missing: Vec<String> = widgets()
+        .into_iter()
+        .filter(|(name, src)| needs_refresh_wiring(name, src))
+        .filter(|(_, src)| !refresh_wiring_is_present(src))
+        .map(|(name, _)| name)
         .collect();
     assert!(
         missing.is_empty(),
-        "fetching widgets missing Refresh/title_busy wiring: {}",
+        "polling widgets missing Refresh/title_busy wiring: {}",
         missing.join(", ")
     );
+}
+
+#[test]
+fn refresh_checker_discovers_new_pollers_and_exempts_clocks() {
+    let future_poller = "std::thread::spawn(move || acquire());";
+    assert!(needs_refresh_wiring("future-widget", future_poller));
+    assert!(!refresh_wiring_is_present(future_poller));
+    assert!(!needs_refresh_wiring("clocks", future_poller));
 }
 
 #[test]
