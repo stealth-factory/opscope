@@ -75,6 +75,15 @@ function runUpdater(root, conflict = false) {
   });
 }
 
+test('an unreadable initial formula fails with bootstrap guidance and no write', t => {
+  const { root } = updateFixture(t);
+  fs.writeFileSync(path.join(root, 'gh'), '#!/bin/sh\nexit 1\n');
+  const run = runUpdater(root);
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /Merge the initial formula PR/);
+  assert.equal(fs.existsSync(path.join(root, 'payload.rb')), false);
+});
+
 test('an identical retry performs no API write', t => {
   const { root } = updateFixture(t);
   const run = runUpdater(root);

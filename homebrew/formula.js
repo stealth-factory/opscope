@@ -87,7 +87,8 @@ ${bins.map(bin => `    ${bin}`).join('\n')}
   end
 
   test do
-    assert_equal ["opscope"], bin.children.map { |file| file.basename.to_s }
+    assert_equal(["opscope"], bin.children.map { |file| file.basename.to_s })
+    assert_match "opscope #{version}", shell_output("#{bin}/opscope --version")
     BINARY_NAMES.each do |name|
       assert_match "#{name} #{version}", shell_output("#{libexec}/#{name} --version")
     end
