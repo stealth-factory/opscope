@@ -656,7 +656,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         // that on every refresh and disagree with the agent's own tab.
         if !matches!(
             group_agent(name).as_str(),
-            "claude" | "cursor" | "devin" | "droid" | "spacexsi"
+            "claude" | "cursor" | "devin" | "droid" | "spacexsi" | "antigravity"
         ) {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }

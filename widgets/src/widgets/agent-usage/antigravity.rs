@@ -247,13 +247,29 @@ const ANTIGRAVITY_RPC: &str =
 /// How long each window the server names actually is. It reports the name
 /// and the fraction left but not the span, and without the span there is no
 /// pace to compare a fill against.
-const ANTIGRAVITY_WINDOWS: &[(&str, f64)] = &[("weekly", 7.0 * 86400.0), ("5h", 5.0 * 3600.0)];
+const ANTIGRAVITY_WINDOWS: &[(&str, f64)] = &[("5h", 5.0 * 3600.0), ("weekly", 7.0 * 86400.0)];
 
 fn window_secs(name: &str) -> Option<f64> {
     ANTIGRAVITY_WINDOWS
         .iter()
         .find(|(k, _)| *k == name)
         .map(|(_, s)| *s)
+}
+
+fn ordered_buckets(group: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut buckets: Vec<_> = group["buckets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["remainingFraction"].as_f64().is_some())
+        .collect();
+    buckets.sort_by_key(|bucket| {
+        ANTIGRAVITY_WINDOWS
+            .iter()
+            .position(|(name, _)| *name == text(bucket, "window"))
+            .unwrap_or(ANTIGRAVITY_WINDOWS.len())
+    });
+    buckets
 }
 
 /// What Antigravity has recorded here, and what its server says is left.
@@ -820,7 +836,8 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             .next()
             .unwrap_or("?")
             .to_lowercase();
-        for bucket in group["buckets"].as_array().into_iter().flatten() {
+        let group_start = out.len();
+        for bucket in ordered_buckets(group) {
             let Some(left) = bucket["remainingFraction"].as_f64() else {
                 continue;
             };
@@ -835,7 +852,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 reset: iso_epoch(&text(bucket, "resetTime")),
                 stale: false,
                 projected: false,
-                            apart: false,
+                apart: group_start > 0 && out.len() == group_start,
             });
         }
     }
@@ -894,12 +911,7 @@ fn antigravity_quota_rows_with_plots(
         w - 1,
     )];
     for group in groups {
-        let buckets: Vec<&serde_json::Value> = group["buckets"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|b| b["remainingFraction"].as_f64().is_some())
-            .collect();
+        let buckets = ordered_buckets(group);
         if buckets.is_empty() {
             continue;
         }
@@ -1352,12 +1364,17 @@ mod tests {
         };
         let found = lanes(&d);
         assert_eq!(found.len(), 3);
-        assert_eq!(found[0].label, "gemini weekly");
-        assert!((found[0].pct - 75.0).abs() < 1e-9);
-        assert_eq!(found[0].window_secs, Some(7.0 * 86400.0));
-        assert_eq!(found[1].label, "gemini 5h");
-        assert_eq!(found[1].pct, 0.0);
+        assert_eq!(found[0].label, "gemini 5h");
+        assert_eq!(found[0].pct, 0.0);
+        assert_eq!(found[0].window_secs, Some(5.0 * 3600.0));
+        assert_eq!(found[1].label, "gemini weekly");
+        assert!((found[1].pct - 75.0).abs() < 1e-9);
+        assert_eq!(found[1].window_secs, Some(7.0 * 86400.0));
         assert_eq!(found[2].label, "claude weekly");
+        assert_eq!(
+            found.iter().map(|l| l.apart).collect::<Vec<_>>(),
+            [false, false, true]
+        );
         assert!(found.iter().all(|l| !l.stale));
         assert!(found.iter().all(|l| l.reset.is_some()));
     }
@@ -1377,6 +1394,85 @@ mod tests {
         let found = lanes(&d);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].label, "gemini 5h");
+    }
+
+    #[test]
+    fn summary_keeps_model_groups_and_short_windows_first() {
+        let state = crate::vendors::State {
+            antigravity: Data {
+                quota: groups(&[
+                    ("Gemini", "weekly", 0.25),
+                    ("Gemini", "5h", 1.0),
+                    ("Claude", "weekly", 0.1),
+                    ("Claude", "5h", 0.5),
+                    ("GPT", "weekly", 0.2),
+                    ("GPT", "5h", 0.75),
+                ]),
+                ..Data::default()
+            },
+            ..crate::vendors::State::default()
+        };
+        let mut plots = Vec::new();
+        let rows = crate::vendors::tab_body_with_plots(
+            SUMMARY_TAB,
+            &state,
+            120,
+            40,
+            &Config::default(),
+            &palette(),
+            &["antigravity".into()],
+            &mut plots,
+        );
+        let labels = [
+            "gemini 5h",
+            "gemini weekly",
+            "claude 5h",
+            "claude weekly",
+            "gpt 5h",
+            "gpt weekly",
+        ];
+        let positions: Vec<_> = labels
+            .iter()
+            .map(|label| rows.iter().position(|row| row.contains(label)).unwrap())
+            .collect();
+        assert_eq!(
+            positions,
+            [
+                positions[0],
+                positions[0] + 1,
+                positions[0] + 3,
+                positions[0] + 4,
+                positions[0] + 6,
+                positions[0] + 7,
+            ]
+        );
+        assert!(rows[positions[2] - 1].is_empty());
+        assert!(rows[positions[4] - 1].is_empty());
+        assert_eq!(
+            plots.iter().map(|plot| plot.y).collect::<Vec<_>>(),
+            positions
+        );
+    }
+
+    #[test]
+    fn quota_charts_put_five_hours_above_weekly_for_every_model() {
+        let quota = groups(&[
+            ("Gemini", "weekly", 0.25),
+            ("Gemini", "5h", 1.0),
+            ("Claude", "weekly", 0.1),
+            ("Claude", "5h", 0.5),
+            ("GPT", "weekly", 0.2),
+            ("GPT", "5h", 0.75),
+        ]);
+        let mut plots = Vec::new();
+        let rows =
+            antigravity_quota_rows_with_plots(&quota, From::Local, 96, &palette(), &mut plots);
+        assert_eq!(plots.len(), 6);
+        for pair in plots.chunks_exact(2) {
+            assert!(rows[pair[0].y].contains("5h"));
+            assert!(rows[pair[1].y].contains("weekly"));
+            assert_eq!(pair[1].y, pair[0].y + 1);
+        }
     }
 
     #[test]
