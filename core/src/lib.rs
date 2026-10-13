@@ -356,8 +356,12 @@ fn keep_escape(escape: &str) -> bool {
 }
 
 /// Append the OSC 8 closer when a clip kept the opener and cut the end.
+///
+/// Links do not nest. A closer means one is not open, and an https opener
+/// means one is. Counting would let a stray closer at the start of a slice
+/// cancel the link that opens after it.
 fn close_dangling_link(s: &str) -> String {
-    let mut open = 0i32;
+    let mut open = false;
     let mut rest = s;
     while !rest.is_empty() {
         if rest.as_bytes()[0] == 0x1b {
@@ -366,9 +370,9 @@ fn close_dangling_link(s: &str) -> String {
                 if let Some(after) = body.strip_prefix("8;") {
                     if let Some((_, uri)) = after.split_once(';') {
                         if uri.is_empty() {
-                            open -= 1;
+                            open = false;
                         } else if https_uri(uri) {
-                            open += 1;
+                            open = true;
                         }
                     }
                 }
@@ -379,7 +383,7 @@ fn close_dangling_link(s: &str) -> String {
         let ch = rest.chars().next().unwrap();
         rest = &rest[ch.len_utf8()..];
     }
-    if open > 0 {
+    if open {
         format!("{s}\x1b]8;;\x1b\\")
     } else {
         s.to_string()
@@ -5024,6 +5028,26 @@ mod tests {
         assert!(!super::https_uri(csi), "U+009B is a C1 control");
         assert_eq!(super::link(csi, "title"), "title");
         assert!(!super::https_uri("https://example.com/a b"));
+    }
+
+    #[test]
+    fn a_stray_closer_does_not_cancel_the_link_opened_after_it() {
+        // A clip can start on the closer of a link that was cut away.
+        // That closer is not a nesting level, so the opener after it
+        // still has to be closed.
+        let url = "https://example.com/opscope";
+        let opener = format!("\x1b]8;;{url}\x1b\\title");
+        let sliced = format!("\x1b]8;;\x1b\\{opener}");
+        assert_eq!(
+            super::close_dangling_link(&sliced),
+            format!("{sliced}\x1b]8;;\x1b\\")
+        );
+        let balanced = super::link(url, "title");
+        assert_eq!(super::close_dangling_link(&balanced), balanced);
+        assert_eq!(
+            super::close_dangling_link(&opener),
+            format!("{opener}\x1b]8;;\x1b\\")
+        );
     }
 
     #[test]
