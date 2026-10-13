@@ -198,12 +198,13 @@ pub fn spacexsi_tabs(tabs: &[String], s: &State) -> Vec<String> {
 }
 
 /// The merged SpaceXSI tab: the shared pool, the credits and the limit
-/// once, then each product's own detail under its own name.
+/// once, then what each product recorded, as one report.
 ///
-/// Cursor's reading leads because it is the live one - its usage call is
-/// asked every two minutes, where Grok's may be a log line - and Grok's
-/// half keeps what only Grok knows: its sessions here, and how much of the
-/// pool Grok Bot spent.
+/// No vendor headings: the plan is one product now, and the sections below
+/// the pool already say what they count - Cursor's spend and authorship,
+/// Grok Build's sessions. Cursor's reading of the pool leads because it is
+/// the live one - its usage call is asked every two minutes, where Grok's
+/// may be a log line.
 fn spacexsi_tab_with_plots(s: &State, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     tc::append_plot_rows(&mut rows, plots, |local| {
@@ -212,13 +213,10 @@ fn spacexsi_tab_with_plots(s: &State, w: usize, p: &Palette, plots: &mut Vec<tc:
     if rows.is_empty() {
         rows.extend(no_local(&crate::cursor::why_no_lane(&s.cursor), "", w, p));
     }
-    for (name, label) in [("cursor", "CURSOR"), ("grok", "GROK")] {
+    for name in ["cursor", "grok"] {
         while rows.last().is_some_and(|r| r.is_empty()) {
             rows.pop();
         }
-        rows.push(String::new());
-        let hue = agent_hue(name).map(|(r, g, b)| tc::rgb(r, g, b)).unwrap_or_else(|| p.txt.clone());
-        rows.push(tc::seg(&[(hue.as_str(), format!(" ▍{label}"))], w - 1));
         rows.push(String::new());
         tc::append_plot_rows(&mut rows, plots, |local| match name {
             "cursor" => crate::cursor::details_with_plots(&s.cursor, w, p, local),
@@ -1746,9 +1744,15 @@ mod tests {
         assert_eq!(body.matches("── SpaceXSI ──").count(), 1, "{body}");
         assert_eq!(body.matches("── EXTRA USAGE ──").count(), 1, "{body}");
         assert_eq!(body.matches("left of $20.00 paid").count(), 1, "the balance stated twice: {body}");
-        let cursor_at = body.find("▍CURSOR").expect("a CURSOR part");
-        let grok_at = body.find("▍GROK").expect("a GROK part");
-        assert!(body.find("SpaceXSI").unwrap() < cursor_at && cursor_at < grok_at, "{body}");
+        // One report: no vendor headings, Cursor's sections then Grok
+        // Build's, under the pool.
+        assert!(!body.contains('▍'), "a vendor heading on the merged tab: {body}");
+        let grok_at = body
+            .find("── GROK BUILD ──")
+            .or_else(|| body.find("No Grok Build sessions"))
+            .expect("Grok Build's part");
+        assert!(body.find("EXTRA USAGE").unwrap() < grok_at, "{body}");
+        assert!(!body.contains("── TOTALS ──"), "an unnamed totals heading: {body}");
         // Grok's part keeps what only Grok says about the pool, and does not
         // draw the pool a second time.
         // The split sits under the pool's bar, named, once.

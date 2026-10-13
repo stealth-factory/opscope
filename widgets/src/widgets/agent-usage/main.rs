@@ -406,11 +406,14 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "notion" => (232, 226, 212),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
-        // The unified Cursor and Grok plan. The brand is monochrome, and
-        // its black is unreadable on a dark pane (1.0 to 1.75 against the
-        // backgrounds here), so this is its white: neutral, with none of
-        // Codex's blue in it. 10.14 on the selected-row tint, 17.78 on black.
-        "spacexsi" => (236, 236, 236),
+        // The unified Cursor and Grok plan, in greyscale: the brand is
+        // monochrome, and its black is unreadable on a dark pane (1.0 to
+        // 1.75 against the backgrounds here). A mid grey rather than white,
+        // because bars ramp this hue toward white - from white there is
+        // nothing left to ramp and the bar draws flat. From here it runs
+        // about 174 to 217. Neutral, with none of Codex's blue in it; 4.6 on
+        // the selected-row tint and 8.03 on black as text.
+        "spacexsi" => (160, 160, 160),
         _ => return None,
     })
 }

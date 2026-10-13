@@ -1530,7 +1530,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // drawn, because it is a fact about the account rather than the disk.
     if !d.ok {
         rows.extend(no_local(
-            "No Grok sessions on this machine.",
+            if quota { "No Grok sessions on this machine." } else { "No Grok Build sessions on this machine." },
             run_hint("grok"),
             w,
             p,
@@ -1540,7 +1540,13 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
 
     rows.push(tc::seg(
         &[
-            (p.lbl.as_str(), " ── TOTALS ── ".into()),
+            // On the merged SpaceXSI tab these sit among Cursor's sections
+            // with no vendor heading above them, so the heading says whose
+            // sessions they are.
+            (
+                p.lbl.as_str(),
+                if quota { " ── TOTALS ── " } else { " ── GROK BUILD ── " }.into(),
+            ),
             (
                 p.dim.as_str(),
                 format!("{} sessions · newest {} ago", d.sessions, ago(d.last)),
