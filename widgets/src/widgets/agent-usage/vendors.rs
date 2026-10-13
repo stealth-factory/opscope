@@ -200,11 +200,12 @@ pub fn spacexsi_tabs(tabs: &[String], s: &State) -> Vec<String> {
 /// The merged SpaceXSI tab: the shared pool, the credits and the limit
 /// once, then what each product recorded, as one report.
 ///
-/// No vendor headings: the plan is one product now, and the sections below
-/// the pool already say what they count - Cursor's spend and authorship,
-/// Grok Build's sessions. Cursor's reading of the pool leads because it is
-/// the live one - its usage call is asked every two minutes, where Grok's
-/// may be a log line.
+/// No vendor headings: the plan is one product now. Cloud figures only -
+/// the pool, extra usage, activity, spend, metered and the plan - since
+/// SpaceXSI is an account, and this machine's tracking database and Grok
+/// session files are one machine's share of it. Cursor's reading of the
+/// pool leads because it is the live one - its usage call is asked every
+/// two minutes, where Grok's may be a log line.
 fn spacexsi_tab_with_plots(s: &State, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     tc::append_plot_rows(&mut rows, plots, |local| {
@@ -213,16 +214,11 @@ fn spacexsi_tab_with_plots(s: &State, w: usize, p: &Palette, plots: &mut Vec<tc:
     if rows.is_empty() {
         rows.extend(no_local(&crate::cursor::why_no_lane(&s.cursor), "", w, p));
     }
-    for name in ["cursor", "grok"] {
-        while rows.last().is_some_and(|r| r.is_empty()) {
-            rows.pop();
-        }
-        rows.push(String::new());
-        tc::append_plot_rows(&mut rows, plots, |local| match name {
-            "cursor" => crate::cursor::details_with_plots(&s.cursor, w, p, local),
-            _ => crate::grok::details_with_plots(&s.grok, w, p, local),
-        });
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
     }
+    rows.push(String::new());
+    tc::append_plot_rows(&mut rows, plots, |local| crate::cursor::details_with_plots(&s.cursor, w, p, local));
     rows
 }
 
@@ -1752,15 +1748,13 @@ mod tests {
         assert_eq!(body.matches("── SpaceXSI ──").count(), 1, "{body}");
         assert_eq!(body.matches("── EXTRA USAGE ──").count(), 1, "{body}");
         assert_eq!(body.matches("left of $20.00 paid").count(), 1, "the balance stated twice: {body}");
-        // One report: no vendor headings, Cursor's sections then Grok
-        // Build's, under the pool.
+        // One report, cloud figures only: no vendor headings, and nothing
+        // read from this machine - no Grok session totals or second
+        // heatmap, no Cursor authorship counts.
         assert!(!body.contains('▍'), "a vendor heading on the merged tab: {body}");
-        let grok_at = body
-            .find("── GROK BUILD ──")
-            .or_else(|| body.find("No Grok Build sessions"))
-            .expect("Grok Build's part");
-        assert!(body.find("EXTRA USAGE").unwrap() < grok_at, "{body}");
-        assert!(!body.contains("── TOTALS ──"), "an unnamed totals heading: {body}");
+        for local in ["GROK BUILD", "TOTALS", "TOKENS / DAY", "AI-WRITTEN CODE", "WHO WROTE IT", "BY MODEL", "Grok sessions"] {
+            assert!(!body.contains(local), "local data {local:?} on the SpaceXSI tab: {body}");
+        }
         // Grok's part keeps what only Grok says about the pool, and does not
         // draw the pool a second time.
         // The split sits under the pool's bar, named, once.

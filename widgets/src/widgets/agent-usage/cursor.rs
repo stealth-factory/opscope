@@ -2173,6 +2173,13 @@ fn cursor_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::P
     }
     rows.extend(cursor_daily(d, w, p));
     tc::append_plot_rows(&mut rows, plots, |local| cursor_spend_with_plots(d, w, p, local));
+    // SpaceXSI is drawn from the account's own figures only. The
+    // authorship counts below are this machine's tracking database - one
+    // machine's share of an account-wide plan - so the unified tab leaves
+    // them out rather than set a local count beside cloud ones.
+    if unified(d) {
+        return rows;
+    }
     if !d.ok {
         // An unreadable database makes the counts unknown, not zero, and
         // which kind of unreadable matters: absent means run the agent,
@@ -3567,6 +3574,23 @@ mod tests {
         assert!(squeeze(&report(&d, 120)).contains("ACTIVITY ── not reported"));
         d.activity = Some(serde_json::json!({}));
         assert!(squeeze(&report(&d, 120)).contains("no active days on the profile"));
+    }
+
+    #[test]
+    fn a_spacexsi_cursor_tab_draws_no_local_authorship() {
+        let mut d = unified_data(true);
+        d.ok = true;
+        d.hashes = 46_404;
+        d.lines = 1_000;
+        let text = cursor_tab(&d, 120, &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        for local in ["AI-WRITTEN CODE", "WHO WROTE IT", "tracked edits", "No AI-written-code counts"] {
+            assert!(!text.contains(local), "local data {local:?} under SpaceXSI: {text}");
+        }
+        // Its own plan still draws them.
+        let mut own = own_plan_data();
+        own.ok = true;
+        own.hashes = 46_404;
+        assert!(cursor_tab(&own, 120, &palette()).join("\n").contains("AI-WRITTEN CODE"));
     }
 
     #[test]

@@ -470,13 +470,14 @@ product's own detail under its own name.
   …
   Less ████ More
 
- SPEND / DAY · SPEND · AI-WRITTEN CODE · METERED · SUBSCRIPTION
- GROK BUILD (sessions) · TOKENS / DAY
+ SPEND / DAY · SPEND · METERED · SUBSCRIPTION
 ```
 
 The merged tab is one report, with no Cursor or Grok headings — the plan is one
-product — and Grok's session totals are headed `GROK BUILD` so they are not read
-as Cursor's. SpaceXSI is drawn in greyscale: the brand is monochrome, its black
+product — and it draws **cloud figures only**. SpaceXSI is an account, so this
+machine's share of it is left out: no AI-written-code counts from Cursor's local
+tracking database, and no Grok Build session totals or second heatmap from
+`~/.grok/sessions`. A vendor still on its own plan keeps those sections. SpaceXSI is drawn in greyscale: the brand is monochrome, its black
 is unreadable on a dark pane, and a mid grey leaves the bars a ramp to draw.
 
 **Activity** is the heatmap cursor.com/@handle shows, and on the unified plan

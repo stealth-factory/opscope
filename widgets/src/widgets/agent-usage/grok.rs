@@ -1286,16 +1286,6 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
     grok_body_with_plots(d, w, p, plots, true)
 }
 
-/// Grok's half of the merged SpaceXSI tab: what this machine recorded,
-/// without the credit window, which that tab draws once above both
-/// products from Cursor's live reading.
-///
-/// The week's split by product is not here: it describes the pool, so the
-/// merged tab draws it under the pool's bar, from `pool_split`.
-pub fn details_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    grok_body_with_plots(d, w, p, plots, false)
-}
-
 fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, quota: bool) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
@@ -1525,6 +1515,12 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
         }
     }
 
+    // SpaceXSI is drawn from the account's own figures only: the session
+    // totals below are this machine's transcripts, one machine's share of
+    // an account-wide plan.
+    if d.spacexsi.unified() {
+        return rows;
+    }
     // Everything below counts what this machine recorded, so it stops here
     // when there is nothing recorded - but the quota above has already been
     // drawn, because it is a fact about the account rather than the disk.
@@ -1566,7 +1562,11 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
         w - 1,
     ));
 
-    if let Some(cal) = day_calendar(&d.daily, w, GROK_STEPS, None, p) {
+    // Not on the merged SpaceXSI tab: it draws the account's own activity
+    // heatmap above, and a second calendar of this machine's Grok Build
+    // sessions beside it read as the same thing twice when it is not.
+    let calendar = if quota { day_calendar(&d.daily, w, GROK_STEPS, None, p) } else { None };
+    if let Some(cal) = calendar {
         let peak = d.daily.values().cloned().fold(0.0f64, f64::max);
         rows.push(String::new());
         rows.push(tc::seg(
@@ -2705,6 +2705,21 @@ mod tests {
     }
 
     #[test]
+    fn a_spacexsi_grok_tab_draws_no_local_session_data() {
+        let mut d = Data::unified_fixture();
+        d.spacexsi = Spacexsi::Alone;
+        let text = tab(&d, 120, 24, &Config::default(), &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("SpaceXSI"), "{text}");
+        for local in ["TOTALS", "TOKENS / DAY", "session files"] {
+            assert!(!text.contains(local), "local data {local:?} under SpaceXSI: {text}");
+        }
+        // Its own plan still draws them.
+        d.spacexsi = Spacexsi::No;
+        let own = tab(&d, 120, 24, &Config::default(), &palette()).join("\n");
+        assert!(own.contains("TOTALS") && own.contains("TOKENS / DAY"), "{own}");
+    }
+
+    #[test]
     fn the_unified_lane_is_named_as_cursor_names_the_pool() {
         let labels = |place| lanes(&unified_grok(place)).into_iter().map(|l| l.label).collect::<Vec<_>>();
         assert_eq!(labels(Spacexsi::Alone), ["weekly pool"]);
@@ -2729,7 +2744,17 @@ mod tests {
 #[cfg(test)]
 impl Data {
     pub fn unified_fixture() -> Data {
-        tests::unified_grok(Spacexsi::No)
+        // With sessions on this machine, so a test can see what the merged
+        // tab does with them.
+        Data {
+            ok: true,
+            sessions: 2,
+            files: 2,
+            total: 1_000.0,
+            daily: HashMap::from([(Local::now().date_naive(), 1_000.0)]),
+            last: now(),
+            ..tests::unified_grok(Spacexsi::No)
+        }
     }
 
     pub fn own_plan_fixture() -> Data {
