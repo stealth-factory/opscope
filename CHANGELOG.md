@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.7.0] - 2026-10-13
+
+### Features
+
+- **agent-usage**: Price gemini-4-argon on its own row (OPS-170) (#409)
+
 ## [1.6.0] - 2026-10-13
 
 ### Bug Fixes
