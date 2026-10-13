@@ -18,6 +18,9 @@ fi
 before=$(sha256sum /usr/bin/link)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+# Minimal distro images may deliberately exclude /usr/share/doc at install.
+# Read the manifest from the package itself, not optional installed docs.
+dpkg-deb --fsys-tarfile "$package" | tar -xOf - ./usr/share/doc/opscope/binaries > "$work/binaries"
 dpkg-deb -R "$package" "$work/old"
 sed -i 's/^Version:.*/Version: 0.0.0/' "$work/old/DEBIAN/control"
 printf '#!/bin/sh\nexit 0\n' > "$work/old/usr/libexec/opscope/retired-widget"
@@ -37,7 +40,7 @@ stamp=$(opscope --version)
 case "$stamp" in "opscope $version ("*) ;; *) exit 1;; esac
 while read -r binary; do
   test "$(/usr/libexec/opscope/"$binary" --version)" = "$binary ${stamp#opscope }"
-done < /usr/share/doc/opscope/binaries
+done < "$work/binaries"
 opscope clocks --help > "$work/help"
 grep -qi clocks "$work/help"
 dpkg -V opscope

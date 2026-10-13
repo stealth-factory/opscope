@@ -29,7 +29,8 @@ There is no Node or Rust runtime dependency. `libc6 (>= 2.35)` and `libgcc-s1`
 are declared; optional host tools remain visible through `opscope doctor`.
 Configuration in `~/.config/opscope/config.json`, `XDG_CONFIG_HOME` or the path
 selected by `OPSCOPE_CONFIG` is outside package ownership and survives removal.
-The example configuration and binary manifest are in `/usr/share/doc/opscope`.
+The example configuration and binary manifest are packaged in
+`/usr/share/doc/opscope`; minimal images may deliberately exclude documentation.
 
 ## Signed repository
 

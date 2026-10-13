@@ -124,6 +124,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --bins
+          # Match release packaging without compressing unused DWARF data.
+          for binary in target/debug/*; do
+            [ ! -f "$binary" ] || [ ! -x "$binary" ] || strip --strip-debug "$binary"
+          done
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           node debian/package.js "$version" target/debug debian-dist
           (cd debian-dist && sha256sum -c *.deb.sha256)
