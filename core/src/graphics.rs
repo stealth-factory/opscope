@@ -604,13 +604,15 @@ fn raster(a: (usize, usize), b: (usize, usize), mut dot: impl FnMut(usize, usize
     }
 }
 
-const MAX_PLOTS: usize = 32;
+pub(crate) const MAX_PLOTS: usize = 32;
 #[cfg(test)]
 const CELL_W: usize = super::terminal::FALLBACK_CELL_W;
 #[cfg(test)]
 const CELL_H: usize = super::terminal::FALLBACK_CELL_H;
 static LIVE: AtomicU32 = AtomicU32::new(0);
 static CACHE: Mutex<Vec<Plot>> = Mutex::new(Vec::new());
+static PLACEMENT_SEQ: AtomicU32 = AtomicU32::new(1);
+static PLACEMENTS: [AtomicU32; MAX_PLOTS] = [const { AtomicU32::new(1) }; MAX_PLOTS];
 
 pub(crate) fn image_id(slot: usize) -> u32 {
     // Five slot bits support a dense quota overview. A separate prefix
@@ -628,6 +630,8 @@ fn delete(slot: usize) -> String {
 
 /// Also called by the signal handler: only atomics and write(2), no locks,
 /// formatting, allocation or shared references to a mutating image cache.
+/// Shared memory is not unlinked here. `shm_unlink` is not async-signal-safe;
+/// `cleanup` collects those objects on the ordinary path.
 pub(crate) fn cleanup_signal() {
     let live = LIVE.swap(0, Ordering::AcqRel);
     for slot in 0..MAX_PLOTS {
@@ -660,6 +664,7 @@ pub(crate) fn cleanup_signal() {
 }
 
 pub(crate) fn cleanup() {
+    super::shm::release();
     cleanup_signal();
     CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
@@ -750,6 +755,7 @@ pub(crate) fn compose(
         }
         if cache.get(slot).is_some() {
             before.push_str(&delete(slot));
+            super::shm::retire_id(image_id(slot));
         }
         if let Some(plot) = images.get(slot) {
             // Set before writing: a signal during transmission must clean it up.
@@ -1002,10 +1008,11 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=1\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1\x1b\\",
         plot.y + 1,
         plot.x + 1,
         image_id(slot),
+        PLACEMENTS[slot].load(Ordering::Acquire),
         plot.width.min(pane_width - plot.x),
         plot.visible_rows
     )
@@ -1040,17 +1047,44 @@ fn image(
     } else {
         (32, rgba)
     };
-    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&raw, ZLIB_LEVEL);
-    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
-    let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
+    let id = image_id(slot);
     let rows = h / cell_h;
+    let placement = loop {
+        let n = PLACEMENT_SEQ.fetch_add(1, Ordering::Relaxed);
+        if n != 0 { break n; }
+    };
+    PLACEMENTS[slot].store(placement, Ordering::Release);
+    let keys = format!(
+        "s={w},v={h},i={id},p={placement},c={cols},r={rows},C=1,q=0"
+    );
+    out.push_str(&transmit_pixels(&raw, format, &keys, id, placement));
+    out
+}
+
+// Below 16 KiB, object creation can cost more than compression. Larger
+// images avoid zlib/base64 work on both sides when the local probe succeeded.
+const MIN_SHARED_BYTES: usize = 16 * 1024;
+
+pub(crate) fn transmit_pixels(pixels: &[u8], format: u8, keys: &str, id: u32, placement: u32) -> String {
+    // A local terminal can map these pixels directly. Choose the transport
+    // before compression and base64 framing, rather than decoding a direct
+    // escape back into another buffer only to put it in shared memory.
+    if pixels.len() >= MIN_SHARED_BYTES {
+        if let Some(command) = super::shm::publish_pixels(keys, pixels, id, placement, format) {
+            return command;
+        }
+    }
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(pixels, ZLIB_LEVEL);
+    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
+    super::shm::mark_direct(id, placement);
+    let mut out = String::new();
+    let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
     for (i, chunk) in chunks.iter().enumerate() {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={rows},C=1,q=1,m={more};",
-                image_id(slot),
+                "\x1b_Ga=T,f={format},t=d,o=z,{keys},m={more};"
             ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
@@ -1059,6 +1093,28 @@ fn image(
         out.push_str("\x1b\\");
     }
     out
+}
+
+/// Render the same chart through either transport for pixel and CPU checks.
+#[cfg(test)]
+pub(crate) fn direct_chart_command(cols: usize, rows: usize) -> String {
+    let values: Vec<_> = (0..48).map(|i| Some(i as f64 / 47.0)).collect();
+    let chart = LineChart {
+        slots: values.len(),
+        traces: vec![Trace {
+            positions: None,
+            values,
+            colour: super::rgb(50, 220, 170),
+            baseline: None,
+        }],
+        focus: None,
+    };
+    image(&Plot::new(2, 1, cols, rows, chart), 3, cols + 4, CELL_W, CELL_H)
+}
+
+#[cfg(test)]
+pub(crate) fn cropped_chart_command(plot: &Plot, pane_width: usize) -> String {
+    image(plot, 3, pane_width, CELL_W, CELL_H)
 }
 
 #[cfg(test)]
@@ -1508,10 +1564,11 @@ mod tests {
 
     #[test]
     fn inline_images_are_compressed_chunked_and_do_not_move_the_cursor() {
+        let _transport = super::super::shm::guard();
         let p = Plot::new(8, 1, 20, 5, chart(vec![Some(0.0), Some(1.0)]));
         let command = image(&p, 0, 80, CELL_W, CELL_H);
         assert!(command.contains("f=32,t=d,o=z,s=160,v=80"));
-        assert!(command.contains("c=20,r=5,C=1,q=1"));
+        assert!(command.contains("c=20,r=5,C=1,q=0"));
         let payload = command.split_once(';').unwrap().1;
         // Locate the graphics header (the cursor sequence also has a semicolon).
         let payload = payload
@@ -1551,6 +1608,7 @@ mod tests {
 
     #[test]
     fn image_cache_reuses_unchanged_plots_and_deletes_on_fallback_or_screen_change() {
+        let _transport = super::super::shm::guard();
         let p = Plot::new(2, 1, 10, 3, chart(vec![Some(0.2), Some(0.8)]));
         let rows = vec!["protected title".into(), "axis".into()];
         let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
@@ -1596,6 +1654,7 @@ mod tests {
 
     #[test]
     fn multi_chunk_images_round_trip_with_exact_cropped_pixels() {
+        let _transport = super::super::shm::guard();
         let mut c = chart(Vec::new());
         c.slots = 120;
         let mut seed = 7u32;
@@ -1683,6 +1742,7 @@ mod tests {
 
     #[test]
     fn opaque_fills_are_rgb_and_anything_with_a_gap_stays_rgba() {
+        let _transport = super::super::shm::guard();
         let colour = super::super::rgb(90, 210, 140);
         let solid = Plot::heatmap_levels(0, 0, &[vec![Some((colour.clone(), 4)); 4]], &colour);
         let command = image(&solid, 0, 80, CELL_W, CELL_H);
@@ -1721,5 +1781,28 @@ mod tests {
             format,
             miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap(),
         )
+    }
+
+    #[test]
+    #[ignore = "requires an OPSCOPE_CAPTURED_IMAGE fixture from a live widget"]
+    fn measure_captured_compression_levels() {
+        let path = std::env::var("OPSCOPE_CAPTURED_IMAGE").expect("captured image JSON path");
+        let sample: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let pixels = base64::engine::general_purpose::STANDARD
+            .decode(sample["rgba"].as_str().unwrap()).unwrap();
+        let w = sample["width"].as_u64().unwrap();
+        let h = sample["height"].as_u64().unwrap();
+        assert_eq!(pixels.len() as u64, w * h * 4);
+        for level in [3, 6, 9] {
+            let started = std::time::Instant::now();
+            let mut bytes = 0;
+            for _ in 0..20 {
+                let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&pixels, level);
+                bytes = compressed.len();
+                std::hint::black_box(compressed);
+            }
+            eprintln!("captured {w}x{h} RGBA raw={} level={level} bytes={bytes} mean={:?}",
+                pixels.len(), started.elapsed() / 20);
+        }
     }
 }

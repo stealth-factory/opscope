@@ -15,7 +15,7 @@ waiting on you.
 
 ## Run it
 
-**`npx opscope` is the official way to use this.** Nothing to install, no
+**npm is the default and recommended method: `npx opscope`.** Nothing to install, no
 `PATH` to manage, no version to pick — it fetches the launcher and the
 binaries and starts whichever widget you name.
 
@@ -104,7 +104,9 @@ nothing at all — it just looks good, and it knows it.
 
 ## Getting them
 
-**The official route is `npx`.** If you have Node, this is the whole thing:
+### npm / npx (recommended)
+
+**Use npm's `npx` command by default.** If you have Node, this is the whole thing:
 
 ```sh
 npx opscope                 # the menu
@@ -122,6 +124,9 @@ Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
 ### Homebrew on macOS
+
+Homebrew is an alternative for Mac users who prefer a package-managed
+installation without Node. npm / npx remains the recommended method.
 
 ```sh
 brew install stealth-factory/tap/opscope

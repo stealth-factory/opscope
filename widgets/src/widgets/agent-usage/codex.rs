@@ -98,18 +98,18 @@ impl Data {
     /// greater than zero.
     ///
     /// `None` when the inventory was not read, or when it was read and the
-    /// count is zero. The parenthetical is the soonest expiry, and only
+    /// count is zero. The timestamp is the soonest expiry, and only
     /// when every listed credit has a readable one. A credit with no
     /// readable expiry keeps the count and drops the date: a dated
     /// neighbour is not the soonest. A count with no list has no
-    /// parenthetical, because no date was in the payload.
+    /// timestamp, because no date was in the payload.
     pub(crate) fn reset_summary_line(&self) -> Option<String> {
         let bank = self.bank.as_ref()?;
         if bank.left == 0 {
             return None;
         }
         Some(match soonest_when_every_credit_is_dated(bank) {
-            Some(stamp) => format!("{} reset available ({stamp})", bank.left),
+            Some(stamp) => format!("{} reset available {stamp}", bank.left),
             None => format!("{} reset available", bank.left),
         })
     }
@@ -1037,19 +1037,39 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// `expires_at` as a local datetime, with the zone named.
 ///
 /// The instant is the one the inventory sent. The calendar fields are this
-/// machine's zone. Minutes are the resolution the row shows. The offset is
-/// in parentheses, and a zone abbreviation sits in front of it when this
+/// machine's zone. Minutes are the resolution the row shows. A zone
+/// abbreviation sits in front of the unparenthesized offset when this
 /// machine has one that is not the offset itself.
 pub(crate) fn local_expiry(at: f64) -> Option<String> {
+    expiry_in_style(at, false)
+}
+
+/// The same local instant, compressed for the `[+]` summary.
+pub(crate) fn summary_expiry(at: f64) -> Option<String> {
+    expiry_in_style(at, true)
+}
+
+fn expiry_in_style(at: f64, compact: bool) -> Option<String> {
     if !at.is_finite() {
         return None;
     }
     let local = Local.timestamp_opt(at.trunc() as i64, 0).single()?;
+    Some(format_expiry(&local, compact))
+}
+
+fn format_expiry<T: TimeZone>(local: &chrono::DateTime<T>, compact: bool) -> String
+where
+    T::Offset: std::fmt::Display,
+{
+    let year = if compact {
+        String::new()
+    } else {
+        format!(" {}", local.year())
+    };
     let stamp = format!(
-        "{} {} {} {:02}:{:02}",
+        "{} {}{year} {:02}:{:02}",
         local.day(),
         MONTHS[local.month0() as usize],
-        local.year(),
         local.hour(),
         local.minute(),
     );
@@ -1061,9 +1081,9 @@ pub(crate) fn local_expiry(at: f64) -> Option<String> {
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | ':'));
     if zone_is_offset {
-        Some(format!("{stamp} ({offset})"))
+        format!("{stamp} {offset}")
     } else {
-        Some(format!("{stamp} {zone} ({offset})"))
+        format!("{stamp} {zone} {offset}")
     }
 }
 
@@ -1071,7 +1091,7 @@ pub(crate) fn local_expiry(at: f64) -> Option<String> {
 ///
 /// A word wider than the pane is broken by display width, so it stays on
 /// screen. Nothing is dropped, and no omission marker is added. A datetime
-/// is passed as its own parts (`4`, `Oct`, `2026`, `04:03`, `(+00:00)`),
+/// is passed as its own parts (`4`, `Oct`, `2026`, `04:03`, `+00:00`),
 /// which stay whole unless one part is still wider than the pane. That
 /// part is broken by hand. A clock is not shortened into a different time.
 ///
@@ -1100,14 +1120,14 @@ fn push_wrapped(rows: &mut Vec<String>, text: &str, room: usize, colour: &str, i
 }
 
 /// The summary sentence, wrapped so the count and `available` both stay,
-/// and so a parenthetical moves to the following lines when it does not
+/// and so a timestamp moves to the following lines when it does not
 /// fit beside them.
 ///
 /// Indented under the Codex rows, the same inset a collapsed provider
 /// uses for a note under its summary. One line when the whole sentence
-/// fits. Otherwise the count phrase is drawn first, and the parenthetical
-/// follows, broken between the datetime's parts. A part wider than the
-/// pane is broken by hand.
+/// fits. Otherwise the count phrase is drawn first, and the timestamp
+/// follows, broken between parts (`4`, `Oct`, `04:03`, `+00:00`). A part
+/// wider than the pane is broken by hand.
 pub(crate) fn append_reset_summary(rows: &mut Vec<String>, line: &str, room: usize, colour: &str) {
     let indent = if room > NESTED_UNDER_SUMMARY {
         NESTED_UNDER_SUMMARY
@@ -1122,13 +1142,11 @@ pub(crate) fn append_reset_summary(rows: &mut Vec<String>, line: &str, room: usi
     let (head, stamp) = split_summary(line);
     push_wrapped(rows, &head, room, colour, indent);
     if let Some(stamp) = stamp {
-        push_wrapped(rows, &format!("({stamp})"), room, colour, indent);
+        push_wrapped(rows, &stamp, room, colour, indent);
     }
 }
 
-/// `{n} reset available` and, when present, the stamp inside the one pair
-/// of parentheses this sentence adds. The stamp's own offset parentheses
-/// stay inside it.
+/// `{n} reset available` and the remaining timestamp and/or cache note.
 fn split_summary(line: &str) -> (String, Option<String>) {
     const MARK: &str = " reset available";
     let Some(at) = line.find(MARK) else {
@@ -1137,13 +1155,7 @@ fn split_summary(line: &str) -> (String, Option<String>) {
     let head_end = at + MARK.len();
     let rest = line[head_end..].trim();
     let head = line[..head_end].to_string();
-    match rest
-        .strip_prefix('(')
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        Some(stamp) if !stamp.is_empty() => (head, Some(stamp.to_string())),
-        _ => (head, None),
-    }
+    (head, (!rest.is_empty()).then(|| rest.to_string()))
 }
 
 /// The soonest local expiry, or nothing when any listed credit has none.
@@ -1156,7 +1168,7 @@ fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank) -> Option<
     }
     let mut soonest = None;
     for credit in &bank.credits {
-        let stamp = credit.expiry.and_then(local_expiry)?;
+        let stamp = credit.expiry.and_then(summary_expiry)?;
         if soonest.is_none() {
             soonest = Some(stamp);
         }
@@ -2081,9 +2093,69 @@ mod tests {
     }
 
     #[test]
+    fn summary_expiry_compresses_without_changing_the_local_clock() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-23T04:58:43+08:00").unwrap();
+        assert_eq!(format_expiry(&at, true), "23 Oct 04:58 +08:00");
+        assert_eq!(format_expiry(&at, false), "23 Oct 2026 04:58 +08:00");
+        let perth = at.with_timezone(&chrono_tz::Australia::Perth);
+        assert_eq!(format_expiry(&perth, true), "23 Oct 04:58 AWST +08:00");
+        assert_eq!(
+            format_expiry(&perth, false),
+            "23 Oct 2026 04:58 AWST +08:00"
+        );
+        assert_eq!(summary_expiry(f64::NAN), None);
+        assert_eq!(summary_expiry(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn reset_summary_keeps_every_part_at_every_width() {
+        for line in [
+            "3 reset available 4 Oct 04:03 +00:00",
+            "3 reset available 23 Oct 04:58 AWST +08:00",
+            "1 reset available 23 Oct 00:00 +08:00 · cached 1m ago",
+            "1 reset available · cached 1m ago",
+        ] {
+            for room in 1..=120 {
+                let mut rows = Vec::new();
+                append_reset_summary(&mut rows, line, room, "");
+                let rows = shown(&rows);
+                assert!(
+                    rows.iter().all(|row| tc::display_width(row) <= room),
+                    "room {room}: {rows:?}"
+                );
+                let flat: String = rows
+                    .iter()
+                    .flat_map(|row| row.chars())
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                let expected: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                assert_eq!(flat, expected, "room {room}: {rows:?}");
+                let budget = if room > NESTED_UNDER_SUMMARY {
+                    room - NESTED_UNDER_SUMMARY
+                } else {
+                    room
+                };
+                for part in line
+                    .split_whitespace()
+                    .filter(|part| tc::display_width(part) <= budget)
+                {
+                    assert!(
+                        rows.iter()
+                            .any(|row| row.split_whitespace().any(|word| word == part)),
+                        "part {part}, room {room}: {rows:?}"
+                    );
+                }
+                if room == 56 && tc::display_width(&format!("     {line}")) <= room {
+                    assert_eq!(rows, vec![format!("     {line}")]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_undated_credit_is_not_called_the_soonest() {
         let soon = iso_epoch("2026-10-04T11:03:00Z").expect("soon");
-        let stamp = local_expiry(soon).expect("a local expiry");
+        let stamp = summary_expiry(soon).expect("a local expiry");
         let mixed = Data {
             bank: Some(crate::parse::ResetBank {
                 left: 2,
@@ -2108,7 +2180,7 @@ mod tests {
         let dated = Data::with_reset(None, Some((2, Some(soon))));
         assert_eq!(
             dated.reset_summary_line().as_deref(),
-            Some(format!("2 reset available ({stamp})")).as_deref()
+            Some(format!("2 reset available {stamp}")).as_deref()
         );
     }
 
@@ -2123,7 +2195,7 @@ mod tests {
             .expect("the clock");
         let offset = stamp
             .split_whitespace()
-            .find(|word| word.starts_with('('))
+            .find(|word| word.starts_with(['+', '-']))
             .expect("the offset");
         let d = Data {
             bank: Some(crate::parse::ResetBank {

@@ -89,8 +89,8 @@ impl Data {
         if bank.left == 0 {
             return None;
         }
-        let mut line = match bank.soonest.and_then(crate::codex::local_expiry) {
-            Some(stamp) => format!("{} reset available ({stamp})", bank.left),
+        let mut line = match bank.soonest.and_then(crate::codex::summary_expiry) {
+            Some(stamp) => format!("{} reset available {stamp}", bank.left),
             None => format!("{} reset available", bank.left),
         };
         if !self.quota_live {
