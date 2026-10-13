@@ -3,6 +3,15 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.5.1] - 2026-10-13
+
+### Bug Fixes
+
+- **refresh**: Preserve pending work and discovered scopes (#402)
+- **apt**: Notify repository after every tagged release (#403)
+- **vercel-deployments**: Clarify discovered team coverage (#405)
+- **homebrew**: Preserve installed launcher checks in generated formula (#401)
+
 ## [1.5.0] - 2026-10-13
 
 ### Bug Fixes
