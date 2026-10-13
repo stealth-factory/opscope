@@ -233,7 +233,11 @@ PTY checks receive, for looking at by eye.
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
 terminals, fragmented/late replies, image errors, cached frames, scrolling,
-resize, screen changes, suspend/resume, quit, panic and signal cleanup. Unit tests
+resize, screen changes, suspend/resume, quit, panic and signal cleanup. They
+also answer the keyboard-protocol query and check that flag 1 is pushed on
+start, popped on exit, suspend, panic and a typed Ctrl-C, Ctrl-Z or Ctrl-\,
+and pushed again after resume.
+Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
@@ -248,8 +252,70 @@ positive reply still needs real visual checks for placement and pane clipping.
 Direct Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
 check; the managed test workspace has no attached graphical terminal.
 
-The independent Kitty keyboard and text-sizing protocols are not enabled by this
-graphics implementation. Legacy keyboard bindings remain the input contract.
+## Keyboard protocol
+
+Core asks `CSI ? u` in the same negotiation as graphics and synchronized
+updates, before the primary device-attributes query, and it does this in text
+mode too. A reply of `CSI ? <flags> u` inside the 800 ms window means the
+terminal speaks the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
+Those flags are the mode currently in force, which is 0 until something
+pushes, so any well-formed reply is enough. The two replies are independent:
+device attributes do not answer the keyboard query, and a flags reply that
+arrives after them, still inside the window, is support. Core then pushes
+disambiguation only (`CSI > 1 u`, flag 1). A late reply, or a window that
+ends with no keyboard reply, leaves the legacy decoder in place. Widgets
+do not branch on this.
+
+Flag 1 sends the Escape key as `CSI 27 u`. That sequence is finished, so the
+key is delivered in the same poll instead of waiting to see whether a bare
+ESC was the start of something else. A bare ESC is still held for one poll:
+it is how every other sequence begins, and a torn arrow has to stay an arrow.
+Ctrl, Alt and the editing keys are decoded from `CSI … u` into the names the
+legacy bytes already produce — `esc`, `enter`, `tab`, `backspace`, `ctrl-y`,
+`ctrl-e`, `ctrl-u`, and the character a legacy ESC prefix already yielded for
+Alt. That includes a printable non-ASCII key: Alt+é is `é`, the same name as
+ESC followed by é. Alt+`[` arrives as `[` instead of sitting in the buffer as
+an unfinished control sequence. Keypad enter, digits and navigation use those
+same legacy names (`enter`, `0`-`9`, the arrows, `home`, `end`, `pgup`,
+`pgdn`). Release events are ignored, and so are functional keys this program
+does not bind. Match arms in the widgets are unchanged, and so are text and
+Braille.
+
+Flag 1 reports Ctrl chords as `CSI … u` instead of the bytes the terminal
+driver would have interpreted. Interrupt, quit and suspend follow the termios
+saved when the keyboard was taken: they raise SIGINT, SIGQUIT and SIGTSTP
+only when `ISIG` is set and the reconstructed byte is `VINTR`, `VQUIT` or
+`VSUSP`. A disabled character (`_POSIX_VDISABLE`) or a remap such as
+`intr = ^X` is honoured. With the usual defaults that is still Ctrl-C,
+Ctrl-\ and Ctrl-Z (`CSI 99;5u`, `CSI 92;5u`, `CSI 122;5u`). SIGQUIT uses the
+same restore path as SIGINT. The handler then calls `_exit(128 + SIGQUIT)`,
+status 131. That is a normal exit, not a death by signal: a waiter does not
+see `WIFSIGNALED`.
+
+Software flow control follows that same saved termios. When `IXON` is set, a
+report whose byte is `VSTOP` or `VSTART` is not handed to the widget as a key.
+Core holds frames instead of stopping the tty: `draw` returns without writing,
+and the same thread keeps reading. `VSTART` releases the hold and the next
+draw paints the current frame. `VINTR` still raises SIGINT while output is
+held. `tcflow` is not used. It would block the next redraw on this thread, and
+on Linux a typed start character does not undo a programmatic stop. `IXON` is
+checked before `ISIG`, which is the order the line discipline uses when one
+byte is configured as both. With the usual defaults those keys are Ctrl-S and
+Ctrl-Q. When `IXON` is clear, the same reports are ordinary keys.
+
+`CSI < u` pops the mode on the same paths that already delete images: normal
+exit, panic (dropping `Keyboard`), handing the terminal to another program,
+and suspend (`SIGTSTP`). Resume queries again and pushes only if the terminal
+answers again. A signal that exits pops as well, so the shell is not left
+disambiguating. The push, the pop and the flag that records them are one
+transition on the calling thread. `pthread_sigmask` blocks the signals that
+pop until the flag and the bytes have both been updated. It does not block
+those signals in any other thread.
+
+The PTY fixture answers the query and checks the push and the pop. It does
+not stand in for a real Kitty, Ghostty, WezTerm, iTerm2, foot, Alacritty or
+Windows Terminal, which are the terminals that implement this flag. The
+text-sizing protocol is not enabled.
 
 ## Underlines
 

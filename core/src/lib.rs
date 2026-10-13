@@ -455,6 +455,12 @@ pub fn append_plot_rows(
 
 /// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
+    // A stopped tty would block this write, and this is the thread that
+    // reads keys. Hold the frame; the next draw after the start character
+    // paints it. `SCREEN_LOST` stays set until that draw.
+    if output_held() {
+        return;
+    }
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
@@ -854,6 +860,10 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+        // Quit joins the same restore path. Flag 1 delivers Ctrl-\ as a
+        // report rather than as the byte the terminal driver would turn
+        // into SIGQUIT, and a default terminate would skip the pop.
+        libc::signal(libc::SIGQUIT, handler);
         libc::signal(libc::SIGTSTP, handle_suspend as *const () as libc::sighandler_t);
         // `sigaction` rather than `signal`, so that `SA_RESTART` is ours to
         // ask for rather than the platform's to decide: `SIGWINCH` arrives
@@ -3118,6 +3128,10 @@ impl Keyboard {
         } else {
             None
         };
+        // A test that builds a Keyboard to hit-test a footer must not start
+        // the session: the query goes to stdout, and a reply in that process
+        // can push flag 1 onto a stream the test never captured.
+        #[cfg(not(test))]
         if saved.is_some() {
             terminal::start();
         }
@@ -3148,6 +3162,9 @@ impl Keyboard {
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
             graphics::cleanup();
+            // Panic, a normal exit, and handing the terminal to a child all
+            // come through here. The signal paths pop in `cleanup_signal`.
+            terminal::pop_keyboard();
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
             out(MOUSE_OFF);
@@ -3491,14 +3508,34 @@ fn settle(
     now: Instant,
 ) -> Vec<String> {
     let arrived = pending.len();
-    let mut keys = decode(pending, lone_esc);
+    let mut signals = Vec::new();
+    let mut flow = Vec::new();
+    // One snapshot for this poll. Flag 1 reports the bytes the line
+    // discipline used to eat, so the saved termios — not the usual
+    // defaults — decides which of them are signals or flow control.
+    let tty = saved_line_discipline();
+    let mut keys = decode_reporting(pending, lone_esc, &mut signals, &mut flow, &tty);
     if pending.len() < arrived {
         // decode consumed something, and an unfinished string can only
         // follow what it consumed: whatever is held now started in this
         // read, so it gets its own patience.
         *since = None;
     }
-    keys.extend(release_stale_string(pending, lone_esc, since, now));
+    keys.extend(release_stale_string(
+        pending,
+        lone_esc,
+        since,
+        now,
+        &mut signals,
+        &mut flow,
+        &tty,
+    ));
+    // Hold or release frames before a signal runs. A stop must not
+    // `tcflow` the tty: the next draw would block this thread, and on
+    // Linux a typed start character does not clear a programmatic stop.
+    // SIGINT and SIGQUIT do not return.
+    apply_output_flow(&flow);
+    raise_legacy_signals(&signals);
     keys
 }
 
@@ -3514,6 +3551,9 @@ fn release_stale_string(
     lone_esc: &mut bool,
     since: &mut Option<Instant>,
     now: Instant,
+    signals: &mut Vec<libc::c_int>,
+    flow: &mut Vec<OutputFlow>,
+    tty: &LineDiscipline,
 ) -> Vec<String> {
     // decode() leaves only an unfinished tail, so an introducer here is a
     // string still waiting for its terminator.
@@ -3528,7 +3568,383 @@ fn release_stale_string(
     }
     *since = None;
     pending.remove(0);
-    decode(pending, lone_esc)
+    decode_reporting(pending, lone_esc, signals, flow, tty)
+}
+
+/// The name a single legacy byte already has, shared with `CSI u` so the
+/// two forms cannot drift. vim's scroll pair and readline's kill-line are
+/// named rather than left as control bytes: a widget matching `"\x05"`
+/// reads as a typo, and a control byte in a match arm is invisible to
+/// anyone scanning the file for its keys. Those three are safe to take.
+/// The terminal is in cbreak with the saved `ISIG` and `IXON` still on, so
+/// the bytes those modes intercept never arrive here as themselves. Flag 1
+/// sends the same chords as `CSI u`, and [`legacy_named`] turns them back
+/// into the signals or the flow control the saved termios describes.
+fn name_byte(ch: char) -> String {
+    match ch {
+        '\r' | '\n' => "enter".to_string(),
+        '\t' => "tab".to_string(),
+        '\u{7f}' | '\u{8}' => "backspace".to_string(),
+        '\u{1b}' => "esc".to_string(),
+        '\u{19}' => "ctrl-y".to_string(),
+        '\u{5}' => "ctrl-e".to_string(),
+        '\u{15}' => "ctrl-u".to_string(),
+        c => c.to_string(),
+    }
+}
+
+/// The byte a legacy terminal emits for Ctrl held with `ch`, from the
+/// keyboard protocol's legacy ctrl table. Keys the table leaves untouched
+/// stay the character itself.
+fn ctrl_legacy(ch: char) -> char {
+    match ch.to_ascii_lowercase() {
+        ' ' | '@' | '2' => '\0',
+        'a'..='z' => char::from((ch.to_ascii_lowercase() as u32 as u8) & 0x1f),
+        '[' | '3' => '\u{1b}',
+        '\\' | '4' => '\u{1c}',
+        ']' | '5' => '\u{1d}',
+        '^' | '6' | '~' => '\u{1e}',
+        '/' | '7' | '_' => '\u{1f}',
+        '?' | '8' => '\u{7f}',
+        other => other,
+    }
+}
+
+fn shifted(ch: char) -> char {
+    match ch {
+        'a'..='z' => ch.to_ascii_uppercase(),
+        '`' => '~',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        other => other,
+    }
+}
+
+fn read_number(s: &[char], i: &mut usize) -> Option<u32> {
+    let start = *i;
+    let mut n = 0u32;
+    while let Some(c) = s.get(*i).filter(|c| c.is_ascii_digit()) {
+        n = n.saturating_mul(10).saturating_add(*c as u32 - '0' as u32);
+        *i += 1;
+    }
+    (*i > start).then_some(n)
+}
+
+/// A finished `CSI … u` key report: how many characters it took, and the
+/// legacy name of a press or a repeat. A release is consumed and named
+/// nothing. Anything that is not this shape returns `None` so the legacy
+/// decoder still owns it.
+///
+/// Alt does not change the name. A legacy terminal sends Alt as an ESC
+/// prefix, and that prefix is discarded, so Alt+a is already `"a"`. The
+/// CSI form has to produce that same name or a widget's match arm would
+/// see a key it was not written for. The gain is that Alt+[ arrives as
+/// `[` instead of sitting in the buffer as an unfinished control sequence.
+fn kitty_press(s: &[char], tty: &LineDiscipline) -> Option<(usize, Option<LegacyPress>)> {
+    if s.first() != Some(&'\x1b') || s.get(1) != Some(&'[') {
+        return None;
+    }
+    let mut i = 2;
+    if !s.get(i).is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let code = read_number(s, &mut i)?;
+    while s.get(i) == Some(&':') {
+        i += 1;
+        read_number(s, &mut i)?;
+    }
+    let mut modifiers = 1u32;
+    let mut event = 1u32;
+    if s.get(i) == Some(&';') {
+        i += 1;
+        if s.get(i).is_some_and(|c| c.is_ascii_digit()) {
+            modifiers = read_number(s, &mut i)?;
+        }
+        if s.get(i) == Some(&':') {
+            i += 1;
+            event = read_number(s, &mut i).unwrap_or(1);
+        }
+        if s.get(i) == Some(&';') {
+            i += 1;
+            while s.get(i).is_some_and(|c| c.is_ascii_digit() || *c == ':') {
+                i += 1;
+            }
+        }
+    }
+    if s.get(i) != Some(&'u') {
+        return None;
+    }
+    i += 1;
+    if event == 3 {
+        return Some((i, None));
+    }
+    Some((i, legacy_named(code, modifiers, tty)))
+}
+
+/// What the line discipline would have done with a byte before flag 1
+/// turned that byte into a `CSI u` report.
+///
+/// Taken from the termios `Keyboard` saved, not from the usual defaults.
+/// No saved tty means none of these bytes are special: there is no driver
+/// underneath to have eaten them.
+#[derive(Clone, Copy, Debug)]
+struct LineDiscipline {
+    isig: bool,
+    intr: u8,
+    quit: u8,
+    susp: u8,
+    ixon: bool,
+    start: u8,
+    stop: u8,
+}
+
+impl LineDiscipline {
+    fn inactive() -> Self {
+        Self {
+            isig: false,
+            intr: 0,
+            quit: 0,
+            susp: 0,
+            ixon: false,
+            start: 0,
+            stop: 0,
+        }
+    }
+
+    fn from_termios(ios: &libc::termios) -> Self {
+        let cc = |index: usize| ios.c_cc[index] as u8;
+        Self {
+            isig: ios.c_lflag & libc::ISIG != 0,
+            intr: cc(libc::VINTR),
+            quit: cc(libc::VQUIT),
+            susp: cc(libc::VSUSP),
+            ixon: ios.c_iflag & libc::IXON != 0,
+            start: cc(libc::VSTART),
+            stop: cc(libc::VSTOP),
+        }
+    }
+
+    /// `IXON` is consulted before `ISIG`. That is the order the line
+    /// discipline uses, so a byte configured as both stops output and does
+    /// not also raise the signal.
+    fn flow_for(&self, ch: char) -> Option<OutputFlow> {
+        if !self.ixon || !ch.is_ascii() {
+            return None;
+        }
+        let byte = ch as u8;
+        if special_char(byte, self.stop) {
+            Some(OutputFlow::Stop)
+        } else if special_char(byte, self.start) {
+            Some(OutputFlow::Start)
+        } else {
+            None
+        }
+    }
+
+    fn signal_for(&self, ch: char) -> Option<libc::c_int> {
+        if !self.isig || !ch.is_ascii() {
+            return None;
+        }
+        let byte = ch as u8;
+        if special_char(byte, self.intr) {
+            Some(libc::SIGINT)
+        } else if special_char(byte, self.quit) {
+            Some(libc::SIGQUIT)
+        } else if special_char(byte, self.susp) {
+            Some(libc::SIGTSTP)
+        } else {
+            None
+        }
+    }
+}
+
+/// A configured special character. `_POSIX_VDISABLE` — 0 on Linux, 0xff on
+/// macOS — means the slot is off, not that the NUL or 0xff byte is special.
+fn special_char(byte: u8, configured: u8) -> bool {
+    configured != libc::_POSIX_VDISABLE as u8 && byte == configured
+}
+
+/// The termios `Keyboard` saved before it entered cbreak. The flag is
+/// published after the struct, so a reader that sees it set sees the copy.
+fn saved_line_discipline() -> LineDiscipline {
+    if !HAS_TERMIOS.load(Ordering::Acquire) {
+        return LineDiscipline::inactive();
+    }
+    let ios = unsafe { SAVED_IOS };
+    LineDiscipline::from_termios(&ios)
+}
+
+/// Stop or restart terminal output, the thing `IXON` did with `VSTOP` and
+/// `VSTART` before those bytes were delivered as reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFlow {
+    Stop,
+    Start,
+}
+
+/// Set while frames are held. `draw` checks it and returns without writing.
+/// The keyboard poll keeps running, so the start character and Ctrl-C still
+/// arrive. `TCOOFF` is the wrong tool: it stops the tty this thread writes,
+/// and the read never happens.
+static OUTPUT_HELD: AtomicBool = AtomicBool::new(false);
+
+fn output_held() -> bool {
+    OUTPUT_HELD.load(Ordering::Acquire)
+}
+
+fn apply_output_flow(actions: &[OutputFlow]) {
+    for action in actions {
+        match action {
+            OutputFlow::Stop => OUTPUT_HELD.store(true, Ordering::Release),
+            OutputFlow::Start => {
+                // Only a real resume forgets the frame. A start character
+                // while output is already running must not repaint.
+                if OUTPUT_HELD.swap(false, Ordering::AcqRel) {
+                    forget_frame();
+                    screen_lost();
+                }
+            }
+        }
+    }
+}
+
+/// A press `CSI u` turns into. A release is the `None` beside the length,
+/// not a variant: it is consumed and names nothing.
+enum LegacyPress {
+    Key(String),
+    /// The chord whose legacy byte is the saved VINTR, VSUSP, or VQUIT.
+    Signal(libc::c_int),
+    /// The chord whose legacy byte is the saved VSTOP or VSTART.
+    Flow(OutputFlow),
+}
+
+/// The key name `code` with Kitty's modifier field would have under the
+/// legacy encoding. Shift-tab stays unnamed: legacy sends `CSI Z`, which
+/// is dropped. Modifiers this program has no binding for are dropped too.
+///
+/// Printable non-ASCII is the character itself. Alt is an ESC prefix in
+/// the legacy encoding and that prefix is not part of the name, so
+/// Alt+é and é agree. Functional keys this program does not bind stay
+/// unnamed, including the private-use numbers flag 1 uses for them.
+fn legacy_named(code: u32, modifiers: u32, tty: &LineDiscipline) -> Option<LegacyPress> {
+    let bits = modifiers.saturating_sub(1) & !0b1100_0000;
+    if bits & !0b0111 != 0 {
+        return None;
+    }
+    let shift = bits & 1 != 0;
+    let ctrl = bits & 4 != 0;
+    // Flag 1 gives keypad keys their own numbers. Legacy mode sends the
+    // non-keypad key, which is the name already matched below.
+    if let Some(name) = keypad_motion(code) {
+        return Some(LegacyPress::Key(name.to_string()));
+    }
+    // The keypad number is already the key. Shift and Ctrl must not run it
+    // through the main-keyboard tables: Ctrl+keypad 4 is not VQUIT, and
+    // Shift+keypad 1 is not `!`.
+    if let Some(ch) = keypad_text(code) {
+        return Some(LegacyPress::Key(ch.to_string()));
+    }
+    match code {
+        27 if !shift && !ctrl => return Some(LegacyPress::Key("esc".to_string())),
+        13 if !shift => return Some(LegacyPress::Key("enter".to_string())),
+        9 if !shift => return Some(LegacyPress::Key("tab".to_string())),
+        127 | 8 if !shift => return Some(LegacyPress::Key("backspace".to_string())),
+        _ => {}
+    }
+    let ch = char::from_u32(code)?;
+    if ch.is_control() || is_private_use(ch) {
+        return None;
+    }
+    named_text(ch, shift, ctrl, tty)
+}
+
+/// Enter and the keypad arrows, as the legacy sequences already name them.
+/// Insert, delete and begin have no name in this decoder, so they are absent.
+fn keypad_motion(code: u32) -> Option<&'static str> {
+    Some(match code {
+        57414 => "enter",
+        57417 => "left",
+        57418 => "right",
+        57419 => "up",
+        57420 => "down",
+        57421 => "pgup",
+        57422 => "pgdn",
+        57423 => "home",
+        57424 => "end",
+        _ => return None,
+    })
+}
+
+/// Keypad digits and the operators a numpad sends as text. `57399` is 0.
+fn keypad_text(code: u32) -> Option<char> {
+    Some(match code {
+        57399..=57408 => char::from(b'0' + (code - 57399) as u8),
+        57409 => '.',
+        57410 => '/',
+        57411 => '*',
+        57412 => '-',
+        57413 => '+',
+        57415 => '=',
+        57416 => ',',
+        _ => return None,
+    })
+}
+
+fn is_private_use(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    )
+}
+
+fn named_text(ch: char, shift: bool, ctrl: bool, tty: &LineDiscipline) -> Option<LegacyPress> {
+    // Shift is not part of the legacy byte: Ctrl-Shift-C is its own report,
+    // and the driver never saw 0x03 for it. Alt is a prefix the driver still
+    // acts on, so Alt-Ctrl-C signals and Alt-Ctrl-S still stops output.
+    if ctrl && !shift {
+        let byte = ctrl_legacy(ch);
+        if let Some(action) = tty.flow_for(byte) {
+            return Some(LegacyPress::Flow(action));
+        }
+        if let Some(sig) = tty.signal_for(byte) {
+            return Some(LegacyPress::Signal(sig));
+        }
+    }
+    if !ch.is_ascii() {
+        return Some(LegacyPress::Key(ch.to_string()));
+    }
+    let produced = if ctrl {
+        ctrl_legacy(ch)
+    } else if shift {
+        shifted(ch)
+    } else {
+        ch
+    };
+    Some(LegacyPress::Key(name_byte(produced)))
+}
+
+fn raise_legacy_signals(signals: &[libc::c_int]) {
+    for &sig in signals {
+        unsafe { libc::raise(sig) };
+    }
 }
 
 /// Turn what the terminal sent into key names, leaving anything incomplete
@@ -3538,7 +3954,30 @@ fn release_stale_string(
 /// order of the checks is what decides whether an unknown key is silently
 /// ignored or arrives as a handful of characters that other keys are bound
 /// to.
+/// Key names only. Signal chords are not names; [`settle`] raises them.
+/// Tests read this. The live poll goes through [`decode_reporting`].
+#[cfg(test)]
 fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
+    let mut signals = Vec::new();
+    let mut flow = Vec::new();
+    // No saved tty in a decoder test. Assuming ^C and ^S here would make
+    // the result depend on whichever terminal happened to run the suite.
+    decode_reporting(
+        buf,
+        lone_esc,
+        &mut signals,
+        &mut flow,
+        &LineDiscipline::inactive(),
+    )
+}
+
+fn decode_reporting(
+    buf: &mut String,
+    lone_esc: &mut bool,
+    signals: &mut Vec<libc::c_int>,
+    flow: &mut Vec<OutputFlow>,
+    tty: &LineDiscipline,
+) -> Vec<String> {
     const SEQUENCES: &[(&str, &str)] = &[
         ("\x1b[A", "up"),
         ("\x1b[B", "down"),
@@ -3594,6 +4033,19 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
                 }
                 continue;
             }
+            // Kitty keyboard protocol, before the catch-all that drops
+            // unknown CSI. `CSI 27 u` is the Escape key and is finished in
+            // this poll; a bare ESC is still a prefix and still waits.
+            if let Some((len, key)) = kitty_press(&chars[at..], tty) {
+                at += len;
+                match key {
+                    Some(LegacyPress::Key(name)) => keys.push(name),
+                    Some(LegacyPress::Signal(sig)) => signals.push(sig),
+                    Some(LegacyPress::Flow(action)) => flow.push(action),
+                    None => {}
+                }
+                continue;
+            }
             if let Some(len) = escape_len(&chars[at..]) {
                 terminal::reply(&chars[at..at + len].iter().collect::<String>());
                 at += len; // a sequence this program does not map; drop it
@@ -3620,29 +4072,7 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
         }
         let ch = chars[at];
         at += 1;
-        match ch {
-            '\r' | '\n' => keys.push("enter".to_string()),
-            '\t' => keys.push("tab".to_string()),
-            '\x7f' | '\x08' => keys.push("backspace".to_string()),
-            // vim's own pair for moving the view and leaving the cursor
-            // where it is, which is exactly what these do here. Named
-            // rather than passed through raw: a widget matching "\x05"
-            // reads as a typo, and a control byte in a match arm is
-            // invisible to anyone scanning the file for its keys.
-            //
-            // Safe to take. The terminal is in cbreak with ISIG still on,
-            // so the bytes it intercepts are the signal ones - these are
-            // not among them, and neither is flow control's ^S/^Q.
-            '\x19' => keys.push("ctrl-y".to_string()),
-            '\x05' => keys.push("ctrl-e".to_string()),
-            // Kill-line, as readline and every shell prompt use it. Named
-            // here so a screen with a text field gets it for free, and so it
-            // cannot be confused with a character somebody meant to type -
-            // which is the whole reason to clear with a control byte rather
-            // than with tab, a letter, or a second meaning for escape.
-            '\x15' => keys.push("ctrl-u".to_string()),
-            c => keys.push(c.to_string()),
-        }
+        keys.push(name_byte(ch));
     }
     chars.drain(..at);
     *buf = chars.into_iter().collect();
@@ -3986,9 +4416,26 @@ mod tests {
         let mut since = None;
         let start = std::time::Instant::now();
         assert!(super::decode(&mut pending, &mut escape).is_empty());
-        assert!(super::release_stale_string(&mut pending, &mut escape, &mut since, start).is_empty());
+        assert!(super::release_stale_string(
+            &mut pending,
+            &mut escape,
+            &mut since,
+            start,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &super::LineDiscipline::inactive(),
+        )
+        .is_empty());
         assert_eq!(
-            super::release_stale_string(&mut pending, &mut escape, &mut since, start + super::STRING_PATIENCE),
+            super::release_stale_string(
+                &mut pending,
+                &mut escape,
+                &mut since,
+                start + super::STRING_PATIENCE,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &super::LineDiscipline::inactive(),
+            ),
             ["]", "q"]
         );
         assert!(pending.is_empty());
@@ -5682,6 +6129,264 @@ mod tests {
         buf.push_str("[A");
         assert_eq!(decode(&mut buf, &mut held), vec!["up"]);
         assert!(buf.is_empty());
+    }
+
+    /// Legacy bytes and `CSI u` name the same keys. Escape is the one that
+    /// is not the same shape: the legacy byte has to wait a poll, because
+    /// it might be the start of a sequence, and `CSI 27 u` is already finished.
+    #[test]
+    fn legacy_and_csi_u_name_esc_ctrl_alt_and_the_editing_keys_alike() {
+        let mut buf = "\u{1b}".to_string();
+        let mut held = false;
+        assert!(decode(&mut buf, &mut held).is_empty(), "a bare escape still waits");
+        assert_eq!(decode(&mut buf, &mut held), vec!["esc".to_string()]);
+
+        let same = [
+            ("\r", "\u{1b}[13u", "enter"),
+            ("\n", "\u{1b}[13u", "enter"),
+            ("\t", "\u{1b}[9u", "tab"),
+            ("\u{7f}", "\u{1b}[127u", "backspace"),
+            ("\u{8}", "\u{1b}[127u", "backspace"),
+            ("\u{19}", "\u{1b}[121;5u", "ctrl-y"),
+            ("\u{5}", "\u{1b}[101;5u", "ctrl-e"),
+            ("\u{15}", "\u{1b}[117;5u", "ctrl-u"),
+            // Alt is an ESC prefix in legacy, and that prefix is not part of the name.
+            ("\u{1b}a", "\u{1b}[97;3u", "a"),
+            ("\u{1b}I", "\u{1b}[105;4u", "I"),
+            ("\u{1b}\u{19}", "\u{1b}[121;7u", "ctrl-y"),
+        ];
+        for (legacy, csi, name) in same {
+            assert_eq!(keys(legacy), vec![name.to_string()], "legacy {legacy:?}");
+            assert_eq!(keys(csi), vec![name.to_string()], "csi {csi:?}");
+        }
+        // One poll, not two: the protocol's Escape key does not wait.
+        assert_eq!(keys("\u{1b}[27u"), vec!["esc".to_string()]);
+        // Alt+[ is no longer an unfinished CSI. Legacy holds that prefix.
+        assert_eq!(keys("\u{1b}[91;3u"), vec!["[".to_string()]);
+        let mut held_prefix = "\u{1b}[".to_string();
+        let mut waiting = false;
+        assert!(decode(&mut held_prefix, &mut waiting).is_empty());
+        assert_eq!(held_prefix, "\u{1b}[");
+        // A release is not a second press. A repeat is the key again.
+        assert_eq!(keys("\u{1b}[121;5:3u"), Vec::<String>::new());
+        assert_eq!(keys("\u{1b}[121;5:2u"), vec!["ctrl-y".to_string()]);
+        // Shift-tab stays dropped, in both encodings.
+        assert_eq!(keys("\u{1b}[Z"), Vec::<String>::new());
+        assert_eq!(keys("\u{1b}[9;2u"), Vec::<String>::new());
+        // The report is one key, and what follows it is still read.
+        assert_eq!(
+            keys("\u{1b}[121;5uq"),
+            vec!["ctrl-y".to_string(), "q".to_string()]
+        );
+        // A query reply is not a key. Neither is a half-arrived report.
+        assert_eq!(keys("\u{1b}[?0u"), Vec::<String>::new());
+        let mut partial = "\u{1b}[121".to_string();
+        assert!(decode(&mut partial, &mut waiting).is_empty());
+        assert_eq!(partial, "\u{1b}[121");
+    }
+
+    /// Flag 1 reports the usual ISIG chords as CSI u. On a tty with the
+    /// ordinary special characters they are signals, not key names.
+    #[test]
+    fn csi_u_ctrl_c_z_and_backslash_are_the_legacy_signals() {
+        let chord = [
+            ("\u{1b}[99;5u", libc::SIGINT),
+            ("\u{1b}[122;5u", libc::SIGTSTP),
+            ("\u{1b}[92;5u", libc::SIGQUIT),
+            // Alt is a prefix; the driver still interrupts on the byte.
+            ("\u{1b}[99;7u", libc::SIGINT),
+            // Ctrl-4 on the main keyboard is the same VQUIT byte as Ctrl-\.
+            // Keypad 4 is not: that number stays the digit.
+            ("\u{1b}[52;5u", libc::SIGQUIT),
+        ];
+        for (sequence, sig) in chord {
+            let (names, signals, flow) = reported(sequence);
+            assert!(names.is_empty(), "{sequence}");
+            assert!(flow.is_empty(), "{sequence}");
+            assert_eq!(signals, vec![sig], "{sequence}");
+        }
+        // A release is not a second signal. A repeat is the signal again.
+        assert!(reported("\u{1b}[99;5:3u").1.is_empty());
+        assert_eq!(reported("\u{1b}[99;5:2u").1, vec![libc::SIGINT]);
+        // Ctrl-Shift-C was never the INTR byte.
+        let (names, signals, _) = reported("\u{1b}[99;6u");
+        assert!(signals.is_empty());
+        assert_eq!(names, vec!["\u{3}"]);
+        // What follows the chord is still a key.
+        let (names, signals, _) = reported("\u{1b}[99;5uq");
+        assert_eq!(signals, vec![libc::SIGINT]);
+        assert_eq!(names, vec!["q"]);
+    }
+
+    /// No saved tty does not invent the usual ^C/^Z/^\/^S characters.
+    #[test]
+    fn without_a_saved_tty_ctrl_chords_are_ordinary_keys() {
+        let (names, signals, flow) = decode_tty(
+            "\u{1b}[99;5u\u{1b}[122;5u\u{1b}[92;5u\u{1b}[115;5u\u{1b}[113;5u",
+            &super::LineDiscipline::inactive(),
+        );
+        assert!(signals.is_empty());
+        assert!(flow.is_empty());
+        assert_eq!(names, vec!["\u{3}", "\u{1a}", "\u{1c}", "\u{13}", "\u{11}"]);
+    }
+
+    /// ISIG, VINTR, VQUIT and VSUSP come from the saved termios, including
+    /// a disabled slot and a remap. IXON's VSTOP and VSTART do too, and
+    /// flow control wins when one byte is configured as both.
+    #[test]
+    fn csi_u_signals_and_flow_follow_the_saved_termios() {
+        let off = libc::_POSIX_VDISABLE as u8;
+        let quiet = termios_tty(false, false, 0x03, 0x1c, 0x1a, 0x11, 0x13);
+        let (names, signals, flow) = decode_tty("\u{1b}[99;5u\u{1b}[115;5u", &quiet);
+        assert!(signals.is_empty() && flow.is_empty());
+        assert_eq!(names, vec!["\u{3}", "\u{13}"]);
+
+        // intr = ^X, quit stays ^\, suspend is disabled, IXON is off.
+        let remapped = termios_tty(true, false, 0x18, 0x1c, off, 0x11, 0x13);
+        let (names, signals, flow) = decode_tty("\u{1b}[120;5u", &remapped);
+        assert_eq!(signals, vec![libc::SIGINT]);
+        assert!(names.is_empty() && flow.is_empty());
+        let (names, signals, _) = decode_tty("\u{1b}[99;5u\u{1b}[122;5u", &remapped);
+        assert!(signals.is_empty());
+        assert_eq!(names, vec!["\u{3}", "\u{1a}"]);
+        let (_, signals, _) = decode_tty("\u{1b}[92;5u", &remapped);
+        assert_eq!(signals, vec![libc::SIGQUIT]);
+
+        // IXON on, stop remapped to ^Y. That report stops output. Ctrl-S is
+        // not the stop character, so it is a key. Alt is still only a prefix.
+        let flow_tty = termios_tty(true, true, 0x03, 0x1c, 0x1a, 0x11, 0x19);
+        let (names, signals, flow) = decode_tty("\u{1b}[121;5u", &flow_tty);
+        assert_eq!(flow, vec![super::OutputFlow::Stop]);
+        assert!(names.is_empty() && signals.is_empty());
+        let (names, _, flow) = decode_tty("\u{1b}[115;5u\u{1b}[113;5u\u{1b}[113;7u", &flow_tty);
+        assert_eq!(names, vec!["\u{13}"]);
+        assert_eq!(
+            flow,
+            vec![super::OutputFlow::Start, super::OutputFlow::Start]
+        );
+
+        // The usual start and stop bytes, and a disabled stop.
+        let usual = termios_tty(true, true, 0x03, 0x1c, 0x1a, 0x11, 0x13);
+        let (names, signals, flow) = decode_tty("\u{1b}[115;5u\u{1b}[113;5u", &usual);
+        assert!(names.is_empty() && signals.is_empty());
+        assert_eq!(
+            flow,
+            vec![super::OutputFlow::Stop, super::OutputFlow::Start]
+        );
+        let stopped = termios_tty(true, true, 0x03, off, 0x1a, 0x11, off);
+        let (names, signals, flow) = decode_tty("\u{1b}[115;5u\u{1b}[92;5u\u{1b}[99;5u", &stopped);
+        assert!(flow.is_empty());
+        assert_eq!(signals, vec![libc::SIGINT]);
+        assert_eq!(names, vec!["\u{13}", "\u{1c}"]);
+
+        // One byte set as both VSTOP and VINTR stops output and does not signal.
+        let both = termios_tty(true, true, 0x03, 0x1c, 0x1a, 0x11, 0x03);
+        let (names, signals, flow) = decode_tty("\u{1b}[99;5u", &both);
+        assert!(names.is_empty() && signals.is_empty());
+        assert_eq!(flow, vec![super::OutputFlow::Stop]);
+    }
+
+    /// Keypad numbers flag 1 sends are the legacy non-keypad names.
+    #[test]
+    fn keypad_reports_use_the_legacy_names() {
+        let same = [
+            (57414, "enter"),
+            (57399, "0"),
+            (57400, "1"),
+            (57408, "9"),
+            (57409, "."),
+            (57410, "/"),
+            (57411, "*"),
+            (57412, "-"),
+            (57413, "+"),
+            (57415, "="),
+            (57416, ","),
+            (57417, "left"),
+            (57418, "right"),
+            (57419, "up"),
+            (57420, "down"),
+            (57421, "pgup"),
+            (57422, "pgdn"),
+            (57423, "home"),
+            (57424, "end"),
+        ];
+        for (code, name) in same {
+            assert_eq!(keys(&format!("\u{1b}[{code}u")), vec![name], "{code}");
+        }
+        // Shift and Ctrl leave the keypad character as it is.
+        assert_eq!(keys("\u{1b}[57400;2u"), vec!["1"]);
+        assert_eq!(keys("\u{1b}[57403;5u"), vec!["4"]);
+        assert!(reported("\u{1b}[57403;5u").1.is_empty());
+        assert_eq!(keys("\u{1b}[57404;3u"), vec!["5"]);
+        assert_eq!(keys("\u{1b}[57419;5u"), vec!["up"]);
+        // Insert, delete, begin and the media keys have no legacy name here.
+        for code in [57425, 57426, 57427, 57428, 57358] {
+            assert_eq!(
+                keys(&format!("\u{1b}[{code}u")),
+                Vec::<String>::new(),
+                "{code}"
+            );
+        }
+    }
+
+    /// Alt+é is an ESC prefix in legacy and `CSI 233;3u` with flag 1.
+    #[test]
+    fn alt_plus_a_printable_non_ascii_key_matches_the_legacy_prefix() {
+        let same = [
+            ("é", "\u{1b}[233u", "é"),
+            ("\u{1b}\u{e9}", "\u{1b}[233;3u", "é"),
+            ("\u{1b}你", "\u{1b}[20320;3u", "你"),
+        ];
+        for (legacy, csi, name) in same {
+            assert_eq!(keys(legacy), vec![name.to_string()], "legacy {legacy:?}");
+            assert_eq!(keys(csi), vec![name.to_string()], "csi {csi:?}");
+        }
+    }
+
+    fn reported(text: &str) -> (Vec<String>, Vec<libc::c_int>, Vec<super::OutputFlow>) {
+        decode_tty(text, &standard_tty())
+    }
+
+    fn decode_tty(
+        text: &str,
+        tty: &super::LineDiscipline,
+    ) -> (Vec<String>, Vec<libc::c_int>, Vec<super::OutputFlow>) {
+        let mut buf = text.to_string();
+        let mut held = false;
+        let mut signals = Vec::new();
+        let mut flow = Vec::new();
+        let names = super::decode_reporting(&mut buf, &mut held, &mut signals, &mut flow, tty);
+        (names, signals, flow)
+    }
+
+    /// The special characters a freshly opened terminal uses: ISIG and IXON
+    /// on, intr ^C, quit ^\, susp ^Z, start ^Q, stop ^S.
+    fn standard_tty() -> super::LineDiscipline {
+        termios_tty(true, true, 0x03, 0x1c, 0x1a, 0x11, 0x13)
+    }
+
+    fn termios_tty(
+        isig: bool,
+        ixon: bool,
+        intr: u8,
+        quit: u8,
+        susp: u8,
+        start: u8,
+        stop: u8,
+    ) -> super::LineDiscipline {
+        let mut ios: libc::termios = unsafe { std::mem::zeroed() };
+        if isig {
+            ios.c_lflag |= libc::ISIG;
+        }
+        if ixon {
+            ios.c_iflag |= libc::IXON;
+        }
+        ios.c_cc[libc::VINTR] = intr;
+        ios.c_cc[libc::VQUIT] = quit;
+        ios.c_cc[libc::VSUSP] = susp;
+        ios.c_cc[libc::VSTART] = start;
+        ios.c_cc[libc::VSTOP] = stop;
+        super::LineDiscipline::from_termios(&ios)
     }
 
     #[test]

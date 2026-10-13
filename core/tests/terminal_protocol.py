@@ -53,11 +53,17 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if self.reply == "kitty":
+                if self.reply == "kitty" or self.reply == "keyboard":
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
                     response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
-                response += b"\x1b[?2026;2$y\x1b[?62;c"
+                response += b"\x1b[?2026;2$y"
+                # Device attributes often arrive before the keyboard flags.
+                # Current flags are 0 until we push; the flags reply is still
+                # the support signal when it comes second, inside the window.
+                response += b"\x1b[?62;c"
+                if self.reply == "keyboard":
+                    response += b"\x1b[?0u"
                 # Deliberately split strings/CSI across reads.
                 for part in [response[:4], response[4:17], response[17:]]:
                     self.send(part)
@@ -140,7 +146,15 @@ def supported(t):
 
 def fallback(t):
     assert not t.images()
+    assert b"\x1b[>1u" not in t.output, "keyboard protocol pushed without an answer"
     assert any(0x2800 < ord(c) <= 0x28ff for c in t.output.decode(errors="replace")), "no text chart"
+
+
+def left_in_legacy(output, where):
+    last_push = output.rfind(b"\x1b[>1u")
+    last_pop = output.rfind(b"\x1b[<u")
+    assert last_push != -1, f"{where}: keyboard protocol was not pushed"
+    assert last_pop > last_push, f"{where}: terminal was not left in legacy mode"
 
 
 def timeout(t):
@@ -265,3 +279,114 @@ if __name__ == "__main__":
             print(f"PASS cleanup/{ending}")
         finally:
             t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[?u" in t.output, "keyboard support was not queried"
+        assert b"\x1b[>1u" in t.output, "an answer did not push disambiguation"
+        t.quit()
+        left_in_legacy(t.output, "exit")
+        print("PASS keyboard/exit")
+    finally:
+        t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        os.kill(t.proc.pid, signal.SIGTSTP)
+        t.read()
+        left_in_legacy(t.output, "suspend")
+        os.kill(t.proc.pid, signal.SIGCONT)
+        t.read(0.6)
+        assert t.output.rfind(b"\x1b[>1u") > t.output.rfind(b"\x1b[<u"), "resume did not push again"
+        t.quit()
+        left_in_legacy(t.output, "exit after resume")
+        print("PASS keyboard/suspend")
+    finally:
+        t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        t.send(b"p")
+        t.read(0.3)
+        assert t.proc.wait(timeout=3) != 0
+        left_in_legacy(t.output, "panic")
+        print("PASS keyboard/panic")
+    finally:
+        t.close()
+
+    # os.kill covers the handler. These are the bytes flag 1 sends for the
+    # chords the terminal driver used to turn into signals.
+    for sequence, sig, label in [
+        (b"\x1b[99;5u", signal.SIGINT, "typed-interrupt"),
+        (b"\x1b[92;5u", signal.SIGQUIT, "typed-quit"),
+    ]:
+        t = Terminal(reply="keyboard")
+        try:
+            t.read(0.3)
+            assert b"\x1b[>1u" in t.output
+            t.send(sequence)
+            t.read(0.4)
+            status = t.proc.wait(timeout=3)
+            t.read(0.2)
+            assert status == 128 + sig, f"{label}: exit {status}"
+            left_in_legacy(t.output, label)
+            print(f"PASS keyboard/{label}")
+        finally:
+            t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        t.send(b"\x1b[122;5u")
+        stopped = False
+        until = time.monotonic() + 1
+        while time.monotonic() < until:
+            state = subprocess.check_output(
+                ["ps", "-o", "state=", "-p", str(t.proc.pid)], text=True
+            ).strip()
+            if state.startswith("T"):
+                stopped = True
+                break
+            time.sleep(0.02)
+        assert stopped, "typed Ctrl-Z did not stop the process"
+        t.read(0.2)
+        left_in_legacy(t.output, "typed suspend")
+        os.kill(t.proc.pid, signal.SIGCONT)
+        t.read(1.0)
+        assert t.output.rfind(b"\x1b[>1u") > t.output.rfind(b"\x1b[<u"), "resume did not push again"
+        t.quit()
+        left_in_legacy(t.output, "exit after typed suspend")
+        print("PASS keyboard/typed-suspend")
+    finally:
+        t.close()
+
+    # Ctrl-S holds frames inside the probe. The redraw goes through poll and
+    # draw_plots; a stopped tty would block that draw and never read Ctrl-Q.
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        assert b"SELECTED:0" in t.output
+        t.send(b"\x1b[115;5u")
+        t.read(0.3)
+        t.send(b"\x1b[B")
+        t.read(0.5)
+        assert t.proc.poll() is None, "Ctrl-S wedged the probe"
+        assert b"SELECTED:1" not in t.output, "stopped output reached the terminal"
+        t.send(b"\x1b[113;5u")
+        t.read(0.8)
+        assert b"SELECTED:1" in t.output, "Ctrl-Q did not resume output"
+        t.send(b"\x1b[99;5u")
+        t.read(0.4)
+        status = t.proc.wait(timeout=3)
+        assert status == 128 + signal.SIGINT, f"flow-control: exit {status}"
+        left_in_legacy(t.output, "flow-control")
+        print("PASS keyboard/flow-control")
+    finally:
+        t.close()
