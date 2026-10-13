@@ -100,7 +100,11 @@ struct Quota {
     tier: String,
     on_demand_used: Option<f64>,
     on_demand_cap: Option<f64>,
+    /// Dollars, converted from the cents x.ai sends. See `prepaid_of`.
     prepaid: Option<f64>,
+    /// The answer carries a marker only the unified Cursor and Grok plan
+    /// sends. See `unified_markers`.
+    unified: bool,
 }
 
 /// What the transcripts on this machine recorded, plus the account-wide
@@ -129,6 +133,9 @@ pub struct Data {
     /// Why the figure on screen is not the server's, when it is not. Empty
     /// when it is, or when nothing is asking.
     quota_why: String,
+    /// Where this account stands relative to the unified plan, once both
+    /// vendors have been read. Set by `vendors::link_spacexsi`.
+    pub spacexsi: Spacexsi,
 }
 
 /// The integer following `key` on a line.
@@ -234,7 +241,8 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
             tier: text(&d["ctx"], "subscriptionTier"),
             on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
             on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
-            prepaid: val_of(&cfg["prepaidBalance"]["val"]),
+            prepaid: prepaid_of(cfg),
+            unified: unified_markers(cfg),
         };
         let better = match &best {
             None => true,
@@ -642,6 +650,8 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         quota_at: quota_read.2,
         quota_why: quota_read.3,
         quota_every: quota_every_secs(cfg),
+        // Decided once both vendors are read; this reader sees only Grok.
+        spacexsi: Spacexsi::No,
     }
 }
 
@@ -851,16 +861,110 @@ fn products_of(cfg: &serde_json::Value) -> Vec<(String, f64)> {
         .as_array()
         .map(|list| {
             list.iter()
-                .filter_map(|entry| {
+                .map(|entry| {
+                    // The unified plan's answer carries an entry with no
+                    // product named - 3% of a 5% week on the measured
+                    // account, beside GrokBot's 2%. Dropping it left a split
+                    // that read as the whole week and was not, so it is kept
+                    // and called what it is rather than given a name the
+                    // server did not send.
+                    // Kept as the server sent it - empty included - and named
+                    // for display by `product_name`, which knows which plan
+                    // the reading came from.
                     let name = text(entry, "product");
-                    if name.is_empty() {
-                        return None;
-                    }
-                    Some((name, val_of(&entry["usagePercent"]).unwrap_or(0.0)))
+                    (name, val_of(&entry["usagePercent"]).unwrap_or(0.0))
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The prepaid balance in dollars.
+///
+/// x.ai sends it in cents, unlike the on-demand cap beside it, which is
+/// dollars. Measured on the one account that has ever held a balance here:
+/// `prepaidBalance {val: 2000}` for the $20 paid on cursor.com, the same
+/// balance Cursor's own GetUserPrepaidBilling states as `availableCents:
+/// "2000"`. Read as dollars it said `prepaid $2000`, a hundredfold error in
+/// a figure about money.
+fn prepaid_of(cfg: &serde_json::Value) -> Option<f64> {
+    val_of(&cfg["prepaidBalance"]["val"]).map(|cents| cents / 100.0)
+}
+
+/// Whether the answer carries a marker only the unified Cursor and Grok
+/// plan sends.
+///
+/// Not `isUnifiedBillingUser`: the log carries that as true on readings
+/// from before the plans merged, on a Free tier with its own window, so it
+/// says something about x.ai's billing and nothing about Cursor. What
+/// arrived with the merge, on the credits endpoint, is a top-up method for
+/// the shared prepaid balance and a `GrokBot` product in the week's split -
+/// Grok Bot being the allowance Cursor bills. A log line has neither, which
+/// is why the window match in `vendors::link_spacexsi` exists as the
+/// second route in.
+fn unified_markers(cfg: &serde_json::Value) -> bool {
+    !text(cfg, "topUpMethod").is_empty()
+        || cfg["productUsage"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|e| text(e, "product") == "GrokBot"))
+}
+
+/// Whether this reading says the account is on the unified plan.
+pub fn unified(d: &Data) -> bool {
+    d.quota.as_ref().is_some_and(|q| q.unified)
+}
+
+/// The credit window, as (start, end) in epoch milliseconds - the
+/// fingerprint `vendors::link_spacexsi` matches against Cursor's pool.
+pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
+    let q = d.quota.as_ref()?;
+    match (iso_epoch(&q.start), iso_epoch(&q.end)) {
+        (Some(s), Some(e)) if e > s => Some((s * 1000.0, e * 1000.0)),
+        _ => None,
+    }
+}
+
+/// A product as the split names it on screen.
+///
+/// On the unified plan the entry the server leaves unnamed is Cursor. Not a
+/// guess at a default: matched against x.ai's own usage dashboard on
+/// 2026-10-13, which listed Cursor 134,394,024 tokens, Grok Bot 137,782,665,
+/// Grok Chat 2,384,739 and Grok Build 103,749 - shares of 48.9%, 50.2%,
+/// 0.87% and 0.04% of a 10.3% week, so 5.03%, 5.16%, 0.09% and 0.004%.
+/// The endpoint answered `[{usagePercent: 5.0}, {product: "GrokBot",
+/// usagePercent: 5.0}]`: whole percents, and a product that rounds to
+/// nought absent altogether. Grok Build carries a name of its own on the
+/// account's own plan, so the unnamed one is not Build; its share is
+/// Cursor's. The other names are spaced the way the dashboard spells them.
+///
+/// On the account's own plan the names stay exactly as they were drawn
+/// before, and an unnamed entry is called what it is.
+fn product_name(raw: &str, unified: bool) -> String {
+    if !unified {
+        return if raw.is_empty() { "unnamed".to_string() } else { raw.to_string() };
+    }
+    if raw.is_empty() {
+        return "Cursor".to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in raw.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The week's pool split by product, for the SpaceXSI section: display
+/// name and whole percent, since that is all the endpoint sends, in the
+/// server's order.
+pub fn pool_split(d: &Data) -> Vec<(String, f64)> {
+    let Some(q) = d.quota.as_ref() else {
+        return Vec::new();
+    };
+    let unified = d.spacexsi.unified() || q.unified;
+    q.products.iter().map(|(name, pct)| (product_name(name, unified), *pct)).collect()
 }
 
 /// The billing body in the same shape the log parser produces, so the rest
@@ -918,7 +1022,8 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         tier: String::new(),
         on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
         on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
-        prepaid: val_of(&cfg["prepaidBalance"]["val"]),
+        prepaid: prepaid_of(cfg),
+        unified: unified_markers(cfg),
     })
 }
 
@@ -977,7 +1082,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     // off the summary and would now take the paid allowance with it.
     if let Some(pct) = q.pct {
         out.push(Lane {
-            label: "credits".into(),
+            // On the unified plan this is the weekly pool Cursor draws on
+            // too, and naming it as Cursor's tab names it is what lets the
+            // two be read as one allowance.
+            label: if d.spacexsi.unified() { crate::cursor::POOL_LABEL } else { "credits" }.into(),
             pct,
             window_secs,
             reset,
@@ -1175,6 +1283,20 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
 }
 
 fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    grok_body_with_plots(d, w, p, plots, true)
+}
+
+/// Grok's half of the merged SpaceXSI tab: what this machine recorded,
+/// without the credit window, which that tab draws once above both
+/// products from Cursor's live reading.
+///
+/// The week's split by product is not here: it describes the pool, so the
+/// merged tab draws it under the pool's bar, from `pool_split`.
+pub fn details_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    grok_body_with_plots(d, w, p, plots, false)
+}
+
+fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, quota: bool) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
     // Not filtered on the percentage any more. A reading that names the
@@ -1183,7 +1305,9 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
     // goes blank and a reader cannot tell an account with no quota from a
     // widget that has stopped working. The window, the countdown and the
     // reason are all still true; only the bar needs a number.
-    if let Some(q) = d.quota.as_ref() {
+    if !quota {
+        // Drawn above both products on the merged tab.
+    } else if let Some(q) = d.quota.as_ref() {
         // The one real remaining-quota figure in this widget: everything
         // else here counts what was spent. It leads the tab for that
         // reason.
@@ -1197,12 +1321,24 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
             window_now(begin, end, now())
         };
         let left = current.map(|e| e - now()).filter(|secs| *secs >= 0.0);
+        // On the unified plan the window is the pool Cursor's tab draws, so
+        // it goes under the same heading. Its own plan keeps the heading it
+        // always had.
+        let unified_here = d.spacexsi.unified();
+        let heading = if unified_here {
+            format!(" ── {} ── ", SPACEXSI)
+        } else {
+            format!(" ── {} QUOTA ── ", period_name(&q.kind).to_uppercase())
+        };
+        let via = match d.spacexsi {
+            Spacexsi::Separate => format!("via Grok · {} · ", period_name(&q.kind)),
+            Spacexsi::No => String::new(),
+            _ => format!("{} · ", period_name(&q.kind)),
+        };
         rows.push(tc::seg(
             &[
-                (
-                    p.lbl.as_str(),
-                    format!(" ── {} QUOTA ── ", period_name(&q.kind).to_uppercase()),
-                ),
+                (p.lbl.as_str(), heading),
+                (p.dim.as_str(), via),
                 (
                     p.dim.as_str(),
                     // left_span, not a decimal of a day: "~0.9 days" is
@@ -1241,7 +1377,10 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                     hue,
                     p,
                 ));
-                line.push((p.dim.clone(), "  credits used".into()));
+                line.push((
+                    p.dim.clone(),
+                    if unified_here { "  of the weekly pool" } else { "  credits used" }.into(),
+                ));
                 line.push(pace_cell(
                     lead(pct, span, reset),
                     pace_guessed(reading_is_old(q.taken), rolled, reset),
@@ -1287,6 +1426,25 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                 ));
                 rows.push(seg_of(&line, w));
             }
+            // The unified plan has no on-demand cap of x.ai's own: extra use
+            // bills to the shared prepaid balance, under a monthly limit set
+            // on cursor.com. "No cap set" would say there is no limit when
+            // there may well be one, so the row says where the money is.
+            None if d.spacexsi == Spacexsi::Shared => rows.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    "  same account as the CURSOR tab - credits and the monthly limit are there"
+                        .into(),
+                )],
+                w - 1,
+            )),
+            None if unified_here => rows.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    "  extra use bills to prepaid credits, under a limit set on cursor.com".into(),
+                )],
+                w - 1,
+            )),
             None => rows.push(tc::seg(
                 &[(p.dim.as_str(), "  no on-demand cap set".into())],
                 w - 1,
@@ -1303,8 +1461,12 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // prepaid balance, which is money on the account rather than an
         // allowance and so has no percentage to be a bar of.
         let mut extras: Vec<String> = Vec::new();
+        // Shared, the balance is Cursor's tab's to show: it is one balance,
+        // and stating it on both tabs reads as two.
         if let Some(prepaid) = q.prepaid.filter(|v| *v != 0.0) {
-            extras.push(format!("prepaid {}", dollars(prepaid)));
+            if d.spacexsi != Spacexsi::Shared {
+                extras.push(format!("prepaid {}", dollars(prepaid)));
+            }
         }
         rows.push(tc::seg(
             &[
@@ -1324,11 +1486,26 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // The same week split by product. Worth a row of its own because
         // the bar above is one number for three different things, and which
         // of them is spending is the part a reader can act on.
-        if !q.products.is_empty() {
+        if unified_here {
+            // The unified plan's split is whole percents with Cursor's share
+            // unnamed; named and said for what it is.
+            let split = pool_split(d);
+            if !split.is_empty() {
+                let text = split
+                    .iter()
+                    .map(|(name, pct)| format!("{} ~{:.0}%", name, pct))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                rows.push(tc::seg(
+                    &[(p.dim.as_str(), "  by product ".into()), (p.txt.as_str(), text)],
+                    w - 1,
+                ));
+            }
+        } else if !q.products.is_empty() {
             let split = q
                 .products
                 .iter()
-                .map(|(name, pct)| format!("{} {}", name, pct_text(*pct).trim()))
+                .map(|(name, pct)| format!("{} {}", product_name(name, false), pct_text(*pct).trim()))
                 .collect::<Vec<_>>()
                 .join(" · ");
             rows.push(tc::seg(
@@ -1431,7 +1608,7 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
     // which of the two routes it took is a different sentence, and the note
     // named only the log for as long as the log was the only route that
     // ever produced one.
-    if d.quota.is_some() {
+    if d.quota.is_some() && quota {
         note.push_str(if d.quota_live {
             " The quota above is the server's own figure, asked for directly - not inferred."
         } else {
@@ -1476,10 +1653,13 @@ fn plan_block(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             },
         ));
     }
-    if let Some(prepaid) = q.prepaid {
+    // Shared, the balance is the CURSOR tab's to state, as on the quota
+    // block above.
+    if let Some(prepaid) = q.prepaid.filter(|_| d.spacexsi != Spacexsi::Shared) {
         pairs.push(("prepaid balance".into(), dollars(prepaid)));
     }
-    plan_rows(&q.tier, &pairs, w, "", None, "", p)
+    let note = if d.spacexsi.unified() { SPACEXSI } else { "" };
+    plan_rows(&q.tier, &pairs, w, note, None, "", p)
 }
 
 /// The whole tab: the credit window, what the transcripts recorded, and
@@ -1501,7 +1681,7 @@ mod tests {
     /// like the real thing down to the microseconds and the numeric offset
     /// on the period - a fixture that arrives in a tidier format than the
     /// server sends tests a parser nobody has.
-    const LOG_LINE: &str = concat!(
+    pub(super) const LOG_LINE: &str = concat!(
         r#"{"msg":"config","lvl":"info","ctx":{"subscriptionTier":"Test Premium","config":{"#,
         r#""creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
         r#""start":"2026-08-10T00:00:00.000000+00:00","#,
@@ -1774,6 +1954,7 @@ mod tests {
             on_demand_used: None,
             on_demand_cap: None,
             prepaid: None,
+            unified: false,
         };
         let p = palette();
         let old = grok_tab(
@@ -2252,6 +2433,7 @@ mod tests {
             quota_at: 0.0,
             quota_every: 0.0,
             quota_why: String::new(),
+            spacexsi: Spacexsi::No,
         };
         for w in [40usize, 80, 200] {
             let rows = tab(&d, w, 24, &Config::default(), &p);
@@ -2361,6 +2543,195 @@ mod tests {
         };
         let note = why_no_lane(&lapsed);
         assert!(note.contains("token lapsed"), "{note}");
+    }
+
+    // The unified Cursor and Grok plan, as the credits endpoint and the log
+    // answered on 2026-10-13. Shapes and figures only.
+
+    /// The credits endpoint on the unified plan, around now.
+    fn unified_body() -> serde_json::Value {
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp_millis((at * 1000.0) as i64)
+                .expect("a stamp")
+                .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+                .to_string()
+        };
+        let (start, end) = (now() - 86400.0, now() + 6.0 * 86400.0);
+        serde_json::json!({"config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": stamp(start), "end": stamp(end)},
+            "creditUsagePercent": 5.0,
+            "productUsage": [{"usagePercent": 3.0}, {"product": "GrokBot", "usagePercent": 2.0}],
+            "prepaidBalance": {"val": 2000},
+            "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+            "billingPeriodStart": stamp(start),
+            "billingPeriodEnd": stamp(end)
+        }})
+    }
+
+    fn strip(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn unified_grok(place: Spacexsi) -> Data {
+        Data {
+            quota: quota_from(&unified_body()),
+            quota_live: true,
+            quota_every: 300.0,
+            spacexsi: place,
+            ..Data::default()
+        }
+    }
+
+    #[test]
+    fn the_credits_endpoint_marks_the_unified_plan_and_states_the_balance_in_cents() {
+        let q = quota_from(&unified_body()).expect("a reading");
+        assert!(q.unified, "topUpMethod and a GrokBot product are the unified plan's");
+        // 2000 is $20 - the balance Cursor states as availableCents "2000".
+        assert_eq!(q.prepaid, Some(20.0));
+        assert_eq!(q.pct, Some(5.0));
+        // A product with no name is kept and not guessed at, so the split
+        // still adds up to the week.
+        assert_eq!(q.products, vec![(String::new(), 3.0), ("GrokBot".to_string(), 2.0)]);
+        // On the unified plan the unnamed share is Cursor's, and the split
+        // is whole percents.
+        let d = unified_grok(Spacexsi::Shared);
+        assert_eq!(pool_split(&d), vec![("Cursor".to_string(), 3.0), ("Grok Bot".to_string(), 2.0)]);
+        // On the account's own plan nothing is renamed.
+        assert_eq!(product_name("", false), "unnamed");
+        assert_eq!(product_name("GrokBuild", false), "GrokBuild");
+        assert_eq!(product_name("GrokBuild", true), "Grok Build");
+        assert_eq!(product_name("GrokImagine", true), "Grok Imagine");
+        // Either marker is enough on its own.
+        let mut only_topup = unified_body();
+        only_topup["config"].as_object_mut().unwrap().remove("productUsage");
+        assert!(quota_from(&only_topup).unwrap().unified);
+        let mut only_bot = unified_body();
+        only_bot["config"].as_object_mut().unwrap().remove("topUpMethod");
+        assert!(quota_from(&only_bot).unwrap().unified);
+    }
+
+    #[test]
+    fn is_unified_billing_user_alone_is_not_the_unified_plan() {
+        // The log carried it as true on a Free tier, with a window of its
+        // own, before the plans merged.
+        let line = concat!(
+            r#"{"msg":"billing: fetched credits config","ctx":{"subscriptionTier":"Free","config":{"#,
+            r#""currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-07T02:09:41.289406+00:00","end":"2026-10-14T02:09:41.289406+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"#,
+            r#""prepaidBalance":{"val":0}}}}"#
+        );
+        let q = newest_quota([line].into_iter()).expect("a reading");
+        assert!(!q.unified);
+    }
+
+    #[test]
+    fn the_newest_window_wins_across_the_merge() {
+        // The log holds the account's own window and then the unified one;
+        // the second is the account now. It carries no marker - the log
+        // never does - and its balance is cents like the endpoint's.
+        let before = concat!(
+            r#"{"ts":"2026-10-12T07:46:27.663Z","ctx":{"subscriptionTier":null,"config":{"#,
+            r#""creditUsagePercent":2.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-11T04:13:45.862845+00:00","end":"2026-10-18T04:13:45.862845+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"#,
+            r#""prepaidBalance":{"val":0}}}}"#
+        );
+        let after = concat!(
+            r#"{"ts":"2026-10-13T04:16:10.188Z","ctx":{"subscriptionTier":"X Premium+","config":{"#,
+            r#""creditUsagePercent":4.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-13T02:39:23.429+00:00","end":"2026-10-20T02:39:23.429+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"prepaidBalance":{"val":2000}}}}"#
+        );
+        for lines in [[before, after], [after, before]] {
+            let q = newest_quota(lines.into_iter()).expect("a reading");
+            assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
+            assert_eq!(q.pct, Some(4.0));
+            assert_eq!(q.prepaid, Some(20.0));
+            assert!(q.on_demand_cap.is_none(), "the unified plan has no x.ai cap");
+        }
+        // The pool's window to the millisecond, which is what Cursor's is
+        // matched against.
+        let d = Data { quota: newest_quota([before, after].into_iter()), ..Data::default() };
+        let (s, e) = pool_window(&d).expect("a window");
+        assert_eq!((s.round(), e.round()), (1_791_859_163_429.0, 1_792_463_963_429.0));
+    }
+
+    #[test]
+    fn a_unified_grok_goes_under_spacexsi_and_its_own_plan_does_not() {
+        let alone = grok_tab(&unified_grok(Spacexsi::Alone), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        for want in ["SpaceXSI", "weekly", "of the weekly pool", "prepaid $20", "bills to prepaid credits"] {
+            assert!(alone.contains(want), "missing {want:?}: {alone}");
+        }
+        for gone in ["WEEKLY QUOTA", "credits used", "no on-demand cap set", "$2000"] {
+            assert!(!alone.contains(gone), "{gone:?}: {alone}");
+        }
+        // Shared, the balance and the limit are the CURSOR tab's to show.
+        let shared = grok_tab(&unified_grok(Spacexsi::Shared), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(shared.contains("same account as the CURSOR tab"), "{shared}");
+        assert!(!shared.contains("prepaid"), "the balance stated twice: {shared}");
+        let whole = tab(&unified_grok(Spacexsi::Shared), 120, 24, &Config::default(), &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(!whole.contains("prepaid balance"), "the SUBSCRIPTION block restated it: {whole}");
+        let separate = grok_tab(&unified_grok(Spacexsi::Separate), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(separate.contains("SpaceXSI ── via Grok"), "{separate}");
+        // The same reading on an account Grok cannot tell is unified, and no
+        // window match: the heading it always had.
+        let own = grok_tab(&unified_grok(Spacexsi::No), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(own.contains("WEEKLY QUOTA") && !own.contains("SpaceXSI"), "{own}");
+    }
+
+    #[test]
+    fn the_unified_lane_is_named_as_cursor_names_the_pool() {
+        let labels = |place| lanes(&unified_grok(place)).into_iter().map(|l| l.label).collect::<Vec<_>>();
+        assert_eq!(labels(Spacexsi::Alone), ["weekly pool"]);
+        assert_eq!(labels(Spacexsi::No), ["credits"]);
+    }
+
+    #[test]
+    fn every_unified_grok_row_fits_its_pane() {
+        for place in [Spacexsi::No, Spacexsi::Alone, Spacexsi::Shared, Spacexsi::Separate] {
+            for w in [26usize, 30, 40, 58, 80, 120] {
+                for row in grok_tab(&unified_grok(place), w, &palette()) {
+                    let n = strip(&row).chars().count();
+                    assert!(n <= w - 1, "{n} wide at {w} ({place:?}): {:?}", strip(&row));
+                }
+            }
+        }
+    }
+}
+
+/// Readings for tests outside this module: the unified plan's credits
+/// answer, and the account's own plan as its log recorded it.
+#[cfg(test)]
+impl Data {
+    pub fn unified_fixture() -> Data {
+        tests::unified_grok(Spacexsi::No)
+    }
+
+    pub fn own_plan_fixture() -> Data {
+        Data {
+            quota: newest_quota([tests::LOG_LINE].into_iter()),
+            quota_every: 300.0,
+            ..Data::default()
+        }
     }
 }
 
