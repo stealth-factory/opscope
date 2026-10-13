@@ -105,6 +105,9 @@ impl Drop for RefreshGuard {
 }
 
 const REFRESH_COLOUR: (u8, u8, u8) = (120, 220, 255);
+/// The three-row spinner moved down one dot, into Braille rows 2–4,
+/// to align with the capital text in the title.
+const REFRESH_SPINNER: &[char] = &['⠖', '⠲', '⢲', '⢰', '⣰', '⣠', '⣄', '⣆', '⡆', '⡖'];
 
 /// Animation time is independent of data polling and the number of input events.
 /// Only use this for decoration/loading indicators, never to invent measurements.
@@ -413,7 +416,7 @@ pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> St
     let spinner = tick.filter(|_| display_width(&wanted) + 2 <= room);
     let fill = if let Some(tick) = spinner {
         let (r, g, b) = REFRESH_COLOUR;
-        format!("{}{} {}{colour}{}", rgb(r, g, b), SPINNER[tick % SPINNER.len()], RST,
+        format!("{}{} {}{colour}{}", rgb(r, g, b), REFRESH_SPINNER[tick % REFRESH_SPINNER.len()], RST,
             "━".repeat(fill_room - 2))
     } else {
         "━".repeat(fill_room)
@@ -5708,11 +5711,11 @@ mod tests {
                 assert_eq!(title_busy(text, w, &colour, None), idle);
                 let wanted = format!(" {} ", text.to_uppercase());
                 let fits = display_width(&wanted) + 5 <= w - version_room(w);
-                for tick in 0..=SPINNER.len() {
+                for tick in 0..=REFRESH_SPINNER.len() {
                     let busy = title_busy(text, w, &colour, Some(tick));
                     assert_eq!(display_width(&strip(&busy)) + version_room(w), w);
                     if fits {
-                        assert!(strip(&busy).contains(&format!("{wanted}{} ", SPINNER[tick % SPINNER.len()])));
+                        assert!(strip(&busy).contains(&format!("{wanted}{} ", REFRESH_SPINNER[tick % REFRESH_SPINNER.len()])));
                     } else {
                         assert_eq!(busy, idle, "spinner displaced title at {w}");
                     }
@@ -5740,7 +5743,7 @@ mod tests {
             1,
         ))[0]);
         assert!(wide.contains("NETWORK LATENCY MONITOR"));
-        assert!(wide.contains(SPINNER[2]));
+        assert!(wide.contains(REFRESH_SPINNER[2]));
         assert!(wide.ends_with(&tag));
     }
 
