@@ -2334,8 +2334,8 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
+                (p.txt.as_str(), " reading usage".into()),
                 (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
-                (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
         ),
@@ -2928,6 +2928,24 @@ mod tests {
                 tc::display_width(&plain(line)) <= w - 1,
                 "overflowed: {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn loading_rows_fit_and_spinner_follows_text() {
+        let p = palette();
+        for w in [20usize, 21, 24, 30, 40, 80, 120] {
+            let rows = loading_rows(w, 3, &p);
+            for row in &rows {
+                assert!(
+                    tc::display_width(&plain(row)) <= w - 1,
+                    "overflowed at {w}: {row:?}"
+                );
+            }
+            let first = plain(&rows[0]);
+            let text = first.find("reading usage").expect("text present");
+            let glyph = first.find(tc::SPINNER[3]).expect("spinner present");
+            assert!(text < glyph, "spinner must follow the text: {first:?}");
         }
     }
 
