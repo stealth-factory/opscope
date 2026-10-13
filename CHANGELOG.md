@@ -3,6 +3,14 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.2.0] - 2026-10-13
+
+### Features
+
+- **core**: Styled underlines for stale, partial, and over-threshold values (OPS-151) (#356)
+- Support Homebrew installation and release updates (#377)
+- **core**: Turn on the kitty keyboard protocol to remove the Esc delay (OPS-153) (#361)
+
 ## [1.1.0] - 2026-10-12
 
 ### Bug Fixes

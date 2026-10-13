@@ -138,9 +138,9 @@ fn main() {
                     ),
                     // Fully opaque, so the transport can drop the alpha channel.
                     tc::Plot::heatmap_levels(
-                        40,
+                        30,
                         17,
-                        &[vec![Some((green.clone(), 4)); 4]],
+                        &[vec![Some((green.clone(), 4)); 48]],
                         &grey,
                     ),
                 ]

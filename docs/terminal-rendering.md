@@ -65,19 +65,61 @@ uses synchronized updates when supported.
 
 ## Image transport and lifecycle
 
-No Kitty executable, image conversion command, shared file, shared memory or
-system graphics library is needed. Images are zlib compressed in pure Rust at
-level 6, base64 encoded and sent in chunks of at most 4096 payload bytes. They
-can travel over SSH. Line charts stay RGBA (`f=32`): a stroke is partial
-coverage. A filled plot is RGB (`f=24`, three quarters of the raw size) when
-every pixel in the crop is opaque, and stays RGBA when a gap, a fractional edge
-or the meter inset has to leave the terminal background showing. Stable charts
-reuse terminal images; changed regions replace their owned image IDs. Scrolling
-crops the chart instead of changing its axes. Geometry is worked out on the
-full chart, then only the visible rows and the columns that fit the pane are
-allocated and stroked, coverage buffers included. Core cleans up on screen
-handoffs, suspend, exit and panic, and recovers on resize or resume. A process
-cannot catch SIGKILL.
+No Kitty executable, image conversion command, shared file or system graphics
+library is needed. Line charts use RGBA (`f=32`); a filled plot uses RGB
+(`f=24`, three quarters of the raw size) when every pixel in its visible crop
+is opaque. Gaps, fractional edges and the meter inset retain alpha. The direct
+path compresses pixels with zlib at level 6 in pure Rust, then base64-encodes
+that payload and sends it in chunks of at most
+4096 bytes (`t=d`). That path works over SSH.
+
+On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
+`a=q`, reply requested) beside the graphics query. The object is created with
+`shm_open`, `ftruncate` and `mmap` from libc, which is already linked. The
+name is what the escape carries. The terminal reads the object and unlinks
+it. `a=q` does not store the image, so the probe id cannot replace another
+image. If the probe is acknowledged, later images of at least 16 KiB
+are published as raw RGB or RGBA in shared memory, before any zlib or base64 work.
+The terminal maps those pixels directly. Smaller images keep the compressed
+direct path: for tiny bars, object creation can cost more than compression.
+The probe-result parser is ordinary code, compiled and tested on every
+target. Acquisition is limited to Linux and macOS. Anywhere else, and
+whenever the probe is rejected, times out, or a later image reports an
+error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
+failure does not turn graphics off. A cleanup table with no free slot sends
+that one image directly and leaves shared memory on. An OS publication failure
+or a shared-upload error reported by the terminal returns the session to `t=d`.
+
+Owned image uploads request a reply (`q=0`) and carry a unique placement ID
+(`p=`), which the terminal echoes. Replies match that ID rather than queue
+position, so a missing, late or out-of-order reply cannot be attributed to a
+newer upload. A table of eight owed uploads does not discard one to make
+room: that frame is sent directly and shared memory stays available. The cap
+removes a slot only when that upload is superseded. Expired keys, and a
+reply that arrives after resume has cleared the table, are ignored. `EBADF`
+still identifies a shared-memory read failure even when its upload is no
+longer in the table, and it does not turn graphics off. Placements and
+deletions stay quiet.
+
+An object the terminal does not take is retired, then unlinked once a short
+read window has passed, so a replacement that reuses the image id is not
+collected by a reply still in flight for the previous object. Darwin reports
+the object size rounded up to a page; the escape carries `S=` with the exact
+payload length, and the bytes are read by mapping the object. `read` is not
+used: Darwin shared-memory descriptors reject it.
+
+Exit and panic unlink from ordinary cleanup, the same path that deletes
+placements. A signal handler does not. `shm_unlink` is not async-signal-safe,
+so SIGINT, SIGTERM and SIGTSTP only disarm the transport and restore the
+terminal; a fatal signal can leave an object behind, as SIGKILL can. Suspend
+unlinks on resume, after the handler has returned.
+
+Stable charts reuse terminal images; changed regions replace their
+owned image IDs. Scrolling crops the chart instead of changing its axes.
+Geometry is worked out on the full chart, then only the visible rows and the
+columns that fit the pane are allocated and stroked, coverage buffers included.
+Core cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
+resume.
 
 Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
 on synthetic frames at the sizes the widgets use:
@@ -99,7 +141,7 @@ than make that up.
 
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
-does not depend on potentially unavailable cell-pixel-size reports. Up to 16
+does not depend on potentially unavailable cell-pixel-size reports. Up to 32
 visible plots, each at most 20,000 cells, use images; additional or larger plots
 use text to bound image memory/transport costs. It is a raster chart renderer,
 not a general replacement for terminal text, native scaled fonts or animation
@@ -258,12 +300,14 @@ sent, and its `.size` line names that format after the width and height.
 
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
-terminals, fragmented/late replies, image errors, cached frames, scrolling,
-resize, screen changes, suspend/resume, quit, panic and signal cleanup. They
-also answer the keyboard-protocol query and check that flag 1 is pushed on
-start, popped on exit, suspend, panic and a typed Ctrl-C, Ctrl-Z or Ctrl-\,
-and pushed again after resume.
-Unit tests
+terminals, fragmented/late replies, image errors, a shared-memory probe that
+fails (the following image stays `t=d`) and one that succeeds (the following
+image is `t=s`, and the object is gone after quit and panic; a fatal signal
+does not unlink, because that call is not async-signal-safe), cached
+frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
+signal cleanup. They also answer the keyboard-protocol query and check that
+flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
+Ctrl-Z or Ctrl-\, and pushed again after resume. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the

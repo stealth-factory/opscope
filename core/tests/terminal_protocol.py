@@ -4,7 +4,9 @@ First build: cargo build -p opscope-core --example terminal_probe
 Emulates terminal replies; real Kitty/multiplexer visual checks remain separate.
 """
 import base64
+import ctypes
 import fcntl
+import mmap
 import os
 from pathlib import Path
 import pty
@@ -17,13 +19,19 @@ import termios
 import time
 import zlib
 
+LIBC = ctypes.CDLL(None, use_errno=True)
+LIBC.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+LIBC.shm_open.restype = ctypes.c_int
+LIBC.shm_unlink.argtypes = [ctypes.c_char_p]
+LIBC.shm_unlink.restype = ctypes.c_int
+
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = ROOT / "target/debug/examples/terminal_probe"
 COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty"):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok"):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
         env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
@@ -33,6 +41,9 @@ class Terminal:
         self.output = b""
         self.reply = reply
         self.answered = 0
+        self.image_reply = image_reply
+        self.ack_commands = 0
+        self.chunk_reply = None
 
     def send(self, value):
         os.write(self.master, value)
@@ -49,6 +60,7 @@ class Terminal:
             if not data:
                 break
             self.output += data
+            self.acknowledge_images()
             count = self.output.count(b"\x1b[?2026$p")
             if count > self.answered and self.reply != "silent":
                 self.answered = count
@@ -70,6 +82,19 @@ class Terminal:
                     time.sleep(0.01)
         return self.output
 
+    def acknowledge_images(self):
+        # q=0 owes one response after the complete upload. Placements and
+        # deletions keep their quiet modes and do not advance the FIFO.
+        commands = self.commands()
+        for keys, _ in commands[self.ack_commands:]:
+            if keys.get(b"a") == b"T":
+                self.chunk_reply = (keys[b"i"] + b",p=" + keys[b"p"]) if keys.get(b"q", b"0") == b"0" else None
+            if keys.get(b"m") == b"0" and self.chunk_reply is not None:
+                if self.image_reply == "ok":
+                    self.send(b"\x1b_Gi=" + self.chunk_reply + b";OK\x1b\\")
+                self.chunk_reply = None
+        self.ack_commands = len(commands)
+
     def commands(self):
         return [(dict(field.split(b"=", 1) for field in keys.split(b",") if b"=" in field), payload or b"")
                 for keys, payload in COMMAND.findall(self.output)]
@@ -78,12 +103,17 @@ class Terminal:
         return [(keys, payload) for keys, payload in self.commands() if keys.get(b"a") == b"T"]
 
     def quit(self):
+        names = shm_names(self.commands())
         self.send(b"q")
         self.read(0.2)
         assert self.proc.wait(timeout=3) == 0
         assert b"KEYS:\r\n" in self.output, "terminal replies became user keys"
+        left = [name for name in names if shm_exists(name)]
+        assert not left, f"exit left shared memory {left!r}"
 
     def close(self):
+        for name in shm_names(self.commands()):
+            LIBC.shm_unlink(name)
         if self.proc.poll() is None:
             os.kill(self.proc.pid, signal.SIGCONT)
             self.proc.kill()
@@ -91,8 +121,44 @@ class Terminal:
         os.close(self.master)
 
 
+def shm_names(commands):
+    names = []
+    for keys, payload in commands:
+        if keys.get(b"t") == b"s" and payload:
+            try:
+                names.append(base64.b64decode(payload))
+            except Exception:
+                continue
+    return names
+
+
+def shm_exists(name):
+    fd = LIBC.shm_open(name, os.O_RDONLY, 0)
+    if fd < 0:
+        return False
+    os.close(fd)
+    return True
+
+
+def shm_read(name):
+    # Darwin shm descriptors reject read(); the bytes are mapped, which is
+    # also how the terminal reads the object. fstat there is the page-rounded
+    # length, so callers slice to the command's S= payload size.
+    fd = LIBC.shm_open(name, os.O_RDONLY, 0)
+    if fd < 0:
+        return None
+    try:
+        size = os.fstat(fd).st_size
+        if size <= 0:
+            return b""
+        with mmap.mmap(fd, size, access=mmap.ACCESS_READ) as mapped:
+            return bytes(mapped)
+    finally:
+        os.close(fd)
+
+
 def run(mode, reply, check):
-    terminal = Terminal(mode, reply)
+    terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
     try:
         terminal.read(0.3)
         check(terminal)
@@ -169,7 +235,7 @@ def timeout(t):
 
 def rejected_image(t):
     keys, _ = t.images()[0]
-    t.send(b"\x1b_Gi=" + keys[b"i"] + b",p=1;ENOMEM:fixture\x1b\\")
+    t.send(b"\x1b_Gi=" + keys[b"i"] + b",p=" + keys[b"p"] + b";ENOMEM:fixture\x1b\\")
     t.read()
     assert b"Kitty image rejected" in t.output
     assert t.commands()[-1][0].get(b"a") == b"d"
@@ -263,6 +329,58 @@ def plain_underlines(t):
     assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
 
 
+def shm_rejected(t):
+    probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
+    assert probes, "no shared-memory probe"
+    name = base64.b64decode(probes[0][1])
+    t.send(b"\x1b_Gi=2147483645;EBADF:fixture\x1b\\")
+    t.read(0.3)
+    assert not shm_exists(name), "rejected probe was not unlinked"
+    before = len(t.images())
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    assert len(t.images()) > before, "resize did not resend the chart"
+    assert all(keys.get(b"t") == b"d" for keys, _ in t.images())
+    assert b"Kitty image rejected" not in t.output
+
+
+def shm_accepted(t):
+    t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+    t.read(0.25)
+    before = len(t.images())
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    added = t.images()[before:]
+    assert added, "accepted probe did not resend an image"
+    keys, payload = added[-1]
+    assert keys[b"t"] == b"s" and keys[b"m"] == b"0" and b"o" not in keys
+    data = shm_read(base64.b64decode(payload))
+    assert data, "shared image was not readable"
+    if b"S" in keys:
+        data = data[: int(keys[b"S"])]
+    decoded = data
+    assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
+    assert any(decoded[3::4]), "empty graphic"
+
+
+def shared_rgb_gallery(t):
+    t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+    t.read(0.25)
+    before = len(t.images())
+    t.send(b"g")
+    t.read(0.25)
+    tiles = [(keys, payload) for keys, payload in t.images()[before:]
+             if keys.get(b"f") == b"24" and keys.get(b"t") == b"s"]
+    assert tiles, "opaque RGB tile did not use shared memory"
+    keys, payload = tiles[-1]
+    data = shm_read(base64.b64decode(payload))[:int(keys[b"S"])]
+    assert len(data) == int(keys[b"s"]) * int(keys[b"v"]) * 3
+    assert data == bytes([50, 220, 170]) * (len(data) // 3), "RGB shared pixels changed"
+    assert b"o" not in keys and keys[b"q"] == b"0"
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -277,10 +395,76 @@ def responsive_selection(t):
     assert b"SELECTED:3" in t.output
     assert len(t.images()) == after_scroll, "selection retransmitted unchanged images"
 
+def successful_upload_before_shared_failure():
+    t = Terminal(reply="kitty", image_reply="manual")
+    try:
+        t.read(0.3)
+        direct = t.images()[-1][0]
+        assert direct[b"t"] == b"d" and direct[b"q"] == b"0", "tracked sends need replies"
+        t.send(b"\x1b_Gi=" + direct[b"i"] + b",p=" + direct[b"p"] + b";OK\x1b\\")
+        t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+        t.read(0.2)
+        # Scrolling preserves the reply queue; resizing would clear it and
+        # hide a stale successful send ahead of this shared-memory failure.
+        before = len(t.images())
+        t.send(b"\x1b[B")
+        t.read(0.2)
+        shared = t.images()[-1][0]
+        assert len(t.images()) > before and shared[b"t"] == b"s"
+        assert shared[b"i"] == direct[b"i"] and shared[b"q"] == b"0"
+        assert shared[b"p"] != direct[b"p"], "upload placement key was reused"
+        t.send(b"\x1b_Gi=" + shared[b"i"] + b",p=" + shared[b"p"] + b";EBADF:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" not in t.output, "shared failure disabled graphics"
+        fallback = t.images()[-1][0]
+        assert fallback[b"t"] == b"d" and fallback[b"q"] == b"0"
+        t.send(b"\x1b_Gi=" + fallback[b"i"] + b",p=" + fallback[b"p"] + b";EINVAL:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" in t.output, "direct failure was mistaken for shared"
+        t.quit()
+    finally:
+        t.close()
+
+def missing_and_late_replies_keep_their_upload_keys():
+    t = Terminal(reply="kitty", image_reply="manual")
+    try:
+        t.read(0.3)
+        old = t.images()[-1][0]
+        # Leave this direct success unanswered. It must not consume a later
+        # shared upload's error, even when replies arrive out of order.
+        t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+        t.read(0.2)
+        t.send(b"\x1b[B")
+        t.read(0.2)
+        shared = t.images()[-1][0]
+        assert shared[b"t"] == b"s" and shared[b"p"] != old[b"p"]
+        t.send(b"\x1b_Gi=" + shared[b"i"] + b",p=" + shared[b"p"] + b";ENOMEM:fixture\x1b\\")
+        t.read(0.3)
+        assert b"Kitty image rejected" not in t.output
+        direct = t.images()[-1][0]
+        assert direct[b"t"] == b"d"
+        t.send(b"\x1b_Gi=" + old[b"i"] + b",p=" + old[b"p"] + b";OK\x1b\\")
+        t.send(b"\x1b_Gi=" + old[b"i"] + b",p=4294967295;EINVAL:unknown\x1b\\")
+        t.read(0.2)
+        assert b"Kitty image rejected" not in t.output, "late reply rejected a newer upload"
+        t.send(b"\x1b_Gi=" + direct[b"i"] + b",p=" + direct[b"p"] + b";EINVAL:current\x1b\\")
+        t.read(0.2)
+        assert b"Kitty image rejected" in t.output, "late reply consumed the current key"
+        t.quit()
+    finally:
+        t.close()
+
+
 if __name__ == "__main__":
+    successful_upload_before_shared_failure()
+    print("PASS shared-memory/success-before-failure")
+    missing_and_late_replies_keep_their_upload_keys()
+    print("PASS shared-memory/missing-and-late-replies")
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
+                               ("auto", "kitty", shm_rejected), ("auto", "kitty", shm_accepted),
+                               ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
@@ -291,6 +475,18 @@ if __name__ == "__main__":
         try:
             t.read(0.3)
             assert t.images()
+            t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+            t.read(0.25)
+            before = len(t.images())
+            fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+            os.kill(t.proc.pid, signal.SIGWINCH)
+            t.read(0.4)
+            added = t.images()[before:]
+            assert added, f"{ending} had no chart after the probe was accepted"
+            keys, payload = added[-1]
+            assert keys[b"t"] == b"s", f"{ending} cleaned up before a shared chart existed"
+            name = base64.b64decode(payload)
+            assert shm_exists(name), f"{ending} chart was not in shared memory"
             if ending == "signal":
                 os.kill(t.proc.pid, signal.SIGTERM)
             else:
@@ -298,6 +494,10 @@ if __name__ == "__main__":
             t.read(0.2)
             assert t.proc.wait(timeout=3) != 0
             assert t.commands()[-1][0].get(b"a") == b"d", f"{ending} left an image"
+            # Panic drops Keyboard, which unlinks. SIGTERM only disarms: shm_unlink
+            # is not async-signal-safe, so the handler must not collect the object.
+            if ending == "panic":
+                assert not shm_exists(name), "panic left shared memory"
             assert t.output.rfind(b"\x1b[?2026l") > t.output.rfind(b"\x1b[?2026h")
             print(f"PASS cleanup/{ending}")
         finally:
