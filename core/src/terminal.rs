@@ -52,6 +52,10 @@ struct Session {
     /// Flag 1 is the mode we pushed. Current flags in the query reply are
     /// usually 0 until that push; the reply itself is what shows support.
     keyboard_disambiguate: bool,
+    /// Set once the shared-memory probe has an answer or has timed out.
+    probe_settled: bool,
+    /// Later images go out as `t=s`. A failure clears this and stays on `t=d`.
+    use_shm: bool,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
@@ -68,6 +72,8 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     underline_answered: false,
     keyboard_answered: false,
     keyboard_disambiguate: false,
+    probe_settled: true,
+    use_shm: false,
 });
 
 /// Query only after cbreak is active, so replies are never echoed as text.
@@ -78,9 +84,13 @@ pub(crate) fn start() {
         Ok("kitty") => GraphicsMode::Kitty,
         _ => GraphicsMode::Auto,
     };
+    // Resume and a fresh start both drop the previous probe. A shared-memory
+    // object that outlived the last session would be the leak this path is for.
+    super::shm::force_direct();
     let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *session = Session {
         mode,
+        probe_settled: true,
         ..Session::default()
     };
     SYNC_SUPPORTED.store(false, Ordering::Release);
@@ -88,6 +98,14 @@ pub(crate) fn start() {
         return;
     }
     session.deadline = Some(Instant::now() + TIMEOUT);
+    let probe = if mode == GraphicsMode::Text {
+        None
+    } else {
+        super::shm::begin_probe()
+    };
+    if probe.is_some() {
+        session.probe_settled = false;
+    }
     drop(session);
     // A resumed or reclaimed session asks again. Pop first so a second push
     // does not leave flag 1 on the stack after the matching pop.
@@ -97,14 +115,18 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    super::out(&format!(
+    let mut bytes = format!(
         "{}{UNDERLINE_QUERY}",
         if mode == GraphicsMode::Text {
             TEXT_QUERY
         } else {
             QUERY
         }
-    ));
+    );
+    if let Some(probe) = probe {
+        bytes.push_str(&probe);
+    }
+    super::out(&bytes);
     super::flush();
 }
 
@@ -122,9 +144,40 @@ fn keyboard_answer(sequence: &str) -> Option<u32> {
     rest.parse().ok()
 }
 
+/// Called once a frame. A probe that never answers is abandoned here, so the
+/// images in this frame stay on the direct path. Retired shared-memory
+/// objects are collected once their read window has passed.
+pub(crate) fn on_frame() {
+    super::shm::reap_expired();
+    let now = Instant::now();
+    let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if !session.probe_settled && session.deadline.is_some_and(|deadline| now > deadline) {
+        session.probe_settled = true;
+        session.use_shm = false;
+        drop(session);
+        super::shm::expire_probe();
+    }
+}
+
 impl Session {
     /// Returns whether this reply is the one that turns disambiguation on.
     fn reply(&mut self, sequence: &str, now: Instant) -> bool {
+        let in_window = self.deadline.is_some_and(|deadline| now <= deadline);
+        if !self.probe_settled {
+            match super::shm::parse_shm_probe(sequence) {
+                super::shm::ProbeFate::Accepted if in_window => {
+                    self.probe_settled = true;
+                    self.use_shm = true;
+                    super::shm::apply_accepted();
+                }
+                super::shm::ProbeFate::Accepted | super::shm::ProbeFate::Rejected => {
+                    self.probe_settled = true;
+                    self.use_shm = false;
+                    super::shm::apply_rejected();
+                }
+                super::shm::ProbeFate::Unrelated => {}
+            }
+        }
         if let Some((keys, message)) = sequence
             .strip_prefix("\x1b_G")
             .and_then(|s| s.split_once(';'))
@@ -132,17 +185,45 @@ impl Session {
             let id = keys
                 .split(',')
                 .find_map(|key| key.strip_prefix("i=")?.parse::<u32>().ok());
-            // ENOENT for one of ours means the terminal dropped the image
-            // (a re-place found nothing): send it again, not give up.
-            if id.is_some_and(super::graphics::owns_image) && message.starts_with("ENOENT") {
-                super::screen_lost();
-                return false;
-            }
-            if id.is_some_and(super::graphics::owns_image) && message != "OK\x1b\\" {
-                self.capabilities.kitty_graphics = false;
-                self.image_rejected = true;
-                self.graphics_answered = true;
-                return false;
+            if let Some(id) = id.filter(|id| super::graphics::owns_image(*id)) {
+                // ENOENT means the terminal dropped the placement. Only a
+                // replaced object is collected; the current one reused the id.
+                // It is not the reply to a transmission, so the generation
+                // that is still owed stays owed.
+                if message.starts_with("ENOENT") {
+                    super::shm::unlink_retired(id);
+                    super::screen_lost();
+                    return false;
+                }
+                let placement = keys.split(',').find_map(|key| key.strip_prefix("p=")?.parse::<u32>().ok());
+                let generation = placement.and_then(|p| super::shm::take_reply(id, p));
+                if message != "OK\x1b\\" {
+                    // A shared reply stays a transport failure even when the
+                    // fallback frame has already been sent. That frame has
+                    // a different placement key. Only a matched direct error
+                    // turns graphics off.
+                    // EBADF is the protocol's file/shared-memory read
+                    // failure, even if its keyed entry has already expired.
+                    // Other uncorrelated replies cannot reject newer images.
+                    let shared_failure = if message.starts_with("EBADF") {
+                        true
+                    } else {
+                        match generation {
+                            Some(shared) => shared,
+                            None => return false,
+                        }
+                    };
+                    if shared_failure {
+                        self.use_shm = false;
+                        super::shm::transport_failed();
+                        super::screen_lost();
+                        return false;
+                    }
+                    self.capabilities.kitty_graphics = false;
+                    self.image_rejected = true;
+                    self.graphics_answered = true;
+                    return false;
+                }
             }
         }
         if !self.deadline.is_some_and(|deadline| now <= deadline) {
@@ -407,6 +488,7 @@ mod tests {
 
     #[test]
     fn a_dropped_image_is_resent_rather_than_ending_graphics() {
+        let _guard = crate::shm::guard();
         let now = Instant::now();
         for slot in [0, 31] {
             let mut s = Session {
@@ -417,7 +499,8 @@ mod tests {
             let ours = crate::graphics::image_id(slot);
             s.reply(&format!("\x1b_Gi={ours};ENOENT:no such image\x1b\\"), now);
             assert!(s.capabilities.kitty_graphics && !s.image_rejected);
-            s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
+            crate::shm::mark_direct(ours, 1);
+            s.reply(&format!("\x1b_Gi={ours},p=1;EINVAL:bad\x1b\\"), now);
             assert!(!s.capabilities.kitty_graphics && s.image_rejected);
         }
     }
@@ -574,5 +657,133 @@ mod tests {
                 "{sig}"
             );
         }
+    }
+
+    #[test]
+    fn a_rejected_shared_memory_probe_stays_direct() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;EBADF:remote\x1b\\", now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.use_shm && s.probe_settled && !s.image_rejected
+        );
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(
+            !s.use_shm,
+            "a second probe reply must not turn shared memory back on"
+        );
+    }
+
+    #[test]
+    fn queued_shared_memory_errors_keep_graphics_until_a_direct_send() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(s.use_shm && s.capabilities.kitty_graphics);
+        let id0 = crate::graphics::image_id(0);
+        let id1 = crate::graphics::image_id(31);
+        crate::shm::mark_shared(id0, 1);
+        crate::shm::mark_shared(id1, 1);
+        s.reply(&format!("\x1b_Gi={id0},p=1;EBADF:shared memory\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected && !s.use_shm);
+        s.reply(&format!("\x1b_Gi={id1},p=1;EBADF:shared memory\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a second queued shared-memory error turned graphics off"
+        );
+        crate::shm::mark_direct(id0, 2);
+        s.reply(&format!("\x1b_Gi={id0},p=2;EINVAL:bad\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn a_late_shared_memory_error_after_fallback_keeps_graphics() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(s.use_shm && s.capabilities.kitty_graphics);
+        let id = crate::graphics::image_id(0);
+        crate::shm::mark_shared(id, 1);
+        crate::shm::mark_direct(id, 2);
+        s.reply(&format!("\x1b_Gi={id},p=1;EBADF:shared memory\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a late shared-memory error disabled graphics"
+        );
+        s.reply(&format!("\x1b_Gi={id},p=2;EINVAL:bad\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn uncorrelated_late_errors_never_reject_a_newer_direct_upload() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session::default();
+        s.capabilities.kitty_graphics = true;
+        let id = crate::graphics::image_id(0);
+        crate::shm::mark_shared(id, 1);
+        crate::shm::supersede(id);
+        assert!(crate::shm::mark_direct(id, 2));
+        s.reply(&format!("\x1b_Gi={id},p=1;ENOMEM:late shared\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        s.reply(&format!("\x1b_Gi={id},p=1;EBADF:late shared\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        s.reply(&format!("\x1b_Gi={id},p=2;EINVAL:direct\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn a_reply_after_resume_is_dropped() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        assert!(s.use_shm && s.capabilities.kitty_graphics);
+        let id = crate::graphics::image_id(0);
+        assert!(crate::shm::mark_direct(id, 4));
+        // SIGCONT runs cleanup and start, which clears PENDING and leaves
+        // the new session on direct transport before the buffered reply is read.
+        crate::shm::force_direct();
+        s.use_shm = false;
+        s.probe_settled = true;
+        s.reply(&format!("\x1b_Gi={id},p=4;EINVAL:stale session\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a reply from the previous session was treated as a direct failure"
+        );
+        assert!(crate::shm::mark_direct(id, 5));
+        s.reply(&format!("\x1b_Gi={id},p=5;EINVAL:current\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+    }
+
+    #[test]
+    fn a_late_shared_memory_ok_does_not_enable_it() {
+        let _guard = crate::shm::guard();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483645;OK\x1b\\", now + TIMEOUT + TIMEOUT);
+        assert!(!s.use_shm && s.probe_settled);
     }
 }

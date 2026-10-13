@@ -25,6 +25,7 @@ mod dependencies;
 mod settings;
 mod terminal;
 mod graphics;
+mod shm;
 
 pub use terminal::{capabilities, graphics_notice, Capabilities};
 pub use graphics::{braille, LineChart, Plot, Trace};
@@ -470,6 +471,8 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // every few seconds is most of a dashboard's bandwidth over SSH.
     let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
+    // Expire the probe and retired objects before images are published.
+    terminal::on_frame();
     let (rows, before, after) =
         graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
     let bytes = paint(&mut shown, &rows, w, h, lost);
@@ -941,6 +944,11 @@ fn forget_termios() {
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
 fn restore_terminal_signal() {
+    // Suspend and a signalled exit both come through here. Disarm shared
+    // memory without unlinking: `shm_unlink` is not async-signal-safe, and
+    // calling it here can stop the handler from restoring the terminal.
+    // Resume and `Keyboard` drop collect the objects.
+    shm::disarm_for_signal();
     graphics::cleanup_signal();
     terminal::cleanup_signal();
     if HAS_TERMIOS.load(Ordering::Acquire) {
