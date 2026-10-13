@@ -8,10 +8,9 @@
 //! off. A full cleanup table is not that failure: that frame stays direct
 //! and the next one may use shared memory again.
 //!
-//! `image()` still builds the direct frame. It belongs to the crop work.
-//! This module rewrites that frame after the fact, when the probe has
-//! succeeded. The compressed bytes are the base64 payload with the
-//! framing removed, which is the same buffer `t=d` would have carried.
+//! `image()` chooses the transport before compression. Shared memory carries
+//! raw RGBA pixels, avoiding zlib and base64 work on both sides. The direct
+//! fallback compresses and encodes only when it is actually needed.
 //!
 //! `shm_unlink` is not async-signal-safe, so a signal handler only disarms
 //! the transport. Exit, panic and resume unlink from ordinary code. A name
@@ -104,7 +103,7 @@ static NAME_SEQ: AtomicU32 = AtomicU32::new(1);
 static PENDING: Mutex<[Pending; super::graphics::MAX_PLOTS]> =
     Mutex::new([Pending::new(); super::graphics::MAX_PLOTS]);
 static STARTED: OnceLock<Instant> = OnceLock::new();
-/// Test seam: the next `create` fails the way `shm_open` does.
+/// Test seam: refuse opening (1) or backing allocation after publication (2).
 #[cfg(test)]
 static FAIL_OS: AtomicU8 = AtomicU8::new(0);
 
@@ -287,51 +286,28 @@ fn clear_pending() {
     with_pending(|rows| *rows = [Pending::new(); super::graphics::MAX_PLOTS]);
 }
 
-/// Rewrite direct transmissions when the probe succeeded. Deletes in
-/// `before` retire the name they replaced; they do not unlink it while the
-/// terminal may still be reading. A full cleanup table sends this frame
-/// directly and leaves shared memory on. An object the OS refuses puts the
-/// original bytes back and leaves shared memory off.
-pub(crate) fn deliver(before: &str, after: String) -> String {
-    reap_expired();
+/// Publish raw RGBA pixels before the direct path does compression or framing.
+/// A full table falls back for this image only. An OS refusal turns the
+/// transport off; neither case disables graphics.
+pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32) -> Option<String> {
     if !is_shared() {
-        note_transport(&after, false);
-        return after;
+        return None;
     }
-    for id in command_ids(before, "a=d") {
-        retire_id(id);
-    }
-    match rewrite(&after) {
-        Ok(rewritten) => {
-            note_transport(&rewritten, true);
-            rewritten
-        }
-        Err(Publish::Busy) => {
-            note_transport(&after, false);
-            after
-        }
+    let name = match create(pixels, id) {
+        Ok(name) => name,
+        Err(Publish::Busy) => return None,
         Err(Publish::Failed) => {
             transport_failed();
-            note_transport(&after, false);
-            after
+            return None;
         }
-    }
-}
-
-fn note_transport(bytes: &str, shared: bool) {
-    let mut pos = 0;
-    while let Some((_start, end, keys, _payload)) = next_apc(bytes, pos) {
-        if keys.split(',').any(|part| part == "a=T") {
-            if let Some(id) = image_id_of(keys) {
-                if shared {
-                    mark_shared(id);
-                } else {
-                    mark_direct(id);
-                }
-            }
-        }
-        pos = end;
-    }
+    };
+    mark_shared(id);
+    let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
+    // Darwin rounds fstat's object size to a page; S is the exact RGBA size.
+    Some(format!(
+        "\x1b_Ga=T,f=32,t=s,{keys},S={},m=0;{payload}\x1b\\",
+        pixels.len()
+    ))
 }
 
 /// `Keyboard` drop, resume and a normal exit end here. Not a signal handler.
@@ -354,86 +330,15 @@ pub(crate) fn reap_expired() {
     });
 }
 
-fn command_ids(bytes: &str, action: &str) -> Vec<u32> {
-    let mut ids = Vec::new();
-    let mut pos = 0;
-    while let Some((_start, end, keys, _payload)) = next_apc(bytes, pos) {
-        if keys.split(',').any(|part| part == action) {
-            if let Some(id) = image_id_of(keys) {
-                ids.push(id);
-            }
-        }
-        pos = end;
-    }
-    ids
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Publish {
-    /// No free cleanup slot, or this frame cannot be rewritten. Shared
-    /// memory still works for a later frame.
+    /// No free cleanup slot. Shared memory still works for a later image.
     Busy,
     /// `shm_open`, `ftruncate` or `mmap` refused the object.
     Failed,
 }
 
-fn rewrite(input: &str) -> Result<String, Publish> {
-    let mut out = String::new();
-    let mut created = Vec::new();
-    let mut pos = 0;
-    while let Some((start, end, keys, payload)) = next_apc(input, pos) {
-        if !is_direct_transmit(keys) {
-            out.push_str(&input[pos..end]);
-            pos = end;
-            continue;
-        }
-        let mut group_end = end;
-        let mut encoded = String::from(payload);
-        let mut scan = end;
-        let mut more = is_more(keys);
-        while more {
-            let Some((next, next_end, next_keys, next_payload)) = next_apc(input, scan) else {
-                break;
-            };
-            if next != scan || !is_continuation(next_keys) {
-                break;
-            }
-            encoded.push_str(next_payload);
-            group_end = next_end;
-            scan = next_end;
-            more = is_more(next_keys);
-        }
-        let raw = match base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()) {
-            Ok(raw) => raw,
-            Err(_) => {
-                retire_created(&created);
-                return Err(Publish::Busy);
-            }
-        };
-        let id = image_id_of(keys).unwrap_or(0);
-        let name = match create(&raw, id) {
-            Ok(name) => {
-                created.push(id);
-                name
-            }
-            Err(err) => {
-                retire_created(&created);
-                return Err(err);
-            }
-        };
-        let wire = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
-        out.push_str(&input[pos..start]);
-        out.push_str("\x1b_G");
-        out.push_str(&retarget(keys, raw.len()));
-        out.push(';');
-        out.push_str(&wire);
-        out.push_str("\x1b\\");
-        pos = group_end;
-    }
-    out.push_str(&input[pos..]);
-    Ok(out)
-}
-
+#[cfg(test)]
 fn next_apc(s: &str, from: usize) -> Option<(usize, usize, &str, &str)> {
     let rest = s.get(from..)?;
     let rel = rest.find("\x1b_G")?;
@@ -448,61 +353,14 @@ fn next_apc(s: &str, from: usize) -> Option<(usize, usize, &str, &str)> {
     Some((start, end, keys, payload))
 }
 
+#[cfg(test)]
 fn is_direct_transmit(keys: &str) -> bool {
-    let mut transmit = false;
-    let mut direct = false;
-    for part in keys.split(',') {
-        transmit |= part == "a=T";
-        direct |= part == "t=d";
-    }
-    transmit && direct
+    keys.split(',').any(|p| p == "a=T") && keys.split(',').any(|p| p == "t=d")
 }
 
-fn is_more(keys: &str) -> bool {
-    keys.split(',').any(|part| part == "m=1")
-}
-
+#[cfg(test)]
 fn is_continuation(keys: &str) -> bool {
-    let mut parts = keys.split(',').filter(|part| !part.is_empty());
-    match (parts.next(), parts.next()) {
-        (Some(part), None) => part.starts_with("m="),
-        _ => false,
-    }
-}
-
-fn image_id_of(keys: &str) -> Option<u32> {
-    keys.split(',')
-        .find_map(|part| part.strip_prefix("i=")?.parse().ok())
-}
-
-fn retarget(keys: &str, nbytes: usize) -> String {
-    let mut out = String::with_capacity(keys.len() + 16);
-    let mut seen_m = false;
-    for part in keys.split(',') {
-        if part.is_empty() || part.starts_with("S=") {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(',');
-        }
-        if part == "t=d" {
-            out.push_str("t=s");
-        } else if part.starts_with("m=") {
-            seen_m = true;
-            out.push_str("m=0");
-        } else {
-            out.push_str(part);
-        }
-    }
-    if !seen_m {
-        if !out.is_empty() {
-            out.push(',');
-        }
-        out.push_str("m=0");
-    }
-    // Darwin's fstat size is the page-rounded object. `S` is the payload.
-    out.push_str(&format!(",S={nbytes}"));
-    out
+    matches!(keys, "m=0" | "m=1")
 }
 
 /// Publish `name` before the caller truncates or copies. The previous object
@@ -535,7 +393,7 @@ fn claim(id: u32, name: &str) -> bool {
     })
 }
 
-fn retire_id(id: u32) {
+pub(crate) fn retire_id(id: u32) {
     let deadline = mono_ms().saturating_add(RETIRE_MS);
     with_table(|slots| {
         for slot in slots.iter_mut() {
@@ -544,12 +402,6 @@ fn retire_id(id: u32) {
             }
         }
     });
-}
-
-fn retire_created(ids: &[u32]) {
-    for id in ids {
-        retire_id(*id);
-    }
 }
 
 pub(crate) fn unlink_id(id: u32) {
@@ -586,7 +438,9 @@ fn drop_named(name: &str) {
     let bytes = name.as_bytes();
     with_table(|slots| {
         for slot in slots.iter_mut() {
-            if slot.live && slot.name_len as usize == bytes.len() && &slot.name[..bytes.len()] == bytes
+            if slot.live
+                && slot.name_len as usize == bytes.len()
+                && &slot.name[..bytes.len()] == bytes
             {
                 unlink_slot(slot);
             }
@@ -620,7 +474,9 @@ fn unlink_cstr(_buf: &[u8]) {}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn create(bytes: &[u8], id: u32) -> Result<String, Publish> {
     #[cfg(test)]
-    if FAIL_OS.swap(0, Ordering::AcqRel) == 1 {
+    let failure = FAIL_OS.swap(0, Ordering::AcqRel);
+    #[cfg(test)]
+    if failure == 1 {
         return Err(Publish::Failed);
     }
     if bytes.is_empty() {
@@ -662,6 +518,13 @@ fn create(bytes: &[u8], id: u32) -> Result<String, Publish> {
         }
         let map_len = bytes.len();
         let failed = unsafe { libc::ftruncate(fd, map_len as libc::off_t) } != 0;
+        // Linux tmpfs can accept ftruncate/mmap with no space left, then
+        // SIGBUS during the copy. Reserve the backing pages first so an
+        // exhausted /dev/shm becomes an ordinary direct fallback.
+        #[cfg(target_os = "linux")]
+        let failed = failed || unsafe { libc::posix_fallocate(fd, 0, map_len as libc::off_t) } != 0;
+        #[cfg(test)]
+        let failed = failed || failure == 2;
         let ptr = if failed {
             libc::MAP_FAILED
         } else {
@@ -872,19 +735,6 @@ mod tests {
         assert_eq!(parse_shm_probe("not a reply"), ProbeFate::Unrelated);
     }
 
-    fn direct_transmit(id: u32) -> String {
-        let encoded = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
-        format!("\x1b_Ga=T,f=32,t=d,o=z,s=1,v=1,i={id},q=1,m=0;{encoded}\x1b\\")
-    }
-
-    fn has_current(id: u32) -> bool {
-        with_table(|slots| {
-            slots
-                .iter()
-                .any(|slot| slot.live && slot.id == id && slot.retire_ms == 0)
-        })
-    }
-
     fn live_names(id: u32) -> Vec<String> {
         with_table(|slots| {
             slots
@@ -913,33 +763,32 @@ mod tests {
     }
 
     #[test]
-    fn a_full_cleanup_table_sends_the_frame_direct_and_stays_shared() {
+    fn a_full_cleanup_table_falls_back_per_image_and_stays_shared() {
         let _guard = guard();
         assert!(SLOTS >= 2 * super::super::graphics::MAX_PLOTS + 1);
         let Some(_) = begin_probe() else {
             return;
         };
         apply_accepted();
-        assert!(is_shared());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             for i in 0..SLOTS - 1 {
                 create(&[1, 2, 3, 4], 100_000 + i as u32).expect("fill");
             }
-            let frame = format!("{}{}", direct_transmit(42), direct_transmit(43));
-            let out = deliver("", frame.clone());
-            assert_eq!(out, frame, "a full table rewrote the frame anyway");
+            let id = super::super::graphics::image_id(0);
+            let id2 = super::super::graphics::image_id(1);
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id).is_some());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2).is_none());
             assert!(is_shared(), "a full table turned shared memory off");
+            assert_eq!(live_names(id).len(), 1, "the sent image lost its object");
             assert!(
-                !has_current(42),
-                "an object from the unsent frame stayed current"
+                live_names(id2).is_empty(),
+                "the refused image left an object"
             );
-            let names = live_names(42);
-            assert_eq!(names.len(), 1, "the unsent object was unlinked immediately");
-            assert!(live_names(43).is_empty(), "the refused image left an object");
-            expire_retired();
-            assert!(live_names(42).is_empty(), "the unsent object was not retired");
-            assert!(!exists(&names[0]));
+            assert_eq!(take_reply(id), Some(true));
+            assert_eq!(take_reply(id2), None, "unsent image queued a reply");
+            unlink_id(id);
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2).is_some());
         }
     }
 
@@ -950,56 +799,48 @@ mod tests {
             return;
         };
         apply_accepted();
-        assert!(is_shared());
         FAIL_OS.store(1, Ordering::Release);
-        let frame = direct_transmit(7);
-        let out = deliver("", frame.clone());
-        assert_eq!(out, frame);
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], 7).is_none());
         assert!(!is_shared(), "an OS refusal left shared memory on");
     }
 
     #[test]
-    fn multi_chunk_direct_frame_round_trips_through_one_object() {
+    fn a_backing_allocation_refusal_unlinks_the_published_object() {
         let _guard = guard();
+        let Some(_) = begin_probe() else { return; };
+        apply_accepted();
+        let id = super::super::graphics::image_id(0);
+        let sequence = NAME_SEQ.load(Ordering::Acquire);
+        let name = format!("/o{:x}-{sequence:x}", unsafe { libc::getpid() });
+        FAIL_OS.store(2, Ordering::Release);
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], id).is_none());
+        assert!(!is_shared());
+        assert!(live_names(id).is_empty());
+        assert_eq!(take_reply(id), None);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(!exists(&name), "failed allocation left a shared-memory object");
+    }
+
+    #[test]
+    fn raw_pixels_round_trip_through_one_object_and_replacements_survive() {
+        let _guard = guard();
+        let Some(_) = begin_probe() else {
+            return;
+        };
+        apply_accepted();
         let raw: Vec<u8> = (0..9000).map(|i| (i * 17 + 3) as u8).collect();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-        assert!(encoded.len() > 4096);
-        let mut command = format!(
-            "\x1b[2;4H\x1b_Ga=p,i=7,p=1,c=3,r=2,C=1,q=1\x1b\\\x1b[8;4H\x1b_Ga=T,f=32,t=d,o=z,s=10,v=10,i=42,p=1,c=10,r=10,C=1,q=1,m=1;"
-        );
-        let (first, rest) = encoded.split_at(4096);
-        command.push_str(first);
-        command.push_str("\x1b\\\x1b_Gm=0;");
-        command.push_str(rest);
-        command.push_str("\x1b\\");
-        let rewritten = rewrite(&command).expect("object");
-        assert!(rewritten.contains("a=p,i=7"));
-        assert!(rewritten.contains("t=s"));
-        assert!(!rewritten.contains("t=d"));
-        assert!(rewritten.contains("m=0"));
-        assert!(!rewritten.contains("m=1"));
-        assert!(rewritten.contains(&format!("S={}", raw.len())));
-        let name = String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(payload_of(&rewritten))
-                .unwrap(),
-        )
-        .unwrap();
+        let command = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42).expect("object");
+        assert!(command.contains("t=s") && !command.contains("o=z"));
+        assert!(command.contains("m=0") && !command.contains("m=1"));
+        assert!(command.contains(&format!("S={}", raw.len())));
+        let name = shared_name(&command);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_object(&name, &raw);
-            let again = rewrite(&command).expect("replacement");
-            let name2 = String::from_utf8(
-                base64::engine::general_purpose::STANDARD
-                    .decode(payload_of(&again))
-                    .unwrap(),
-            )
-            .unwrap();
+            let again = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42).expect("replacement");
+            let name2 = shared_name(&again);
             assert_ne!(name, name2);
-            assert!(
-                exists(&name),
-                "the object still being read was unlinked with its image id"
-            );
+            assert!(exists(&name), "an object still being read was unlinked");
             assert_object(&name2, &raw);
             unlink_retired(42);
             assert!(!exists(&name), "the retired object survived ENOENT");
@@ -1012,27 +853,74 @@ mod tests {
         assert!(!exists(&name), "release left an object");
     }
 
+    fn shared_name(command: &str) -> String {
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(payload_of(command))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn a_real_chart_command_is_rewritten_without_changing_pixels() {
+    fn both_chart_transports_have_identical_cropped_pixels() {
         let _guard = guard();
-        let command = super::super::graphics::direct_chart_command(24, 4);
-        assert!(command.contains("t=d"));
-        let compressed = direct_payload(&command);
-        let rewritten = rewrite(&command).expect("object");
-        assert!(rewritten.contains("t=s") && !rewritten.contains("t=d"));
-        assert!(rewritten.contains(&format!("S={}", compressed.len())));
+        force_direct();
+        let direct = super::super::graphics::direct_chart_command(24, 4);
+        let pixels =
+            miniz_oxide::inflate::decompress_to_vec_zlib(&direct_payload(&direct)).unwrap();
+        let Some(_) = begin_probe() else {
+            return;
+        };
+        apply_accepted();
+        let shared = super::super::graphics::direct_chart_command(24, 4);
+        assert!(shared.contains("t=s") && !shared.contains("t=d") && !shared.contains("o=z"));
+        assert!(shared.contains(&format!("S={}", pixels.len())));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_object(&shared_name(&shared), &pixels);
+    }
+
+    #[test]
+    fn tiny_images_stay_direct_without_disabling_shared_memory() {
+        let _guard = guard();
+        let Some(_) = begin_probe() else { return; };
+        apply_accepted();
+        let id = super::super::graphics::image_id(3);
+        let small = super::super::graphics::direct_chart_command(16, 1);
+        assert!(small.contains("t=d"));
+        assert_eq!(take_reply(id), Some(false));
+        let large = super::super::graphics::direct_chart_command(32, 1);
+        assert!(large.contains("t=s"));
+        assert_eq!(take_reply(id), Some(true));
+        assert!(is_shared());
+    }
+
+    #[test]
+    fn deleting_a_plot_retires_its_old_object_before_publishing_the_new_one() {
+        let _guard = guard();
+        let Some(_) = begin_probe() else {
+            return;
+        };
+        apply_accepted();
+        let colour = super::super::rgb(120, 196, 250);
+        let plot =
+            super::super::Plot::gradient_meter(2, 1, 40, 0.5, None, &colour, &colour, &colour);
+        let rows = vec!["title".into(); 4];
+        let (_, _, first) =
+            super::super::graphics::compose(&rows, &[plot.clone()], 44, 4, true, true, false);
+        let old = shared_name(&first);
+        let (_, before, second) =
+            super::super::graphics::compose(&rows, &[plot], 44, 4, true, true, false);
+        let new = shared_name(&second);
+        assert!(before.contains("a=d"));
+        assert_ne!(old, new);
+        expire_retired();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let name = String::from_utf8(
-                base64::engine::general_purpose::STANDARD
-                    .decode(payload_of(&rewritten))
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_object(&name, &compressed);
-            release();
-            assert!(!exists(&name));
+            assert!(!exists(&old));
+            assert!(exists(&new), "deletion retired the replacement");
         }
+        super::super::graphics::cleanup();
     }
 
     fn direct_payload(command: &str) -> Vec<u8> {
@@ -1104,56 +992,59 @@ mod tests {
     #[ignore = "timed by hand for the PR write-up"]
     fn measure_shared_memory_transport() {
         let _guard = guard();
-        let cols = 70;
-        let rows = 8;
-        let raw_pixels = cols * 8 * rows * 16 * 4;
-        let command = super::super::graphics::direct_chart_command(cols, rows);
-        let compressed = direct_payload(&command);
         let rounds = 40u32;
-        let direct = cpu_for(|| {
-            for _ in 0..rounds {
-                let _ = frame_direct(&compressed);
-            }
-        });
-        let shared = cpu_for(|| {
-            for _ in 0..rounds {
-                let name = create(&compressed, 7).expect("shm");
-                let _ = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
-                unlink_id(7);
-            }
-        });
-        let shipped = cpu_for(|| {
-            for _ in 0..rounds {
-                let framed = frame_direct(&compressed);
-                let _ = rewrite(&framed);
-                unlink_id(7);
-            }
-        });
-        eprintln!(
-            "chart {cols}x{rows} cells raw={raw_pixels} zlib={} direct_escape={} t=s_name_escape~80",
-            compressed.len(),
-            frame_direct(&compressed).len()
-        );
-        eprintln!(
-            "cpu {rounds} rounds: direct_only={direct:?} shm_only={shared:?} shipped_direct_plus_rewrite={shipped:?}"
-        );
+        for (cols, rows) in [(4, 1), (8, 1), (16, 1), (32, 1), (24, 4), (70, 8), (140, 16)] {
+            force_direct();
+            let sample = super::super::graphics::direct_chart_command(cols, rows);
+            let direct = cpu_for(|| {
+                for _ in 0..rounds {
+                    std::hint::black_box(super::super::graphics::direct_chart_command(cols, rows));
+                }
+            });
+            let Some(_) = begin_probe() else {
+                return;
+            };
+            apply_accepted();
+            let shared = cpu_for(|| {
+                for _ in 0..rounds {
+                    std::hint::black_box(super::super::graphics::direct_chart_command(cols, rows));
+                    // The terminal normally unlinks after mapping. Count the
+                    // syscall here too, conservatively, to avoid table pressure.
+                    unlink_id(super::super::graphics::image_id(3));
+                }
+            });
+            eprintln!("chart {cols}x{rows} cells raw={} zlib={} direct_escape={} cpu {rounds} rounds: direct={direct:?} raw_shared={shared:?}", cols * 8 * rows * 16 * 4, direct_payload(&sample).len(), sample.len());
+        }
     }
 
-    fn frame_direct(bytes: &[u8]) -> String {
-        let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
-        let mut out = String::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let more = usize::from(i + 1 < chunks.len());
-            if i == 0 {
-                out.push_str(&format!("\x1b_Ga=T,f=32,t=d,o=z,s=1,v=1,i=7,m={more};"));
-            } else {
-                out.push_str(&format!("\x1b_Gm={more};"));
+    #[test]
+    #[ignore = "requires an OPSCOPE_CAPTURED_IMAGE fixture from a live widget"]
+    fn measure_captured_image_transport() {
+        let _guard = guard();
+        let path = std::env::var("OPSCOPE_CAPTURED_IMAGE").expect("captured image JSON path");
+        let sample: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let pixels = base64::engine::general_purpose::STANDARD.decode(sample["rgba"].as_str().unwrap()).unwrap();
+        let w = sample["width"].as_u64().unwrap();
+        let h = sample["height"].as_u64().unwrap();
+        assert_eq!(pixels.len() as u64, w * h * 4);
+        let id = super::super::graphics::image_id(0);
+        let keys = format!("s={w},v={h},i={id},p=1,C=1,q=0");
+        let rounds = 400;
+        force_direct();
+        let direct = cpu_for(|| {
+            for _ in 0..rounds {
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id));
             }
-            out.push_str(std::str::from_utf8(chunk).unwrap());
-            out.push_str("\x1b\\");
-        }
-        out
+        });
+        let Some(_) = begin_probe() else { return; };
+        apply_accepted();
+        let shared = cpu_for(|| {
+            for _ in 0..rounds {
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id));
+                unlink_id(id);
+            }
+        });
+        eprintln!("captured {w}x{h} pixels raw={} cpu {rounds} uploads: direct={direct:?} shared={shared:?}", pixels.len());
     }
 
     fn cpu_for(body: impl FnOnce()) -> std::time::Duration {

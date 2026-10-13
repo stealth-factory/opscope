@@ -332,12 +332,12 @@ def shm_accepted(t):
     added = t.images()[before:]
     assert added, "accepted probe did not resend an image"
     keys, payload = added[-1]
-    assert keys[b"t"] == b"s" and keys[b"m"] == b"0" and keys[b"o"] == b"z"
+    assert keys[b"t"] == b"s" and keys[b"m"] == b"0" and b"o" not in keys
     data = shm_read(base64.b64decode(payload))
     assert data, "shared image was not readable"
     if b"S" in keys:
         data = data[: int(keys[b"S"])]
-    decoded = zlib.decompress(data)
+    decoded = data
     assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
     assert any(decoded[3::4]), "empty graphic"
 

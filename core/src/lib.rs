@@ -471,12 +471,11 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // every few seconds is most of a dashboard's bandwidth over SSH.
     let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
+    // Expire the probe and retired objects before images are published.
+    terminal::on_frame();
+    shm::reap_expired();
     let (rows, before, after) =
         graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
-    // The probe expires here, before this frame's images are published, so a
-    // terminal that never answers does not stay on the shared-memory path.
-    terminal::on_frame();
-    let after = shm::deliver(&before, after);
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);

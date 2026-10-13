@@ -751,6 +751,7 @@ pub(crate) fn compose(
         }
         if cache.get(slot).is_some() {
             before.push_str(&delete(slot));
+            super::shm::retire_id(image_id(slot));
         }
         if let Some(plot) = images.get(slot) {
             // Set before writing: a signal during transmission must clean it up.
@@ -959,17 +960,39 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
         let start = y * plot.width * CELL_W * 4;
         clipped.extend_from_slice(&source[start..start + w * 4]);
     }
-    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&clipped, 3);
-    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
+    let id = image_id(slot);
+    let keys = format!(
+        "s={w},v={h},i={id},p=1,c={cols},r={},C=1,q=0",
+        plot.visible_rows
+    );
+    out.push_str(&transmit_pixels(&clipped, &keys, id));
+    out
+}
+
+// Below 32 cells, object creation can cost more than compression. Larger
+// images avoid zlib/base64 work on both sides when the local probe succeeded.
+const MIN_SHARED_BYTES: usize = 16 * 1024;
+
+pub(crate) fn transmit_pixels(pixels: &[u8], keys: &str, id: u32) -> String {
+    // A local terminal can map these pixels directly. Choose the transport
+    // before compression and base64 framing, rather than decoding a direct
+    // escape back into another buffer only to put it in shared memory.
+    if pixels.len() >= MIN_SHARED_BYTES {
+        if let Some(command) = super::shm::publish_pixels(keys, pixels, id) {
+            return command;
+        }
+    }
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(pixels, 3);
+    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
+    super::shm::mark_direct(id);
+    let mut out = String::new();
     let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
     for (i, chunk) in chunks.iter().enumerate() {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f=32,t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={},C=1,q=0,m={more};",
-                image_id(slot),
-                plot.visible_rows
+                "\x1b_Ga=T,f=32,t=d,o=z,{keys},m={more};"
             ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
@@ -980,8 +1003,7 @@ fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
     out
 }
 
-/// The direct frame `image()` emits, so the shared-memory rewrite can be
-/// checked against a real chart without a second rasteriser.
+/// Render the same chart through either transport for pixel and CPU checks.
 #[cfg(test)]
 pub(crate) fn direct_chart_command(cols: usize, rows: usize) -> String {
     let values: Vec<_> = (0..48).map(|i| Some(i as f64 / 47.0)).collect();
@@ -1433,6 +1455,7 @@ mod tests {
 
     #[test]
     fn inline_images_are_compressed_chunked_and_do_not_move_the_cursor() {
+        let _transport = super::super::shm::guard();
         let p = Plot::new(8, 1, 20, 5, chart(vec![Some(0.0), Some(1.0)]));
         let command = image(&p, 0, 80);
         assert!(command.contains("f=32,t=d,o=z,s=160,v=80"));
@@ -1476,6 +1499,7 @@ mod tests {
 
     #[test]
     fn image_cache_reuses_unchanged_plots_and_deletes_on_fallback_or_screen_change() {
+        let _transport = super::super::shm::guard();
         let p = Plot::new(2, 1, 10, 3, chart(vec![Some(0.2), Some(0.8)]));
         let rows = vec!["protected title".into(), "axis".into()];
         let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
@@ -1521,6 +1545,7 @@ mod tests {
 
     #[test]
     fn multi_chunk_images_round_trip_with_exact_cropped_pixels() {
+        let _transport = super::super::shm::guard();
         let mut c = chart(Vec::new());
         c.slots = 120;
         let mut seed = 7u32;

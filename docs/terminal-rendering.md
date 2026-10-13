@@ -66,22 +66,25 @@ uses synchronized updates when supported.
 ## Image transport and lifecycle
 
 No Kitty executable, image conversion command, shared file or system graphics
-library is needed. Images are RGBA, zlib compressed in pure Rust. The direct
-path base64-encodes that payload and sends it in chunks of at most 4096 bytes
-(`t=d`). That path works over SSH.
+library is needed. Images are RGBA. The direct path compresses them with zlib
+in pure Rust, then base64-encodes that payload and sends it in chunks of at most
+4096 bytes (`t=d`). That path works over SSH.
 
 On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
 `a=q`, reply requested) beside the graphics query. The object is created with
 `shm_open`, `ftruncate` and `mmap` from libc, which is already linked. The
 name is what the escape carries. The terminal reads the object and unlinks
 it. `a=q` does not store the image, so the probe id cannot replace another
-image. If the probe is acknowledged, later images are published the same way.
+image. If the probe is acknowledged, later images of at least 16 KiB (32 cells)
+are published as raw RGBA in shared memory, before any zlib or base64 work.
+The terminal maps those pixels directly. Smaller images keep the compressed
+direct path: for tiny bars, object creation can cost more than compression.
 The probe-result parser is ordinary code, compiled and tested on every
 target. Acquisition is limited to Linux and macOS. Anywhere else, and
 whenever the probe is rejected, times out, or a later image reports an
 error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
 failure does not turn graphics off. A cleanup table with no free slot sends
-that one frame directly and leaves shared memory on. An OS publication failure
+that one image directly and leaves shared memory on. An OS publication failure
 or a shared-upload error reported by the terminal returns the session to `t=d`.
 
 Owned image uploads request a reply (`q=0`) so every pending transmission has
@@ -108,7 +111,7 @@ resume.
 
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
-does not depend on potentially unavailable cell-pixel-size reports. Up to 16
+does not depend on potentially unavailable cell-pixel-size reports. Up to 32
 visible plots, each at most 20,000 cells, use images; additional or larger plots
 use text to bound image memory/transport costs. It is a raster chart renderer,
 not a general replacement for terminal text, native scaled fonts or animation
