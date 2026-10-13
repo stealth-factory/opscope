@@ -322,10 +322,10 @@ fn clear_pending() {
     with_pending(|rows| *rows = [Pending::new(); super::graphics::MAX_PLOTS]);
 }
 
-/// Publish raw RGBA pixels before the direct path does compression or framing.
+/// Publish raw RGB or RGBA pixels before the direct path does compression or framing.
 /// A full table falls back for this image only. An OS refusal turns the
 /// transport off; neither case disables graphics.
-pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32) -> Option<String> {
+pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32, format: u8) -> Option<String> {
     if !is_shared() {
         return None;
     }
@@ -347,9 +347,9 @@ pub(crate) fn publish_pixels(keys: &str, pixels: &[u8], id: u32, placement: u32)
         return None;
     }
     let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
-    // Darwin rounds fstat's object size to a page; S is the exact RGBA size.
+    // Darwin rounds fstat's object size to a page; S is the exact pixel size.
     Some(format!(
-        "\x1b_Ga=T,f=32,t=s,{keys},S={},m=0;{payload}\x1b\\",
+        "\x1b_Ga=T,f={format},t=s,{keys},S={},m=0;{payload}\x1b\\",
         pixels.len()
     ))
 }
@@ -821,8 +821,8 @@ mod tests {
             }
             let id = super::super::graphics::image_id(0);
             let id2 = super::super::graphics::image_id(1);
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1).is_some());
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1).is_none());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1, 32).is_some());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1, 32).is_none());
             assert!(is_shared(), "a full table turned shared memory off");
             assert_eq!(live_names(id).len(), 1, "the sent image lost its object");
             assert!(
@@ -832,7 +832,7 @@ mod tests {
             assert_eq!(take_reply(id, 1), Some(true));
             assert_eq!(take_reply(id2, 1), None, "unsent image queued a reply");
             unlink_id(id);
-            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1).is_some());
+            assert!(publish_pixels("q=0", &[1, 2, 3, 4], id2, 1, 32).is_some());
         }
     }
 
@@ -844,7 +844,7 @@ mod tests {
         };
         apply_accepted();
         FAIL_OS.store(1, Ordering::Release);
-        assert!(publish_pixels("q=0", &[1, 2, 3, 4], 7, 1).is_none());
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], 7, 1, 32).is_none());
         assert!(!is_shared(), "an OS refusal left shared memory on");
     }
 
@@ -857,7 +857,7 @@ mod tests {
         let sequence = NAME_SEQ.load(Ordering::Acquire);
         let name = format!("/o{:x}-{sequence:x}", unsafe { libc::getpid() });
         FAIL_OS.store(2, Ordering::Release);
-        assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1).is_none());
+        assert!(publish_pixels("q=0", &[1, 2, 3, 4], id, 1, 32).is_none());
         assert!(!is_shared());
         assert!(live_names(id).is_empty());
         assert_eq!(take_reply(id, 1), None);
@@ -873,7 +873,7 @@ mod tests {
         };
         apply_accepted();
         let raw: Vec<u8> = (0..9000).map(|i| (i * 17 + 3) as u8).collect();
-        let command = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1).expect("object");
+        let command = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1, 32).expect("object");
         assert!(command.contains("t=s") && !command.contains("o=z"));
         assert!(command.contains("m=0") && !command.contains("m=1"));
         assert!(command.contains(&format!("S={}", raw.len())));
@@ -881,7 +881,7 @@ mod tests {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_object(&name, &raw);
-            let again = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1).expect("replacement");
+            let again = publish_pixels("s=30,v=75,i=42,q=0", &raw, 42, 1, 32).expect("replacement");
             let name2 = shared_name(&again);
             assert_ne!(name, name2);
             assert!(exists(&name), "an object still being read was unlinked");
@@ -926,6 +926,45 @@ mod tests {
         assert!(shared.contains(&format!("S={}", pixels.len())));
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_object(&shared_name(&shared), &pixels);
+    }
+
+    #[test]
+    fn cropped_rgb_and_rgba_charts_keep_their_format_and_bytes_in_shared_memory() {
+        let _guard = guard();
+        let colour = super::super::rgb(90, 210, 140);
+        let solid = super::super::Plot::heatmap_levels(
+            2, 1, &vec![vec![Some((colour.clone(), 4)); 64]; 10], &colour,
+        );
+        let mut cells = vec![vec![Some((colour.clone(), 4)); 64]; 10];
+        cells[5][10] = None;
+        let gapped = super::super::Plot::heatmap_levels(2, 1, &cells, &colour);
+        let line = super::super::Plot::new(2, 1, 64, 10, super::super::LineChart {
+            slots: 3,
+            traces: vec![super::super::Trace {
+                positions: None, values: vec![Some(0.2), Some(0.8), Some(0.5)],
+                colour, baseline: None,
+            }],
+            focus: None,
+        });
+        for (plot, format) in [(solid, 24), (gapped, 32), (line, 32)] {
+            force_direct();
+            let plot = plot.in_viewport(5, 1, 5).unwrap();
+            let direct = super::super::graphics::cropped_chart_command(&plot, 42);
+            assert!(direct.contains(&format!("f={format},t=d")));
+            assert!(direct.contains("s=320,v=80") && direct.contains("c=40,r=5"));
+            let bytes = miniz_oxide::inflate::decompress_to_vec_zlib(&direct_payload(&direct)).unwrap();
+            assert_eq!(bytes.len(), 320 * 80 * (format as usize / 8));
+            let Some(_) = begin_probe() else { return; };
+            apply_accepted();
+            let shared = super::super::graphics::cropped_chart_command(&plot, 42);
+            assert!(shared.contains(&format!("f={format},t=s")));
+            assert!(shared.contains(&format!("S={}", bytes.len())));
+            assert!(shared.contains("s=320,v=80") && shared.contains("c=40,r=5"));
+            assert!(!shared.contains("o=z"));
+            assert_ne!(placement_of(&direct), placement_of(&shared));
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            assert_object(&shared_name(&shared), &bytes);
+        }
     }
 
     #[test]
@@ -1136,14 +1175,14 @@ mod tests {
         force_direct();
         let direct = cpu_for(|| {
             for _ in 0..rounds {
-                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id, 1));
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, 32, &keys, id, 1));
             }
         });
         let Some(_) = begin_probe() else { return; };
         apply_accepted();
         let shared = cpu_for(|| {
             for _ in 0..rounds {
-                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, &keys, id, 1));
+                std::hint::black_box(super::super::graphics::transmit_pixels(&pixels, 32, &keys, id, 1));
                 unlink_id(id);
             }
         });

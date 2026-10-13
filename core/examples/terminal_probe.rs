@@ -136,6 +136,13 @@ fn main() {
                         20,
                         &[(0.375, green.clone()), (0.625, blue.clone())],
                     ),
+                    // Fully opaque, so the transport can drop the alpha channel.
+                    tc::Plot::heatmap_levels(
+                        30,
+                        17,
+                        &[vec![Some((green.clone(), 4)); 48]],
+                        &grey,
+                    ),
                 ]
                 .into_iter()
                 .filter_map(|p| p.in_viewport(scroll, 1, h.saturating_sub(2))),

@@ -66,8 +66,11 @@ uses synchronized updates when supported.
 ## Image transport and lifecycle
 
 No Kitty executable, image conversion command, shared file or system graphics
-library is needed. Images are RGBA. The direct path compresses them with zlib
-in pure Rust, then base64-encodes that payload and sends it in chunks of at most
+library is needed. Line charts use RGBA (`f=32`); a filled plot uses RGB
+(`f=24`, three quarters of the raw size) when every pixel in its visible crop
+is opaque. Gaps, fractional edges and the meter inset retain alpha. The direct
+path compresses pixels with zlib at level 6 in pure Rust, then base64-encodes
+that payload and sends it in chunks of at most
 4096 bytes (`t=d`). That path works over SSH.
 
 On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
@@ -75,8 +78,8 @@ On Linux and macOS the session also sends one 1×1 shared-memory probe (`t=s`,
 `shm_open`, `ftruncate` and `mmap` from libc, which is already linked. The
 name is what the escape carries. The terminal reads the object and unlinks
 it. `a=q` does not store the image, so the probe id cannot replace another
-image. If the probe is acknowledged, later images of at least 16 KiB (32 cells)
-are published as raw RGBA in shared memory, before any zlib or base64 work.
+image. If the probe is acknowledged, later images of at least 16 KiB
+are published as raw RGB or RGBA in shared memory, before any zlib or base64 work.
 The terminal maps those pixels directly. Smaller images keep the compressed
 direct path: for tiny bars, object creation can cost more than compression.
 The probe-result parser is ordinary code, compiled and tested on every
@@ -112,9 +115,37 @@ terminal; a fatal signal can leave an object behind, as SIGKILL can. Suspend
 unlinks on resume, after the handler has returned.
 
 Stable charts reuse terminal images; changed regions replace their
-owned image IDs. Scrolling crops the chart instead of changing its axes. Core
-cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
+owned image IDs. Scrolling crops the chart instead of changing its axes.
+Geometry is worked out on the full chart, then only the visible rows and the
+columns that fit the pane are allocated and stroked, coverage buffers included.
+Core cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
 resume.
+
+Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
+on synthetic frames at the sizes the widgets use:
+
+| frame | raw | level 3 | level 6 | level 9 |
+| --- | --- | --- | --- | --- |
+| 100×10 line, 12 traces | 512000 RGBA | 69770 B, 5.0 ms | 48569 B, 12.8 ms | 44863 B, 39.1 ms |
+| same chart, 5 rows visible | 256000 RGBA | 35754 B, 2.5 ms | 25256 B, 7.1 ms | 23560 B, 18.7 ms |
+| 80×5 line, 1 trace | 204800 RGBA | 1871 B, 0.49 ms | 1942 B, 0.65 ms | 1359 B, 1.5 ms |
+| 40×4 bars | 81920 RGBA | 1366 B, 0.25 ms | 564 B, 0.30 ms | 457 B, 0.37 ms |
+| 26×7 heatmap with gaps | 93184 RGBA | 1253 B, 0.24 ms | 470 B, 0.26 ms | 463 B, 0.47 ms |
+| 26×7 solid heatmap | 69888 RGB | 95 B, 0.14 ms | 95 B, 0.14 ms | 95 B, 0.14 ms |
+| 24-cell meter | 12288 RGBA | 141 B, 0.04 ms | 152 B, 0.08 ms | 117 B, 0.10 ms |
+
+On the 12-trace chart, level 6 removes about 30% of the bytes versus level 3.
+Level 9 saves little more and triples the time. A one-trace chart and the meter
+are a few dozen bytes larger at level 6 than at level 3; the filled plots more
+than make that up.
+
+A captured latency chart from actual localhost ping measurements (568×64
+RGBA pixels, 145,408 raw bytes) also checks the direct-path choice. In this
+release build, 20 compressions averaged 0.680 ms / 896 bytes at level 3,
+0.690 ms / 743 bytes at level 6, and 1.078 ms / 744 bytes at level 9. That
+frame saves 17% at level 6 for similar time. The multi-trace table above
+shows the larger CPU tradeoff; these results do not promise the same saving
+for every chart. Shared-memory uploads bypass compression entirely.
 
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
@@ -271,7 +302,9 @@ python3 core/tests/terminal_protocol.py
 ```
 
 Set `OPSCOPE_PROBE_ARTIFACTS` to a directory to keep the decoded images the
-PTY checks receive, for looking at by eye.
+PTY checks receive, for looking at by eye. RGBA is saved as `.rgba`. An
+opaque `f=24` image is saved as `.rgb`, unchanged from the bytes that were
+sent, and its `.size` line names that format after the width and height.
 
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
