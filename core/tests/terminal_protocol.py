@@ -284,7 +284,7 @@ def filled_graphics(t):
             f"{width} {height} {ext}".encode(),
         )
     assert formats[:4] == [b"32", b"32", b"32", b"32"], "gaps, partial bars and the meter inset keep alpha"
-    assert formats[-1] == b"24", "a fully opaque tile is sent as RGB"
+    assert formats[-2:] == [b"24", b"24"], "the stacked bar and fully opaque tile are sent as RGB"
     count = len(t.images())
     t.read()
     assert len(t.images()) == count, "unchanged figures retransmitted"
