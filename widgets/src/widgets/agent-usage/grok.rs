@@ -941,18 +941,17 @@ pub fn unified(d: &Data) -> bool {
 /// The credit window, as (start, end) in epoch milliseconds - the
 /// fingerprint `vendors::link_spacexsi` matches against Cursor's pool.
 ///
-/// A reading that is not live may describe a week that has since rolled
-/// over; it is projected onto the current week the way the lanes project
-/// it, or the same account's two windows could never match after a reset.
+/// A reading may describe a week that has since rolled over - a log line,
+/// or a live answer still held in the poll cache across the reset - so a
+/// window that has ended is projected onto the current week the way the
+/// lanes project it, or the same account's two windows could never match
+/// after a reset. A window still running is taken as sent.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     let q = d.quota.as_ref()?;
     let (s, e) = match (iso_epoch(&q.start), iso_epoch(&q.end)) {
         (Some(s), Some(e)) if e > s => (s, e),
         _ => return None,
     };
-    if d.quota_live {
-        return Some((s * 1000.0, e * 1000.0));
-    }
     match window_now(Some(s), Some(e), now()) {
         (Some(end), true) => Some(((end - (e - s)) * 1000.0, end * 1000.0)),
         _ => Some((s * 1000.0, e * 1000.0)),
@@ -2831,9 +2830,16 @@ mod tests {
         assert!((e - s - week * 1000.0).abs() < 1.0, "the week's length kept");
         assert!(s / 1000.0 <= now() && now() < e / 1000.0, "rolled onto the week we are in");
         assert!(((e / 1000.0 - end) / week - 2.0).abs() < 1e-6, "rolled by whole weeks");
-        // A live reading is taken as sent.
+        // Review: a live answer held in the poll cache can outlast its
+        // week too, and rolls the same way.
         d.quota_live = true;
-        assert!((pool_window(&d).unwrap().1 / 1000.0 - end).abs() < 0.01);
+        assert_eq!(pool_window(&d), Some((s, e)));
+        // A window still running is taken as sent.
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(now() - 0.5 * week);
+        q.end = stamp(now() + 0.5 * week);
+        let (s, e) = pool_window(&d).unwrap();
+        assert!((s / 1000.0 - (now() - 0.5 * week)).abs() < 1.0 && (e / 1000.0 - (now() + 0.5 * week)).abs() < 1.0);
     }
 
     #[test]
