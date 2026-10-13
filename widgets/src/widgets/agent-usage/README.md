@@ -202,9 +202,11 @@ The **quota block** answers a different question from everything below it —
 what is *left*, account-wide, rather than what this machine spent — and it is
 the same set of windows Claude Code's own `/usage` shows.
 
-On **`[+]`**, Claude also shows **`N reset available (<expiry>)`** under
+On **`[+]`**, Claude also shows **`N reset available <expiry>`** under
 each account's rows, with the same indentation and wrapping as Codex.
-The date is the soonest expiry in the machine's local zone; if any counted
+The date is the soonest expiry in the machine's local zone, formatted as
+`23 Oct 04:58 +08:00` (or `23 Oct 04:58 AWST +08:00` when a zone abbreviation
+is available), without the year or parentheses. If any counted
 grant has no readable expiry, only the count is shown. Zero or unavailable
 inventory adds no line. Multiple profiles keep their own counts, including
 when an account has no quota lanes. Cached availability carries its age,
@@ -1121,9 +1123,11 @@ The usage payload is not a source for the count or the dates. On the `[+]`
 summary the Codex title stays `CODEX`. When the inventory was read and the
 count is greater than zero, `N reset available` is indented under that
 group, at the same inset a collapsed provider uses for a note under its
-rows, with a blank line above it. The soonest expiry is added in parentheses only
+rows, with a blank line above it. The soonest expiry is added in the same compact
+form as Claude (`23 Oct 04:58 +08:00`) only
 when every listed credit has a readable expiry. Zero and an unread
-inventory add nothing. Claude publishes no such count.
+inventory add nothing. The Codex tab's per-credit expiry keeps the full year
+but also omits parentheses around the offset.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
