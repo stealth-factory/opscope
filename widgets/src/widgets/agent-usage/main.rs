@@ -47,7 +47,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "1 Oct 2026";
+const LIST_RATES_AS_OF: &str = "14 Oct 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -340,9 +340,20 @@ const LIST_RATES: tc::Catalogue = &[
     ("grok-4.20-0309-non-reasoning", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-4.20-multi-agent-0309", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-build-0.1", "xAI", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.20)]),
-    // Google bills context caching by storage - dollars per million tokens
-    // per *hour* - which is not a per-request cache write and is deliberately
-    // not carried here. Pricing it as one would invent a number.
+    // Google bills explicit context caching by storage - dollars per million
+    // tokens per *hour* - which is not a per-request cache write and is
+    // deliberately not carried here. Pricing it as one would invent a number.
+    //
+    // gemini-4-argon's row is an INTRODUCTORY price through 30 November 2026:
+    // 2.0 / 10.0 / 0.10, doubling to 4.0 / 20.0 / 0.20 on 1 December 2026.
+    // Explicit caching (and therefore hourly storage) is not supported on
+    // this model; implicit caching is on by default and discounts cached
+    // input to 0.05x input ($0.10 today, $0.20 from 1 December 2026). The
+    // full 1M context window bills at these rates with no long-context tier.
+    // As with gemini-3.8-flash below, no existing key is a substring of
+    // "gemini-4-argon", so without this row its tokens resolve to None and
+    // cost zero.
+    ("gemini-4-argon", "Google", &[("input", 2.0), ("output", 10.0), ("cache_read", 0.10)]),
     //
     // gemini-3.8-flash's row is an INTRODUCTORY price and the page dates its
     // own end: 0.75 / 3.75 / 0.075 through 31 December 2026, doubling to
@@ -3754,6 +3765,57 @@ mod tests {
         assert_eq!(older.get("cache_write_1h"), Some(&4.0));
         let (dated_five, _) = rate_for("claude-sonnet-5-20260101", &none);
         assert_eq!(dated_five.unwrap().get("input"), Some(&2.0));
+    }
+
+    /// Introductory standard rates from Google's pricing page on 14 Oct 2026
+    /// (through 30 Nov 2026; doubling to 4 / 20 / 0.20 on 1 Dec 2026).
+    ///
+    /// No existing key is a substring of `gemini-4-argon`, so without its own
+    /// row the model resolves to None and its tokens cost zero. Explicit
+    /// caching is not supported on this model; implicit caching discounts
+    /// cached input to 0.05× input ($0.10) with no cache_write fee.
+    #[test]
+    fn gemini_4_argon_is_priced_on_its_own_row() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        assert_eq!(
+            LIST_RATES.iter().filter(|(k, _, _)| *k == "gemini-4-argon").count(),
+            1,
+            "gemini-4-argon needs its own row; no existing key is a substring of it"
+        );
+
+        let (rate, origin) = rate_for("gemini-4-argon", &none);
+        let rate = rate.expect("gemini-4-argon must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
+        assert!(
+            !rate.contains_key("cache_write"),
+            "Google publishes no per-request cache-write price"
+        );
+        assert!(
+            !rate.contains_key("cache_write_1h"),
+            "Google publishes no 1h cache-write price"
+        );
+
+        // Dated or thinking-tier suffixed strings still reach this row.
+        for variant in ["gemini-4-argon-20261014", "gemini-4-argon-medium", "gemini-4-argon-high"] {
+            let (got, got_origin) = rate_for(variant, &none);
+            assert_eq!(got_origin, "list", "{variant}");
+            let got = got.unwrap_or_else(|| panic!("{variant} must resolve to gemini-4-argon"));
+            assert_eq!(got.get("input"), Some(&2.0), "{variant}");
+            assert_eq!(got.get("output"), Some(&10.0), "{variant}");
+            assert_eq!(got.get("cache_read"), Some(&0.10), "{variant}");
+        }
+
+        // Earlier Gemini families keep their own rows untouched.
+        let (flash_38, _) = rate_for("gemini-3.8-flash", &none);
+        assert_eq!(flash_38.unwrap().get("input"), Some(&0.75));
+        let (pro_31, _) = rate_for("gemini-3.1-pro-preview", &none);
+        assert_eq!(pro_31.unwrap().get("output"), Some(&12.0));
+        let (pro_25, _) = rate_for("gemini-2.5-pro", &none);
+        assert_eq!(pro_25.unwrap().get("input"), Some(&1.25));
     }
 
     #[test]
