@@ -473,7 +473,6 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let caps = capabilities();
     // Expire the probe and retired objects before images are published.
     terminal::on_frame();
-    shm::reap_expired();
     let (rows, before, after) =
         graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
     let bytes = paint(&mut shown, &rows, w, h, lost);
