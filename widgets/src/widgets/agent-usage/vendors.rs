@@ -192,11 +192,16 @@ fn link_spacexsi(s: &mut State) {
     // Only a current reading: Grok's split is drawn under Cursor's `live`
     // heading, and a share from a request that has since failed, or a log
     // line, would read as live there when it is not.
-    s.cursor.pool_split = if cursor == Spacexsi::Shared && crate::grok::reading_is_current(&s.grok) {
-        crate::grok::pool_split(&s.grok)
-    } else {
-        Vec::new()
-    };
+    let current = cursor == Spacexsi::Shared && crate::grok::reading_is_current(&s.grok);
+    s.cursor.pool_split = if current { crate::grok::pool_split(&s.grok) } else { Vec::new() };
+    // Grok's figure for the pool, on the same terms, for a Cursor response
+    // that carries none of its own.
+    s.cursor.pool_from_grok = if current { pool_lane(&crate::grok::lanes(&s.grok)).map(|l| l.pct) } else { None };
+}
+
+/// The weekly pool among a vendor's lanes, if it published one.
+fn pool_lane(lanes: &[Lane]) -> Option<&Lane> {
+    lanes.iter().find(|l| l.label == crate::cursor::POOL_LABEL)
 }
 
 /// The tab strip with the unified plan folded in, on the same rules as the
@@ -522,7 +527,8 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         // Shared, the pool, the credits and the limit are one allowance,
         // and Cursor's reading of it is the live one. Grok's lanes are then
         // the same pool a second time, so Grok adds a section only when
-        // Cursor has nothing to say for it.
+        // Cursor has nothing to say for it - and when Cursor has the money
+        // but no pool figure, Grok's pool joins Cursor's group below.
         let place = match name {
             "cursor" => s.cursor.spacexsi,
             "grok" => s.grok.spacexsi,
@@ -547,7 +553,15 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             continue;
         }
         let heading = spacexsi_heading(name, place);
-        let got = lanes_of(name, s);
+        let mut got = lanes_of(name, s);
+        if name == "cursor"
+            && place == Spacexsi::Shared
+            && names.contains(&"grok")
+            && !got.is_empty()
+            && pool_lane(&got).is_none()
+        {
+            got.extend(pool_lane(&lanes_of("grok", s)).cloned());
+        }
         if got.is_empty() {
             quiet.push((heading, name.to_string()));
         } else {
@@ -2004,6 +2018,31 @@ mod tests {
         let summary = summary_text(&s);
         assert_eq!(summary.matches("SpaceXSI").count(), 1, "two SpaceXSI groups: {summary}");
         assert!(summary.contains("Cursor no quota"), "Cursor's reason lost: {summary}");
+    }
+
+    #[test]
+    fn a_cursor_answer_without_a_pool_figure_takes_grok_s_beside_its_money() {
+        // Review: Cursor answering with its money but no pool percentage
+        // printed "no pool figure" on the tab, and [+] dropped Grok's pool
+        // because Cursor had other lanes.
+        let mut s = State {
+            cursor: crate::cursor::Data::without_pool_figure(crate::cursor::Data::unified_fixture(true)),
+            grok: crate::grok::Data::unified_fixture(),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        let grok_pool = pool_lane(&crate::grok::lanes(&s.grok)).expect("Grok's fixture has a pool").pct;
+        let summary = summary_text(&s);
+        assert_eq!(summary.matches("SpaceXSI").count(), 1, "two SpaceXSI groups: {summary}");
+        assert!(summary.contains("weekly pool"), "Grok's pool dropped: {summary}");
+        assert!(summary.contains("usage limit"), "Cursor's money dropped: {summary}");
+        s.cursor.pool_from_grok = Some(grok_pool);
+        let tabs: Vec<String> = ["+", "cursor", "grok"].iter().map(|t| t.to_string()).collect();
+        let body = plain(&tab_body("spacexsi", &s, 120, 40, &Config::default(), &palette(), &tabs)).join("\n");
+        assert!(!body.contains("no pool figure"), "Grok's figure not used: {body}");
+        assert!(body.contains("pool figure from Grok"), "the figure's source unsaid: {body}");
+        assert!(body.contains("EXTRA USAGE"), "Cursor's money lost: {body}");
     }
 
     #[test]

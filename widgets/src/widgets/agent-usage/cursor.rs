@@ -149,6 +149,11 @@ pub struct Data {
     /// split it only into auto and API, and API is nought on this plan.
     /// Set with `spacexsi`.
     pub pool_split: Vec<(String, f64)>,
+    /// Grok's figure for the same pool, when Grok is on the same account
+    /// and current - drawn only when Cursor answers without a pool figure
+    /// of its own, so the tab shows the reading there is rather than
+    /// none. Set with `spacexsi`.
+    pub pool_from_grok: Option<f64>,
     /// The per-day summary folded out of GetFilteredUsageEvents.
     events: Option<serde_json::Value>,
     /// GetAggregatedUsageEvents: per-model cents over the window.
@@ -817,7 +822,8 @@ fn spacexsi_quota_with_plots(
     let fits_pace = |label_w: usize, pct: &str, pace: &str| {
         2 + label_w + 1 + 3 + pct.chars().count() + pace.chars().count() <= w.saturating_sub(1)
     };
-    match pool_pct(live) {
+    let from_grok = pool_pct(live).is_none() && d.pool_from_grok.is_some();
+    match pool_pct(live).or(d.pool_from_grok) {
         // Grok's split is there: the pool bar in one segment per product,
         // then each product on a line of its own in its segment's colour.
         Some(pct) if !d.pool_split.is_empty() => {
@@ -904,6 +910,15 @@ fn spacexsi_quota_with_plots(
             &[(p.dim.as_str(), "  no pool figure for this week".into())],
             w - 1,
         )),
+    }
+    // Said, since the heading reads `live` for Cursor's call: this one
+    // figure is Grok's reading of the same pool. Dropped whole when it does
+    // not fit rather than cut mid-sentence.
+    if from_grok {
+        let note = "  pool figure from Grok · Cursor sent none";
+        if note.chars().count() <= w.saturating_sub(1) {
+            rows.push(tc::seg(&[(p.dim.as_str(), note.into())], w - 1));
+        }
     }
     rows.push(String::new());
     tc::append_plot_rows(&mut rows, plots, |local| extra_report(d, live, w, p, local));
@@ -1504,8 +1519,15 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
     // which is what usage.py's sqlite-error branch does.
+    //
+    // Every reading is keyed by account, the usage call's as much as the
+    // plan's: the plan decides how the usage is drawn, so a usage response
+    // held for the account signed in before would be drawn under the new
+    // account's plan - a monthly figure labelled as a weekly pool.
+    let me = account_key();
+    let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
-    d.live = match cached(caches, "cursor", LIVE_TTL, || match cursor_live() {
+    d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live() {
         None => {
             refuse = "Cursor's usage endpoint did not answer".into();
             None
@@ -1521,11 +1543,9 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     };
     if !refuse.is_empty() {
         d.live_why = refuse.clone();
-        remember_refusal(caches, "cursor", &refuse);
+        remember_refusal(caches, &live_key, &refuse);
     }
-    // Keyed by account, like everything held for the plan below: a plan
-    // cached for one account must never classify another.
-    let me = account_key();
+    // A plan cached for one account must never classify another.
     d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
     // The plan decides which drawing the live figures get, so a failed
     // plan read keeps the last good one for this account rather than draw
@@ -1548,7 +1568,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // spend block refreshed every two minutes against an hour-old
     // `noUsageBasedAllowed` would draw the old state for the rest of that
     // hour. One small POST on the same schedule as the reading it qualifies.
-    d.hard = cached(caches, "cursor-hard", LIVE_TTL, cursor_hard_limit);
+    d.hard = cached(caches, &format!("cursor-hard:{me}"), LIVE_TTL, cursor_hard_limit);
     // The unified plan's money lives in two calls an account on its own
     // plan has no use for, so they are asked only once the plan says it is
     // unified. Best-effort like the hard limit: the pool bar stands without
@@ -3785,6 +3805,16 @@ impl Data {
 
     pub fn own_plan_fixture() -> Data {
         tests::own_plan_data()
+    }
+
+    /// The same reading with the usage call answered but no pool figure in
+    /// it - neither the total nor the auto percentage.
+    pub fn without_pool_figure(mut d: Data) -> Data {
+        if let Some(plan) = d.live.as_mut().and_then(|l| l["planUsage"].as_object_mut()) {
+            plan.remove("totalPercentUsed");
+            plan.remove("autoPercentUsed");
+        }
+        d
     }
 
     /// The same reading with the usage call unanswered.
