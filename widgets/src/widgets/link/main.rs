@@ -455,11 +455,13 @@ fn main() {
         err: String::new(),
         read_at: 0.0,
     }));
+    let activity = tc::Refresh::default();
     // [r] asks for a reading now rather than at the end of the interval, so
     // the poller sleeps on a condition it can be woken out of.
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || {
         // A thread that ends leaves the last frame on screen for ever, and a
         // widget frozen on real numbers is harder to catch than one showing
@@ -474,6 +476,7 @@ fn main() {
         };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
+            let work = poller_activity.start();
             // Not fatal: ss can fail for a moment. Reported and retried
             // rather than ending the thread. The last good rows stay, with
             // the failure as a line above them, so a missed poll is not an
@@ -493,6 +496,7 @@ fn main() {
                 };
                 store_poll(&mut guard, reading, history_len, tc::now());
             }
+            drop(work);
             let (lock, cond) = &*poller_wake;
             let mut asked = match lock.lock() {
                 Ok(g) => g,
@@ -732,7 +736,18 @@ fn main() {
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
             let room = h.saturating_sub(foot.lines.len() + 1).max(1);
-            let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p, &mut plots);
+            let body = detail_view(
+                &shown[pick],
+                &guard,
+                w,
+                room,
+                pick,
+                window,
+                refresh,
+                activity.tick(tc::animation_tick()),
+                &p,
+                &mut plots,
+            );
             drop(guard);
             // The body is as tall as it needs to be and the pane shows a
             // window onto it, rather than the body being cut to the pane
@@ -763,7 +778,12 @@ fn main() {
             continue;
         }
 
-        let mut rows = vec![tc::title("connections", w, &p.link)];
+        let mut rows = vec![tc::title_busy(
+            "connections",
+            w,
+            &p.link,
+            activity.tick(tc::animation_tick()),
+        )];
         let mut cursor: Option<usize> = None;
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         rows.push(tc::seg(
@@ -1136,12 +1156,13 @@ fn detail_view(
     idx: usize,
     window: f64,
     refresh: f64,
+    busy: Option<usize>,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let empty = Vec::new();
     let users = state.names.get(&row.ip).unwrap_or(&empty);
-    let mut rows = vec![tc::title("connection", w, &p.link)];
+    let mut rows = vec![tc::title_busy("connection", w, &p.link, busy)];
     rows.push(tc::seg(
         &[
             (p.hues[idx % p.hues.len()].as_str(), " ▐ ".to_string()),
@@ -1772,7 +1793,18 @@ mod tests {
         };
         let list = plain(&table(&[row.clone()], &state, 100, None, &palette(), false)[1]);
         assert!(list.contains("macOS n/a"), "{list}");
-        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
+        let detail = detail_view(
+            &row,
+            &state,
+            100,
+            40,
+            0,
+            60.0,
+            2.0,
+            None,
+            &palette(),
+            &mut Vec::new(),
+        )
             .iter()
             .map(|line| plain(line))
             .collect::<Vec<_>>()
@@ -1808,7 +1840,18 @@ mod tests {
         let list = plain(&table(&[row.clone()], &state, 86, None, &palette(), false)[1]);
         assert!(list.contains("n/a"), "{list}");
         assert!(!list.contains("0.00%"), "{list}");
-        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
+        let detail = detail_view(
+            &row,
+            &state,
+            100,
+            40,
+            0,
+            60.0,
+            2.0,
+            None,
+            &palette(),
+            &mut Vec::new(),
+        )
             .iter()
             .map(|line| plain(line))
             .collect::<Vec<_>>()

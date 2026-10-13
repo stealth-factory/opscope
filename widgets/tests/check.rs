@@ -250,6 +250,201 @@ fn widgets() -> BTreeMap<String, String> {
     found
 }
 
+const FETCHING_WIDGETS: [&str; 13] = [
+    "agent-usage",
+    "github",
+    "github-prs",
+    "github-actions",
+    "vercel-deployments",
+    "linear",
+    "herdr-panes",
+    "luvus-panes",
+    "link",
+    "tailnet",
+    "ports",
+    "netwatch",
+    "latency",
+];
+
+fn without_comments(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if quoted {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted = true;
+            out.push(ch);
+            i += 1;
+        } else if ch == '/' && chars.get(i + 1) == Some(&'/') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            let mut depth = 1usize;
+            while i < chars.len() && depth > 0 {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn call_arguments(src: &str, name: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut search = 0;
+    while let Some(at) = src[search..].find(name) {
+        let open = search + at + name.len() - 1;
+        let mut depth = 0usize;
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut close = None;
+        for (offset, ch) in src[open..].char_indices() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quoted = false;
+                }
+                continue;
+            }
+            if ch == '"' {
+                quoted = true;
+            } else if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    close = Some(open + offset);
+                    break;
+                }
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        found.push(src[open + 1..close].to_string());
+        search = close + 1;
+    }
+    found
+}
+
+fn split_arguments(args: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (at, ch) in args.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => quoted = true,
+            '(' => parens += 1,
+            ')' => parens = parens.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ',' if parens == 0 && brackets == 0 && braces == 0 => {
+                parts.push(args[start..at].trim().to_string());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(args[start..].trim().to_string());
+    parts
+}
+
+fn refresh_wiring_is_present(src: &str) -> bool {
+    let src = without_comments(&without_tests(src));
+    let titles = call_arguments(&src, "tc::title_busy(");
+    src.contains("tc::Refresh")
+        && src.contains(".start()")
+        && !src.contains("tc::title(")
+        && !titles.is_empty()
+        && titles.iter().all(|call| {
+            split_arguments(call)
+                .get(3)
+                .is_some_and(|busy| busy != "None" && !busy.is_empty())
+        })
+}
+
+#[test]
+fn refresh_wiring_shape_rejects_missing_guard_or_busy_title() {
+    let good = r#"let refresh = tc::Refresh::default();
+        let _guard = refresh.start();
+        tc::title_busy("widget", w, colour, refresh.tick(tick));"#;
+    assert!(refresh_wiring_is_present(good));
+    assert!(!refresh_wiring_is_present(&good.replace(".start()", "")));
+    assert!(!refresh_wiring_is_present(
+        &good.replace("refresh.tick(tick)", "None")
+    ));
+    assert!(!refresh_wiring_is_present(&format!("// {good}\n")));
+}
+
+#[test]
+fn every_fetching_widget_tracks_refresh_activity_in_its_title() {
+    let sources = widgets();
+    let missing: Vec<&str> = FETCHING_WIDGETS
+        .iter()
+        .copied()
+        .filter(|name| {
+            sources
+                .get(*name)
+                .is_none_or(|src| !refresh_wiring_is_present(src))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "fetching widgets missing Refresh/title_busy wiring: {}",
+        missing.join(", ")
+    );
+}
+
 #[test]
 fn every_widget_owns_its_complete_folder() {
     let dir = root().join("widgets/src/widgets");

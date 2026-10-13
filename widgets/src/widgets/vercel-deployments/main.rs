@@ -864,11 +864,12 @@ fn info_overlay(
     h: usize,
     note: &str,
     p: &Palette,
+    busy: Option<usize>,
 ) -> Vec<String> {
     let meta = &dep["meta"];
     let empty = serde_json::Value::Null;
     let d = detail.unwrap_or(&empty);
-    let mut rows = vec![tc::title("deployment", w, &p.prod)];
+    let mut rows = vec![tc::title_busy("deployment", w, &p.prod, busy)];
 
     macro_rules! field {
         ($label:expr, $value:expr, $colour:expr) => {{
@@ -1065,9 +1066,10 @@ fn copy_overlay(
     h: usize,
     note: &str,
     p: &Palette,
+    busy: Option<usize>,
 ) -> (Vec<String>, tc::Footer, usize) {
     let pairs = copy_items(dep, detail);
-    let mut rows = vec![tc::title("copy", w, &p.prod)];
+    let mut rows = vec![tc::title_busy("copy", w, &p.prod, busy)];
     rows.push(String::new());
     if pairs.is_empty() {
         rows.push(tc::seg(
@@ -1192,6 +1194,7 @@ fn main() {
     teams = scopes_for(teams, discovered);
 
     let state = Arc::new(Mutex::new(State::default()));
+    let refresh_activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
@@ -1200,6 +1203,7 @@ fn main() {
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
     let poll_scope = scope_note.clone();
+    let poller_activity = refresh_activity.clone();
     // Teams that turned the token away for want of a SAML session, by id,
     // and the names to show for them. A token does not gain a SAML session
     // by being asked again, so they are not asked again.
@@ -1214,6 +1218,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let mut out: Vec<serde_json::Value> = Vec::new();
             // Whether any scope answered this round, deployments or not.
             let mut any_loaded = false;
@@ -1305,6 +1310,7 @@ fn main() {
                     (Some(said), false) => format!("{} · {}", said, err),
                 };
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -1565,7 +1571,9 @@ fn main() {
                 if start {
                     let (details, fetching) = (Arc::clone(&details), Arc::clone(&fetching));
                     let (uid, team, tok) = (uid.clone(), text(&chosen, "_team"), tok.clone());
+                    let detail_activity = refresh_activity.clone();
                     std::thread::spawn(move || {
+                        let _work = detail_activity.start();
                         let got = fetch_detail(&uid, &team, &tok);
                         if let Ok(mut g) = details.lock() {
                             g.insert(uid.clone(), got);
@@ -1582,9 +1590,25 @@ fn main() {
             // to be drawn on that row behind it.
             placed.clear();
             let (rows, packed, foot_top) = if copying {
-                copy_overlay(&chosen, held.as_ref(), w, h, &note.0, &p)
+                copy_overlay(
+                    &chosen,
+                    held.as_ref(),
+                    w,
+                    h,
+                    &note.0,
+                    &p,
+                    refresh_activity.tick(tick),
+                )
             } else {
-                let body = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
+                let body = info_overlay(
+                    &chosen,
+                    held.as_ref(),
+                    w,
+                    h,
+                    &note.0,
+                    &p,
+                    refresh_activity.tick(tick),
+                );
                 let mut hints = vec![
                     vec![(p.hint.as_str(), "[c]opy".into())],
                     vec![(p.hint.as_str(), "[r]efresh".into())],
@@ -1658,7 +1682,12 @@ fn main() {
             .map(|s| states.get(*s).copied().unwrap_or(0))
             .sum();
 
-        let mut rows = vec![tc::title("vercel deployments", w, &p.prod)];
+        let mut rows = vec![tc::title_busy(
+            "vercel deployments",
+            w,
+            &p.prod,
+            refresh_activity.tick(tick),
+        )];
         // The totals leave the SAML-locked teams out, and a partial count
         // must not read as the whole account. It leads the header, because
         // the header clips from the right and this must outlast the totals;

@@ -766,7 +766,7 @@ struct Resolver {
 }
 
 impl Resolver {
-    fn new() -> Resolver {
+    fn new(activity: tc::Refresh) -> Resolver {
         let known: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let wanted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (k, q) = (Arc::clone(&known), Arc::clone(&wanted));
@@ -779,6 +779,7 @@ impl Resolver {
                     continue;
                 }
             };
+            let work = activity.start();
             // getent rather than a resolver library: it is glibc's own
             // lookup, so it honours /etc/hosts, nsswitch and the search
             // domains exactly as everything else on the machine does.
@@ -791,6 +792,7 @@ impl Resolver {
             if let Ok(mut guard) = k.lock() {
                 guard.insert(ip, name);
             }
+            drop(work);
         });
         Resolver { known, wanted }
     }
@@ -897,7 +899,7 @@ struct DetailLoader {
 }
 
 impl DetailLoader {
-    fn new() -> DetailLoader {
+    fn new(activity: tc::Refresh) -> DetailLoader {
         let current: Arc<Mutex<Option<(i32, String)>>> = Arc::new(Mutex::new(None));
         let known: Arc<Mutex<HashMap<(i32, String), DetailSnapshot>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -908,6 +910,7 @@ impl DetailLoader {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             };
+            let work = activity.start();
             let snapshot = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (files, files_err) = match open_files(pid) {
                     Ok(files) => (files, String::new()),
@@ -933,6 +936,7 @@ impl DetailLoader {
                 guard.clear();
                 guard.insert((pid, name), snapshot);
             }
+            drop(work);
             std::thread::sleep(Duration::from_secs(1));
         });
         DetailLoader { current, known }
@@ -1357,6 +1361,7 @@ fn detail_rows(
     names: &Resolver,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, Option<(usize, usize)>) {
     // Where the cursor ended up in the body, and how many rows it owns - its
     // own row plus the chart drawn under it. The caller cannot work this out:
@@ -1364,10 +1369,11 @@ fn detail_rows(
     // position depends on how many rows every section above it drew.
     let mut cursor: Option<(usize, usize)> = None;
     let total = (row.up + row.down) as f64;
-    let mut out = vec![tc::title(
+    let mut out = vec![tc::title_busy(
         &format!("{} · pid {}", row.name, row.pid),
         w,
         &p.accent,
+        busy,
     )];
     out.push(tc::seg(
         &[
@@ -1700,16 +1706,21 @@ fn main() {
     }
 
     let p = palette();
+    let activity = tc::Refresh::default();
     let state = Arc::new(Mutex::new(State {
         started: tc::now(),
         ..Default::default()
     }));
     let poller = Arc::clone(&state);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
         // A poller that dies takes its explanation with it, and an empty
         // table looks exactly like a machine with no sockets on it.
+        let work = poller_activity.start();
         let began = tc::now();
-        if !poll_once(&poller, || acquire(external)) {
+        let completed = poll_once(&poller, || acquire(external));
+        drop(work);
+        if !completed {
             return;
         }
 
@@ -1780,8 +1791,8 @@ fn main() {
     let mut notice: Option<(String, String, f64)> = None;
     // What `c` would copy: known while drawing, wanted when the key is hit.
     let mut pending_copy = String::new();
-    let names = Resolver::new();
-    let details = DetailLoader::new();
+    let names = Resolver::new(activity.clone());
+    let details = DetailLoader::new(activity.clone());
     // Input is sampled independently of painting and of source acquisition.
     // A key or wheel turn forces the next frame immediately; otherwise ten
     // frames a second are enough for resize and elapsed-time updates without
@@ -2113,6 +2124,7 @@ fn main() {
                 &names,
                 &p,
                 &mut plots,
+                activity.tick(tc::animation_tick()),
             );
             // The title is pinned and everything below it is the window.
             // `cursor` addresses the whole body, so its row shifts by the
@@ -2196,7 +2208,12 @@ fn main() {
         let down: f64 = rows.iter().map(|r| r.down_rate).sum();
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
-        let mut out = vec![tc::title("netwatch", w, &p.accent)];
+        let mut out = vec![tc::title_busy(
+            "netwatch",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         let mut placed_now: Vec<(usize, usize)> = Vec::new();
         // Held open. What this line has to say depends on how many rows fit,
         // which is not known until the chart above the table has been built -

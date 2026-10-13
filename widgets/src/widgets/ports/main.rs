@@ -1732,11 +1732,17 @@ fn detail_rows(
     p: &Palette,
     err: &str,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, Option<usize>) {
     // Which row the selected address came out on, so the caller can keep it
     // in view. Nothing when there are no addresses to pick between.
     let mut cursor = None;
-    let mut rows = vec![tc::title(&format!(":{}", row.port), w, &p.port)];
+    let mut rows = vec![tc::title_busy(
+        &format!(":{}", row.port),
+        w,
+        &p.port,
+        busy,
+    )];
     // Same banner as the list: a sampling failure that only appears there
     // leaves this screen presenting held rates as if they were still being
     // taken.
@@ -2136,8 +2142,11 @@ fn main() {
         traffic: Mutex::new(Traffic::default()),
         wake: (Mutex::new(false), Condvar::new()),
     });
+    let activity = tc::Refresh::default();
     let poller = Arc::clone(&store);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
+        let work = poller_activity.start();
         // A thread that dies takes its explanation with it, so the scan is
         // caught - but catching it is only half of the rule. It used to end
         // in `unwrap_or_default()`, which handed the table an empty list and
@@ -2213,6 +2222,7 @@ fn main() {
         // absence has been stored. Otherwise the UI can briefly turn the
         // pre-scan empty vector into a real-looking zero.
         poller.ready.store(true, Ordering::Release);
+        drop(work);
         let (lock, cond) = &poller.wake;
         let mut asked = match lock.lock() {
             Ok(g) => g,
@@ -2543,7 +2553,12 @@ fn main() {
 
         if !store.ready.load(Ordering::Acquire) {
             let rows = vec![
-                tc::title("dev servers", w, &ok.port),
+                tc::title_busy(
+                    "dev servers",
+                    w,
+                    &ok.port,
+                    activity.tick(tc::animation_tick()),
+                ),
                 tc::seg(
                     &[(ok.dim.as_str(), " scanning listening ports…".into())],
                     w - 1,
@@ -2596,6 +2611,7 @@ fn main() {
                 &ok,
                 &err,
                 &mut plots,
+                activity.tick(tc::animation_tick()),
             );
             let foot = footer(
                 &confirm,
@@ -2656,7 +2672,12 @@ fn main() {
         let off_box = all.iter().filter(|r| !r.exposed.is_empty()).count();
 
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("dev servers", w, &ok.port)];
+        let mut rows = vec![tc::title_busy(
+            "dev servers",
+            w,
+            &ok.port,
+            activity.tick(tc::animation_tick()),
+        )];
         rows.push(tc::seg(
             &[
                 (ok.dim.as_str(), format!(" {} listening", all.len())),
@@ -3552,6 +3573,7 @@ mod tests {
             &p,
             why,
             &mut plots,
+            None,
         );
         assert_eq!(plots.len(), 2);
         assert_eq!(plots[1].y, plots[0].y + 4);
@@ -3583,6 +3605,7 @@ mod tests {
             &p,
             "",
             &mut Vec::new(),
+            None,
         );
         let live = live.join("\n");
         assert!(!live.contains("traffic sampling failed"));

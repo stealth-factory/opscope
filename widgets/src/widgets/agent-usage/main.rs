@@ -2361,15 +2361,18 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(vendors::State::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_cfg = cfg.clone();
+    let poller_activity = activity.clone();
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
         let mut asked = false;
         loop {
+            let work = poller_activity.start();
             if asked {
                 caches.asked_at = now();
             }
@@ -2415,6 +2418,7 @@ fn main() {
                     return;
                 }
             }
+            drop(work);
             let (lock, cond) = &*poller_wake;
             let mut pressed = match lock.lock() {
                 Ok(g) => g,
@@ -2517,7 +2521,12 @@ fn main() {
             Ok(g) => g.clone(),
             Err(_) => return,
         };
-        let mut rows = vec![tc::title("agent usage", w, &p.agent)];
+        let mut rows = vec![tc::title_busy(
+            "agent usage",
+            w,
+            &p.agent,
+            activity.tick(tick),
+        )];
         // What discovery and config chose, and the strip drawn from it with
         // the unified plan folded in. The summary and the hidden count read
         // the first: a Cursor folded into SPACEXSI is not hidden, and its
