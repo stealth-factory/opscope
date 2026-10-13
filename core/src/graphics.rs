@@ -559,14 +559,17 @@ fn pixel_y(value: f64, height: usize) -> usize {
 
 /// Terminal row of a bottom-to-top chart fraction.
 ///
-/// The stroke is placed in a bitmap `rows * 16` pixels tall and that pixel
-/// falls into a cell. A four-row chart at 20% of peak ends on row 3;
-/// rounding against `rows - 1` puts a label on row 2.
+/// The stroke is placed in a bitmap `rows * cell_h` pixels tall, where
+/// `cell_h` is the terminal's cell height, and that pixel falls into a
+/// cell. A four-row chart at 20% of peak ends on row 3 when the cell is
+/// 16 pixels; rounding against `rows - 1` puts a label on row 2.
 pub fn line_row(value: f64, rows: usize) -> usize {
     if rows == 0 {
         return 0;
     }
-    pixel_y(value, rows.saturating_mul(CELL_H)) / CELL_H
+    let (_, cell_h) = super::terminal::cell_size();
+    let cell_h = cell_h.max(1);
+    pixel_y(value, rows.saturating_mul(cell_h)) / cell_h
 }
 
 fn segments(
