@@ -430,6 +430,10 @@ pub fn why_no_lane(d: &Data) -> String {
         return String::new();
     }
     if d.credits.as_ref().is_some_and(|c| c.is_empty()) {
+        // A weekly limit that failed beside it is the actionable half.
+        if let Some(fault) = quota_fault(d) {
+            return format!("no quota · {fault}");
+        }
         return "no quota · Perplexity answered, and published no credits for this account."
             .into();
     }
@@ -514,7 +518,25 @@ fn credit_rows_with_plots(
     }
     for lane in lanes(d) {
         let used = (lane.pct / 100.0).clamp(0.0, 1.0);
-        let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
+        let pct = (pct_colour(lane.pct, hue, p), pct_text(lane.pct));
+        let pace = pace_cell(
+            lead(lane.pct, lane.window_secs, lane.reset),
+            pace_guessed(lane.stale, lane.projected, lane.reset),
+            p,
+        );
+        // The figures are kept whole and the bar takes what is left, so a
+        // narrow pane shortens the bar rather than cutting a number.
+        let mut figures = label_w + 2 + tc::display_width(&pct.1) + tc::display_width(&pace.1);
+        // Too narrow for even a one-cell bar beside both: the pace goes to
+        // a row of its own under the bar.
+        let pace_below = figures + 1 > w - 1;
+        if pace_below {
+            figures -= tc::display_width(&pace.1);
+        }
+        let room = ((w as i64) - 38 - label_w as i64)
+            .max(8)
+            .min(w as i64 - 1 - figures as i64)
+            .max(1) as usize;
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
         line.extend(paced_bar_with_plot(
@@ -527,14 +549,17 @@ fn credit_rows_with_plots(
             hue,
             p,
         ));
-        line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
-        line.push(pace_cell(
-            lead(lane.pct, lane.window_secs, lane.reset),
-            pace_guessed(lane.stale, lane.projected, lane.reset),
-            p,
-        ));
+        line.push(pct);
+        let pace_row = match pace_below {
+            true => Some(tc::seg(&[(pace.0.as_str(), format!("  pace {}", pace.1.trim()))], w - 1)),
+            false => {
+                line.push(pace);
+                None
+            }
+        };
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
+        rows.extend(pace_row);
         let detail = match (lane.label.as_str(), c) {
             ("weekly", _) => weekly_detail(lane.reset),
             (label, Some(c)) => pool_detail(label, &lane, c),
@@ -1158,6 +1183,47 @@ mod tests {
         let d = Data::answered(CARRIED_OVER);
         let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
         assert!(!rows.contains("not read"), "{rows}");
+    }
+
+    #[test]
+    fn a_narrow_pane_shortens_the_bar_and_keeps_the_figures_whole() {
+        // Below thirty columns the bar kept eight cells and the pace figure
+        // was cut, so -100% read as -10.
+        let renews = now() + 86400.0 * 25.0;
+        let d = Data::answered(&answer(renews));
+        let lane = lanes(&d).into_iter().find(|l| l.label == "monthly").unwrap();
+        let pace = pace_cell(
+            lead(lane.pct, lane.window_secs, lane.reset),
+            pace_guessed(lane.stale, lane.projected, lane.reset),
+            &palette(),
+        )
+        .1;
+        assert!(!pace.trim().is_empty());
+        for w in 22usize..=40 {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            let lines: Vec<&str> = rows.lines().collect();
+            let at = lines.iter().position(|r| r.trim_start().starts_with("monthly")).unwrap();
+            let bar = lines[at];
+            for r in &lines {
+                assert!(tc::display_width(r) < w, "width {w}: {r:?}");
+            }
+            // Beside the bar, or on its own row under it when even a
+            // one-cell bar leaves no room - but never cut.
+            let below = format!("pace {}", pace.trim());
+            assert!(
+                bar.trim_end().ends_with(pace.trim()) || lines[at + 1].trim() == below,
+                "width {w}: {bar:?} / {:?} wants {pace:?}",
+                lines[at + 1]
+            );
+            assert!(bar.contains(&pct_text(lane.pct)), "width {w}: {bar:?}");
+        }
+    }
+
+    #[test]
+    fn the_summary_says_a_failed_weekly_limit_beside_an_empty_account() {
+        let mut d = Data::answered(r#"{"credit_grants":[],"total_usage_cents":0}"#);
+        d.quota_why = "weekly limit the request timed out".into();
+        assert!(why_no_lane(&d).contains("weekly limit not read"), "{}", why_no_lane(&d));
     }
 
     #[test]
