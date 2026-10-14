@@ -343,13 +343,15 @@ fn session_names_no_plan(body: &str) -> bool {
     })
 }
 
-/// A quota answer that is an object with no share used in it: a plan with
-/// no weekly limit (Max, it may be). It is a reading, so it is not said as a
-/// fault, where a timeout, an error status or a body that is not JSON is.
+/// A quota answer that names no share used: an empty object, or the
+/// quota's own fields set to null. That is a plan with no weekly limit (Max,
+/// it may be), a reading rather than a fault. Any other key - an error, or
+/// a share under a new name - is a changed answer, and is said as one.
 fn answers_no_weekly_limit(body: &str) -> bool {
+    const OWN: [&str; 4] = ["percent_used", "percentUsed", "reset_date", "resetDate"];
     serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
         v.as_object()
-            .is_some_and(|o| !o.contains_key("percent_used") && !o.contains_key("percentUsed"))
+            .is_some_and(|o| o.iter().all(|(k, v)| OWN.contains(&k.as_str()) && v.is_null()))
     })
 }
 
@@ -1298,7 +1300,13 @@ mod tests {
     fn a_weekly_limit_that_failed_is_said_and_a_plan_without_one_is_not() {
         // A timeout on the quota request looked exactly like a plan with no
         // weekly limit: the bar was simply not there.
-        assert!(answers_no_weekly_limit(r#"{"plan":"max"}"#));
+        assert!(answers_no_weekly_limit("{}"));
+        assert!(answers_no_weekly_limit(r#"{"percent_used":null,"reset_date":null}"#));
+        // An error object, or the share under a new name, is not a plan
+        // without a limit: the bar would vanish with nothing said.
+        assert!(!answers_no_weekly_limit(r#"{"plan":"max"}"#));
+        assert!(!answers_no_weekly_limit(r#"{"error":"unauthorised"}"#));
+        assert!(!answers_no_weekly_limit(r#"{"usage_percent":40}"#));
         assert!(!answers_no_weekly_limit(r#"{"percent_used":3}"#));
         assert!(!answers_no_weekly_limit("<html>bad gateway</html>"));
         let mut d = Data::answered(CARRIED_OVER);

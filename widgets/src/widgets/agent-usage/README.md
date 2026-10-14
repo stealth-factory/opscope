@@ -1509,8 +1509,9 @@ window to pace against, so neither has a pace.
   are not read. The weekly limit gives a share used and
   a reset, not the allowance's size, and is paced on the seven days before
   its reset. A plan with no weekly limit - which may be Max - answers none,
-  so a quota request that does not answer one leaves the bar out rather than
-  reporting a fault; a session that names no plan leaves the heading bare.
+  so a quota answer of an empty object, or of its own fields set to null,
+  leaves the bar out rather than reporting a fault; any other answer without
+  a share is said as a fault; a session that names no plan leaves the heading bare.
 - **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
   from perplexity.ai - developer tools, then Application (Storage in
   Firefox), then Cookies - into `perplexity_token` through the settings

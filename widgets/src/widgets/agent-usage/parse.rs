@@ -960,10 +960,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     if stated_this_period > left + 0.5 {
         return None;
     }
-    // Beside grants that do not say, a grant whose share of this period is
-    // unknown leaves nothing safe to spread: what the stated grants did not
-    // take is said as not drawn on a pool rather than put on one.
-    let split_unknown = share_unknown && unsaid > 0;
+    // Beside grants that do not say, or a grant of a type this widget does
+    // not know, a grant whose share of this period is unknown leaves nothing
+    // safe to spread: what the stated grants did not take is said as not
+    // drawn on a pool rather than put on one.
+    let split_unknown = share_unknown && (unsaid > 0 || out.unknown_grants > 0);
     left = (left - if split_unknown { stated_this_period } else { said_this_period }).max(0.0);
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
@@ -2329,6 +2330,14 @@ Period resets : 2026-10-06
         let c = parse_perplexity_credits(raw, 0.0).unwrap();
         assert_eq!(c.recurring.used, 100.0);
         assert_eq!(c.uncovered, 300.0);
+        // A known grant that says what is left but not what went before:
+        // its 50 spent may be from any period, so beside an unknown grant
+        // none of this period's 50 is taken as its.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100,"remaining_cents":50},
+            {"type":"mystery","amount_cents":900}],"total_usage_cents":50}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.recurring.used, 50.0);
+        assert_eq!(c.uncovered, 50.0);
     }
 
     #[test]
