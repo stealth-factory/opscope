@@ -989,7 +989,12 @@ pub fn parse_perplexity_plan(text: &str) -> Option<String> {
     }
     let mut chars = tier.chars();
     let mut plan: String = chars.next()?.to_uppercase().chain(chars).collect();
-    match user.get("subscription_status").and_then(|s| s.as_str()).map(str::trim) {
+    // A status that is there and not text is a changed answer, not an active plan.
+    let status = match user.get("subscription_status") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(s) => Some(s.as_str()?.trim()),
+    };
+    match status {
         None | Some("") | Some("active") => {}
         Some(status) => plan.push_str(&format!(" ({status})")),
     }
@@ -2125,6 +2130,12 @@ Period resets : 2026-10-06
         );
         assert_eq!(plan(r#"{"user":{"subscription_tier":null}}"#), None);
         assert_eq!(plan(r#"{}"#), None);
+        // A status that changed type is a changed answer, not an active plan.
+        assert_eq!(plan(r#"{"user":{"subscription_tier":"pro","subscription_status":1}}"#), None);
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"pro","subscription_status":null}}"#).as_deref(),
+            Some("Pro")
+        );
     }
 
     #[test]

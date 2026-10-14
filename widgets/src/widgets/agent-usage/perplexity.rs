@@ -619,7 +619,15 @@ fn credit_rows_with_plots(
             }
         };
         let pace_row = match pace_below {
-            true => Some(tc::seg(&[(pace.0.as_str(), format!("  pace {}", pace.1.trim()))], w - 1)),
+            // The word goes on a row of its own when it and the figure do
+            // not fit together, so the figure is never the part cut.
+            true if 2 + 5 + tc::display_width(pace.1.trim()) > w - 1 => Some(
+                ["  pace".to_string(), format!("  {}", pace.1.trim())]
+                    .into_iter()
+                    .map(|t| tc::seg(&[(pace.0.as_str(), t)], w - 1))
+                    .collect::<Vec<_>>(),
+            ),
+            true => Some(vec![tc::seg(&[(pace.0.as_str(), format!("  pace {}", pace.1.trim()))], w - 1)]),
             false => {
                 line.push(pace);
                 None
@@ -628,7 +636,7 @@ fn credit_rows_with_plots(
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
         rows.extend(pct_row);
-        rows.extend(pace_row);
+        rows.extend(pace_row.into_iter().flatten());
         let detail = match (lane.label.as_str(), c) {
             ("weekly", _) => weekly_detail(lane.reset),
             (label, Some(c)) => pool_detail(label, &lane, c),
@@ -1318,6 +1326,14 @@ mod tests {
                 "width {w}: {bar:?} / {:?} wants {share:?}",
                 lines[at + 1]
             );
+        }
+        // Down to the narrowest pane there is, the label may be cut but the
+        // share and the pace each still stand whole on a row.
+        for w in 8usize..12 {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            let lines: Vec<&str> = rows.lines().map(str::trim).collect();
+            assert!(lines.contains(&pct_text(lane.pct).trim()), "width {w}: {rows}");
+            assert!(lines.contains(&pace.trim()), "width {w}: {rows}");
         }
     }
 
