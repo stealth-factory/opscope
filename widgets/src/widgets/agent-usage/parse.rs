@@ -1091,8 +1091,9 @@ pub fn parse_perplexity_quota(text: &str) -> Option<PerplexityQuota> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let v = v.as_object()?;
     let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
-    // Over 100 is what the server said and is drawn as said; under 0 is no reading.
-    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite() && *n >= 0.0)?;
+    // Over 100 is what the server said and is drawn as said; under 0 is no
+    // reading, and so is a share past 9999%, which no pane draws whole.
+    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite() && (0.0..10_000.0).contains(n))?;
     let resets = match field("reset_date", "resetDate") {
         None | Some(serde_json::Value::Null) => None,
         Some(x) => Some(chrono::DateTime::parse_from_rfc3339(x.as_str()?).ok()?.timestamp() as f64),
@@ -2212,6 +2213,9 @@ Period resets : 2026-10-06
         // Over the limit is kept as sent; a negative share is no reading.
         assert_eq!(parse_perplexity_quota(r#"{"percent_used":120}"#).unwrap().pct, 120.0);
         assert!(parse_perplexity_quota(r#"{"percent_used":-5}"#).is_none());
+        // A share too large to draw whole was clipped to a different one.
+        assert!(parse_perplexity_quota(r#"{"percent_used":1e300}"#).is_none());
+        assert_eq!(parse_perplexity_quota(r#"{"percent_used":9999}"#).unwrap().pct, 9999.0);
     }
 
     #[test]
