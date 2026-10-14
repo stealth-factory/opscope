@@ -41,15 +41,19 @@ const AUTH: &str = ".grok/auth.json";
 const QUOTA_TIMEOUT: u64 = 6;
 /// The CLI, whose only job here is to refresh the token it owns.
 const CLI: &str = ".grok/bin/grok";
-/// Cache key for the billing reading.
-const PING_KEY: &str = "grok:billing";
+/// Cache key for the billing reading, per signed-in account: a reading
+/// held for one account must not answer for another, whose plan markers
+/// and window would then decide where SpaceXSI is drawn.
+fn ping_key(account: Option<&str>) -> String {
+    format!("grok:billing:{}", account.unwrap_or_default())
+}
 /// Cache key for the last session-end refresh, so one ending refreshes once.
 const SEEN_KEY: &str = "grok:session-seen";
 /// Cache key for the last expiry a refresh was attempted against, and
 /// whether that attempt was made before or after the lapse.
 const EXPIRY_KEY: &str = "grok:token-expiry";
 /// Cache key for the last reading the server actually gave, kept apart
-/// from `PING_KEY` because that slot is overwritten by every refusal and
+/// from `ping_key` because that slot is overwritten by every refusal and
 /// emptied by every token refresh. This one only ever holds a success,
 /// tagged with the token's account so a sign-in as someone else does not
 /// keep showing the previous account's figure.
@@ -214,7 +218,13 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
         // Unified-billing accounts omit `creditUsagePercent` entirely, so
         // the paid-allowance keys have to count on their own or a valid
         // on-demand lane never leaves the log.
-        if !line.contains("creditUsagePercent") && !line.contains("onDemandCap") {
+        // Unified-plan lines can carry neither - nought usage is omitted,
+        // and the plan has no x.ai cap - so its own keys admit a line too.
+        if !line.contains("creditUsagePercent")
+            && !line.contains("onDemandCap")
+            && !line.contains("prepaidBalance")
+            && !line.contains("isUnifiedBillingUser")
+        {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -277,6 +287,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
     let account = token_account();
+    let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
     let key = match usable_token() {
@@ -292,22 +303,22 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                 why
             };
             // "polled x.ai" is when we last asked, not when a success
-            // last landed. A failed poll still updates PING_KEY; a
+            // last landed. A failed poll still updates the ping slot; a
             // refresh that has just run clears it, and then the last
             // live reading's time is what remains.
             let at = caches
                 .live
-                .get(PING_KEY)
+                .get(&ping)
                 .map(|(when, _, _)| *when)
                 .unwrap_or(held_at);
             return (fresher(held, from_log()), false, at, why);
         }
     };
     let ttl = ping_ttl(cfg.grok_ping_minutes);
-    let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
+    let got = cached(caches, &ping, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
-    let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
+    let at = caches.live.get(&ping).map(|(when, _, _)| *when).unwrap_or(0.0);
     match got.as_ref() {
         None => (
             fresher(held, from_log()),
@@ -535,7 +546,7 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
             f64::MAX,
         ),
     );
-    caches.live.remove(PING_KEY);
+    caches.live.remove(&ping_key(token_account().as_deref()));
 }
 
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
@@ -626,7 +637,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             );
             // The token is new, so the reading held from before it is not
             // the best one available any more.
-            caches.live.remove(PING_KEY);
+            caches.live.remove(&ping_key(token_account().as_deref()));
         }
     }
     // One read, one spawn. The expiry helper re-reads auth.json, so a
@@ -707,6 +718,12 @@ fn parse_token_account(raw: &str) -> Option<String> {
             })
             .map(|(k, _)| k.clone())
     })
+}
+
+/// Which Grok account is signed in here, for scoping what is remembered
+/// about it between polls.
+pub fn account_id() -> Option<String> {
+    token_account()
 }
 
 fn token_account() -> Option<String> {
@@ -909,6 +926,17 @@ fn unified_markers(cfg: &serde_json::Value) -> bool {
             .is_some_and(|list| list.iter().any(|e| text(e, "product") == "GrokBot"))
 }
 
+/// Whether the reading on hand is the server's, and recent: asked just now
+/// rather than read back from the log, not older than the window that
+/// judges a reading current, and of a week that has not yet ended - a
+/// cached answer can outlive its reset, and its split is last week's.
+pub fn reading_is_current(d: &Data) -> bool {
+    d.quota_live
+        && d.quota.as_ref().is_some_and(|q| {
+            !reading_is_old(q.taken) && iso_epoch(&q.end).is_none_or(|end| end > now())
+        })
+}
+
 /// Whether this reading says the account is on the unified plan.
 pub fn unified(d: &Data) -> bool {
     d.quota.as_ref().is_some_and(|q| q.unified)
@@ -916,12 +944,49 @@ pub fn unified(d: &Data) -> bool {
 
 /// The credit window, as (start, end) in epoch milliseconds - the
 /// fingerprint `vendors::link_spacexsi` matches against Cursor's pool.
+///
+/// A reading may describe a week that has since rolled over - a log line,
+/// or a live answer still held in the poll cache across the reset - so a
+/// window that has ended is projected onto the current week the way the
+/// lanes project it, or the same account's two windows could never match
+/// after a reset. A window still running is taken as sent.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     let q = d.quota.as_ref()?;
-    match (iso_epoch(&q.start), iso_epoch(&q.end)) {
-        (Some(s), Some(e)) if e > s => Some((s * 1000.0, e * 1000.0)),
-        _ => None,
+    let (s, e) = match (iso_epoch(&q.start), iso_epoch(&q.end)) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return None,
+    };
+    match window_now(Some(s), Some(e), now()) {
+        (Some(end), true) => Some(((end - (e - s)) * 1000.0, end * 1000.0)),
+        _ => Some((s * 1000.0, e * 1000.0)),
     }
+}
+
+/// The week split by product, one `name ~pct` entry after another, each
+/// entry whole: an entry that does not fit carries on to the next row,
+/// under the first, rather than be cut and lose its percentage.
+fn by_product_rows(entries: Vec<String>, w: usize, p: &Palette) -> Vec<String> {
+    // Later rows sit under the first entry, or at a short indent where an
+    // entry would not fit even there.
+    let head = "  by product ";
+    let under = " ".repeat(head.chars().count());
+    let short = "    ";
+    let room = |lead: &str| w.saturating_sub(1).saturating_sub(lead.chars().count()).max(1);
+    let mut lines: Vec<(String, String)> = vec![(head.to_string(), String::new())];
+    for entry in entries {
+        let (lead, last) = lines.last_mut().unwrap();
+        let joined = if last.is_empty() { entry.clone() } else { format!("{last} · {entry}") };
+        if last.is_empty() || joined.chars().count() <= room(lead) {
+            *last = joined;
+        } else {
+            let lead = if entry.chars().count() <= room(&under) { under.clone() } else { short.to_string() };
+            lines.push((lead, entry));
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(lead, text)| tc::seg(&[(p.dim.as_str(), lead), (p.txt.as_str(), text)], w - 1))
+        .collect()
 }
 
 /// A product as the split names it on screen.
@@ -1011,9 +1076,18 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         // token.
         //
         // So nought is the real reading and not a guess, which is the only
-        // reason it may be drawn. A period this cannot parse is still
-        // unknown, and still refused above.
-        pct: Some(val_of(&cfg["creditUsagePercent"]).unwrap_or(0.0)),
+        // reason it may be drawn - and only while nothing in the same answer
+        // says otherwise. An omitted total beside a product that reports
+        // use is not nought: it is a total the answer did not give, and
+        // drawing 0% there invents a reading against the evidence in the
+        // same response. That is unknown, the same as a total never sent.
+        // A period this cannot parse is still unknown, and still refused
+        // above.
+        pct: match val_of(&cfg["creditUsagePercent"]) {
+            Some(v) => Some(v),
+            None if products_of(cfg).iter().any(|(_, used)| *used > 0.0) => None,
+            None => Some(0.0),
+        },
         products: products_of(cfg),
         taken: Some(now()),
         kind: text(period, "type"),
@@ -1061,8 +1135,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
     // A live reading is of the window we are in, so there is nothing to roll
-    // forward and nothing to qualify. Only the log needs either.
-    let (reset, projected) = if d.quota_live {
+    // forward and nothing to qualify - until that window ends while the
+    // answer is still held in the poll cache, when it is last week's figure
+    // as much as a log line is, and is rolled and qualified the same way.
+    let (reset, projected) = if d.quota_live && end.is_none_or(|e| e > now()) {
         (end, false)
     } else {
         window_now(begin, end, now())
@@ -1283,20 +1359,6 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
 }
 
 fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    grok_body_with_plots(d, w, p, plots, true)
-}
-
-/// Grok's half of the merged SpaceXSI tab: what this machine recorded,
-/// without the credit window, which that tab draws once above both
-/// products from Cursor's live reading.
-///
-/// The week's split by product is not here: it describes the pool, so the
-/// merged tab draws it under the pool's bar, from `pool_split`.
-pub fn details_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    grok_body_with_plots(d, w, p, plots, false)
-}
-
-fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, quota: bool) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
     // Not filtered on the percentage any more. A reading that names the
@@ -1305,9 +1367,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // goes blank and a reader cannot tell an account with no quota from a
     // widget that has stopped working. The window, the countdown and the
     // reason are all still true; only the bar needs a number.
-    if !quota {
-        // Drawn above both products on the merged tab.
-    } else if let Some(q) = d.quota.as_ref() {
+    if let Some(q) = d.quota.as_ref() {
         // The one real remaining-quota figure in this widget: everything
         // else here counts what was spent. It leads the tab for that
         // reason.
@@ -1315,7 +1375,9 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
         // The window we are in, not the one the reading came from - the
         // heading used the raw end, so a rolled window lost its countdown
         // here while the summary still had one. Two screens, one answer.
-        let (current, rolled) = if d.quota_live {
+        // A live answer still held after its week ended is rolled too, as
+        // the summary rolls it.
+        let (current, rolled) = if d.quota_live && end.is_none_or(|e| e > now()) {
             (end, false)
         } else {
             window_now(begin, end, now())
@@ -1491,30 +1553,16 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
             // unnamed; named and said for what it is.
             let split = pool_split(d);
             if !split.is_empty() {
-                let text = split
-                    .iter()
-                    .map(|(name, pct)| format!("{} ~{:.0}%", name, pct))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                rows.push(tc::seg(
-                    &[(p.dim.as_str(), "  by product ".into()), (p.txt.as_str(), text)],
-                    w - 1,
-                ));
+                let entries = split.iter().map(|(name, pct)| format!("{} ~{:.0}%", name, pct)).collect();
+                rows.extend(by_product_rows(entries, w, p));
             }
         } else if !q.products.is_empty() {
-            let split = q
+            let entries = q
                 .products
                 .iter()
                 .map(|(name, pct)| format!("{} {}", product_name(name, false), pct_text(*pct).trim()))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            rows.push(tc::seg(
-                &[
-                    (p.dim.as_str(), "  by product ".into()),
-                    (p.txt.as_str(), split),
-                ],
-                w - 1,
-            ));
+                .collect();
+            rows.extend(by_product_rows(entries, w, p));
         }
         rows.push(String::new());
     } else {
@@ -1525,6 +1573,12 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
         }
     }
 
+    // SpaceXSI is drawn from the account's own figures only: the session
+    // totals below are this machine's transcripts, one machine's share of
+    // an account-wide plan.
+    if d.spacexsi.unified() {
+        return rows;
+    }
     // Everything below counts what this machine recorded, so it stops here
     // when there is nothing recorded - but the quota above has already been
     // drawn, because it is a fact about the account rather than the disk.
@@ -1608,7 +1662,7 @@ fn grok_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plo
     // which of the two routes it took is a different sentence, and the note
     // named only the log for as long as the log was the only route that
     // ever produced one.
-    if d.quota.is_some() && quota {
+    if d.quota.is_some() {
         note.push_str(if d.quota_live {
             " The quota above is the server's own figure, asked for directly - not inferred."
         } else {
@@ -1879,10 +1933,18 @@ mod tests {
         // being discarded and an eleven-day-old log line shown instead.
         let base = newest_quota([LOG_LINE].into_iter()).expect("a reading");
 
-        // Taken a minute ago: current, and its window is the one we are in.
+        // Taken a minute ago: current, and its window is the one we are in -
+        // a live answer is of the week it was asked in, so the log line's
+        // week is moved to end after now.
+        let live_end = "2099-08-17T00:00:00.000000+00:00";
         let d = Data {
             ok: true,
-            quota: Some(Quota { taken: Some(now() - 60.0), ..base.clone() }),
+            quota: Some(Quota {
+                taken: Some(now() - 60.0),
+                start: "2099-08-10T00:00:00.000000+00:00".into(),
+                end: live_end.into(),
+                ..base.clone()
+            }),
             quota_live: true,
             ..Default::default()
         };
@@ -1894,7 +1956,7 @@ mod tests {
         assert!(got.iter().all(|l| !l.projected), "a live window was read, not worked out");
         assert_eq!(
             got[0].reset,
-            iso_epoch("2026-08-17T00:00:00.000000+00:00"),
+            iso_epoch(live_end),
             "a live window is reported as the server gave it, not rolled"
         );
 
@@ -2143,13 +2205,24 @@ mod tests {
             },
             "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
             "productUsage": [
-                {"product": "GrokBuild", "usagePercent": 1.0},
+                {"product": "GrokBuild"},
                 {"product": "GrokChat"},
                 {"product": "GrokImagine"}
             ],
         }});
         let q = quota_from(&body).expect("a named period is a reading");
         assert_eq!(q.pct, Some(0.0), "an omitted default read as unknown");
+
+        // But not when the same answer shows use. This fixture once had
+        // GrokBuild at 1.0 beside the omitted total and called the total
+        // nought - a total of 0% over a product at 1% contradicts itself,
+        // and the endpoint has not been seen to send it (it answers 10.0
+        // beside 5.0 and 5.0). Review flagged the 0% as fabricated; it is
+        // unknown, the same as a total never sent.
+        let mut used = body.clone();
+        used["config"]["productUsage"][0] = serde_json::json!({"product": "GrokBuild", "usagePercent": 1.0});
+        let q = quota_from(&used).expect("still a reading of the period");
+        assert_eq!(q.pct, None, "a total invented against the product beside it");
         assert_eq!(q.start, "2026-08-26T02:09:41.289406+00:00");
         assert!(q.taken.is_some(), "a live reading knows when it was taken");
 
@@ -2699,6 +2772,154 @@ mod tests {
     }
 
     #[test]
+    fn a_spacexsi_grok_tab_draws_no_local_session_data() {
+        let mut d = Data::unified_fixture();
+        d.spacexsi = Spacexsi::Alone;
+        let text = tab(&d, 120, 24, &Config::default(), &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("SpaceXSI"), "{text}");
+        for local in ["TOTALS", "TOKENS / DAY", "session files"] {
+            assert!(!text.contains(local), "local data {local:?} under SpaceXSI: {text}");
+        }
+        // Its own plan still draws them.
+        d.spacexsi = Spacexsi::No;
+        let own = tab(&d, 120, 24, &Config::default(), &palette()).join("\n");
+        assert!(own.contains("TOTALS") && own.contains("TOKENS / DAY"), "{own}");
+    }
+
+    #[test]
+    fn a_just_reset_unified_log_line_still_reaches_the_reader() {
+        // Review: nought usage omits creditUsagePercent and the unified plan
+        // has no onDemandCap, so the line was skipped before it was parsed.
+        let line = concat!(
+            r#"{"ts":"2026-10-13T02:40:00.000Z","ctx":{"config":{"#,
+            r#""currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-13T02:39:23.429+00:00","end":"2026-10-20T02:39:23.429+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"prepaidBalance":{"val":2000}}}}"#
+        );
+        let q = newest_quota([line].into_iter()).expect("the line was skipped");
+        assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
+        assert_eq!(q.prepaid, Some(20.0));
+    }
+
+    #[test]
+    fn the_product_split_wraps_whole_entries_on_a_narrow_pane() {
+        // Review: one joined row let `seg` clip `Grok Bot ~2%` off a
+        // 26-column pane.
+        let entries = vec!["Cursor ~3%".to_string(), "Grok Bot ~2%".to_string(), "Grok Imagine ~1%".to_string()];
+        for w in [26usize, 40, 120] {
+            let rows: Vec<String> = by_product_rows(entries.clone(), w, &palette()).iter().map(|r| strip(r)).collect();
+            let text = rows.join("\n");
+            for entry in &entries {
+                assert!(text.contains(entry.as_str()), "{entry:?} cut at {w}: {text}");
+            }
+            for row in &rows {
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+        assert_eq!(by_product_rows(entries, 120, &palette()).len(), 1, "a wide pane keeps one row");
+    }
+
+    #[test]
+    fn a_cached_live_answer_past_its_reset_is_projected_like_a_log_line() {
+        // Review: a live answer held across the weekly reset kept last
+        // week's figure as an unqualified current lane in [+].
+        let mut d = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        let begun = chrono::DateTime::from_timestamp((now() - 60.0 - 7.0 * 86400.0) as i64, 0).unwrap();
+        let q = d.quota.as_mut().unwrap();
+        q.start = begun.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        q.end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        let lane = lanes(&d).into_iter().next().expect("a lane");
+        assert!(lane.projected, "last week's figure drawn as this week's");
+        assert!(lane.reset.unwrap() > now(), "the reset left in the past");
+        // Review: the tab's heading rolls it the same way, so its countdown
+        // is to the reset coming rather than gone.
+        let tab = tab_with_plots(&d, 120, 40, &Config::default(), &palette(), &mut Vec::new())
+            .iter()
+            .map(|r| strip(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tab.contains("resets in ~"), "{tab}");
+        // A live answer of the week we are in is taken as sent.
+        assert!(!lanes(&unified_grok(Spacexsi::Shared))[0].projected);
+    }
+
+    #[test]
+    fn only_a_live_recent_reading_is_current() {
+        // Review: a split from a request that has since failed was drawn
+        // under Cursor's `live` heading.
+        let d = unified_grok(Spacexsi::Shared);
+        assert!(reading_is_current(&d));
+        let log = Data { quota_live: false, ..unified_grok(Spacexsi::Shared) };
+        assert!(!reading_is_current(&log), "a log reading");
+        let mut old = unified_grok(Spacexsi::Shared);
+        old.quota.as_mut().unwrap().taken = Some(now() - GROK_FRESH_FOR - 60.0);
+        assert!(!reading_is_current(&old), "an old reading");
+        // Review: a fresh answer held in the cache past its week's reset.
+        let mut ended = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        ended.quota.as_mut().unwrap().end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        assert!(!reading_is_current(&ended), "a week that has ended");
+    }
+
+    #[test]
+    fn an_omitted_total_beside_a_product_in_use_is_unknown_not_nought() {
+        // Review (P1): proto3 omits a total at nought, but a total omitted
+        // while a product reports use is a total the answer did not give.
+        let period = serde_json::json!({
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-10-13T02:39:23.429+00:00", "end": "2026-10-20T02:39:23.429+00:00"
+        });
+        let used = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild", "usagePercent": 1.0}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&used).unwrap().pct, None, "a fabricated 0%");
+        // Nothing reports use: nought is the real reading, as before.
+        let idle = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild"}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&idle).unwrap().pct, Some(0.0));
+        // And no lane is drawn for an unknown total.
+        let d = Data { quota: quota_from(&used), quota_live: true, spacexsi: Spacexsi::Alone, ..Data::default() };
+        assert!(lanes(&d).is_empty(), "a lane for an unknown total");
+    }
+
+    #[test]
+    fn a_stale_window_is_rolled_onto_this_week_before_it_is_matched() {
+        // Review: an old reading's window was compared as recorded, so it
+        // could never match the same account's current Cursor window.
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp_millis((at * 1000.0) as i64)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+                .to_string()
+        };
+        let week = 7.0 * 86400.0;
+        let (start, end) = (now() - 2.5 * week, now() - 1.5 * week);
+        let mut d = unified_grok(Spacexsi::Shared);
+        d.quota_live = false;
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(start);
+        q.end = stamp(end);
+        let (s, e) = pool_window(&d).expect("a window");
+        assert!((e - s - week * 1000.0).abs() < 1.0, "the week's length kept");
+        assert!(s / 1000.0 <= now() && now() < e / 1000.0, "rolled onto the week we are in");
+        assert!(((e / 1000.0 - end) / week - 2.0).abs() < 1e-6, "rolled by whole weeks");
+        // Review: a live answer held in the poll cache can outlast its
+        // week too, and rolls the same way.
+        d.quota_live = true;
+        assert_eq!(pool_window(&d), Some((s, e)));
+        // A window still running is taken as sent.
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(now() - 0.5 * week);
+        q.end = stamp(now() + 0.5 * week);
+        let (s, e) = pool_window(&d).unwrap();
+        assert!((s / 1000.0 - (now() - 0.5 * week)).abs() < 1.0 && (e / 1000.0 - (now() + 0.5 * week)).abs() < 1.0);
+    }
+
+    #[test]
     fn the_unified_lane_is_named_as_cursor_names_the_pool() {
         let labels = |place| lanes(&unified_grok(place)).into_iter().map(|l| l.label).collect::<Vec<_>>();
         assert_eq!(labels(Spacexsi::Alone), ["weekly pool"]);
@@ -2723,7 +2944,24 @@ mod tests {
 #[cfg(test)]
 impl Data {
     pub fn unified_fixture() -> Data {
-        tests::unified_grok(Spacexsi::No)
+        // With sessions on this machine, so a test can see what the merged
+        // tab does with them.
+        Data {
+            ok: true,
+            sessions: 2,
+            files: 2,
+            total: 1_000.0,
+            daily: HashMap::from([(Local::now().date_naive(), 1_000.0)]),
+            last: now(),
+            ..tests::unified_grok(Spacexsi::No)
+        }
+    }
+
+    /// The same reading with nothing polling x.ai - a log figure.
+    pub fn polling_nobody(mut d: Data) -> Data {
+        d.quota_every = 0.0;
+        d.quota_live = false;
+        d
     }
 
     pub fn own_plan_fixture() -> Data {

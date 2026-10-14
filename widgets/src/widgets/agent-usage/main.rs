@@ -47,7 +47,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "1 Oct 2026";
+const LIST_RATES_AS_OF: &str = "14 Oct 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -279,14 +279,14 @@ const LIST_RATES: tc::Catalogue = &[
         &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
     ),
     (
-        // claude-sonnet-5 is a prefix of this id. The published five match
-        // Sonnet 5 today, so inheriting would bill the same number, and the
-        // row is still its own: a later move of one model must not reprice
-        // the other. Fast mode is not offered. The full 1M window bills at
+        // claude-sonnet-5 is a prefix of this id. Four of the five match
+        // Sonnet 5; cache reads are 0.05x input, $0.10 against Sonnet 5's
+        // $0.20, the footnote Opus 5.5 shares. Inheriting would double every
+        // cache read. Fast mode is not offered. The full 1M window bills at
         // these rates; there is no long-context column.
         "claude-sonnet-5-5",
         "Anthropic",
-        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
+        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.10), ("cache_write_1h", 4.0)],
     ),
     (
         "claude-sonnet-5",
@@ -340,9 +340,20 @@ const LIST_RATES: tc::Catalogue = &[
     ("grok-4.20-0309-non-reasoning", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-4.20-multi-agent-0309", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-build-0.1", "xAI", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.20)]),
-    // Google bills context caching by storage - dollars per million tokens
-    // per *hour* - which is not a per-request cache write and is deliberately
-    // not carried here. Pricing it as one would invent a number.
+    // Google bills explicit context caching by storage - dollars per million
+    // tokens per *hour* - which is not a per-request cache write and is
+    // deliberately not carried here. Pricing it as one would invent a number.
+    //
+    // gemini-4-argon's row is an INTRODUCTORY price through 30 November 2026:
+    // 2.0 / 10.0 / 0.10, doubling to 4.0 / 20.0 / 0.20 on 1 December 2026.
+    // Explicit caching (and therefore hourly storage) is not supported on
+    // this model; implicit caching is on by default and discounts cached
+    // input to 0.05x input ($0.10 today, $0.20 from 1 December 2026). The
+    // full 1M context window bills at these rates with no long-context tier.
+    // As with gemini-3.8-flash below, no existing key is a substring of
+    // "gemini-4-argon", so without this row its tokens resolve to None and
+    // cost zero.
+    ("gemini-4-argon", "Google", &[("input", 2.0), ("output", 10.0), ("cache_read", 0.10)]),
     //
     // gemini-3.8-flash's row is an INTRODUCTORY price and the page dates its
     // own end: 0.75 / 3.75 / 0.075 through 31 December 2026, doubling to
@@ -382,6 +393,8 @@ const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
 #[allow(dead_code)]
 const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
+/// SpaceXSI's activity calendar, in the plan's greyscale.
+const SPACEXSI_STEPS: [(u8, u8, u8); 4] = [(62, 62, 62), (110, 110, 110), (165, 165, 165), (225, 225, 225)];
 #[allow(dead_code)]
 const CURSOR_STEPS: [(u8, u8, u8); 4] =
     [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
@@ -406,11 +419,14 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "notion" => (232, 226, 212),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
-        // The unified Cursor and Grok plan. The brand is monochrome, and
-        // its black is unreadable on a dark pane (1.0 to 1.75 against the
-        // backgrounds here), so this is its white: neutral, with none of
-        // Codex's blue in it. 10.14 on the selected-row tint, 17.78 on black.
-        "spacexsi" => (236, 236, 236),
+        // The unified Cursor and Grok plan, in greyscale: the brand is
+        // monochrome, and its black is unreadable on a dark pane (1.0 to
+        // 1.75 against the backgrounds here). A mid grey rather than white,
+        // because bars ramp this hue toward white - from white there is
+        // nothing left to ramp and the bar draws flat. From here it runs
+        // about 174 to 217. Neutral, with none of Codex's blue in it; 4.6 on
+        // the selected-row tint and 8.03 on black as text.
+        "spacexsi" => (160, 160, 160),
         _ => return None,
     })
 }
@@ -418,6 +434,11 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
 /// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
 /// only the directory's basename, uppercased like every other tab.
 fn tab_title(name: &str) -> String {
+    // Two unified accounts each get a tab, named for the product that
+    // reported it - the internal `spacexsi:cursor` is for dispatch only.
+    if let Some(product) = name.strip_prefix("spacexsi:") {
+        return format!("SPACEXSI·{}", product.to_uppercase());
+    }
     match name.strip_prefix("claude:") {
         Some(label) => label.to_uppercase(),
         None => name.to_uppercase(),
@@ -1048,25 +1069,74 @@ fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &
 
 /// Suffix Codex appends when a rollout's `service_tier` is Fast.
 ///
-/// The row has to say so: a 2× total on the bare model id reads as Standard.
+/// The row has to say so: a Fast total on the bare model id reads as Standard.
 pub(crate) const CODEX_TIER_FAST: &str = " · Fast";
 /// Suffix Codex appends when a rollout's `service_tier` is Ultrafast.
 ///
-/// Published for `gpt-6-astra` only. A 6× Astra total on the bare id reads
-/// as Standard.
+/// Only attached for a model in `SPEED_TIERS` with an Ultrafast price. A 6×
+/// total on the bare id reads as Standard.
 pub(crate) const CODEX_TIER_ULTRAFAST: &str = " · Ultrafast";
 
-/// The model id without a Codex speed suffix, and the published API
-/// multiplier that suffix names.
+/// Fast multiplier for a model the table below does not name.
+const FAST_MULTIPLIER: f64 = 2.0;
+
+/// OpenAI's published speed tiers, as multiples of the standard
+/// short-context row: `(LIST_RATES key, Fast, Ultrafast)`.
 ///
-/// Fast is 2× the standard short-context row. Ultrafast is 6×. The suffix
-/// is only present when that multiplier was applied, so stripping it and
-/// scaling is the whole bill. An id with neither suffix is the standard row.
+/// Fast is 2× for most models and needs no line. These are the rows the
+/// Fast table prices at another ratio, and the only models with an
+/// Ultrafast price at all — every kind on a published row moves by the same
+/// factor, so one number per tier is the whole row. Each is the published
+/// Fast input over the standard input; the fractions are written out where
+/// the decimal does not terminate. A key matches its exact id or a dated
+/// snapshot of it, never a longer name: `o3-mini` is not `o3`.
+const SPEED_TIERS: &[(&str, f64, Option<f64>)] = &[
+    ("gpt-6-astra", 2.0, Some(6.0)),
+    ("gpt-6.1-sol", 2.0, Some(6.0)),
+    ("gpt-5.5", 2.5, None),
+    ("gpt-5-mini", 1.8, None),
+    ("gpt-4.1-mini", 1.75, None),
+    ("gpt-4.1", 1.75, None),
+    ("gpt-4o-mini", 0.25 / 0.15, None),
+    ("gpt-4o", 1.7, None),
+    ("o4-mini", 2.0 / 1.1, None),
+    ("o3", 1.75, None),
+];
+
+/// The `SPEED_TIERS` line for a model: its key exactly, or the key followed
+/// by `-` and a digit, which is how a dated snapshot is named.
+fn speed_tier(model: &str) -> Option<&'static (&'static str, f64, Option<f64>)> {
+    SPEED_TIERS.iter().find(|(key, _, _)| {
+        model == *key
+            || model
+                .strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
+/// The published Fast multiplier for a bare model id.
+fn fast_multiplier(model: &str) -> f64 {
+    speed_tier(model).map_or(FAST_MULTIPLIER, |(_, fast, _)| *fast)
+}
+
+/// The published Ultrafast multiplier, or `None` where OpenAI publishes no
+/// Ultrafast price and the meter must not invent one.
+pub(crate) fn ultrafast_multiplier(model: &str) -> Option<f64> {
+    speed_tier(model).and_then(|(_, _, ultra)| *ultra)
+}
+
+/// The model id without a Codex speed suffix, and the published API
+/// multiplier that suffix names for that model.
+///
+/// The suffix is only present when a published multiplier applies, so
+/// stripping it and scaling is the whole bill. An id with neither suffix is
+/// the standard row.
 fn split_codex_tier(model: &str) -> (&str, f64) {
     if let Some(base) = model.strip_suffix(CODEX_TIER_ULTRAFAST) {
-        (base, 6.0)
+        (base, ultrafast_multiplier(base).unwrap_or(1.0))
     } else if let Some(base) = model.strip_suffix(CODEX_TIER_FAST) {
-        (base, 2.0)
+        (base, fast_multiplier(base))
     } else {
         (model, 1.0)
     }
@@ -2324,8 +2394,8 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
+                (p.txt.as_str(), " reading usage".into()),
                 (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
-                (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
         ),
@@ -2361,15 +2431,18 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(vendors::State::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_cfg = cfg.clone();
+    let poller_activity = activity.clone();
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
         let mut asked = false;
         loop {
+            let work = poller_activity.start();
             if asked {
                 caches.asked_at = now();
             }
@@ -2415,6 +2488,7 @@ fn main() {
                     return;
                 }
             }
+            drop(work);
             let (lock, cond) = &*poller_wake;
             let mut pressed = match lock.lock() {
                 Ok(g) => g,
@@ -2438,6 +2512,10 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let mut active = 0i64;
+    // The strip the selection was made on. When the unified plan folds or
+    // unfolds tabs between frames, the selection is carried by name rather
+    // than position, or a read landing could move it to another agent.
+    let mut last_tabs: Vec<String> = Vec::new();
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
     let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
@@ -2517,13 +2595,25 @@ fn main() {
             Ok(g) => g.clone(),
             Err(_) => return,
         };
-        let mut rows = vec![tc::title("agent usage", w, &p.agent)];
+        let mut rows = vec![tc::title_busy(
+            "agent usage",
+            w,
+            &p.agent,
+            activity.tick(tick),
+        )];
         // What discovery and config chose, and the strip drawn from it with
         // the unified plan folded in. The summary and the hidden count read
         // the first: a Cursor folded into SPACEXSI is not hidden, and its
         // lanes still belong on [+].
         let listed = visible_agents(&snapshot.installed, &cfg);
         let tabs = vendors::spacexsi_tabs(&listed, &snapshot);
+        if !last_tabs.is_empty() && last_tabs != tabs {
+            let was = &last_tabs[step_tab(active, 0, last_tabs.len())];
+            if let Some(i) = vendors::retarget_tab(was, &tabs) {
+                active = i as i64;
+            }
+        }
+        last_tabs = tabs.clone();
         let at = step_tab(active, 0, tabs.len());
         active = at as i64;
         let name = tabs[at].clone();
@@ -2907,6 +2997,24 @@ mod tests {
                 tc::display_width(&plain(line)) <= w - 1,
                 "overflowed: {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn loading_rows_fit_and_spinner_follows_text() {
+        let p = palette();
+        for w in [20usize, 21, 24, 30, 40, 80, 120] {
+            let rows = loading_rows(w, 3, &p);
+            for row in &rows {
+                assert!(
+                    tc::display_width(&plain(row)) <= w - 1,
+                    "overflowed at {w}: {row:?}"
+                );
+            }
+            let first = plain(&rows[0]);
+            let text = first.find("reading usage").expect("text present");
+            let glyph = first.find(tc::SPINNER[3]).expect("spinner present");
+            assert!(text < glyph, "spinner must follow the text: {first:?}");
         }
     }
 
@@ -3562,9 +3670,9 @@ mod tests {
     }
 
     /// Codex speed is a multiplier on the standard row, named on the id the
-    /// rollout parser emits. Fast is 2×. Ultrafast is 6× and the suffix is
-    /// only attached for gpt-6-astra, so a non-Astra ultrafast id never
-    /// reaches this scale.
+    /// rollout parser emits. Fast is 2× here. Ultrafast is 6× and the suffix
+    /// is only attached where OpenAI publishes it, so any other ultrafast id
+    /// never reaches this scale.
     #[test]
     fn codex_fast_and_ultrafast_scale_the_published_row_and_name_the_tier() {
         let none: HashMap<String, Rate> = HashMap::new();
@@ -3653,12 +3761,89 @@ mod tests {
         assert!(!rate.contains_key("output"));
     }
 
-    /// Published rates from Anthropic's pricing page on 28 Sep 2026.
+    /// OpenAI's Fast table on 14 Oct 2026, for the rows that are not 2×.
+    /// Every one of these billed at 2× before, which overstated seven and
+    /// understated `gpt-5.5`.
+    #[test]
+    fn fast_bills_the_published_ratio_where_it_is_not_double() {
+        let none: HashMap<String, Rate> = HashMap::new();
+        let published: &[(&str, f64, f64, f64)] = &[
+            // (model, input, cache_read, output)
+            ("gpt-5.5", 12.50, 1.25, 75.0),
+            ("gpt-5-mini", 0.45, 0.045, 3.60),
+            ("gpt-4.1", 3.50, 0.875, 14.0),
+            ("gpt-4.1-mini", 0.70, 0.175, 2.80),
+            ("gpt-4o", 4.25, 2.125, 17.0),
+            ("gpt-4o-mini", 0.25, 0.125, 1.0),
+            ("o3", 3.50, 0.875, 14.0),
+            ("o4-mini", 2.0, 0.50, 8.0),
+        ];
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        for (model, input, cache_read, output) in published {
+            let fast = format!("{model}{CODEX_TIER_FAST}");
+            let rate = session_rate(&fast, &none).0.expect(model);
+            assert!(close(rate["input"], *input), "{model} {rate:?}");
+            assert!(close(rate["cache_read"], *cache_read), "{model} {rate:?}");
+            assert!(close(rate["output"], *output), "{model} {rate:?}");
+        }
+
+        // A dated snapshot is the same model; a longer name is not.
+        let dated = session_rate(&format!("gpt-4.1-2025-04-14{CODEX_TIER_FAST}"), &none).0.unwrap();
+        assert!(close(dated["input"], 3.50), "{dated:?}");
+        let nano = session_rate(&format!("gpt-4.1-nano{CODEX_TIER_FAST}"), &none).0.unwrap();
+        assert!(close(nano["input"], 0.20), "{nano:?}");
+        let mini = session_rate(&format!("o3-mini{CODEX_TIER_FAST}"), &none).0.unwrap();
+        assert!(close(mini["input"], 2.20), "{mini:?}");
+        // A published 2× row needs no line of its own.
+        let luna = session_rate(&format!("gpt-6-luna{CODEX_TIER_FAST}"), &none).0.unwrap();
+        assert!(close(luna["output"], 1.0), "{luna:?}");
+    }
+
+    /// The multiplier comes from the bare model, and config keeps its two
+    /// places: a bare-id price is scaled by the published ratio, and a key
+    /// on the suffixed row is the reader's number for that tier, unscaled.
+    #[test]
+    fn a_published_speed_ratio_keeps_per_kind_config_precedence() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let fast = format!("gpt-5.5{CODEX_TIER_FAST}");
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert("gpt-5.5".into(), [("input".to_string(), 4.0)].into_iter().collect());
+        mine.insert(fast.clone(), [("output".to_string(), 70.0)].into_iter().collect());
+        let (rate, origin) = session_rate(&fast, &mine);
+        let rate = rate.unwrap();
+        assert_eq!(origin, "config");
+        assert!(close(rate["input"], 10.0), "2.5× the bare-id price: {rate:?}");
+        assert!(close(rate["output"], 70.0), "the suffixed key, unscaled: {rate:?}");
+        assert!(close(rate["cache_read"], 1.25), "2.5× the list: {rate:?}");
+
+        let ultra = format!("gpt-6.1-sol{CODEX_TIER_ULTRAFAST}");
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(ultra.clone(), [("input".to_string(), 11.0)].into_iter().collect());
+        let rate = session_rate(&ultra, &mine).0.unwrap();
+        assert!(close(rate["input"], 11.0), "{rate:?}");
+        assert!(close(rate["output"], 60.0), "{rate:?}");
+    }
+
+    /// A speed-tier key that prices nothing is a multiplier on a model the
+    /// list cannot find, and would sit there doing nothing.
+    #[test]
+    fn every_speed_tier_names_a_listed_model() {
+        for (key, fast, ultra) in SPEED_TIERS {
+            assert!(
+                LIST_RATES.iter().any(|(k, vendor, _)| k == key && *vendor == "OpenAI"),
+                "{key} is not an OpenAI row in LIST_RATES"
+            );
+            assert!(*fast > 1.0, "{key}");
+            assert!(ultra.is_none_or(|u| u > *fast), "{key}");
+            assert_eq!(speed_tier(key).map(|(k, _, _)| *k), Some(*key), "{key} is shadowed");
+        }
+    }
+
+    /// Published rates from Anthropic's pricing page on 14 Oct 2026.
     ///
-    /// `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and the five
-    /// numbers match, so a missing row would still bill the same today.
-    /// Membership is what the test pins: deleting the line must fail here
-    /// even while the bill would not move.
+    /// `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and four of the
+    /// five numbers match, so a missing row would bill 5.5's cache reads at
+    /// Sonnet 5's $0.20 — twice the published $0.10.
     #[test]
     fn sonnet_5_5_is_priced_on_its_own_row() {
         let none: HashMap<String, Rate> = HashMap::new();
@@ -3674,13 +3859,14 @@ mod tests {
         assert_eq!(origin, "list");
         assert_eq!(rate.get("input"), Some(&2.0));
         assert_eq!(rate.get("output"), Some(&10.0));
-        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        // 0.05x input, not Sonnet 5's 0.1x. The row as first shipped
+        // carried $0.20 and doubled every Sonnet 5.5 cache read.
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
         assert_eq!(rate.get("cache_write"), Some(&2.50));
         assert_eq!(rate.get("cache_write_1h"), Some(&4.0));
 
-        // The five match Sonnet 5, so the rate alone cannot tell the rows
-        // apart. Longest substring is what `rate_for` uses, and that is what
-        // has to land on 5.5 for a 5.5 id and on Sonnet 5 for a Sonnet 5 id.
+        // Longest substring is what `rate_for` uses, and that is what has to
+        // land on 5.5 for a 5.5 id and on Sonnet 5 for a Sonnet 5 id.
         let longest = |model: &str| {
             LIST_RATES
                 .iter()
@@ -3695,7 +3881,7 @@ mod tests {
 
         let (dated, dated_origin) = rate_for("claude-sonnet-5-5-20260928", &none);
         assert_eq!(dated_origin, "list");
-        assert_eq!(dated.unwrap().get("input"), Some(&2.0));
+        assert_eq!(dated.unwrap().get("cache_read"), Some(&0.10));
 
         let (older, _) = rate_for("claude-sonnet-5", &none);
         let older = older.expect("claude-sonnet-5 was already priced");
@@ -3706,6 +3892,57 @@ mod tests {
         assert_eq!(older.get("cache_write_1h"), Some(&4.0));
         let (dated_five, _) = rate_for("claude-sonnet-5-20260101", &none);
         assert_eq!(dated_five.unwrap().get("input"), Some(&2.0));
+    }
+
+    /// Introductory standard rates from Google's pricing page on 14 Oct 2026
+    /// (through 30 Nov 2026; doubling to 4 / 20 / 0.20 on 1 Dec 2026).
+    ///
+    /// No existing key is a substring of `gemini-4-argon`, so without its own
+    /// row the model resolves to None and its tokens cost zero. Explicit
+    /// caching is not supported on this model; implicit caching discounts
+    /// cached input to 0.05× input ($0.10) with no cache_write fee.
+    #[test]
+    fn gemini_4_argon_is_priced_on_its_own_row() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        assert_eq!(
+            LIST_RATES.iter().filter(|(k, _, _)| *k == "gemini-4-argon").count(),
+            1,
+            "gemini-4-argon needs its own row; no existing key is a substring of it"
+        );
+
+        let (rate, origin) = rate_for("gemini-4-argon", &none);
+        let rate = rate.expect("gemini-4-argon must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
+        assert!(
+            !rate.contains_key("cache_write"),
+            "Google publishes no per-request cache-write price"
+        );
+        assert!(
+            !rate.contains_key("cache_write_1h"),
+            "Google publishes no 1h cache-write price"
+        );
+
+        // Dated or thinking-tier suffixed strings still reach this row.
+        for variant in ["gemini-4-argon-20261014", "gemini-4-argon-medium", "gemini-4-argon-high"] {
+            let (got, got_origin) = rate_for(variant, &none);
+            assert_eq!(got_origin, "list", "{variant}");
+            let got = got.unwrap_or_else(|| panic!("{variant} must resolve to gemini-4-argon"));
+            assert_eq!(got.get("input"), Some(&2.0), "{variant}");
+            assert_eq!(got.get("output"), Some(&10.0), "{variant}");
+            assert_eq!(got.get("cache_read"), Some(&0.10), "{variant}");
+        }
+
+        // Earlier Gemini families keep their own rows untouched.
+        let (flash_38, _) = rate_for("gemini-3.8-flash", &none);
+        assert_eq!(flash_38.unwrap().get("input"), Some(&0.75));
+        let (pro_31, _) = rate_for("gemini-3.1-pro-preview", &none);
+        assert_eq!(pro_31.unwrap().get("output"), Some(&12.0));
+        let (pro_25, _) = rate_for("gemini-2.5-pro", &none);
+        assert_eq!(pro_25.unwrap().get("input"), Some(&1.25));
     }
 
     #[test]
@@ -4475,6 +4712,10 @@ mod tests {
         assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
         assert_eq!(tab_title("claude"), "CLAUDE");
         assert_eq!(tab_title("claude:bbi"), "BBI");
+        // Two unified accounts' tabs read as SpaceXSI per product, not as
+        // their internal ids.
+        assert_eq!(tab_title("spacexsi"), "SPACEXSI");
+        assert_eq!(tab_title("spacexsi:cursor"), "SPACEXSI·CURSOR");
         // The default profile's group keeps the plain heading rather than
         // stuttering `claude - CLAUDE`.
         let headings: Vec<String> = cfg

@@ -81,6 +81,19 @@ breaking changes without claiming to be finished.
 badly-titled PR is not untidy — it is a change the next release will not
 mention and may not count towards the version.
 
+The title check uses `pull_request` with only `pull-requests: read`, no
+checkout, and no repository secrets. It reads the current title through
+the API, including when a failed check is re-run after a title edit.
+Opened, edited, reopened, and synchronized PRs all trigger it. Fork PRs
+use GitHub's normal approval rules; PRs with merge conflicts must resolve
+them before `pull_request` workflows can run.
+
+No workflow requires `pull_request_target`, so keep GitHub's
+[default event policy](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target#default-policy-for-pull_request_target)
+enabled rather than adding an exception. The release workflow defaults
+to `contents: read`; only its tag-gated `publish` job receives
+`contents: write` and `id-token: write`.
+
 ## Cutting one
 
 1. Open the pull request titled `release: vX.Y.Z`.
@@ -247,7 +260,16 @@ SHA on each write, retries a concurrent update, skips an identical formula,
 and refuses a downgrade. A retry of the same version with different bytes
 is an error. Tokens stay in the environment, never in clone URLs or files.
 
-Merge the tap's initial formula before releasing this workflow. To generate
+Merge the tap's initial formula before releasing this workflow. If the first
+Contents API read returns 404, check that `Formula/opscope.rb` exists on the tap's
+`main` branch before investigating the existing bot's access; do not create a
+new credential just to bypass a missing bootstrap formula.
+
+Keep changes to the formula's tests in `homebrew/formula.js` as well as the tap,
+so the next generated update preserves them. If a bootstrap formula includes
+new tests absent from the already released tag's generator, do not rerun that
+old tag to overwrite it: the same-version byte check will correctly reject it.
+The next release containing the aligned generator resumes normal updates. To generate
 an initial formula or inspect one locally, use a checkout whose binary
 manifest matches that release (normally the tag that carries these scripts):
 
@@ -263,6 +285,56 @@ at its previous version. Fix the credential or packaging failure and
 re-dispatch that tag's release workflow; published npm versions and the
 GitHub release are already handled as retries. The release job cannot pick
 up script fixes that exist only on main: those require a new release.
+
+## Debian and the shared APT repository
+
+On a `vX.Y.Z` tag, the Linux build runs `debian/package.js` against the same
+manifest-declared binaries that go into the tarball. It verifies ELF amd64
+headers and identical version/commit/date stamps, keeps all binaries under
+`/usr/libexec/opscope`, and adds a single exec wrapper at `/usr/bin/opscope`.
+`dpkg-deb --root-owner-group` produces `opscope_X.Y.Z_amd64.deb`; a SHA-256
+file is generated alongside it. Ownership is root, permissions are fixed,
+and the commit timestamp supplies `SOURCE_DATE_EPOCH`.
+
+The control metadata declares amd64, `libc6 (>= 2.35)` and `libgcc-s1`.
+The artifact upload and GitHub release asset list explicitly include both
+`.deb` and `.deb.sha256`. The tagged `debian-lifecycle` job verifies their
+checksum and tests Ubuntu 22.04, Debian 12, and dependency refusal on Debian 11
+before `publish` can run. macOS skips packaging. Pull-request release builds
+skip the tagged package step; ordinary CI separately exercises the packer with
+the manifest version in a disposable test artifact, never a `dev` version.
+
+After tagged `publish` succeeds, the `apt-repository` job sends the exact source,
+release tag and commit to the shared [APT repository](https://github.com/stealth-factory/apt-repo)
+through `repository_dispatch`. It reuses `secrets.GH_TOKEN || secrets.RELEASE_TOKEN`,
+the Homebrew bot credential already configured here. The endpoint needs Contents
+write in the destination for a fine-grained token, not Actions write. No secret
+travels in the event and no new credential or account grant is configured.
+
+The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
+immutable versions, rejects stale updates, signs indexes, tests APT installation,
+and publishes a complete Pages snapshot. A scheduled job refreshes metadata
+for existing packages before its 90-day expiry; it never polls for new releases.
+The current test schedule is daily at 19:30 Asia/Taipei; the intended steady
+schedule is monthly after live refresh validation.
+Every successful tagged release sends the notification without an enable flag.
+The receiver runs on main and retains its publishing environment and signing
+checks. Missing signing or hosting configuration fails visibly instead of
+silently skipping publication.
+Signing credentials and Pages activation are managed in that repository and
+were not configured by these changes. Its operations guide documents the exact
+approval requirements, scoped key trust, expiration, rotation, and recovery.
+
+A failed APT import leaves GitHub/npm and the downloadable `.deb` available,
+with the APT site on its previous snapshot. Fix the repository problem and
+retry its workflow on main. If the package itself is wrong, cut a new Opscope
+version; do not replace an existing version's bytes. A published old release
+without Debian assets is not backfilled automatically. The existing release
+retry behavior still skips an already published GitHub release.
+
+See [Debian installation](debian.md) for direct package use. Public tagged
+asset delivery and signed repository installation remain acceptance checks
+for the first approved activation/release, not claims made by PR-only tests.
 
 ## If something goes wrong
 

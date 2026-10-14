@@ -169,8 +169,8 @@
       "1.1.1.1",
       "8.8.8.8"
     ],
-    "_interval_comment": "Seconds between ping samples per target.",
-    "interval": 0.5,
+    "_interval_comment": "Seconds between ping samples per target; minimum 1 second.",
+    "interval": 1.0,
     "_seconds_per_column_comment": "Seconds represented by one graph column; 0 chooses from the pane width and retained window.",
     "seconds_per_column": 0.0,
     "_window_comment": "Seconds of readings retained for statistics and graphs.",

@@ -249,6 +249,76 @@ fn scopes_for(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+struct TeamDiscovery {
+    configured: Vec<String>,
+    scopes: Vec<String>,
+    note: Option<String>,
+    ready: bool,
+}
+
+impl TeamDiscovery {
+    fn new(configured: Vec<String>) -> Self {
+        Self {
+            configured,
+            scopes: Vec::new(),
+            note: None,
+            ready: false,
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        discover: impl FnOnce() -> (Vec<String>, Option<String>),
+    ) -> &[String] {
+        if self.ready {
+            return &self.scopes;
+        }
+        if self.configured.is_empty() {
+            if self.scopes.is_empty() {
+                self.scopes.push(String::new());
+            }
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover)) {
+                Ok((found, note)) => {
+                    self.ready = note.is_none();
+                    if self.ready {
+                        self.scopes = scopes_for(Vec::new(), found);
+                    } else {
+                        // A partial page is not an authoritative account list.
+                        // Keep earlier teams until a complete walk replaces it.
+                        for scope in found {
+                            if !scope.is_empty() && !self.scopes.contains(&scope) {
+                                self.scopes.push(scope);
+                            }
+                        }
+                    }
+                    self.note = note;
+                }
+                Err(_) => {
+                    self.note = Some("team discovery failed".into());
+                }
+            }
+            if let Some(note) = self.note.as_mut() {
+                // The latest walk cannot describe coverage retained from an
+                // earlier attempt. Token refusal remains its own explanation.
+                if self.scopes.iter().any(|scope| !scope.is_empty())
+                    && !note.starts_with("the Vercel token is not valid")
+                {
+                    note.push_str(" - discovered teams are still included; other teams may be missing");
+                }
+            }
+        } else {
+            self.scopes = scopes_for(self.configured.clone(), Vec::new());
+            self.note = None;
+            self.ready = true;
+        }
+        &self.scopes
+    }
+
+    fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+}
+
 /// One row per deployment, however many scopes returned it.
 ///
 /// The personal scope is a request with no `teamId`, and Vercel answers
@@ -331,8 +401,8 @@ fn walk_teams(
                     said.clone()
                 } else if ids.is_empty() {
                     tc::missing_config(&format!(
-                        "could not list teams ({}) - showing your personal account \
-                         only. A token that cannot list teams can still read a \
+                        "could not list teams ({}) - team discovery is incomplete. \
+                         A token that cannot list teams can still read a \
                          team's deployments: name the team ids under \
                          vercel_deployments.teams to include them.",
                         said
@@ -870,11 +940,12 @@ fn info_overlay(
     h: usize,
     note: &str,
     p: &Palette,
+    busy: Option<usize>,
 ) -> Vec<String> {
     let meta = &dep["meta"];
     let empty = serde_json::Value::Null;
     let d = detail.unwrap_or(&empty);
-    let mut rows = vec![tc::title("deployment", w, &p.prod)];
+    let mut rows = vec![tc::title_busy("deployment", w, &p.prod, busy)];
 
     macro_rules! field {
         ($label:expr, $value:expr, $colour:expr) => {{
@@ -1077,9 +1148,10 @@ fn copy_overlay(
     h: usize,
     note: &str,
     p: &Palette,
+    busy: Option<usize>,
 ) -> (Vec<String>, tc::Footer, usize) {
     let pairs = copy_items(dep, detail);
-    let mut rows = vec![tc::title("copy", w, &p.prod)];
+    let mut rows = vec![tc::title_busy("copy", w, &p.prod, busy)];
     rows.push(String::new());
     if pairs.is_empty() {
         rows.push(tc::seg(
@@ -1190,28 +1262,16 @@ fn main() {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
         if name.is_empty() { "VERCEL_TOKEN".to_string() } else { name }
     };
-    // Why the discovered scope is not everything, when it is not. Kept for
-    // the poller rather than said once: `err` is rebuilt every round, and a
-    // board that is missing a team goes on missing it every round too.
-    let mut scope_note: Option<String> = None;
-    let discovered = if !tok.is_empty() && teams.is_empty() {
-        let (found, stopped) = discover_teams(&tok);
-        scope_note = stopped;
-        found
-    } else {
-        Vec::new()
-    };
-    teams = scopes_for(teams, discovered);
-
     let state = Arc::new(Mutex::new(State::default()));
+    let refresh_activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
-    let poll_teams = teams.clone();
+    let mut team_discovery = TeamDiscovery::new(teams);
     let poll_projects = projects.clone();
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
-    let poll_scope = scope_note.clone();
+    let poller_activity = refresh_activity.clone();
     // Teams that turned the token away for want of a SAML session, by id,
     // and the names to show for them. A token does not gain a SAML session
     // by being asked again, so they are not asked again.
@@ -1226,6 +1286,11 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
+            let poll_teams = team_discovery
+                .resolve(|| discover_teams(&poll_token))
+                .to_vec();
+            let poll_scope = team_discovery.note().map(str::to_owned);
             let mut out: Vec<serde_json::Value> = Vec::new();
             // Whether any scope answered this round, deployments or not.
             let mut any_loaded = false;
@@ -1317,6 +1382,7 @@ fn main() {
                     (Some(said), false) => format!("{} · {}", said, err),
                 };
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -1577,7 +1643,9 @@ fn main() {
                 if start {
                     let (details, fetching) = (Arc::clone(&details), Arc::clone(&fetching));
                     let (uid, team, tok) = (uid.clone(), text(&chosen, "_team"), tok.clone());
+                    let detail_activity = refresh_activity.clone();
                     std::thread::spawn(move || {
+                        let _work = detail_activity.start();
                         let got = fetch_detail(&uid, &team, &tok);
                         if let Ok(mut g) = details.lock() {
                             g.insert(uid.clone(), got);
@@ -1594,9 +1662,25 @@ fn main() {
             // to be drawn on that row behind it.
             placed.clear();
             let (rows, packed, foot_top) = if copying {
-                copy_overlay(&chosen, held.as_ref(), w, h, &note.0, &p)
+                copy_overlay(
+                    &chosen,
+                    held.as_ref(),
+                    w,
+                    h,
+                    &note.0,
+                    &p,
+                    refresh_activity.tick(tick),
+                )
             } else {
-                let body = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
+                let body = info_overlay(
+                    &chosen,
+                    held.as_ref(),
+                    w,
+                    h,
+                    &note.0,
+                    &p,
+                    refresh_activity.tick(tick),
+                );
                 let mut hints = vec![
                     vec![(p.hint.as_str(), "[c]opy".into())],
                     vec![(p.hint.as_str(), "[r]efresh".into())],
@@ -1670,7 +1754,12 @@ fn main() {
             .map(|s| states.get(*s).copied().unwrap_or(0))
             .sum();
 
-        let mut rows = vec![tc::title("vercel deployments", w, &p.prod)];
+        let mut rows = vec![tc::title_busy(
+            "vercel deployments",
+            w,
+            &p.prod,
+            refresh_activity.tick(tick),
+        )];
         // The totals leave the SAML-locked teams out, and a partial count
         // must not read as the whole account. It leads the header, because
         // the header clips from the right and this must outlast the totals;
@@ -2161,6 +2250,126 @@ mod tests {
         assert_eq!(wrap_words("hello", 0), vec!["hello".to_string()]);
     }
 
+    #[test]
+    fn failed_team_discovery_retries_until_a_complete_result() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        let mut calls = 0;
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                panic!("temporary discovery failure");
+            })
+            .to_vec();
+        assert_eq!(scopes, vec![""]);
+        assert_eq!(discovery.note(), Some("team discovery failed"));
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                (
+                    vec!["team_a".into()],
+                    Some("team list stopped early".into()),
+                )
+            })
+            .to_vec();
+        assert_eq!(scopes, vec!["", "team_a"]);
+        assert_eq!(discovery.note(), Some(
+            "team list stopped early - discovered teams are still included; other teams may be missing"
+        ));
+
+        let scopes = discovery
+            .resolve(|| {
+                calls += 1;
+                (vec!["team_a".into(), "team_b".into()], None)
+            })
+            .to_vec();
+        assert_eq!(scopes, vec!["", "team_a", "team_b"]);
+        assert_eq!(discovery.note(), None);
+        assert_eq!(calls, 3);
+
+        let cached = discovery.resolve(|| panic!("complete discovery is cached"));
+        assert_eq!(cached, ["", "team_a", "team_b"]);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn partial_discovery_keeps_known_scopes_until_an_authoritative_result() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        let partial = || Some("team list stopped early".to_string());
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_a".into(), "team_b".into()], partial())),
+            ["", "team_a", "team_b"],
+        );
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into(), "team_c".into()], partial())),
+            ["", "team_a", "team_b", "team_c"],
+            "partial discovery discarded a known team or duplicated an ID",
+        );
+        assert_eq!(
+            discovery.resolve(|| (Vec::new(), partial())),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(
+            discovery.resolve(|| panic!("transient discovery failure")),
+            ["", "team_a", "team_b", "team_c"],
+        );
+        assert_eq!(discovery.note(), Some(
+            "team discovery failed - discovered teams are still included; other teams may be missing"
+        ));
+        assert_eq!(
+            discovery.resolve(|| (vec!["team_b".into()], None)),
+            ["", "team_b"],
+            "complete discovery did not remove teams no longer in the account",
+        );
+        assert_eq!(discovery.note(), None);
+        assert_eq!(discovery.resolve(|| panic!("complete discovery is cached")), ["", "team_b"]);
+    }
+
+    #[test]
+    fn failed_discovery_warning_matches_retained_team_coverage() {
+        let mut discovery = TeamDiscovery::new(Vec::new());
+        discovery.resolve(|| walk_teams(|_| Err("HTTP 403".into())));
+        assert_eq!(discovery.scopes, [""]);
+        assert!(discovery.note().unwrap().contains("HTTP 403"));
+        assert!(!discovery.note().unwrap().contains("teams are still included"));
+
+        discovery.resolve(|| walk_teams(|until| match until {
+            None => Ok(serde_json::json!({
+                "teams": [{"id": "team_a"}], "pagination": {"next": 300}
+            })),
+            _ => Err("curl exited 28".into()),
+        }));
+        discovery.resolve(|| walk_teams(|_| Err("HTTP 403".into())));
+        assert_eq!(discovery.scopes, ["", "team_a"]);
+        let note = discovery.note().unwrap();
+        assert!(note.contains("HTTP 403"), "{note}");
+        assert!(note.contains("discovered teams are still included"), "{note}");
+        assert!(!note.contains("showing your personal account only"), "{note}");
+        assert!(note.contains("vercel_deployments.teams"), "{note}");
+
+        discovery.resolve(|| panic!("transient discovery failure"));
+        assert!(discovery.note().unwrap().contains("discovered teams are still included"));
+        discovery.resolve(|| walk_teams(|_| {
+            Err(vercel_refusal(403, r#"{"error":{"invalidToken":true}}"#))
+        }));
+        let note = discovery.note().unwrap();
+        assert!(note.starts_with("the Vercel token is not valid"), "{note}");
+        assert!(!note.contains("teams are still included"), "{note}");
+
+        discovery.resolve(|| (vec!["team_a".into()], None));
+        assert_eq!(discovery.note(), None);
+    }
+
+    #[test]
+    fn explicit_team_scopes_bypass_discovery() {
+        let configured = vec!["team_named".into()];
+        let mut discovery = TeamDiscovery::new(configured.clone());
+        let scopes = discovery.resolve(|| panic!("explicit scopes do not discover"));
+        assert_eq!(scopes, configured);
+        assert_eq!(discovery.note(), None);
+    }
+
 
     /// An empty `teams` covers the personal account as well as every team.
     ///
@@ -2375,7 +2584,7 @@ mod tests {
         // The fetched detail has no inspector URL. The subject still links
         // the deployment the copy sheet lists first.
         let detail = serde_json::json!({"readyState": "READY"});
-        let rows = info_overlay(&dep, Some(&detail), 80, 24, "", &palette());
+        let rows = info_overlay(&dep, Some(&detail), 80, 24, "", &palette(), None);
         let subject = rows
             .iter()
             .find(|r| r.contains("ship the pane"))

@@ -10,7 +10,9 @@ fn main() {
     let mut hidden = false;
     let mut scroll = 0;
     let mut gallery = false;
-    let mut selected = 0;
+    let mut moving_meter = false;
+    let mut tick = 0_u64;
+    let mut selected = 0_usize;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -25,7 +27,27 @@ fn main() {
                     scroll = 2;
                     selected += 1;
                 }
+                "up" => {
+                    scroll = 0;
+                    selected = selected.saturating_sub(1);
+                }
                 "g" => gallery = !gallery,
+                "m" => moving_meter = !moving_meter,
+                "h" => {
+                    keyboard.restore();
+                    tc::restore_screen();
+                    // Stay up until SIGTERM. The printed pid is the sleep
+                    // after `exec`, and sleep does not read the tty, so the
+                    // test can queue a stale cell report and only then let
+                    // the parent reclaim. The long sleep is a backstop if
+                    // that signal never arrives.
+                    std::process::Command::new("/bin/sh")
+                        .args(["-c", "printf 'CHILD_READY %s\\n' \"$$\"; exec sleep 30"])
+                        .status()
+                        .expect("run handoff fixture");
+                    keyboard.reclaim();
+                    tc::claim_screen();
+                }
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
@@ -110,6 +132,7 @@ fn main() {
             Vec::new()
         } else {
             tc::Plot::new(3, 2, w.saturating_sub(6), 6, chart)
+                .under_text()
                 .in_viewport(scroll, 1, h.saturating_sub(2))
                 .into_iter()
                 .collect()
@@ -158,7 +181,19 @@ fn main() {
                 .filter_map(|p| p.in_viewport(scroll, 1, h.saturating_sub(2))),
             );
         }
+        if moving_meter && !hidden {
+            tick += 1;
+            plots = vec![tc::Plot::gradient_meter(
+                3, 2, w.saturating_sub(6), 0.4, Some(0.501 + tick as f64 * 1e-12),
+                &tc::rgb(80, 210, 160), &tc::rgb(70, 80, 90), &ink,
+            )];
+        }
         rows.resize(h, String::new());
+        // Inside the line-chart rectangle. Pixel mode keeps it; Braille
+        // paints over it, which is the text-mode chart.
+        if h > 3 {
+            rows[2] = "   now".into();
+        }
         if h > 9 {
             rows[8] = samples;
         }

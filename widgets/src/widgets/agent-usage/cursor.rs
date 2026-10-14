@@ -137,6 +137,10 @@ pub struct Data {
     /// resets on. Asked only on a unified plan, where the usage call's own
     /// cycle has stopped being monthly and become the weekly included pool.
     month: Option<serde_json::Value>,
+    /// The profile's activity summary - the daily token counts behind the
+    /// heatmap cursor.com/@handle and grok.com both show. Asked only on a
+    /// unified plan.
+    activity: Option<serde_json::Value>,
     /// Where this account stands relative to the unified plan, once both
     /// vendors have been read. Set by `vendors::link_spacexsi`.
     pub spacexsi: Spacexsi,
@@ -145,6 +149,11 @@ pub struct Data {
     /// split it only into auto and API, and API is nought on this plan.
     /// Set with `spacexsi`.
     pub pool_split: Vec<(String, f64)>,
+    /// Grok's figure for the same pool, when Grok is on the same account
+    /// and current - drawn only when Cursor answers without a pool figure
+    /// of its own, so the tab shows the reading there is rather than
+    /// none. Set with `spacexsi`.
+    pub pool_from_grok: Option<f64>,
     /// The per-day summary folded out of GetFilteredUsageEvents.
     events: Option<serde_json::Value>,
     /// GetAggregatedUsageEvents: per-model cents over the window.
@@ -209,6 +218,29 @@ fn commas(n: i64) -> String {
     } else {
         out
     }
+}
+
+/// Which account the token on disk belongs to, as a short key for the
+/// caches holding that account's money and plan.
+///
+/// The refresh token, hashed: it changes when someone signs in as another
+/// account, so a balance read for one account is never served for another,
+/// and it is never written anywhere itself. A refresh that rotates it only
+/// costs one early re-read.
+pub fn account_key() -> String {
+    use std::hash::{Hash, Hasher};
+    let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match text(&auth, "refreshToken") {
+        t if !t.is_empty() => t.hash(&mut h),
+        _ => text(&auth, "accessToken").hash(&mut h),
+    }
+    format!("{:x}", h.finish())
+}
+
+/// Whether Cursor's usage call answered this pass - the pool's live figure.
+pub fn has_live(d: &Data) -> bool {
+    d.live.is_some()
 }
 
 fn cursor_token() -> Option<String> {
@@ -628,12 +660,22 @@ pub fn unified(d: &Data) -> bool {
 /// happen to share a machine. Milliseconds, because that is the precision
 /// both vendors state it to, and the precision is what makes the match
 /// worth trusting.
+///
+/// A response still held in the cache when its week ends is rolled onto
+/// the week now running, as Grok's is, or for those minutes the same
+/// account's two windows would not match.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
     let live = d.live.as_ref()?;
-    match (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
-        (Some(s), Some(e)) if e > s => Some((s, e)),
-        _ => None,
+    let (s, e) = match (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return None,
+    };
+    let at = now() * 1000.0;
+    if e > at {
+        return Some((s, e));
     }
+    let weeks = ((at - e) / (e - s)).floor() + 1.0;
+    Some((s + weeks * (e - s), e + weeks * (e - s)))
 }
 
 /// The monthly cycle additional usage resets on, as (start, end) epoch
@@ -666,12 +708,15 @@ fn month_of(d: &Data) -> (Option<f64>, Option<f64>) {
 fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
     let mut state = extra_state(live, d.hard.as_ref());
     let spent = d.prepaid.as_ref().and_then(|v| loose(&v["spentThisMonthCents"]));
+    // The account's own spend, so a user limit only: against a team pool
+    // the pool's total is the figure, and one member's share of it would be
+    // a partial presented as the whole.
     if let Some(spent) = spent {
         match &mut state {
-            ExtraState::Fixed { used, .. }
+            ExtraState::Fixed { used, shared: false, .. }
             | ExtraState::Unlimited { used }
             | ExtraState::Disabled { used } => *used = spent,
-            ExtraState::NotReported { .. } => {}
+            ExtraState::Fixed { shared: true, .. } | ExtraState::NotReported { .. } => {}
         }
     }
     state
@@ -720,6 +765,11 @@ fn product_hue(name: &str) -> (u8, u8, u8) {
 /// plan the two are the same number - third-party models no longer draw on
 /// the pool, so `apiPercentUsed` sits at nought and auto is the whole of it.
 fn pool_pct(live: &serde_json::Value) -> Option<f64> {
+    // A cached answer whose week has ended describes last week's pool: it
+    // is not this week's figure, so it is withheld rather than drawn live.
+    if loose(&live["billingCycleEnd"]).is_some_and(|e| e <= now() * 1000.0) {
+        return None;
+    }
     let plan = &live["planUsage"];
     loose(&plan["totalPercentUsed"]).or_else(|| loose(&plan["autoPercentUsed"]))
 }
@@ -778,16 +828,23 @@ fn spacexsi_quota_with_plots(
     let label_w = report_label_w();
     // The bar takes whatever the row has left once the label, the
     // percentage and the pace are placed, so it runs to the pane's edge.
+    // At the narrowest the bar shrinks to a few cells rather than push the
+    // percentage off the row; the pace stands down whole before that.
     let fill_w = |label_w: usize, pct: &str, pace: &str| {
         let fixed = 2 + label_w + 1 + pct.chars().count() + pace.chars().count();
-        w.saturating_sub(1).saturating_sub(fixed).max(8)
+        w.saturating_sub(1).saturating_sub(fixed).max(1)
     };
-    match pool_pct(live) {
+    let fits_pace = |label_w: usize, pct: &str, pace: &str| {
+        2 + label_w + 1 + 3 + pct.chars().count() + pace.chars().count() <= w.saturating_sub(1)
+    };
+    let from_grok = pool_pct(live).is_none() && d.pool_from_grok.is_some();
+    match pool_pct(live).or(d.pool_from_grok) {
         // Grok's split is there: the pool bar in one segment per product,
         // then each product on a line of its own in its segment's colour.
         Some(pct) if !d.pool_split.is_empty() => {
             let (pace_colour, pace_txt) =
                 pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let pace_txt = if fits_pace(label_w, &pct_text(pct), &pace_txt) { pace_txt } else { String::new() };
             let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
             // One colour per filled cell, each product's run as long as its
             // share of the bar; the track and the pace marker are the meter's
@@ -828,12 +885,16 @@ fn spacexsi_quota_with_plots(
             line.push((pace_colour, pace_txt));
             rows.push(seg_owned(&line, w));
             let name_w = d.pool_split.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+            // Under the bar where it fits; at a short indent where the bar's
+            // column would push the share off the row.
+            let need = 2 + name_w + 2 + "~100%".len();
+            let indent = if label_w + 3 + need <= w.saturating_sub(1) { label_w + 3 } else { 4 };
             for (name, share) in &d.pool_split {
                 let (r, g, b) = product_hue(name);
                 let hue = tc::rgb(r, g, b);
                 rows.push(seg_owned(
                     &[
-                        (p.dim.clone(), " ".repeat(label_w + 3)),
+                        (p.dim.clone(), " ".repeat(indent)),
                         (hue.clone(), "■ ".into()),
                         (hue, tc::pad(name, name_w)),
                         (p.txt.clone(), format!("  ~{:.0}%", share)),
@@ -845,6 +906,7 @@ fn spacexsi_quota_with_plots(
         Some(pct) => {
             let (pace_colour, pace_txt) =
                 pace_cell(lead(pct, cycle_secs, reset_ts), pace_guessed(false, false, reset_ts), p);
+            let pace_txt = if fits_pace(label_w, &pct_text(pct), &pace_txt) { pace_txt } else { String::new() };
             let bar_w = fill_w(label_w, &pct_text(pct), &pace_txt);
             let mut line: Vec<(String, String)> =
                 vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
@@ -864,8 +926,19 @@ fn spacexsi_quota_with_plots(
             w - 1,
         )),
     }
+    // Said, since the heading reads `live` for Cursor's call: this one
+    // figure is Grok's reading of the same pool. Dropped whole when it does
+    // not fit rather than cut mid-sentence.
+    if from_grok {
+        let note = "  pool figure from Grok · Cursor sent none";
+        if note.chars().count() <= w.saturating_sub(1) {
+            rows.push(tc::seg(&[(p.dim.as_str(), note.into())], w - 1));
+        }
+    }
     rows.push(String::new());
     tc::append_plot_rows(&mut rows, plots, |local| extra_report(d, live, w, p, local));
+    rows.push(String::new());
+    tc::append_plot_rows(&mut rows, plots, |local| activity_rows(d, w, p, local));
     rows.push(String::new());
     rows
 }
@@ -903,21 +976,45 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
     // Each bar leads its block, and what it is a bar of - the dollars, and
     // the rule that refills them - sits under it, indented to the bar.
     let indent = " ".repeat(label_w + 3);
-    let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> String {
-        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), indent.clone())];
-        line.extend(parts);
+    let detail = |parts: Vec<(String, String)>, tails: Vec<String>| -> Vec<String> {
+        // The figures are the reading, so they keep the row: where the
+        // bar's column leaves too little room for them, they move left
+        // to a short indent rather than be cut, and where even that is too
+        // narrow they carry on to the next row a whole part at a time.
+        let room_for = |lead: &str| w.saturating_sub(1).saturating_sub(lead.chars().count());
+        let need: usize = parts.iter().map(|(_, t)| t.chars().count()).sum();
+        let lead = if need <= room_for(&indent) { indent.clone() } else { "    ".to_string() };
+        let mut lines: Vec<Vec<(String, String)>> = vec![Vec::new()];
+        let mut used = 0;
+        for (colour, part) in parts {
+            let n = part.chars().count();
+            if used > 0 && used + n > room_for(&lead) {
+                lines.push(Vec::new());
+                used = 0;
+            }
+            // A part opening its own row drops the space that joined it on.
+            let part = if used == 0 { part.trim_start().to_string() } else { part };
+            used += part.chars().count();
+            lines.last_mut().unwrap().push((colour, part));
+        }
         // The tails are the parts a narrow pane can do without, and each
-        // goes whole or not at all.
-        let mut room = w.saturating_sub(1);
-        room = room.saturating_sub(line.iter().map(|(_, t)| t.chars().count()).sum::<usize>());
+        // goes whole or not at all, on the last row.
+        let mut room = room_for(&lead).saturating_sub(used);
         for tail in tails {
             let n = tail.chars().count();
             if n <= room {
                 room -= n;
-                line.push((p.dim.clone(), tail));
+                lines.last_mut().unwrap().push((p.dim.clone(), tail));
             }
         }
-        seg_owned(&line, w)
+        lines
+            .into_iter()
+            .map(|parts| {
+                let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lead.clone())];
+                line.extend(parts);
+                seg_owned(&line, w)
+            })
+            .collect()
     };
     let prepaid = d.prepaid.as_ref();
     let left = prepaid.and_then(|v| loose(&v["availableCents"]));
@@ -951,7 +1048,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 tails.push(format!(" · {} used", money(paid - left)));
             }
         }
-        rows.push(detail(parts, tails));
+        rows.extend(detail(parts, tails));
         // The rule that refills the balance, and whether it can run.
         let mut parts: Vec<(String, String)> = vec![(p.dim.clone(), "auto top-up ".into())];
         let mut tails: Vec<String> = Vec::new();
@@ -977,7 +1074,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
             }
             _ => parts.push((p.dim.clone(), "off".into())),
         }
-        rows.push(detail(parts, tails));
+        rows.extend(detail(parts, tails));
         if let Some(said) = below {
             let budget = w.saturating_sub(1).saturating_sub(indent.chars().count());
             if said.chars().count() <= budget {
@@ -1026,10 +1123,10 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 if failed {
                     parts.push((p.warn.clone(), format!(" {}", status.to_lowercase().replace('_', " "))));
                 }
-                rows.push(detail(parts, Vec::new()));
+                rows.extend(detail(parts, Vec::new()));
             }
             if sorted.len() > TOPUPS_SHOWN {
-                rows.push(detail(
+                rows.extend(detail(
                     vec![(p.dim.clone(), format!("        +{} earlier", sorted.len() - TOPUPS_SHOWN))],
                     Vec::new(),
                 ));
@@ -1087,13 +1184,13 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 tails.push(format!(" · {} left", money(limit - used)));
             }
             tails.extend(when.clone());
-            rows.push(detail(parts, tails));
+            rows.extend(detail(parts, tails));
         }
         // No limit set and nothing spent: the account is not using it.
         ExtraState::Unlimited { used } | ExtraState::Disabled { used } if *used <= 0.0 => {}
         ExtraState::Unlimited { used } => {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "no limit set".into())], w - 1));
-            rows.push(detail(
+            rows.extend(detail(
                 vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month".into())],
                 when.into_iter().collect(),
             ));
@@ -1101,7 +1198,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
         ExtraState::Disabled { used } => {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {} ", tc::pad(LIMIT_LABEL, label_w))), (p.dim.as_str(), "disabled".into())], w - 1));
             if *used > 0.0 {
-                rows.push(detail(
+                rows.extend(detail(
                     vec![(p.txt.clone(), money(*used)), (p.dim.clone(), " this month, before it was disabled".into())],
                     Vec::new(),
                 ));
@@ -1133,21 +1230,28 @@ fn report_label_w() -> usize {
 /// pace where the lane has a clock to pace against.
 fn report_bar(lane: &Lane, label: &str, label_w: usize, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, row: usize) -> String {
     let hue = agent_hue("spacexsi").unwrap();
+    // The same sizing as the pool row: the percentage is the reading and
+    // keeps its cells; the pace stands down whole when it does not fit, and
+    // the bar takes what is left, down to a single cell.
+    let pct = pct_text(lane.pct);
+    let lead_w = 2 + label_w + 1;
+    let pace = lane
+        .window_secs
+        .map(|_| pace_cell(lead(lane.pct, lane.window_secs, lane.reset), pace_guessed(false, false, lane.reset), p))
+        .filter(|(_, t)| lead_w + 3 + pct.chars().count() + t.chars().count() <= w.saturating_sub(1));
+    let tail = pct.chars().count() + pace.as_ref().map(|(_, t)| t.chars().count()).unwrap_or(0);
+    let bar_w = w.saturating_sub(1).saturating_sub(lead_w + tail).max(1);
     let mut line: Vec<(String, String)> = vec![(p.dim.clone(), format!("  {} ", tc::pad(label, label_w)))];
     line.extend(paced_bar_with_plot(plots, row, &line,
         (lane.pct / 100.0).clamp(0.0, 1.0),
         elapsed_of(lane.window_secs, lane.reset),
-        w.saturating_sub(20 + label_w).max(8),
+        bar_w,
         Some(hue),
         p,
     ));
-    line.push((pct_colour(lane.pct, Some(hue), p), pct_text(lane.pct)));
-    if lane.window_secs.is_some() {
-        line.push(pace_cell(
-            lead(lane.pct, lane.window_secs, lane.reset),
-            pace_guessed(false, false, lane.reset),
-            p,
-        ));
+    line.push((pct_colour(lane.pct, Some(hue), p), pct));
+    if let Some(pace) = pace {
+        line.push(pace);
     }
     seg_owned(&line, w)
 }
@@ -1156,6 +1260,100 @@ fn report_bar(lane: &Lane, label: &str, label_w: usize, w: usize, p: &Palette, p
 fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     tc::seg(&refs, w - 1)
+}
+
+/// The account's activity summary, from its own profile.
+///
+/// Two calls: the handle is not on disk, and the summary is keyed by it.
+/// The same summary cursor.com/@handle draws its heatmap from, and on the
+/// unified plan grok.com shows the same heatmap. The handle is the
+/// account's public one, so asking by it reveals nothing the profile page
+/// does not.
+fn cursor_activity() -> Option<serde_json::Value> {
+    let me = cursor_rpc("GetUserProfile", &serde_json::json!({}))?;
+    let handle = text(&me["profile"], "handle");
+    if handle.is_empty() {
+        return None;
+    }
+    let got = cursor_rpc("GetViewableProfileByHandle", &serde_json::json!({ "handle": handle }))?;
+    got.get("activitySummary").cloned()
+}
+
+/// The activity summary's daily counts, by date. A count is read as a
+/// number or a string - Connect writes int64 as strings - and a day the
+/// summary lists with no count is proto3 omitting a nought.
+fn activity_days(summary: &serde_json::Value) -> HashMap<NaiveDate, f64> {
+    summary["activityCounts"]
+        .as_array()
+        .map(|days| {
+            days.iter()
+                .filter_map(|day| {
+                    let date = NaiveDate::parse_from_str(&text(day, "date"), "%Y-%m-%d").ok()?;
+                    let n = loose(&day["count"]).or_else(|| loose(&day["value"])).unwrap_or(0.0);
+                    Some((date, n))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The activity heatmap: tokens per day from the account's profile, its
+/// peak, and its streaks.
+///
+/// Labelled as the profile's figures, because that is what they are: when
+/// the plans merged, the day of the merge was still empty here while the
+/// pool had moved, so whether this counts Grok's side of the plan as well
+/// as Cursor's is not yet settled, and the heading does not claim it.
+fn activity_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let Some(summary) = d.activity.as_ref() else {
+        return vec![tc::seg(
+            &[(p.lbl.as_str(), " ── ACTIVITY ── ".into()), (p.warn.as_str(), "not reported".into())],
+            w - 1,
+        )];
+    };
+    let days = activity_days(summary);
+    let Some(cal) = day_calendar(&days, w, SPACEXSI_STEPS, None, p) else {
+        return vec![tc::seg(
+            &[(p.lbl.as_str(), " ── ACTIVITY ── ".into()), (p.dim.as_str(), "no active days on the profile".into())],
+            w - 1,
+        )];
+    };
+    let peak = days.values().cloned().fold(0.0f64, f64::max);
+    let best = cal
+        .best
+        .map(|b| format!(" on {} {}", MONTHS[b.month0() as usize], b.day()))
+        .unwrap_or_default();
+    // The heading gives up its parts whole, the peak's date first: "peak
+    // 937.0M on" with no date after it is a sentence that stops.
+    let mut head: Vec<(String, String)> = vec![
+        (p.lbl.clone(), " ── ACTIVITY ── ".into()),
+        (p.dim.clone(), "profile tokens / day · peak ".into()),
+        (p.txt.clone(), big_num(peak)),
+    ];
+    let used: usize = head.iter().map(|(_, t)| t.chars().count()).sum();
+    if used + best.chars().count() <= w.saturating_sub(1) {
+        head.push((p.dim.clone(), best));
+    }
+    let mut rows = vec![seg_owned(&head, w)];
+    // The streaks as the profile states them, where it does; the calendar's
+    // own count otherwise.
+    let current = loose(&summary["currentStreak"]).map(|v| v as usize).unwrap_or(cal.current);
+    let longest = loose(&summary["longestStreak"]).map(|v| v as usize).unwrap_or(cal.longest);
+    rows.push(tc::seg(
+        &[(p.dim.as_str(), format!("  streak {} days · longest {}", current, longest))],
+        w - 1,
+    ));
+    let mut plot = cal.plot.clone();
+    plot.y += rows.len();
+    plots.push(plot);
+    for line in &cal.rows {
+        rows.push(seg_owned(line, w));
+    }
+    let mut legend: Vec<(String, String)> = vec![(p.dim.clone(), "  Less ".into())];
+    legend.extend(SPACEXSI_STEPS.iter().map(|(r, g, b)| (tc::rgb(*r, *g, *b), "█".to_string())));
+    legend.push((p.dim.clone(), " More".into()));
+    rows.push(seg_owned(&legend, w));
+    rows
 }
 
 /// Per-model tokens and real cost over a window.
@@ -1355,8 +1553,15 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
     // which is what usage.py's sqlite-error branch does.
+    //
+    // Every reading is keyed by account, the usage call's as much as the
+    // plan's: the plan decides how the usage is drawn, so a usage response
+    // held for the account signed in before would be drawn under the new
+    // account's plan - a monthly figure labelled as a weekly pool.
+    let me = account_key();
+    let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
-    d.live = match cached(caches, "cursor", LIVE_TTL, || match cursor_live() {
+    d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live() {
         None => {
             refuse = "Cursor's usage endpoint did not answer".into();
             None
@@ -1372,9 +1577,22 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     };
     if !refuse.is_empty() {
         d.live_why = refuse.clone();
-        remember_refusal(caches, "cursor", &refuse);
+        remember_refusal(caches, &live_key, &refuse);
     }
-    d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
+    // A plan cached for one account must never classify another.
+    d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
+    // The plan decides which drawing the live figures get, so a failed
+    // plan read keeps the last good one for this account rather than draw
+    // a unified account's week as an old plan's three lanes.
+    let last_plan = format!("cursor-plan-last:{me}");
+    match d.plan.as_ref() {
+        Some(plan) => {
+            caches.live.insert(last_plan, (now(), Some(plan.clone()), f64::INFINITY));
+        }
+        None => {
+            d.plan = caches.live.get(&last_plan).and_then(|(_, v, _)| v.clone());
+        }
+    }
     // Best-effort beside the usage call, and never able to take it down:
     // the cap in the usage block answers the state this account is in, and
     // this only tells an absent cap from a forbidden one.
@@ -1384,18 +1602,20 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // spend block refreshed every two minutes against an hour-old
     // `noUsageBasedAllowed` would draw the old state for the rest of that
     // hour. One small POST on the same schedule as the reading it qualifies.
-    d.hard = cached(caches, "cursor-hard", LIVE_TTL, cursor_hard_limit);
+    d.hard = cached(caches, &format!("cursor-hard:{me}"), LIVE_TTL, cursor_hard_limit);
     // The unified plan's money lives in two calls an account on its own
     // plan has no use for, so they are asked only once the plan says it is
     // unified. Best-effort like the hard limit: the pool bar stands without
     // either, and the rows they feed say nothing rather than a guess.
     if is_unified(d.plan.as_ref()) {
-        d.prepaid = cached(caches, "cursor-prepaid", LIVE_TTL, || {
+        d.prepaid = cached(caches, &format!("cursor-prepaid:{me}"), LIVE_TTL, || {
             cursor_rpc("GetUserPrepaidBilling", &serde_json::json!({}))
         });
-        d.month = cached(caches, "cursor-month", PLAN_TTL, || {
+        d.month = cached(caches, &format!("cursor-month:{me}"), PLAN_TTL, || {
             cursor_rpc("GetMonthlyBillingCycle", &serde_json::json!({}))
         });
+        // Daily figures, so the plan's hour is plenty.
+        d.activity = cached(caches, &format!("cursor-activity:{me}"), PLAN_TTL, cursor_activity);
     }
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
@@ -2071,6 +2291,13 @@ fn cursor_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::P
     }
     rows.extend(cursor_daily(d, w, p));
     tc::append_plot_rows(&mut rows, plots, |local| cursor_spend_with_plots(d, w, p, local));
+    // SpaceXSI is drawn from the account's own figures only. The
+    // authorship counts below are this machine's tracking database - one
+    // machine's share of an account-wide plan - so the unified tab leaves
+    // them out rather than set a local count beside cloud ones.
+    if unified(d) {
+        return rows;
+    }
     if !d.ok {
         // An unreadable database makes the counts unknown, not zero, and
         // which kind of unreadable matters: absent means run the agent,
@@ -3176,8 +3403,23 @@ mod tests {
             sand: Some(serde_json::json!({
                 "hasNonZeroIncludedLimit": true, "usagePercent": 4.969027, "isUnified": true
             })),
+            activity: Some(unified_activity()),
             ..Data::default()
         }
+    }
+
+    /// GetViewableProfileByHandle's activitySummary, in the measured shape:
+    /// counts as numbers with a string twin, and the streaks beside them.
+    fn unified_activity() -> serde_json::Value {
+        let day = |back: i64| (Local::now().date_naive() - Days::days(back)).format("%Y-%m-%d").to_string();
+        serde_json::json!({
+            "longestStreak": 33, "currentStreak": 2,
+            "activityCounts": [
+                {"date": day(2), "count": 568088972, "value": "568088972"},
+                {"date": day(1), "count": 179410954, "value": "179410954"},
+                {"date": day(9), "value": "25164817"},
+            ]
+        })
     }
 
     #[test]
@@ -3426,6 +3668,126 @@ mod tests {
     }
 
     #[test]
+    fn the_activity_heatmap_draws_the_profiles_days_and_streaks() {
+        let d = unified_data(true);
+        let days = activity_days(d.activity.as_ref().unwrap());
+        assert_eq!(days.len(), 3);
+        assert!(days.values().any(|v| *v == 25164817.0), "a count stated only as a string");
+        let text = report(&d, 120);
+        assert!(squeeze(&text).contains("ACTIVITY ── profile tokens / day · peak"), "{text}");
+        assert!(squeeze(&text).contains("streak 2 days · longest 33"), "{text}");
+        for w in [40usize, 57, 58] {
+            let head = report(&d, w).lines().find(|l| l.contains("ACTIVITY")).unwrap().trim_end().to_string();
+            assert!(!head.ends_with(" on") && !head.ends_with(" o"), "a cut date at {w}: {head:?}");
+        }
+        assert!(text.contains("Less") && text.contains("More"), "{text}");
+        // Its plot is published at its own row.
+        let mut plots = Vec::new();
+        let rows = cursor_quota_with_plots(&d, 120, &palette(), &mut plots);
+        let head = rows.iter().position(|r| strip(r).contains("ACTIVITY")).unwrap();
+        assert!(plots.iter().any(|pl| pl.y > head), "no calendar plot under the heading");
+        // A failed call says so; a profile with no days says that.
+        let mut d = unified_data(true);
+        d.activity = None;
+        assert!(squeeze(&report(&d, 120)).contains("ACTIVITY ── not reported"));
+        d.activity = Some(serde_json::json!({}));
+        assert!(squeeze(&report(&d, 120)).contains("no active days on the profile"));
+    }
+
+    #[test]
+    fn a_spacexsi_cursor_tab_draws_no_local_authorship() {
+        let mut d = unified_data(true);
+        d.ok = true;
+        d.hashes = 46_404;
+        d.lines = 1_000;
+        let text = cursor_tab(&d, 120, &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        for local in ["AI-WRITTEN CODE", "WHO WROTE IT", "tracked edits", "No AI-written-code counts"] {
+            assert!(!text.contains(local), "local data {local:?} under SpaceXSI: {text}");
+        }
+        // Its own plan still draws them.
+        let mut own = own_plan_data();
+        own.ok = true;
+        own.hashes = 46_404;
+        assert!(cursor_tab(&own, 120, &palette()).join("\n").contains("AI-WRITTEN CODE"));
+    }
+
+    #[test]
+    fn a_cached_window_past_its_reset_is_rolled_before_it_is_matched() {
+        // Review: Grok's ended window was rolled and Cursor's was not, so a
+        // cached Cursor response across the reset split one account in two.
+        let mut d = unified_data(true);
+        let week = 7.0 * 86_400_000.0;
+        let end = now() * 1000.0 - 60_000.0;
+        d.live.as_mut().unwrap()["billingCycleStart"] = serde_json::json!((end - week).to_string());
+        d.live.as_mut().unwrap()["billingCycleEnd"] = serde_json::json!(end.to_string());
+        let (s, e) = pool_window(&d).unwrap();
+        assert_eq!((s, e), (end, end + week));
+        // A window still running is taken as sent.
+        let d = unified_data(true);
+        let live = d.live.as_ref().unwrap();
+        let sent = (loose(&live["billingCycleStart"]).unwrap(), loose(&live["billingCycleEnd"]).unwrap());
+        if sent.1 > now() * 1000.0 {
+            assert_eq!(pool_window(&d), Some(sent));
+        }
+    }
+
+    #[test]
+    fn narrow_panes_keep_whole_figures_and_the_pool_percentage() {
+        // Review: money in the report was clipped (`$0.00 of $1`) and the
+        // pool's percentage pushed off the row on narrow panes.
+        let d = unified_data(true);
+        for w in [26usize, 30, 40, 50] {
+            let text = report(&d, w);
+            let pool = text.lines().find(|l| l.trim_start().starts_with("weekly pool")).unwrap();
+            assert!(pool.contains("5.1%"), "the pool's percentage was cut at {w}: {pool:?}");
+            assert!(text.contains("$0.00 of $100.00"), "the limit was cut at {w}: {text}");
+            assert!(text.contains("$20.00 left"), "the balance was cut at {w}: {text}");
+            // Review: the refill rule is money too, and wraps whole parts
+            // onto the next row rather than end in `when be`.
+            for part in ["auto top-up", "$10.00", "when below", "$2.00"] {
+                assert!(text.contains(part), "the refill rule's {part:?} was cut at {w}: {text}");
+            }
+            for row in text.lines() {
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_team_pool_keeps_the_pools_spend() {
+        // Review: on a team limit the account's own spentThisMonthCents
+        // replaced the pool's total - one member's share shown as the whole.
+        let mut d = unified_data(true);
+        d.live.as_mut().unwrap()["spendLimitUsage"] =
+            serde_json::json!({"individualLimit": 10000, "totalSpend": 5000, "limitType": "team"});
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("100");
+        let state = additional_state(&d, d.live.as_ref().unwrap());
+        assert_eq!(state, ExtraState::Fixed { used: 5000.0, limit: 10000.0, shared: true });
+        // A user limit still takes the account's own figure.
+        let mut d = unified_data(true);
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        assert_eq!(
+            additional_state(&d, d.live.as_ref().unwrap()),
+            ExtraState::Fixed { used: 350.0, limit: 10000.0, shared: false }
+        );
+    }
+
+    #[test]
+    fn the_report_bars_keep_their_percentage_on_narrow_panes() {
+        // Review: the report bars kept an eight-cell floor and clipped
+        // their own percentage at 26 to 40 columns.
+        let d = unified_data(true);
+        for w in [26usize, 30, 34, 40] {
+            let text = report(&d, w);
+            for label in ["prepaid credits", "usage limit"] {
+                let row = text.lines().find(|l| l.trim_start().starts_with(label)).unwrap_or_else(|| panic!("{label} at {w}: {text}"));
+                assert!(row.trim_end().ends_with('%'), "{label}'s percentage cut at {w}: {row:?}");
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
     fn every_unified_row_fits_its_pane() {
         for limit_set in [true, false] {
             for place in [Spacexsi::Alone, Spacexsi::Shared, Spacexsi::Separate] {
@@ -3472,6 +3834,14 @@ mod tests {
         assert!(!report(&d, 120).contains('■'));
         d.spacexsi = Spacexsi::Separate;
         assert!(report(&d, 160).contains("SpaceXSI ── via Cursor"));
+        // Every product line keeps its share on a narrow pane.
+        let mut narrow = unified_data(true);
+        narrow.pool_split = vec![("Cursor".into(), 5.0), ("Grok Bot".into(), 5.0)];
+        for w in [26usize, 30] {
+            let text = report(&narrow, w);
+            assert!(text.contains("Cursor ~5%") || squeeze(&text).contains("■ Cursor ~5%"), "share cut at {w}: {text}");
+            assert!(squeeze(&text).contains("■ Grok Bot ~5%"), "share cut at {w}: {text}");
+        }
         // Every product line fits a narrow pane whole.
         let mut d = unified_data(true);
         d.pool_split = vec![("Cursor".into(), 5.0), ("Grok Bot".into(), 5.0), ("Grok Imagine".into(), 1.0)];
@@ -3494,6 +3864,33 @@ impl Data {
 
     pub fn own_plan_fixture() -> Data {
         tests::own_plan_data()
+    }
+
+    /// The same reading with the usage call answered but no pool figure in
+    /// it - neither the total nor the auto percentage.
+    pub fn without_pool_figure(mut d: Data) -> Data {
+        if let Some(plan) = d.live.as_mut().and_then(|l| l["planUsage"].as_object_mut()) {
+            plan.remove("totalPercentUsed");
+            plan.remove("autoPercentUsed");
+        }
+        d
+    }
+
+    /// The same reading with the usage call unanswered.
+    /// The same reading cached from a week that has since ended.
+    pub fn from_an_ended_week(mut d: Data) -> Data {
+        if let Some(live) = d.live.as_mut() {
+            let end = now() * 1000.0 - 60_000.0;
+            live["billingCycleStart"] = serde_json::json!((end - 7.0 * 86_400_000.0).to_string());
+            live["billingCycleEnd"] = serde_json::json!(end.to_string());
+        }
+        d
+    }
+
+    pub fn without_live(mut d: Data) -> Data {
+        d.live = None;
+        d.live_why = "Cursor's usage endpoint did not answer".into();
+        d
     }
 }
 

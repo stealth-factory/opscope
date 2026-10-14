@@ -465,8 +465,10 @@ fn ask_explain(
     what: String,
     gen: u64,
     inbox: Arc<Mutex<Option<(u64, Detail)>>>,
+    activity: tc::Refresh,
 ) {
     std::thread::spawn(move || {
+        let _work = activity.start();
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             explain_agent(&session, &pane, &what)
         }));
@@ -1001,9 +1003,11 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
+    let activity = tc::Refresh::default();
     let wake = refresh_wake::new();
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_activity = activity.clone();
     let polled_session = session.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let poller_stop = Arc::clone(&stop);
@@ -1013,6 +1017,7 @@ fn main() {
             ..Default::default()
         };
         loop {
+            let work = poller_activity.start();
             // A poller that dies takes its explanation with it, and an
             // empty board looks exactly like a session with nothing in it.
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1024,6 +1029,7 @@ fn main() {
                 }
                 return;
             }
+            drop(work);
             if poller_stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1167,6 +1173,7 @@ fn main() {
                                 agent.name.clone(),
                                 detail_gen,
                                 Arc::clone(&inbox),
+                                activity.clone(),
                             );
                         }
                     } else if let Some(row) =
@@ -1411,7 +1418,12 @@ fn main() {
         .collect();
 
         // ---- the pinned header ----
-        let mut head = vec![tc::title("luvus panes", w, &p.accent)];
+        let mut head = vec![tc::title_busy(
+            "luvus panes",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         let mut counts: HashMap<&str, usize> = HashMap::new();
         if let Ok(listed) = &agents {
             for a in listed {

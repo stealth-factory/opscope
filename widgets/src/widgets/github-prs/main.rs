@@ -1884,6 +1884,7 @@ fn main() {
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
     let rate = Arc::new(Mutex::new(Rate::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let (tok, source) = token(&cfg);
     let env_name = {
@@ -1898,6 +1899,7 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_rate = Arc::clone(&rate);
+    let poller_activity = activity.clone();
     let poll_tok = tok.clone();
     let poll_env = env_name.clone();
     let poll_sources = sources.clone();
@@ -1911,6 +1913,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let want = poller.lock().ok().and_then(|g| {
                 let have = g.detail.as_ref().map(|d| number(d, "number"));
                 match &g.want {
@@ -1990,6 +1993,7 @@ fn main() {
                     g.loading = false;
                 }
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -2286,7 +2290,12 @@ fn main() {
         // panes headed GITHUB OPS, GITHUB PRS and GITHUB ACTIONS say what
         // they have in common; PR WATCH read as a fourth unrelated thing.
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("github prs", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "github prs",
+            w,
+            &p.accent,
+            activity.tick(tick),
+        )];
         // Two rows, in the order the other GitHub widgets use them. The
         // first is the chrome every polling widget draws and is meant to
         // read identically across panes: who is being watched, when it last

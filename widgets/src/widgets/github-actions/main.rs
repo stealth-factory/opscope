@@ -1474,9 +1474,10 @@ fn info_overlay(
     w: usize,
     repeats: usize,
     note: &str,
+    busy: Option<usize>,
     p: &Palette,
 ) -> Vec<String> {
-    let mut rows = vec![tc::title(
+    let mut rows = vec![tc::title_busy(
         &format!(
             "{} / {}",
             text(run, "repo"),
@@ -1484,6 +1485,7 @@ fn info_overlay(
         ),
         w,
         &p.accent,
+        busy,
     )];
     let kind = outcome(run);
     let colour = outcome_colour(&kind, p);
@@ -1674,9 +1676,11 @@ fn main() {
         window_hours: start_window,
         ..Default::default()
     }));
+    let refresh_activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_activity = refresh_activity.clone();
     let poll_tok = tok.clone();
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
@@ -1691,6 +1695,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 one_pass(
                     &poll_tok,
@@ -1726,6 +1731,7 @@ fn main() {
                     return;
                 }
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -2005,7 +2011,9 @@ fn main() {
                 if start {
                     let (details, fetching) = (Arc::clone(&details), Arc::clone(&fetching));
                     let (chosen, tok) = (chosen.clone(), tok.clone());
+                    let detail_activity = refresh_activity.clone();
                     std::thread::spawn(move || {
+                        let _work = detail_activity.start();
                         let got = fetch_jobs(&chosen, &tok);
                         if let Ok(mut g) = details.lock() {
                             g.insert(id, got);
@@ -2024,7 +2032,15 @@ fn main() {
                         && is_failed(r)
                 })
                 .count();
-            let body = info_overlay(&chosen, held.as_ref(), w, repeats, &note.0, &p);
+            let body = info_overlay(
+                &chosen,
+                held.as_ref(),
+                w,
+                repeats,
+                &note.0,
+                refresh_activity.tick(tick),
+                &p,
+            );
             let foot = 2;
             let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
@@ -2071,7 +2087,12 @@ fn main() {
             continue;
         }
 
-        let mut rows = vec![tc::title("github actions", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "github actions",
+            w,
+            &p.accent,
+            refresh_activity.tick(tick),
+        )];
         let mut meta = vec![(
             p.dim.as_str(),
             format!(
@@ -2764,7 +2785,7 @@ mod tests {
         let url = "https://github.com/acme/app/actions/runs/9";
         assert_eq!(run_url(&got), url);
         assert_eq!(copy_items(&got)[0].1, url);
-        let rows = info_overlay(&got, None, 80, 0, "", &palette());
+        let rows = info_overlay(&got, None, 80, 0, "", None, &palette());
         assert!(
             rows.iter().any(|r| r.contains(&format!("\x1b]8;;{url}\x1b\\"))),
             "the run title links the url the copy sheet lists"
