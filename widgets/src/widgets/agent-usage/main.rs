@@ -407,6 +407,18 @@ fn agent_family(name: &str) -> &str {
     name.split_once(':').map(|(head, _)| head).unwrap_or(name)
 }
 
+/// Perplexity's hue. Named, because its bars are drawn between their own
+/// two teals rather than on the shared ramp - see `bar_stops`.
+const PERPLEXITY_HUE: (u8, u8, u8) = (60, 180, 166);
+
+/// Bar stops for a hue the shared ramp washes out. The ramp mixes every hue
+/// 15% to 60% toward white, which took Perplexity's dark teal to a pale
+/// mint at the full end; its bars instead run from the hue to a brighter
+/// teal of the same family. Every other hue keeps the shared ramp.
+fn bar_stops(hue: (u8, u8, u8)) -> Option<([u8; 3], [u8; 3])> {
+    (hue == PERPLEXITY_HUE).then_some(([60, 180, 166], [112, 214, 198]))
+}
+
 fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
     Some(match agent_family(name) {
         "claude" => (240, 132, 84),
@@ -420,7 +432,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         // Perplexity's dark teal, its brand #20808D lifted only as far as
         // reading needs: the brand measures 2.59 on the selected-row tint,
         // this 4.72 there and 8.27 on black.
-        "perplexity" => (60, 180, 166),
+        "perplexity" => PERPLEXITY_HUE,
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
         // The unified Cursor and Grok plan, in greyscale: the brand is
@@ -886,8 +898,15 @@ fn paced_bar_with_plot(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
-    let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
-    let plot = tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark);
+    let plot = match hue.and_then(bar_stops) {
+        Some((start, end)) => {
+            tc::Plot::gradient_meter_between(x, row, room, used, elapsed, start, end, &p.grid, &p.pace_mark)
+        }
+        None => {
+            let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
+            tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark)
+        }
+    };
     let parts = plot.text_row(0).to_vec();
     plots.push(plot);
     parts

@@ -402,8 +402,28 @@ impl Plot {
         track: &str,
         mark: &str,
     ) -> Self {
-        let fraction = finite_fraction(fraction);
         let (start, end) = gradient_stops(rgb(colour).unwrap_or([180, 200, 220]));
+        Self::gradient_meter_between(x, y, width, fraction, marker, start, end, track, mark)
+    }
+
+    /// `gradient_meter` between two stops the caller chooses, for a hue the
+    /// shared ramp would wash toward white. Each stop is still lifted to AA
+    /// on the selected-row tint when it falls short, so a dark brand colour
+    /// cannot make a bar unreadable where `gradient_meter`'s would not be.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradient_meter_between(
+        x: usize,
+        y: usize,
+        width: usize,
+        fraction: f64,
+        marker: Option<f64>,
+        start: [u8; 3],
+        end: [u8; 3],
+        track: &str,
+        mark: &str,
+    ) -> Self {
+        let fraction = finite_fraction(fraction);
+        let (start, end) = (readable_on_tint(start, 0.0), readable_on_tint(end, 0.0));
         let filled = (fraction * width as f64).round() as usize;
         let cells: Vec<_> = (0..filled.max(usize::from(fraction > 0.0)).min(width))
             .map(|i| colour_at(start, end, i as f64 / filled.saturating_sub(1).max(1) as f64))
@@ -907,12 +927,25 @@ fn gradient_stops(hue: [u8; 3]) -> ([u8; 3], [u8; 3]) {
     // Clocks' brighter ramp, shared by every horizontal bar. Lift a darker
     // provider/category hue just enough for AA on the selected-row tint;
     // the terminal background is darker and clears the same threshold.
+    let t = lift_for_tint(hue, 0.15);
+    (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
+}
+
+/// How far toward white `hue` has to go, starting from `from`, to reach AA
+/// on the selected-row tint.
+fn lift_for_tint(hue: [u8; 3], from: f64) -> f64 {
     let minimum = 4.5 * (luminance([38, 56, 76]) + 0.05) - 0.05;
-    let mut t = 0.15;
-    while luminance(mix_rgb(hue, [255; 3], t)) < minimum {
+    let mut t = from;
+    while t < 1.0 && luminance(mix_rgb(hue, [255; 3], t)) < minimum {
         t = (t + 0.01_f64).min(1.0);
     }
-    (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
+    t
+}
+
+/// `hue` itself when it already reads on the tint, otherwise lifted only as
+/// far as it must be.
+fn readable_on_tint(hue: [u8; 3], from: f64) -> [u8; 3] {
+    mix_rgb(hue, [255; 3], lift_for_tint(hue, from))
 }
 
 #[cfg(test)]
@@ -1178,6 +1211,20 @@ pub(crate) fn cropped_chart_command(plot: &Plot, pane_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_meter_between_chosen_stops_keeps_them_unless_they_would_not_read() {
+        let floor = 4.5 * (luminance([38, 56, 76]) + 0.05) - 0.05;
+        // Readable already: kept exactly, not washed toward white.
+        assert_eq!(readable_on_tint([60, 180, 166], 0.0), [60, 180, 166]);
+        // Perplexity's own brand teal is too dark for the tint: lifted to it.
+        let lifted = readable_on_tint([32, 128, 141], 0.0);
+        assert_ne!(lifted, [32, 128, 141]);
+        assert!(luminance(lifted) >= floor, "{lifted:?}");
+        let plot = Plot::gradient_meter_between(0, 0, 10, 0.5, None, [32, 128, 141], [112, 214, 198], "", "");
+        let fill = plot.fill.as_ref().unwrap();
+        assert_eq!(fill.gradients, vec![(1, [112, 214, 198])]);
+    }
     fn chart(values: Vec<Option<f64>>) -> LineChart {
         LineChart {
             slots: values.len(),
