@@ -756,6 +756,36 @@ pub struct PerplexityCredits {
     pub uncovered: f64,
     /// Grants of a type this widget does not know, left out of every pool.
     pub unknown_grants: usize,
+    /// The account's whole balance, as Perplexity states it.
+    pub balance: Option<f64>,
+    /// `total_usage_cents`: this period's usage alone.
+    pub period_usage: f64,
+    /// Each live grant, in the order Perplexity listed them.
+    pub grants: Vec<PerplexityGrant>,
+    /// Auto top-up, when it is on: what it adds, and below what balance.
+    pub auto_topup: Option<(f64, f64)>,
+    /// `spending_limit_cents`, when the account has one.
+    pub spending_limit: Option<f64>,
+}
+
+/// One credit grant, as the answer lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityGrant {
+    pub kind: String,
+    pub amount: f64,
+    pub remaining: Option<f64>,
+    /// What of it was spent in periods before this one.
+    pub prior_periods: Option<f64>,
+    pub effective: Option<f64>,
+    pub expires: Option<f64>,
+}
+
+impl PerplexityGrant {
+    /// Perplexity marks a grant that never lapses with a date in the year
+    /// 9999 rather than leaving it out; anything past 2200 is read as that.
+    pub fn never_expires(&self) -> bool {
+        self.expires.is_none_or(|t| t > 7_258_118_400.0)
+    }
 }
 
 impl PerplexityCredits {
@@ -781,8 +811,34 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         None | Some(serde_json::Value::Null) => None,
         Some(x) => Some(finite(x)?).filter(|t| *t > 0.0),
     };
-    let mut out = PerplexityCredits { renews, ..PerplexityCredits::default() };
-    let (mut recurring, mut bought, mut bonus) = (0.0, 0.0, 0.0);
+    let optional = |snake: &str, camel: &str| -> Option<Option<f64>> {
+        match field(snake, camel) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(x) => Some(Some(finite(x)?)),
+        }
+    };
+    let balance = optional("balance_cents", "balanceCents")?;
+    let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
+    let topup_on = field("auto_topup_enabled", "autoTopupEnabled").and_then(|x| x.as_bool());
+    let auto_topup = match topup_on {
+        Some(true) => {
+            let amount = optional("auto_topup_amount_cents", "autoTopupAmountCents")?;
+            let under = optional("auto_topup_threshold_cents", "autoTopupThresholdCents")?;
+            amount.zip(under)
+        }
+        _ => None,
+    };
+    let mut out = PerplexityCredits {
+        renews,
+        balance,
+        spending_limit,
+        auto_topup,
+        period_usage: left,
+        ..PerplexityCredits::default()
+    };
+    // Per pool: the grants' amounts, and what they say is left of them.
+    let (mut recurring, mut bought, mut bonus) = ([0.0; 2], [0.0; 2], [0.0; 2]);
+    let (mut every_grant_says_what_is_left, mut grants) = (true, 0);
     for grant in field("credit_grants", "creditGrants")?.as_array()? {
         let grant = grant.as_object()?;
         let kind = grant.get("type")?.as_str()?;
@@ -791,18 +847,57 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             None | Some(serde_json::Value::Null) => None,
             Some(x) => Some(finite(x)?),
         };
-        match kind {
-            "recurring" => recurring += amount,
-            "purchased" => bought += amount,
+        let remaining = match grant.get("remaining_cents").or_else(|| grant.get("remainingCents")) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(x) => Some(finite(x)?.clamp(0.0, amount.max(0.0))),
+        };
+        let pool = match kind {
+            "recurring" => &mut recurring,
+            "purchased" => &mut bought,
             "promotional" if expires.is_none_or(|t| t > now) => {
-                bonus += amount;
                 if let Some(t) = expires {
                     out.bonus_expires = Some(out.bonus_expires.map_or(t, |e: f64| e.min(t)));
                 }
+                &mut bonus
             }
-            "promotional" => {}
-            _ => out.unknown_grants += 1,
+            "promotional" => continue,
+            _ => {
+                out.unknown_grants += 1;
+                continue;
+            }
+        };
+        grants += 1;
+        let num = |snake: &str, camel: &str| {
+            grant.get(snake).or_else(|| grant.get(camel)).and_then(finite)
+        };
+        out.grants.push(PerplexityGrant {
+            kind: kind.to_string(),
+            amount,
+            remaining,
+            prior_periods: num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents"),
+            effective: num("effective_at_ts", "effectiveAtTs"),
+            expires,
+        });
+        pool[0] += amount;
+        match remaining {
+            Some(r) => pool[1] += r,
+            None => every_grant_says_what_is_left = false,
         }
+    }
+    // A grant that says what is left of it is exact, across every period it
+    // has been drawn on. `total_usage_cents` counts this period alone, so
+    // spreading it over the pools reads a grant bought last month and part
+    // spent then as untouched. It is only the fallback, for an answer whose
+    // grants do not say.
+    if grants > 0 && every_grant_says_what_is_left {
+        let pool = |[total, left]: [f64; 2]| {
+            let total = total.max(0.0);
+            PerplexityPool { total, used: (total - left).max(0.0) }
+        };
+        out.recurring = pool(recurring);
+        out.purchased = pool(bought);
+        out.bonus = pool(bonus);
+        return Some(out);
     }
     let mut spend = |total: f64| {
         let total = total.max(0.0);
@@ -810,9 +905,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         left -= used;
         PerplexityPool { total, used }
     };
-    out.recurring = spend(recurring);
-    out.purchased = spend(bought.max(bought_field));
-    out.bonus = spend(bonus);
+    out.recurring = spend(recurring[0]);
+    out.purchased = spend(bought[0].max(bought_field));
+    out.bonus = spend(bonus[0]);
     out.uncovered = left;
     Some(out)
 }

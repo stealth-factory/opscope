@@ -1472,6 +1472,62 @@ These are the same two requests CodexBar makes for its Notion AI provider.
 
 Perplexity keeps up to three pools of credits on an account: the plan's
 monthly credits, credits bought on top, and promotional bonus credits. The
+`perplexity` tab draws one bar per pool that has anything in it, and `[+]`
+draws them beside every other agent's. Under the bars it lists the balance,
+this period's usage and when the period ends, every credit grant on its own
+row - what is left of it, when it was added, what was spent of it before
+this period, and when it lapses - and the billing settings: auto top-up and
+the spending limit. The monthly credits are paced on the calendar month
+ending at the renewal Perplexity reports; bought and bonus credits have no
+window to pace against, so neither has a pace.
+
+- **There is no public API for it.** The widget asks
+  `/rest/billing/credits`, the endpoint perplexity.ai's own usage page
+  calls, which is internal and can change without notice. When it answers
+  in a shape the widget cannot read, the tab says so rather than drawing an
+  empty bar.
+- **Amounts are credits.** The answer's fields are named in cents, but the
+  usage page counts the same numbers as credits, one to one, so that is the
+  unit drawn.
+- **A grant that says what is left of it is believed.** Each grant carries
+  `remaining_cents`, which counts every period it has been drawn on.
+  `total_usage_cents` counts only this one, so spreading it over the pools
+  - CodexBar's way - reads a grant bought last month and part spent then as
+  untouched. Only when a grant does not say is usage spread in Perplexity's
+  spending order: monthly first, then bought, then bonus. A bonus grant past
+  its expiry is gone and is not counted. Usage more than every pool holds,
+  and grants of a type the widget does not know, are said under the bars
+  rather than dropped.
+- **The weekly limit Pro shows is not here yet.** perplexity.ai draws it
+  from a different request than the credits, which this does not ask.
+- **It needs your session cookie.** Copy `token_v2` from app.notion.com
+  (developer tools, then cookies) into `notion_token`, or into the variable
+  `notion_token_env` names (`NOTION_TOKEN_V2`). That cookie is a full
+  sign-in to your Notion account, not a scoped key, so keep `config.json`
+  `chmod 600`; the tab warns when it is not. The widget never reads it out
+  of a browser or the Notion app, for the reason given above.
+- **Notion is here when a token is.** It leaves nothing on this machine to
+  discover, so with no token it has no tab, and with one it is asked every
+  five minutes - and only while it is one of the agents you chose.
+- **The allowance is per member**, in one workspace. `notion_workspace`
+  picks it by id; empty takes the first on a Business or Enterprise plan. A
+  Free or Plus workspace answers that it has no allowance, and the tab says
+  that rather than showing a gauge.
+- **Custom Agents are not in it.** Notion bills those in Notion credits,
+  which this does not read.
+
+| key | default | what it does |
+|---|---|---|
+| `notion_token` | `""` | the `token_v2` cookie, or a whole `Cookie` header copied from a request |
+| `notion_token_env` | `NOTION_TOKEN_V2` | the variable read when `notion_token` is empty |
+| `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
+
+These are the same two requests CodexBar makes for its Notion AI provider.
+
+### Perplexity asks its account page's endpoint, with a cookie you hand it
+
+Perplexity keeps up to three pools of credits on an account: the plan's
+monthly credits, credits bought on top, and promotional bonus credits. The
 `perplexity` tab draws one bar per pool that has anything in it, each with
 how many dollars of it are used, and `[+]` draws them beside every other
 agent's. The monthly credits are paced on the calendar month ending at the
@@ -1490,8 +1546,9 @@ a window to pace against.
   more than every pool holds, and grants of a type the widget does not
   know, are said under the bars rather than dropped.
 - **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
-  from perplexity.ai (developer tools, then cookies) into
-  `perplexity_token`, or into the variable `perplexity_token_env` names
+  from perplexity.ai - developer tools, then Application (Storage in
+  Firefox), then Cookies - into `perplexity_token` through the settings
+  screen (`,`), or into the variable `perplexity_token_env` names
   (`PERPLEXITY_SESSION_TOKEN`, the one CodexBar reads too). A whole
   `Cookie` header copied from a request works as well, including a long
   session split into `.0`, `.1` chunks. That cookie is a full sign-in to

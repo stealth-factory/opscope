@@ -278,9 +278,27 @@ pub fn why_no_lane(d: &Data) -> String {
     "no quota · no reading from Perplexity yet.".into()
 }
 
-/// Cents as dollars, the unit every field in the answer is named for.
+/// The answer's fields are named in cents, but Perplexity's own usage page
+/// counts the same numbers as credits, one to one: `balance_cents` 1314 is
+/// "1,314 credits left" there. So they are drawn as credits, whole, with the
+/// page's thousands separator - a dollar sign would be a conversion nobody
+/// was offered.
 fn cents(value: f64) -> String {
-    format!("${:.2}", value / 100.0)
+    format!("{} credits", count(value))
+}
+
+/// A credit figure with no unit, for the first of two in one phrase.
+fn count(value: f64) -> String {
+    let whole = value.max(0.0).floor() as u64;
+    let digits = whole.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn day(ts: f64) -> String {
@@ -306,6 +324,7 @@ fn credit_rows_with_plots(
     )];
     let hue = agent_hue("perplexity");
     let label_w = 7;
+    rows.extend(balance_rows(c, w, p));
     for lane in lanes(d) {
         let used = (lane.pct / 100.0).clamp(0.0, 1.0);
         let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
@@ -334,7 +353,7 @@ fn credit_rows_with_plots(
             "bought" => &c.purchased,
             _ => &c.bonus,
         };
-        let mut detail = format!("{} of {} used", cents(pool.used), cents(pool.total));
+        let mut detail = format!("{} of {} used", count(pool.used), cents(pool.total));
         match lane.label.as_str() {
             "monthly" => match lane.reset.map(|r| r - now()) {
                 Some(left) if left > 0.0 => detail.push_str(&format!(" · renews in {}", left_span(left))),
@@ -348,11 +367,13 @@ fn credit_rows_with_plots(
             }
             _ => detail.push_str(" · does not expire"),
         }
-        rows.push(tc::seg(
-            &[(p.dim.as_str(), format!(" {}  {}", " ".repeat(label_w), detail))],
-            w - 1,
-        ));
+        let indent = if w < 40 { 2 } else { label_w + 3 };
+        for line in wrap_text(&detail, w.saturating_sub(indent + 2).max(8)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), line))], w - 1));
+        }
     }
+    rows.extend(grant_rows(c, w, p));
+    rows.extend(billing_rows(c, w, p));
     if c.recurring.total > 0.0 && c.renews.and_then(period_secs).is_none() {
         let text = "Perplexity's answer had no renewal date this widget can read, so the \
                     monthly credits have no pace or renewal drawn.";
@@ -375,6 +396,119 @@ fn credit_rows_with_plots(
         );
         rows.extend(note(&text, &p.warn, w));
     }
+    rows
+}
+
+/// A section heading inside the tab, in the shape the QUOTAS view uses.
+fn heading(name: &str, tail: &str, w: usize, p: &Palette) -> String {
+    tc::seg(
+        &[(p.lbl.as_str(), format!(" ── {name} ── ")), (p.dim.as_str(), tail.to_string())],
+        w - 1,
+    )
+}
+
+/// A label and its value, the value wrapped under itself when the pane is
+/// narrow rather than cut.
+fn field_rows(label: &str, value: &str, colour: &str, w: usize, p: &Palette) -> Vec<String> {
+    let label_w = 15;
+    // Too narrow for a value beside its label: the label goes above it.
+    if w < label_w + 4 + 16 {
+        let mut rows = vec![tc::seg(&[(p.dim.as_str(), format!("  {label}"))], w - 1)];
+        rows.extend(
+            wrap_text(value, w.saturating_sub(6).max(8))
+                .into_iter()
+                .map(|line| tc::seg(&[(colour, format!("    {line}"))], w - 1)),
+        );
+        return rows;
+    }
+    let room = w - label_w - 4;
+    wrap_text(value, room)
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let lead = if i == 0 { label } else { "" };
+            tc::seg(
+                &[(p.dim.as_str(), format!("  {} ", tc::pad(lead, label_w))), (colour, line)],
+                w - 1,
+            )
+        })
+        .collect()
+}
+
+/// The balance as Perplexity states it, then this period's usage and when
+/// the period turns over. Usage is labelled as the period's, because it is
+/// not what the grants below have lost in all.
+fn balance_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
+    let mut rows = Vec::new();
+    if let Some(balance) = c.balance {
+        rows.extend(field_rows("balance", &format!("{} left", cents(balance)), &p.ok, w, p));
+    }
+    let mut period = format!("{} used", cents(c.period_usage));
+    match c.renews.map(|r| (r, r - now())) {
+        Some((r, left)) if left > 0.0 => {
+            period.push_str(&format!(" · ends {} (in {})", day(r), left_span(left)))
+        }
+        Some(_) => period.push_str(" · ended, renewing"),
+        None => {}
+    }
+    rows.extend(field_rows("this period", &period, &p.txt, w, p));
+    rows.push(String::new());
+    rows
+}
+
+/// Every grant on its own row: what it was, what is left, when it came and
+/// when it lapses. The bars above add grants of a kind together.
+fn grant_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
+    if c.grants.is_empty() {
+        return Vec::new();
+    }
+    let n = c.grants.len();
+    let mut rows = vec![String::new(), heading("GRANTS", &format!("{n} on the account"), w, p)];
+    for g in &c.grants {
+        let kind = match g.kind.as_str() {
+            "recurring" => "monthly",
+            "purchased" => "bought",
+            "promotional" => "bonus",
+            other => other,
+        };
+        let mut text = match g.remaining {
+            Some(left) => format!("{} left of {}", count(left), cents(g.amount)),
+            None => format!("{} granted", cents(g.amount)),
+        };
+        if let Some(t) = g.effective {
+            text.push_str(&format!(" · added {}", day(t)));
+        }
+        if let Some(before) = g.prior_periods.filter(|x| *x > 0.0) {
+            text.push_str(&format!(" · {} spent before this period", cents(before)));
+        }
+        if g.never_expires() {
+            text.push_str(" · never expires");
+        } else if let Some(t) = g.expires {
+            text.push_str(&format!(" · expires {}", day(t)));
+        }
+        rows.extend(field_rows(kind, &text, &p.txt, w, p));
+    }
+    rows
+}
+
+/// What refills the balance and what caps it, as the account has them set.
+fn billing_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
+    let mut body = Vec::new();
+    match c.auto_topup {
+        Some((adds, under)) => body.extend(field_rows(
+            "auto top-up",
+            &format!("on · adds {} when the balance drops under {}", cents(adds), cents(under)),
+            &p.txt,
+            w,
+            p,
+        )),
+        None => body.extend(field_rows("auto top-up", "off", &p.dim, w, p)),
+    }
+    if let Some(limit) = c.spending_limit {
+        body.extend(field_rows("spending limit", &cents(limit), &p.txt, w, p));
+    }
+    let mut rows = vec![String::new(), heading("BILLING", "", w, p)];
+    rows.extend(body);
     rows
 }
 
@@ -417,7 +551,8 @@ pub fn tab_with_plots(
                      cookie. Copy __Secure-next-auth.session-token from perplexity.ai \
                      (developer tools, cookies) into perplexity_token in config.json, or \
                      into {}. It is a full sign-in to your Perplexity account, so keep \
-                     config.json chmod 600.",
+                     config.json chmod 600. Press , to open settings and paste it into \
+                     perplexity_token.",
                     TOKEN_ENV
                 )
             } else {
@@ -491,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_says_each_pool_in_dollars_and_fits_at_every_width() {
+    fn the_tab_says_each_pool_in_credits_and_fits_at_every_width() {
         let d = reading();
         for w in [30usize, 40, 60, 100] {
             let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
@@ -499,9 +634,49 @@ mod tests {
                 assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
             }
             if w >= 60 {
-                assert!(rows.contains("$100.00 of $100.00 used"), "{rows}");
-                assert!(rows.contains("$5.00 of $15.00 used"), "{rows}");
+                assert!(rows.contains("10,000 of 10,000 credits used"), "{rows}");
+                assert!(rows.contains("500 of 1,500 credits used"), "{rows}");
                 assert!(rows.contains("renews in") && rows.contains("expires"), "{rows}");
+            }
+        }
+    }
+
+    /// The shape a real account answered with: one bought grant, part
+    /// spent in an earlier period, nothing spent in this one, auto top-up on.
+    const CARRIED_OVER: &str = r#"{
+        "balance_cents": 1314.1, "renewal_date_ts": 4102444800,
+        "auto_topup_enabled": true, "auto_topup_amount_cents": 2000,
+        "auto_topup_threshold_cents": 500, "spending_limit_cents": 4000,
+        "current_period_purchased_cents": 0, "total_usage_cents": 0,
+        "credit_grants": [{"type": "purchased", "amount_cents": 2000,
+            "expires_at_ts": 253402214400, "effective_at_ts": 1789282800,
+            "amount_applied_prior_period_cents": 686, "remaining_cents": 1314}]
+    }"#;
+
+    #[test]
+    fn a_grant_spent_in_an_earlier_period_is_drawn_as_spent() {
+        let d = Data::answered(CARRIED_OVER);
+        let lanes = lanes(&d);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].label, "bought");
+        assert!((lanes[0].pct - 34.3).abs() < 1e-9, "{}", lanes[0].pct);
+        for w in [30usize, 40, 60, 100] {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            for r in rows.lines() {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+            for want in [
+                "1,314 credits left",
+                "686 of 2,000 credits used",
+                "GRANTS",
+                "1,314 left of 2,000 credits",
+                "686 credits spent before this period",
+                "never expires",
+                "adds 2,000 credits when the balance drops under 500 credits",
+                "4,000 credits",
+            ] {
+                assert!(words.contains(want), "width {w}, {want:?}:\n{rows}");
             }
         }
     }
@@ -529,7 +704,7 @@ mod tests {
         );
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("$3.00 of the period's usage is more than"), "{rows}");
+        assert!(words.contains("300 credits of the period's usage is more than"), "{rows}");
         assert!(words.contains("1 credit grant of a type this widget does not know is left out"), "{rows}");
         assert!(words.contains("no renewal date"), "{rows}");
     }
