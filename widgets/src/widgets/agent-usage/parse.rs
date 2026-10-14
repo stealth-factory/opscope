@@ -795,7 +795,7 @@ impl PerplexityGrant {
     /// 9999 rather than leaving it out; anything past 2200 is read as that.
     /// An expiry left out is unstated, not never.
     pub fn never_expires(&self) -> bool {
-        self.expires.is_some_and(|t| t > 7_258_118_400.0)
+        self.expires.is_some_and(never_expires)
     }
 }
 
@@ -815,6 +815,11 @@ impl PerplexityCredits {
 /// `now` decides which promotional grants are still live. Anything that is
 /// not the shape Perplexity's usage page reads is `None`, so a changed
 /// endpoint is reported as one rather than drawn as an empty account.
+/// Perplexity's year-9999-style marker for a grant that does not lapse.
+fn never_expires(t: f64) -> bool {
+    t > 7_258_118_400.0
+}
+
 pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredits> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let v = v.as_object()?;
@@ -889,7 +894,8 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         let amount = finite(grant.get("amount_cents").or_else(|| grant.get("amountCents"))?)?;
         let expires = match grant.get("expires_at_ts").or_else(|| grant.get("expiresAtTs")) {
             None | Some(serde_json::Value::Null) => None,
-            Some(x) => Some(finite(x)?),
+            // The never-expires marker is a date; one past any date is a changed answer.
+            Some(x) => Some(finite(x).filter(|t| chrono::DateTime::from_timestamp(*t as i64, 0).is_some())?),
         };
         let remaining = match grant.get("remaining_cents").or_else(|| grant.get("remainingCents")) {
             None | Some(serde_json::Value::Null) => None,
@@ -900,7 +906,8 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             "recurring" => &mut recurring,
             "purchased" => &mut bought,
             "promotional" if expires.is_none_or(|t| t > now) => {
-                if let Some(t) = expires {
+                // The never-expires marker is not a date anything lapses on.
+                if let Some(t) = expires.filter(|t| !never_expires(*t)) {
                     out.bonus_expires = Some(out.bonus_expires.map_or(t, |e: f64| e.min(t)));
                 }
                 &mut bonus
@@ -2381,6 +2388,13 @@ Period resets : 2026-10-06
         let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000,"effective_at_ts":1e14}],
             "total_usage_cents":0}"#;
         assert!(parse_perplexity_credits(raw, 10.0).is_none());
+        let raw = r#"{"credit_grants":[{"type":"promotional","amount_cents":10,"expires_at_ts":1e14}],
+            "total_usage_cents":0}"#;
+        assert!(parse_perplexity_credits(raw, 10.0).is_none());
+        // The never-expires marker is not the bonus pool's next expiry.
+        let raw = r#"{"credit_grants":[{"type":"promotional","amount_cents":10,"expires_at_ts":253402300799}],
+            "total_usage_cents":0}"#;
+        assert_eq!(parse_perplexity_credits(raw, 10.0).unwrap().bonus_expires, None);
     }
 
     #[test]

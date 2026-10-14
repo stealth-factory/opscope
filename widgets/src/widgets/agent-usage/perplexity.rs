@@ -742,10 +742,12 @@ fn pool_detail(label: &str, lane: &Lane, c: &PerplexityCredits) -> String {
             "bonus" => {
                 // The pool is every live bonus, and the date is the first of
                 // them to lapse, so with several it is not when all of it goes.
+                let bonuses = || c.grants.iter().filter(|g| g.kind == "promotional");
                 if let Some(t) = c.bonus_expires {
-                    let several = c.grants.iter().filter(|g| g.kind == "promotional").count() > 1;
-                    let what = if several { "next expiry" } else { "expires" };
+                    let what = if bonuses().count() > 1 { "next expiry" } else { "expires" };
                     detail.push_str(&format!(" · {what} {}", day(t)));
+                } else if bonuses().next().is_some() && bonuses().all(|g| g.never_expires()) {
+                    detail.push_str(" · does not expire");
                 }
             }
             _ => detail.push_str(" · does not expire"),
@@ -1426,6 +1428,11 @@ mod tests {
         };
         assert!(detail(&one).contains(" · expires "), "{}", detail(&one));
         assert!(detail(&two).contains(" · next expiry "), "{}", detail(&two));
+        // The never-expires marker read as "expires Dec 31".
+        let never = Data::answered(
+            r#"{"credit_grants":[{"type":"promotional","amount_cents":500,"expires_at_ts":253402300799}],"total_usage_cents":0}"#,
+        );
+        assert!(detail(&never).ends_with(" · does not expire"), "{}", detail(&never));
     }
 
     #[test]
