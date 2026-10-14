@@ -799,8 +799,13 @@ impl PerplexityGrant {
 }
 
 impl PerplexityCredits {
+    /// No credits in any pool. Grants of a type this widget does not know
+    /// are not nothing, so an answer holding only those is not empty.
     pub fn is_empty(&self) -> bool {
-        self.recurring.total <= 0.0 && self.purchased.total <= 0.0 && self.bonus.total <= 0.0
+        self.recurring.total <= 0.0
+            && self.purchased.total <= 0.0
+            && self.bonus.total <= 0.0
+            && self.unknown_grants == 0
     }
 }
 
@@ -959,16 +964,22 @@ pub struct PerplexitySubscription {
 pub fn parse_perplexity_subscription(text: &str) -> Option<PerplexitySubscription> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let v = v.as_object()?;
-    let ts = |k: &str| v.get(k).and_then(|x| x.as_f64()).filter(|t| t.is_finite() && *t > 0.0);
+    // A known field that is there but not the type it was is a changed
+    // answer, so it is unreadable rather than a reading with a date gone.
+    let ts = |k: &str| -> Option<Option<f64>> {
+        match v.get(k) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(x) => Some(x.as_f64().filter(|t| t.is_finite())?).map(|t| (t > 0.0).then_some(t)),
+        }
+    };
+    let interval = match v.get("billing_interval") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_str()?.trim()).filter(|s| !s.is_empty()).map(str::to_string),
+    };
     let sub = PerplexitySubscription {
-        interval: v
-            .get("billing_interval")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        next_bill: ts("next_billing_date_ts"),
-        cancels: ts("cancel_at_ts"),
+        interval,
+        next_bill: ts("next_billing_date_ts")?,
+        cancels: ts("cancel_at_ts")?,
     };
     (sub != PerplexitySubscription::default()).then_some(sub)
 }
@@ -2077,6 +2088,10 @@ Period resets : 2026-10-06
         assert_eq!(sub.interval.as_deref(), Some("monthly"));
         assert_eq!((sub.next_bill, sub.cancels), (Some(1_794_544_385.0), None));
         assert!(parse_perplexity_subscription(r#"{"retention_offer":{}}"#).is_none());
+        // A known field gone to another type is a changed answer, not a
+        // reading with its date quietly missing.
+        let changed = r#"{"billing_interval":"monthly","next_billing_date_ts":"2026-11-13T00:00:00Z"}"#;
+        assert!(parse_perplexity_subscription(changed).is_none());
     }
 
     #[test]

@@ -437,6 +437,13 @@ pub fn why_no_lane(d: &Data) -> String {
         return "no quota · Perplexity answered, and published no credits for this account."
             .into();
     }
+    if let Some(n) = d.credits.as_ref().map(|c| c.unknown_grants).filter(|n| *n > 0) {
+        return format!(
+            "no quota · Perplexity's {n} credit grant{} {} of a type this widget does not know.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "is" } else { "are" },
+        );
+    }
     if d.expired() {
         return "no quota · Perplexity session expired · press , to paste a fresh token".into();
     }
@@ -1224,6 +1231,18 @@ mod tests {
         let mut d = Data::answered(r#"{"credit_grants":[],"total_usage_cents":0}"#);
         d.quota_why = "weekly limit the request timed out".into();
         assert!(why_no_lane(&d).contains("weekly limit not read"), "{}", why_no_lane(&d));
+    }
+
+    #[test]
+    fn only_unknown_grants_are_not_an_account_with_no_credits() {
+        // A new grant type read as "published no credits" in [+].
+        let d = Data::answered(r#"{"credit_grants":[{"type":"mystery","amount_cents":500}],
+            "total_usage_cents":0,"balance_cents":500}"#);
+        assert!(!d.credits.as_ref().unwrap().is_empty());
+        let why = why_no_lane(&d);
+        assert!(why.contains("1 credit grant is of a type this widget does not know"), "{why}");
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("published no credits") && rows.contains("500 credits left"), "{rows}");
     }
 
     #[test]
