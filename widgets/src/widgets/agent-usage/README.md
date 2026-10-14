@@ -885,12 +885,15 @@ reads are $0.10 rather than $0.20. `claude-opus-5` is a prefix of
 `claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
 would inherit Opus 5, cache reads at $0.50 against the published $0.20.
 Codex Fast and Ultrafast are not model ids. A rollout's `service_tier` of
-`fast` bills 2× the standard row and the row says Fast; `ultrafast` bills
-6× and only for `gpt-6-astra`, and the row says Ultrafast.
-`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`. The published five
-match Sonnet 5 — 2 / 10 / 0.20 / 2.50 / 4 — so inheriting would bill the
-same today, and the row is still its own so a later move of one model does
-not reprice the other.
+`fast` bills the model's published Fast multiple of the standard row and
+the row says Fast. That is 2× for most models; `gpt-5.5` is 2.5×, and
+`gpt-5-mini`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3` and
+`o4-mini` sit between 1.67× and 1.82× (`wiki/model-prices.md` has the
+table). `ultrafast` bills 6× and only for `gpt-6-astra` and `gpt-6.1-sol`,
+and the row says Ultrafast.
+`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and without its own row
+Sonnet 5.5 would inherit Sonnet 5's cache reads at $0.20 against the
+published $0.10 (2 / 10 / 0.10 / 2.50 / 4).
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
