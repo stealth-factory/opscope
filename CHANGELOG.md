@@ -3,6 +3,38 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.8.0] - 2026-10-14
+
+### Bug Fixes
+
+- **core**: Send Kitty images inline inside Herdr panes (OPS-171) (#412)
+- **agent-usage**: Correct Sonnet 5.5 cache reads and OpenAI speed-tier rates (OPS-174) (#421)
+- **latency**: Bound intervals and stop idle refresh animation (OPS-176) (#426)
+- **core**: Quarantine first cell reply after child handoff (#425)
+
+### CI
+
+- Replace privileged PR trigger and narrow release permissions (#418)
+
+### Documentation
+
+- Document signed APT installation (#432)
+
+### Features
+
+- **core**: Rasterise charts at the reported cell size (OPS-149) (#360)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175) (#423)
+- **agent-usage**: Add a Perplexity tab for weekly limit, credits and billing (OPS-173) (#416)
+
+### Miscellaneous
+
+- Preserve latest main in netwatch restoration
+
+### Reverted
+
+- Restore main pending netwatch border-label review
+
 ## [1.7.0] - 2026-10-13
 
 ### Features
