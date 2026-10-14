@@ -803,7 +803,9 @@ fn field_rows(label: &str, value: &str, colour: &str, w: usize, p: &Palette) -> 
     let label_w = 15;
     // Too narrow for a value beside its label: the label goes above it.
     if w < label_w + 4 + 16 {
-        let mut rows = vec![tc::seg(&[(p.dim.as_str(), format!("  {label}"))], w - 1)];
+        // The label wraps too, and gives up its indent first, so its meaning
+        // is not the part cut beside a figure that survives.
+        let mut rows = indented(label, 2, &p.dim, w);
         // The indent gives way before the value does, and the value wraps
         // at what is left after it, so a figure is never the part cut.
         let indent = (w.saturating_sub(13)).min(4);
@@ -1509,6 +1511,11 @@ mod tests {
             }
             let words: Vec<&str> = rows.split_whitespace().collect();
             assert!(words.contains(&"-250") && words.contains(&"credits"), "width {w}: {rows}");
+            // The label is whole too, not cut to "balanc" at eight columns.
+            assert!(words.contains(&"balance"), "width {w}: {rows}");
+            let rows = plain(&field_rows("this period", "10 credits used", "", w, &palette()));
+            let kept: String = rows.split_whitespace().collect();
+            assert!(kept.starts_with("thisperiod"), "width {w}: {rows}");
         }
         // The heading's age is the oldest answer drawn.
         assert_eq!(older(0.0, 100.0), 100.0);

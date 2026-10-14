@@ -880,6 +880,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // A grant that says what is left but not what went before: its share of
     // this period is unknown, so the period's total cannot be split by it.
     let mut share_unknown = false;
+    // A lapsed bonus still listed may have spent some of this period before
+    // it lapsed, and it is in no pool, so that spend is not a live pool's.
+    let mut lapsed_spent = false;
     for grant in field("credit_grants", "creditGrants")?.as_array()? {
         let grant = grant.as_object()?;
         let kind = grant.get("type")?.as_str()?;
@@ -902,7 +905,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
                 }
                 &mut bonus
             }
-            "promotional" => continue,
+            "promotional" => {
+                lapsed_spent |= remaining.is_none_or(|r| r < amount);
+                continue;
+            }
             _ => {
                 out.unknown_grants += 1;
                 continue;
@@ -921,7 +927,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             amount,
             remaining,
             prior_periods,
-            effective: num("effective_at_ts", "effectiveAtTs")?,
+            // A date that cannot be drawn is a changed answer, not "added" with no day.
+            effective: num("effective_at_ts", "effectiveAtTs")?
+                .map(|t| chrono::DateTime::from_timestamp(t as i64, 0).map(|_| t))
+                .map_or(Some(None), |t| t.map(Some))?,
             expires,
         });
         pool[0] += amount;
@@ -967,11 +976,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // not know, a grant whose share of this period is unknown leaves nothing
     // safe to spread: what the stated grants did not take is said as not
     // drawn on a pool rather than put on one.
-    let split_unknown = share_unknown && (unsaid > 0 || out.unknown_grants > 0);
+    let split_unknown = share_unknown && (unsaid > 0 || out.unknown_grants > 0 || lapsed_spent);
     left = (left - if split_unknown { stated_this_period } else { said_this_period }).max(0.0);
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
-    let spreadable = out.unknown_grants == 0 && !split_unknown;
+    let spreadable = out.unknown_grants == 0 && !split_unknown && !lapsed_spent;
     let mut spend = |[total, said, said_left, before]: [f64; 4], floor: f64| {
         let to_spread = (total - said - before).max(floor - said - before).max(0.0);
         let used = if spreadable { left.min(to_spread) } else { 0.0 };
@@ -2351,6 +2360,27 @@ Period resets : 2026-10-06
         let c = parse_perplexity_credits(raw, 0.0).unwrap();
         assert_eq!(c.recurring.used, 50.0);
         assert_eq!(c.uncovered, 50.0);
+    }
+
+    #[test]
+    fn usage_a_lapsed_bonus_may_have_spent_is_not_put_on_a_live_pool() {
+        // A bonus that lapsed this period, still listed, could have spent
+        // the period's 100; it read as 100 monthly credits used.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000},
+            {"type":"promotional","amount_cents":100,"remaining_cents":0,"expires_at_ts":5}],
+            "total_usage_cents":100}"#;
+        let c = parse_perplexity_credits(raw, 10.0).unwrap();
+        assert_eq!(c.recurring.used, 0.0);
+        assert_eq!(c.uncovered, 100.0);
+        // Untouched when it lapsed, it spent nothing, and the usage is spread.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000},
+            {"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":5}],
+            "total_usage_cents":100}"#;
+        assert_eq!(parse_perplexity_credits(raw, 10.0).unwrap().recurring.used, 100.0);
+        // A grant date past what can be drawn is a changed answer.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000,"effective_at_ts":1e14}],
+            "total_usage_cents":0}"#;
+        assert!(parse_perplexity_credits(raw, 10.0).is_none());
     }
 
     #[test]
