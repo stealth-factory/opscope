@@ -338,13 +338,20 @@ and intentional text presentation, not unimplemented widget migrations.
 ## OSC 8 hyperlinks
 
 `tc::link(url, text)` wraps a title when `url` is an `https://` target with
-no spaces and no controls. Any other string comes back unchanged, which is
-the row drawn today.
+no spaces and no controls. Any other target leaves the sanitized title
+unlinked.
 
 Clickable titles have a dashed underline when styled underline support has
 been negotiated, or a plain underline otherwise, in both text and Kitty
 mode. The mark ends before alignment padding and adjacent columns. A clip
 closes both the underline and hyperlink so neither reaches the next column.
+
+External build output is not widget markup. Vercel passes log lines and log
+errors through `tc::source_text()` before wrapping: all terminal escapes,
+including source-provided OSC 8 targets, are removed. Tabs become spaces.
+`link()` sanitizes its visible label the same way, then adds the widget-owned
+target. The final row sanitizer also closes any dangling link before the next
+row, since an SGR reset alone does not end OSC 8.
 
 `draw` keeps that sequence, and the empty OSC 8 that closes it. OSC 8 with
 another scheme, and every other OSC, is stripped with the rest of the

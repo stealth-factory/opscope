@@ -893,7 +893,7 @@ fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
         return vec![
             String::new(),
             tc::seg(&[(p.lbl.as_str(), " ── BUILD LOG ──".into())], w - 1),
-            tc::seg(&[(p.dim.as_str(), format!("  {}", err))], w - 1),
+            tc::seg(&[(p.dim.as_str(), format!("  {}", tc::source_text(err)))], w - 1),
         ];
     }
     let Some(lines) = events.as_array() else {
@@ -916,7 +916,9 @@ fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
         ),
     ];
     for event in lines {
-        let said = text(event, "text");
+        // Build output is source data, never widget-owned terminal markup.
+        // Sanitize before wrapping so even split escapes cannot survive.
+        let said = tc::source_text(&text(event, "text"));
         let said = said.trim_end();
         if said.is_empty() {
             continue;
@@ -2432,6 +2434,25 @@ mod tests {
     /// The line that says why a build failed is the one worth finding, and
     /// it arrives on stderr among dozens of stdout lines that all look the
     /// same. Vercel marks them; this checks we keep the mark.
+    #[test]
+    fn build_log_cannot_supply_hyperlinks_or_terminal_markup() {
+        let detail = serde_json::json!({"_events": [
+            {"type": "stdout", "text": "\u{1b}]8;;https://example.com/untrusted\u{1b}\\Build finished\u{1b}]8;;\u{1b}\\"},
+            {"type": "stderr", "text": "\u{1b}]8;;https://example.com/untrusted\u{7}Check failed"},
+            {"type": "stdout", "text": "\u{1b}[31mfix:\tparser\u{1b}[0m"}
+        ]});
+        for width in [20, 90] {
+            let rows = build_log(&detail, width, &palette());
+            let joined = rows.join("\n");
+            assert!(!joined.contains("\u{1b}]8;"), "{joined:?}");
+            assert!(!joined.contains("example.com"), "{joined:?}");
+            assert!(!joined.contains("\u{1b}[31m"), "{joined:?}");
+            assert!(joined.contains("Build finished"), "{joined:?}");
+            assert!(joined.contains("Check failed"), "{joined:?}");
+            assert!(joined.contains("fix: parser"), "{joined:?}");
+        }
+    }
+
     #[test]
     fn the_build_log_picks_stderr_out_of_stdout() {
         let p = palette();

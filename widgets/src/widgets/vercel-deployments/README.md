@@ -94,6 +94,10 @@ press were then reliably scrolled off the screen you were pressing them from.
 
 ## The build log
 
+Build output is shown as plain source text. Terminal escape sequences,
+including hyperlinks supplied by a build step, are removed before wrapping.
+Only the deployment detail's widget-owned subject link is clickable.
+
 The detail view ends with the deployment's own build output, which arrives
 with the rest of the detail. The line above it says a build failed and names
 a code; the log says which line of somebody's config did it, which is the

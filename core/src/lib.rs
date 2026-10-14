@@ -261,6 +261,25 @@ pub fn display_width(s: &str) -> usize {
     strip_escapes(s).width()
 }
 
+/// Plain text from an external source, before it is wrapped or styled.
+/// Removes all terminal escapes, including source-provided OSC 8 targets.
+/// Tabs retain their separator as a space; other control characters vanish.
+/// Add widget-owned hyperlinks with `link()` only after this boundary.
+pub fn source_text(s: &str) -> String {
+    strip_escapes(s)
+        .chars()
+        .filter_map(|ch| {
+            if ch == '\t' {
+                Some(' ')
+            } else if ch.is_control() {
+                None
+            } else {
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
 /// `s` with every escape removed and the characters that were text left
 /// in order. An escape that never terminates takes the rest of the string
 /// with it: those bytes have not been shown.
@@ -438,7 +457,7 @@ fn close_dangling_link(s: &str) -> String {
 ///
 /// Core owns the escape. Widgets pass the URL a key already copies and
 /// the title text; they do not branch on the terminal. Only an `https://`
-/// target is wrapped. Every other string comes back unchanged, which is
+/// target is wrapped. Every other target leaves the sanitized title unlinked, which is
 /// the row a terminal that ignores OSC 8 shows anyway: the sequence is
 /// defined to be skipped, so the text does not move and no probe is
 /// required before sending it.
@@ -449,13 +468,11 @@ pub fn link(url: &str, text: &str) -> String {
 }
 
 fn link_with_support(url: &str, text: &str, support: terminal::UnderlineSupport) -> String {
+    // Source titles cannot introduce their own escapes or link targets.
+    let visible = source_text(text);
     if !https_uri(url) {
-        return text.to_string();
+        return visible;
     }
-    // A control in the title could close the link early and leave the
-    // rest of the row wearing the target. Titles from the APIs do not
-    // carry controls; one that did is shown without them.
-    let visible: String = text.chars().filter(|c| !c.is_control()).collect();
     let mark = if support == terminal::UnderlineSupport::Styled {
         "\x1b[4:5m"
     } else {
@@ -1027,7 +1044,7 @@ fn inert(row: &str) -> String {
         }
         rest = &rest[ch.len_utf8()..];
     }
-    out
+    close_dangling_link(&out)
 }
 
 /// An inert row cut to what the version leaves of `w`, padded out to
@@ -5096,6 +5113,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_link_is_balanced_at_the_rendered_row_boundary() {
+        let row = "\x1b]8;;https://example.com/log\x1b\\\x1b[4:5mBuild finished";
+        let clean = super::inert(row);
+        assert!(clean.ends_with("\x1b[24m\x1b]8;;\x1b\\"), "{clean:?}");
+        assert_eq!(super::strip_escapes(&clean), "Build finished");
+    }
+
+    #[test]
+    fn adding_a_link_preserves_tab_separators_in_the_visible_label() {
+        let title = "fix:\tparser";
+        let linked = super::link("https://example.com/pr/1", title);
+        assert_eq!(super::strip_escapes(&linked), super::inert(title));
+        let source = "\x1b]8;;https://example.com/untrusted\x1b\\title\x1b]8;;\x1b\\";
+        assert_eq!(super::link("", source), "title");
+        let linked = super::link("https://example.com/pr/1", source);
+        assert!(!linked.contains("/untrusted"));
+        assert_eq!(super::strip_escapes(&linked), "title");
+    }
+
+    #[test]
     fn clickable_titles_are_marked_without_underlining_neighbouring_columns() {
         use super::terminal::UnderlineSupport;
         let url = "https://example.com/pr/1";
@@ -5143,9 +5180,9 @@ mod tests {
         assert_eq!(super::inert("\x1b]8;https://example.com/a\x1b\\t"), "t");
         assert_eq!(super::link("http://example.com/a", "t"), "t");
         assert_eq!(super::link("https://", "t"), "t");
-        // A control in the title cannot close the link early.
+        // A source escape cannot close the link early; ESC b is removed whole.
         let guarded = super::link(url, "a\x1bb");
-        assert_eq!(super::strip_escapes(&guarded), "ab");
+        assert_eq!(super::strip_escapes(&guarded), "a");
         assert_eq!(super::inert(&guarded), guarded);
     }
 
