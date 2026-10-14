@@ -819,8 +819,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let v = v.as_object()?;
     let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
-    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite());
-    let mut left = finite(field("total_usage_cents", "totalUsageCents")?)?.max(0.0);
+    // Every amount and date here is at least zero; a negative one is a
+    // changed answer, not a figure to bend to zero. The balance alone may
+    // go below, so it is read on its own.
+    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite() && *n >= 0.0);
+    let mut left = finite(field("total_usage_cents", "totalUsageCents")?)?;
     let bought_field = match field("current_period_purchased_cents", "currentPeriodPurchasedCents") {
         None | Some(serde_json::Value::Null) => 0.0,
         Some(x) => finite(x)?,
@@ -835,7 +838,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             Some(x) => Some(Some(finite(x)?)),
         }
     };
-    let balance = optional("balance_cents", "balanceCents")?;
+    let balance = match field("balance_cents", "balanceCents") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_f64().filter(|n| n.is_finite())?),
+    };
     let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
     let topup_on = match field("auto_topup_enabled", "autoTopupEnabled") {
         None | Some(serde_json::Value::Null) => None,
@@ -2195,6 +2201,13 @@ Period resets : 2026-10-06
         assert_eq!(c.uncovered, 50.0);
         // An expiry left out is not one that never comes.
         assert!(!c.grants[0].never_expires());
+        // A negative amount or usage is a changed answer, not zero.
+        for raw in [
+            r#"{"total_usage_cents":-5,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":0,"credit_grants":[{"type":"recurring","amount_cents":-100}]}"#,
+        ] {
+            assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none(), "{raw}");
+        }
         // A remainder below nothing or above the grant is a changed answer.
         for r in ["-1", "1001"] {
             let raw = format!(r#"{{"total_usage_cents":0,"credit_grants":[
