@@ -2,6 +2,7 @@
   "_comment": "Reads local agent state, plus remaining quota from each agent's own host with that agent's own credential. Grok's quota call is on by default and may start the Grok CLI to refresh its token; turn grok_ping off to keep those off. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
   "_schema": {
     "notion_token": { "secret": true },
+    "perplexity_token": { "secret": true },
     "devin_token": { "secret": true },
     "factory_api_key": { "secret": true },
     "agents": {
@@ -16,6 +17,7 @@
           "antigravity",
           "coderabbit",
           "notion",
+          "perplexity",
           "devin",
           "droid"
         ]
@@ -37,6 +39,7 @@
           "antigravity",
           "coderabbit",
           "notion",
+          "perplexity",
           "devin",
           "droid"
         ]
@@ -136,6 +139,10 @@
   "notion_token_env": "NOTION_TOKEN_V2",
   "_notion_workspace_comment": "The Notion workspace to report, by id, with or without its dashes. Empty picks the first on a Business or Enterprise plan, since only those carry an allowance. An id the account cannot see falls back to that choice.",
   "notion_workspace": "",
+  "_perplexity_token_comment": "Perplexity's account credits: the plan's monthly credits with their renewal, purchased credits, and bonus credits with their expiry. Perplexity publishes no API for them, so the widget asks the endpoint its own usage page uses, with your web session cookie - copy __Secure-next-auth.session-token from perplexity.ai (developer tools, then cookies). A whole Cookie header copied from a request works too. It is a full sign-in to your Perplexity account, not a scoped key, so keep this file chmod 600. The widget never reads it out of a browser. Empty reads the variable named in perplexity_token_env; empty there too and Perplexity has no tab.",
+  "perplexity_token": "",
+  "_perplexity_token_env_comment": "Environment variable holding the Perplexity session cookie when perplexity_token is empty.",
+  "perplexity_token_env": "PERPLEXITY_SESSION_TOKEN",
   "_devin_token_comment": "Devin's bearer token for the daily and weekly quota. Copy it yourself; the widget never reads a browser. It is sent only to app.devin.ai, and only while Devin is one of the agents shown. Keep this file chmod 600. Empty reads the variable named in devin_token_env, DEVIN_AUTHORIZATION when that variable is empty too, and then the credential a signed-in Devin CLI stored - devin_cli_credentials switches that last step off.",
   "devin_token": "",
   "_devin_token_env_comment": "Environment variable holding the Devin bearer token when devin_token is empty.",

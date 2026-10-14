@@ -717,6 +717,106 @@ pub fn pick_notion_space<'a>(spaces: &'a [NotionSpace], wanted: &str) -> Option<
     spaces.iter().find(|s| s.has_allowance()).or_else(|| spaces.first())
 }
 
+/// One Perplexity credit pool, in the cents the answer counts in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityPool {
+    pub total: f64,
+    pub used: f64,
+}
+
+impl PerplexityPool {
+    /// Share used, 0–100. Only asked of a pool with something in it.
+    pub fn pct(&self) -> f64 {
+        if self.total > 0.0 {
+            (self.used / self.total * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Perplexity `GET /rest/billing/credits`: the account's credit pools.
+///
+/// The answer gives one usage figure for the period and a list of grants,
+/// not a figure per pool. The split is Perplexity's own spending order, the
+/// one CodexBar reads it in: the plan's recurring credits first, then
+/// purchased ones, then promotional. A promotional grant past its expiry is
+/// gone, so it is not counted at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityCredits {
+    pub recurring: PerplexityPool,
+    pub purchased: PerplexityPool,
+    pub bonus: PerplexityPool,
+    /// The soonest expiry among the live promotional grants.
+    pub bonus_expires: Option<f64>,
+    /// When the recurring credits renew, as epoch seconds.
+    pub renews: Option<f64>,
+    /// Usage the three pools did not cover. Nothing should land here; when
+    /// something does, the tab says so rather than losing it.
+    pub uncovered: f64,
+    /// Grants of a type this widget does not know, left out of every pool.
+    pub unknown_grants: usize,
+}
+
+impl PerplexityCredits {
+    pub fn is_empty(&self) -> bool {
+        self.recurring.total <= 0.0 && self.purchased.total <= 0.0 && self.bonus.total <= 0.0
+    }
+}
+
+/// `now` decides which promotional grants are still live. Anything that is
+/// not the shape Perplexity's usage page reads is `None`, so a changed
+/// endpoint is reported as one rather than drawn as an empty account.
+pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredits> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
+    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite());
+    let mut left = finite(field("total_usage_cents", "totalUsageCents")?)?.max(0.0);
+    let bought_field = match field("current_period_purchased_cents", "currentPeriodPurchasedCents") {
+        None | Some(serde_json::Value::Null) => 0.0,
+        Some(x) => finite(x)?,
+    };
+    let renews = match field("renewal_date_ts", "renewalDateTs") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(finite(x)?).filter(|t| *t > 0.0),
+    };
+    let mut out = PerplexityCredits { renews, ..PerplexityCredits::default() };
+    let (mut recurring, mut bought, mut bonus) = (0.0, 0.0, 0.0);
+    for grant in field("credit_grants", "creditGrants")?.as_array()? {
+        let grant = grant.as_object()?;
+        let kind = grant.get("type")?.as_str()?;
+        let amount = finite(grant.get("amount_cents").or_else(|| grant.get("amountCents"))?)?;
+        let expires = match grant.get("expires_at_ts").or_else(|| grant.get("expiresAtTs")) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(x) => Some(finite(x)?),
+        };
+        match kind {
+            "recurring" => recurring += amount,
+            "purchased" => bought += amount,
+            "promotional" if expires.is_none_or(|t| t > now) => {
+                bonus += amount;
+                if let Some(t) = expires {
+                    out.bonus_expires = Some(out.bonus_expires.map_or(t, |e: f64| e.min(t)));
+                }
+            }
+            "promotional" => {}
+            _ => out.unknown_grants += 1,
+        }
+    }
+    let mut spend = |total: f64| {
+        let total = total.max(0.0);
+        let used = left.min(total);
+        left -= used;
+        PerplexityPool { total, used }
+    };
+    out.recurring = spend(recurring);
+    out.purchased = spend(bought.max(bought_field));
+    out.bonus = spend(bonus);
+    out.uncovered = left;
+    Some(out)
+}
+
 /// One Devin quota window. `pct` is the number the body sent, on a 0–100
 /// scale. `reset` is an absolute instant, when one was sent.
 #[derive(Clone, Debug, PartialEq)]
@@ -1759,6 +1859,99 @@ Period resets : 2026-10-06
         assert!(!coderabbit_signed_out("Your reviews : 3"));
         // A count that is not a number does not make a report on its own.
         assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
+    }
+
+    const PERPLEXITY: &str = r#"{
+        "balance_cents": 7250,
+        "renewal_date_ts": 1790000000,
+        "current_period_purchased_cents": 0,
+        "credit_grants": [
+            { "type": "recurring", "amount_cents": 10000, "expires_at_ts": 1790000000 },
+            { "type": "promotional", "amount_cents": 20000, "expires_at_ts": 1795000000 }
+        ],
+        "total_usage_cents": 2750
+    }"#;
+
+    #[test]
+    fn perplexity_usage_is_spent_from_the_recurring_pool_first() {
+        let c = parse_perplexity_credits(PERPLEXITY, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 10000.0, used: 2750.0 });
+        assert_eq!(c.bonus, PerplexityPool { total: 20000.0, used: 0.0 });
+        assert_eq!(c.purchased.total, 0.0);
+        assert_eq!(c.renews, Some(1_790_000_000.0));
+        assert_eq!(c.bonus_expires, Some(1_795_000_000.0));
+        assert!((c.recurring.pct() - 27.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perplexity_spends_recurring_then_purchased_then_bonus() {
+        // 9000 used: 5000 recurring, all 3000 purchased, 1000 of the bonus.
+        let raw = r#"{"renewal_date_ts":1790000000,"current_period_purchased_cents":3000,
+            "credit_grants":[{"type":"recurring","amount_cents":5000},
+                             {"type":"promotional","amount_cents":4000}],
+            "total_usage_cents":9000}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring.used, 5000.0);
+        assert_eq!(c.purchased, PerplexityPool { total: 3000.0, used: 3000.0 });
+        assert_eq!(c.bonus, PerplexityPool { total: 4000.0, used: 1000.0 });
+        assert_eq!(c.uncovered, 0.0);
+    }
+
+    #[test]
+    fn an_expired_perplexity_promotion_is_not_counted() {
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":10000},
+            {"type":"promotional","amount_cents":5000,"expires_at_ts":1700000000}],
+            "total_usage_cents":1000}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.bonus.total, 0.0);
+        assert_eq!(c.bonus_expires, None);
+    }
+
+    #[test]
+    fn perplexity_purchases_take_the_larger_of_the_grants_and_the_period_figure() {
+        let raw = |field: u32| format!(
+            r#"{{"current_period_purchased_cents":{field},
+                "credit_grants":[{{"type":"purchased","amount_cents":2000}}],
+                "total_usage_cents":0}}"#
+        );
+        assert_eq!(parse_perplexity_credits(&raw(500), 0.0).unwrap().purchased.total, 2000.0);
+        assert_eq!(parse_perplexity_credits(&raw(6000), 0.0).unwrap().purchased.total, 6000.0);
+    }
+
+    #[test]
+    fn perplexity_usage_beyond_every_pool_is_kept_and_unknown_grants_are_counted() {
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100},
+            {"type":"mystery","amount_cents":900}],"total_usage_cents":400}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.recurring.used, 100.0);
+        assert_eq!(c.uncovered, 300.0);
+        assert_eq!(c.unknown_grants, 1);
+    }
+
+    #[test]
+    fn an_account_with_no_perplexity_credits_is_empty_not_unreadable() {
+        let c = parse_perplexity_credits(r#"{"credit_grants":[],"total_usage_cents":0}"#, 0.0).unwrap();
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn a_perplexity_answer_in_another_shape_is_not_a_reading() {
+        for bad in [
+            "<html>",
+            "[]",
+            r#"{"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1}"#,
+            r#"{"total_usage_cents":"1","credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"amount_cents":1}]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring"}]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring","amount_cents":1,"expires_at_ts":"x"}]}"#,
+            r#"{"total_usage_cents":1,"renewal_date_ts":"soon","credit_grants":[]}"#,
+        ] {
+            assert!(parse_perplexity_credits(bad, 0.0).is_none(), "{bad}");
+        }
+        // camelCase is the same answer.
+        let camel = r#"{"totalUsageCents":5,"creditGrants":[{"type":"recurring","amountCents":10}]}"#;
+        assert_eq!(parse_perplexity_credits(camel, 0.0).unwrap().recurring.used, 5.0);
     }
 
     const NOTION_STATUS: &str = r#"{

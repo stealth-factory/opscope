@@ -37,6 +37,7 @@ pub struct State {
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
     pub notion: crate::notion::Data,
+    pub perplexity: crate::perplexity::Data,
     pub devin: crate::devin::Data,
     pub droid: crate::droid::Data,
     pub installed: HashMap<String, Presence>,
@@ -58,6 +59,12 @@ fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool
 /// count as a choice.
 fn notion_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
     chosen_agents(installed, cfg).iter().any(|t| t == "notion")
+}
+
+/// Whether Perplexity may be asked, on the same terms: it sends the reader's
+/// own session to Perplexity.
+fn perplexity_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "perplexity")
 }
 
 /// Whether Devin may be asked. It sends the reader's token to Devin, so a
@@ -82,6 +89,7 @@ pub fn read_all(
     // answer could disagree with the map the tabs were drawn from.
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
     let notion_shown = notion_asked(&installed, cfg);
+    let perplexity_shown = perplexity_asked(&installed, cfg);
     let devin_shown = devin_asked(&installed, cfg);
     let droid_shown = droid_asked(&installed, cfg);
     let mut state = State {
@@ -93,6 +101,7 @@ pub fn read_all(
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown, &cfg.coderabbit_repo),
         notion: crate::notion::read(caches, cfg, notion_shown),
+        perplexity: crate::perplexity::read(caches, cfg, perplexity_shown),
         devin: crate::devin::read(caches, cfg, devin_shown),
         droid: crate::droid::read(caches, cfg, droid_shown),
         installed,
@@ -331,6 +340,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
         "notion" => crate::notion::lanes(&s.notion),
+        "perplexity" => crate::perplexity::lanes(&s.perplexity),
         "devin" => crate::devin::lanes(&s.devin),
         "droid" => crate::droid::lanes(&s.droid),
         _ => Vec::new(),
@@ -398,6 +408,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
         "notion" => crate::notion::why_no_lane(&s.notion),
+        "perplexity" => crate::perplexity::why_no_lane(&s.perplexity),
         "devin" => crate::devin::why_no_lane(&s.devin),
         "droid" => crate::droid::why_no_lane(&s.droid),
         _ => String::new(),
@@ -654,9 +665,10 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         // Devin's daily sits inside its weekly, and Droid's five-hour window
         // sits inside weekly inside monthly. Percentage order would reshuffle
         // that on every refresh and disagree with the agent's own tab.
+        // Perplexity's pools are listed in the order they are spent.
         if !matches!(
             group_agent(name).as_str(),
-            "claude" | "cursor" | "devin" | "droid" | "spacexsi" | "antigravity"
+            "claude" | "cursor" | "devin" | "droid" | "spacexsi" | "antigravity" | "perplexity"
         ) {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }
@@ -899,6 +911,7 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
         "antigravity" => crate::antigravity::tab_with_plots(&s.antigravity, w, h, cfg, p, plots),
         "coderabbit" => crate::coderabbit::tab_with_plots(&s.coderabbit, w, h, cfg, p, plots),
         "notion" => crate::notion::tab_with_plots(&s.notion, w, h, cfg, p, plots),
+        "perplexity" => crate::perplexity::tab_with_plots(&s.perplexity, w, h, cfg, p, plots),
         "devin" => crate::devin::tab_with_plots(&s.devin, w, h, cfg, p, plots),
         "droid" => crate::droid::tab_with_plots(&s.droid, w, h, cfg, p, plots),
         other => unknown(other, &s.installed, w, p),

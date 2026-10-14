@@ -16,6 +16,7 @@ The agents this widget reads:
 - Antigravity
 - CodeRabbit
 - Notion
+- Perplexity
 - Devin
 - Droid (Factory)
 
@@ -1466,6 +1467,49 @@ ends, since Notion gives the end and not the start.
 | `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
 
 These are the same two requests CodexBar makes for its Notion AI provider.
+
+### Perplexity asks its account page's endpoint, with a cookie you hand it
+
+Perplexity keeps up to three pools of credits on an account: the plan's
+monthly credits, credits bought on top, and promotional bonus credits. The
+`perplexity` tab draws one bar per pool that has anything in it, each with
+how many dollars of it are used, and `[+]` draws them beside every other
+agent's. The monthly credits are paced on the calendar month ending at the
+renewal Perplexity reports; bought credits do not expire, and bonus credits
+show their soonest expiry. Neither of those has a pace, because neither has
+a window to pace against.
+
+- **There is no public API for it.** The widget asks
+  `/rest/billing/credits`, the endpoint perplexity.ai's own usage page
+  calls, which is internal and can change without notice. When it answers
+  in a shape the widget cannot read, the tab says so rather than drawing an
+  empty bar.
+- **Perplexity reports one usage figure, not one per pool.** The split is
+  its spending order: monthly credits first, then bought, then bonus. A
+  bonus grant past its expiry is gone and is not counted. Usage that is
+  more than every pool holds, and grants of a type the widget does not
+  know, are said under the bars rather than dropped.
+- **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
+  from perplexity.ai (developer tools, then cookies) into
+  `perplexity_token`, or into the variable `perplexity_token_env` names
+  (`PERPLEXITY_SESSION_TOKEN`, the one CodexBar reads too). A whole
+  `Cookie` header copied from a request works as well, including a long
+  session split into `.0`, `.1` chunks. That cookie is a full sign-in to
+  your Perplexity account, not a scoped key, so keep `config.json`
+  `chmod 600`; the tab warns when it is not. The widget never reads it out
+  of a browser, for the reason given above.
+- **Perplexity is here when a token is.** It leaves nothing on this machine
+  to discover, so with no token it has no tab, and with one it is asked
+  every five minutes - and only while it is one of the agents you chose.
+- **API (Sonar) spend is not in it.** That is billed to an API key, which
+  this does not read.
+
+| key | default | what it does |
+|---|---|---|
+| `perplexity_token` | `""` | the session cookie, or a whole `Cookie` header copied from a request |
+| `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the variable read when `perplexity_token` is empty |
+
+This is the same request CodexBar makes for its Perplexity provider.
 
 ### Devin asks app.devin.ai with a bearer token and an organization
 

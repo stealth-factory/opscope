@@ -417,6 +417,9 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
+        // Perplexity's turquoise, lifted off its brand #20808D, which is
+        // too dark to read as text on these panes.
+        "perplexity" => (96, 196, 204),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
         // The unified Cursor and Grok plan, in greyscale: the brand is
@@ -458,7 +461,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
     "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
-    "devin", "droid",
+    "perplexity", "devin", "droid",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1841,6 +1844,11 @@ struct Config {
     /// The workspace to report, by id. Empty picks the first on a plan
     /// that has an allowance.
     notion_workspace: String,
+    /// Perplexity's web session cookie. Empty reads `perplexity_token_env`.
+    perplexity_token: String,
+    /// The environment variable holding that cookie when `perplexity_token`
+    /// is empty. Empty means `PERPLEXITY_SESSION_TOKEN`.
+    perplexity_token_env: String,
     /// Devin's bearer token. Empty reads `devin_token_env`.
     devin_token: String,
     /// The environment variable holding that token when `devin_token` is
@@ -1912,6 +1920,8 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
         notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
+        perplexity_token: tc::cfg_str(&raw, "perplexity_token", ""),
+        perplexity_token_env: tc::cfg_str(&raw, "perplexity_token_env", crate::perplexity::TOKEN_ENV),
         devin_token: tc::cfg_str(&raw, "devin_token", ""),
         devin_token_env: tc::cfg_str(&raw, "devin_token_env", crate::devin::TOKEN_ENV),
         devin_org: tc::cfg_str(&raw, "devin_org", ""),
@@ -2023,6 +2033,7 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
+        "perplexity" => ("Perplexity", vec![], vec![]),
         // Same shape: a credential the reader pasted or the CLI stored,
         // not a binary and not a browser. `detect_agents` resolves both.
         "devin" => ("Devin", vec![], vec![]),
@@ -2093,6 +2104,12 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
         "notion".into(),
         Presence {
             present: !crate::notion::token(cfg).0.is_empty(),
+        },
+    );
+    found.insert(
+        "perplexity".into(),
+        Presence {
+            present: !crate::perplexity::token(cfg).0.is_empty(),
         },
     );
     let (devin_token, _) = crate::devin::token(cfg);
@@ -2728,6 +2745,7 @@ mod antigravity;
 mod claude;
 mod coderabbit;
 mod notion;
+mod perplexity;
 mod devin;
 mod droid;
 mod codex;
