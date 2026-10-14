@@ -492,7 +492,19 @@ fn credit_rows_with_plots(
     }
     // No weekly bar when the quota endpoint did not answer one: a plan
     // without a weekly limit (Max, it may be) is not something gone wrong.
+    // But credits that failed beside a quota that answered are said, or the
+    // weekly bar alone would read as the whole account.
     let Some(c) = c else {
+        let (why, colour) = match &d.credits {
+            Some(_) => (
+                "credits · Perplexity answered, and published none for this account.".to_string(),
+                &p.dim,
+            ),
+            None if !d.why.is_empty() => (format!("credits not read · {}", d.why), &p.warn),
+            None => ("credits not read · no reading from Perplexity yet.".to_string(), &p.warn),
+        };
+        rows.push(String::new());
+        rows.extend(note(&why, colour, w));
         return rows;
     };
     rows.extend(grant_rows(c, w, p));
@@ -687,14 +699,20 @@ fn billing_rows(
         let colour = if sub.cancels.is_some() { &p.warn } else { &p.txt };
         body.extend(field_rows("plan", &text, colour, w, p));
     }
-    match c.auto_topup {
-        Some((adds, under)) => body.extend(field_rows(
-            "auto top-up",
-            &format!("on · adds {} when the balance drops under {}", cents(adds), cents(under)),
-            &p.txt,
-            w,
-            p,
-        )),
+    // On with a part missing stays on: reading it as off would reverse
+    // what the account is set to.
+    let topup = c.auto_topup.map(|topup| match topup {
+        (Some(adds), Some(under)) => {
+            format!("on · adds {} when the balance drops under {}", cents(adds), cents(under))
+        }
+        (adds, under) => {
+            let adds = adds.map(|a| format!(" · adds {}", cents(a))).unwrap_or_default();
+            let under = under.map(|u| format!(" · under {}", cents(u))).unwrap_or_default();
+            format!("on{adds}{under} · Perplexity did not say all of how it tops up")
+        }
+    });
+    match topup {
+        Some(text) => body.extend(field_rows("auto top-up", &text, &p.txt, w, p)),
         None => body.extend(field_rows("auto top-up", "off", &p.dim, w, p)),
     }
     if let Some(limit) = c.spending_limit {
@@ -957,6 +975,42 @@ mod tests {
                 assert!(solid.contains(&place.replace(' ', "")), "{source}: {rows}");
             }
         }
+    }
+
+    #[test]
+    fn credits_that_failed_beside_an_answered_weekly_limit_are_said() {
+        // The weekly bar drew alone and the credits, grants and billing just
+        // went missing, which read as an account with a weekly limit only.
+        let d = Data {
+            quota: Some(PerplexityQuota { pct: 40.0, resets: None }),
+            why: "credits refused (500)".into(),
+            source: "config",
+            ..Data::default()
+        };
+        for w in [30usize, 60, 100] {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            for r in rows.lines() {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("weekly"), "{rows}");
+            assert!(words.contains("credits not read · credits refused (500)"), "width {w}: {rows}");
+        }
+    }
+
+    #[test]
+    fn auto_top_up_that_is_on_stays_on_when_its_amounts_are_missing() {
+        // Missing amounts collapsed the setting to off, the opposite of it.
+        let d = Data::answered(
+            r#"{"total_usage_cents":0,"balance_cents":100,"auto_topup_enabled":true,
+                "auto_topup_amount_cents":2000,
+                "credit_grants":[{"type":"purchased","amount_cents":100,"remaining_cents":100}]}"#,
+        );
+        assert_eq!(d.credits.as_ref().unwrap().auto_topup, Some((Some(2000.0), None)));
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("auto top-up on · adds 2,000 credits"), "{rows}");
+        assert!(!words.contains("auto top-up off"), "{rows}");
     }
 
     #[test]

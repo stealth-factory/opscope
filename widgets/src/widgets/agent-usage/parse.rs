@@ -763,7 +763,9 @@ pub struct PerplexityCredits {
     /// Each live grant, in the order Perplexity listed them.
     pub grants: Vec<PerplexityGrant>,
     /// Auto top-up, when it is on: what it adds, and below what balance.
-    pub auto_topup: Option<(f64, f64)>,
+    /// Either can be missing from an answer that still says it is on, and
+    /// that is kept as on rather than read as off.
+    pub auto_topup: Option<(Option<f64>, Option<f64>)>,
     /// `spending_limit_cents`, when the account has one.
     pub spending_limit: Option<f64>,
 }
@@ -824,7 +826,7 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         Some(true) => {
             let amount = optional("auto_topup_amount_cents", "autoTopupAmountCents")?;
             let under = optional("auto_topup_threshold_cents", "autoTopupThresholdCents")?;
-            amount.zip(under)
+            Some((amount, under))
         }
         _ => None,
     };

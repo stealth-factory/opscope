@@ -1510,51 +1510,6 @@ window to pace against, so neither has a pace.
   its reset. A plan with no weekly limit - which may be Max - answers none,
   so a quota request that does not answer one leaves the bar out rather than
   reporting a fault; a session that names no plan leaves the heading bare.
-- **It needs your session cookie.** Copy `token_v2` from app.notion.com
-  (developer tools, then cookies) into `notion_token`, or into the variable
-  `notion_token_env` names (`NOTION_TOKEN_V2`). That cookie is a full
-  sign-in to your Notion account, not a scoped key, so keep `config.json`
-  `chmod 600`; the tab warns when it is not. The widget never reads it out
-  of a browser or the Notion app, for the reason given above.
-- **Notion is here when a token is.** It leaves nothing on this machine to
-  discover, so with no token it has no tab, and with one it is asked every
-  five minutes - and only while it is one of the agents you chose.
-- **The allowance is per member**, in one workspace. `notion_workspace`
-  picks it by id; empty takes the first on a Business or Enterprise plan. A
-  Free or Plus workspace answers that it has no allowance, and the tab says
-  that rather than showing a gauge.
-- **Custom Agents are not in it.** Notion bills those in Notion credits,
-  which this does not read.
-
-| key | default | what it does |
-|---|---|---|
-| `notion_token` | `""` | the `token_v2` cookie, or a whole `Cookie` header copied from a request |
-| `notion_token_env` | `NOTION_TOKEN_V2` | the variable read when `notion_token` is empty |
-| `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
-
-These are the same two requests CodexBar makes for its Notion AI provider.
-
-### Perplexity asks its account page's endpoint, with a cookie you hand it
-
-Perplexity keeps up to three pools of credits on an account: the plan's
-monthly credits, credits bought on top, and promotional bonus credits. The
-`perplexity` tab draws one bar per pool that has anything in it, each with
-how many dollars of it are used, and `[+]` draws them beside every other
-agent's. The monthly credits are paced on the calendar month ending at the
-renewal Perplexity reports; bought credits do not expire, and bonus credits
-show their soonest expiry. Neither of those has a pace, because neither has
-a window to pace against.
-
-- **There is no public API for it.** The widget asks
-  `/rest/billing/credits`, the endpoint perplexity.ai's own usage page
-  calls, which is internal and can change without notice. When it answers
-  in a shape the widget cannot read, the tab says so rather than drawing an
-  empty bar.
-- **Perplexity reports one usage figure, not one per pool.** The split is
-  its spending order: monthly credits first, then bought, then bonus. A
-  bonus grant past its expiry is gone and is not counted. Usage that is
-  more than every pool holds, and grants of a type the widget does not
-  know, are said under the bars rather than dropped.
 - **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
   from perplexity.ai - developer tools, then Application (Storage in
   Firefox), then Cookies - into `perplexity_token` through the settings
@@ -1580,7 +1535,7 @@ a window to pace against.
 | `perplexity_token` | `""` | the session cookie, or a whole `Cookie` header copied from a request |
 | `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the name of the environment variable to read the cookie from, only when `perplexity_token` is empty; `perplexity_token` wins when both are set |
 
-This is the same request CodexBar makes for its Perplexity provider.
+The credits request is the same one CodexBar makes for its Perplexity provider.
 
 ### Devin asks app.devin.ai with a bearer token and an organization
 
