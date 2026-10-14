@@ -239,7 +239,9 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     let mut got = None;
     for _ in 0..2 {
         got = cached(caches, &qkey, REPORT_TTL, || {
-            match ask(&token, QUOTA_URL, "weekly limit", |b| parse_perplexity_quota(b).is_some()) {
+            match ask(&token, QUOTA_URL, "weekly limit", |b| {
+                parse_perplexity_quota(b).is_some() || answers_no_weekly_limit(b)
+            }) {
                 Ok(v) => Some(v),
                 Err(why) => {
                     refused = why;
@@ -284,6 +286,8 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     }
     d.subscription = sub.as_ref().and_then(|g| parse_perplexity_subscription(&text(g, "body")));
     if let Some(got) = got.as_ref().filter(|_| d.quota_why.is_empty()) {
+        // A refusal held from an earlier read comes back as the cached value.
+        d.quota_why = text(got, "why");
         d.quota = parse_perplexity_quota(&text(got, "body"));
         if d.read_at == 0.0 {
             d.read_at = num(got, "at");
@@ -294,6 +298,24 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         d.read_at = num(got, "at");
     }
     d
+}
+
+/// A quota answer that is an object with no share used in it: a plan with
+/// no weekly limit (Max, it may be). It is a reading, so it is not said as a
+/// fault, where a timeout, an error status or a body that is not JSON is.
+fn answers_no_weekly_limit(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
+        v.as_object()
+            .is_some_and(|o| !o.contains_key("percent_used") && !o.contains_key("percentUsed"))
+    })
+}
+
+/// Why the weekly limit is missing, when that is a fault and not a plan
+/// without one. A 404 is taken as the plan having no such endpoint.
+fn quota_fault(d: &Data) -> Option<String> {
+    let why = d.quota_why.as_str();
+    (d.quota.is_none() && !why.is_empty() && !why.ends_with("the endpoint is gone"))
+        .then(|| format!("weekly limit not read · {why}"))
 }
 
 fn renewal_passed(got: &serde_json::Value) -> bool {
@@ -523,8 +545,13 @@ fn credit_rows_with_plots(
             rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), line))], w - 1));
         }
     }
-    // No weekly bar when the quota endpoint did not answer one: a plan
-    // without a weekly limit (Max, it may be) is not something gone wrong.
+    // No weekly bar when the quota endpoint answered none: a plan without a
+    // weekly limit (Max, it may be) is not something gone wrong. A request
+    // that failed is, or the bars left would read as the whole account.
+    if let Some(fault) = quota_fault(d) {
+        rows.push(String::new());
+        rows.extend(note(&fault, &p.warn, w));
+    }
     // But credits that failed beside a quota that answered are said, or the
     // weekly bar alone would read as the whole account. Each answer stands
     // alone, so the billing a subscription answered is drawn either way.
@@ -988,7 +1015,7 @@ mod tests {
         // A plan with no weekly limit, or a quota endpoint that failed, has
         // no weekly bar and no complaint about one.
         let mut d = Data::answered(CARRIED_OVER);
-        d.quota_why = "weekly limit refused (404)".into();
+        d.quota_why = "weekly limit the endpoint is gone".into();
         assert!(lanes(&d).iter().all(|l| l.label != "weekly"));
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("weekly") && !rows.contains("404"), "{rows}");
@@ -1113,6 +1140,24 @@ mod tests {
         assert!(words.contains("live · billing"), "{rows}");
         assert!(words.contains("yearly · next bill"), "{rows}");
         assert!(words.contains("credits not read · credits refused (500)"), "{rows}");
+    }
+
+    #[test]
+    fn a_weekly_limit_that_failed_is_said_and_a_plan_without_one_is_not() {
+        // A timeout on the quota request looked exactly like a plan with no
+        // weekly limit: the bar was simply not there.
+        assert!(answers_no_weekly_limit(r#"{"plan":"max"}"#));
+        assert!(!answers_no_weekly_limit(r#"{"percent_used":3}"#));
+        assert!(!answers_no_weekly_limit("<html>bad gateway</html>"));
+        let mut d = Data::answered(CARRIED_OVER);
+        d.quota_why = "weekly limit the request timed out".into();
+        let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("weekly limit not read · weekly limit the request timed out"), "{rows}");
+        // An answer with no weekly limit in it is a reading, not a fault.
+        let d = Data::answered(CARRIED_OVER);
+        let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("not read"), "{rows}");
     }
 
     #[test]
