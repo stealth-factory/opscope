@@ -7,7 +7,7 @@ is not built. npm/npx remains the default and recommended installation route.
 
 ## Downloadable package
 
-After a release containing this packaging change is published, download its
+Download
 `opscope_X.Y.Z_amd64.deb` and matching `.sha256` from the
 [GitHub release](https://github.com/stealth-factory/opscope/releases). In that
 directory, replacing `X.Y.Z` with the release number:
@@ -34,18 +34,56 @@ The example configuration and binary manifest are packaged in
 
 ## Signed repository
 
-The shared [stealth-factory/apt-repo](https://github.com/stealth-factory/apt-repo)
-implementation provides signed indexes and release reconciliation. **It is not
-live until the owner approves signing and hosting activation.** Follow its
-README for the approved key fingerprint and scoped `Signed-By` setup once it
-is activated; never disable signature verification to work around setup.
+The live [Stealth Factory repository](https://github.com/stealth-factory/apt-repo)
+provides signed repository metadata and package updates. It is a third-party
+source, not part of Debian or Ubuntu's default archives. npm/npx remains the
+recommended method.
 
-After configuring the source once, use:
+### One-time setup
+
+Install the setup tools:
+
+```sh
+sudo apt update
+sudo apt install ca-certificates curl gnupg
+```
+
+Download the signing key and add the source:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings && curl -fsSL https://stealth-factory.github.io/apt-repo/stealth-factory.asc | sudo tee /etc/apt/keyrings/stealth-factory.asc >/dev/null
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/stealth-factory.asc] https://stealth-factory.github.io/apt-repo stable main' | sudo tee /etc/apt/sources.list.d/stealth-factory.list
+```
+
+Before installing, verify the key with
+`gpg --show-keys --fingerprint /etc/apt/keyrings/stealth-factory.asc`.
+It should contain exactly one primary key with fingerprint
+`95AD77762F38D1AECCD7BFC92A5C45AEC00E7388`. Stop if it differs or the download
+failed. These short commands do not compare the fingerprint automatically.
+`signed-by` scopes the key to this source; never use `apt-key`, `trusted=yes`,
+or disable signature verification.
+
+### Install and upgrade
+
+Only after setup succeeds, install and check the package:
 
 ```sh
 sudo apt update
 sudo apt install opscope
-sudo apt upgrade
+opscope --version
+opscope clocks
+```
+
+APT installs the declared runtime libraries automatically. External widget
+tools such as `ip`/`ss`, `ping`, Tailscale and Herdr must currently be installed
+manually; they are not package dependencies. Some widgets require these tools
+to run. Use `opscope doctor` to see what is missing and how to install it.
+
+For subsequent Opscope upgrades:
+
+```sh
+sudo apt update
+sudo apt install --only-upgrade opscope
 ```
 
 After release asset publication, Opscope notifies the shared repository using
@@ -70,5 +108,6 @@ A Debian 11 container verifies dependency refusal.
 On tags, the release matrix packages only the Linux build and generates its
 SHA-256 file. Tagged lifecycle tests consume the uploaded package and gate
 publication. macOS never runs the Debian packer. The release's explicit asset
-list includes both new files. A real approved tagged release is still needed
-to prove public asset delivery; no tag or live publication is part of this PR.
+list includes both files. Publication validates signed installation and upgrade
+before deploying the repository snapshot; local PR checks alone do not prove
+live delivery.
