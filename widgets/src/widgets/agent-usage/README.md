@@ -1470,10 +1470,12 @@ These are the same two requests CodexBar makes for its Notion AI provider.
 
 ### Perplexity asks its account page's endpoint, with a cookie you hand it
 
-Perplexity keeps up to three pools of credits on an account: the plan's
-monthly credits, credits bought on top, and promotional bonus credits. The
-`perplexity` tab draws one bar per pool that has anything in it, and `[+]`
-draws them beside every other agent's. Under the bars it lists the balance,
+Perplexity's usage page shows a weekly limit a plan includes and up to three
+pools of credits: the plan's monthly credits, credits bought on top
+(`credits`), and promotional bonus credits. The `perplexity` tab draws the
+weekly limit first, with its reset, then one bar per pool that has anything
+in it, and `[+]` draws them beside every other agent's. The heading names
+the plan - Pro, Max - as the sign-in's session states it. Under the bars it lists the balance,
 this period's usage and when the period ends, every credit grant on its own
 row - what is left of it, when it was added, what was spent of it before
 this period, and when it lapses - and the billing settings: auto top-up and
@@ -1498,8 +1500,16 @@ window to pace against, so neither has a pace.
   its expiry is gone and is not counted. Usage more than every pool holds,
   and grants of a type the widget does not know, are said under the bars
   rather than dropped.
-- **The weekly limit Pro shows is not here yet.** perplexity.ai draws it
-  from a different request than the credits, which this does not ask.
+- **Four requests, each standing alone.** The credits come from
+  `/rest/billing/credits`, the weekly limit from `/rest/billing/quota`, and
+  the plan from `/api/auth/session`, and how it is billed - interval and
+  next billing date, or the date a cancelled plan ends - from
+  `/rest/stripe/subscription-billing-info`, whose retention-offer prices
+  are not read. The weekly limit gives a share used and
+  a reset, not the allowance's size, and is paced on the seven days before
+  its reset. A plan with no weekly limit - which may be Max - answers none,
+  so a quota request that does not answer one leaves the bar out rather than
+  reporting a fault; a session that names no plan leaves the heading bare.
 - **It needs your session cookie.** Copy `token_v2` from app.notion.com
   (developer tools, then cookies) into `notion_token`, or into the variable
   `notion_token_env` names (`NOTION_TOKEN_V2`). That cookie is a full

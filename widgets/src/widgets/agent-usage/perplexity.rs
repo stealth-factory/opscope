@@ -31,11 +31,34 @@
 use chrono::{DateTime, Local, Months, Utc};
 use opscope_core as tc;
 
-use crate::parse::{parse_perplexity_credits, PerplexityCredits};
+use crate::parse::{parse_perplexity_credits, parse_perplexity_plan, parse_perplexity_quota,
+    parse_perplexity_subscription, PerplexitySubscription, PerplexityCredits, PerplexityQuota};
 use crate::shared::*;
 use crate::*;
 
-const URL: &str = "https://www.perplexity.ai/rest/billing/credits?version=2.18&source=default";
+/// The query the usage page itself sends, which leaves out per-thread usage
+/// and purchase history the tab does not draw.
+const URL: &str = "https://www.perplexity.ai/rest/billing/credits?include_thread_usage=false\
+                   &fetch_purchase_history=false&version=2.18&source=default";
+
+/// How the plan is billed: its interval and next billing date.
+const SUBSCRIPTION_URL: &str =
+    "https://www.perplexity.ai/rest/stripe/subscription-billing-info?version=2.18&source=default";
+
+/// The weekly limit a plan includes, asked separately: the usage page draws
+/// it above the credits from this endpoint, not from the credits answer.
+const QUOTA_URL: &str = "https://www.perplexity.ai/rest/billing/quota?version=2.18&source=default";
+
+/// The sign-in's session, which names the plan: Pro, Max and so on.
+const SESSION_URL: &str = "https://www.perplexity.ai/api/auth/session";
+
+/// What `ask` says when Perplexity refuses the cookie. Every billing
+/// endpoint answers a stale or signed-out session with 401, so a refusal is
+/// read as the sign-in having lapsed, and the tab says how to replace it.
+const EXPIRED: &str = "session expired";
+
+/// The weekly limit's length. The answer gives only its end.
+const WEEK: f64 = 7.0 * 86400.0;
 
 /// The environment variable the cookie is read from when
 /// `perplexity_token` is empty and `perplexity_token_env` names nothing.
@@ -59,6 +82,15 @@ const REPORT_TTL: f64 = 300.0;
 #[derive(Clone, Default)]
 pub struct Data {
     credits: Option<PerplexityCredits>,
+    /// The plan's weekly limit, when the quota endpoint answered.
+    quota: Option<PerplexityQuota>,
+    /// Why there is no weekly limit, when the quota endpoint did not answer.
+    /// Kept apart from `why`, so one endpoint failing does not hide the other.
+    quota_why: String,
+    /// The plan the session names, when it named one.
+    plan: Option<String>,
+    /// How the plan is billed, when that answered.
+    subscription: Option<PerplexitySubscription>,
     /// When the reading was taken.
     read_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
@@ -110,7 +142,7 @@ fn cookie_header(token: &str) -> Result<String, String> {
 ///
 /// The headers are the ones the account page sends. The cookie reaches curl
 /// on its standard input, never on its command line.
-fn ask(token: &str) -> Result<serde_json::Value, String> {
+fn ask(token: &str, url: &str, what: &str, reads: fn(&str) -> bool) -> Result<serde_json::Value, String> {
     let cookie = cookie_header(token)?;
     let headers = [
         ("Accept", "application/json"),
@@ -123,15 +155,15 @@ fn ask(token: &str) -> Result<serde_json::Value, String> {
         ),
         ("Cookie", cookie.as_str()),
     ];
-    let body = tc::get(URL, &headers, 15).map_err(|said| {
+    let body = tc::get(url, &headers, 15).map_err(|said| {
         if status_of(&said).is_some_and(|code| code == 401 || code == 403) {
-            "session refused · copy a fresh session token from perplexity.ai".to_string()
+            EXPIRED.to_string()
         } else {
-            format!("credits {}", refusal(&said))
+            format!("{what} {}", refusal(&said))
         }
     })?;
-    if parse_perplexity_credits(&body, now()).is_none() {
-        return Err("Perplexity answered in a shape this widget cannot read".into());
+    if !reads(&body) {
+        return Err(format!("Perplexity's {what} answer is in a shape this widget cannot read"));
     }
     Ok(serde_json::json!({ "body": body, "at": now() }))
 }
@@ -168,11 +200,13 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     let mut refused = String::new();
     let mut got = None;
     for _ in 0..2 {
-        got = cached(caches, &key, REPORT_TTL, || match ask(&token) {
-            Ok(v) => Some(v),
-            Err(why) => {
-                refused = why;
-                None
+        got = cached(caches, &key, REPORT_TTL, || {
+            match ask(&token, URL, "credits", |b| parse_perplexity_credits(b, now()).is_some()) {
+                Ok(v) => Some(v),
+                Err(why) => {
+                    refused = why;
+                    None
+                }
             }
         });
         if !got.as_ref().is_some_and(renewal_passed) {
@@ -183,16 +217,54 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         caches.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
-    if !refused.is_empty() {
-        d.why = refused;
-        return d;
+    d.why = refused;
+    if let Some(got) = got.as_ref().filter(|_| d.why.is_empty()) {
+        d.why = text(got, "why");
+        d.read_at = num(got, "at");
+        d.credits = parse_perplexity_credits(&text(got, "body"), d.read_at);
     }
-    let Some(got) = got else {
-        return d;
-    };
-    d.why = text(&got, "why");
-    d.read_at = num(&got, "at");
-    d.credits = parse_perplexity_credits(&text(&got, "body"), d.read_at);
+    let qkey = format!("{key}:quota");
+    let mut refused = String::new();
+    let mut got = None;
+    for _ in 0..2 {
+        got = cached(caches, &qkey, REPORT_TTL, || {
+            match ask(&token, QUOTA_URL, "weekly limit", |b| parse_perplexity_quota(b).is_some()) {
+                Ok(v) => Some(v),
+                Err(why) => {
+                    refused = why;
+                    None
+                }
+            }
+        });
+        // Past its reset, a held reading is last week's.
+        let stale = got.as_ref().is_some_and(|g| {
+            parse_perplexity_quota(&text(g, "body")).and_then(|q| q.resets).is_some_and(|r| r <= now())
+        });
+        if !stale {
+            break;
+        }
+        caches.live.remove(&qkey);
+    }
+    remember_refusal(caches, &qkey, &refused);
+    d.quota_why = refused;
+    // The plan is only a label in the heading; a session that did not
+    // answer leaves it out rather than saying anything went wrong.
+    let pkey = format!("{key}:plan");
+    let plan = cached(caches, &pkey, REPORT_TTL, || {
+        ask(&token, SESSION_URL, "plan", |b| parse_perplexity_plan(b).is_some()).ok()
+    });
+    d.plan = plan.and_then(|g| parse_perplexity_plan(&text(&g, "body")));
+    let skey = format!("{key}:subscription");
+    let sub = cached(caches, &skey, REPORT_TTL, || {
+        ask(&token, SUBSCRIPTION_URL, "subscription", |b| parse_perplexity_subscription(b).is_some()).ok()
+    });
+    d.subscription = sub.and_then(|g| parse_perplexity_subscription(&text(&g, "body")));
+    if let Some(got) = got.as_ref().filter(|_| d.quota_why.is_empty()) {
+        d.quota = parse_perplexity_quota(&text(got, "body"));
+        if d.read_at == 0.0 {
+            d.read_at = num(got, "at");
+        }
+    }
     d
 }
 
@@ -214,10 +286,21 @@ fn period_secs(ends: f64) -> Option<f64> {
 /// One lane per pool that has anything in it. Only the recurring credits
 /// renew; purchased and bonus credits have no clock, and none is invented.
 pub fn lanes(d: &Data) -> Vec<Lane> {
-    let Some(c) = d.credits.as_ref() else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
+    if let Some(q) = d.quota.as_ref() {
+        out.push(Lane {
+            label: "weekly".into(),
+            pct: q.pct,
+            window_secs: q.resets.map(|_| WEEK),
+            reset: q.resets,
+            stale: q.resets.is_some_and(|r| r <= now()),
+            projected: false,
+            apart: false,
+        });
+    }
+    let Some(c) = d.credits.as_ref() else {
+        return out;
+    };
     if c.recurring.total > 0.0 {
         let length = c.renews.and_then(period_secs);
         out.push(Lane {
@@ -230,7 +313,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             apart: false,
         });
     }
-    for (label, pool) in [("bought", &c.purchased), ("bonus", &c.bonus)] {
+    for (label, pool) in [("credits", &c.purchased), ("bonus", &c.bonus)] {
         if pool.total > 0.0 {
             out.push(Lane {
                 label: label.into(),
@@ -255,12 +338,33 @@ impl Data {
             credits: parse_perplexity_credits(raw, read_at),
             read_at,
             source: "config",
-            why: String::new(),
+            ..Data::default()
         }
     }
 }
 
 /// Why `[+]` has no bar for Perplexity.
+impl Data {
+    /// Perplexity refused the cookie: it expired, or the account signed out.
+    fn expired(&self) -> bool {
+        self.why == EXPIRED
+    }
+}
+
+/// How to put a fresh cookie where this one came from.
+fn replace_token(d: &Data) -> String {
+    let find = "Sign in at perplexity.ai, open developer tools, then Application (Storage in \
+                Firefox), Cookies, https://www.perplexity.ai, and copy the Value of \
+                __Secure-next-auth.session-token.";
+    match d.source {
+        "env" => format!(
+            "{find} Put it in {TOKEN_ENV} (or the variable perplexity_token_env names) and \
+             restart this widget, or press , and paste it into perplexity_token."
+        ),
+        _ => format!("{find} Then press , and paste it into perplexity_token."),
+    }
+}
+
 pub fn why_no_lane(d: &Data) -> String {
     if !lanes(d).is_empty() {
         return String::new();
@@ -269,8 +373,14 @@ pub fn why_no_lane(d: &Data) -> String {
         return "no quota · Perplexity answered, and published no credits for this account."
             .into();
     }
+    if d.expired() {
+        return "no quota · Perplexity session expired · press , to paste a fresh token".into();
+    }
     if !d.why.is_empty() {
         return format!("no quota · {}", d.why);
+    }
+    if !d.quota_why.is_empty() {
+        return format!("no quota · {}", d.quota_why);
     }
     if d.source.is_empty() {
         return format!("no quota · no token · set perplexity_token or {}.", TOKEN_ENV);
@@ -309,22 +419,31 @@ fn day(ts: f64) -> String {
 
 fn credit_rows_with_plots(
     d: &Data,
-    c: &PerplexityCredits,
+    c: Option<&PerplexityCredits>,
     w: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
+    let read = match (d.quota.is_some(), c.is_some()) {
+        (true, true) => "weekly limit · credits",
+        (true, false) => "weekly limit",
+        _ => "credits",
+    };
     let mut rows = vec![tc::seg(
         &[
-            (p.lbl.as_str(), " ── PERPLEXITY ── ".into()),
+            (p.lbl.as_str(), " ── PERPLEXITY ".into()),
+            (p.txt.as_str(), d.plan.as_ref().map(|plan| format!("{plan} ")).unwrap_or_default()),
+            (p.lbl.as_str(), "── ".into()),
             (p.ok.as_str(), "live".into()),
-            (p.dim.as_str(), format!(" · credits · read {} ago", ago(d.read_at))),
+            (p.dim.as_str(), format!(" · {read} · read {} ago", ago(d.read_at))),
         ],
         w - 1,
     )];
     let hue = agent_hue("perplexity");
     let label_w = 7;
-    rows.extend(balance_rows(c, w, p));
+    if let Some(c) = c {
+        rows.extend(balance_rows(c, w, p));
+    }
     for lane in lanes(d) {
         let used = (lane.pct / 100.0).clamp(0.0, 1.0);
         let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
@@ -348,13 +467,53 @@ fn credit_rows_with_plots(
         ));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
-        let pool = match lane.label.as_str() {
-            "monthly" => &c.recurring,
-            "bought" => &c.purchased,
-            _ => &c.bonus,
+        let detail = match (lane.label.as_str(), c) {
+            ("weekly", _) => weekly_detail(lane.reset),
+            (label, Some(c)) => pool_detail(label, &lane, c),
+            _ => String::new(),
         };
-        let mut detail = format!("{} of {} used", count(pool.used), cents(pool.total));
-        match lane.label.as_str() {
+        let indent = if w < 40 { 2 } else { label_w + 3 };
+        for line in wrap_text(&detail, w.saturating_sub(indent + 2).max(8)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), line))], w - 1));
+        }
+    }
+    // No weekly bar when the quota endpoint did not answer one: a plan
+    // without a weekly limit (Max, it may be) is not something gone wrong.
+    let Some(c) = c else {
+        return rows;
+    };
+    rows.extend(grant_rows(c, w, p));
+    rows.extend(billing_rows(c, d.subscription.as_ref(), w, p));
+    rows.extend(credit_notes(c, w, p));
+    rows
+}
+
+/// The line under the weekly bar: when it resets, in the reader's own time,
+/// the way the usage page says it.
+fn weekly_detail(reset: Option<f64>) -> String {
+    let Some(r) = reset else {
+        return "Perplexity gave no reset time".into();
+    };
+    let at = DateTime::from_timestamp(r as i64, 0)
+        .map(|t| t.with_timezone(&Local).format("%a %H:%M").to_string())
+        .unwrap_or_default();
+    match r - now() {
+        left if left > 0.0 => format!("resets {at} · in {}", left_span(left)),
+        _ => "resetting".into(),
+    }
+}
+
+/// The line under a credit pool's bar: how much of it is gone, and when it
+/// renews or lapses.
+fn pool_detail(label: &str, lane: &Lane, c: &PerplexityCredits) -> String {
+    let pool = match label {
+        "monthly" => &c.recurring,
+        "credits" => &c.purchased,
+        _ => &c.bonus,
+    };
+    let mut detail = format!("{} of {} used", count(pool.used), cents(pool.total));
+    {
+        match label {
             "monthly" => match lane.reset.map(|r| r - now()) {
                 Some(left) if left > 0.0 => detail.push_str(&format!(" · renews in {}", left_span(left))),
                 Some(_) => detail.push_str(" · renewing"),
@@ -367,13 +526,13 @@ fn credit_rows_with_plots(
             }
             _ => detail.push_str(" · does not expire"),
         }
-        let indent = if w < 40 { 2 } else { label_w + 3 };
-        for line in wrap_text(&detail, w.saturating_sub(indent + 2).max(8)) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), line))], w - 1));
-        }
     }
-    rows.extend(grant_rows(c, w, p));
-    rows.extend(billing_rows(c, w, p));
+    detail
+}
+
+/// What the credits answer said that the bars cannot show.
+fn credit_notes(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
+    let mut rows = Vec::new();
     if c.recurring.total > 0.0 && c.renews.and_then(period_secs).is_none() {
         let text = "Perplexity's answer had no renewal date this widget can read, so the \
                     monthly credits have no pace or renewal drawn.";
@@ -467,7 +626,7 @@ fn grant_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
     for g in &c.grants {
         let kind = match g.kind.as_str() {
             "recurring" => "monthly",
-            "purchased" => "bought",
+            "purchased" => "purchased",
             "promotional" => "bonus",
             other => other,
         };
@@ -492,8 +651,29 @@ fn grant_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
 }
 
 /// What refills the balance and what caps it, as the account has them set.
-fn billing_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
+fn billing_rows(
+    c: &PerplexityCredits,
+    sub: Option<&PerplexitySubscription>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     let mut body = Vec::new();
+    if let Some(sub) = sub {
+        let mut text = sub.interval.clone().unwrap_or_default();
+        let when = match (sub.cancels, sub.next_bill) {
+            (Some(t), _) => Some(format!("cancelled · ends {}", day(t))),
+            (None, Some(t)) => Some(format!("next bill {}", day(t))),
+            _ => None,
+        };
+        if let Some(when) = when {
+            if !text.is_empty() {
+                text.push_str(" · ");
+            }
+            text.push_str(&when);
+        }
+        let colour = if sub.cancels.is_some() { &p.warn } else { &p.txt };
+        body.extend(field_rows("plan", &text, colour, w, p));
+    }
     match c.auto_topup {
         Some((adds, under)) => body.extend(field_rows(
             "auto top-up",
@@ -522,9 +702,16 @@ fn token_warning(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 }
 
 /// A sentence under the bars, wrapped to the pane rather than cut by it.
+/// A word longer than the room - the cookie's name is 32 characters - is
+/// broken by hand, since wrapping alone would leave it to be cut.
 fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
-    wrap_text(text, w.saturating_sub(4).max(20))
+    let room = w.saturating_sub(4).max(8);
+    wrap_text(text, room)
         .into_iter()
+        .flat_map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            chars.chunks(room).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>()
+        })
         .map(|line| tc::seg(&[(colour, format!("  {}", line))], w - 1))
         .collect()
 }
@@ -537,9 +724,27 @@ pub fn tab_with_plots(
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
-    match d.credits.as_ref() {
-        Some(c) if !c.is_empty() => {
-            let mut rows = credit_rows_with_plots(d, c, w, p, plots);
+    if d.expired() {
+        let mut rows = vec![
+            tc::seg(&[(p.lbl.as_str(), " ── PERPLEXITY ──".into())], w - 1),
+            tc::seg(&[(p.warn.as_str(), "  session expired".into())], w - 1),
+            String::new(),
+        ];
+        rows.extend(note(
+            "Perplexity no longer accepts the session token this widget was given: it expired, \
+             or the account signed out. Nothing on this tab can be read until it is replaced.",
+            &p.warn,
+            w,
+        ));
+        rows.push(String::new());
+        rows.extend(note(&replace_token(d), &p.txt, w));
+        rows.extend(token_warning(d, w, p));
+        return rows;
+    }
+    let credits = d.credits.as_ref().filter(|c| !c.is_empty());
+    match credits {
+        _ if credits.is_some() || d.quota.is_some() => {
+            let mut rows = credit_rows_with_plots(d, credits, w, p, plots);
             rows.extend(token_warning(d, w, p));
             rows
         }
@@ -615,7 +820,7 @@ mod tests {
         let d = reading();
         let lanes = lanes(&d);
         let labels: Vec<_> = lanes.iter().map(|l| l.label.as_str()).collect();
-        assert_eq!(labels, ["monthly", "bought", "bonus"]);
+        assert_eq!(labels, ["monthly", "credits", "bonus"]);
         assert_eq!(lanes[0].pct, 100.0);
         assert!(lanes[0].reset.is_some() && lanes[0].window_secs.is_some());
         // 10500 used: all 10000 recurring, then 500 of the 1500 bought.
@@ -658,7 +863,7 @@ mod tests {
         let d = Data::answered(CARRIED_OVER);
         let lanes = lanes(&d);
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].label, "bought");
+        assert_eq!(lanes[0].label, "credits");
         assert!((lanes[0].pct - 34.3).abs() < 1e-9, "{}", lanes[0].pct);
         for w in [30usize, 40, 60, 100] {
             let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
@@ -677,6 +882,58 @@ mod tests {
                 "4,000 credits",
             ] {
                 assert!(words.contains(want), "width {w}, {want:?}:\n{rows}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_weekly_limit_comes_first_with_its_reset_and_is_left_out_when_not_answered() {
+        let resets = now() + 6.0 * 86400.0;
+        let mut d = Data::answered(CARRIED_OVER);
+        d.quota = Some(PerplexityQuota { pct: 3.0, resets: Some(resets) });
+        d.plan = Some("Pro".into());
+        let got = lanes(&d);
+        let labels: Vec<_> = got.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["weekly", "credits"]);
+        assert_eq!((got[0].pct, got[0].reset, got[0].window_secs), (3.0, Some(resets), Some(WEEK)));
+        for w in [30usize, 60, 100] {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            for r in rows.lines() {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            assert!(rows.contains("PERPLEXITY Pro"), "{rows}");
+            assert!(rows.contains("resets ") && rows.contains("weekly"), "{rows}");
+        }
+        // A plan with no weekly limit, or a quota endpoint that failed, has
+        // no weekly bar and no complaint about one.
+        let mut d = Data::answered(CARRIED_OVER);
+        d.quota_why = "weekly limit refused (404)".into();
+        assert!(lanes(&d).iter().all(|l| l.label != "weekly"));
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("weekly") && !rows.contains("404"), "{rows}");
+        // Only the weekly limit answering is still a tab.
+        let d = Data { quota: Some(PerplexityQuota { pct: 40.0, resets: None }), source: "env", ..Data::default() };
+        let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
+        assert!(rows.contains("weekly") && rows.contains("no reset time"), "{rows}");
+    }
+
+    #[test]
+    fn an_expired_session_says_so_and_where_to_paste_a_fresh_one() {
+        for (source, place) in [("config", "press , and paste it into perplexity_token"), ("env", TOKEN_ENV)] {
+            let d = Data { why: EXPIRED.into(), source, ..Data::default() };
+            assert!(lanes(&d).is_empty());
+            assert!(why_no_lane(&d).contains("session expired"), "{}", why_no_lane(&d));
+            for w in [30usize, 60, 100] {
+                let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+                for r in rows.lines() {
+                    assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+                }
+                let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(words.contains("session expired"), "{rows}");
+                // The cookie's name is broken across lines in a narrow pane.
+                let solid: String = rows.split_whitespace().collect();
+                assert!(solid.contains("__Secure-next-auth.session-token"), "{rows}");
+                assert!(solid.contains(&place.replace(' ', "")), "{source}: {rows}");
             }
         }
     }

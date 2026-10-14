@@ -912,6 +912,79 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     Some(out)
 }
 
+/// Perplexity's plan, from the sign-in's own `GET /api/auth/session`:
+/// `user.subscription_tier` (`pro`, `max`, ...) and its status. `None` when
+/// the answer names no tier, so nothing is guessed from the credit amounts.
+pub fn parse_perplexity_plan(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let user = v.get("user")?;
+    let tier = user.get("subscription_tier")?.as_str()?.trim();
+    if tier.is_empty() {
+        return None;
+    }
+    let mut chars = tier.chars();
+    let mut plan: String = chars.next()?.to_uppercase().chain(chars).collect();
+    match user.get("subscription_status").and_then(|s| s.as_str()).map(str::trim) {
+        None | Some("") | Some("active") => {}
+        Some(status) => plan.push_str(&format!(" ({status})")),
+    }
+    Some(plan)
+}
+
+/// Perplexity `GET /rest/stripe/subscription-billing-info`: how the plan is
+/// billed. Only what the account is on; the retention offer the answer also
+/// carries is a price on offer, not one being paid, and is not read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexitySubscription {
+    /// `monthly`, `yearly`, as sent.
+    pub interval: Option<String>,
+    pub next_bill: Option<f64>,
+    /// When a cancelled plan ends.
+    pub cancels: Option<f64>,
+}
+
+pub fn parse_perplexity_subscription(text: &str) -> Option<PerplexitySubscription> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    let ts = |k: &str| v.get(k).and_then(|x| x.as_f64()).filter(|t| t.is_finite() && *t > 0.0);
+    let sub = PerplexitySubscription {
+        interval: v
+            .get("billing_interval")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        next_bill: ts("next_billing_date_ts"),
+        cancels: ts("cancel_at_ts"),
+    };
+    (sub != PerplexitySubscription::default()).then_some(sub)
+}
+
+/// Perplexity `GET /rest/billing/quota`: the weekly limit a plan includes,
+/// the bar the usage page draws above the credits. It says only a share
+/// used and when it resets; the size of the allowance is not given.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PerplexityQuota {
+    /// Share used, 0–100, as sent.
+    pub pct: f64,
+    /// When it resets, as epoch seconds.
+    pub resets: Option<f64>,
+}
+
+/// Anything without a numeric `percent_used` is `None`, so a changed
+/// endpoint is reported rather than drawn as an untouched allowance.
+pub fn parse_perplexity_quota(text: &str) -> Option<PerplexityQuota> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
+    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite())?;
+    let resets = match field("reset_date", "resetDate") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(chrono::DateTime::parse_from_rfc3339(x.as_str()?).ok()?.timestamp() as f64),
+    };
+    Some(PerplexityQuota { pct: pct.clamp(0.0, 100.0), resets })
+}
+
 /// One Devin quota window. `pct` is the number the body sent, on a 0–100
 /// scale. `reset` is an absolute instant, when one was sent.
 #[derive(Clone, Debug, PartialEq)]
@@ -1966,6 +2039,46 @@ Period resets : 2026-10-06
         ],
         "total_usage_cents": 2750
     }"#;
+
+    #[test]
+    fn perplexity_plan_is_the_session_tier_and_any_status_not_active() {
+        let plan = |raw: &str| parse_perplexity_plan(raw);
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"pro","subscription_status":"active"}}"#).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"max","subscription_status":"past_due"}}"#).as_deref(),
+            Some("Max (past_due)")
+        );
+        assert_eq!(plan(r#"{"user":{"subscription_tier":null}}"#), None);
+        assert_eq!(plan(r#"{}"#), None);
+    }
+
+    #[test]
+    fn perplexity_subscription_is_its_interval_and_dates_not_the_offer() {
+        let raw = r#"{"billing_interval":"monthly","cancel_at_ts":null,
+            "next_billing_date_ts":1794544385,
+            "retention_offer":{"discounted_price":{"price_minor_units":1000}}}"#;
+        let sub = parse_perplexity_subscription(raw).unwrap();
+        assert_eq!(sub.interval.as_deref(), Some("monthly"));
+        assert_eq!((sub.next_bill, sub.cancels), (Some(1_794_544_385.0), None));
+        assert!(parse_perplexity_subscription(r#"{"retention_offer":{}}"#).is_none());
+    }
+
+    #[test]
+    fn perplexity_quota_is_a_share_used_and_a_reset() {
+        let q = parse_perplexity_quota(
+            r#"{"percent_used":3,"reset_date":"2026-10-21T04:59:31.996000Z","platform":null}"#,
+        )
+        .unwrap();
+        assert_eq!(q.pct, 3.0);
+        assert_eq!(q.resets, Some(1_792_558_771.0));
+        let none = parse_perplexity_quota(r#"{"percentUsed":40,"resetDate":null}"#).unwrap();
+        assert_eq!((none.pct, none.resets), (40.0, None));
+        assert!(parse_perplexity_quota(r#"{"reset_date":"2026-10-21T04:59:31Z"}"#).is_none());
+        assert!(parse_perplexity_quota(r#"{"percent_used":3,"reset_date":"Wed"}"#).is_none());
+    }
 
     #[test]
     fn perplexity_usage_is_spent_from_the_recurring_pool_first() {
