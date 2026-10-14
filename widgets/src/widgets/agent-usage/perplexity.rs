@@ -220,11 +220,13 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                 }
             }
         });
-        if !got.as_ref().is_some_and(renewal_passed) {
+        if !got.as_ref().is_some_and(|g| renewal_passed(g) || bonus_lapsed(g)) {
             break;
         }
         // A reading held past the renewal it reported is the last
-        // period's, so the cache gives way rather than outliving it.
+        // period's, and one held past a bonus's expiry still counts that
+        // bonus in its balance, so the cache gives way rather than outliving
+        // either.
         caches.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
@@ -318,6 +320,12 @@ fn quota_fault(d: &Data) -> Option<String> {
     let why = d.quota_why.as_str();
     (d.quota.is_none() && !why.is_empty() && !why.ends_with("the endpoint is gone"))
         .then(|| format!("weekly limit not read · {why}"))
+}
+
+fn bonus_lapsed(got: &serde_json::Value) -> bool {
+    parse_perplexity_credits(&text(got, "body"), num(got, "at"))
+        .and_then(|c| c.bonus_expires)
+        .is_some_and(|t| t <= now())
 }
 
 fn renewal_passed(got: &serde_json::Value) -> bool {
@@ -482,9 +490,10 @@ fn cents(value: f64) -> String {
 
 /// A credit figure with no unit, for the first of two in one phrase.
 fn count(value: f64) -> String {
-    let whole = value.max(0.0).floor() as u64;
+    // An overdrawn balance keeps its sign; every other figure is at least 0.
+    let whole = value.abs().floor() as u64;
     let digits = whole.to_string();
-    let mut out = String::new();
+    let mut out = String::from(if value < 0.0 && whole > 0 { "-" } else { "" });
     for (i, ch) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
             out.push(',');
@@ -1319,6 +1328,19 @@ mod tests {
         let got = |renews: f64| serde_json::json!({ "body": answer(renews), "at": now() - 600.0 });
         assert!(!renewal_passed(&got(now() + 3600.0)));
         assert!(renewal_passed(&got(now() - 60.0)));
+        // A bonus that has lapsed since the reading also lets it go.
+        let bonus = |expires: f64| {
+            let body = format!(
+                r#"{{"total_usage_cents":0,"balance_cents":500,"credit_grants":[
+                    {{"type":"promotional","amount_cents":500,"expires_at_ts":{expires}}}]}}"#
+            );
+            serde_json::json!({ "body": body, "at": now() - 600.0 })
+        };
+        assert!(!bonus_lapsed(&bonus(now() + 3600.0)));
+        assert!(bonus_lapsed(&bonus(now() - 60.0)));
+        // An overdrawn balance keeps its sign.
+        assert_eq!(cents(-250.0), "-250 credits");
+        assert_eq!(cents(1234.0), "1,234 credits");
     }
 
     #[test]

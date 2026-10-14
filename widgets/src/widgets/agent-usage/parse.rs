@@ -801,14 +801,14 @@ impl PerplexityGrant {
 
 impl PerplexityCredits {
     /// No credits in any pool. Grants of a type this widget does not know
-    /// are not nothing, and neither is a balance above zero, so an answer
+    /// are not nothing, and neither is a balance off zero, so an answer
     /// holding only those is not empty.
     pub fn is_empty(&self) -> bool {
         self.recurring.total <= 0.0
             && self.purchased.total <= 0.0
             && self.bonus.total <= 0.0
             && self.unknown_grants == 0
-            && !self.balance.is_some_and(|b| b > 0.0)
+            && !self.balance.is_some_and(|b| b != 0.0)
     }
 }
 
@@ -867,6 +867,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // the grants that say, so the rest is what has to be spread.
     let (mut recurring, mut bought, mut bonus) = ([0.0; 3], [0.0; 3], [0.0; 3]);
     let (mut said_this_period, mut grants, mut unsaid) = (0.0, 0, 0);
+    // This period's spend from grants that also state their earlier spend,
+    // so it is a figure the answer itself gives rather than an estimate.
+    let mut stated_this_period = 0.0;
     for grant in field("credit_grants", "creditGrants")?.as_array()? {
         let grant = grant.as_object()?;
         let kind = grant.get("type")?.as_str()?;
@@ -919,7 +922,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             // What this grant took this period, so it is not spread again
             // over the grants that do not say.
             let spent = (amount - r).max(0.0);
-            said_this_period += (spent - prior_periods.unwrap_or(0.0).max(0.0)).max(0.0);
+            let this_period = (spent - prior_periods.unwrap_or(0.0)).max(0.0);
+            said_this_period += this_period;
+            if prior_periods.is_some() {
+                stated_this_period += this_period;
+            }
         } else {
             unsaid += 1;
         }
@@ -932,6 +939,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     let exact = grants > 0 && unsaid == 0 && out.unknown_grants == 0;
     // What the grants that say do not account for is kept, never dropped:
     // with every grant exact it is usage no grant explains.
+    // Grants that state this period's spend in full and add up to more than
+    // the period's total disagree with it, and neither figure can be drawn.
+    if stated_this_period > left + 0.5 {
+        return None;
+    }
     left = (left - said_this_period).max(0.0);
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
@@ -2201,6 +2213,11 @@ Period resets : 2026-10-06
         assert_eq!(c.uncovered, 50.0);
         // An expiry left out is not one that never comes.
         assert!(!c.grants[0].never_expires());
+        // Grants that state more spent this period than its total disagree with it.
+        let raw = r#"{"total_usage_cents":20,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":50,
+             "amount_applied_prior_period_cents":0}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
         // A negative amount or usage is a changed answer, not zero.
         for raw in [
             r#"{"total_usage_cents":-5,"credit_grants":[]}"#,
