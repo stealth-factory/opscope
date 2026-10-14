@@ -12,9 +12,11 @@ from pathlib import Path
 import pty
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
+import tempfile
 import termios
 import time
 import zlib
@@ -31,13 +33,13 @@ COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra_env=None):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra=None, extra_env=None):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
-        # This fixture is the terminal. A run from inside a Herdr pane would
-        # otherwise hand the probe Herdr's variables and skip shared memory.
-        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
-        env.update(TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode, **(extra_env or {}))
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_") and k not in ("TMUX", "TMUX_PANE")}
+        env.update(TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
+        env.update(extra or {})
+        env.update(extra_env or {})
         self.proc = subprocess.Popen([str(BINARY)], stdin=slave, stdout=slave,
                                      stderr=slave, env=env, start_new_session=True)
         os.close(slave)
@@ -69,9 +71,11 @@ class Terminal:
                 self.answered = count
                 response = b""
                 if self.reply == "kitty" or self.reply == "keyboard":
+                    response += self._graphics_reply(b"OK")
+                elif self.reply == "basic":
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
-                    response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
+                    response += self._graphics_reply(b"ENOTSUP")
                 response += b"\x1b[?2026;2$y"
                 # Device attributes often arrive before the keyboard flags.
                 # Current flags are 0 until we push; the flags reply is still
@@ -123,6 +127,13 @@ class Terminal:
             self.proc.wait(timeout=3)
         os.close(self.master)
 
+    def _graphics_reply(self, status):
+        # 2147483645 is the shared-memory probe. The placeholder path does
+        # not send it, and a direct session may send only that probe.
+        for keys, _ in self.commands():
+            if keys.get(b"i") == b"2147483645":
+                assert keys.get(b"a") == b"q" and keys.get(b"t") == b"s", keys
+        return b"\x1b_Gi=2147483646;" + status + b"\x1b\\"
 
 def shm_names(commands):
     names = []
@@ -174,8 +185,13 @@ def wait_for(t, ready, seconds):
     return bool(ready())
 
 
-def run(mode, reply, check):
-    terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
+def run(mode, reply, check, extra=None):
+    terminal = Terminal(
+        mode,
+        reply,
+        image_reply="manual" if check == rejected_image else "ok",
+        extra=extra,
+    )
     try:
         terminal.read(0.3)
         if mode == "text":
@@ -730,6 +746,91 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+# ESC P tmux ; then the payload, with each ESC doubled. A payload that
+# starts with ESC therefore has two ESC bytes before its command, which
+# is the example in tmux's FAQ. unwrap_tmux treats the header as ending
+# at `tmux;`, with no extra ESC of its own.
+# Eight hex digits: U+10EEEE, not U+010EEE plus a trailing E.
+PLACEHOLDER = "\U0010EEEE".encode()
+
+
+def unwrap_tmux(data):
+    """Undo DCS passthrough so the graphics commands can be parsed."""
+    out = bytearray()
+    i = 0
+    header = b"\x1bPtmux;"
+    while i < len(data):
+        if data.startswith(header, i):
+            i += len(header)
+            while i < len(data):
+                if data.startswith(b"\x1b\x1b", i):
+                    out.append(0x1B)
+                    i += 2
+                    continue
+                if data.startswith(b"\x1b\\", i):
+                    i += 2
+                    break
+                out.append(data[i])
+                i += 1
+            continue
+        out.append(data[i])
+        i += 1
+    return bytes(out)
+
+
+def commands_of(data):
+    return [
+        (dict(field.split(b"=", 1) for field in keys.split(b",") if b"=" in field), payload or b"")
+        for keys, payload in COMMAND.findall(data)
+    ]
+
+
+def tmux_placeholders(t):
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
+    assert b"i=2147483646," not in t.output, "tmux sent the plain graphics query"
+    assert b"2147483645" not in t.output, "tmux used the shared-memory probe id"
+    assert b"\x1bPtmux;\x1b\x1b\x1b" not in t.output, "passthrough header carried an extra ESC"
+    images = [(keys, payload) for keys, payload in commands_of(unwrap_tmux(t.output)) if keys.get(b"a") == b"T"]
+    assert images, "answered passthrough did not upload a chart"
+    keys, _ = images[0]
+    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"2", keys
+    upload = t.output.find(b"a=T")
+    cell = t.output.find(PLACEHOLDER)
+    assert 0 <= upload < cell, "virtual placement was not uploaded before the cells"
+    assert b"now" in t.output, "under-text reading was replaced by placeholders"
+    assert not any(k.get(b"a") == b"p" for k, _ in commands_of(unwrap_tmux(t.output)))
+    t.send(b"\x1b[B")
+    t.read()
+    later = [k for k, _ in commands_of(unwrap_tmux(t.output)) if k.get(b"a") == b"T"]
+    assert int(later[-1][b"r"]) < int(keys[b"r"]), "scroll did not crop the placeholder chart"
+
+
+def tmux_text(t):
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
+    t.read(0.7)
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "a failed termtype query still drew placeholders"
+
+
+def tmux_passthrough_off_is_braille(t):
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "passthrough off still drew placeholders"
+
+
+def tmux_basic_is_braille(t):
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
+    t.read(0.2)
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "a plain graphics OK enabled placeholders"
+
+
+def herdr_direct(t):
+    assert b"\x1bPtmux;" not in t.output, "Herdr was wrapped in a tmux passthrough"
+    assert b"U=1" not in t.output
+    supported(t)
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -804,6 +905,60 @@ def missing_and_late_replies_keep_their_upload_keys():
         t.close()
 
 
+def tmux_env(termtype, passthrough="on", pane="%1"):
+    """A tmux on PATH that prints client_termtype and this pane's option.
+
+    termtype None makes the termtype command fail. passthrough None makes
+    the option unreadable. pane None omits TMUX_PANE, so the query has no -t.
+    A window-scoped query (-Awv) is not answered.
+    """
+    directory = tempfile.mkdtemp(prefix="opscope-tmux-")
+    script = Path(directory) / "tmux"
+    term = "exit 1" if termtype is None else f"printf '%s\\n' '{termtype}'"
+    option = "exit 1" if passthrough is None else f"printf '%s\\n' '{passthrough}'"
+    if pane:
+        option_if = (
+            "if [ \"$1\" = show-options ] && [ \"$2\" = -Apv ] && "
+            "[ \"$3\" = -t ] && [ \"$4\" = '" + pane + "' ] && "
+            "[ \"$5\" = allow-passthrough ]; then\n"
+        )
+    else:
+        option_if = (
+            "if [ \"$1\" = show-options ] && [ \"$2\" = -Apv ] && "
+            "[ \"$3\" = allow-passthrough ]; then\n"
+        )
+    body = (
+        "#!/bin/sh\n"
+        "if [ \"$1\" = display ] && [ \"$2\" = -p ] && [ \"$3\" = '#{client_termtype}' ]; then\n"
+        f"  {term}\n"
+        "  exit 0\n"
+        "fi\n"
+        f"{option_if}"
+        f"  {option}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    script.write_text(body)
+    script.chmod(0o755)
+    path = os.environ.get("PATH", "/usr/bin")
+    env = {
+        "TMUX": "/tmp/tmux-0/default,1,0",
+        "PATH": f"{directory}:{path}",
+    }
+    if pane:
+        env["TMUX_PANE"] = pane
+    return directory, env
+
+
+def run_tmux(reply, check, termtype, passthrough="on", pane="%1"):
+    directory, env = tmux_env(termtype, passthrough, pane)
+    try:
+        run("auto", reply, check, env)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def herdr_pane_sends_images_inline():
     # Herdr's server answers the shared-memory probe OK and then draws
     # nothing sent through t=s, so a Herdr pane never sends the probe.
@@ -849,6 +1004,20 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on", "%1")
+    print("PASS placeholder tmux")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on", None)
+    print("PASS placeholder tmux without TMUX_PANE")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "all")
+    print("PASS placeholder tmux allow-passthrough all")
+    run_tmux("kitty", tmux_passthrough_off_is_braille, "kitty(0.40.0)", "off")
+    print("PASS placeholder passthrough off stays text")
+    run_tmux("basic", tmux_basic_is_braille, "kitty(0.27.1)")
+    print("PASS placeholder old kitty stays text")
+    run("auto", "kitty", herdr_direct, {"HERDR_ENV": "1"})
+    print("PASS herdr direct")
+    run_tmux("silent", tmux_text, None)
+    print("PASS placeholder termtype failed")
     for ending in ["signal", "panic"]:
         t = Terminal()
         try:
