@@ -1565,6 +1565,10 @@ a window to pace against.
   your Perplexity account, not a scoped key, so keep `config.json`
   `chmod 600`; the tab warns when it is not. The widget never reads it out
   of a browser, for the reason given above.
+- **`perplexity_token` wins over the variable.** The variable is read only
+  when `perplexity_token` is empty, so a stale cookie left in `config.json`
+  is the one sent even when the variable holds a fresh one - empty the
+  field to use the variable. The tab's `token` line says which was used.
 - **Perplexity is here when a token is.** It leaves nothing on this machine
   to discover, so with no token it has no tab, and with one it is asked
   every five minutes - and only while it is one of the agents you chose.
@@ -1574,7 +1578,7 @@ a window to pace against.
 | key | default | what it does |
 |---|---|---|
 | `perplexity_token` | `""` | the session cookie, or a whole `Cookie` header copied from a request |
-| `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the variable read when `perplexity_token` is empty |
+| `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the name of the environment variable to read the cookie from, only when `perplexity_token` is empty; `perplexity_token` wins when both are set |
 
 This is the same request CodexBar makes for its Perplexity provider.
 

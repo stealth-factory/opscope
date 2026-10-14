@@ -95,6 +95,8 @@ pub struct Data {
     read_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
     source: &'static str,
+    /// The variable read, when `source` is `env`.
+    env_name: String,
     why: String,
 }
 
@@ -103,14 +105,17 @@ pub fn token(cfg: &Config) -> (String, &'static str) {
     if !cfg.perplexity_token.trim().is_empty() {
         return (cfg.perplexity_token.trim().to_string(), "config");
     }
-    let name = if cfg.perplexity_token_env.trim().is_empty() {
-        TOKEN_ENV
-    } else {
-        cfg.perplexity_token_env.trim()
-    };
-    match std::env::var(name) {
+    match std::env::var(env_name(cfg)) {
         Ok(v) if !v.trim().is_empty() => (v.trim().to_string(), "env"),
         _ => (String::new(), ""),
+    }
+}
+
+/// The variable the cookie is read from when `perplexity_token` is empty.
+fn env_name(cfg: &Config) -> &str {
+    match cfg.perplexity_token_env.trim() {
+        "" => TOKEN_ENV,
+        name => name,
     }
 }
 
@@ -193,6 +198,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     }
     let (token, source) = token(cfg);
     d.source = source;
+    d.env_name = env_name(cfg).to_string();
     if token.is_empty() {
         return d;
     }
@@ -441,6 +447,13 @@ fn credit_rows_with_plots(
     )];
     let hue = agent_hue("perplexity");
     let label_w = 7;
+    // Which token was sent: config wins over the variable, so a stale one
+    // left in config.json is otherwise invisible behind a fresh variable.
+    let from = match d.source {
+        "env" => format!("from ${}", d.env_name),
+        _ => "from config.json (perplexity_token)".to_string(),
+    };
+    rows.extend(field_rows("token", &from, &p.dim, w, p));
     if let Some(c) = c {
         rows.extend(balance_rows(c, w, p));
     }
@@ -902,6 +915,8 @@ mod tests {
                 assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
             }
             assert!(rows.contains("PERPLEXITY Pro"), "{rows}");
+            let solid: String = rows.split_whitespace().collect();
+            assert!(solid.contains("fromconfig.json"), "{rows}");
             assert!(rows.contains("resets ") && rows.contains("weekly"), "{rows}");
         }
         // A plan with no weekly limit, or a quota endpoint that failed, has
@@ -912,8 +927,14 @@ mod tests {
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("weekly") && !rows.contains("404"), "{rows}");
         // Only the weekly limit answering is still a tab.
-        let d = Data { quota: Some(PerplexityQuota { pct: 40.0, resets: None }), source: "env", ..Data::default() };
+        let d = Data {
+            quota: Some(PerplexityQuota { pct: 40.0, resets: None }),
+            source: "env",
+            env_name: TOKEN_ENV.into(),
+            ..Data::default()
+        };
         let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
+        assert!(rows.contains(&format!("from ${TOKEN_ENV}")), "{rows}");
         assert!(rows.contains("weekly") && rows.contains("no reset time"), "{rows}");
     }
 
