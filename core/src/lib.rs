@@ -366,10 +366,10 @@ fn osc8_kept(body: &str) -> bool {
     let Some(rest) = body.strip_prefix("8;") else {
         return false;
     };
-    let Some((_, uri)) = rest.split_once(';') else {
+    let Some((params, uri)) = rest.split_once(';') else {
         return false;
     };
-    uri.is_empty() || https_uri(uri)
+    !params.chars().any(char::is_control) && (uri.is_empty() || https_uri(uri))
 }
 
 fn keep_escape(escape: &str) -> bool {
@@ -453,11 +453,22 @@ pub fn link(url: &str, text: &str) -> String {
 fn clip_width(s: &str, width: usize) -> (String, usize, bool, usize) {
     let mut end = 0usize;
     let mut used = 0usize;
-    for (at, ch) in s.char_indices() {
-        let candidate_end = at + ch.len_utf8();
-        let columns = display_width(&s[..candidate_end]);
+    let mut visible = String::with_capacity(s.len());
+    let mut at = 0;
+    let mut columns = 0;
+    while at < s.len() {
+        if let Some(n) = markup_len(&s[at..]) {
+            at += n;
+        } else {
+            let ch = s[at..].chars().next().unwrap();
+            visible.push(ch);
+            at += ch.len_utf8();
+            // Preserve string-width semantics for combining/emoji sequences,
+            // without stripping all preceding escapes for every source byte.
+            columns = visible.width();
+        }
         if columns <= width {
-            end = candidate_end;
+            end = at;
             used = columns;
         }
     }
@@ -1028,7 +1039,7 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
         .into_iter()
         .find(|n| name + display_width(" · ") + display_width(n) <= keep)
     {
-        Some(n) => format!("{}{RST} · {n}", &title[..name_end]),
+        Some(n) => format!("{}{RST} · {n}", close_dangling_link(&title[..name_end])),
         None => title.to_string(),
     }
 }
@@ -1063,6 +1074,7 @@ fn stamped(row: &str, w: usize) -> String {
         used = width;
         rest = &rest[c.len_utf8()..];
     }
+    let cut = close_dangling_link(&cut);
     let (r, g, b) = VERSION_INK;
     format!(
         "{cut}{RST}{}{}{}",
@@ -5035,6 +5047,30 @@ mod tests {
         let row = format!("{}ok{} {}warn{}", super::rgb(1, 2, 3), super::RST, super::bg(4, 5, 6), super::NOBG);
         assert_eq!(super::inert(&row), row);
         assert_eq!(super::inert("a\tb"), "a b");
+    }
+
+    #[test]
+    fn osc8_control_parameters_are_stripped() {
+        for params in ["id=\x1b[2J", "id=\r", "id=\u{9b}2J", "id=\u{7f}"] {
+            for uri in ["https://example.com", ""] {
+                let escape = format!("\x1b]8;{params};{uri}\x1b\\");
+                assert_eq!(super::inert(&format!("{escape}readable")), "readable");
+            }
+        }
+        let good = "\x1b]8;id=title;https://example.com\x1b\\readable\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(good), good);
+    }
+
+    #[test]
+    fn osc8_clips_close_before_version_and_graphics_notice() {
+        let close = "\x1b]8;;\x1b\\";
+        let row = super::link("https://example.com", &"a".repeat(100));
+        let stamped = super::stamped(&row, 40);
+        assert!(stamped.find(close).is_some_and(|at| at < stamped.find(&super::version_tag()).unwrap()));
+        let row = super::link("https://example.com", "LATENCY");
+        let notice = super::with_notice(&row, "Kitty unavailable", 80);
+        assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
+        assert_eq!(super::display_width(&stamped), 40);
     }
 
     #[test]

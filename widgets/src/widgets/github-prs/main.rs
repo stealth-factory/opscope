@@ -2228,7 +2228,7 @@ fn main() {
                         Some(d) => pr_url(d),
                         None => shown
                             .get(selected.min(shown.len().saturating_sub(1)))
-                            .map(|pr| pr_url(pr))
+                            .map(pr_url)
                             .unwrap_or_default(),
                     };
                     if !url.is_empty() {

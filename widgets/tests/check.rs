@@ -4269,8 +4269,13 @@ fn skip_tick(src: &str, i: usize) -> usize {
     // 'x' is a character, not a lifetime. Leaving the closing quote for a
     // second scan treats the next byte as the character and can swallow a
     // `}` that closes the function.
-    if i + 2 < b.len() && b[i + 1] != b'\\' && b[i + 2] == b'\'' {
-        return i + 3;
+    if b.get(i + 1).is_some_and(|c| *c != b'\\') {
+        if let Some(ch) = src[i + 1..].chars().next() {
+            let closing = i + 1 + ch.len_utf8();
+            if b.get(closing) == Some(&b'\'') {
+                return closing + 1;
+            }
+        }
     }
     if i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_') {
         let mut j = i + 1;
@@ -4283,7 +4288,7 @@ fn skip_tick(src: &str, i: usize) -> usize {
     if j < b.len() && b[j] == b'\\' {
         j += 2;
     } else if j < b.len() {
-        j += 1;
+        j += src[j..].chars().next().unwrap().len_utf8();
     }
     if j < b.len() && b[j] == b'\'' {
         j += 1;
@@ -4698,4 +4703,16 @@ fn a_link_names_a_url_a_key_already_copies() {
         "a title link whose url no key copies:\n  {}",
         wrong.join("\n  ")
     );
+}
+
+#[test]
+fn a_unicode_character_literal_keeps_its_closing_quote_out_of_code() {
+    for glyph in ["█", "▸", "●", "✖", "○"] {
+        let literal = format!("'{glyph}'}}");
+        assert_eq!(skip_tick(&literal, 0), literal.len() - 1);
+        assert_eq!(literal.as_bytes()[skip_tick(&literal, 0)], b'}');
+    }
+    assert_eq!(skip_tick("'a}", 0), 2);
+    assert_eq!(skip_tick("'x'}", 0), 3);
+    assert_eq!(skip_tick("'\\n'}", 0), 4);
 }
