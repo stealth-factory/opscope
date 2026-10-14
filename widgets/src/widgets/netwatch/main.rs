@@ -2469,33 +2469,32 @@ fn main() {
     }
 }
 
-/// Put complete labels in the border, wrapping a narrow header into a band.
-fn chart_border(label: &str, width: usize, ink: &str, grid: &str, upper: bool) -> Vec<String> {
-    let inner = width.saturating_sub(2).max(1);
-    let mut labels = vec![String::new()];
-    for (i, part) in label.split(" · ").enumerate() {
-        let word = if i == 0 { part.to_string() } else { format!("· {part}") };
-        let n = labels.last().unwrap().chars().count();
-        if n > 0 && n + 1 + word.chars().count() > inner {
-            labels.push(String::new());
-        } else if n > 0 {
-            labels.last_mut().unwrap().push(' ');
-        }
-        for c in word.chars() {
-            if labels.last().unwrap().chars().count() == inner {
-                labels.push(String::new());
-            }
-            labels.last_mut().unwrap().push(c);
-        }
+/// Terminal row of a rate inside a chart of `rows`.
+///
+/// Upload grows upward, so a full peak is row 0. Download is inverted and
+/// a full peak is the last row. The row is the cell the stroke's pixel
+/// falls in. Rounding against `rows - 1` puts a four-row upload at 20% of
+/// peak on row 2 while the endpoint is on row 3.
+fn chart_end_row(now: f64, peak: f64, rows: usize, inverted: bool) -> usize {
+    let fraction = if peak.is_finite() && peak > 0.0 {
+        (now / peak).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let value = if inverted { 1.0 - fraction } else { fraction };
+    tc::line_row(value, rows)
+}
+
+/// The current rate at the right edge of a chart row, or the gap alone
+/// when the rate is wider than the plot. Nothing is cut to fit.
+fn push_end(line: &mut Vec<(String, String)>, width: usize, here: bool, label: &str, ink: &str, gap: &str) {
+    let n = label.chars().count();
+    if here && n > 0 && n <= width {
+        line.push((gap.to_string(), " ".repeat(width - n)));
+        line.push((ink.to_string(), label.to_string()));
+    } else {
+        line.push((gap.to_string(), " ".repeat(width)));
     }
-    let last = labels.len() - 1;
-    labels.iter().enumerate().map(|(i, label)| {
-        let edge = if upper && i == 0 { ("┌", "┐") }
-            else if !upper && i == last { ("└", "┘") }
-            else { ("│", "│") };
-        tc::seg(&[(grid, edge.0.into()), (ink, label.clone()),
-            (grid, "─".repeat(inner - label.chars().count())), (grid, edge.1.into())], width)
-    }).collect()
 }
 
 /// Sent above the line, received below it, newest on the right.
@@ -2506,7 +2505,7 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
     let canvas = h.saturating_sub(3).max(2);
     let up_h = (canvas / 2).max(1);
     let down_h = canvas.saturating_sub(up_h).max(1);
-    let plot = w.saturating_sub(3).max(1);
+    let plot = w.saturating_sub(18).max(12);
     let window: Vec<(f64, f64)> = series.iter().rev().take(plot * 2).rev().copied().collect();
     let rx: Vec<f64> = window.iter().map(|s| s.0).collect();
     let tx: Vec<f64> = window.iter().map(|s| s.1).collect();
@@ -2514,53 +2513,80 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
     let tx_peak = tx.iter().cloned().fold(0.0f64, f64::max).max(1.0);
     // Each label carries its own direction and neither is signed: rx is not
     // negative traffic, it is simply the half drawn downward.
-    let tx_now = *tx.last().unwrap_or(&0.0);
-    let rx_now = *rx.last().unwrap_or(&0.0);
-    let border_label = |arrow, peak, now| format!("{arrow} peak {} · now {}", rate(peak), rate(now));
-    let mut out = chart_border(&border_label("↑", tx_peak, tx_now), w.saturating_sub(1), &p.up, &p.grid, true);
-    let up_top = top + out.len();
+    let up_label = format!("↑ {}", rate(tx_peak));
+    let down_label = format!("↓ {}", rate(rx_peak));
+    let lab = up_label
+        .chars()
+        .count()
+        .max(down_label.chars().count())
+        .clamp(9, 16);
+    let plot = w.saturating_sub(lab + 4).max(12);
     for (values, peak, colour, height, y, inverted) in [
-        (&tx, tx_peak, &p.up, up_h, up_top, false),
-        (&rx, rx_peak, &p.down, down_h, up_top + up_h + 1, true),
+        (&tx, tx_peak, &p.up, up_h, top + 1, false),
+        (&rx, rx_peak, &p.down, down_h, top + up_h + 2, true),
     ] {
         let values: Vec<_> = values.iter().rev().take(plot * 2).rev().map(|v| {
             let fraction = (v / peak).clamp(0.0, 1.0);
             Some(if inverted { 1.0 - fraction } else { fraction })
         }).collect();
         let slots = values.len();
-        plots.push(tc::Plot::new(1, y, plot, height, tc::LineChart {
+        plots.push(tc::Plot::new(lab + 2, y, plot, height, tc::LineChart {
             traces: vec![tc::Trace { positions: None, values, colour: colour.clone(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
             slots,
             focus: None,
         }).under_text());
     }
-    for _ in 0..up_h {
+    let tx_now = *tx.last().unwrap_or(&0.0);
+    let rx_now = *rx.last().unwrap_or(&0.0);
+    // Newest sample, on the row the stroke ends on. Omitted when it does
+    // not fit: cutting a rate would name a different number.
+    let tx_row = chart_end_row(tx_now, tx_peak, up_h, false);
+    let rx_row = chart_end_row(rx_now, rx_peak, down_h, true);
+    let tx_label = rate(tx_now);
+    let rx_label = rate(rx_now);
+
+    let mut out = Vec::new();
+    out.push(tc::seg(
+        &[
+            (p.up.as_str(), format!("{:>1$} ", up_label, lab)),
+            (p.grid.as_str(), format!("┌{}┐", "─".repeat(plot))),
+        ],
+        w - 1,
+    ));
+    for i in 0..up_h {
         let mut line = vec![
+            (p.dim.clone(), " ".repeat(lab + 1)),
             (p.grid.clone(), "│".into()),
         ];
-        line.push((p.grid.clone(), " ".repeat(plot)));
+        push_end(&mut line, plot, i == tx_row, &tx_label, &p.up, &p.grid);
         line.push((p.grid.clone(), "│".into()));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         out.push(tc::seg(&refs, w - 1));
     }
     out.push(tc::seg(
         &[
-            (p.grid.as_str(), "├".into()),
-            (p.dim.as_str(), "0".into()),
-            (p.grid.as_str(), format!("{}┤", "─".repeat(plot.saturating_sub(1)))),
+            (p.dim.as_str(), format!("{:>1$} ", "0", lab)),
+            (p.grid.as_str(), format!("├{}┤", "─".repeat(plot))),
         ],
         w - 1,
     ));
-    for _ in 0..down_h {
+    for i in 0..down_h {
         let mut line = vec![
+            (p.dim.clone(), " ".repeat(lab + 1)),
             (p.grid.clone(), "│".into()),
         ];
-        line.push((p.grid.clone(), " ".repeat(plot)));
+        push_end(&mut line, plot, i == rx_row, &rx_label, &p.down, &p.grid);
         line.push((p.grid.clone(), "│".into()));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         out.push(tc::seg(&refs, w - 1));
     }
-    out.extend(chart_border(&border_label("↓", rx_peak, rx_now), w.saturating_sub(1), &p.down, &p.grid, false));
+    out.push(tc::seg(
+        &[
+            (p.down.as_str(), format!("{:>1$} ", down_label, lab)),
+            (p.grid.as_str(), format!("└{}┘", "─".repeat(plot))),
+        ],
+        w - 1,
+    ));
     out
 }
 
@@ -3106,29 +3132,20 @@ mod tests {
     }
 
     #[test]
-    fn border_labels_reclaim_width_and_keep_current_rates_outside_the_plots() {
-        for w in [18, 26, 40, 56, 80, 120] {
-            {
-                let mut plots = Vec::new();
-                let rows = chart(&[(1000.0, 100.0), (200.0, 20.0)], w, 11, &palette(), &mut plots, 7);
-                assert!(rows.iter().all(|row| bare(row).chars().count() <= w - 1));
-                assert!(plots.iter().all(|plot| plot.x == 1 && plot.width == w - 3));
-                let first_body = plots[0].y - 7;
-                let upper = rows[..first_body].iter().map(|s| bare(s)).collect::<Vec<_>>().join(" ");
-                let lower_start = plots[1].y - 7 + plots[1].height;
-                let lower = rows[lower_start..].iter().map(|s| bare(s)).collect::<Vec<_>>().join(" ");
-                assert!(upper.contains("↑ peak 100 B/s"), "{upper}");
-                assert!(lower.contains("↓ peak 1.0 KB/s"), "{lower}");
-                assert!(upper.contains("now 20 B/s"), "{upper}");
-                assert!(lower.contains("now 200 B/s"), "{lower}");
-                for plot in &plots {
-                    for row in &rows[plot.y - 7..plot.y - 7 + plot.height] {
-                        let text = bare(row);
-                        assert!(text.chars().all(|c| c == '│' || c == ' '), "{text}");
-                    }
-                }
-            }
-        }
+    fn the_current_rate_sits_on_the_stroke_row() {
+        // Four rows each way. Both ends are 20% of their own peak.
+        // Cell rounding puts the upload on row 2 and the download on row 1.
+        // The strokes are on upload row 3 and download row 0.
+        let series = [(1000.0, 100.0), (200.0, 20.0)];
+        let mut plots = Vec::new();
+        let rows = chart(&series, 80, 11, &palette(), &mut plots, 1);
+        assert_eq!(chart_end_row(20.0, 100.0, 4, false), 3);
+        assert_eq!(chart_end_row(200.0, 1000.0, 4, true), 0);
+        assert_eq!(((1.0 - 0.2) * 3.0_f64).round() as usize, 2);
+        assert!(bare(&rows[4]).ends_with("20 B/s│"), "{}", bare(&rows[4]));
+        assert!(!bare(&rows[3]).contains("20 B/s"));
+        assert!(bare(&rows[6]).ends_with("200 B/s│"), "{}", bare(&rows[6]));
+        assert!(!bare(&rows[7]).contains("200 B/s"));
     }
 
     #[test]
