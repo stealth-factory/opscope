@@ -797,6 +797,7 @@ def tmux_placeholders(t):
     upload = t.output.find(b"a=T")
     cell = t.output.find(PLACEHOLDER)
     assert 0 <= upload < cell, "virtual placement was not uploaded before the cells"
+    assert b"now" in t.output, "under-text reading was replaced by placeholders"
     assert not any(k.get(b"a") == b"p" for k, _ in commands_of(unwrap_tmux(t.output)))
     t.send(b"\x1b[B")
     t.read()

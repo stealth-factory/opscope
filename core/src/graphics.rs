@@ -132,8 +132,10 @@ impl Plot {
 
     /// Draw this line chart under the cell text instead of blanking it.
     ///
-    /// Pixel mode keeps the glyphs and the selected-row tint; Braille and
-    /// text mode still paint the chart the way they do today. Solid fills
+    /// Pixel mode keeps the glyphs and the selected-row tint. Inside tmux
+    /// the blank cells of that rectangle are Unicode placeholders, so the
+    /// image stays anchored to the text and the reading stays put. Braille
+    /// and text mode still paint the chart the way they do today. Solid fills
     /// ignore it: text over a heatmap or a meter does not stay readable.
     pub fn under_text(mut self) -> Self {
         if self.fill.is_none() {
@@ -871,15 +873,20 @@ pub(crate) fn compose(
         };
         // A line chart under the text keeps whatever the widget drew there:
         // an axis value, a rate, the tint. Blanking those cells is what
-        // puts the image in a hole beside the label. Braille and solid
-        // fills still replace the cells, so text mode does not move.
+        // puts the image in a hole beside the label. Direct Kitty leaves
+        // the cells alone and places the image at z=-1. A placeholder cell
+        // cannot also hold a glyph, so the blanks become placeholders and
+        // the glyphs stay. Braille and solid fills still replace the cells.
         let slot = images.len();
         let keep_text = use_pixels && plot.under_text && !placeholders;
+        let overlay = use_pixels && plot.under_text && placeholders;
         for row in 0..plot.visible_rows {
             if keep_text {
                 continue;
             }
-            let content = if use_pixels && placeholders {
+            let content = if overlay {
+                placeholders_keeping_text(&text[plot.y + row], plot.x, cols, image_id(slot), row)
+            } else if use_pixels && placeholders {
                 super::placeholder::placeholder_run(image_id(slot), row, cols)
             } else if use_pixels {
                 " ".repeat(cols)
@@ -1002,6 +1009,96 @@ pub(crate) fn compose(
     (before, after)
     });
     (text, before, after)
+}
+
+/// Placeholder cells for the blanks in an under-text plot. The widget's
+/// glyphs stay, with the colour that applied to them. A placeholder paints
+/// the image id as the foreground, so the next glyph re-applies its own
+/// colour, or a reset when it never had one.
+fn placeholders_keeping_text(row: &str, x: usize, cols: usize, id: u32, image_row: usize) -> String {
+    let row = super::inert(row);
+    let mut out = String::new();
+    let mut column = 0usize;
+    let mut active = String::new();
+    let mut dirty = false;
+    let mut after_placeholder = false;
+    let mut chars = row.chars().peekable();
+    while column < x + cols {
+        let Some(c) = chars.next() else {
+            break;
+        };
+        if c == '\x1b' {
+            let mut seq = String::from("\x1b");
+            for c in chars.by_ref() {
+                seq.push(c);
+                if c == 'm' {
+                    break;
+                }
+            }
+            active.push_str(&seq);
+            dirty = true;
+            continue;
+        }
+        let source_placeholder = c == super::placeholder::PLACEHOLDER;
+        if source_placeholder {
+            while chars
+                .peek()
+                .copied()
+                .is_some_and(super::placeholder::is_placeholder_diacritic)
+            {
+                chars.next();
+            }
+        }
+        let width = if source_placeholder {
+            1
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        };
+        if width == 0 {
+            if (x..x + cols).contains(&column.saturating_sub(1)) && !after_placeholder {
+                out.push(c);
+            }
+            continue;
+        }
+        if column < x + cols && column + width > x {
+            let blank = c == ' ' || source_placeholder;
+            // A wide glyph that starts outside the rectangle, or hangs past
+            // it, is not one cell we can keep. Those columns become
+            // placeholders so the row stays `cols` wide.
+            let fits = column >= x && column + width <= x + cols;
+            if blank || !fits {
+                let start = column.max(x);
+                let end = (column + width).min(x + cols);
+                for col in start..end {
+                    out.push_str(&super::placeholder::placeholder_cell(id, image_row, col - x));
+                }
+                after_placeholder = true;
+                dirty = true;
+            } else if dirty {
+                if active.is_empty() {
+                    if after_placeholder {
+                        out.push_str(super::RST);
+                    }
+                } else {
+                    out.push_str(&active);
+                }
+                dirty = false;
+                after_placeholder = false;
+                out.push(c);
+            } else {
+                after_placeholder = false;
+                out.push(c);
+            }
+        }
+        column += width;
+    }
+    while column < x + cols {
+        if column >= x {
+            out.push_str(&super::placeholder::placeholder_cell(id, image_row, column - x));
+        }
+        column += 1;
+    }
+    out
 }
 
 fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String {
@@ -2316,6 +2413,46 @@ mod tests {
         assert!(!text[1].contains("keep"));
         assert!(graphics_keys(&after).iter().all(|keys| !keys.contains("z=")));
         compose(&rows, &[], 40, 6, true, false, true, false);
+    }
+
+    #[test]
+    fn placeholders_keep_under_text_readings() {
+        let _transport = super::super::shm::guard();
+        // Four blanks, then the reading. The plot starts on the blanks.
+        let plain = "ab    12.3ms later".to_string();
+        let rows = vec!["title".into(), plain.clone(), "abaxis values".into()];
+        let chart = chart(vec![Some(0.2), Some(0.8)]);
+        let over = Plot::new(2, 1, 10, 2, chart.clone()).under_text();
+        compose(&rows, &[], 40, 6, true, true, true, false);
+        let (text, before, after) = compose(&rows, &[over], 40, 6, true, true, true, false);
+        assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
+        assert!(text[1].contains('\u{10EEEE}'), "{:?}", text[1]);
+        assert!(text[2].contains("axis") && text[2].contains("value"), "{:?}", text[2]);
+        let reading = text[1].find("12.3ms").unwrap();
+        let cell = text[1][..reading].rfind('\u{10EEEE}').unwrap();
+        let reset = text[1][..reading].rfind("\x1b[0m").unwrap();
+        assert!(cell < reset && reset < reading, "{:?}", text[1]);
+        assert_eq!(super::super::display_width(&text[1]), plain.chars().count());
+        assert!(before.contains("q=2,U=1"), "{before:?}");
+        assert!(!before.contains("a=p") && !after.contains("a=p"), "{before:?} {after:?}");
+        // The reading's own colour is put back after the image-id colour.
+        // Row 0 is the pinned title; a plot there is not drawn.
+        let colour = super::super::rgb(30, 220, 180);
+        let coloured = format!("ab    {colour}12.3ms");
+        let rows = vec!["title".into(), coloured];
+        let over = Plot::new(2, 1, 10, 1, chart.clone()).under_text();
+        compose(&rows, &[], 40, 4, true, true, true, false);
+        let (text, _, _) = compose(&rows, &[over], 40, 4, true, true, true, false);
+        let reading = text[1].find("12.3ms").unwrap();
+        let paint = text[1][..reading].rfind(&colour).unwrap();
+        let cell = text[1][..reading].rfind('\u{10EEEE}').unwrap();
+        assert!(cell < paint && paint < reading, "{:?}", text[1]);
+        // A chart that did not ask to keep its text still becomes placeholders.
+        let bare = Plot::new(2, 1, 10, 1, chart);
+        compose(&rows, &[], 40, 4, true, true, true, false);
+        let (text, _, _) = compose(&rows, &[bare], 40, 4, true, true, true, false);
+        assert!(!text[1].contains("12.3ms"), "{:?}", text[1]);
+        compose(&rows, &[], 40, 4, true, true, true, false);
     }
 
     fn graphics_keys(bytes: &str) -> Vec<&str> {

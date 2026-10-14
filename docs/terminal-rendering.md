@@ -239,16 +239,20 @@ stays as it is today.
 The cells are ordinary text, so a scroll or a pane move is expected to keep
 the image. That was not checked by eye.
 
-`Plot::under_text()` is only for line charts. In a Kitty graphics session the
+`Plot::under_text()` is only for line charts. On a direct Kitty session the
 image is placed at `z=-1`: under the glyphs, and above cells that have a
 background colour. A lower z, below `-1073741824`, would also sit under that
 background, so an opaque selected-row tint would cover the stroke. The widget
 draws labels and the current value in the chart cells. The row a label shares
 with the stroke is `line_row`: the pixel y the chart rounds against, then the
 cell that pixel falls in. Rounding against the cell count instead lands the
-label on a different row. Pixel mode leaves the labels there. Braille and text
-mode still replace those cells with the chart, so the
-fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
+label on a different row. Pixel mode leaves the labels there. Inside tmux
+those labels stay too. A placeholder cell cannot also hold a glyph, so the
+blank cells of the rectangle become the placeholders and the reading is left
+where the widget drew it. An uncoloured glyph after a placeholder is reset,
+because the placeholder's foreground is the image id. There is still no
+`a=p` inside tmux. Braille and text mode still replace those cells with the
+chart, so the fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
 meters or stacked bars: text over a solid fill does not stay readable, and it
 would fail the contrast rule.
 
