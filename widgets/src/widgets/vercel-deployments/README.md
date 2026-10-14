@@ -109,6 +109,18 @@ pane shows a few dozen, so asking for all of them would spend the wait on
 text nobody reads; the tail is the useful end, since a build explains itself
 on the way out rather than on the way in.
 
+## Clickable titles
+
+The commit subject in the deployment detail view links to that deployment's
+Vercel page, using the same URL as the copy sheet. Main-list subjects are
+plain text. Links have a dashed underline in text and Kitty mode, or a plain
+underline when the terminal does not support styled underlines.
+
+In Herdr, hold **Ctrl and left-click** the underlined subject to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for opening the copy sheet.
+
 ## Keys
 
 | Key | Action |

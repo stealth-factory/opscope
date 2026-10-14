@@ -341,14 +341,21 @@ and intentional text presentation, not unimplemented widget migrations.
 no spaces and no controls. Any other string comes back unchanged, which is
 the row drawn today.
 
+Clickable titles have a dashed underline when styled underline support has
+been negotiated, or a plain underline otherwise, in both text and Kitty
+mode. The mark ends before alignment padding and adjacent columns. A clip
+closes both the underline and hyperlink so neither reaches the next column.
+
 `draw` keeps that sequence, and the empty OSC 8 that closes it. OSC 8 with
 another scheme, and every other OSC, is stripped with the rest of the
 non-colour escapes. The sequence is zero width in `display_width`, `pad` and
 `seg`. A clip that cuts the visible text appends the closer, so the next
 column is not part of the target.
 
-Widgets call `link` only where a key already copies that same URL. They do
-not probe for OSC 8 and they do not branch on Kitty. A terminal that ignores
+Widgets call `link` only in detail views where a key already copies that same
+URL. Main dashboards and lists keep their titles as plain text. In Herdr,
+Ctrl + left-click activates a link; regular clicks keep widget behaviour.
+Widgets do not probe for OSC 8 and they do not branch on Kitty. A terminal that ignores
 the sequence shows the same text; that is the defined fallback, so there is
 nothing to negotiate first. Kitty, Ghostty, WezTerm, iTerm2, Konsole and
 tmux 3.4+ are the protocol's audience. This workspace has no attached

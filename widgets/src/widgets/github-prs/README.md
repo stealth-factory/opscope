@@ -266,6 +266,17 @@ Sorting is done locally on the fetched set, so both keys are instant.
 filter and returns to navigating; `esc` clears it. The match is a substring
 against number, title, author, repository and both branch names.
 
+## Clickable titles
+
+The PR title in the detail view links to its GitHub page. Main-list titles
+are plain text. Links have a dashed underline in text and Kitty mode, or a
+plain underline when the terminal does not support styled underlines.
+
+In Herdr, hold **Ctrl and left-click** the underlined title to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for copying the URL.
+
 ## Copying
 
 `c` copies a PR's URL — the highlighted row in the list, the open PR in the

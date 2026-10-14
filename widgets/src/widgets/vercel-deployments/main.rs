@@ -1960,7 +1960,6 @@ fn main() {
             };
             let subject = text(meta, "githubCommitMessage");
             let subject = subject.lines().next().unwrap_or("").to_string();
-            let subject = tc::link(&deployment_url(d), &subject);
             let c = |colour: &str| format!("{}{}", tint, colour);
             let mut line = vec![
                 (

@@ -315,6 +315,18 @@ private. `w` has no need to.
 Accounts are read one at a time rather than together: rows appear as they
 arrive, and one bad account cannot blank the whole board.
 
+## Clickable titles
+
+PR titles in the account detail view link to their GitHub pages. The main
+dashboard has no title hyperlinks. Links have a dashed underline in text and
+Kitty mode, or a plain underline when the terminal does not support styled
+underlines.
+
+In Herdr, hold **Ctrl and left-click** an underlined title to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for copying the URL.
+
 ## Keys
 
 | Key | Action |

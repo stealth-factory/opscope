@@ -2389,7 +2389,7 @@ fn main() {
                     format!(
                         "  {} · {}",
                         text(run, "workflow"),
-                        tc::link(&run_url(run), &subject)
+                        subject
                     ),
                 ));
             }
@@ -2408,7 +2408,7 @@ fn main() {
                         (&c(&p.lbl), format!("   {}", text(run, "workflow"))),
                         (
                             &c(if here { &p.txt } else { &p.msg }),
-                            format!(" · {}", tc::link(&run_url(run), &subject)),
+                            format!(" · {}", subject),
                         ),
                         (&tint, if here { " ".repeat(w) } else { String::new() }),
                     ],

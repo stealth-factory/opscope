@@ -3451,7 +3451,7 @@ fn list_view(
         let shown = name.chars().take(title_w - 1).collect::<String>();
         line.push((
             c(&p.txt),
-            tc::pad(&tc::link(&pr_url(pr), &shown), title_w),
+            tc::pad(&shown, title_w),
         ));
         line.push((c(rcol), format!("{:>13}", rlabel)));
         line.push((c(ccol), format!("{:>8}", clabel)));
@@ -4169,14 +4169,18 @@ mod tests {
     }
 
     #[test]
-    fn a_list_title_links_the_url_c_copies() {
+    fn only_the_detail_title_links_the_url_c_copies() {
         let p = palette();
         let prs = a_long_list(1);
         let url = "https://github.com/owner/repo/pull/1";
         assert_eq!(pr_url(&prs[0]), url);
         let (list, _, _) =
             list_view(&prs, 0, "created", true, "", 120, false, "all", prs.len(), &p);
-        let row = list
+        assert!(list.iter().all(|r| !r.contains("\x1b]8;")));
+        let (detail, _) = detail_view(
+            Some(&prs[0]), &[], 0, false, 120, 40, 0, &[], "", 0, &p,
+        );
+        let row = detail
             .iter()
             .find(|r| r.contains(url))
             .expect("the title carries the pull request url");

@@ -395,17 +395,27 @@ fn keep_escape(escape: &str) -> bool {
 /// cancel the link that opens after it.
 fn close_dangling_link(s: &str) -> String {
     let mut open = false;
+    let mut marked = false;
     let mut rest = s;
     while !rest.is_empty() {
         if rest.as_bytes()[0] == 0x1b {
             let n = markup_len(rest).unwrap_or(1);
+            if open {
+                if opens_underline(&rest[..n]) {
+                    marked = true;
+                } else if matches!(&rest[..n], "\x1b[24m" | "\x1b[0m") {
+                    marked = false;
+                }
+            }
             if let Some(body) = osc_body(&rest[..n]) {
                 if let Some(after) = body.strip_prefix("8;") {
                     if let Some((_, uri)) = after.split_once(';') {
                         if uri.is_empty() {
                             open = false;
+                            marked = false;
                         } else if https_uri(uri) {
                             open = true;
+                            marked = false;
                         }
                     }
                 }
@@ -417,7 +427,8 @@ fn close_dangling_link(s: &str) -> String {
         rest = &rest[ch.len_utf8()..];
     }
     if open {
-        format!("{s}\x1b]8;;\x1b\\")
+        let off = if marked { "\x1b[24m" } else { "" };
+        format!("{s}{off}\x1b]8;;\x1b\\")
     } else {
         s.to_string()
     }
@@ -431,7 +442,13 @@ fn close_dangling_link(s: &str) -> String {
 /// the row a terminal that ignores OSC 8 shows anyway: the sequence is
 /// defined to be skipped, so the text does not move and no probe is
 /// required before sending it.
+/// Clickable titles use a dashed underline when the terminal supports styled
+/// underlines, and a plain underline otherwise. Padding is outside the mark.
 pub fn link(url: &str, text: &str) -> String {
+    link_with_support(url, text, terminal::underline_caps().support)
+}
+
+fn link_with_support(url: &str, text: &str, support: terminal::UnderlineSupport) -> String {
     if !https_uri(url) {
         return text.to_string();
     }
@@ -439,7 +456,12 @@ pub fn link(url: &str, text: &str) -> String {
     // rest of the row wearing the target. Titles from the APIs do not
     // carry controls; one that did is shown without them.
     let visible: String = text.chars().filter(|c| !c.is_control()).collect();
-    format!("\x1b]8;;{url}\x1b\\{visible}\x1b]8;;\x1b\\")
+    let mark = if support == terminal::UnderlineSupport::Styled {
+        "\x1b[4:5m"
+    } else {
+        "\x1b[4m"
+    };
+    format!("\x1b]8;;{url}\x1b\\{mark}{visible}\x1b[24m\x1b]8;;\x1b\\")
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
@@ -5071,6 +5093,30 @@ mod tests {
         let notice = super::with_notice(&row, "Kitty unavailable", 80);
         assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
         assert_eq!(super::display_width(&stamped), 40);
+    }
+
+    #[test]
+    fn clickable_titles_are_marked_without_underlining_neighbouring_columns() {
+        use super::terminal::UnderlineSupport;
+        let url = "https://example.com/pr/1";
+        for (support, mark) in [
+            (UnderlineSupport::Styled, "\x1b[4:5m"),
+            (UnderlineSupport::Plain, "\x1b[4m"),
+            (UnderlineSupport::Unknown, "\x1b[4m"),
+        ] {
+            let linked = super::link_with_support(url, "Clickable title", support);
+            assert!(linked.contains(&format!("{mark}Clickable title\x1b[24m")));
+            assert_eq!(super::display_width(&linked), 15);
+            let padded = super::pad(&linked, 20);
+            assert!(padded.ends_with("\x1b[24m\x1b]8;;\x1b\\     "));
+            let clipped = super::clip_width(&linked, 5).0;
+            assert!(clipped.ends_with("Click\x1b[24m\x1b]8;;\x1b\\"));
+            assert_eq!(super::strip_escapes(&clipped), "Click");
+            assert_eq!(
+                super::link_with_support("http://example.com", "title", support),
+                "title"
+            );
+        }
     }
 
     #[test]
