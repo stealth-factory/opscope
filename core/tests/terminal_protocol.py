@@ -557,12 +557,61 @@ def lost_startup_cell_reply_does_not_block_resize(t):
     os.kill(t.proc.pid, signal.SIGWINCH)
     t.read(0.4)
     assert t.output.count(b"\x1b[16t") > before
-    t.send(b"\x1b[6;40;20t")
-    t.read(0.4)
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
     keys = t.images()[-1][0]
     assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "lost startup reply blocked the resize report"
     assert int(keys[b"v"]) == int(keys[b"r"]) * 40
     cell_queries_stay_outside_images(t.output)
+
+
+def ambiguous_cell_reply_retries(t):
+    # Startup reply is lost; the first resize reply is therefore ambiguous.
+    before = t.output.count(b"\x1b[16t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.2)
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
+    assert t.output.count(b"\x1b[16t") > before + 1, "ambiguous reply did not retry"
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "ambiguous reply left fallback raster"
+
+
+def expired_cell_reply_is_quarantined(t):
+    t.read(1.6)
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.2)
+    # Expired startup response precedes the actual current response.
+    t.send(b"\x1b[6;40;20t\x1b[6;24;12t")
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;24;12t")
+        t.read(0.2)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 12, "expired reply was relabeled current"
+
+
+def resumed_cell_reply_is_quarantined(t):
+    # Leave a resize query outstanding before suspending with a buffered reply.
+    t.send(b"\x1b[6;16;8t")
+    t.read(0.1)
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.1)
+    os.kill(t.proc.pid, signal.SIGTSTP)
+    t.read(0.1)
+    t.send(b"\x1b[6;20;10t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    os.kill(t.proc.pid, signal.SIGCONT)
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "resume accepted a buffered old report"
 
 
 def shm_rejected(t):
@@ -730,6 +779,9 @@ if __name__ == "__main__":
                                ("auto", "kitty", cell_raster_follows_winsize_pixels),
                                ("auto", "kitty", cell_raster_drops_a_barren_resize),
                                ("auto", "kitty", lost_startup_cell_reply_does_not_block_resize),
+                               ("auto", "kitty", ambiguous_cell_reply_retries),
+                               ("auto", "kitty", expired_cell_reply_is_quarantined),
+                               ("auto", "kitty", resumed_cell_reply_is_quarantined),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

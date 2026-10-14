@@ -477,3 +477,10 @@ replies. The timeout retains the idle refresh cadence, but input no longer waits
 behind an unconditional 200–400 ms sleep. Settings uses the same helper; matrix
 retains its animation pacing. Buffered partial escapes use a short bounded wait.
 Unchanged Kitty plots remain cached when only the selected row changes.
+
+Cell-size replies carry no request ID. Resume keeps unread queries accounted
+for. A missing or ambiguous reply triggers a retry; after expired accounting,
+the first apparent response is quarantined and a follow-up query confirms the
+current dimensions. Until then, charts use the window pixel fields or the
+8×16 fallback rather than accepting a delayed old report. Silent terminals
+retry at the 1.5-second query timeout, without blocking input or drawing.

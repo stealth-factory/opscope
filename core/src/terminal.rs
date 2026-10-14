@@ -48,6 +48,9 @@ static CELL_SENT_PREV: AtomicU64 = AtomicU64::new(0);
 /// `CSI 16 t` has no id. Replies arrive in order, so a reply answers the
 /// latest query only when it is the only one still outstanding.
 static CELL_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
+// CSI 16 t has no request ID. After losing accounting, quarantine the
+// first apparent response and ask again before trusting a new generation.
+static CELL_CONFIRM: AtomicBool = AtomicBool::new(false);
 /// Milliseconds on `cell_clock_ms` when a query was sent or a reply
 /// consumed. Zero means nothing is being timed.
 static CELL_HEARD_AT_MS: AtomicU64 = AtomicU64::new(0);
@@ -164,11 +167,12 @@ pub(crate) fn start() {
     // reply before the deadline leaves the legacy decoder in place.
     let query_cells = mode != GraphicsMode::Text;
     QUERY_CELLS.store(query_cells, Ordering::Release);
-    // A new negotiation replaces any query the previous session left in flight.
-    CELL_OUTSTANDING.store(0, Ordering::Release);
-    CELL_HEARD_AT_MS.store(0, Ordering::Release);
+    // Resume can leave an unread reply in the tty. Keep that query counted,
+    // so its buffered report cannot answer the new negotiation.
+    expire_silent_cell_queries(cell_clock_ms());
     if query_cells {
         CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+        CELL_NEED_SEND.store(false, Ordering::Release);
         note_cell_query_sent();
         let (w, h) = cell_from_winsize().unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
         publish_cell(w, h);
@@ -355,7 +359,18 @@ pub(crate) fn reply(sequence: &str) {
         let query = CELL_QUERY_GEN.load(Ordering::Acquire);
         // A newer resize, or an older query still in flight, means this
         // reply does not answer the query we are waiting on.
-        if cell_reply_matches(sent, query, outstanding) {
+        if outstanding > 1 {
+            // A missing earlier response makes this reply ambiguous. Drain
+            // the uncertain batch and require a follow-up, rather than
+            // leaving a phantom query that blocks all future dimensions.
+            CELL_OUTSTANDING.store(0, Ordering::Release);
+            CELL_CONFIRM.store(true, Ordering::Release);
+            CELL_NEED_SEND.store(true, Ordering::Release);
+        } else if cell_reply_matches(sent, query, outstanding)
+            && CELL_CONFIRM.swap(false, Ordering::AcqRel)
+        {
+            CELL_NEED_SEND.store(true, Ordering::Release);
+        } else if cell_reply_matches(sent, query, outstanding) {
             let ioctl = if report.is_some() {
                 None
             } else {
@@ -529,13 +544,12 @@ fn note_cell_query_sent() {
         CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel),
         Ordering::Release,
     );
+    expire_silent_cell_queries(now);
+    // This send also fulfills a retry armed by expiry at the boundary.
+    CELL_NEED_SEND.store(false, Ordering::Release);
     loop {
-        let silent = cell_query_silence_ms(CELL_HEARD_AT_MS.load(Ordering::Acquire), now);
         let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
-        // A lost reply leaves a count of two or more, or one phantom after
-        // the reply that did arrive was rejected. Silence drops it, so this
-        // send is the only query in flight.
-        let next = cell_outstanding_after_silence(outstanding, silent).saturating_add(1);
+        let next = outstanding.saturating_add(1);
         if CELL_OUTSTANDING
             .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -591,6 +605,10 @@ fn expire_silent_cell_queries(now_ms: u64) {
             .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            CELL_CONFIRM.store(true, Ordering::Release);
+            if QUERY_CELLS.load(Ordering::Acquire) {
+                CELL_NEED_SEND.store(true, Ordering::Release);
+            }
             // A send that landed after this expiry keeps its own timestamp.
             let _ = CELL_HEARD_AT_MS.compare_exchange(
                 heard,
