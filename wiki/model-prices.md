@@ -12,8 +12,9 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 14 Oct 2026 the two agree — see
-[what this collection changed](#what-this-collection-changed) for what moved.
+As of 14 Oct 2026 the code and current published prices agree after the dated
+corrections below. The tables retain the 2 Sep snapshot; see
+[what this collection changed](#what-this-collection-changed) for updates.
 
 ## The two rules that shape every table here
 
@@ -64,10 +65,11 @@ record which was taken, so both are carried.
 - **Opus 5.5 reads cache at 0.05× input**, $0.20. The pricing page footnotes
   it. `claude-opus-5` is a prefix of `claude-opus-5-5`, so the 5.5 row has to
   exist or 5.5 inherits Opus 5 — $5/$25 and cache reads at $0.50.
-- **Sonnet 5.5 publishes the same five as Sonnet 5**, 2 / 10 / 0.20 / 2.50 / 4.
-  Cache reads are the standard 0.1×, not Opus 5.5's 0.05×. `claude-sonnet-5`
-  is a prefix of `claude-sonnet-5-5`, so the 5.5 row has to exist or a later
-  move of one model reprices the other. Fast mode is not offered.
+- **Sonnet 5.5 has its own cache-read price**, $0.10/M, versus Sonnet 5 at
+  $0.20/M. Its other four prices match Sonnet 5. `claude-sonnet-5` is a prefix
+  of `claude-sonnet-5-5`, so the 5.5 row has to exist or a later move of one
+  model reprices the other. The 14 Oct correction below records the current
+  price; the table above remains the 2 Sep snapshot.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
 - Fast mode, where offered, is a different rate — `claude-opus-5-5` is
@@ -151,17 +153,15 @@ record which was taken, so both are carried.
 - Reasoning tokens bill as output. Regional data-residency endpoints add 10%
   for models released on or after 5 Mar 2026. Batch, Flex and fine-tuned
   inference are separate tables, out of scope.
-- **Fast and Ultrafast are multipliers, not rows.** Codex records the speed
-  beside the model, as `service_tier` on `thread_settings`. `fast`, and the
-  API's `priority` (the value a Fast response reports), bill at 2× the
-  standard short-context row and the pane names the row Fast.
-  `gpt-6.1-sol` Fast is therefore 4 / 20 / 0.20 / 5. `ultrafast` is 6× and
-  published for `gpt-6-astra` only: 60 / 300 / 6 / 75 short context, and the
-  row says Ultrafast. Any other model with `ultrafast` stays on its standard
-  row — the meter does not invent an Ultrafast rate. Missing, `default` and
-  `auto` stay on the standard row. These are published API list dollars.
-  Codex credit multipliers (included usage 2.5× Fast / 8× Ultrafast) are a
-  different bill and are not applied.
+- **Fast and Ultrafast are model-specific API list rates.** Codex records the
+  speed beside the model, as `service_tier` on `thread_settings`; the API's
+  `priority` tier is also Fast. Fast is usually 2× the standard short-context
+  row, with the eight published-price exceptions listed in the 14 Oct
+  correction below. Ultrafast is 6× and published for `gpt-6-astra` and
+  `gpt-6.1-sol`; any other model with `ultrafast` stays on its standard row.
+  Missing, `default` and `auto` stay on the standard row. These are published
+  API list dollars. Codex credit multipliers (included usage 2.5× Fast / 8×
+  Ultrafast) are a different bill and are not applied.
 
 ## xAI
 
@@ -247,6 +247,36 @@ Named so prefix matching cannot hand them a family rate.
 ## What this collection changed
 
 ### 14 Oct 2026
+
+**Current-rate corrections.** The 2 Sep Anthropic table above remains a dated
+snapshot. On 14 Oct, an audit against the current [Anthropic pricing
+page](https://platform.claude.com/docs/en/about-claude/pricing) found that
+`claude-sonnet-5-5` cache reads are $0.10/M, not the $0.20/M shown in that
+snapshot; the other four prices remain 2 / 10 / 2.50 / 4 (input, output,
+cache writes, 1-hour cache writes). `claude-sonnet-5` remains at $0.20/M for
+cache reads.
+
+The OpenAI [API pricing page](https://developers.openai.com/api/docs/pricing)
+also publishes these Fast rates (USD per million tokens), which differ from
+the generic 2× Fast multiplier:
+
+| model | input | output | cache_read |
+|---|--:|--:|--:|
+| `gpt-5.5` | 12.5 | 75 | 1.25 |
+| `gpt-5-mini` | 0.45 | 3.6 | 0.045 |
+| `gpt-4.1` | 3.5 | 14 | 0.875 |
+| `gpt-4.1-mini` | 0.7 | 2.8 | 0.175 |
+| `gpt-4o` | 4.25 | 17 | 2.125 |
+| `gpt-4o-mini` | 0.25 | 1 | 0.125 |
+| `o3` | 3.5 | 14 | 0.875 |
+| `o4-mini` | 2 | 8 | 0.5 |
+
+For configured rates, the standard-row config is scaled by the applicable
+Fast or Ultrafast multiplier; an override keyed to the full tiered model is
+used as-is, and unspecified kinds retain the scaled row. Ultrafast is now
+published for both `gpt-6-astra` and `gpt-6.1-sol`, at 6× their standard
+short-context rates. `gpt-6.1-sol` Ultrafast is 12 / 60 / 0.60 / 15
+(input / output / cache_read / cache_write).
 
 **Added `gemini-4-argon`,** at 2 / 10 / 0.10 (input, output including thinking
 tokens, cached input). Confirmed 14 Oct 2026 on Google's

@@ -279,14 +279,10 @@ const LIST_RATES: tc::Catalogue = &[
         &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
     ),
     (
-        // claude-sonnet-5 is a prefix of this id. The published five match
-        // Sonnet 5 today, so inheriting would bill the same number, and the
-        // row is still its own: a later move of one model must not reprice
-        // the other. Fast mode is not offered. The full 1M window bills at
-        // these rates; there is no long-context column.
+        // Cache reads are 0.05× input, not Sonnet 5's 0.1×.
         "claude-sonnet-5-5",
         "Anthropic",
-        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
+        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.10), ("cache_write_1h", 4.0)],
     ),
     (
         "claude-sonnet-5",
@@ -1069,25 +1065,50 @@ fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &
 
 /// Suffix Codex appends when a rollout's `service_tier` is Fast.
 ///
-/// The row has to say so: a 2× total on the bare model id reads as Standard.
+/// The row has to say so: a premium total on the bare id reads as Standard.
 pub(crate) const CODEX_TIER_FAST: &str = " · Fast";
 /// Suffix Codex appends when a rollout's `service_tier` is Ultrafast.
 ///
-/// Published for `gpt-6-astra` only. A 6× Astra total on the bare id reads
-/// as Standard.
+/// Published for `gpt-6-astra` and `gpt-6.1-sol` at 6× standard.
 pub(crate) const CODEX_TIER_ULTRAFAST: &str = " · Ultrafast";
+
+pub(crate) fn model_or_snapshot(model: &str, base: &str) -> bool {
+    model == base
+        || model.strip_prefix(base).is_some_and(|rest| {
+            rest.strip_prefix('-')
+                .is_some_and(|date| date.starts_with(|c: char| c.is_ascii_digit()))
+        })
+}
+
+/// Exceptions to 2× on OpenAI's Fast card, checked 14 Oct 2026.
+/// https://developers.openai.com/api/docs/pricing
+fn codex_fast_multiplier(model: &str) -> f64 {
+    [
+        ("gpt-5.5", 2.5),
+        ("gpt-5-mini", 1.8),
+        ("gpt-4.1", 1.75),
+        ("gpt-4.1-mini", 1.75),
+        ("gpt-4o", 1.7),
+        ("gpt-4o-mini", 5.0 / 3.0),
+        ("o3", 1.75),
+        ("o4-mini", 20.0 / 11.0),
+    ]
+    .into_iter()
+    .find(|(base, _)| model_or_snapshot(model, base))
+    .map_or(2.0, |(_, multiplier)| multiplier)
+}
 
 /// The model id without a Codex speed suffix, and the published API
 /// multiplier that suffix names.
 ///
-/// Fast is 2× the standard short-context row. Ultrafast is 6×. The suffix
+/// Fast uses the model's short-context multiplier. Ultrafast is 6×. The suffix
 /// is only present when that multiplier was applied, so stripping it and
 /// scaling is the whole bill. An id with neither suffix is the standard row.
 fn split_codex_tier(model: &str) -> (&str, f64) {
     if let Some(base) = model.strip_suffix(CODEX_TIER_ULTRAFAST) {
         (base, 6.0)
     } else if let Some(base) = model.strip_suffix(CODEX_TIER_FAST) {
-        (base, 2.0)
+        (base, codex_fast_multiplier(base))
     } else {
         (model, 1.0)
     }
@@ -3620,10 +3641,7 @@ mod tests {
         assert_eq!(older.unwrap().get("cache_read"), Some(&0.20));
     }
 
-    /// Codex speed is a multiplier on the standard row, named on the id the
-    /// rollout parser emits. Fast is 2×. Ultrafast is 6× and the suffix is
-    /// only attached for gpt-6-astra, so a non-Astra ultrafast id never
-    /// reaches this scale.
+    /// Codex speed is named on the id the rollout parser emits.
     #[test]
     fn codex_fast_and_ultrafast_scale_the_published_row_and_name_the_tier() {
         let none: HashMap<String, Rate> = HashMap::new();
@@ -3674,6 +3692,45 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("unpriced")), "{rows:#?}");
     }
 
+    #[test]
+    fn codex_fast_exceptions_match_the_official_card() {
+        for (model, input, output, cached) in [
+            ("gpt-5.5", 12.50, 75.0, 1.25),
+            ("gpt-5-mini", 0.45, 3.60, 0.045),
+            ("gpt-4.1", 3.50, 14.0, 0.875),
+            ("gpt-4.1-mini", 0.70, 2.80, 0.175),
+            ("gpt-4o", 4.25, 17.0, 2.125),
+            ("gpt-4o-mini", 0.25, 1.0, 0.125),
+            ("o3", 3.50, 14.0, 0.875),
+            ("o4-mini", 2.0, 8.0, 0.50),
+        ] {
+            for id in [model.to_string(), format!("{model}-20261001")] {
+                let (rate, _) = session_rate(&format!("{id}{CODEX_TIER_FAST}"), &HashMap::new());
+                let rate = rate.unwrap();
+                for (kind, expected) in [("input", input), ("output", output), ("cache_read", cached)] {
+                    assert!((rate[kind] - expected).abs() < 1e-12, "{id} {kind}: {rate:?}");
+                }
+            }
+        }
+        assert_eq!(codex_fast_multiplier("gpt-5.5-pro"), 2.0);
+        assert_eq!(codex_fast_multiplier("gpt-4.1-nano"), 2.0);
+    }
+
+    #[test]
+    fn fast_exception_preserves_per_kind_config_precedence() {
+        let model = format!("gpt-5.5{CODEX_TIER_FAST}");
+        let config = HashMap::from([
+            ("gpt-5.5".to_string(), HashMap::from([("input".to_string(), 4.0)])),
+            (model.clone(), HashMap::from([("output".to_string(), 70.0)])),
+        ]);
+        let (rate, origin) = session_rate(&model, &config);
+        let rate = rate.unwrap();
+        assert_eq!(origin, "config");
+        assert_eq!(rate["input"], 10.0);
+        assert_eq!(rate["output"], 70.0);
+        assert_eq!(rate["cache_read"], 1.25);
+    }
+
     /// A config entry for the suffixed row names only the kinds the reader
     /// set. The rest stay on the multiplied list. Looking the suffixed id up
     /// as a model filled those leftovers from the standard row, so a Fast
@@ -3712,12 +3769,7 @@ mod tests {
         assert!(!rate.contains_key("output"));
     }
 
-    /// Published rates from Anthropic's pricing page on 28 Sep 2026.
-    ///
-    /// `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and the five
-    /// numbers match, so a missing row would still bill the same today.
-    /// Membership is what the test pins: deleting the line must fail here
-    /// even while the bill would not move.
+    /// Published rates from Anthropic's pricing page on 14 Oct 2026.
     #[test]
     fn sonnet_5_5_is_priced_on_its_own_row() {
         let none: HashMap<String, Rate> = HashMap::new();
@@ -3733,13 +3785,11 @@ mod tests {
         assert_eq!(origin, "list");
         assert_eq!(rate.get("input"), Some(&2.0));
         assert_eq!(rate.get("output"), Some(&10.0));
-        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
         assert_eq!(rate.get("cache_write"), Some(&2.50));
         assert_eq!(rate.get("cache_write_1h"), Some(&4.0));
 
-        // The five match Sonnet 5, so the rate alone cannot tell the rows
-        // apart. Longest substring is what `rate_for` uses, and that is what
-        // has to land on 5.5 for a 5.5 id and on Sonnet 5 for a Sonnet 5 id.
+        // Sonnet 5 must not supply 5.5's lower cache-read rate.
         let longest = |model: &str| {
             LIST_RATES
                 .iter()
@@ -3754,7 +3804,7 @@ mod tests {
 
         let (dated, dated_origin) = rate_for("claude-sonnet-5-5-20260928", &none);
         assert_eq!(dated_origin, "list");
-        assert_eq!(dated.unwrap().get("input"), Some(&2.0));
+        assert_eq!(dated.unwrap().get("cache_read"), Some(&0.10));
 
         let (older, _) = rate_for("claude-sonnet-5", &none);
         let older = older.expect("claude-sonnet-5 was already priced");

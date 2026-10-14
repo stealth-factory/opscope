@@ -1840,6 +1840,12 @@ fifteen seconds** to put anything on any tab, because Claude's transcripts and
 Cursor's spend history are both read through before there is anything to draw.
 Neither is paid again.
 
+Metered token costs use published API list prices, not subscription-credit
+multipliers. The 14 Oct 2026 rate correction sets Sonnet 5.5 cache reads to
+$0.10/M and applies model-specific Fast rates, with Ultrafast rates for GPT-6
+Astra and GPT-6.1 Sol. See the [model price notes](../../../../wiki/model-prices.md)
+for the audited rates and sources.
+
 ## More than one Claude Max
 
 A second Max seat is a second Claude Code config directory. This widget
