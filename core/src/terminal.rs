@@ -98,7 +98,9 @@ pub(crate) fn start() {
         return;
     }
     session.deadline = Some(Instant::now() + TIMEOUT);
-    let probe = if mode == GraphicsMode::Text {
+    let probe = if mode == GraphicsMode::Text
+        || super::shm::host_relays_images(|key| std::env::var(key).ok())
+    {
         None
     } else {
         super::shm::begin_probe()
