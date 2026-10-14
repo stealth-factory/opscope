@@ -1377,6 +1377,10 @@ struct Tally {
     unmetered: u64,
     unpriced: u64,
     estimated: u64,
+    /// Fetched events whose timestamps cannot be placed in the window.
+    unclassified: u64,
+    /// Requests whose token counters were present but not usable numbers.
+    invalid_counters: u64,
     tokens: f64,
     counted: u64,
 }
@@ -1394,6 +1398,30 @@ fn nonnegative(v: &serde_json::Value) -> Option<f64> {
     loose(v).filter(|n| n.is_finite() && *n >= 0.0)
 }
 
+const TOKEN_FIELDS: &[(&str, &str)] = &[
+    ("input", "inputTokens"),
+    ("output", "outputTokens"),
+    ("cache_read", "cacheReadTokens"),
+    ("cache_write", "cacheWriteTokens"),
+];
+
+/// Absent counters are zero. A present value that is not a finite
+/// nonnegative number is not zero: pricing the other counters would leave
+/// that usage out and still read as a complete estimate.
+fn usage_tokens(usage: &serde_json::Value) -> Option<Tokens> {
+    let mut tokens = Tokens::new();
+    for (kind, field) in TOKEN_FIELDS {
+        let value = &usage[*field];
+        let count = if value.is_null() {
+            0.0
+        } else {
+            nonnegative(value)?
+        };
+        tokens.insert((*kind).to_string(), count);
+    }
+    Some(tokens)
+}
+
 /// Cursor's input/cache counters are disjoint. Only omitted prices may
 /// use a list-rate fallback; a reported zero is already a price.
 fn event_price(usage: &serde_json::Value, model: &str) -> (Option<f64>, bool, bool) {
@@ -1401,15 +1429,9 @@ fn event_price(usage: &serde_json::Value, model: &str) -> (Option<f64>, bool, bo
         let cents = nonnegative(&usage["totalCents"]);
         return (cents, false, cents.is_none());
     }
-    let tokens: Tokens = [
-        ("input", "inputTokens"),
-        ("output", "outputTokens"),
-        ("cache_read", "cacheReadTokens"),
-        ("cache_write", "cacheWriteTokens"),
-    ]
-    .into_iter()
-    .map(|(kind, field)| (kind.to_string(), nonnegative(&usage[field]).unwrap_or(0.0)))
-    .collect();
+    let Some(tokens) = usage_tokens(usage) else {
+        return (None, false, true);
+    };
     let model = cursor_price_model(model);
     let cents = rate_for(&model, &HashMap::new())
         .0
@@ -1446,7 +1468,12 @@ fn cursor_price_model(model: &str) -> String {
 
 fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mut Tally) {
     for e in events {
+        // A timestamp outside the requested window is classifiable and stays
+        // out of the total. A missing or unreadable one is not: the page
+        // count already included it, so dropping its charge would understate
+        // a total this snapshot would otherwise call complete.
         let Some(ms) = nonnegative(&e["timestamp"]).filter(|ms| *ms > 0.0) else {
+            t.unclassified += 1;
             continue;
         };
         if ms < start_ms as f64 || ms > end_ms as f64 {
@@ -1457,6 +1484,7 @@ fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mu
             .single()
             .map(|d| d.format("%Y-%m-%d").to_string())
         else {
+            t.unclassified += 1;
             continue;
         };
         t.counted += 1;
@@ -1465,17 +1493,18 @@ fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mu
             _ => t.unmetered += 1,
         }
         let usage = &e["tokenUsage"];
-        let n = [
-            "inputTokens",
-            "outputTokens",
-            "cacheReadTokens",
-            "cacheWriteTokens",
-        ]
-        .iter()
-        .map(|k| nonnegative(&usage[*k]).unwrap_or(0.0))
-        .sum::<f64>();
-        if n <= 0.0 || !n.is_finite() {
+        let parsed = usage_tokens(usage);
+        let n = parsed
+            .as_ref()
+            .map(|tokens| tokens.values().sum::<f64>())
+            .unwrap_or(0.0);
+        // No token usage, and every counter that was present parsed. Charged
+        // cents were already counted; there is nothing for the API-rate rows.
+        if parsed.is_some() && (n <= 0.0 || !n.is_finite()) {
             continue;
+        }
+        if parsed.is_none() {
+            t.invalid_counters += 1;
         }
         let model = match text(e, "model") {
             s if s.is_empty() => "unknown".to_string(),
@@ -1483,7 +1512,12 @@ fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mu
         };
         let (cents, estimated, invalid) = event_price(usage, &model);
         let slot = t.by_day_model.entry(day).or_default().entry(model).or_default();
-        slot.tokens += n;
+        // Invalid counters are omitted entirely. Adding the valid remainder
+        // would publish a partial token total as the request's usage.
+        if parsed.is_some() {
+            slot.tokens += n;
+            t.tokens += n;
+        }
         slot.invalid |= invalid;
         if let Some(cents) = cents {
             slot.cents += cents;
@@ -1494,7 +1528,6 @@ fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mu
             t.unpriced += 1;
         }
         t.estimated += u64::from(estimated);
-        t.tokens += n;
     }
 }
 
@@ -1585,23 +1618,53 @@ fn event_report(
     for (day, models) in &t.by_day_model {
         let mut inner = serde_json::Map::new();
         let mut total = 0.0;
+        let mut total_ok = true;
+        let mut day_complete = true;
         for (model, value) in models {
-            let cents = (!value.invalid && value.priced > 0).then_some(value.cents);
-            total += cents.unwrap_or(0.0);
+            // One bad price used to replace the whole group's known cents
+            // with null, so a $10 event beside an invalid one drew as $0.
+            // Keep the finite sum and say it is incomplete.
+            let sum_ok = value.cents.is_finite();
+            let known = sum_ok && value.priced > 0;
+            let cents = known.then_some(value.cents);
+            let complete = known && !value.invalid && value.unpriced == 0;
+            if !complete {
+                day_complete = false;
+            }
+            if let Some(cents) = cents {
+                if total_ok && (total + cents).is_finite() {
+                    total += cents;
+                } else {
+                    total_ok = false;
+                }
+            }
             inner.insert(
                 model.clone(),
                 serde_json::json!({ "cents": cents, "tokens": value.tokens,
-                    "complete": !value.invalid && value.unpriced == 0 }),
+                    "complete": complete }),
             );
         }
-        by_day.insert(day.clone(), serde_json::json!(total));
+        // A non-finite sum is not a total. A zero that is only a floor is
+        // not a measured zero either: nothing priced, so there is no known
+        // spend to put on the chart.
+        let day_value = if total_ok && (day_complete || total > 0.0) {
+            serde_json::json!({ "cents": total, "complete": day_complete })
+        } else {
+            serde_json::json!({ "cents": null, "complete": false })
+        };
+        by_day.insert(day.clone(), day_value);
         by_day_model.insert(day.clone(), serde_json::Value::Object(inner));
     }
+    let charges_complete = t.counted > 0
+        && t.unmetered == 0
+        && t.unclassified == 0
+        && t.charged_cents.is_finite();
     serde_json::json!({
         "by_day": by_day,
         "by_day_model": by_day_model,
-        "metered_cents": (t.counted > 0 && t.unmetered == 0).then_some(t.charged_cents),
+        "metered_cents": charges_complete.then_some(t.charged_cents),
         "unmetered": t.unmetered, "unpriced": t.unpriced, "estimated": t.estimated,
+        "unclassified": t.unclassified, "invalid_counters": t.invalid_counters,
         "tokens": t.tokens,
         "events": t.counted,
         "days": days,
@@ -2185,9 +2248,12 @@ fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     }
     let metered = nonnegative(&ev["metered_cents"]);
     let by = &ev["by_day_model"];
-    if by.as_object().is_none_or(|o| o.is_empty())
+    // A successful snapshot always carries `events`, including zero. Missing
+    // that key means no reading was taken, which is a different screen from
+    // a window that was fetched and was empty.
+    if ev.get("events").is_none()
+        && by.as_object().is_none_or(|o| o.is_empty())
         && metered.is_none()
-        && ev["events"].as_u64().unwrap_or(0) == 0
     {
         return Vec::new();
     }
@@ -2209,14 +2275,34 @@ fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let unpriced = ev["unpriced"].as_u64().unwrap_or(0);
     let estimated = ev["estimated"].as_u64().unwrap_or(0);
     let unmetered = ev["unmetered"].as_u64().unwrap_or(0);
+    let unclassified = ev["unclassified"].as_u64().unwrap_or(0);
+    let invalid_counters = ev["invalid_counters"].as_u64().unwrap_or(0);
     let mut caveat = format!("Cursor dashboard · {} requests · {} unpriced · {} estimated. Metered usage is not your bill.",
         ev["events"].as_u64().unwrap_or(0), unpriced, estimated);
     if let Some(at) = snapshot {
         caveat.push_str(&format!(" As of {}.", at.format("%Y-%m-%d %H:%M")));
     }
+    if ev.get("events").is_some() && ev["events"].as_u64() == Some(0) && unclassified == 0 {
+        caveat.push_str(" No usage events in this window.");
+    }
     if unmetered > 0 {
         caveat.push_str(&format!(
             " Metered total unavailable: {unmetered} events lack valid charged costs."
+        ));
+    }
+    if unclassified > 0 {
+        let word = if unclassified == 1 {
+            "event has"
+        } else {
+            "events have"
+        };
+        caveat.push_str(&format!(
+            " Metered total unavailable: {unclassified} {word} no usable timestamp."
+        ));
+    }
+    if invalid_counters > 0 {
+        caveat.push_str(&format!(
+            " Token totals omit {invalid_counters} requests with invalid counters."
         ));
     }
     let mut rows = metered_block(
@@ -2252,6 +2338,44 @@ fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     rows
 }
 
+/// One day's bar. `shown` is missing when the day has no usable sum, which
+/// is not the same as a measured zero.
+struct DayPoint {
+    bar: f64,
+    shown: Option<f64>,
+    complete: bool,
+}
+
+fn day_point(v: Option<&serde_json::Value>) -> DayPoint {
+    let Some(v) = v else {
+        return DayPoint {
+            bar: 0.0,
+            shown: Some(0.0),
+            complete: true,
+        };
+    };
+    // A bare number is a complete total from an older snapshot.
+    if let Some(n) = nonnegative(v) {
+        return DayPoint {
+            bar: n,
+            shown: Some(n),
+            complete: true,
+        };
+    }
+    if let Some(n) = nonnegative(&v["cents"]) {
+        return DayPoint {
+            bar: n,
+            shown: Some(n),
+            complete: v["complete"].as_bool().unwrap_or(false),
+        };
+    }
+    DayPoint {
+        bar: 0.0,
+        shown: None,
+        complete: false,
+    }
+}
+
 /// Spend per day, one column per day, the way the usage page shows it.
 ///
 /// A bar chart rather than the calendar the token tabs use: this window is
@@ -2275,53 +2399,63 @@ fn cursor_daily(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         .map(|at| at.date_naive())
         .unwrap_or_else(|| Local::now().date_naive());
     let series: Vec<NaiveDate> = (0..days).rev().map(|n| today - Days::days(n)).collect();
-    let cents: Vec<f64> = series
+    let points: Vec<DayPoint> = series
         .iter()
-        .map(|day| {
-            by_day
-                .get(&day.format("%Y-%m-%d").to_string())
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0)
-        })
+        .map(|day| day_point(by_day.get(&day.format("%Y-%m-%d").to_string())))
         .collect();
+    let cents: Vec<f64> = points.iter().map(|point| point.bar).collect();
     let top = cents.iter().cloned().fold(0.0f64, f64::max);
     let peak = if top > 0.0 { top } else { 1.0 };
-    // The peak's own day, or nothing when every day is zero - a peak of $0
-    // has no date worth naming.
-    let best = (top > 0.0)
+    // An incomplete day is a floor. Naming its bar, or any other day's bar,
+    // as the peak would pick a winner the missing prices might overturn.
+    let proven = points.iter().all(|point| point.complete);
+    let best = (proven && top > 0.0)
         .then(|| cents.iter().position(|c| *c == top))
         .flatten()
         .map(|i| series[i]);
     let label = |d: &NaiveDate| format!("{} {}", MONTHS[d.month0() as usize], d.day());
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── SPEND / DAY ── ".into()),
-            (p.dim.as_str(), format!("{}d · peak ", days)),
-            (p.agent.as_str(), format!("${:.0}", peak / 100.0)),
-            (
-                p.dim.as_str(),
-                format!(
-                    " on {}",
-                    best.as_ref().map(&label).unwrap_or_else(|| "--".into())
-                ),
+    let peak_label = if proven {
+        format!("${:.0}", peak / 100.0)
+    } else if top > 0.0 {
+        format!("at least ${:.0}", top / 100.0)
+    } else {
+        "—".into()
+    };
+    let today_label = match points.last() {
+        Some(point) if point.shown.is_none() => "—".into(),
+        Some(point) if !point.complete => {
+            format!("at least ${:.2}", point.shown.unwrap_or(0.0) / 100.0)
+        }
+        Some(point) => format!("${:.2}", point.shown.unwrap_or(0.0) / 100.0),
+        None => "$0.00".into(),
+    };
+    let mut head = vec![
+        (p.lbl.as_str(), " ── SPEND / DAY ── ".into()),
+        (p.dim.as_str(), format!("{}d · peak ", days)),
+        (p.agent.as_str(), peak_label),
+    ];
+    if proven {
+        head.push((
+            p.dim.as_str(),
+            format!(
+                " on {}",
+                best.as_ref().map(&label).unwrap_or_else(|| "--".into())
             ),
-            (p.dim.as_str(), " · today ".into()),
-            (
-                p.txt.as_str(),
-                format!("${:.2}", cents.last().copied().unwrap_or(0.0) / 100.0),
-            ),
-        ],
-        w - 1,
-    )];
+        ));
+    }
+    head.push((p.dim.as_str(), " · today ".into()));
+    head.push((p.txt.as_str(), today_label));
+    let mut rows = vec![tc::seg(&head, w - 1)];
     let avail = w.saturating_sub(3).max(10);
-    for line in wrap_text(
-        &format!(
-            "API-rate estimates · {} unpriced · {} estimated requests",
-            ev["unpriced"].as_u64().unwrap_or(0),
-            ev["estimated"].as_u64().unwrap_or(0)
-        ),
-        w.saturating_sub(4).max(20),
-    ) {
+    let mut note = format!(
+        "API-rate estimates · {} unpriced · {} estimated requests",
+        ev["unpriced"].as_u64().unwrap_or(0),
+        ev["estimated"].as_u64().unwrap_or(0)
+    );
+    if !proven {
+        note.push_str(". Incomplete days show known spend only");
+    }
+    for line in wrap_text(&note, w.saturating_sub(4).max(20)) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1));
     }
     let mut cols: Vec<(f64, String)> = Vec::new();
@@ -3358,6 +3492,7 @@ mod tests {
         assert!(report["metered_cents"].is_null());
         assert_eq!(report["unmetered"], 1);
         assert_eq!(report["unpriced"], 1);
+        assert_eq!(report["unclassified"], 0);
         assert_eq!(report["events"], 3);
         assert_eq!(report["tokens"], 30.0);
         let shown = cursor_metered(
@@ -3373,6 +3508,180 @@ mod tests {
         assert!(shown.contains("1 unpriced"));
         assert!(shown.contains("Metered total unavailable"));
         assert!(!shown.contains("cursor meters"));
+    }
+
+    #[test]
+    fn invalid_token_counters_are_unpriced_instead_of_partial_estimates() {
+        let model = "claude-sonnet-4-5";
+        let bad = serde_json::json!({
+            "inputTokens": 1_000_000,
+            "cacheReadTokens": "bad",
+        });
+        assert_eq!(event_price(&bad, model), (None, false, true));
+        let omitted = serde_json::json!({ "inputTokens": 1_000_000 });
+        let (estimate, estimated, invalid) = event_price(&omitted, model);
+        assert!(estimate.is_some() && estimated && !invalid);
+        let negative = serde_json::json!({ "inputTokens": 1_000_000, "outputTokens": -1 });
+        assert_eq!(event_price(&negative, model), (None, false, true));
+
+        let end = Local::now().timestamp_millis();
+        let start = event_window(30, end).unwrap();
+        let rows = vec![
+            serde_json::json!({
+                "timestamp": end, "model": model, "chargedCents": 4, "tokenUsage": bad,
+            }),
+            serde_json::json!({
+                "timestamp": end, "model": model, "chargedCents": 12,
+                "tokenUsage": { "totalCents": 12, "inputTokens": 100, "cacheReadTokens": "bad" },
+            }),
+        ];
+        let report = event_report(&rows, 30, start, end);
+        assert_eq!(report["unpriced"], 1);
+        assert_eq!(report["estimated"], 0);
+        assert_eq!(report["invalid_counters"], 2);
+        assert_eq!(report["tokens"], 0.0);
+        assert_eq!(report["metered_cents"], 16.0);
+        let day = Local
+            .timestamp_millis_opt(end)
+            .single()
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let slot = &report["by_day_model"][&day][model];
+        assert_eq!(slot["cents"], 12.0);
+        assert_eq!(slot["complete"], false);
+        let shown = cursor_metered(
+            &Data {
+                events: Some(report),
+                ..Data::default()
+            },
+            120,
+            &palette(),
+        )
+        .join("\n");
+        assert!(shown.contains("invalid counters"), "{shown}");
+        assert!(shown.contains("at least $0.12"), "{shown}");
+    }
+
+    #[test]
+    fn a_bad_price_keeps_known_cents_and_marks_the_day_a_floor() {
+        let end = Local::now().timestamp_millis();
+        let start = event_window(30, end).unwrap();
+        let rows = vec![
+            serde_json::json!({
+                "timestamp": end, "model": "model-x", "chargedCents": 1000,
+                "tokenUsage": { "totalCents": 1000, "inputTokens": 10 },
+            }),
+            serde_json::json!({
+                "timestamp": end, "model": "model-x", "chargedCents": 50,
+                "tokenUsage": { "totalCents": "bad", "inputTokens": 10 },
+            }),
+            serde_json::json!({
+                "timestamp": end, "model": "unknown-model", "chargedCents": 25,
+                "tokenUsage": { "inputTokens": 10 },
+            }),
+        ];
+        let report = event_report(&rows, 30, start, end);
+        let day = Local
+            .timestamp_millis_opt(end)
+            .single()
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let known = &report["by_day_model"][&day]["model-x"];
+        assert_eq!(known["cents"], 1000.0);
+        assert_eq!(known["complete"], false);
+        assert!(report["by_day_model"][&day]["unknown-model"]["cents"].is_null());
+        assert_eq!(report["by_day"][&day]["cents"], 1000.0);
+        assert_eq!(report["by_day"][&day]["complete"], false);
+        assert_eq!(report["metered_cents"], 1075.0);
+        let p = palette();
+        let data = Data {
+            events: Some(report),
+            ..Data::default()
+        };
+        let metered = cursor_metered(&data, 120, &p).join("\n");
+        assert!(metered.contains("at least $10.00"), "{metered}");
+        let daily = cursor_daily(&data, 120, &p).join("\n");
+        assert!(daily.contains("at least $10"), "{daily}");
+        assert!(daily.contains("known spend only"), "{daily}");
+        assert!(!daily.contains(" on "), "{daily}");
+    }
+
+    #[test]
+    fn an_unclassified_timestamp_withholds_the_metered_total() {
+        let end = Local::now().timestamp_millis();
+        let start = event_window(30, end).unwrap();
+        let rows = vec![
+            serde_json::json!({
+                "timestamp": end, "model": "model-x", "chargedCents": 100,
+                "tokenUsage": { "totalCents": 100, "inputTokens": 1 },
+            }),
+            serde_json::json!({
+                "timestamp": null, "model": "model-x", "chargedCents": 50,
+                "tokenUsage": { "totalCents": 50, "inputTokens": 1 },
+            }),
+            serde_json::json!({
+                "model": "model-x", "chargedCents": 25,
+                "tokenUsage": { "totalCents": 25, "inputTokens": 1 },
+            }),
+        ];
+        let report = event_report(&rows, 30, start, end);
+        assert!(report["metered_cents"].is_null());
+        assert_eq!(report["unclassified"], 2);
+        assert_eq!(report["events"], 1);
+        assert_eq!(report["unmetered"], 0);
+        let shown = cursor_metered(
+            &Data {
+                events: Some(report),
+                ..Data::default()
+            },
+            120,
+            &palette(),
+        )
+        .join("\n");
+        assert!(shown.contains("no usable timestamp"), "{shown}");
+        assert!(!shown.contains("cursor meters"), "{shown}");
+    }
+
+    #[test]
+    fn an_empty_snapshot_says_the_window_was_empty() {
+        let end = Local::now().timestamp_millis();
+        let start = event_window(30, end).unwrap();
+        let report = event_report(&[], 30, start, end);
+        assert_eq!(report["events"], 0);
+        assert!(report["metered_cents"].is_null());
+        let shown = cursor_metered(
+            &Data {
+                events: Some(report),
+                ..Data::default()
+            },
+            100,
+            &palette(),
+        )
+        .join("\n");
+        assert!(shown.contains("METERED"), "{shown}");
+        assert!(shown.contains("No usage events in this window"), "{shown}");
+        assert!(cursor_metered(&Data::default(), 100, &palette()).is_empty());
+    }
+
+    #[test]
+    fn a_complete_daily_total_still_names_its_peak() {
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let data = Data {
+            events: Some(serde_json::json!({
+                "by_day": { today: 2500.0 },
+                "days": 30,
+                "end_ms": Local::now().timestamp_millis(),
+                "unpriced": 0,
+                "estimated": 0,
+            })),
+            ..Data::default()
+        };
+        let shown = strip(&cursor_daily(&data, 120, &palette()).join("\n"));
+        assert!(shown.contains("peak $25"), "{shown}");
+        assert!(shown.contains(" on "), "{shown}");
+        assert!(!shown.contains("at least"), "{shown}");
     }
 
     #[test]
