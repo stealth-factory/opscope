@@ -92,6 +92,9 @@ pub struct Data {
     plan: Option<String>,
     /// How the plan is billed, when that answered.
     subscription: Option<PerplexitySubscription>,
+    /// Why the billing request did not answer, so the billing drawn without
+    /// it is not taken for all of it.
+    subscription_why: String,
     /// When the reading was taken.
     read_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
@@ -262,9 +265,22 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     });
     d.plan = plan.and_then(|g| parse_perplexity_plan(&text(&g, "body")));
     let skey = format!("{key}:subscription");
+    let mut refused = String::new();
     let sub = cached(caches, &skey, REPORT_TTL, || {
-        ask(&token, SUBSCRIPTION_URL, "subscription", |b| parse_perplexity_subscription(b).is_some()).ok()
+        match ask(&token, SUBSCRIPTION_URL, "subscription", |b| parse_perplexity_subscription(b).is_some()) {
+            Ok(v) => Some(v),
+            Err(why) => {
+                refused = why;
+                None
+            }
+        }
     });
+    remember_refusal(caches, &skey, &refused);
+    d.subscription_why = refused;
+    // A refusal held from an earlier read comes back as the cached value.
+    if let Some(why) = sub.as_ref().map(|g| text(g, "why")).filter(|_| d.subscription_why.is_empty()) {
+        d.subscription_why = why;
+    }
     d.subscription = sub.and_then(|g| parse_perplexity_subscription(&text(&g, "body")));
     if let Some(got) = got.as_ref().filter(|_| d.quota_why.is_empty()) {
         d.quota = parse_perplexity_quota(&text(got, "body"));
@@ -359,14 +375,24 @@ impl Data {
 }
 
 /// How to put a fresh cookie where this one came from.
+/// The variable the cookie is read from, as configured, so no guidance
+/// names a default the reader has changed.
+fn var_name(d: &Data) -> &str {
+    match d.env_name.as_str() {
+        "" => TOKEN_ENV,
+        name => name,
+    }
+}
+
 fn replace_token(d: &Data) -> String {
     let find = "Sign in at perplexity.ai, open developer tools, then Application (Storage in \
                 Firefox), Cookies, https://www.perplexity.ai, and copy the Value of \
                 __Secure-next-auth.session-token.";
     match d.source {
         "env" => format!(
-            "{find} Put it in {TOKEN_ENV} (or the variable perplexity_token_env names) and \
-             restart this widget, or press , and paste it into perplexity_token."
+            "{find} Put it in {} and restart this widget, or press , and paste it into \
+             perplexity_token.",
+            var_name(d)
         ),
         _ => format!("{find} Then press , and paste it into perplexity_token."),
     }
@@ -390,7 +416,7 @@ pub fn why_no_lane(d: &Data) -> String {
         return format!("no quota · {}", d.quota_why);
     }
     if d.source.is_empty() {
-        return format!("no quota · no token · set perplexity_token or {}.", TOKEN_ENV);
+        return format!("no quota · no token · set perplexity_token or {}.", var_name(d));
     }
     "no quota · no reading from Perplexity yet.".into()
 }
@@ -512,6 +538,9 @@ fn credit_rows_with_plots(
         }
     }
     rows.extend(billing_rows(c, d.subscription.as_ref(), w, p));
+    if d.subscription.is_none() && !d.subscription_why.is_empty() {
+        rows.extend(note(&format!("plan billing not read · {}", d.subscription_why), &p.warn, w));
+    }
     if let Some(c) = c {
         rows.extend(credit_notes(c, w, p));
     }
@@ -802,7 +831,7 @@ pub fn tab_with_plots(
                      into {}. It is a full sign-in to your Perplexity account, so keep \
                      config.json chmod 600. Press , to open settings and paste it into \
                      perplexity_token.",
-                    TOKEN_ENV
+                    var_name(d)
                 )
             } else {
                 why_no_lane(d).trim_start_matches("no quota · ").to_string()
@@ -1037,6 +1066,25 @@ mod tests {
         let rows = plain(&tab(&empty, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("0 credits left") && words.contains("published no credits"), "{rows}");
+    }
+
+    #[test]
+    fn guidance_names_the_variable_configured_and_a_failed_billing_request_is_said() {
+        // The setup steps named PERPLEXITY_SESSION_TOKEN even when
+        // perplexity_token_env pointed somewhere else, and a billing request
+        // that failed just left the plan line out.
+        let d = Data { env_name: "MY_PPLX".into(), ..Data::default() };
+        assert!(why_no_lane(&d).contains("MY_PPLX"), "{}", why_no_lane(&d));
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        assert!(rows.contains("MY_PPLX") && !rows.contains(TOKEN_ENV), "{rows}");
+        let d = Data { why: EXPIRED.into(), source: "env", env_name: "MY_PPLX".into(), ..Data::default() };
+        let solid: String = plain(&tab(&d, 100, 30, &Config::default(), &palette())).split_whitespace().collect();
+        assert!(solid.contains("PutitinMY_PPLX"), "{solid}");
+        let mut d = Data::answered(CARRIED_OVER);
+        d.subscription_why = "subscription refused (502)".into();
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("plan billing not read · subscription refused (502)"), "{rows}");
     }
 
     #[test]
