@@ -353,6 +353,14 @@ including source-provided OSC 8 targets, are removed. Tabs become spaces.
 target. The final row sanitizer also closes any dangling link before the next
 row, since an SGR reset alone does not end OSC 8.
 
+All JSON API responses in the five linked widgets use `parse_source_json()`
+at acquisition. It removes terminal escapes recursively from string values
+before either main or detail views receive them, including commit subjects,
+PR titles, issue names and API error messages. Source line breaks and tabs
+are retained so first-line selection and text parsing keep their meaning.
+HTTP refusal text is sanitized too. This boundary covers raw fields rendered
+without `link()`, rather than relying on the detail-label helper alone.
+
 `draw` keeps that sequence, and the empty OSC 8 that closes it. OSC 8 with
 another scheme, and every other OSC, is stripped with the rest of the
 non-colour escapes. The sequence is zero width in `display_width`, `pad` and

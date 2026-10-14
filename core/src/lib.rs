@@ -280,6 +280,28 @@ pub fn source_text(s: &str) -> String {
         .collect()
 }
 
+/// Decode external JSON without admitting terminal markup in any string field.
+/// Preserve source whitespace so callers can still select the first line of a
+/// commit message, wrap descriptions, or parse structured source fields.
+pub fn parse_source_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+    fn clean(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                *text = strip_escapes(text)
+                    .chars()
+                    .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+                    .collect();
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(clean),
+            serde_json::Value::Object(values) => values.values_mut().for_each(clean),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::from_str(s)?;
+    clean(&mut value);
+    Ok(value)
+}
+
 /// `s` with every escape removed and the characters that were text left
 /// in order. An escape that never terminates takes the rest of the string
 /// with it: those bytes have not been shown.
@@ -2354,7 +2376,8 @@ pub fn post_json(
 /// Squeezed onto one line and capped the way every other subprocess
 /// complaint here is, so an HTML error page cannot take the whole pane.
 pub fn refused(status: u16, body: &str) -> String {
-    let said: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = strip_escapes(body);
+    let said = source_text(&plain.split_whitespace().collect::<Vec<_>>().join(" "));
     let said: String = said.chars().take(200).collect();
     if said.is_empty() {
         format!("HTTP {}", status)
@@ -5110,6 +5133,33 @@ mod tests {
         let notice = super::with_notice(&row, "Kitty unavailable", 80);
         assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
         assert_eq!(super::display_width(&stamped), 40);
+    }
+
+    #[test]
+    fn source_json_strips_markup_before_main_and_detail_views_receive_it() {
+        let malicious = "\x1b]8;;https://example.com/untrusted\x1b\\fix:\tparser\x1b]8;;\x1b\\\ncommit body";
+        let raw = serde_json::json!({"data": {"runs": [
+            {"display_title": malicious, "html_url": "https://example.com/run/1", "number": 42},
+            {"display_title": "\x1b[31mred\x1b[0m\r\nbody", "state": null},
+            {"display_title": "\x1b]8;;https://example.com/untrusted\x07BEL label\x1b]8;;\x07"}
+        ]}});
+        let data = super::parse_source_json(&raw.to_string()).unwrap();
+        let run = &data["data"]["runs"][0];
+        assert_eq!(run["display_title"], "fix:\tparser\ncommit body");
+        assert_eq!(run["number"], 42);
+        assert_eq!(data["data"]["runs"][1]["display_title"], "red\r\nbody");
+        assert!(data["data"]["runs"][1]["state"].is_null());
+        assert_eq!(data["data"]["runs"][2]["display_title"], "BEL label");
+        let subject = run["display_title"].as_str().unwrap().lines().next().unwrap();
+        let row = super::seg(&[("", subject.to_string())], 80);
+        assert!(!row.contains("\x1b]8;"), "{row:?}");
+        assert_eq!(super::strip_escapes(&super::inert(&row)), "fix: parser");
+        let detail = super::link(run["html_url"].as_str().unwrap(), subject);
+        assert!(detail.contains("https://example.com/run/1"));
+        assert!(!detail.contains("/untrusted"));
+        assert_eq!(super::strip_escapes(&detail), "fix: parser");
+        assert!(super::parse_source_json("not JSON").is_err());
+        assert_eq!(super::refused(403, malicious), "HTTP 403: fix: parser commit body");
     }
 
     #[test]

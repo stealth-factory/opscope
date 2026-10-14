@@ -116,7 +116,7 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     if !(200..300).contains(&status) {
         return Err(vercel_refusal(status, &body));
     }
-    serde_json::from_str(&body).map_err(|e| e.to_string())
+    tc::parse_source_json(&body).map_err(|e| e.to_string())
 }
 
 /// What Vercel's refusal actually means, in words worth reading.
@@ -161,7 +161,7 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
     if !flat.contains("\"saml\":true") {
         return None;
     }
-    let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let body = tc::parse_source_json(body).unwrap_or_default();
     let message = body["error"]["message"].as_str().unwrap_or("");
     let slug = message
         .split_once("scope \"")

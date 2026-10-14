@@ -210,7 +210,7 @@ fn short_explain(said: &str, code: u16) -> Option<String> {
     if rest.is_empty() || rest.starts_with('<') {
         return None;
     }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
+    if let Ok(v) = tc::parse_source_json(rest) {
         if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
             let m = m.trim();
             if !m.is_empty() {
@@ -238,7 +238,7 @@ fn graphql(
         45,
     )
     .map_err(|said| plain_refusal(&said))?;
-    let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
             .as_str()

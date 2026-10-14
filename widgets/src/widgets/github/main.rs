@@ -2048,7 +2048,7 @@ fn graphql(
             }
         }
     }
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
     // GraphQL answers 200 with an `errors` array, so a successful request is
     // not a successful query. Read past it and every alias the query asked
     // for is missing, which `count_at` turns into zeros - and those zeros go

@@ -119,7 +119,7 @@ fn graphql(
         45,
     )?;
     take_rate(rate, &headers);
-    let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     graphql_payload(&data)
 }
 
@@ -170,7 +170,7 @@ fn rest_get(
         30,
     )?;
     take_rate(rate, &headers);
-    serde_json::from_str(&body).map_err(|e| e.to_string())
+    tc::parse_source_json(&body).map_err(|e| e.to_string())
 }
 
 /// Remaining/limit from GitHub's rate-limit headers. GraphQL and REST
