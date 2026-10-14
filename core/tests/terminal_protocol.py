@@ -240,6 +240,10 @@ def scroll_clears_previous_image_region():
 def supported(t):
     assert t.images(), "acknowledged Kitty did not receive images"
     assert b"\x1b[?2026h" in t.output
+    assert b"now" in t.output, "line-chart label was blanked"
+    assert any(
+        keys.get(b"a") == b"p" and keys.get(b"z") == b"-1" for keys, _ in t.commands()
+    ), "line chart was not placed under the text"
     count = len(t.images())
     t.read(0.2)
     assert len(t.images()) == count, "unchanged chart retransmitted"
@@ -262,14 +266,21 @@ def supported(t):
     assert t.commands()[-1][0].get(b"a") == b"d", "screen handoff left an image"
     t.send(b"c")
     t.read()
-    assert t.commands()[-1][0].get(b"a") == b"T"
+    placed_under_text(t.commands())
     os.kill(t.proc.pid, signal.SIGTSTP)
     t.read()
     assert t.commands()[-1][0].get(b"a") == b"d", "suspend left an image"
     os.kill(t.proc.pid, signal.SIGCONT)
     t.read(0.3)
     assert t.answered == 2, "resume did not renegotiate"
-    assert t.commands()[-1][0].get(b"a") == b"T"
+    placed_under_text(t.commands())
+
+
+def placed_under_text(commands):
+    # image() still transmits at the default z. compose() then re-places
+    # that same id under the text, so the last command is the placement.
+    assert commands[-2][0].get(b"a") == b"T", "chart was not transmitted"
+    assert commands[-1][0].get(b"a") == b"p" and commands[-1][0].get(b"z") == b"-1"
 
 
 def fallback(t):
@@ -324,6 +335,7 @@ def filled_graphics(t):
             assert any(decoded[3::4]), "empty graphic"
         else:
             assert any(decoded), "empty graphic"
+        assert b"z" not in keys, "a solid fill must not sit under text"
         formats.append(keys[b"f"])
         if n == 3:
             # Pace mark at 65% of the meter: two dark pixels, the mark, two

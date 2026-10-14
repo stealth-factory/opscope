@@ -851,7 +851,27 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart));
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
+    // The number is the bucket the stroke ends on, in that bucket's column.
+    // A later loss-only bucket is a gap, so the line stops short of the
+    // right edge and the label has to stop with it. A raw reply inside the
+    // bucket is not what was plotted. Pixel mode leaves the number on the
+    // chart; Braille paints over these cells, so text mode still shows the
+    // axis and the trace alone. One trace can be labelled without a
+    // selection. Several traces share the canvas, so the number is the
+    // focused line only.
+    let current_idx = focus.or_else(|| (series.len() == 1).then_some(series[0].0));
+    let current = current_idx.and_then(|idx| {
+        series.iter().find(|(i, _, _)| *i == idx).and_then(|(_, values, positions)| {
+            values.iter().zip(positions).rev().find_map(|(v, x)| v.map(|v| (v, *x)))
+        })
+    });
+    let current_row = current.map(|(v, _)| {
+        let frac = (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9);
+        tc::line_row(frac, gh)
+    });
+    let current_col = current.map(|(_, x)| tc::line_col(x, gw));
+    let reading = current.map(|(v, _)| fmt_ms(Some(v)));
     let mut out = Vec::new();
     for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
@@ -865,7 +885,26 @@ fn graph(
         };
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
-        parts.push((p.grid.as_str(), " ".repeat(gw)));
+        if current_row == Some(y) {
+            if let (Some(reading), Some(end)) = (reading.as_deref(), current_col) {
+                let n = reading.chars().count();
+                if n <= gw && end < gw && n <= end + 1 {
+                    let lead = end + 1 - n;
+                    let trail = gw - (end + 1);
+                    parts.push((p.grid.as_str(), " ".repeat(lead)));
+                    parts.push((p.txt.as_str(), reading.to_string()));
+                    if trail > 0 {
+                        parts.push((p.grid.as_str(), " ".repeat(trail)));
+                    }
+                } else {
+                    parts.push((p.grid.as_str(), " ".repeat(gw)));
+                }
+            } else {
+                parts.push((p.grid.as_str(), " ".repeat(gw)));
+            }
+        } else {
+            parts.push((p.grid.as_str(), " ".repeat(gw)));
+        }
         out.push(tc::seg(&parts, w - 1));
     }
     (out, span)
@@ -1872,6 +1911,105 @@ mod tests {
                 assert_eq!(positions, vec![0.0]);
             }
         }
+    }
+
+    #[test]
+    fn the_chart_label_is_the_bucket_the_line_plots() {
+        // Three replies in one bucket. The trace is their median, 10ms.
+        // The label is that same 10ms, not the latest raw reply of 40ms.
+        let now = tc::now();
+        let mut focused = Target::default();
+        focused.record(now, Some(10.0), 600);
+        focused.record(now, Some(10.0), 600);
+        focused.record(now, Some(40.0), 600);
+        let mut other = Target::default();
+        other.record(now, Some(80.0), 600);
+        let targets = [focused, other];
+        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(0), &palette(), &mut Vec::new(), 1);
+        assert_eq!(rows.iter().filter(|row| bare(row).ends_with("10.00ms")).count(), 1);
+        assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
+        assert!(!rows.iter().any(|row| bare(row).ends_with("80.00ms")));
+        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(1), &palette(), &mut Vec::new(), 1);
+        assert!(rows.iter().any(|row| bare(row).ends_with("80.00ms")));
+        assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
+        assert!(!rows.iter().any(|row| bare(row).ends_with("10.00ms")));
+    }
+
+    #[test]
+    fn a_later_loss_keeps_the_label_on_the_last_plotted_bucket() {
+        // NOW in the table is empty: the newest samples are losses. The
+        // stroke still ends on the last bucket that had a reply, and the
+        // label ends on that column rather than the right edge.
+        let now = tc::now();
+        let mut target = Target::default();
+        target.record(now - 4.0, Some(40.0), 600);
+        target.record(now - 2.0, None, 600);
+        target.record(now, None, 600);
+        assert_eq!(target.stats().now, None);
+        let mut plots = Vec::new();
+        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut plots, 1);
+        let trace = &plots[0].chart.traces[0];
+        let positions = trace.positions.as_ref().expect("bucket positions");
+        let at = trace
+            .values
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, v)| v.is_some())
+            .expect("plotted bucket")
+            .0;
+        let gw = 40 - 9;
+        let col = tc::line_col(positions[at], gw);
+        assert!(col + 1 < gw, "trailing losses still reach the right edge at {col}");
+        let reading = "40.00ms";
+        let row = rows
+            .iter()
+            .find(|row| bare(row).contains(reading))
+            .expect("label");
+        let chart = bare(row).split('│').nth(1).expect("chart").to_string();
+        let start = chart.find(reading).expect("reading in the chart");
+        assert_eq!(start + reading.len() - 1, col, "label {chart:?} column {col}");
+        assert!(chart.len() > start + reading.len(), "label was pinned to the right edge");
+    }
+
+    #[test]
+    fn the_current_reply_sits_on_the_stroke_row() {
+        // One reply at 20% of the log axis. Cell rounding puts it on row 2
+        // of a four-row chart; the stroke is on row 3.
+        let lo = 8.0_f64;
+        let hi = 1250.0_f64;
+        let latest = 10f64.powf(lo.log10() + 0.2 * (hi.log10() - lo.log10()));
+        let frac = (latest.log10() - lo.log10()) / (hi.log10() - lo.log10());
+        assert!((frac - 0.2).abs() < 1e-9);
+        assert_eq!(((1.0 - frac) * 3.0_f64).round() as usize, 2);
+        assert_eq!(tc::line_row(frac, 4), 3);
+        let now = tc::now();
+        let mut target = Target::default();
+        target.record(now - 4.0, Some(10.0), 600);
+        target.record(now - 2.0, Some(1000.0), 600);
+        target.record(now - 0.2, Some(latest), 600);
+        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut Vec::new(), 1);
+        let reading = fmt_ms(Some(latest));
+        assert_eq!(reading, "21.97ms");
+        assert!(bare(&rows[3]).ends_with(&reading), "{}", bare(&rows[3]));
+        assert!(!bare(&rows[2]).contains(&reading));
+    }
+
+    fn bare(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     #[test]

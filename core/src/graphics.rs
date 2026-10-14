@@ -75,6 +75,9 @@ pub struct Plot {
     fill: Option<Fill>,
     first_row: usize,
     visible_rows: usize,
+    /// Place the image under terminal text. Line charts only: a solid fill
+    /// would hide the glyphs and fail the contrast rule.
+    under_text: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +127,20 @@ impl Plot {
             fill: None,
             first_row: 0,
             visible_rows: height,
+            under_text: false,
         }
+    }
+
+    /// Draw this line chart under the cell text instead of blanking it.
+    ///
+    /// Pixel mode keeps the glyphs and the selected-row tint; Braille and
+    /// text mode still paint the chart the way they do today. Solid fills
+    /// ignore it: text over a heatmap or a meter does not stay readable.
+    pub fn under_text(mut self) -> Self {
+        if self.fill.is_none() {
+            self.under_text = true;
+        }
+        self
     }
 
     /// Discrete columns, one terminal cell per bucket. Both renderers share
@@ -533,6 +549,46 @@ fn braille_with_baseline(
     grid
 }
 
+/// Pixel row of a bottom-to-top chart fraction inside a bitmap `height` pixels tall.
+///
+/// Both renderers round against this height minus one. A label that rounds
+/// against the cell count instead misses the stroke.
+fn pixel_y(value: f64, height: usize) -> usize {
+    ((1.0 - value.clamp(0.0, 1.0)) * (height - 1) as f64).round() as usize
+}
+
+/// Terminal row of a bottom-to-top chart fraction.
+///
+/// The stroke is placed in a bitmap `rows * cell_h` pixels tall, where
+/// `cell_h` is the terminal's cell height, and that pixel falls into a
+/// cell. A four-row chart at 20% of peak ends on row 3 when the cell is
+/// 16 pixels; rounding against `rows - 1` puts a label on row 2.
+pub fn line_row(value: f64, rows: usize) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    let (_, cell_h) = super::terminal::cell_size();
+    let cell_h = cell_h.max(1);
+    pixel_y(value, rows.saturating_mul(cell_h)) / cell_h
+}
+
+/// Terminal column of a left-to-right chart fraction.
+///
+/// The stroke rounds against `cols * cell_w - 1` pixels, the same width the
+/// line raster uses, and that pixel falls into a cell. A label that assumes
+/// the point is the rightmost cell sits past the stroke when later buckets
+/// are gaps.
+pub fn line_col(position: f64, cols: usize) -> usize {
+    if cols == 0 {
+        return 0;
+    }
+    let (cell_w, _) = super::terminal::cell_size();
+    let cell_w = cell_w.max(1);
+    let width = cols.saturating_mul(cell_w);
+    let x = (position.clamp(0.0, 1.0) * width.saturating_sub(1) as f64).round() as usize;
+    x / cell_w
+}
+
 fn segments(
     values: &[Option<f64>],
     slots: usize,
@@ -566,7 +622,7 @@ fn segments(
                     - ((age as f64 * (w - 1) as f64) / slots.saturating_sub(1).max(1) as f64)
                         .round() as usize
             };
-            let y = ((1.0 - v.clamp(0.0, 1.0)) * (h - 1) as f64).round() as usize;
+            let y = pixel_y(v, h);
             Some((x, y))
         });
         let idle = baseline.is_some()
@@ -744,7 +800,15 @@ pub(crate) fn compose(
         } else {
             plot.chart.cells(plot.width, plot.height)
         };
+        // A line chart under the text keeps whatever the widget drew there:
+        // an axis value, a rate, the tint. Blanking those cells is what
+        // puts the image in a hole beside the label. Braille and solid
+        // fills still replace the cells, so text mode does not move.
+        let keep_text = use_pixels && plot.under_text;
         for row in 0..plot.visible_rows {
+            if keep_text {
+                continue;
+            }
             let content = if use_pixels {
                 " ".repeat(cols)
             } else if let Some(fill) = &plot.fill {
@@ -797,8 +861,12 @@ pub(crate) fn compose(
                 // Time-dependent values can change without changing a pixel.
                 // Upload acknowledgements must not start a redraw/upload loop.
                 if cached.same_pixels(plot, cols, (cell_w, cell_h), rgba) {
+                    // Pixels do not record z. Turning under_text on or off
+                    // has to re-place this id, or the stroke stays over the
+                    // label until the next heal.
+                    let z_changed = cached.plot.under_text != plot.under_text;
                     cached.plot = plot.clone();
-                    if heal {
+                    if heal || z_changed {
                         after.push_str(&place(plot, slot, w));
                     }
                     continue;
@@ -819,6 +887,12 @@ pub(crate) fn compose(
             // Set before writing: a signal during transmission must clean it up.
             LIVE.fetch_or(1 << slot, Ordering::Release);
             after.push_str(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba));
+            // image_rgba() places at the default z, above the text. The same
+            // placement id is put back underneath, in this write, so a
+            // frame never shows the chart covering its labels.
+            if plot.under_text {
+                after.push_str(&place(plot, slot, w));
+            }
             let cached = CachedPlot {
                 plot: plot.clone(),
                 cols,
@@ -1073,14 +1147,19 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
 /// Re-place an image the terminal already holds, at the same cell and size.
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
+    // z=-1 is under the glyphs and above cells that have a background.
+    // Anything below -1073741824 is also under that background, so an
+    // opaque selected-row tint would cover the stroke.
+    let z = if plot.under_text { ",z=-1" } else { "" };
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1{z}\x1b\\",
         plot.y + 1,
         plot.x + 1,
         image_id(slot),
         PLACEMENTS[slot].load(Ordering::Acquire),
         plot.width.min(pane_width - plot.x),
-        plot.visible_rows
+        plot.visible_rows,
+        z = z,
     )
 }
 
@@ -1805,6 +1884,27 @@ mod tests {
     }
 
     #[test]
+    fn an_under_text_change_replaces_the_placement_without_resending() {
+        let _transport = super::super::shm::guard();
+        let rows = vec!["title".into(), "keep".into()];
+        let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        let (_, _, first) = compose(&rows, &[plain.clone()], 40, 6, true, true, false);
+        assert!(first.contains("a=T"));
+        assert!(graphics_keys(&first).iter().all(|keys| !keys.contains("z=")));
+        let over = plain.clone().under_text();
+        let (_, _, placed) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(!placed.contains("a=T"), "{placed}");
+        assert!(placed.contains("a=p") && placed.contains("z=-1"), "{placed}");
+        let (_, _, quiet) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(quiet.is_empty(), "{quiet}");
+        let (_, _, back) = compose(&rows, &[plain], 40, 6, true, false, false);
+        assert!(!back.contains("a=T"), "{back}");
+        assert!(back.contains("a=p") && !back.contains("z="), "{back}");
+        let (_, before, after) = compose(&rows, &[], 40, 6, true, false, false);
+        assert!(before.contains("a=d") && after.is_empty());
+    }
+
+    #[test]
     fn multi_chunk_images_round_trip_with_exact_cropped_pixels() {
         let _transport = super::super::shm::guard();
         let mut c = chart(Vec::new());
@@ -1917,6 +2017,87 @@ mod tests {
         assert_eq!(decoded, pixels(&gapped));
         let line = Plot::new(0, 0, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
         assert!(image(&line, 0, 80, CELL_W, CELL_H).contains("f=32,"));
+    }
+
+    #[test]
+    fn line_row_is_the_terminal_row_of_the_stroke() {
+        // 20% of a four-row chart. Cell rounding lands on row 2.
+        assert_eq!(((1.0 - 0.2) * 3.0_f64).round() as usize, 2);
+        assert_eq!(line_row(0.2, 4), 3);
+        assert_eq!(inked_rows(&chart(vec![Some(0.2); 4]), 4), vec![3]);
+        // Inverted 20% is the fraction 0.8, and cell rounding lands on row 1.
+        assert_eq!((0.2_f64 * 3.0).round() as usize, 1);
+        assert_eq!(line_row(0.8, 4), 0);
+        assert_eq!(inked_rows(&chart(vec![Some(0.8); 4]), 4), vec![0]);
+        assert_eq!(line_row(0.5, 1), 0);
+        assert_eq!(line_row(0.5, 0), 0);
+        assert_eq!(line_col(0.0, 4), 0);
+        assert_eq!(line_col(1.0, 4), 3);
+        assert_eq!(line_col(0.5, 0), 0);
+        let (cell_w, _) = super::super::terminal::cell_size();
+        let width = 4 * cell_w.max(1);
+        let x = (0.2_f64 * (width - 1) as f64).round() as usize;
+        assert_eq!(line_col(0.2, 4), x / cell_w.max(1));
+    }
+
+    fn inked_rows(chart: &LineChart, rows: usize) -> Vec<usize> {
+        let plot = Plot::new(0, 0, 4, rows, chart.clone());
+        let bytes = pixels(&plot);
+        let w = 4 * CELL_W;
+        let mut hit = Vec::new();
+        for row in 0..rows {
+            let ink = (0..CELL_H).any(|y| {
+                (0..w).any(|x| bytes[((row * CELL_H + y) * w + x) * 4 + 3] != 0)
+            });
+            if ink {
+                hit.push(row);
+            }
+        }
+        hit
+    }
+
+    #[test]
+    fn under_text_keeps_cell_text_in_pixel_mode_and_matches_braille() {
+        // compose() writes the shared image cache. Without the guard this
+        // races the other cache tests and fails most of the time.
+        let _transport = super::super::shm::guard();
+        let rows = vec![
+            "title".into(),
+            "ab12.3ms later".into(),
+            "abaxis values".into(),
+        ];
+        let chart = chart(vec![Some(0.2), Some(0.8)]);
+        let plain = Plot::new(2, 1, 8, 2, chart);
+        let over = plain.clone().under_text();
+        assert!(over.under_text);
+        let (braille, _, _) = compose(&rows, &[plain], 40, 6, false, true, false);
+        let (same, _, quiet) = compose(&rows, &[over.clone()], 40, 6, false, true, false);
+        assert_eq!(braille, same);
+        assert!(quiet.is_empty());
+        assert!(braille.iter().any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
+        assert!(!braille[1].contains("12.3ms"));
+        let (text, _, after) = compose(&rows, &[over], 40, 6, true, true, false);
+        assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
+        assert!(text[2].contains("axis"));
+        assert!(after.contains("a=T"));
+        assert!(graphics_keys(&after).iter().any(|keys| keys.contains("z=-1")));
+        let colour = super::super::rgb(30, 220, 180);
+        let cols = vec![(1.0, colour)];
+        let bars = Plot::bars(0, 1, &cols, 1, 1.0, false).under_text();
+        assert!(!bars.under_text, "a solid bar is not a line chart");
+        let bar_rows = vec![String::new(), "keep".into()];
+        let (text, _, after) = compose(&bar_rows, &[bars], 20, 4, true, true, false);
+        assert!(!text[1].contains("keep"));
+        assert!(graphics_keys(&after).iter().all(|keys| !keys.contains("z=")));
+        compose(&rows, &[], 40, 6, true, true, false);
+    }
+
+    fn graphics_keys(bytes: &str) -> Vec<&str> {
+        bytes
+            .split("\x1b_G")
+            .skip(1)
+            .filter_map(|chunk| chunk.split(';').next())
+            .collect()
     }
 
     fn decode_image(command: &str) -> (u8, Vec<u8>) {
