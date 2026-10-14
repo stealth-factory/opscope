@@ -36,8 +36,13 @@ fn main() {
                 "h" => {
                     keyboard.restore();
                     tc::restore_screen();
+                    // Stay up until SIGTERM. The printed pid is the sleep
+                    // after `exec`, and sleep does not read the tty, so the
+                    // test can queue a stale cell report and only then let
+                    // the parent reclaim. The long sleep is a backstop if
+                    // that signal never arrives.
                     std::process::Command::new("/bin/sh")
-                        .args(["-c", "printf 'CHILD_READY\\n'; sleep 0.5"])
+                        .args(["-c", "printf 'CHILD_READY %s\\n' \"$$\"; exec sleep 30"])
                         .status()
                         .expect("run handoff fixture");
                     keyboard.reclaim();

@@ -160,6 +160,20 @@ def shm_read(name):
         os.close(fd)
 
 
+def wait_for(t, ready, seconds):
+    # Short reads, not one fixed pause: a busy runner can print the marker
+    # late, and the caller decides when the condition is actually true.
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if ready():
+            return True
+        slice_s = min(0.05, deadline - time.monotonic())
+        if slice_s <= 0:
+            break
+        t.read(slice_s)
+    return bool(ready())
+
+
 def run(mode, reply, check):
     terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
     try:
@@ -614,33 +628,51 @@ def resumed_cell_reply_is_quarantined(t):
     assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "resume accepted a buffered old report"
 
 
+def stop_child(pid):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
 def reclaimed_cell_reply_is_quarantined(t):
     # Leave the startup size query unanswered, then buffer an old report while
     # a child owns the tty. Reclaim must not relabel it as the new query's reply.
+    # The child prints its pid and waits for SIGTERM, so a slow runner cannot
+    # exit it before the stale report is queued.
     before = len(t.images())
     t.send(b"h")
-    t.read(0.1)
-    assert b"CHILD_READY" in t.output, "handoff did not reach the child"
-    queries = t.output.count(b"\x1b[16t")
-    t.send(b"\x1b[6;20;10t")
-    t.read(0.15)
-    assert t.output.count(b"\x1b[16t") == queries, "cell query reached the child"
-    t.read(0.5)
-    assert t.answered == 2, "reclaim did not renegotiate"
-    assert len(t.images()) > before, "reclaim did not redraw"
-    assert all(int(keys[b"s"]) != int(keys[b"c"]) * 10
-               for keys, _ in t.images()[before:]), "reclaim accepted a buffered old report"
-    # Answer only emitted queries, including confirmation. No SIGWINCH is sent.
-    answered = queries + 1  # The buffered report consumed the reclaim query.
-    for _ in range(4):
-        pending = t.output.count(b"\x1b[16t") - answered
-        if pending:
-            t.send(b"\x1b[6;40;20t" * pending)
-            answered += pending
+    assert wait_for(t, lambda: re.search(rb"CHILD_READY (\d+)", t.output), 2), \
+        "handoff did not reach the child"
+    child = int(re.search(rb"CHILD_READY (\d+)", t.output).group(1))
+    reclaimed = False
+    try:
+        queries = t.output.count(b"\x1b[16t")
+        t.send(b"\x1b[6;20;10t")
         t.read(0.15)
-    keys = t.images()[-1][0]
-    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "reclaim left stale raster without resize"
-    assert int(keys[b"v"]) == int(keys[b"r"]) * 40, "reclaim left stale raster height"
+        assert t.output.count(b"\x1b[16t") == queries, "cell query reached the child"
+        stop_child(child)
+        assert wait_for(t, lambda: t.answered >= 2 and len(t.images()) > before, 2), \
+            "reclaim did not renegotiate"
+        reclaimed = True
+        assert t.answered == 2, "reclaim did not renegotiate"
+        assert len(t.images()) > before, "reclaim did not redraw"
+        assert all(int(keys[b"s"]) != int(keys[b"c"]) * 10
+                   for keys, _ in t.images()[before:]), "reclaim accepted a buffered old report"
+        # Answer only emitted queries, including confirmation. No SIGWINCH is sent.
+        answered = queries + 1  # The buffered report consumed the reclaim query.
+        for _ in range(4):
+            pending = t.output.count(b"\x1b[16t") - answered
+            if pending:
+                t.send(b"\x1b[6;40;20t" * pending)
+                answered += pending
+            t.read(0.15)
+        keys = t.images()[-1][0]
+        assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "reclaim left stale raster without resize"
+        assert int(keys[b"v"]) == int(keys[b"r"]) * 40, "reclaim left stale raster height"
+    finally:
+        if not reclaimed:
+            stop_child(child)
 
 
 def shm_rejected(t):
