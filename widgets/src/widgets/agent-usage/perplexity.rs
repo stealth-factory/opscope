@@ -601,6 +601,13 @@ fn credit_rows_with_plots(
         // The figures are kept whole and the bar takes what is left, so a
         // narrow pane shortens the bar rather than cutting a number.
         let mut figures = label_w + 2 + tc::display_width(&pct.1) + tc::display_width(&pace.1);
+        // Too narrow for the label and a one-cell bar: the label goes on a
+        // row of its own above the bar, without its padding, so it is whole.
+        let label_above = label_w + 2 + 1 > w - 1;
+        if label_above {
+            figures -= label_w + 2;
+            rows.push(tc::seg(&[(p.dim.as_str(), lane.label.clone())], w - 1));
+        }
         // Too narrow for even a one-cell bar beside both: the pace goes to
         // a row of its own under the bar.
         let pace_below = figures + 1 > w - 1;
@@ -616,8 +623,8 @@ fn credit_rows_with_plots(
             .max(8)
             .min(w as i64 - 1 - figures as i64)
             .max(1) as usize;
-        let mut line: Vec<(String, String)> =
-            vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
+        let lead_cell = if label_above { String::new() } else { format!(" {} ", tc::pad(&lane.label, label_w)) };
+        let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lead_cell)];
         line.extend(paced_bar_with_plot(
             plots,
             rows.len(),
@@ -1363,13 +1370,19 @@ mod tests {
                 lines[at + 1]
             );
         }
-        // Down to the narrowest pane there is, the label may be cut but the
-        // share and the pace each still stand whole on a row.
+        // Down to the narrowest pane there is, the label, the share and the
+        // pace each still stand whole.
         for w in 8usize..12 {
             let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
             let lines: Vec<&str> = rows.lines().map(str::trim).collect();
-            assert!(lines.contains(&pct_text(lane.pct).trim()), "width {w}: {rows}");
-            assert!(lines.contains(&pace.trim()), "width {w}: {rows}");
+            // With the label above, the share may fit beside the bar again.
+            assert!(lines.iter().any(|l| l.ends_with(pct_text(lane.pct).trim())), "width {w}: {rows}");
+            assert!(lines.iter().any(|l| l.ends_with(pace.trim())), "width {w}: {rows}");
+            // And the label is whole on its own row, not cut to "monthl".
+            assert!(lines.contains(&"monthly"), "width {w}: {rows}");
+            for r in rows.lines() {
+                assert!(tc::display_width(r) < w, "width {w}: {r:?}");
+            }
         }
     }
 
