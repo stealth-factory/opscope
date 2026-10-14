@@ -2328,6 +2328,7 @@ mod tests {
 
     #[test]
     fn placeholders_are_one_cell_and_direct_placement_stays() {
+        let _transport = super::super::shm::guard();
         let rows = vec![
             "title".into(),
             "ab12.3ms later".into(),
@@ -2388,6 +2389,7 @@ mod tests {
 
     #[test]
     fn passthrough_wraps_frame_edits_and_leaves_shared_memory_unwrapped() {
+        let _transport = super::super::shm::guard();
         struct ResetPassthrough;
         impl Drop for ResetPassthrough {
             fn drop(&mut self) {
