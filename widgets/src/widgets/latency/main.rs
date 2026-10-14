@@ -88,12 +88,6 @@ struct Target {
     down_since: Option<f64>,
     /// Whether the last reading was an answer, for the dot beside the name.
     alive: bool,
-    /// The live ping, so a new interval can be applied without waiting for
-    /// the old one to notice.
-    pid: Option<i32>,
-    /// Set while we are killing our own ping on purpose, so its exit is not
-    /// logged as an outage.
-    restarting: bool,
     /// Why this target has no reading, when the reason is this widget's own
     /// rather than the network's. A host that does not answer is a result;
     /// a `ping` that will not start is a failure, and the two used to look
@@ -287,7 +281,16 @@ fn aggregate(values: &[f64], how: &str) -> f64 {
 }
 
 const AGGREGATORS: &[&str] = &["median", "mean", "min", "max", "p95"];
-const INTERVAL_CHOICES: &[f64] = &[0.2, 0.5, 1.0, 2.0, 5.0];
+const MIN_INTERVAL: f64 = 1.0;
+const DEFAULT_INTERVAL: f64 = 1.0;
+
+fn effective_interval(interval: f64) -> f64 {
+    if interval.is_finite() {
+        interval.max(MIN_INTERVAL)
+    } else {
+        DEFAULT_INTERVAL
+    }
+}
 const COLUMN_CHOICES: &[f64] = &[0.0, 2.0, 5.0, 10.0];
 
 /// The next entry after `current`, wrapping. Used by the cycling keys.
@@ -351,6 +354,7 @@ fn ping_dialect() -> PingDialect {
 }
 
 fn ping_args(dialect: PingDialect, interval: f64, host: &str) -> Vec<String> {
+    let interval = effective_interval(interval);
     let mut args = vec!["-n".to_string()];
     if dialect == PingDialect::Outstanding {
         args.push("-O".to_string());
@@ -494,7 +498,7 @@ fn watch(
 ) {
     loop {
         let (interval, spike_factor) = match settings.lock() {
-            Ok(s) => (s.interval, s.spike_factor),
+            Ok(s) => (effective_interval(s.interval), s.spike_factor),
             Err(_) => return,
         };
         let child = std::process::Command::new("ping")
@@ -515,23 +519,15 @@ fn watch(
                 continue;
             }
         };
-        let work = activity.start();
         // It started, so whatever stopped it last time is over.
         if let Ok(mut guard) = shared.lock() {
             guard[index].err.clear();
-        }
-        if let Ok(mut guard) = shared.lock() {
-            guard[index].pid = Some(child.id() as i32);
         }
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                if let Ok(mut guard) = shared.lock() {
-                    guard[index].pid = None;
-                }
-                drop(work);
                 continue;
             }
         };
@@ -558,6 +554,7 @@ fn watch(
                         let stamp = tc::now();
                         let due = silence.losses_due(stamp, window.max(1));
                         if due > 0 {
+                            let _work = activity.start();
                             let mut guard = match shared.lock() {
                                 Ok(g) => g,
                                 Err(_) => return,
@@ -579,6 +576,9 @@ fn watch(
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
+            // A streaming ping is not a request that remains busy forever.
+            // Track processing/publication, leaving the receive wait idle.
+            let _work = activity.start();
             let stamp = tc::now();
             let mut guard = match shared.lock() {
                 Ok(g) => g,
@@ -646,21 +646,6 @@ fn watch(
             }
         }
         let _ = child.wait();
-        let ours = match shared.lock() {
-            Ok(mut guard) => {
-                guard[index].pid = None;
-                let deliberate = guard[index].restarting;
-                guard[index].restarting = false;
-                deliberate
-            }
-            Err(_) => return,
-        };
-        drop(work);
-        // We killed it ourselves to apply a new interval; not an outage, and
-        // it starts again immediately rather than after the retry pause.
-        if ours {
-            continue;
-        }
         if let Ok(mut guard) = shared.lock() {
             let target = &mut guard[index];
             if target.down_since.is_none() {
@@ -725,24 +710,6 @@ fn log(events: &Arc<Mutex<Vec<Event>>>, hue: &str, host: &str, kind: &'static st
 /// read as a broken widget rather than as a different timezone.
 fn clock_time() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
-}
-
-/// Restart every ping so a new interval takes effect at once.
-///
-/// SIGTERM rather than waiting for the current one to end: at five seconds
-/// a change would otherwise take five seconds to become visible, which
-/// reads as the key not having worked.
-fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
-    if let Ok(mut guard) = shared.lock() {
-        for target in guard.iter_mut() {
-            if let Some(pid) = target.pid {
-                target.restarting = true;
-                if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-                    target.restarting = false;
-                }
-            }
-        }
-    }
 }
 
 /// Aggregate successful replies per bucket, leaving a gap only when a
@@ -955,7 +922,7 @@ fn main() {
     let window = tc::cfg_usize(&cfg, "window", 600);
     let strip: Vec<String> = tc::cfg_strings(&cfg, "strip_suffixes", &[]);
     let mut live = Settings {
-        interval: tc::cfg_f64(&cfg, "interval", 0.5).max(0.2),
+        interval: effective_interval(tc::cfg_f64(&cfg, "interval", DEFAULT_INTERVAL)),
         seconds_per_column: tc::cfg_f64(&cfg, "seconds_per_column", 0.0),
         aggregate: tc::cfg_str(&cfg, "aggregate", "median"),
         spike_factor: tc::cfg_f64(&cfg, "spike_factor", 3.0),
@@ -967,7 +934,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-i" | "--interval" if i + 1 < args.len() => {
-                live.interval = args[i + 1].parse::<f64>().unwrap_or(0.5).max(0.2);
+                live.interval = effective_interval(args[i + 1].parse::<f64>().unwrap_or(DEFAULT_INTERVAL));
                 i += 2;
             }
             "-c" | "--column-seconds" if i + 1 < args.len() => {
@@ -1115,12 +1082,6 @@ fn main() {
                 "esc" => {
                     selected = None;
                     moved = true;
-                }
-                "i" | "I" => {
-                    if let Ok(mut s) = settings.lock() {
-                        s.interval = cycle(INTERVAL_CHOICES, s.interval);
-                    }
-                    apply_interval(&shared);
                 }
                 "g" | "G" => {
                     if let Ok(mut s) = settings.lock() {
@@ -1412,7 +1373,6 @@ fn main() {
             hints.push(vec![(p.dim.as_str(), "[esc] clear focus".into())]);
         }
         hints.extend([
-            vec![(p.dim.as_str(), "[i]nterval".into())],
             vec![(p.dim.as_str(), "[g]roup".into())],
             vec![(p.dim.as_str(), "[c]olumns".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -1677,7 +1637,7 @@ mod tests {
         assert_eq!(parse_sequence(transcript), Some(2));
         assert_eq!(
             ping_args(PingDialect::Outstanding, 0.5, "127.0.0.1"),
-            ["-n", "-O", "-i", "0.5", "127.0.0.1"]
+            ["-n", "-O", "-i", "1", "127.0.0.1"]
         );
     }
 
@@ -1687,7 +1647,7 @@ mod tests {
         assert_eq!(dialect_from_probe(false), PingDialect::SequenceGaps);
         assert_eq!(
             ping_args(PingDialect::SequenceGaps, 0.2, "example.test"),
-            ["-n", "-i", "0.2", "example.test"]
+            ["-n", "-i", "1", "example.test"]
         );
     }
 
@@ -1886,11 +1846,27 @@ mod tests {
     }
 
     #[test]
+    fn interval_bounds_agree_with_the_ui_and_every_ping_launch() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!("settings.json")).unwrap();
+        assert_eq!(schema["_schema"]["interval"]["minimum"].as_f64(), Some(MIN_INTERVAL));
+        assert_eq!(schema["interval"].as_f64(), Some(DEFAULT_INTERVAL));
+        for n in [-1.0, 0.0, 0.001, 0.2, 0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(effective_interval(n), MIN_INTERVAL);
+            for dialect in [PingDialect::Outstanding, PingDialect::SequenceGaps] {
+                let args = ping_args(dialect, n, "127.0.0.1");
+                let at = args.iter().position(|a| a == "-i").unwrap();
+                assert_eq!(args[at + 1].parse::<f64>().unwrap(), MIN_INTERVAL);
+            }
+        }
+        assert_eq!(effective_interval(3.3), 3.3);
+        assert_eq!(effective_interval(5.0), 5.0);
+        let args = ping_args(PingDialect::Outstanding, 5.0, "127.0.0.1");
+        let at = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[at + 1], "5");
+    }
+
+    #[test]
     fn the_cycling_keys_wrap() {
-        assert_eq!(cycle(INTERVAL_CHOICES, 0.5), 1.0);
-        assert_eq!(cycle(INTERVAL_CHOICES, 5.0), 0.2);
-        // A value that is not one of the choices starts from the first.
-        assert_eq!(cycle(INTERVAL_CHOICES, 3.3), 0.5);
         assert_eq!(cycle(COLUMN_CHOICES, 10.0), 0.0);
     }
 

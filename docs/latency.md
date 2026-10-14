@@ -24,7 +24,7 @@ is already closed by the reply that reveals it is recorded as empty samples
 without a LOSS/UP pair — that pair would otherwise read as a 0s outage.
 Statistics, events, retained history and drawing are otherwise unchanged.
 
-The stock macOS ping accepts the widget's 0.2-second minimum as an unprivileged
+The stock macOS ping accepts the widget's 1-second minimum as an unprivileged
 user. The configured interval is therefore passed through unchanged on both
 platforms.
 
