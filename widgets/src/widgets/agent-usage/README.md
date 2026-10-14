@@ -885,12 +885,14 @@ reads are $0.10 rather than $0.20. `claude-opus-5` is a prefix of
 `claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
 would inherit Opus 5, cache reads at $0.50 against the published $0.20.
 Codex Fast and Ultrafast are not model ids. A rollout's `service_tier` of
-`fast` bills 2× the standard row and the row says Fast; `ultrafast` bills
-6× and only for `gpt-6-astra`, and the row says Ultrafast.
-`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`. The published five
-match Sonnet 5 — 2 / 10 / 0.20 / 2.50 / 4 — so inheriting would bill the
-same today, and the row is still its own so a later move of one model does
-not reprice the other.
+`fast` uses the model's published multiplier (usually 2×, but 2.5× for
+`gpt-5.5`, with seven other exceptions in the price notes) and the row says
+Fast; `ultrafast` bills 6× for `gpt-6-astra` and `gpt-6.1-sol`, and the row
+says Ultrafast. Standard-row config is scaled; an override keyed by the
+full tiered model is used as-is, per kind.
+`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, but Sonnet 5.5 cache
+reads are $0.10/M rather than Sonnet 5's $0.20/M. Its five prices are
+2 / 10 / 0.10 / 2.50 / 4, so inheriting Sonnet 5 would overstate cache reads.
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
@@ -1839,12 +1841,6 @@ The first paint is the slow one: a freshly started widget takes **roughly
 fifteen seconds** to put anything on any tab, because Claude's transcripts and
 Cursor's spend history are both read through before there is anything to draw.
 Neither is paid again.
-
-Metered token costs use published API list prices, not subscription-credit
-multipliers. The 14 Oct 2026 rate correction sets Sonnet 5.5 cache reads to
-$0.10/M and applies model-specific Fast rates, with Ultrafast rates for GPT-6
-Astra and GPT-6.1 Sol. See the [model price notes](../../../../wiki/model-prices.md)
-for the audited rates and sources.
 
 ## More than one Claude Max
 

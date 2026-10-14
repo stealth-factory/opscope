@@ -12,8 +12,8 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 14 Oct 2026 the code and current published prices agree after the dated
-corrections below. The tables retain the 2 Sep snapshot; see
+The tables include the confirmed 14 Oct 2026 price corrections; they remain
+short-context defaults, not a complete billing model. See
 [what this collection changed](#what-this-collection-changed) for updates.
 
 ## The two rules that shape every table here
@@ -49,7 +49,7 @@ record which was taken, so both are carried.
 | `claude-opus-4-5` | 5 | 25 | 0.50 | 6.25 | 10 |
 | `claude-opus-4-1` | 15 | 75 | 1.50 | 18.75 | 30 |
 | `claude-opus-4` | 15 | 75 | 1.50 | 18.75 | 30 |
-| `claude-sonnet-5-5` | 2 | 10 | 0.20 | 2.50 | 4 |
+| `claude-sonnet-5-5` | 2 | 10 | 0.10 | 2.50 | 4 |
 | `claude-sonnet-5` | 2 | 10 | 0.20 | 2.50 | 4 |
 | `claude-sonnet-4-6` | 3 | 15 | 0.30 | 3.75 | 6 |
 | `claude-sonnet-4-5` | 3 | 15 | 0.30 | 3.75 | 6 |
@@ -68,8 +68,7 @@ record which was taken, so both are carried.
 - **Sonnet 5.5 has its own cache-read price**, $0.10/M, versus Sonnet 5 at
   $0.20/M. Its other four prices match Sonnet 5. `claude-sonnet-5` is a prefix
   of `claude-sonnet-5-5`, so the 5.5 row has to exist or a later move of one
-  model reprices the other. The 14 Oct correction below records the current
-  price; the table above remains the 2 Sep snapshot.
+  model reprices the other. The table above includes the 14 Oct correction.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
 - Fast mode, where offered, is a different rate — `claude-opus-5-5` is
@@ -248,11 +247,10 @@ Named so prefix matching cannot hand them a family rate.
 
 ### 14 Oct 2026
 
-**Current-rate corrections.** The 2 Sep Anthropic table above remains a dated
-snapshot. On 14 Oct, an audit against the current [Anthropic pricing
+**Current-rate corrections.** On 14 Oct, an audit against the current [Anthropic pricing
 page](https://platform.claude.com/docs/en/about-claude/pricing) found that
-`claude-sonnet-5-5` cache reads are $0.10/M, not the $0.20/M shown in that
-snapshot; the other four prices remain 2 / 10 / 2.50 / 4 (input, output,
+`claude-sonnet-5-5` cache reads are $0.10/M, not the previously recorded $0.20/M;
+the other four prices remain 2 / 10 / 2.50 / 4 (input, output,
 cache writes, 1-hour cache writes). `claude-sonnet-5` remains at $0.20/M for
 cache reads.
 
@@ -340,7 +338,15 @@ Codex credit multipliers — included usage at 2.5× Fast and 8× Ultrafast —
 are a different bill. The pane meters published API list dollars, not
 credits. Batch, Flex and the regional 10% stay off.
 
+**14 Oct correction:** The preceding note records the original implementation.
+Fast has model-specific exceptions, and GPT-6.1 Sol now has a published
+Ultrafast rate. See the 14 Oct entry and current tier rules above.
+
 ### 28 Sep 2026
+
+**14 Oct correction:** The following is the historical collection note.
+Sonnet 5.5 cache reads are now verified at $0.10/M (0.05× input); the current
+table and runtime catalogue include that correction.
 
 **Added `claude-sonnet-5-5`.** The published five match `claude-sonnet-5`:
 2 / 10 / 0.20 / 2.50 / 4 (input, output, cache read, 5m cache write, 1h

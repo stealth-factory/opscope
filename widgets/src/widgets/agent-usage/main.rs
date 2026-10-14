@@ -3789,7 +3789,7 @@ mod tests {
         assert_eq!(rate.get("cache_write"), Some(&2.50));
         assert_eq!(rate.get("cache_write_1h"), Some(&4.0));
 
-        // Sonnet 5 must not supply 5.5's lower cache-read rate.
+        // The models have different cache-read rates.
         let longest = |model: &str| {
             LIST_RATES
                 .iter()
