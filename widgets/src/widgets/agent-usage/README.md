@@ -1007,10 +1007,32 @@ in the heading.
 
 ### Where each agent's numbers come from
 
-**Cursor** needs no rate card — it publishes both sides. Its own events carry
-vendor rates, Cursor says what it actually metered, and the gap is the discount
-the plan applied. Its header reads `at vendor rates · Cursor meters $762.64
-of it`.
+**Cursor** uses the same dashboard event endpoint as CodexBar:
+`POST https://cursor.com/api/dashboard/get-filtered-usage-events`. Both numbers
+cover one snapshot, from local midnight 29 days ago through the fetch time:
+
+- **30 days** sums `tokenUsage.totalCents` for events with tokens. Missing/null
+  costs use Opscope's published list-rate table when it covers every token kind;
+  explicit zero is retained and invalid costs are not estimated. Input, output,
+  cache reads and cache writes are counted separately.
+- **cursor meters** sums `chargedCents` from those same fetched events, including
+  metered-only events with no tokens. A missing/invalid charge withholds the total.
+- Request, unpriced and estimated counts and the snapshot time are shown. Unknown
+  prices are not silently free. Partial priced windows say `at least`.
+
+The fetch pages to completion (up to the same 200 × 1,000 safety ceiling as
+CodexBar). Failed, inconsistent or capped histories show an error, not a total.
+Only boundary duplicates proven by the API's total count are removed. The
+existing Cursor CLI token supplies the subject and signed token for the dashboard
+cookie, without importing browser cookies, switching accounts or refreshing
+credentials. If the dashboard refuses it, the cost section says so. Other quota
+and aggregate SPEND calls keep their existing Connect API transport.
+
+This aligns the data source and arithmetic, not a guarantee of exact CodexBar
+parity: accounts, refresh time, timezone and versions must match. CodexBar can
+use a cached models.dev catalog and date-sensitive bundled rates; Opscope uses
+its own bundled rates for omitted costs. Those estimates may differ. Neither
+number is the subscription fee plus extra-usage payments.
 
 **Claude** is costed from the **transcripts** rather than from Claude Code's
 own summary file. That file holds one total per model per day, and input,
@@ -1054,8 +1076,9 @@ by a `"*"` entry.
 
 ### What the plan saves
 
-Cursor computes it from its own two figures. Everyone else needs one number
-that no machine here knows — what you actually pay — so it is configured:
+Cursor does not show savings: subtracting its two usage values does not account
+for subscription fees or extra-usage payments. Other supported agents use a
+configured plan cost:
 
 ```json
 "agent_usage": {
@@ -1082,12 +1105,11 @@ simply absent.
  Jul 18                                                Aug 16
 ```
 
-The chart is built from Cursor's **individual charge events**, each with its
-own timestamp and its own money figure, rather than from the per-model totals
-the tab above uses — those carry no timestamp at all, so no per-day view can
-be built from them. Only the window on screen is read, and it is refreshed on
-a slower cadence of its own, so the chart can be up to half an hour behind the
-figures above it.
+The chart uses the same Cursor **dashboard event snapshot** and API-rate costs
+as METERED. Partial/estimated pricing is labelled. It refreshes every half hour,
+or on `r` subject to the shared refresh floor. The separate aggregate SPEND
+section still uses Cursor's Connect API and can differ in coverage and freshness;
+it is not used as the metered total or to calculate savings.
 
 It is a bar chart rather than the calendar the token tabs use. Thirty days in a
 year-wide grid is six columns of colour in a field of dots; money over a month

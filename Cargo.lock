@@ -268,6 +268,7 @@ dependencies = [
 name = "opscope-widgets"
 version = "1.8.0"
 dependencies = [
+ "base64",
  "chrono",
  "chrono-tz",
  "libc",

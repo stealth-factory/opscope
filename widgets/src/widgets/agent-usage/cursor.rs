@@ -17,9 +17,8 @@
 //! Cursor: the three lanes its own Usage view shows, the spend its server
 //! prices, and the tracking database that says how much code it wrote.
 //!
-//! The one agent whose metered section needs no rate card: the API states
-//! both what Cursor charges against the plan and what the same traffic
-//! costs at vendor list, so nothing here is estimated. The authorship
+//! Metered usage and API-rate estimates share one dashboard event window.
+//! Missing prices remain visible, not zero. The authorship
 //! counts answer a different question - how much code the agent wrote,
 //! not what it cost - and the tab keeps the two apart.
 
@@ -102,10 +101,9 @@ const NO_LIMIT: f64 = 2_147_483_647.0;
 
 /// The events RPC's own ceiling per request.
 const EVENT_PAGE: usize = 1000;
-/// Enough pages to reach past any sane window.
-const EVENT_PAGES: usize = 8;
-/// Half an hour: thirty days of events is about five pages and eleven
-/// seconds of paging, far too slow to repeat on a redraw.
+/// CodexBar's safety ceiling; reaching it is an error, not a partial total.
+const EVENT_PAGES: usize = 200;
+/// Full history paging is too slow to repeat on a redraw.
 const EVENTS_TTL: f64 = 1800.0;
 
 /// What Cursor publishes, and what its tracking database recorded here.
@@ -208,7 +206,7 @@ fn commas(n: i64) -> String {
     let digits = n.abs().to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -1374,117 +1372,274 @@ fn cursor_spend(days: i64) -> Option<serde_json::Value> {
 /// The per-day running totals that pages of raw events fold into.
 #[derive(Default)]
 struct Tally {
-    by_day: HashMap<String, f64>,
-    tokens_by_day: HashMap<String, f64>,
-    /// day -> model -> (cents, tokens).
-    by_day_model: HashMap<String, HashMap<String, (f64, f64)>>,
-    vendor_cents: f64,
+    by_day_model: HashMap<String, HashMap<String, EventModel>>,
+    charged_cents: f64,
+    unmetered: u64,
+    unpriced: u64,
+    estimated: u64,
     tokens: f64,
     counted: u64,
 }
 
-/// Fold one page of events into the tally.
-///
-/// Returns the oldest timestamp on the page, which is what tells the
-/// caller a page has reached past the window - events older than the cut
-/// are not counted, but their age is still the stop signal.
-fn tally_events(events: &[serde_json::Value], cut: f64, t: &mut Tally) -> f64 {
-    let mut oldest = now();
+#[derive(Default)]
+struct EventModel {
+    cents: f64,
+    tokens: f64,
+    priced: u64,
+    unpriced: u64,
+    invalid: bool,
+}
+
+fn nonnegative(v: &serde_json::Value) -> Option<f64> {
+    loose(v).filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+/// Cursor's input/cache counters are disjoint. Only omitted prices may
+/// use a list-rate fallback; a reported zero is already a price.
+fn event_price(usage: &serde_json::Value, model: &str) -> (Option<f64>, bool, bool) {
+    if !usage["totalCents"].is_null() {
+        let cents = nonnegative(&usage["totalCents"]);
+        return (cents, false, cents.is_none());
+    }
+    let tokens: Tokens = [
+        ("input", "inputTokens"),
+        ("output", "outputTokens"),
+        ("cache_read", "cacheReadTokens"),
+        ("cache_write", "cacheWriteTokens"),
+    ]
+    .into_iter()
+    .map(|(kind, field)| (kind.to_string(), nonnegative(&usage[field]).unwrap_or(0.0)))
+    .collect();
+    let model = cursor_price_model(model);
+    let cents = rate_for(&model, &HashMap::new())
+        .0
+        .filter(|rate| rate_covers(&tokens, rate))
+        .map(|rate| cost_of(&tokens, &rate) * 100.0)
+        .filter(|n| n.is_finite());
+    (cents, cents.is_some(), false)
+}
+
+fn cursor_price_model(model: &str) -> String {
+    // claude-4.5-sonnet -> claude-sonnet-4-5, as in CodexBar's fallback.
+    let parts: Vec<_> = model.split('-').collect();
+    if parts.len() >= 3
+        && parts[0] == "claude"
+        && ["sonnet", "opus", "haiku"].contains(&parts[2])
+        && parts[1].split('.').count() == 2
+        && parts[1].chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        let suffix = if parts.len() > 3 {
+            format!("-{}", parts[3..].join("-"))
+        } else {
+            String::new()
+        };
+        format!(
+            "claude-{}-{}{}",
+            parts[2],
+            parts[1].replace('.', "-"),
+            suffix
+        )
+    } else {
+        model.to_string()
+    }
+}
+
+fn tally_events(events: &[serde_json::Value], start_ms: i64, end_ms: i64, t: &mut Tally) {
     for e in events {
-        let Some(when) = loose(&e["timestamp"]).map(|ms| ms / 1000.0) else {
+        let Some(ms) = nonnegative(&e["timestamp"]).filter(|ms| *ms > 0.0) else {
             continue;
         };
-        oldest = oldest.min(when);
-        if when < cut {
+        if ms < start_ms as f64 || ms > end_ms as f64 {
             continue;
         }
-        let usage = &e["tokenUsage"];
-        let cents = loose(&usage["totalCents"]).unwrap_or(0.0);
-        // Same three kinds SPEND sums. Cache reads are most of some
-        // models' traffic; leaving them out here would put a smaller
-        // number on METERED than on SPEND for the same events.
-        let n = ["inputTokens", "outputTokens", "cacheReadTokens"]
-            .iter()
-            .map(|k| loose(&usage[*k]).unwrap_or(0.0))
-            .sum::<f64>();
         let Some(day) = Local
-            .timestamp_opt(when as i64, 0)
+            .timestamp_millis_opt(ms as i64)
             .single()
             .map(|d| d.format("%Y-%m-%d").to_string())
         else {
             continue;
         };
-        *t.by_day.entry(day.clone()).or_default() += cents;
-        *t.tokens_by_day.entry(day.clone()).or_default() += n;
+        t.counted += 1;
+        match nonnegative(&e["chargedCents"]) {
+            Some(cents) if (t.charged_cents + cents).is_finite() => t.charged_cents += cents,
+            _ => t.unmetered += 1,
+        }
+        let usage = &e["tokenUsage"];
+        let n = [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+        ]
+        .iter()
+        .map(|k| nonnegative(&usage[*k]).unwrap_or(0.0))
+        .sum::<f64>();
+        if n <= 0.0 || !n.is_finite() {
+            continue;
+        }
         let model = match text(e, "model") {
-            s if s.is_empty() => "?".to_string(),
+            s if s.is_empty() => "unknown".to_string(),
             s => s,
         };
+        let (cents, estimated, invalid) = event_price(usage, &model);
         let slot = t.by_day_model.entry(day).or_default().entry(model).or_default();
-        slot.0 += cents;
-        slot.1 += n;
-        t.vendor_cents += cents;
+        slot.tokens += n;
+        slot.invalid |= invalid;
+        if let Some(cents) = cents {
+            slot.cents += cents;
+            slot.invalid |= !slot.cents.is_finite();
+            slot.priced += 1;
+        } else {
+            slot.unpriced += 1;
+            t.unpriced += 1;
+        }
+        t.estimated += u64::from(estimated);
         t.tokens += n;
-        t.counted += 1;
     }
-    oldest
 }
 
-/// Per-day spend, from the raw events cursor.com's own dashboard uses.
-///
-/// GetAggregatedUsageEvents totals by model and carries no timestamp at
-/// all, so no calendar can be built from it. GetFilteredUsageEvents
-/// returns the individual events - each with a timestamp, a model and its
-/// cents - newest first, a thousand at a time.
-///
-/// Paging stops as soon as a page reaches past the window, so the cost is
-/// proportional to the window rather than to the account's whole history;
-/// EVENT_PAGES caps it regardless. Held for half an hour by the caller,
-/// because this is far too slow to repeat on a redraw.
-fn cursor_events(days: i64) -> Option<serde_json::Value> {
-    let cut = now() - days as f64 * 86400.0;
+fn event_window(days: i64, end_ms: i64) -> Option<i64> {
+    let today = Local.timestamp_millis_opt(end_ms).single()?.date_naive();
+    let first = today.checked_sub_signed(Days::days(days.checked_sub(1)?))?;
+    // Use calendar days, not 24-hour subtraction across DST changes.
+    Local
+        .from_local_datetime(&first.and_hms_opt(0, 0, 0)?)
+        .earliest()
+        .map(|d| d.timestamp_millis())
+}
+
+fn collect_event_pages<F>(
+    mut fetch: F,
+    page_size: usize,
+    max_pages: usize,
+) -> Result<Vec<serde_json::Value>, String>
+where
+    F: FnMut(usize) -> Result<serde_json::Value, String>,
+{
+    let mut pages: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut expected = None;
+    let mut complete = false;
+    for page in 1..=max_pages {
+        let got = fetch(page)?;
+        let obj = got.as_object().ok_or("invalid usage page")?;
+        let count = match obj.get("totalUsageEventsCount") {
+            None => None,
+            Some(value) => Some(
+                nonnegative(value)
+                    .filter(|n| n.fract() == 0.0 && *n <= usize::MAX as f64)
+                    .ok_or("invalid usage count")? as usize,
+            ),
+        };
+        if let Some(count) = count.or_else(|| obj.is_empty().then_some(0)) {
+            if expected.is_some_and(|old| old != count) {
+                return Err("usage count changed while paging; refresh to retry".into());
+            }
+            expected = Some(count);
+        }
+        let events = match obj.get("usageEventsDisplay") {
+            Some(v) => v.as_array().ok_or("invalid usage events")?.clone(),
+            None if obj.is_empty() || (obj.len() == 1 && count.is_some()) => Vec::new(),
+            None => return Err("usage response has no events".into()),
+        };
+        let short = events.len() < page_size;
+        pages.push(events);
+        if short {
+            complete = true;
+            break;
+        }
+    }
+    if !complete {
+        return Err("usage history reached the page limit; totals withheld".into());
+    }
+    let received: usize = pages.iter().map(Vec::len).sum();
+    let expected = expected.unwrap_or(received);
+    let mut excess = received
+        .checked_sub(expected)
+        .ok_or("incomplete usage history; totals withheld")?;
+    let mut events = pages.first().cloned().unwrap_or_default();
+    for pair in pages.windows(2) {
+        let overlap = (1..=pair[0].len().min(pair[1].len()))
+            .rev()
+            .find(|n| pair[0][pair[0].len() - n..] == pair[1][..*n])
+            .unwrap_or(0);
+        let remove = overlap.min(excess);
+        excess -= remove;
+        events.extend_from_slice(&pair[1][remove..]);
+    }
+    if excess != 0 {
+        return Err("inconsistent usage pages; totals withheld".into());
+    }
+    Ok(events)
+}
+
+fn event_report(
+    events: &[serde_json::Value],
+    days: i64,
+    start_ms: i64,
+    end_ms: i64,
+) -> serde_json::Value {
     let mut t = Tally::default();
-    for page in 1..=EVENT_PAGES {
-        let got = cursor_rpc(
-            "GetFilteredUsageEvents",
-            &serde_json::json!({ "page": page, "pageSize": EVENT_PAGE }),
-        );
-        let events: Vec<serde_json::Value> = got
-            .as_ref()
-            .and_then(|g| g["usageEventsDisplay"].as_array())
-            .cloned()
-            .unwrap_or_default();
-        if events.is_empty() {
-            break;
-        }
-        let oldest = tally_events(&events, cut, &mut t);
-        if oldest < cut || events.len() < EVENT_PAGE {
-            break;
-        }
-    }
-    if t.counted == 0 {
-        return None;
-    }
+    tally_events(events, start_ms, end_ms, &mut t);
     let mut by_day_model = serde_json::Map::new();
+    let mut by_day = serde_json::Map::new();
     for (day, models) in &t.by_day_model {
         let mut inner = serde_json::Map::new();
-        for (model, (cents, tokens)) in models {
+        let mut total = 0.0;
+        for (model, value) in models {
+            let cents = (!value.invalid && value.priced > 0).then_some(value.cents);
+            total += cents.unwrap_or(0.0);
             inner.insert(
                 model.clone(),
-                serde_json::json!({ "cents": cents, "tokens": tokens }),
+                serde_json::json!({ "cents": cents, "tokens": value.tokens,
+                    "complete": !value.invalid && value.unpriced == 0 }),
             );
         }
+        by_day.insert(day.clone(), serde_json::json!(total));
         by_day_model.insert(day.clone(), serde_json::Value::Object(inner));
     }
-    Some(serde_json::json!({
-        "by_day": t.by_day,
-        "tokens_by_day": t.tokens_by_day,
+    serde_json::json!({
+        "by_day": by_day,
         "by_day_model": by_day_model,
-        "vendor_cents": t.vendor_cents,
+        "metered_cents": (t.counted > 0 && t.unmetered == 0).then_some(t.charged_cents),
+        "unmetered": t.unmetered, "unpriced": t.unpriced, "estimated": t.estimated,
         "tokens": t.tokens,
         "events": t.counted,
         "days": days,
-    }))
+        "start_ms": start_ms, "end_ms": end_ms,
+    })
+}
+
+fn cursor_events(days: i64) -> Result<serde_json::Value, String> {
+    let end_ms = (now() * 1000.0) as i64;
+    let start_ms = event_window(days, end_ms).ok_or("invalid usage window")?;
+    let token = cursor_token().ok_or("no token - Cursor has not signed in here")?;
+    let cookie = crate::parse::parse_cursor_cookie(&token, end_ms as f64 / 1000.0)
+        .ok_or("Cursor token cannot open the dashboard; sign in again")?;
+    let events = collect_event_pages(
+        |page| {
+            // Keep one identity and fixed bounds for the entire snapshot. Never
+            // fall back to another endpoint or an unrelated browser session.
+            post_json_said(
+                "https://cursor.com/api/dashboard/get-filtered-usage-events",
+                &[
+                    ("Cookie", &cookie),
+                    ("Origin", "https://cursor.com"),
+                    ("Content-Type", "application/json"),
+                    ("Accept", "application/json"),
+                ],
+                &serde_json::json!({ "page": page, "pageSize": EVENT_PAGE,
+                "startDate": start_ms.to_string(), "endDate": end_ms.to_string() })
+                .to_string(),
+                30,
+            )
+            .map_err(|_| {
+                "Cursor dashboard request failed; check login/network and refresh".to_string()
+            })
+        },
+        EVENT_PAGE,
+        EVENT_PAGES,
+    )?;
+    Ok(event_report(&events, days, start_ms, end_ms))
 }
 
 /// The authorship counts, straight out of the tracking database.
@@ -1617,8 +1772,24 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         // Daily figures, so the plan's hour is plenty.
         d.activity = cached(caches, &format!("cursor-activity:{me}"), PLAN_TTL, cursor_activity);
     }
-    d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
-    d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
+    let events_key = format!("cursor-events:{me}");
+    let mut events_why = String::new();
+    d.events = cached(caches, &events_key, EVENTS_TTL, || {
+        match cursor_events(30) {
+            Ok(events) => Some(events),
+            Err(why) => {
+                events_why = why;
+                None
+            }
+        }
+    });
+    if !events_why.is_empty() {
+        remember_refusal(caches, &events_key, &events_why);
+        d.events = Some(serde_json::json!({"why": events_why}));
+    }
+    d.spend = cached(caches, &format!("cursor-spend:{me}"), LIVE_TTL, || {
+        cursor_spend(30)
+    });
     // Deliberately last of the four and deliberately unable to affect them:
     // this is an extra allowance, and an account without one is the normal
     // case rather than a fault.
@@ -1968,51 +2139,64 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
 /// and the models under them, costliest first.
 fn window_of(by: &serde_json::Value, days: i64, today: NaiveDate) -> (f64, f64, Vec<Metered>) {
     let first = (today - Days::days(days - 1)).format("%Y-%m-%d").to_string();
+    let last = today.format("%Y-%m-%d").to_string();
     let (mut cents, mut tokens) = (0.0, 0.0);
     // Per model, both figures the day already carries: Cursor's own events
     // state cents and tokens together, so its model rows can show their
     // tokens beside their dollars like every other metered tab.
-    let mut models: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut models: HashMap<String, (Option<f64>, f64, bool)> = HashMap::new();
     for (day, entries) in by.as_object().into_iter().flatten() {
-        if day.as_str() < first.as_str() {
+        if day.as_str() < first.as_str() || day.as_str() > last.as_str() {
             continue;
         }
         for (model, got) in entries.as_object().into_iter().flatten() {
-            cents += num(got, "cents");
+            let cost = nonnegative(&got["cents"]);
+            cents += cost.unwrap_or(0.0);
             tokens += num(got, "tokens");
-            let seen = models.entry(model.clone()).or_default();
-            seen.0 += num(got, "cents");
+            let seen = models.entry(model.clone()).or_insert((None, 0.0, true));
+            if let Some(cost) = cost {
+                seen.0 = Some(seen.0.unwrap_or(0.0) + cost);
+            }
             seen.1 += num(got, "tokens");
+            seen.2 &= cost.is_some() && got["complete"].as_bool().unwrap_or(true);
         }
     }
-    // Every Cursor event carries its own vendor rate, so nothing here is
-    // unpriced and every cost is `Some`.
-    let mut ranked: Vec<Metered> =
-        models.into_iter().map(|(m, (c, t))| (m, Some((c / 100.0, true)), t)).collect();
+    let mut ranked: Vec<Metered> = models
+        .into_iter()
+        .map(|(m, (c, t, complete))| (m, c.map(|c| (c / 100.0, complete)), t))
+        .collect();
     ranked.sort_by(|a, b| super::model_amount(&b.1).total_cmp(&super::model_amount(&a.1)));
     (cents / 100.0, tokens, ranked)
 }
 
-/// What Cursor charges, beside what the same traffic costs at list.
-///
-/// Cursor is the one agent that publishes both, so no rate card - and no
-/// config - is needed: GetAggregatedUsageEvents returns what it meters
-/// against the plan, and the raw events carry their own vendor-rate cents.
-/// The gap is what the subscription is worth, and every event states its
-/// own discount.
+/// API-rate costs and charged cents from the same complete event snapshot.
 fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let nothing = serde_json::Value::Null;
     let ev = d.events.as_ref().unwrap_or(&nothing);
-    let metered = d
-        .spend
-        .as_ref()
-        .and_then(|s| loose(&s["totalCostCents"]))
-        .unwrap_or(0.0);
+    let why = text(ev, "why");
+    if !why.is_empty() {
+        return wrap_text(
+            &format!("Cursor cost unavailable: {why}"),
+            w.saturating_sub(4).max(20),
+        )
+        .into_iter()
+        .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {line}"))], w - 1))
+        .collect();
+    }
+    let metered = nonnegative(&ev["metered_cents"]);
     let by = &ev["by_day_model"];
-    if by.as_object().is_none_or(|o| o.is_empty()) && metered == 0.0 {
+    if by.as_object().is_none_or(|o| o.is_empty())
+        && metered.is_none()
+        && ev["events"].as_u64().unwrap_or(0) == 0
+    {
         return Vec::new();
     }
-    let today = Local::now().date_naive();
+    let snapshot = ev["end_ms"]
+        .as_i64()
+        .and_then(|ms| Local.timestamp_millis_opt(ms).single());
+    let today = snapshot
+        .map(|at| at.date_naive())
+        .unwrap_or_else(|| Local::now().date_naive());
     let span = match ev["days"].as_i64() {
         Some(days) if days > 0 => days,
         _ => 30,
@@ -2022,31 +2206,50 @@ fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let (cost, tokens, models) = window_of(by, days, today);
         windows.push((label.to_string(), cost, tokens, models));
     }
-    let vendor = loose(&ev["vendor_cents"]).unwrap_or(0.0);
-    let saves = if vendor > 0.0 && metered > 0.0 {
-        Some((vendor - metered) / 100.0)
-    } else {
-        None
-    };
-    metered_block(
-        "vendor rates",
+    let unpriced = ev["unpriced"].as_u64().unwrap_or(0);
+    let estimated = ev["estimated"].as_u64().unwrap_or(0);
+    let unmetered = ev["unmetered"].as_u64().unwrap_or(0);
+    let mut caveat = format!("Cursor dashboard · {} requests · {} unpriced · {} estimated. Metered usage is not your bill.",
+        ev["events"].as_u64().unwrap_or(0), unpriced, estimated);
+    if let Some(at) = snapshot {
+        caveat.push_str(&format!(" As of {}.", at.format("%Y-%m-%d %H:%M")));
+    }
+    if unmetered > 0 {
+        caveat.push_str(&format!(
+            " Metered total unavailable: {unmetered} events lack valid charged costs."
+        ));
+    }
+    let mut rows = metered_block(
+        "API-rate estimates",
         &windows,
         w,
-        &[
-            (
-                "cursor meters".to_string(),
-                (metered > 0.0).then(|| dollars(metered / 100.0, false)),
-                p.txt.clone(),
-            ),
-            // Nothing Cursor reports is unpriced, so neither figure here is
-            // a floor.
-            ("the plan saves".to_string(), saves.map(|s| dollars(s, false)), p.ok.clone()),
-        ],
+        &[(
+            "cursor meters".to_string(),
+            metered.map(|cents| dollars(cents / 100.0, false)),
+            p.txt.clone(),
+        )],
         "",
         "account-wide",
-        "From Cursor's own API, so it covers every device on the account, not just this one.",
+        &caveat,
         p,
-    )
+    );
+    // Metered-only events have no token window for metered_block to draw.
+    if rows.is_empty() {
+        rows.push(tc::seg(
+            &[(p.lbl.as_str(), " ── METERED ── account-wide".into())],
+            w - 1,
+        ));
+        for line in wrap_text(&caveat, w.saturating_sub(4).max(20)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1));
+        }
+        if let Some(cents) = metered {
+            rows.push(tc::seg(
+                &[(p.txt.as_str(), format!(" cursor meters {}", money(cents)))],
+                w - 1,
+            ));
+        }
+    }
+    rows
 }
 
 /// Spend per day, one column per day, the way the usage page shows it.
@@ -2066,7 +2269,11 @@ fn cursor_daily(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         Some(n) if n > 0 => n,
         _ => 30,
     };
-    let today = Local::now().date_naive();
+    let today = ev["end_ms"]
+        .as_i64()
+        .and_then(|ms| Local.timestamp_millis_opt(ms).single())
+        .map(|at| at.date_naive())
+        .unwrap_or_else(|| Local::now().date_naive());
     let series: Vec<NaiveDate> = (0..days).rev().map(|n| today - Days::days(n)).collect();
     let cents: Vec<f64> = series
         .iter()
@@ -2095,7 +2302,7 @@ fn cursor_daily(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 p.dim.as_str(),
                 format!(
                     " on {}",
-                    best.as_ref().map(|b| label(b)).unwrap_or_else(|| "--".into())
+                    best.as_ref().map(&label).unwrap_or_else(|| "--".into())
                 ),
             ),
             (p.dim.as_str(), " · today ".into()),
@@ -2107,6 +2314,16 @@ fn cursor_daily(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         w - 1,
     )];
     let avail = w.saturating_sub(3).max(10);
+    for line in wrap_text(
+        &format!(
+            "API-rate estimates · {} unpriced · {} estimated requests",
+            ev["unpriced"].as_u64().unwrap_or(0),
+            ev["estimated"].as_u64().unwrap_or(0)
+        ),
+        w.saturating_sub(4).max(20),
+    ) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1));
+    }
     let mut cols: Vec<(f64, String)> = Vec::new();
     for (c, wide) in cents.iter().zip(tc::spread(cents.len(), avail)) {
         cols.extend(std::iter::repeat_n((*c, p.agent.clone()), wide));
@@ -2770,7 +2987,7 @@ mod tests {
     }
 
     #[test]
-    fn paging_stops_at_the_window_not_the_history() {
+    fn events_use_identical_bounds_and_include_cache_writes() {
         let cut = now() - 30.0 * 86400.0;
         let recent = ((now() - 3600.0) * 1000.0) as i64;
         let ancient = ((cut - 86400.0) * 1000.0) as i64;
@@ -2779,7 +2996,8 @@ mod tests {
                 "timestamp": recent.to_string(), "model": "model-x",
                 "tokenUsage": { "totalCents": "12.5",
                                 "inputTokens": "100", "outputTokens": "50",
-                                "cacheReadTokens": "25" },
+                                "cacheReadTokens": "25", "cacheWriteTokens": "10" },
+                "chargedCents": "8",
             }),
             serde_json::json!({
                 "timestamp": ancient.to_string(), "model": "model-x",
@@ -2788,15 +3006,15 @@ mod tests {
             }),
         ];
         let mut t = Tally::default();
-        let oldest = tally_events(&events, cut, &mut t);
-        // The old event is not counted, but its age is what tells the
-        // caller this page reached past the window and paging can stop.
+        tally_events(
+            &events,
+            (cut * 1000.0) as i64,
+            (now() * 1000.0) as i64,
+            &mut t,
+        );
         assert_eq!(t.counted, 1);
-        assert!((t.vendor_cents - 12.5).abs() < 1e-9);
-        // 100 in + 50 out + 25 cache. A sum that skipped cache reads
-        // would still be 150 and would disagree with SPEND.
-        assert!((t.tokens - 175.0).abs() < 1e-9);
-        assert!(oldest < cut);
+        assert!((t.charged_cents - 8.0).abs() < 1e-9);
+        assert!((t.tokens - 185.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2983,7 +3201,7 @@ mod tests {
     }
 
     #[test]
-    fn the_metered_section_reports_the_gap_the_plan_covers() {
+    fn the_metered_section_uses_event_charges_not_aggregate_or_savings() {
         let p = palette();
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let d = Data {
@@ -2992,20 +3210,171 @@ mod tests {
                 "by_day_model": {
                     today: { "model-x": { "cents": 1000.0, "tokens": 5000.0 } },
                 },
-                "vendor_cents": 1000.0,
+                "metered_cents": 400.0,
                 "days": 30,
             })),
             // Connect writes the metered figure as a string too.
-            spend: Some(serde_json::json!({ "totalCostCents": "400" })),
+            spend: Some(serde_json::json!({ "totalCostCents": "999999" })),
             ..Data::default()
         };
         let joined = cursor_metered(&d, 100, &p).join("\n");
-        // Vendor list $10.00, Cursor metered $4.00, so the plan saved $6.00
-        // - and the scope is named, because the QUOTA above it is too.
-        for want in ["account-wide", "$10.00", "cursor meters", "$4.00", "the plan saves", "$6.00"]
-        {
+        for want in [
+            "account-wide",
+            "$10.00",
+            "cursor meters",
+            "$4.00",
+            "not your bill",
+        ] {
             assert!(joined.contains(want), "missing {}", want);
         }
+        assert!(!joined.contains("the plan saves"));
+        assert!(!joined.contains("9999.99"));
+    }
+
+    #[test]
+    fn dashboard_pagination_covers_43000_events_and_rejects_partial_histories() {
+        let mut calls = 0;
+        let all = collect_event_pages(|page| {
+            calls += 1;
+            let rows: Vec<_> = if page <= 43 { (0..1000).map(|i|
+                serde_json::json!({"timestamp": page * 1000 + i})).collect() } else { Vec::new() };
+            Ok(serde_json::json!({"totalUsageEventsCount": "43000", "usageEventsDisplay": rows}))
+        }, 1000, 200).unwrap();
+        assert_eq!(calls, 44);
+        assert_eq!(all.len(), 43000);
+        assert!(collect_event_pages(
+            |_| Ok(serde_json::json!({"usageEventsDisplay": [1, 2]})),
+            2,
+            8
+        )
+        .is_err());
+        assert!(collect_event_pages(
+            |p| if p == 1 {
+                Ok(serde_json::json!({"usageEventsDisplay": [1, 2], "totalUsageEventsCount": 3}))
+            } else {
+                Err("offline".into())
+            },
+            2,
+            8
+        )
+        .is_err());
+        assert!(collect_event_pages(
+            |_| Ok(serde_json::json!({"usageEventsDisplay": [1], "totalUsageEventsCount": 3})),
+            2,
+            8
+        )
+        .is_err());
+        assert!(
+            collect_event_pages(|_| Ok(serde_json::json!({"error": "unauthorized"})), 2, 8)
+                .is_err()
+        );
+        assert!(collect_event_pages(|_| Ok(serde_json::json!({})), 2, 8)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn only_count_proven_boundary_duplicates_are_removed() {
+        for (total, want) in [(3, vec![1, 2, 3]), (4, vec![1, 2, 2, 3])] {
+            let all = collect_event_pages(|page| Ok(serde_json::json!({
+                "totalUsageEventsCount": total,
+                "usageEventsDisplay": match page { 1 => vec![1, 2], 2 => vec![2, 3], _ => vec![] }
+            })), 2, 5).unwrap();
+            assert_eq!(
+                all,
+                want.into_iter()
+                    .map(serde_json::Value::from)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(collect_event_pages(
+            |page| Ok(serde_json::json!({
+                "totalUsageEventsCount": page,
+                "usageEventsDisplay": [1, 2]
+            })),
+            2,
+            5
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reported_zero_is_not_estimated_and_unknown_or_invalid_cost_is_not_free() {
+        let model = "claude-sonnet-4-5";
+        let usage = serde_json::json!({"inputTokens": 1000000, "cacheWriteTokens": 1000000});
+        let (estimate, estimated, invalid) = event_price(&usage, model);
+        let rate = rate_for(model, &HashMap::new()).0.unwrap();
+        assert_eq!(
+            estimate,
+            Some((rate["input"] + rate["cache_write"]) * 100.0)
+        );
+        assert!(estimated && !invalid);
+        assert_eq!(cursor_price_model("claude-4.5-sonnet"), model);
+        assert_eq!(
+            event_price(&usage, "unknown-future-model"),
+            (None, false, false)
+        );
+        let mut reported = usage;
+        reported["totalCents"] = serde_json::json!(0);
+        assert_eq!(event_price(&reported, model), (Some(0.0), false, false));
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!("NaN"),
+            serde_json::json!("bad"),
+        ] {
+            reported["totalCents"] = bad;
+            assert_eq!(event_price(&reported, model), (None, false, true));
+        }
+    }
+
+    #[test]
+    fn missing_charges_withhold_metered_total_but_keep_token_coverage() {
+        let end = Local::now().timestamp_millis();
+        let start = event_window(30, end).unwrap();
+        let rows = vec![
+            serde_json::json!({"timestamp": end, "model": "unknown-model", "chargedCents": 4,
+                "tokenUsage": {"inputTokens": 10}}),
+            serde_json::json!({"timestamp": end, "model": "priced-model",
+                "tokenUsage": {"totalCents": 10, "inputTokens": 20}}),
+            serde_json::json!({"timestamp": end, "chargedCents": 2}),
+            serde_json::json!({"timestamp": start - 1, "chargedCents": 900}),
+            serde_json::json!({"timestamp": end + 1, "chargedCents": 900}),
+        ];
+        let report = event_report(&rows, 30, start, end);
+        assert!(report["metered_cents"].is_null());
+        assert_eq!(report["unmetered"], 1);
+        assert_eq!(report["unpriced"], 1);
+        assert_eq!(report["events"], 3);
+        assert_eq!(report["tokens"], 30.0);
+        let shown = cursor_metered(
+            &Data {
+                events: Some(report),
+                ..Data::default()
+            },
+            100,
+            &palette(),
+        )
+        .join("\n");
+        assert!(shown.contains("at least $0.10"));
+        assert!(shown.contains("1 unpriced"));
+        assert!(shown.contains("Metered total unavailable"));
+        assert!(!shown.contains("cursor meters"));
+    }
+
+    #[test]
+    fn event_window_starts_at_local_midnight_29_days_ago() {
+        let end = Local
+            .with_ymd_and_hms(2026, 10, 14, 16, 0, 0)
+            .single()
+            .unwrap();
+        let start = Local
+            .timestamp_millis_opt(event_window(30, end.timestamp_millis()).unwrap())
+            .single()
+            .unwrap();
+        assert_eq!(
+            start.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-09-15 00:00"
+        );
     }
 
     #[test]

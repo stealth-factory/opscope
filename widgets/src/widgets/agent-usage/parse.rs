@@ -18,6 +18,40 @@
 
 use crate::iso_epoch;
 
+/// Derive the dashboard cookie from the same Cursor token used for quota.
+/// Decoding only selects the subject; Cursor validates the token on receipt.
+pub fn parse_cursor_cookie(token: &str, now: f64) -> Option<String> {
+    use base64::Engine;
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        return None;
+    }
+    let parts: Vec<_> = token.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if payload["exp"].as_f64()? <= now + 60.0 {
+        return None;
+    }
+    let user = payload["sub"]
+        .as_str()?
+        .split('|')
+        .rfind(|s| !s.is_empty())?;
+    if !user
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    Some(format!("WorkosCursorSessionToken={user}%3A%3A{token}"))
+}
+
 /// Claude's optional `cedar_ember` usage block. A grant can hold several
 /// resets; its expiry applies to all of them. No grant identifiers are kept.
 #[derive(Debug, PartialEq)]
@@ -1675,6 +1709,30 @@ pub fn format_balance(n: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_cookie_reuses_the_token_subject_without_exposing_another_session() {
+        use base64::Engine;
+        let token = |sub: &str, exp: f64| {
+            format!(
+                "header.{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::json!({"sub": sub, "exp": exp}).to_string())
+            )
+        };
+        let valid = token("auth0|user_fixture", 1000.0);
+        assert_eq!(
+            super::parse_cursor_cookie(&valid, 100.0),
+            Some(format!(
+                "WorkosCursorSessionToken=user_fixture%3A%3A{valid}"
+            ))
+        );
+        assert!(super::parse_cursor_cookie(&valid, 940.0).is_none());
+        assert!(super::parse_cursor_cookie(&token("bad;injection", 1000.0), 100.0).is_none());
+        assert!(super::parse_cursor_cookie(&token("", 1000.0), 100.0).is_none());
+        assert!(super::parse_cursor_cookie("bad", 100.0).is_none());
+        assert!(super::parse_cursor_cookie(&format!("{valid}\r\nheader"), 100.0).is_none());
+    }
+
     #[test]
     fn claude_resets_count_usable_grants_and_expire_cached_offers() {
         let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
