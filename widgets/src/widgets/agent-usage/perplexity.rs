@@ -90,6 +90,9 @@ pub struct Data {
     quota_why: String,
     /// The plan the session names, when it named one.
     plan: Option<String>,
+    /// Why the session request did not answer, so a heading with no plan
+    /// in it is not taken for a session that names none.
+    plan_why: String,
     /// How the plan is billed, when that answered.
     subscription: Option<PerplexitySubscription>,
     /// Why the billing request did not answer, so the billing drawn without
@@ -264,12 +267,26 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     }
     remember_refusal(caches, &qkey, &refused);
     d.quota_why = refused;
-    // The plan is only a label in the heading; a session that did not
-    // answer leaves it out rather than saying anything went wrong.
+    // The plan is only a label in the heading, but a session that failed
+    // is said, so it is not taken for one that names no plan.
     let pkey = format!("{key}:plan");
+    let mut refused = String::new();
     let plan = cached(caches, &pkey, REPORT_TTL, || {
-        ask(&token, SESSION_URL, "plan", |b| parse_perplexity_plan(b).is_some()).ok()
+        match ask(&token, SESSION_URL, "plan", |b| {
+            parse_perplexity_plan(b).is_some() || session_names_no_plan(b)
+        }) {
+            Ok(v) => Some(v),
+            Err(why) => {
+                refused = why;
+                None
+            }
+        }
     });
+    remember_refusal(caches, &pkey, &refused);
+    d.plan_why = refused;
+    if let Some(why) = plan.as_ref().map(|g| text(g, "why")).filter(|_| d.plan_why.is_empty()) {
+        d.plan_why = why;
+    }
     d.plan = plan.and_then(|g| parse_perplexity_plan(&text(&g, "body")));
     let skey = format!("{key}:subscription");
     let mut refused = String::new();
@@ -302,6 +319,15 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         d.read_at = num(got, "at");
     }
     d
+}
+
+/// A signed-in session that names no tier: a user object and nothing to
+/// call a plan, which is an answer and not a fault.
+fn session_names_no_plan(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("user").map(|u| u.is_object()))
+        .unwrap_or(false)
 }
 
 /// A quota answer that is an object with no share used in it: a plan with
@@ -627,6 +653,9 @@ fn credit_rows_with_plots(
     rows.extend(billing_rows(c, d.subscription.as_ref(), w, p));
     if d.subscription.is_none() && !d.subscription_why.is_empty() {
         rows.extend(note(&format!("plan billing not read · {}", d.subscription_why), &p.warn, w));
+    }
+    if d.plan.is_none() && !d.plan_why.is_empty() {
+        rows.extend(note(&format!("plan name not read · {}", d.plan_why), &p.warn, w));
     }
     if let Some(c) = c {
         rows.extend(credit_notes(c, w, p));
@@ -1187,6 +1216,13 @@ mod tests {
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("plan billing not read · subscription refused (502)"), "{rows}");
+        // A session request that failed is said too; one naming no plan is not.
+        d.plan_why = "plan the request timed out".into();
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("plan name not read · plan the request timed out"), "{rows}");
+        assert!(session_names_no_plan(r#"{"user":{"email":"x"}}"#));
+        assert!(!session_names_no_plan("{}"));
     }
 
     #[test]

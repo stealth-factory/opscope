@@ -870,6 +870,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // This period's spend from grants that also state their earlier spend,
     // so it is a figure the answer itself gives rather than an estimate.
     let mut stated_this_period = 0.0;
+    // A grant that says what is left but not what went before: its share of
+    // this period is unknown, so the period's total cannot be split by it.
+    let mut share_unknown = false;
     for grant in field("credit_grants", "creditGrants")?.as_array()? {
         let grant = grant.as_object()?;
         let kind = grant.get("type")?.as_str()?;
@@ -926,6 +929,8 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             said_this_period += this_period;
             if prior_periods.is_some() {
                 stated_this_period += this_period;
+            } else {
+                share_unknown = true;
             }
         } else {
             unsaid += 1;
@@ -944,10 +949,14 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     if stated_this_period > left + 0.5 {
         return None;
     }
-    left = (left - said_this_period).max(0.0);
+    // Beside grants that do not say, a grant whose share of this period is
+    // unknown leaves nothing safe to spread: what the stated grants did not
+    // take is said as not drawn on a pool rather than put on one.
+    let split_unknown = share_unknown && unsaid > 0;
+    left = (left - if split_unknown { stated_this_period } else { said_this_period }).max(0.0);
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
-    let spreadable = out.unknown_grants == 0;
+    let spreadable = out.unknown_grants == 0 && !split_unknown;
     let mut spend = |[total, said, said_left]: [f64; 3], floor: f64| {
         let to_spread = (total - said).max(floor - said).max(0.0);
         let used = if spreadable { left.min(to_spread) } else { 0.0 };
@@ -2213,6 +2222,15 @@ Period resets : 2026-10-06
         assert_eq!(c.uncovered, 50.0);
         // An expiry left out is not one that never comes.
         assert!(!c.grants[0].never_expires());
+        // A grant that does not say what went before, beside one that does
+        // not say what is left, leaves the period's usage unsplit.
+        let raw = r#"{"total_usage_cents":300,"credit_grants":[
+            {"type":"purchased","amount_cents":2000,"remaining_cents":1314},
+            {"type":"recurring","amount_cents":1000}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 300.0);
         // Grants that state more spent this period than its total disagree with it.
         let raw = r#"{"total_usage_cents":20,"credit_grants":[
             {"type":"recurring","amount_cents":100,"remaining_cents":50,
