@@ -33,7 +33,9 @@ on:
       - 'npm/platform.js'
 
 permissions:
-  contents: write
+  # PR builds and post-release smoke tests only need read access.
+  # The tag-only publish job grants its own write permissions.
+  contents: read
 
 jobs:
   build:
@@ -88,6 +90,7 @@ jobs:
           # The changelog reads the history between two tags, and the build
           # stamps the commit into --version. A shallow clone has neither.
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -362,9 +365,8 @@ jobs:
     concurrency:
       group: ${{ startsWith(github.ref, 'refs/tags/v') && 'npm-release-publish' || format('npm-release-publish-{0}', github.run_id) }}
       cancel-in-progress: false
-    # Job-level permissions replace the workflow ones, so contents
-    # has to be restated. id-token is for npm trusted publishing —
-    # OIDC, no secret — which is the only path left after classic
+    # Only publication needs contents: write. id-token is for npm trusted
+    # publishing — OIDC, no secret — the only path left after classic
     # automation tokens were revoked and is the one this repo uses.
     permissions:
       contents: write
@@ -731,9 +733,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # This job runs the module's downloaded binaries with the
-          # workspace as cwd. The job token can write contents; do not
-          # leave it in .git for those steps.
+          # Do not leave the checkout token in .git while running the
+          # module's downloaded binaries with the workspace as cwd.
           persist-credentials: false
 
       - name: The Luvus module's build step fetches this version
