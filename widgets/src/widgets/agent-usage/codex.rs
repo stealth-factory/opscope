@@ -235,9 +235,10 @@ fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank>
 /// records it on `thread_settings` (`thread_settings_applied`). Either
 /// snapshot replaces the tier carried so far — including one that names
 /// no tier, which is Standard. `fast` and the API's
-/// `priority` (what a Fast response reports) bill at 2× and the row says
-/// Fast. `ultrafast` bills at 6× and only for `gpt-6-astra`; any other
-/// model stays on its standard row rather than inventing an Ultrafast rate.
+/// `priority` (what a Fast response reports) bill at the published Fast
+/// multiplier — 2× for most models — and the row says Fast. `ultrafast`
+/// bills at 6× and only for the models OpenAI prices it on; any other model
+/// stays on its standard row rather than inventing an Ultrafast rate.
 /// Missing, `default`, `auto` and `flex` stay on the standard row.
 ///
 /// `last_token_usage` is the per-turn delta - the running total is on every
@@ -350,24 +351,16 @@ fn tier_from_event(payload: &serde_json::Value) -> Option<String> {
 /// The model id the meter keys on, with the speed tier named when a
 /// published API multiplier applies.
 ///
-/// Ultrafast is published for `gpt-6-astra` only, including a dated
-/// snapshot of that id. A different model that merely contains the
-/// substring is not Astra, and stays on its standard row.
+/// Ultrafast is published for a few models only, including a dated
+/// snapshot of each. A different model that merely contains one of those
+/// ids is not that model, and stays on its standard row.
 fn billed_model(model: &str, tier: &str) -> String {
     match tier.trim().to_ascii_lowercase().as_str() {
         "fast" | "priority" => format!("{model}{}", crate::CODEX_TIER_FAST),
-        "ultrafast" if astra_model(model) => format!("{model}{}", crate::CODEX_TIER_ULTRAFAST),
+        "ultrafast" if crate::ultrafast_multiplier(model).is_some() => {
+            format!("{model}{}", crate::CODEX_TIER_ULTRAFAST)
+        }
         _ => model.to_string(),
-    }
-}
-
-fn astra_model(model: &str) -> bool {
-    if model == "gpt-6-astra" {
-        return true;
-    }
-    match model.strip_prefix("gpt-6-astra-") {
-        Some(rest) => rest.starts_with(|c: char| c.is_ascii_digit()),
-        None => false,
     }
 }
 
@@ -1491,18 +1484,35 @@ mod tests {
     }
 
     #[test]
-    fn ultrafast_on_gpt_6_1_sol_does_not_invent_an_ultrafast_rate() {
-        // Ultrafast is published for Astra only. Naming it here would bill
-        // a rate nobody published.
+    fn ultrafast_gpt_6_1_sol_is_billed_at_six_times_and_the_row_says_ultrafast() {
+        // OpenAI publishes 12 / 0.60 / 15 / 60. Without this, the turn fell
+        // back to the bare id and billed at a sixth of that as Standard.
         let model = only_model(&tiered_turn("gpt-6.1-sol", "ultrafast"));
-        assert_eq!(model, "gpt-6.1-sol");
-        assert!(!model.contains("Ultrafast"));
+        assert_eq!(model, format!("gpt-6.1-sol{}", crate::CODEX_TIER_ULTRAFAST));
+        let none = HashMap::new();
+        let (rate, origin) = crate::session_rate(&model, &none);
+        let rate = rate.expect("ultrafast gpt-6.1-sol is priced");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&12.0));
+        assert_eq!(rate.get("output"), Some(&60.0));
+        assert_eq!(rate.get("cache_write"), Some(&15.0));
+        assert!((rate["cache_read"] - 0.60).abs() < 1e-9, "{rate:?}");
+
+        let dated = only_model(&tiered_turn("gpt-6.1-sol-20261001", "ultrafast"));
+        assert!(dated.ends_with(crate::CODEX_TIER_ULTRAFAST), "{dated}");
+    }
+
+    #[test]
+    fn ultrafast_where_none_is_published_does_not_invent_a_rate() {
+        // Luna has a Fast price and no Ultrafast one. Naming it would bill a
+        // rate nobody published.
+        let model = only_model(&tiered_turn("gpt-6-luna", "ultrafast"));
+        assert_eq!(model, "gpt-6-luna");
         let none = HashMap::new();
         let (rate, _) = crate::session_rate(&model, &none);
         let rate = rate.expect("the standard row still prices it");
-        assert_eq!(rate.get("input"), Some(&2.0));
-        assert_eq!(rate.get("cache_read"), Some(&0.10));
-        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("input"), Some(&0.10));
+        assert_eq!(rate.get("output"), Some(&0.50));
     }
 
     #[test]
@@ -1573,7 +1583,7 @@ mod tests {
         let (rate, _) = crate::session_rate(&model, &none);
         assert_eq!(rate.unwrap().get("output"), Some(&20.0));
 
-        // Ultrafast on the opening event is the same path, and still Astra only.
+        // Ultrafast on the opening event is the same path.
         let ultra = [
             r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"session_configured","model":"gpt-6-astra","service_tier":"ultrafast"}}"#,
             r#"{"type":"turn_context","payload":{"model":"gpt-6-astra"}}"#,
