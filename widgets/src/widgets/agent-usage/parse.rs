@@ -742,6 +742,16 @@ impl PerplexityPool {
 /// one CodexBar reads it in: the plan's recurring credits first, then
 /// purchased ones, then promotional. A promotional grant past its expiry is
 /// gone, so it is not counted at all.
+/// Auto top-up, kept apart from an answer that did not say: reading a
+/// missing setting as off would misstate something that buys credits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PerplexityTopup {
+    Off,
+    /// What it adds, and below what balance. Either can be missing from an
+    /// answer that still says it is on, and it stays on.
+    On { adds: Option<f64>, under: Option<f64> },
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerplexityCredits {
     pub recurring: PerplexityPool,
@@ -762,10 +772,8 @@ pub struct PerplexityCredits {
     pub period_usage: f64,
     /// Each live grant, in the order Perplexity listed them.
     pub grants: Vec<PerplexityGrant>,
-    /// Auto top-up, when it is on: what it adds, and below what balance.
-    /// Either can be missing from an answer that still says it is on, and
-    /// that is kept as on rather than read as off.
-    pub auto_topup: Option<(Option<f64>, Option<f64>)>,
+    /// Auto top-up as the answer states it; `None` when it does not say.
+    pub auto_topup: Option<PerplexityTopup>,
     /// `spending_limit_cents`, when the account has one.
     pub spending_limit: Option<f64>,
 }
@@ -823,12 +831,12 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
     let topup_on = field("auto_topup_enabled", "autoTopupEnabled").and_then(|x| x.as_bool());
     let auto_topup = match topup_on {
-        Some(true) => {
-            let amount = optional("auto_topup_amount_cents", "autoTopupAmountCents")?;
-            let under = optional("auto_topup_threshold_cents", "autoTopupThresholdCents")?;
-            Some((amount, under))
-        }
-        _ => None,
+        Some(true) => Some(PerplexityTopup::On {
+            adds: optional("auto_topup_amount_cents", "autoTopupAmountCents")?,
+            under: optional("auto_topup_threshold_cents", "autoTopupThresholdCents")?,
+        }),
+        Some(false) => Some(PerplexityTopup::Off),
+        None => None,
     };
     let mut out = PerplexityCredits {
         renews,
@@ -838,9 +846,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         period_usage: left,
         ..PerplexityCredits::default()
     };
-    // Per pool: the grants' amounts, and what they say is left of them.
-    let (mut recurring, mut bought, mut bonus) = ([0.0; 2], [0.0; 2], [0.0; 2]);
-    let (mut every_grant_says_what_is_left, mut grants) = (true, 0);
+    // Per pool: every grant's amount, then the amount and what is left of
+    // the grants that say, so the rest is what has to be spread.
+    let (mut recurring, mut bought, mut bonus) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+    let (mut said_this_period, mut grants, mut unsaid) = (0.0, 0, 0);
     for grant in field("credit_grants", "creditGrants")?.as_array()? {
         let grant = grant.as_object()?;
         let kind = grant.get("type")?.as_str()?;
@@ -868,48 +877,50 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
                 continue;
             }
         };
-        grants += 1;
         let num = |snake: &str, camel: &str| {
             grant.get(snake).or_else(|| grant.get(camel)).and_then(finite)
         };
+        grants += 1;
+        let prior_periods = num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents");
         out.grants.push(PerplexityGrant {
             kind: kind.to_string(),
             amount,
             remaining,
-            prior_periods: num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents"),
+            prior_periods,
             effective: num("effective_at_ts", "effectiveAtTs"),
             expires,
         });
         pool[0] += amount;
-        match remaining {
-            Some(r) => pool[1] += r,
-            None => every_grant_says_what_is_left = false,
+        if let Some(r) = remaining {
+            pool[1] += amount;
+            pool[2] += r;
+            // What this grant took this period, so it is not spread again
+            // over the grants that do not say.
+            let spent = (amount - r).max(0.0);
+            said_this_period += (spent - prior_periods.unwrap_or(0.0).max(0.0)).max(0.0);
+        } else {
+            unsaid += 1;
         }
     }
     // A grant that says what is left of it is exact, across every period it
     // has been drawn on. `total_usage_cents` counts this period alone, so
     // spreading it over the pools reads a grant bought last month and part
-    // spent then as untouched. It is only the fallback, for an answer whose
-    // grants do not say.
-    if grants > 0 && every_grant_says_what_is_left {
-        let pool = |[total, left]: [f64; 2]| {
-            let total = total.max(0.0);
-            PerplexityPool { total, used: (total - left).max(0.0) }
-        };
-        out.recurring = pool(recurring);
-        out.purchased = pool(bought);
-        out.bonus = pool(bonus);
-        return Some(out);
-    }
-    let mut spend = |total: f64| {
-        let total = total.max(0.0);
-        let used = left.min(total);
+    // spent then as untouched. It is only the fallback, for the grants that
+    // do not say, and only for what the ones that do say did not take.
+    let exact = grants > 0 && unsaid == 0;
+    left = if exact { 0.0 } else { (left - said_this_period).max(0.0) };
+    let mut spend = |[total, said, said_left]: [f64; 3], floor: f64| {
+        let to_spread = (total - said).max(floor - said).max(0.0);
+        let used = left.min(to_spread);
         left -= used;
-        PerplexityPool { total, used }
+        PerplexityPool { total: total.max(floor).max(0.0), used: (said - said_left).max(0.0) + used }
     };
-    out.recurring = spend(recurring[0]);
-    out.purchased = spend(bought[0].max(bought_field));
-    out.bonus = spend(bonus[0]);
+    // The bought total the answer states counts only while no bought grant
+    // says what is left of it, as when nothing said.
+    let bought_floor = if exact || bought[1] > 0.0 { 0.0 } else { bought_field };
+    out.recurring = spend(recurring, 0.0);
+    out.purchased = spend(bought, bought_floor);
+    out.bonus = spend(bonus, 0.0);
     out.uncovered = left;
     Some(out)
 }
@@ -2104,6 +2115,22 @@ Period resets : 2026-10-06
         assert_eq!(c.recurring.used, 5000.0);
         assert_eq!(c.purchased, PerplexityPool { total: 3000.0, used: 3000.0 });
         assert_eq!(c.bonus, PerplexityPool { total: 4000.0, used: 1000.0 });
+        assert_eq!(c.uncovered, 0.0);
+    }
+
+    #[test]
+    fn a_perplexity_grant_that_says_what_is_left_is_believed_beside_one_that_does_not() {
+        // One grant with no remaining_cents threw away every other grant's,
+        // and a bought grant 686 spent last month read as untouched.
+        let raw = r#"{"total_usage_cents":300,"credit_grants":[
+            {"type":"purchased","amount_cents":2000,"remaining_cents":1314,
+             "amount_applied_prior_period_cents":686},
+            {"type":"recurring","amount_cents":1000}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
+        // This period's 300 took nothing from the bought grant, so it is
+        // spread over the one that did not say.
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 300.0 });
         assert_eq!(c.uncovered, 0.0);
     }
 

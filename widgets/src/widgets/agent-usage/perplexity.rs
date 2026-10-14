@@ -32,7 +32,8 @@ use chrono::{DateTime, Local, Months, Utc};
 use opscope_core as tc;
 
 use crate::parse::{parse_perplexity_credits, parse_perplexity_plan, parse_perplexity_quota,
-    parse_perplexity_subscription, PerplexitySubscription, PerplexityCredits, PerplexityQuota};
+    parse_perplexity_subscription, PerplexitySubscription, PerplexityCredits, PerplexityQuota,
+    PerplexityTopup};
 use crate::shared::*;
 use crate::*;
 
@@ -493,23 +494,27 @@ fn credit_rows_with_plots(
     // No weekly bar when the quota endpoint did not answer one: a plan
     // without a weekly limit (Max, it may be) is not something gone wrong.
     // But credits that failed beside a quota that answered are said, or the
-    // weekly bar alone would read as the whole account.
-    let Some(c) = c else {
-        let (why, colour) = match &d.credits {
-            Some(_) => (
-                "credits · Perplexity answered, and published none for this account.".to_string(),
-                &p.dim,
-            ),
-            None if !d.why.is_empty() => (format!("credits not read · {}", d.why), &p.warn),
-            None => ("credits not read · no reading from Perplexity yet.".to_string(), &p.warn),
-        };
-        rows.push(String::new());
-        rows.extend(note(&why, colour, w));
-        return rows;
-    };
-    rows.extend(grant_rows(c, w, p));
+    // weekly bar alone would read as the whole account. Each answer stands
+    // alone, so the billing a subscription answered is drawn either way.
+    match c {
+        Some(c) if c.is_empty() => {
+            let text = "Perplexity answered, and published no credits for this account.";
+            rows.extend(note(text, &p.dim, w));
+        }
+        Some(c) => rows.extend(grant_rows(c, w, p)),
+        None => {
+            let why = match d.why.as_str() {
+                "" => "credits not read · no reading from Perplexity yet.".to_string(),
+                why => format!("credits not read · {why}"),
+            };
+            rows.push(String::new());
+            rows.extend(note(&why, &p.warn, w));
+        }
+    }
     rows.extend(billing_rows(c, d.subscription.as_ref(), w, p));
-    rows.extend(credit_notes(c, w, p));
+    if let Some(c) = c {
+        rows.extend(credit_notes(c, w, p));
+    }
     rows
 }
 
@@ -677,7 +682,7 @@ fn grant_rows(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
 
 /// What refills the balance and what caps it, as the account has them set.
 fn billing_rows(
-    c: &PerplexityCredits,
+    c: Option<&PerplexityCredits>,
     sub: Option<&PerplexitySubscription>,
     w: usize,
     p: &Palette,
@@ -699,24 +704,30 @@ fn billing_rows(
         let colour = if sub.cancels.is_some() { &p.warn } else { &p.txt };
         body.extend(field_rows("plan", &text, colour, w, p));
     }
-    // On with a part missing stays on: reading it as off would reverse
-    // what the account is set to.
-    let topup = c.auto_topup.map(|topup| match topup {
-        (Some(adds), Some(under)) => {
-            format!("on · adds {} when the balance drops under {}", cents(adds), cents(under))
+    if let Some(c) = c {
+        // On with a part missing stays on, and a setting the answer left out is
+        // not drawn: reading either as off would misstate what buys credits.
+        match c.auto_topup {
+            Some(PerplexityTopup::On { adds: Some(adds), under: Some(under) }) => {
+                let text =
+                    format!("on · adds {} when the balance drops under {}", cents(adds), cents(under));
+                body.extend(field_rows("auto top-up", &text, &p.txt, w, p));
+            }
+            Some(PerplexityTopup::On { adds, under }) => {
+                let adds = adds.map(|a| format!(" · adds {}", cents(a))).unwrap_or_default();
+                let under = under.map(|u| format!(" · under {}", cents(u))).unwrap_or_default();
+                let text = format!("on{adds}{under} · Perplexity did not say all of how it tops up");
+                body.extend(field_rows("auto top-up", &text, &p.txt, w, p));
+            }
+            Some(PerplexityTopup::Off) => body.extend(field_rows("auto top-up", "off", &p.dim, w, p)),
+            None => {}
         }
-        (adds, under) => {
-            let adds = adds.map(|a| format!(" · adds {}", cents(a))).unwrap_or_default();
-            let under = under.map(|u| format!(" · under {}", cents(u))).unwrap_or_default();
-            format!("on{adds}{under} · Perplexity did not say all of how it tops up")
+        if let Some(limit) = c.spending_limit {
+            body.extend(field_rows("spending limit", &cents(limit), &p.txt, w, p));
         }
-    });
-    match topup {
-        Some(text) => body.extend(field_rows("auto top-up", &text, &p.txt, w, p)),
-        None => body.extend(field_rows("auto top-up", "off", &p.dim, w, p)),
     }
-    if let Some(limit) = c.spending_limit {
-        body.extend(field_rows("spending limit", &cents(limit), &p.txt, w, p));
+    if body.is_empty() {
+        return body;
     }
     let mut rows = vec![String::new(), heading("BILLING", "", w, p)];
     rows.extend(body);
@@ -772,7 +783,9 @@ pub fn tab_with_plots(
         rows.extend(token_warning(d, w, p));
         return rows;
     }
-    let credits = d.credits.as_ref().filter(|c| !c.is_empty());
+    // An answer with no credit pools still has a balance and billing to
+    // draw, so it is not filtered out here; it simply has no bars.
+    let credits = d.credits.as_ref();
     match credits {
         _ if credits.is_some() || d.quota.is_some() => {
             let mut rows = credit_rows_with_plots(d, credits, w, p, plots);
@@ -999,6 +1012,34 @@ mod tests {
     }
 
     #[test]
+    fn billing_and_an_empty_balance_are_drawn_when_credits_give_no_bars() {
+        // A failed credits request, or an answer with no pools, took the
+        // billing the subscription had answered down with it.
+        let sub = Some(PerplexitySubscription {
+            interval: Some("monthly".into()),
+            next_bill: Some(now() + 86400.0 * 10.0),
+            cancels: None,
+        });
+        let failed = Data {
+            quota: Some(PerplexityQuota { pct: 3.0, resets: None }),
+            why: "credits refused (500)".into(),
+            subscription: sub.clone(),
+            source: "config",
+            ..Data::default()
+        };
+        let mut empty = Data::answered(r#"{"credit_grants":[],"total_usage_cents":0,"balance_cents":0}"#);
+        empty.subscription = sub;
+        for d in [&failed, &empty] {
+            let rows = plain(&tab(d, 100, 30, &Config::default(), &palette()));
+            let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("BILLING") && words.contains("monthly · next bill"), "{rows}");
+        }
+        let rows = plain(&tab(&empty, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("0 credits left") && words.contains("published no credits"), "{rows}");
+    }
+
+    #[test]
     fn auto_top_up_that_is_on_stays_on_when_its_amounts_are_missing() {
         // Missing amounts collapsed the setting to off, the opposite of it.
         let d = Data::answered(
@@ -1006,11 +1047,20 @@ mod tests {
                 "auto_topup_amount_cents":2000,
                 "credit_grants":[{"type":"purchased","amount_cents":100,"remaining_cents":100}]}"#,
         );
-        assert_eq!(d.credits.as_ref().unwrap().auto_topup, Some((Some(2000.0), None)));
+        assert_eq!(
+            d.credits.as_ref().unwrap().auto_topup,
+            Some(PerplexityTopup::On { adds: Some(2000.0), under: None })
+        );
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("auto top-up on · adds 2,000 credits"), "{rows}");
         assert!(!words.contains("auto top-up off"), "{rows}");
+        // An answer that does not say is not drawn as off either.
+        let d = Data::answered(r#"{"total_usage_cents":0,"credit_grants":[
+            {"type":"purchased","amount_cents":100,"remaining_cents":100}]}"#);
+        assert_eq!(d.credits.as_ref().unwrap().auto_topup, None);
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("auto top-up"), "{rows}");
     }
 
     #[test]
