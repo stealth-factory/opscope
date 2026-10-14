@@ -147,13 +147,32 @@ frame saves 17% at level 6 for similar time. The multi-trace table above
 shows the larger CPU tradeoff; these results do not promise the same saving
 for every chart. Shared-memory uploads bypass compression entirely.
 
-The first implementation uses an 8×16 pixel raster per cell, scaled to the
-placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
-does not depend on potentially unavailable cell-pixel-size reports. Up to 32
-visible plots, each at most 20,000 cells, use images; additional or larger plots
-use text to bound image memory/transport costs. It is a raster chart renderer,
-not a general replacement for terminal text, native scaled fonts or animation
-frames in the Kitty protocol.
+Charts rasterise at the terminal's reported cell size. During the 800 ms
+negotiation core sends `CSI 16 t` and reads `CSI 6 ; height ; width t`. A
+resize (`SIGWINCH`, including a Kitty font change) only records that the
+next frame should ask again. That frame sends `CSI 16 t` on the normal
+output path, before its image bytes, and only while this process owns the
+terminal, so the query cannot split a Kitty chunk or land in a child's
+session. `restore_screen` drops a pending query before the handoff. Until
+that reply, and when the numbers are missing, zero, or not a
+character cell (outside 4×8..=48×96, or an aspect outside 5:4..=3:1), core
+uses the pixel fields of `TIOCGWINSZ` divided by the column and row counts.
+If those are missing, zero, or not a character cell either, the raster is
+8×16 rather than the size from before the resize. That is what Braille's
+2×4 dots are compared with and what every in-process test measures. A
+reply that already matched this resize is left as reported. The terminal
+still places the image in the same cell box; only the raster is finer, so
+a HiDPI cell is not an 8×16 image scaled up after the stroke was drawn. A
+reply answers the latest query only while it is the only one in flight.
+If none arrives for a second and a half, that count is dropped so a lost
+reply cannot reject the next one.
+
+A larger cell lowers the per-plot cell cap. At 8×16 a plot may be 20,000
+cells (10,240,000 uncompressed RGBA bytes). At 20×40 the cap is 3,200 cells
+and the byte product is the same. Thirty-two plots at that cap (327,680,000 raw RGBA bytes) is the frame
+ceiling, unchanged from the fixed raster. Bigger or extra plots stay text.
+Cell layout is unchanged. It is a raster chart renderer, not a general
+replacement for terminal text, native scaled fonts or animation frames.
 
 ## Widget API
 
@@ -173,11 +192,34 @@ let chart = tc::LineChart {
     }],
     focus: None,
 };
-let plot = tc::Plot::new(chart_x, chart_y, chart_width, chart_height, chart);
+let plot = tc::Plot::new(chart_x, chart_y, chart_width, chart_height, chart).under_text();
 let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
     .into_iter().collect();
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
+
+`Plot::under_text()` is only for line charts. In a Kitty graphics session the
+image is placed at `z=-1`: under the glyphs, and above cells that have a
+background colour. A lower z, below `-1073741824`, would also sit under that
+background, so an opaque selected-row tint would cover the stroke. The widget
+draws labels and the current value in the chart cells. The row a label shares
+with the stroke is `line_row`: the pixel y the chart rounds against, then the
+cell that pixel falls in. Rounding against the cell count instead lands the
+label on a different row. Pixel mode leaves the labels there. Braille and text
+mode still replace those cells with the chart, so the
+fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
+meters or stacked bars: text over a solid fill does not stay readable, and it
+would fail the contrast rule.
+
+The placement is a second graphics command (`a=p` with the same placement id)
+after `image()` transmits the pixels at the default z. `image()` is unchanged.
+Terminals without Kitty graphics never see the command, and the cells are
+drawn as Braille exactly as before.
+
+This was checked by the PTY fixture, which asserts the `z=-1` placement and
+that the label cell is not blanked. Kitty, Ghostty and WezTerm were not
+available in the build environment, so the z-index under a tinted cell was
+not watched on a real terminal.
 
 For discrete data, use the other `Plot` constructors with the same viewport and
 drawing path:
@@ -199,13 +241,15 @@ let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
 Claude, Codex and Grok calendars all use the same gapless core heatmap renderer:
-solid tiles fill each entire 8×16 pixel cell, matching the solid text blocks.
+solid tiles fill each entire cell (8×16 pixels only when neither a cell-size
+reply nor valid window pixel fields supply a size), matching the solid text blocks.
 Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
-Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
-and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
+Kitty meters fill seven eighths of the cell height (14 of 16 pixels at the
+fallback size), with a gap above and below, so quota bars remain readable
+alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. `Plot::ramped_meter` takes a colour per filled
 cell, so a ramp the text bar draws is painted in pixels too rather than
@@ -273,9 +317,9 @@ and intentional text presentation, not unimplemented widget migrations.
 
 | Widget | Implemented in this change | Further useful visual work / reason to retain text |
 | --- | --- | --- |
-| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved | Measure real-terminal readability with many overlapping targets |
+| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved. The focused target's last plotted bucket, or the only target's, sits at the end of its line in pixel mode | Measure real-terminal readability with many overlapping targets |
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
-| `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank | Profile busy process views with several changing plots |
+| `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
 | `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
 | `linear` | Pixel created/completed bars, cycle burnup, board/detail progress and milestone meters, and state distributions | Preserve exact scope/percentage labels; validate dense project details |
@@ -287,8 +331,8 @@ and intentional text presentation, not unimplemented widget migrations.
 | `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
 | `clocks` | Pixel countdown and pomodoro progress/overtime bars | Keep clock digits as text; native scaled text needs separate capability negotiation |
 | `months` | Synchronized text presentation | Date cells are discrete and benefit from stable text; no reason to animate static dates |
-| `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels | Keep the server table and unmeasured-history dots as text |
-| `tailnet` | Shared pixel/Braille receive/send history in machine details | Compact board sparklines remain efficient text; exact current rates stay beside traces |
+| `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
+| `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## Verification and compatibility limits
@@ -315,9 +359,12 @@ does not unlink, because that call is not async-signal-safe), cached
 frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
 signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
-Ctrl-Z or Ctrl-\, and pushed again after resume. Unit tests
+Ctrl-Z or Ctrl-\, and pushed again after resume. Cell-size checks verify reported dimensions,
+window-pixel fallback, invalid/zero reports and a barren resize returning to
+8×16; cell queries stay outside image chunks. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
-markers, quota references, cropping, compression/chunking and input isolation.
+markers, quota references, cropping, compression/chunking and input isolation,
+plus the cell-size parser and the byte cap.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
 PTY checks exercise both its pixel and text paths. These tests verify emitted
 bytes and state, not a terminal
@@ -417,6 +464,11 @@ Startup sends an XTGETTCAP query for `Smulx` and `Setulc` with the graphics and 
 
 The PTY fixture checks the query, a positive reply (curly, dashed, and the coloured underline around the same three words) and a negative reply (a plain underline, same words). That is a byte check, not a Kitty window. Visual confirmation in Kitty, SSH, Herdr, Luvus and tmux is still outstanding.
 
+Cell size is the xterm `CSI 16 t` report. It is separate from the keyboard
+protocol above and from font sizing. Legacy keyboard bindings remain the
+input contract. A HiDPI Kitty display has not been checked by eye; the PTY
+fixture checks the bytes, not placement on a real screen.
+
 ### Input responsiveness
 
 Interactive widget loops use `Keyboard::wait(timeout)` between frames. It waits
@@ -425,3 +477,10 @@ replies. The timeout retains the idle refresh cadence, but input no longer waits
 behind an unconditional 200–400 ms sleep. Settings uses the same helper; matrix
 retains its animation pacing. Buffered partial escapes use a short bounded wait.
 Unchanged Kitty plots remain cached when only the selected row changes.
+
+Cell-size replies carry no request ID. Resume keeps unread queries accounted
+for. A missing or ambiguous reply triggers a retry; after expired accounting,
+the first apparent response is quarantined and a follow-up query confirms the
+current dimensions. Until then, charts use the window pixel fields or the
+8×16 fallback rather than accepting a delayed old report. Silent terminals
+retry at the 1.5-second query timeout, without blocking input or drawing.

@@ -75,6 +75,9 @@ pub struct Plot {
     fill: Option<Fill>,
     first_row: usize,
     visible_rows: usize,
+    /// Place the image under terminal text. Line charts only: a solid fill
+    /// would hide the glyphs and fail the contrast rule.
+    under_text: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +127,20 @@ impl Plot {
             fill: None,
             first_row: 0,
             visible_rows: height,
+            under_text: false,
         }
+    }
+
+    /// Draw this line chart under the cell text instead of blanking it.
+    ///
+    /// Pixel mode keeps the glyphs and the selected-row tint; Braille and
+    /// text mode still paint the chart the way they do today. Solid fills
+    /// ignore it: text over a heatmap or a meter does not stay readable.
+    pub fn under_text(mut self) -> Self {
+        if self.fill.is_none() {
+            self.under_text = true;
+        }
+        self
     }
 
     /// Discrete columns, one terminal cell per bucket. Both renderers share
@@ -533,6 +549,46 @@ fn braille_with_baseline(
     grid
 }
 
+/// Pixel row of a bottom-to-top chart fraction inside a bitmap `height` pixels tall.
+///
+/// Both renderers round against this height minus one. A label that rounds
+/// against the cell count instead misses the stroke.
+fn pixel_y(value: f64, height: usize) -> usize {
+    ((1.0 - value.clamp(0.0, 1.0)) * (height - 1) as f64).round() as usize
+}
+
+/// Terminal row of a bottom-to-top chart fraction.
+///
+/// The stroke is placed in a bitmap `rows * cell_h` pixels tall, where
+/// `cell_h` is the terminal's cell height, and that pixel falls into a
+/// cell. A four-row chart at 20% of peak ends on row 3 when the cell is
+/// 16 pixels; rounding against `rows - 1` puts a label on row 2.
+pub fn line_row(value: f64, rows: usize) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    let (_, cell_h) = super::terminal::cell_size();
+    let cell_h = cell_h.max(1);
+    pixel_y(value, rows.saturating_mul(cell_h)) / cell_h
+}
+
+/// Terminal column of a left-to-right chart fraction.
+///
+/// The stroke rounds against `cols * cell_w - 1` pixels, the same width the
+/// line raster uses, and that pixel falls into a cell. A label that assumes
+/// the point is the rightmost cell sits past the stroke when later buckets
+/// are gaps.
+pub fn line_col(position: f64, cols: usize) -> usize {
+    if cols == 0 {
+        return 0;
+    }
+    let (cell_w, _) = super::terminal::cell_size();
+    let cell_w = cell_w.max(1);
+    let width = cols.saturating_mul(cell_w);
+    let x = (position.clamp(0.0, 1.0) * width.saturating_sub(1) as f64).round() as usize;
+    x / cell_w
+}
+
 fn segments(
     values: &[Option<f64>],
     slots: usize,
@@ -566,7 +622,7 @@ fn segments(
                     - ((age as f64 * (w - 1) as f64) / slots.saturating_sub(1).max(1) as f64)
                         .round() as usize
             };
-            let y = ((1.0 - v.clamp(0.0, 1.0)) * (h - 1) as f64).round() as usize;
+            let y = pixel_y(v, h);
             Some((x, y))
         });
         let idle = baseline.is_some()
@@ -605,8 +661,10 @@ fn raster(a: (usize, usize), b: (usize, usize), mut dot: impl FnMut(usize, usize
 }
 
 pub(crate) const MAX_PLOTS: usize = 32;
-const CELL_W: usize = 8;
-const CELL_H: usize = 16;
+#[cfg(test)]
+const CELL_W: usize = super::terminal::FALLBACK_CELL_W;
+#[cfg(test)]
+const CELL_H: usize = super::terminal::FALLBACK_CELL_H;
 static LIVE: AtomicU32 = AtomicU32::new(0);
 static CACHE: Mutex<Vec<CachedPlot>> = Mutex::new(Vec::new());
 // At most 8 MiB across all slots. Larger crops compare by re-rasterizing
@@ -616,18 +674,25 @@ const MAX_CACHED_RGBA: usize = 256 * 1024;
 struct CachedPlot {
     plot: Plot,
     cols: usize,
+    cell_size: (usize, usize),
     rgba: Option<Vec<u8>>,
 }
 
 impl CachedPlot {
-    fn same_pixels(&self, plot: &Plot, cols: usize, rgba: &[u8]) -> bool {
+    fn same_region(&self, plot: &Plot, cols: usize, cell_size: (usize, usize)) -> bool {
         self.plot.x == plot.x
             && self.plot.y == plot.y
             && self.cols == cols
+            && self.cell_size == cell_size
+            && self.plot.first_row == plot.first_row
             && self.plot.visible_rows == plot.visible_rows
+    }
+
+    fn same_pixels(&self, plot: &Plot, cols: usize, cell_size: (usize, usize), rgba: &[u8]) -> bool {
+        self.same_region(plot, cols, cell_size)
             && match &self.rgba {
                 Some(previous) => previous == rgba,
-                None => raster_pixels(&self.plot, self.cols) == rgba,
+                None => raster_pixels(&self.plot, self.cols, cell_size.0, cell_size.1) == rgba,
             }
     }
 }
@@ -731,7 +796,7 @@ pub(crate) fn compose(
         let cols = plot.width.min(w - plot.x);
         let use_pixels = kitty
             && images.len() < MAX_PLOTS
-            && plot.width.saturating_mul(plot.height) <= 20_000
+            && plot.width.saturating_mul(plot.height) <= super::terminal::max_plot_cells()
             && plot
                 .fill
                 .as_ref()
@@ -742,7 +807,15 @@ pub(crate) fn compose(
         } else {
             plot.chart.cells(plot.width, plot.height)
         };
+        // A line chart under the text keeps whatever the widget drew there:
+        // an axis value, a rate, the tint. Blanking those cells is what
+        // puts the image in a hole beside the label. Braille and solid
+        // fills still replace the cells, so text mode does not move.
+        let keep_text = use_pixels && plot.under_text;
         for row in 0..plot.visible_rows {
+            if keep_text {
+                continue;
+            }
             let content = if use_pixels {
                 " ".repeat(cols)
             } else if let Some(fill) = &plot.fill {
@@ -770,10 +843,15 @@ pub(crate) fn compose(
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let mut before = String::new();
     let mut after = String::new();
+    // One read for the frame: cache comparison, rasterization and upload
+    // geometry must agree, including when a font-size change arrives.
+    let (cell_w, cell_h) = super::terminal::cell_size();
     for slot in 0..cache.len().max(images.len()) {
         let plot = images.get(slot);
         let cols = plot.map_or(0, |p| p.width.min(w - p.x));
-        if !lost && cache.get(slot).is_some_and(|c| Some(&c.plot) == plot && c.cols == cols) {
+        if !lost && cache.get(slot).is_some_and(|c| {
+            Some(&c.plot) == plot && c.cols == cols && c.cell_size == (cell_w, cell_h)
+        }) {
             // The periodic whole frame repairs text another process may
             // have scrolled or covered. The terminal still holds the image,
             // so only its placement is put back, not the pixels.
@@ -782,16 +860,20 @@ pub(crate) fn compose(
             }
             continue;
         }
-        let rgba = plot.map(|p| raster_pixels(p, cols));
+        let rgba = plot.map(|p| raster_pixels(p, cols, cell_w, cell_h));
         if !lost {
             if let (Some(cached), Some(plot), Some(rgba)) =
                 (cache.get_mut(slot), plot, rgba.as_deref())
             {
                 // Time-dependent values can change without changing a pixel.
                 // Upload acknowledgements must not start a redraw/upload loop.
-                if cached.same_pixels(plot, cols, rgba) {
+                if cached.same_pixels(plot, cols, (cell_w, cell_h), rgba) {
+                    // Pixels do not record z. Turning under_text on or off
+                    // has to re-place this id, or the stroke stays over the
+                    // label until the next heal.
+                    let z_changed = cached.plot.under_text != plot.under_text;
                     cached.plot = plot.clone();
-                    if heal {
+                    if heal || z_changed {
                         after.push_str(&place(plot, slot, w));
                     }
                     continue;
@@ -799,10 +881,12 @@ pub(crate) fn compose(
             }
         }
         let mut replaced = None;
-        if cache.get(slot).is_some() {
-            // a=T replaces this image ID itself. Deleting it first exposes a
-            // blank interval while the replacement pixels are transmitted.
-            if lost || plot.is_none() {
+        if let Some(cached) = cache.get(slot) {
+            // Clear the old region before text is repainted when scrolling
+            // moves/crops it. Some multiplexers retain old placements on a=T.
+            // Updates inside the same region still replace without a blank
+            // interval, and identical pixels never reach this path.
+            if lost || plot.is_none_or(|p| !cached.same_region(p, cols, (cell_w, cell_h))) {
                 before.push_str(&delete(slot));
             } else {
                 replaced = Some(PLACEMENTS[slot].load(Ordering::Acquire));
@@ -812,15 +896,20 @@ pub(crate) fn compose(
         if let (Some(plot), Some(rgba)) = (plot, rgba) {
             // Set before writing: a signal during transmission must clean it up.
             LIVE.fetch_or(1 << slot, Ordering::Release);
-            after.push_str(&image_rgba(plot, slot, w, &rgba));
-            // Only once the new frame is placed, so nothing blinks. The old
-            // placement would otherwise show through every transparent pixel.
+            after.push_str(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba));
+            // image_rgba() places at the default z, above the text. The same
+            // placement id is put back underneath, in this write, so a
+            // frame never shows the chart covering its labels.
+            if plot.under_text {
+                after.push_str(&place(plot, slot, w));
+            }
             if let Some(old) = replaced {
                 after.push_str(&delete_placement(slot, old));
             }
             let cached = CachedPlot {
                 plot: plot.clone(),
                 cols,
+                cell_size: (cell_w, cell_h),
                 rgba: (rgba.len() <= MAX_CACHED_RGBA).then_some(rgba),
             };
             if let Some(previous) = cache.get_mut(slot) {
@@ -929,34 +1018,39 @@ fn alloc_bytes(n: usize) -> Vec<u8> {
 /// Pixel origin and size of the visible crop. Geometry stays in the full
 /// chart; only this rectangle is allocated and stroked. Columns are the
 /// left-hand pane clip, rows the scrolled window.
-fn crop_px(plot: &Plot, cols: usize) -> (usize, usize, usize, usize) {
+fn crop_px(
+    plot: &Plot,
+    cols: usize,
+    cell_w: usize,
+    cell_h: usize,
+) -> (usize, usize, usize, usize) {
     let cols = cols.min(plot.width);
     let row0 = plot.first_row.min(plot.height);
     let rows = plot.visible_rows.min(plot.height - row0);
-    (0, row0 * CELL_H, cols * CELL_W, rows * CELL_H)
+    (0, row0 * cell_h, cols * cell_w, rows * cell_h)
 }
 
 #[cfg(test)]
 fn pixels(plot: &Plot) -> Vec<u8> {
-    raster_pixels(plot, plot.width)
+    raster_pixels(plot, plot.width, CELL_W, CELL_H)
 }
 
-fn raster_pixels(plot: &Plot, cols: usize) -> Vec<u8> {
-    let (x0, y0, w, h) = crop_px(plot, cols);
+fn raster_pixels(plot: &Plot, cols: usize, cell_w: usize, cell_h: usize) -> Vec<u8> {
+    let (x0, y0, w, h) = crop_px(plot, cols, cell_w, cell_h);
     if w == 0 || h == 0 {
         return Vec::new();
     }
-    let full_w = plot.width * CELL_W;
-    let full_h = plot.height * CELL_H;
+    let full_w = plot.width * cell_w;
+    let full_h = plot.height * cell_h;
     let mut pixels = alloc_bytes(w * h * 4);
     if let Some(fill) = &plot.fill {
         for (index, rect) in fill.rects.iter().enumerate() {
             let colour = rgb(&rect.colour).unwrap_or([180, 200, 220]);
             let end = fill.gradients.iter().find(|(i, _)| *i == index).map(|(_, end)| *end);
-            let left = rect.x * CELL_W as f64;
-            let top = rect.y * CELL_H as f64;
-            let right = left + rect.width * CELL_W as f64;
-            let bottom = top + rect.height * CELL_H as f64;
+            let left = rect.x * cell_w as f64;
+            let top = rect.y * cell_h as f64;
+            let right = left + rect.width * cell_w as f64;
+            let bottom = top + rect.height * cell_h as f64;
             let y_start = (top.floor().max(0.0) as usize).max(y0);
             let y_end = (bottom.ceil() as usize).min(full_h).min(y0 + h);
             let x_start = (left.floor().max(0.0) as usize).max(x0);
@@ -1066,14 +1160,19 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
 /// Re-place an image the terminal already holds, at the same cell and size.
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
+    // z=-1 is under the glyphs and above cells that have a background.
+    // Anything below -1073741824 is also under that background, so an
+    // opaque selected-row tint would cover the stroke.
+    let z = if plot.under_text { ",z=-1" } else { "" };
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1{z}\x1b\\",
         plot.y + 1,
         plot.x + 1,
         image_id(slot),
         PLACEMENTS[slot].load(Ordering::Acquire),
         plot.width.min(pane_width - plot.x),
-        plot.visible_rows
+        plot.visible_rows,
+        z = z,
     )
 }
 
@@ -1082,9 +1181,16 @@ fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
 /// 9 saves little more at triple the time. See `docs/terminal-rendering.md`.
 const ZLIB_LEVEL: u8 = 6;
 
-fn image_rgba(plot: &Plot, slot: usize, pane_width: usize, rgba: &[u8]) -> String {
+fn image_rgba(
+    plot: &Plot,
+    slot: usize,
+    pane_width: usize,
+    cell_w: usize,
+    cell_h: usize,
+    rgba: &[u8],
+) -> String {
     let cols = plot.width.min(pane_width.saturating_sub(plot.x));
-    let (_, _, w, h) = crop_px(plot, cols);
+    let (_, _, w, h) = crop_px(plot, cols, cell_w, cell_h);
     // Filled plots are RGB only when the crop is fully opaque. Gaps,
     // fractional edges and the meter inset need alpha, and line charts
     // always do: their strokes are partial coverage.
@@ -1101,7 +1207,7 @@ fn image_rgba(plot: &Plot, slot: usize, pane_width: usize, rgba: &[u8]) -> Strin
     };
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
     let id = image_id(slot);
-    let rows = h / CELL_H;
+    let rows = h / cell_h;
     let placement = loop {
         let n = PLACEMENT_SEQ.fetch_add(1, Ordering::Relaxed);
         if n != 0 { break n; }
@@ -1148,9 +1254,9 @@ pub(crate) fn transmit_pixels(pixels: &[u8], format: u8, keys: &str, id: u32, pl
 }
 
 #[cfg(test)]
-fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
+fn image(plot: &Plot, slot: usize, pane_width: usize, cell_w: usize, cell_h: usize) -> String {
     let cols = plot.width.min(pane_width.saturating_sub(plot.x));
-    image_rgba(plot, slot, pane_width, &raster_pixels(plot, cols))
+    image_rgba(plot, slot, pane_width, cell_w, cell_h, &raster_pixels(plot, cols, cell_w, cell_h))
 }
 
 /// Render the same chart through either transport for pixel and CPU checks.
@@ -1167,12 +1273,12 @@ pub(crate) fn direct_chart_command(cols: usize, rows: usize) -> String {
         }],
         focus: None,
     };
-    image(&Plot::new(2, 1, cols, rows, chart), 3, cols + 4)
+    image(&Plot::new(2, 1, cols, rows, chart), 3, cols + 4, CELL_W, CELL_H)
 }
 
 #[cfg(test)]
 pub(crate) fn cropped_chart_command(plot: &Plot, pane_width: usize) -> String {
-    image(plot, 3, pane_width)
+    image(plot, 3, pane_width, CELL_W, CELL_H)
 }
 
 #[cfg(test)]
@@ -1624,7 +1730,7 @@ mod tests {
     fn inline_images_are_compressed_chunked_and_do_not_move_the_cursor() {
         let _transport = super::super::shm::guard();
         let p = Plot::new(8, 1, 20, 5, chart(vec![Some(0.0), Some(1.0)]));
-        let command = image(&p, 0, 80);
+        let command = image(&p, 0, 80, CELL_W, CELL_H);
         assert!(command.contains("f=32,t=d,o=z,s=160,v=80"));
         assert!(command.contains("c=20,r=5,C=1,q=0"));
         let payload = command.split_once(';').unwrap().1;
@@ -1678,7 +1784,7 @@ mod tests {
             let first = meter(0.501);
             let next = meter(0.501 + 1e-12);
             assert_ne!(first, next);
-            assert_eq!(raster_pixels(&first, width - 6), raster_pixels(&next, width - 6));
+            assert_eq!(raster_pixels(&first, width - 6, CELL_W, CELL_H), raster_pixels(&next, width - 6, CELL_W, CELL_H));
             let (_, _, after) = compose(&rows, &[first], width, 8, true, true, false);
             assert!(after.contains("a=T"));
             let placement = PLACEMENTS[0].load(Ordering::Acquire);
@@ -1694,10 +1800,33 @@ mod tests {
             let mut moved = meter(0.75);
             moved.x += 1;
             let (_, before, after) = compose(&rows, &[moved], width, 8, true, false, false);
-            assert!(before.is_empty() && after.contains("a=T"));
+            assert!(before.contains("a=d") && after.contains("a=T"));
             let (text, _, _) = compose(&rows, &[next], width, 8, false, false, false);
             let (same_text, _, _) = compose(&rows, &[meter(0.501)], width, 8, false, false, false);
             assert_eq!(text, same_text);
+        }
+        cleanup();
+    }
+
+    #[test]
+    fn image_scroll_crops_clear_the_previous_region_before_replacement() {
+        let _transport = super::super::shm::guard();
+        let base = Plot::new(2, 3, 12, 8, chart(vec![Some(0.2), Some(0.8)]));
+        let rows = vec!["protected title".into()];
+        for scroll in [0, 1, 3, 4, 6, 0] {
+            let original = base.clone().in_viewport(0, 1, 10).unwrap();
+            compose(&rows, &[original], 40, 12, true, true, false);
+            let next = base.clone().in_viewport(scroll, 1, 10).unwrap();
+            let (_, before, after) = compose(&rows, std::slice::from_ref(&next), 40, 12, true, false, false);
+            if scroll == 0 {
+                assert!(before.is_empty() && after.is_empty());
+            } else {
+                assert!(before.contains("a=d,d=I"), "scroll {scroll} left the old region alive");
+                assert!(after.contains("a=T"));
+            }
+            // A steady frame does not delete or upload anything.
+            let (_, before, after) = compose(&rows, &[next], 40, 12, true, false, false);
+            assert!(before.is_empty() && after.is_empty());
         }
         cleanup();
     }
@@ -1728,8 +1857,9 @@ mod tests {
         // A moved chart leaves nothing at its old place either.
         let mut moved = bars(0.2);
         moved.y += 1;
-        let (_, _, after) = compose(&rows, &[moved], 40, 8, true, false, false);
-        assert!(after.contains(&delete_placement(0, second)));
+        let (_, before, after) = compose(&rows, &[moved], 40, 8, true, false, false);
+        assert!(before.contains(&delete(0)));
+        assert!(after.contains("a=T"));
         cleanup();
     }
 
@@ -1738,16 +1868,17 @@ mod tests {
         let p = Plot::new(2, 1, 12, 4, chart(vec![Some(0.2), Some(0.8)]));
         let mut next = p.clone();
         next.chart.traces[0].values[0] = Some(0.2 + 1e-12);
-        let rgba = raster_pixels(&p, 12);
-        let next_rgba = raster_pixels(&next, 12);
+        let rgba = raster_pixels(&p, 12, CELL_W, CELL_H);
+        let next_rgba = raster_pixels(&next, 12, CELL_W, CELL_H);
         assert_ne!(p, next);
         for buffer in [Some(rgba), None] {
-            let cached = CachedPlot { plot: p.clone(), cols: 12, rgba: buffer };
-            assert!(cached.same_pixels(&next, 12, &next_rgba));
-            assert!(!cached.same_pixels(&next, 11, &next_rgba));
+            let cached = CachedPlot { plot: p.clone(), cols: 12, cell_size: (CELL_W, CELL_H), rgba: buffer };
+            assert!(cached.same_pixels(&next, 12, (CELL_W, CELL_H), &next_rgba));
+            assert!(!cached.same_pixels(&next, 11, (CELL_W, CELL_H), &next_rgba));
+            assert!(!cached.same_pixels(&next, 12, (20, 40), &next_rgba));
             let mut moved = next.clone();
             moved.y += 1;
-            assert!(!cached.same_pixels(&moved, 12, &next_rgba));
+            assert!(!cached.same_pixels(&moved, 12, (CELL_W, CELL_H), &next_rgba));
         }
     }
 
@@ -1798,6 +1929,27 @@ mod tests {
     }
 
     #[test]
+    fn an_under_text_change_replaces_the_placement_without_resending() {
+        let _transport = super::super::shm::guard();
+        let rows = vec!["title".into(), "keep".into()];
+        let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        let (_, _, first) = compose(&rows, &[plain.clone()], 40, 6, true, true, false);
+        assert!(first.contains("a=T"));
+        assert!(graphics_keys(&first).iter().all(|keys| !keys.contains("z=")));
+        let over = plain.clone().under_text();
+        let (_, _, placed) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(!placed.contains("a=T"), "{placed}");
+        assert!(placed.contains("a=p") && placed.contains("z=-1"), "{placed}");
+        let (_, _, quiet) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(quiet.is_empty(), "{quiet}");
+        let (_, _, back) = compose(&rows, &[plain], 40, 6, true, false, false);
+        assert!(!back.contains("a=T"), "{back}");
+        assert!(back.contains("a=p") && !back.contains("z="), "{back}");
+        let (_, before, after) = compose(&rows, &[], 40, 6, true, false, false);
+        assert!(before.contains("a=d") && after.is_empty());
+    }
+
+    #[test]
     fn multi_chunk_images_round_trip_with_exact_cropped_pixels() {
         let _transport = super::super::shm::guard();
         let mut c = chart(Vec::new());
@@ -1818,7 +1970,7 @@ mod tests {
             .collect();
         let base = Plot::new(3, 2, 100, 10, c);
         let p = base.clone().in_viewport(3, 1, 5).unwrap();
-        let command = image(&p, 0, 70);
+        let command = image(&p, 0, 70, CELL_W, CELL_H);
         let chunks: Vec<_> = command.split("\x1b_G").skip(1).collect();
         assert!(chunks.len() > 1);
         let mut payload = String::new();
@@ -1874,7 +2026,7 @@ mod tests {
         // One raster plus one coverage buffer per trace, both the crop.
         assert_eq!(cropped_bytes * p.height, full_bytes * scrolled.visible_rows);
         assert_eq!(cropped_bytes, cropped.len() * (1 + p.chart.traces.len()));
-        let pane = raster_pixels(&scrolled, 40);
+        let pane = raster_pixels(&scrolled, 40, CELL_W, CELL_H);
         assert_eq!(pane.len(), scrolled.visible_rows * CELL_H * 40 * CELL_W * 4);
         let row = 100 * CELL_W * 4;
         let cols = 40 * CELL_W * 4;
@@ -1890,7 +2042,7 @@ mod tests {
         let _transport = super::super::shm::guard();
         let colour = super::super::rgb(90, 210, 140);
         let solid = Plot::heatmap_levels(0, 0, &[vec![Some((colour.clone(), 4)); 4]], &colour);
-        let command = image(&solid, 0, 80);
+        let command = image(&solid, 0, 80, CELL_W, CELL_H);
         assert!(command.contains("f=24,t=d,o=z,s=32,v=16"));
         let (format, decoded) = decode_image(&command);
         assert_eq!(format, 24);
@@ -1904,12 +2056,93 @@ mod tests {
             .collect();
         assert_eq!(decoded, rgb);
         let gapped = Plot::heatmap(0, 0, &[vec![None, Some(colour.clone())]], &colour);
-        let command = image(&gapped, 0, 80);
+        let command = image(&gapped, 0, 80, CELL_W, CELL_H);
         assert!(command.contains("f=32,"));
         let (_, decoded) = decode_image(&command);
         assert_eq!(decoded, pixels(&gapped));
         let line = Plot::new(0, 0, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
-        assert!(image(&line, 0, 80).contains("f=32,"));
+        assert!(image(&line, 0, 80, CELL_W, CELL_H).contains("f=32,"));
+    }
+
+    #[test]
+    fn line_row_is_the_terminal_row_of_the_stroke() {
+        // 20% of a four-row chart. Cell rounding lands on row 2.
+        assert_eq!(((1.0 - 0.2) * 3.0_f64).round() as usize, 2);
+        assert_eq!(line_row(0.2, 4), 3);
+        assert_eq!(inked_rows(&chart(vec![Some(0.2); 4]), 4), vec![3]);
+        // Inverted 20% is the fraction 0.8, and cell rounding lands on row 1.
+        assert_eq!((0.2_f64 * 3.0).round() as usize, 1);
+        assert_eq!(line_row(0.8, 4), 0);
+        assert_eq!(inked_rows(&chart(vec![Some(0.8); 4]), 4), vec![0]);
+        assert_eq!(line_row(0.5, 1), 0);
+        assert_eq!(line_row(0.5, 0), 0);
+        assert_eq!(line_col(0.0, 4), 0);
+        assert_eq!(line_col(1.0, 4), 3);
+        assert_eq!(line_col(0.5, 0), 0);
+        let (cell_w, _) = super::super::terminal::cell_size();
+        let width = 4 * cell_w.max(1);
+        let x = (0.2_f64 * (width - 1) as f64).round() as usize;
+        assert_eq!(line_col(0.2, 4), x / cell_w.max(1));
+    }
+
+    fn inked_rows(chart: &LineChart, rows: usize) -> Vec<usize> {
+        let plot = Plot::new(0, 0, 4, rows, chart.clone());
+        let bytes = pixels(&plot);
+        let w = 4 * CELL_W;
+        let mut hit = Vec::new();
+        for row in 0..rows {
+            let ink = (0..CELL_H).any(|y| {
+                (0..w).any(|x| bytes[((row * CELL_H + y) * w + x) * 4 + 3] != 0)
+            });
+            if ink {
+                hit.push(row);
+            }
+        }
+        hit
+    }
+
+    #[test]
+    fn under_text_keeps_cell_text_in_pixel_mode_and_matches_braille() {
+        // compose() writes the shared image cache. Without the guard this
+        // races the other cache tests and fails most of the time.
+        let _transport = super::super::shm::guard();
+        let rows = vec![
+            "title".into(),
+            "ab12.3ms later".into(),
+            "abaxis values".into(),
+        ];
+        let chart = chart(vec![Some(0.2), Some(0.8)]);
+        let plain = Plot::new(2, 1, 8, 2, chart);
+        let over = plain.clone().under_text();
+        assert!(over.under_text);
+        let (braille, _, _) = compose(&rows, &[plain], 40, 6, false, true, false);
+        let (same, _, quiet) = compose(&rows, &[over.clone()], 40, 6, false, true, false);
+        assert_eq!(braille, same);
+        assert!(quiet.is_empty());
+        assert!(braille.iter().any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
+        assert!(!braille[1].contains("12.3ms"));
+        let (text, _, after) = compose(&rows, &[over], 40, 6, true, true, false);
+        assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
+        assert!(text[2].contains("axis"));
+        assert!(after.contains("a=T"));
+        assert!(graphics_keys(&after).iter().any(|keys| keys.contains("z=-1")));
+        let colour = super::super::rgb(30, 220, 180);
+        let cols = vec![(1.0, colour)];
+        let bars = Plot::bars(0, 1, &cols, 1, 1.0, false).under_text();
+        assert!(!bars.under_text, "a solid bar is not a line chart");
+        let bar_rows = vec![String::new(), "keep".into()];
+        let (text, _, after) = compose(&bar_rows, &[bars], 20, 4, true, true, false);
+        assert!(!text[1].contains("keep"));
+        assert!(graphics_keys(&after).iter().all(|keys| !keys.contains("z=")));
+        compose(&rows, &[], 40, 6, true, true, false);
+    }
+
+    fn graphics_keys(bytes: &str) -> Vec<&str> {
+        bytes
+            .split("\x1b_G")
+            .skip(1)
+            .filter_map(|chunk| chunk.split(';').next())
+            .collect()
     }
 
     fn decode_image(command: &str) -> (u8, Vec<u8>) {

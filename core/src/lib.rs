@@ -27,7 +27,7 @@ mod graphics;
 mod shm;
 
 pub use terminal::{capabilities, graphics_notice, Capabilities};
-pub use graphics::{braille, LineChart, Plot, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
@@ -508,6 +508,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // A font change is a SIGWINCH. Read the window's pixel fields before
+    // this frame is rasterised, unless a cell-size reply already won.
+    terminal::apply_pending_cell_size();
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
@@ -524,6 +527,10 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
+    // The resize handler only sets a flag. The query goes out here, before
+    // this frame's image chunks, so it cannot land inside one.
+    let query = terminal::take_cell_query();
+    let bytes = format!("{query}{bytes}");
     // `out` drops a failed write, which a full frame every time could
     // afford: the next one put it right. Rows that never reached the
     // terminal must not be remembered as on it, or they stay wrong until
@@ -534,6 +541,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         .and_then(|_| stdout.flush())
         .is_err()
     {
+        if !query.is_empty() {
+            terminal::restore_cell_query();
+        }
         *shown = None;
     }
 }
@@ -602,6 +612,9 @@ static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
     SCREEN_LOST.store(true, Ordering::Release);
+    if sig == libc::SIGWINCH {
+        terminal::note_resize();
+    }
     if sig == libc::SIGCONT {
         SESSION_CHANGED.store(true, Ordering::Release);
         if HAS_TERMIOS.load(Ordering::Acquire) {
@@ -942,6 +955,7 @@ pub fn setup() {
 pub fn claim_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::claim_terminal();
     out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
@@ -1030,6 +1044,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 pub fn restore_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::release_terminal();
     terminal::cleanup_signal();
     out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
@@ -4433,6 +4448,8 @@ mod tests {
             "\x1b[?2026;2$y",
             "\x1b[?62;4;c",
             "\x1b]10;rgb:ffff/0000/0000\x1b\\",
+            "\x1b[6;40;20t",
+            "\x1b[6;0;0t",
         ] {
             for split in 1..response.len() {
                 let mut pending = response[..split].to_string();

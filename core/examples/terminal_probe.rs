@@ -12,7 +12,7 @@ fn main() {
     let mut gallery = false;
     let mut moving_meter = false;
     let mut tick = 0_u64;
-    let mut selected = 0;
+    let mut selected = 0_usize;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -26,6 +26,10 @@ fn main() {
                 "down" => {
                     scroll = 2;
                     selected += 1;
+                }
+                "up" => {
+                    scroll = 0;
+                    selected = selected.saturating_sub(1);
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
@@ -103,6 +107,7 @@ fn main() {
             Vec::new()
         } else {
             tc::Plot::new(3, 2, w.saturating_sub(6), 6, chart)
+                .under_text()
                 .in_viewport(scroll, 1, h.saturating_sub(2))
                 .into_iter()
                 .collect()
@@ -159,6 +164,11 @@ fn main() {
             )];
         }
         rows.resize(h, String::new());
+        // Inside the line-chart rectangle. Pixel mode keeps it; Braille
+        // paints over it, which is the text-mode chart.
+        if h > 3 {
+            rows[2] = "   now".into();
+        }
         if h > 9 {
             rows[8] = samples;
         }

@@ -1,6 +1,6 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) const SYNC_BEGIN: &str = "\x1b[?2026h";
@@ -9,14 +9,61 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
-const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c";
+/// Raster used when the terminal never reports a cell, or reports one that
+/// is not a character cell. Today's charts are this size.
+pub(crate) const FALLBACK_CELL_W: usize = 8;
+pub(crate) const FALLBACK_CELL_H: usize = 16;
+/// Cells in one plot at the fallback raster. A larger cell lowers the cap
+/// so the uncompressed RGBA bytes of a plot stay at or under this times
+/// 8×16×4.
+pub(crate) const MAX_PLOT_CELLS: usize = 20_000;
+/// `CSI ? u` stays immediately before `CSI c`. `CSI 16 t` follows `CSI c`.
+const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c\x1b[16t";
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
+/// A lost `CSI 16 t` reply never decrements the in-flight count, so every
+/// later reply is rejected. Drop the count after this long with no send
+/// and no reply. A cell report normally comes back in a round trip.
+const CELL_REPLY_WAIT_MS: u64 = 1_500;
+/// Inclusive window for a reported cell. 20×40, a HiDPI Kitty cell, sits
+/// inside it. Wider or taller than this, or an aspect outside 5:4..=3:1,
+/// is not a cell we will rasterise.
+const MIN_CELL_W: usize = 4;
+const MAX_CELL_W: usize = 48;
+const MIN_CELL_H: usize = 8;
+const MAX_CELL_H: usize = 96;
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 /// True after flag 1 was pushed, so every cleanup path pops exactly once.
 static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+static QUERY_CELLS: AtomicBool = AtomicBool::new(false);
+static CELL_QUERY_GEN: AtomicU64 = AtomicU64::new(0);
+static CELL_REPORT_GEN: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Generation of the `CSI 16 t` whose bytes were last handed to the terminal.
+/// A reply answers that query only. A newer resize leaves this behind.
+static CELL_SENT_GEN: AtomicU64 = AtomicU64::new(0);
+/// Sent generation to put back if the frame write fails.
+static CELL_SENT_PREV: AtomicU64 = AtomicU64::new(0);
+/// `CSI 16 t` has no id. Replies arrive in order, so a reply answers the
+/// latest query only when it is the only one still outstanding.
+static CELL_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
+// CSI 16 t has no request ID. After losing accounting, quarantine the
+// first apparent response and ask again before trusting a new generation.
+static CELL_CONFIRM: AtomicBool = AtomicBool::new(false);
+/// Milliseconds on `cell_clock_ms` when a query was sent or a reply
+/// consumed. Zero means nothing is being timed.
+static CELL_HEARD_AT_MS: AtomicU64 = AtomicU64::new(0);
+static CELL_STALE: AtomicBool = AtomicBool::new(false);
+/// Set from the SIGWINCH handler. The next complete frame sends the query;
+/// the handler itself does not write, so `CSI 16 t` cannot land inside an
+/// image chunk.
+static CELL_NEED_SEND: AtomicBool = AtomicBool::new(false);
+/// True between `claim_screen` and `restore_screen`. A cell query is
+/// written only while this is set, so a resize during a child handoff
+/// does not land in the child's session.
+static OWNS_TERMINAL: AtomicBool = AtomicBool::new(false);
+static CELL: AtomicU32 = AtomicU32::new(((FALLBACK_CELL_H as u32) << 16) | FALLBACK_CELL_W as u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
@@ -112,11 +159,24 @@ pub(crate) fn start() {
     // A resumed or reclaimed session asks again. Pop first so a second push
     // does not leave flag 1 on the stack after the matching pop.
     pop_keyboard();
-    // Text mode still benefits from synchronized updates, but sends no image query.
+    // Text mode still benefits from synchronized updates, but sends no image query
+    // and does not ask for a cell size it will not rasterise.
     // The keyboard query is sent either way: it is independent of graphics.
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
+    let query_cells = mode != GraphicsMode::Text;
+    QUERY_CELLS.store(query_cells, Ordering::Release);
+    // Resume can leave an unread reply in the tty. Keep that query counted,
+    // so its buffered report cannot answer the new negotiation.
+    expire_silent_cell_queries(cell_clock_ms());
+    if query_cells {
+        CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+        CELL_NEED_SEND.store(false, Ordering::Release);
+        note_cell_query_sent();
+        let (w, h) = cell_from_winsize().unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
+        publish_cell(w, h);
+    }
     let mut bytes = format!(
         "{}{UNDERLINE_QUERY}",
         if mode == GraphicsMode::Text {
@@ -286,6 +346,41 @@ impl Session {
 }
 
 pub(crate) fn reply(sequence: &str) {
+    // Outside the 800 ms capability window on purpose: a font change asks
+    // again on SIGWINCH, long after startup, and the reply is still a cell size.
+    if let Some(report) = cell_report(sequence) {
+        let now = cell_clock_ms();
+        expire_silent_cell_queries(now);
+        let outstanding = decrement_cell_outstanding(&CELL_OUTSTANDING);
+        if outstanding > 0 {
+            CELL_HEARD_AT_MS.store(now, Ordering::Release);
+        }
+        let sent = CELL_SENT_GEN.load(Ordering::Acquire);
+        let query = CELL_QUERY_GEN.load(Ordering::Acquire);
+        // A newer resize, or an older query still in flight, means this
+        // reply does not answer the query we are waiting on.
+        if outstanding > 1 {
+            // A missing earlier response makes this reply ambiguous. Drain
+            // the uncertain batch and require a follow-up, rather than
+            // leaving a phantom query that blocks all future dimensions.
+            CELL_OUTSTANDING.store(0, Ordering::Release);
+            CELL_CONFIRM.store(true, Ordering::Release);
+            CELL_NEED_SEND.store(true, Ordering::Release);
+        } else if cell_reply_matches(sent, query, outstanding)
+            && CELL_CONFIRM.swap(false, Ordering::AcqRel)
+        {
+            CELL_NEED_SEND.store(true, Ordering::Release);
+        } else if cell_reply_matches(sent, query, outstanding) {
+            let ioctl = if report.is_some() {
+                None
+            } else {
+                cell_from_winsize()
+            };
+            let (w, h) = resolve_cell(report, ioctl);
+            CELL_REPORT_GEN.store(sent, Ordering::Release);
+            publish_cell(w, h);
+        }
+    }
     let push = {
         let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
         let push = session.reply(sequence, Instant::now());
@@ -312,6 +407,300 @@ pub(crate) fn pop_keyboard() {
         super::out(KEYBOARD_POP);
         super::flush();
     }
+}
+
+/// `CSI 16 t` answers `CSI 6 ; height ; width t`.
+///
+/// `None` means this sequence is not that reply. `Some(None)` means it is,
+/// and the numbers are zero, missing or not a character cell — the caller
+/// falls through to the window size, then to 8×16.
+pub(crate) fn cell_report(sequence: &str) -> Option<Option<(usize, usize)>> {
+    let rest = sequence.strip_prefix("\x1b[6;")?.strip_suffix('t')?;
+    let (height, width) = rest.split_once(';')?;
+    if height.is_empty()
+        || width.is_empty()
+        || height.len() > 6
+        || width.len() > 6
+        || !height.bytes().all(|b| b.is_ascii_digit())
+        || !width.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(None);
+    }
+    let width = width.parse::<usize>().unwrap_or(0);
+    let height = height.parse::<usize>().unwrap_or(0);
+    Some(sane_cell(width, height))
+}
+
+pub(crate) fn sane_cell(width: usize, height: usize) -> Option<(usize, usize)> {
+    if !(MIN_CELL_W..=MAX_CELL_W).contains(&width) || !(MIN_CELL_H..=MAX_CELL_H).contains(&height) {
+        return None;
+    }
+    // height/width from 5/4 through 3, inclusive. 8×16 and 20×40 are 2.
+    if height.saturating_mul(4) < width.saturating_mul(5) || height > width.saturating_mul(3) {
+        return None;
+    }
+    Some((width, height))
+}
+
+pub(crate) fn resolve_cell(
+    report: Option<(usize, usize)>,
+    ioctl: Option<(usize, usize)>,
+) -> (usize, usize) {
+    report.unwrap_or(ioctl.unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H)))
+}
+
+pub(crate) fn max_plot_cells_for(cell_w: usize, cell_h: usize) -> usize {
+    let area = cell_w.saturating_mul(cell_h).max(1);
+    MAX_PLOT_CELLS.saturating_mul(FALLBACK_CELL_W * FALLBACK_CELL_H) / area
+}
+
+pub(crate) fn max_plot_cells() -> usize {
+    let (w, h) = cell_size();
+    max_plot_cells_for(w, h)
+}
+
+pub(crate) fn cell_size() -> (usize, usize) {
+    let packed = CELL.load(Ordering::Acquire);
+    ((packed & 0xffff) as usize, (packed >> 16) as usize)
+}
+
+fn publish_cell(width: usize, height: usize) {
+    // Unit tests share one process, and several of them decode terminal
+    // replies. Publishing here would change the 8×16 raster those tests
+    // measure. The probe binary is not built as a test.
+    #[cfg(test)]
+    {
+        let _ = (width, height);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let packed = ((height as u32) << 16) | (width as u32);
+        if CELL.swap(packed, Ordering::AcqRel) != packed {
+            super::screen_lost();
+        }
+    }
+}
+
+fn cell_from_winsize() -> Option<(usize, usize)> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if ok != 0 || ws.ws_col == 0 || ws.ws_row == 0 || ws.ws_xpixel == 0 || ws.ws_ypixel == 0 {
+        return None;
+    }
+    sane_cell(
+        ws.ws_xpixel as usize / ws.ws_col as usize,
+        ws.ws_ypixel as usize / ws.ws_row as usize,
+    )
+}
+
+/// A font change in Kitty is a SIGWINCH with a new cell size. Record that
+/// the next frame should ask again. Signal-safe: atomics only, no write
+/// and no locks, so the query cannot split an image chunk.
+pub(crate) fn note_resize() {
+    if !QUERY_CELLS.load(Ordering::Acquire) {
+        return;
+    }
+    CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+    CELL_STALE.store(true, Ordering::Release);
+    CELL_NEED_SEND.store(true, Ordering::Release);
+}
+
+/// `CSI 16 t` when this process owns the terminal and a resize is waiting.
+pub(crate) fn cell_query_to_send(owns: bool, pending: bool) -> &'static str {
+    if owns && pending {
+        "\x1b[16t"
+    } else {
+        ""
+    }
+}
+
+/// Prefix for the next complete frame, or empty when no resize is waiting
+/// or this process does not own the terminal. A failed write puts the flag
+/// back. Handing the terminal to a child clears it.
+pub(crate) fn take_cell_query() -> &'static str {
+    let owns = OWNS_TERMINAL.load(Ordering::Acquire);
+    // Do not consume the flag while a child has the terminal. The next
+    // frame after we claim it again still asks.
+    let pending = owns && CELL_NEED_SEND.swap(false, Ordering::AcqRel);
+    let query = cell_query_to_send(owns, pending);
+    if !query.is_empty() {
+        note_cell_query_sent();
+    }
+    query
+}
+
+pub(crate) fn restore_cell_query() {
+    CELL_NEED_SEND.store(true, Ordering::Release);
+    // The bytes did not go out, so a reply still belongs to the previous query.
+    CELL_SENT_GEN.store(CELL_SENT_PREV.load(Ordering::Acquire), Ordering::Release);
+    decrement_cell_outstanding(&CELL_OUTSTANDING);
+}
+
+fn note_cell_query_sent() {
+    let now = cell_clock_ms();
+    let query_gen = CELL_QUERY_GEN.load(Ordering::Acquire);
+    CELL_SENT_PREV.store(
+        CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel),
+        Ordering::Release,
+    );
+    expire_silent_cell_queries(now);
+    // This send also fulfills a retry armed by expiry at the boundary.
+    CELL_NEED_SEND.store(false, Ordering::Release);
+    loop {
+        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        let next = outstanding.saturating_add(1);
+        if CELL_OUTSTANDING
+            .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    CELL_HEARD_AT_MS.store(now, Ordering::Release);
+}
+
+fn cell_clock_ms() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    // Zero means no query is being timed. The first send must have a real
+    // timestamp too, or a lost startup reply never expires.
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+}
+
+/// Previous count, or zero when there was nothing to release. The
+/// subtraction lands only while the observed count is still positive, so a
+/// racing reply cannot wrap it.
+fn decrement_cell_outstanding(count: &AtomicU64) -> u64 {
+    loop {
+        let outstanding = count.load(Ordering::Acquire);
+        if outstanding == 0 {
+            return 0;
+        }
+        if count
+            .compare_exchange(
+                outstanding,
+                outstanding - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return outstanding;
+        }
+    }
+}
+
+fn expire_silent_cell_queries(now_ms: u64) {
+    loop {
+        let heard = CELL_HEARD_AT_MS.load(Ordering::Acquire);
+        let silent = cell_query_silence_ms(heard, now_ms);
+        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        let next = cell_outstanding_after_silence(outstanding, silent);
+        if next == outstanding {
+            return;
+        }
+        if CELL_OUTSTANDING
+            .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            CELL_CONFIRM.store(true, Ordering::Release);
+            if QUERY_CELLS.load(Ordering::Acquire) {
+                CELL_NEED_SEND.store(true, Ordering::Release);
+            }
+            // A send that landed after this expiry keeps its own timestamp.
+            let _ = CELL_HEARD_AT_MS.compare_exchange(
+                heard,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            return;
+        }
+    }
+}
+
+/// Milliseconds since the last send or reply. Zero when nothing is timed,
+/// so a cleared count is not treated as ancient silence.
+pub(crate) fn cell_query_silence_ms(heard_at_ms: u64, now_ms: u64) -> u64 {
+    if heard_at_ms == 0 {
+        0
+    } else {
+        now_ms.saturating_sub(heard_at_ms)
+    }
+}
+
+/// In-flight queries still counted after `silent_ms` with no send and no
+/// reply. At the wait, the count drops to zero: a lost reply must not
+/// reject every later one, and the phantom it leaves between frames goes
+/// with it.
+pub(crate) fn cell_outstanding_after_silence(outstanding: u64, silent_ms: u64) -> u64 {
+    if silent_ms >= CELL_REPLY_WAIT_MS {
+        0
+    } else {
+        outstanding
+    }
+}
+
+/// A cell-size reply answers the latest query only when that query is the
+/// only one still unanswered. `sent_gen` is zero until a query has gone out.
+pub(crate) fn cell_reply_matches(sent_gen: u64, query_gen: u64, outstanding: u64) -> bool {
+    sent_gen != 0 && sent_gen == query_gen && outstanding == 1
+}
+
+pub(crate) fn claim_terminal() {
+    OWNS_TERMINAL.store(true, Ordering::Release);
+}
+
+/// Drop a pending cell query. Called from `restore_screen`, before a child
+/// is given the terminal.
+pub(crate) fn release_terminal() {
+    OWNS_TERMINAL.store(false, Ordering::Release);
+    CELL_NEED_SEND.store(false, Ordering::Release);
+    CELL_OUTSTANDING.store(0, Ordering::Release);
+    CELL_HEARD_AT_MS.store(0, Ordering::Release);
+}
+
+/// Cell to publish for a resize that does not already have a reply.
+///
+/// `None` leaves a still-valid report for this resize alone. Otherwise the
+/// window pixel size, or 8×16 when that report is missing, zero or absurd.
+pub(crate) fn pending_cell(
+    report_is_current: bool,
+    ioctl: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    if report_is_current {
+        None
+    } else {
+        Some(ioctl.unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H)))
+    }
+}
+
+/// Cell this resize should publish, starting from the size already in force.
+///
+/// A reply that already matched this resize leaves `previous` alone.
+/// Otherwise the window pixel size, or 8×16 when that report is missing,
+/// zero or absurd — never the size from before the resize.
+pub(crate) fn cell_after_resize(
+    previous: (usize, usize),
+    report_is_current: bool,
+    ioctl: Option<(usize, usize)>,
+) -> (usize, usize) {
+    pending_cell(report_is_current, ioctl).unwrap_or(previous)
+}
+
+/// Use the window pixel size, or 8×16, when a resize is still waiting on
+/// `CSI 16 t`. A reply that already matched this resize is left alone.
+pub(crate) fn apply_pending_cell_size() {
+    expire_silent_cell_queries(cell_clock_ms());
+    if !CELL_STALE.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let report_is_current =
+        CELL_REPORT_GEN.load(Ordering::Acquire) == CELL_QUERY_GEN.load(Ordering::Acquire);
+    let (w, h) = cell_after_resize(cell_size(), report_is_current, cell_from_winsize());
+    publish_cell(w, h);
 }
 
 pub(crate) fn cleanup_signal() {
@@ -662,6 +1051,160 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_report_is_height_then_width_and_junk_is_not_one() {
+        // CSI 16 t is answered `CSI 6 ; height ; width t`.
+        assert_eq!(cell_report("\x1b[6;40;20t"), Some(Some((20, 40))));
+        assert_eq!(cell_report("\x1b[6;16;8t"), Some(Some((8, 16))));
+        assert_eq!(cell_report("\x1b[6;22;10t"), Some(Some((10, 22))));
+        assert_eq!(cell_report("\x1b[?62;c"), None);
+        assert_eq!(cell_report("\x1b_Gi=2147483646;OK\x1b\\"), None);
+        assert_eq!(cell_report("\x1b[6;40;20;1t"), Some(None));
+    }
+
+    #[test]
+    fn zero_missing_and_absurd_cell_reports_fall_back_to_8x16() {
+        assert_eq!(cell_report("\x1b[6;0;0t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;0;20t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;;t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;2;500t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;8;8t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;400;200t"), Some(None));
+        assert_eq!(sane_cell(0, 0), None);
+        assert_eq!(resolve_cell(None, None), (FALLBACK_CELL_W, FALLBACK_CELL_H));
+        assert_eq!(
+            resolve_cell(cell_report("\x1b[6;0;0t").unwrap(), None),
+            (8, 16)
+        );
+        assert_eq!(
+            resolve_cell(cell_report("\x1b[6;2;500t").unwrap(), None),
+            (8, 16)
+        );
+        // A usable window size is the step between a bad report and 8×16.
+        assert_eq!(resolve_cell(None, Some((10, 22))), (10, 22));
+        assert_eq!(resolve_cell(Some((20, 40)), Some((10, 22))), (20, 40));
+    }
+
+    #[test]
+    fn a_resize_without_a_report_or_pixels_uses_8x16() {
+        // A reply already matched this resize: leave that size alone.
+        assert_eq!(pending_cell(true, None), None);
+        assert_eq!(pending_cell(true, Some((20, 40))), None);
+        // No reply yet. A sane window size stands; a missing one is 8×16.
+        assert_eq!(pending_cell(false, Some((20, 40))), Some((20, 40)));
+        assert_eq!(pending_cell(false, None), Some((8, 16)));
+    }
+
+    #[test]
+    fn a_20x40_report_falls_back_to_8x16_when_the_next_resize_has_nothing() {
+        let reported = resolve_cell(cell_report("\x1b[6;40;20t").unwrap(), None);
+        assert_eq!(reported, (20, 40));
+        // No pixel fields and no reply for this resize. The 20×40 does not stick.
+        assert_eq!(cell_after_resize(reported, false, None), (8, 16));
+        // A reply that already matched this resize is left alone.
+        assert_eq!(cell_after_resize(reported, true, None), (20, 40));
+        assert_eq!(
+            cell_after_resize(reported, false, Some((10, 22))),
+            (10, 22)
+        );
+    }
+
+    #[test]
+    fn a_late_cell_reply_does_not_mark_a_newer_resize_as_reported() {
+        let previous = (20, 40);
+        // Query 4 was sent. A second resize is generation 5 before the reply.
+        assert!(!cell_reply_matches(4, 5, 1));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(4, 5, 1), None),
+            (8, 16)
+        );
+        // The reply that matches the only query in flight does mark that resize.
+        assert!(cell_reply_matches(5, 5, 1));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(5, 5, 1), None),
+            previous
+        );
+        assert!(!cell_reply_matches(0, 1, 1));
+    }
+
+    #[test]
+    fn a_reply_does_not_answer_a_query_sent_while_it_was_still_in_flight() {
+        let previous = (20, 40);
+        // Query 5 went out before the reply to query 4. The generations now
+        // match, but two replies are still owed, so this one is the older.
+        assert!(!cell_reply_matches(5, 5, 2));
+        assert_eq!(
+            cell_after_resize(previous, cell_reply_matches(5, 5, 2), None),
+            (8, 16)
+        );
+        assert!(cell_reply_matches(5, 5, 1));
+    }
+
+    #[test]
+    fn silence_drops_a_lost_cell_reply_so_the_next_query_can_match() {
+        assert_eq!(cell_query_silence_ms(0, 5_000), 0);
+        assert_eq!(cell_outstanding_after_silence(2, CELL_REPLY_WAIT_MS - 1), 2);
+        assert_eq!(cell_outstanding_after_silence(4, CELL_REPLY_WAIT_MS), 0);
+        // The reply that did arrive was rejected and left a phantom of one.
+        assert_eq!(cell_outstanding_after_silence(1, CELL_REPLY_WAIT_MS), 0);
+        let outstanding = cell_outstanding_after_silence(2, CELL_REPLY_WAIT_MS).saturating_add(1);
+        assert!(cell_reply_matches(5, 5, outstanding));
+        assert!(!cell_reply_matches(5, 5, 2));
+    }
+
+    #[test]
+    fn a_rollback_does_not_wrap_the_outstanding_count() {
+        let count = AtomicU64::new(0);
+        assert_eq!(decrement_cell_outstanding(&count), 0);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        let count = AtomicU64::new(2);
+        assert_eq!(decrement_cell_outstanding(&count), 2);
+        assert_eq!(count.load(Ordering::Acquire), 1);
+
+        let count = std::sync::Arc::new(AtomicU64::new(1));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let count = std::sync::Arc::clone(&count);
+            let gate = std::sync::Arc::clone(&gate);
+            handles.push(std::thread::spawn(move || {
+                gate.wait();
+                decrement_cell_outstanding(&count);
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_cell_query_is_sent_only_while_this_process_owns_the_terminal() {
+        assert_eq!(cell_query_to_send(false, true), "");
+        assert_eq!(cell_query_to_send(true, false), "");
+        assert_eq!(cell_query_to_send(true, true), "\x1b[16t");
+    }
+
+    #[test]
+    fn a_larger_cell_does_not_raise_the_worst_case_raster_bytes() {
+        let fallback_cells = max_plot_cells_for(FALLBACK_CELL_W, FALLBACK_CELL_H);
+        assert_eq!(fallback_cells, MAX_PLOT_CELLS);
+        let pixels = |w, h| max_plot_cells_for(w, h) * w * h;
+        let cap = pixels(FALLBACK_CELL_W, FALLBACK_CELL_H);
+        assert_eq!(pixels(20, 40), cap);
+        let plots = super::super::graphics::MAX_PLOTS;
+        assert_eq!(plots, 32);
+        let frame_bytes = cap * 4 * plots;
+        assert_eq!(frame_bytes, 327_680_000);
+        for w in MIN_CELL_W..=MAX_CELL_W {
+            for h in MIN_CELL_H..=MAX_CELL_H {
+                if sane_cell(w, h).is_none() { continue; }
+                assert!(pixels(w, h) * 4 * plots <= frame_bytes,
+                    "{w}x{h} exceeds the existing 32-plot byte cap");
+            }
+        }
+    }
+
+    #[test]
     fn a_rejected_shared_memory_probe_stays_direct() {
         let _guard = crate::shm::guard();
         let now = Instant::now();
@@ -788,4 +1331,5 @@ mod tests {
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!s.use_shm && s.probe_settled);
     }
+
 }
