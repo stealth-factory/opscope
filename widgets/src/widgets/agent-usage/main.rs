@@ -417,9 +417,10 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
-        // Perplexity's turquoise, lifted off its brand #20808D, which is
-        // too dark to read as text on these panes.
-        "perplexity" => (96, 196, 204),
+        // Perplexity's dark teal, its brand #20808D lifted only as far as
+        // reading needs: the brand measures 2.59 on the selected-row tint,
+        // this 4.72 there and 8.27 on black.
+        "perplexity" => (60, 180, 166),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
         // The unified Cursor and Grok plan, in greyscale: the brand is
