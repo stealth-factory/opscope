@@ -923,9 +923,12 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // do not say, and only for what the ones that do say did not take.
     let exact = grants > 0 && unsaid == 0;
     left = if exact { 0.0 } else { (left - said_this_period).max(0.0) };
+    // A grant of a type this widget does not know may have taken any of it,
+    // so nothing is spread and the rest is said as not drawn on a pool.
+    let spreadable = out.unknown_grants == 0;
     let mut spend = |[total, said, said_left]: [f64; 3], floor: f64| {
         let to_spread = (total - said).max(floor - said).max(0.0);
-        let used = left.min(to_spread);
+        let used = if spreadable { left.min(to_spread) } else { 0.0 };
         left -= used;
         PerplexityPool { total: total.max(floor).max(0.0), used: (said - said_left).max(0.0) + used }
     };
@@ -1010,12 +1013,13 @@ pub fn parse_perplexity_quota(text: &str) -> Option<PerplexityQuota> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let v = v.as_object()?;
     let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
-    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite())?;
+    // Over 100 is what the server said and is drawn as said; under 0 is no reading.
+    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite() && *n >= 0.0)?;
     let resets = match field("reset_date", "resetDate") {
         None | Some(serde_json::Value::Null) => None,
         Some(x) => Some(chrono::DateTime::parse_from_rfc3339(x.as_str()?).ok()?.timestamp() as f64),
     };
-    Some(PerplexityQuota { pct: pct.clamp(0.0, 100.0), resets })
+    Some(PerplexityQuota { pct, resets })
 }
 
 /// One Devin quota window. `pct` is the number the body sent, on a 0–100
@@ -2115,6 +2119,9 @@ Period resets : 2026-10-06
         assert_eq!((none.pct, none.resets), (40.0, None));
         assert!(parse_perplexity_quota(r#"{"reset_date":"2026-10-21T04:59:31Z"}"#).is_none());
         assert!(parse_perplexity_quota(r#"{"percent_used":3,"reset_date":"Wed"}"#).is_none());
+        // Over the limit is kept as sent; a negative share is no reading.
+        assert_eq!(parse_perplexity_quota(r#"{"percent_used":120}"#).unwrap().pct, 120.0);
+        assert!(parse_perplexity_quota(r#"{"percent_used":-5}"#).is_none());
     }
 
     #[test]
@@ -2161,6 +2168,14 @@ Period resets : 2026-10-06
         let changed = raw.replace(r#""amount_applied_prior_period_cents":686"#,
             r#""amount_applied_prior_period_cents":"686""#);
         assert!(parse_perplexity_credits(&changed, 1_780_000_000.0).is_none());
+        // Beside a grant of an unknown type, the period's usage could be its,
+        // so it is not put on the recurring pool.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":1000},
+            {"type":"mystery","amount_cents":500}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
     }
 
     #[test]
@@ -2189,9 +2204,15 @@ Period resets : 2026-10-06
         let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100},
             {"type":"mystery","amount_cents":900}],"total_usage_cents":400}"#;
         let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        // The unknown grant could have taken any of it, so none is spread.
+        assert_eq!(c.recurring.used, 0.0);
+        assert_eq!(c.uncovered, 400.0);
+        assert_eq!(c.unknown_grants, 1);
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100}],
+            "total_usage_cents":400}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
         assert_eq!(c.recurring.used, 100.0);
         assert_eq!(c.uncovered, 300.0);
-        assert_eq!(c.unknown_grants, 1);
     }
 
     #[test]

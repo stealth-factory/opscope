@@ -232,7 +232,9 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(got) = got.as_ref().filter(|_| d.why.is_empty()) {
         d.why = text(got, "why");
         d.read_at = num(got, "at");
-        d.credits = parse_perplexity_credits(&text(got, "body"), d.read_at);
+        // A bonus that has expired since the reading is gone now, not at
+        // the next fetch.
+        d.credits = parse_perplexity_credits(&text(got, "body"), now());
     }
     let qkey = format!("{key}:quota");
     let mut refused = String::new();
@@ -672,7 +674,14 @@ fn credit_notes(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
                     monthly credits have no pace or renewal drawn.";
         rows.extend(note(text, &p.warn, w));
     }
-    if c.uncovered > 0.0 {
+    if c.uncovered > 0.0 && c.unknown_grants > 0 {
+        let text = format!(
+            "{} of the period's usage may be on a grant of a type this widget does not \
+             know, so it is not drawn on any pool.",
+            cents(c.uncovered)
+        );
+        rows.extend(note(&text, &p.warn, w));
+    } else if c.uncovered > 0.0 {
         let text = format!(
             "{} of the period's usage is more than every pool above holds, so it is \
              not drawn on any of them.",
@@ -1319,9 +1328,15 @@ mod tests {
         );
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("300 credits of the period's usage is more than"), "{rows}");
+        assert!(words.contains("400 credits of the period's usage may be on a grant of a type"), "{rows}");
         assert!(words.contains("1 credit grant of a type this widget does not know is left out"), "{rows}");
         assert!(words.contains("no renewal date"), "{rows}");
+        let d = Data::answered(
+            r#"{"credit_grants":[{"type":"recurring","amount_cents":100}],"total_usage_cents":400}"#,
+        );
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("300 credits of the period's usage is more than"), "{rows}");
     }
 
     #[test]
