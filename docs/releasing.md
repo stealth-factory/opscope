@@ -81,6 +81,19 @@ breaking changes without claiming to be finished.
 badly-titled PR is not untidy — it is a change the next release will not
 mention and may not count towards the version.
 
+The title check uses `pull_request` with only `pull-requests: read`, no
+checkout, and no repository secrets. It reads the current title through
+the API, including when a failed check is re-run after a title edit.
+Opened, edited, reopened, and synchronized PRs all trigger it. Fork PRs
+use GitHub's normal approval rules; PRs with merge conflicts must resolve
+them before `pull_request` workflows can run.
+
+No workflow requires `pull_request_target`, so keep GitHub's
+[default event policy](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target#default-policy-for-pull_request_target)
+enabled rather than adding an exception. The release workflow defaults
+to `contents: read`; only its tag-gated `publish` job receives
+`contents: write` and `id-token: write`.
+
 ## Cutting one
 
 1. Open the pull request titled `release: vX.Y.Z`.
