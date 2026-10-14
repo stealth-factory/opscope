@@ -447,6 +447,13 @@ pub fn why_no_lane(d: &Data) -> String {
             if n == 1 { "is" } else { "are" },
         );
     }
+    if d.credits.is_some() {
+        if let Some(fault) = quota_fault(d) {
+            return format!("no quota · {fault}");
+        }
+        return "no quota · Perplexity reported a balance with no credit grant to draw it from."
+            .into();
+    }
     if d.expired() {
         return "no quota · Perplexity session expired · press , to paste a fresh token".into();
     }
@@ -1250,6 +1257,13 @@ mod tests {
         let mut d = d;
         d.quota_why = "weekly limit the request timed out".into();
         assert!(why_no_lane(&d).contains("weekly limit not read"), "{}", why_no_lane(&d));
+        // A balance above zero with no grant behind it is not an empty account either.
+        let d = Data::answered(r#"{"credit_grants":[],"total_usage_cents":0,"balance_cents":300}"#);
+        assert!(!d.credits.as_ref().unwrap().is_empty());
+        let why = why_no_lane(&d);
+        assert!(why.contains("reported a balance with no credit grant"), "{why}");
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("published no credits"), "{rows}");
     }
 
     #[test]

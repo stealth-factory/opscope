@@ -800,12 +800,14 @@ impl PerplexityGrant {
 
 impl PerplexityCredits {
     /// No credits in any pool. Grants of a type this widget does not know
-    /// are not nothing, so an answer holding only those is not empty.
+    /// are not nothing, and neither is a balance above zero, so an answer
+    /// holding only those is not empty.
     pub fn is_empty(&self) -> bool {
         self.recurring.total <= 0.0
             && self.purchased.total <= 0.0
             && self.bonus.total <= 0.0
             && self.unknown_grants == 0
+            && !self.balance.is_some_and(|b| b > 0.0)
     }
 }
 
@@ -885,17 +887,21 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
                 continue;
             }
         };
-        let num = |snake: &str, camel: &str| {
-            grant.get(snake).or_else(|| grant.get(camel)).and_then(finite)
+        // Absent or null is unsaid; present and not a number is a changed answer.
+        let num = |snake: &str, camel: &str| -> Option<Option<f64>> {
+            match grant.get(snake).or_else(|| grant.get(camel)) {
+                None | Some(serde_json::Value::Null) => Some(None),
+                Some(x) => Some(Some(finite(x)?)),
+            }
         };
         grants += 1;
-        let prior_periods = num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents");
+        let prior_periods = num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents")?;
         out.grants.push(PerplexityGrant {
             kind: kind.to_string(),
             amount,
             remaining,
             prior_periods,
-            effective: num("effective_at_ts", "effectiveAtTs"),
+            effective: num("effective_at_ts", "effectiveAtTs")?,
             expires,
         });
         pool[0] += amount;
@@ -2150,6 +2156,11 @@ Period resets : 2026-10-06
         // spread over the one that did not say.
         assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 300.0 });
         assert_eq!(c.uncovered, 0.0);
+        // A prior-period figure that changed type is a changed answer, not
+        // a grant that spent everything this period.
+        let changed = raw.replace(r#""amount_applied_prior_period_cents":686"#,
+            r#""amount_applied_prior_period_cents":"686""#);
+        assert!(parse_perplexity_credits(&changed, 1_780_000_000.0).is_none());
     }
 
     #[test]
