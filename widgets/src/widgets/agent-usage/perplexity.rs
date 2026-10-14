@@ -310,15 +310,25 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         // A refusal held from an earlier read comes back as the cached value.
         d.quota_why = text(got, "why");
         d.quota = parse_perplexity_quota(&text(got, "body"));
-        if d.read_at == 0.0 {
-            d.read_at = num(got, "at");
+        if d.quota.is_some() {
+            d.read_at = older(d.read_at, num(got, "at"));
         }
     }
     // Billing alone is still a reading, and says when it was taken.
-    if let Some(got) = sub.as_ref().filter(|_| d.read_at == 0.0 && d.subscription.is_some()) {
-        d.read_at = num(got, "at");
+    if let Some(got) = sub.as_ref().filter(|_| d.subscription.is_some()) {
+        d.read_at = older(d.read_at, num(got, "at"));
     }
     d
+}
+
+/// The four answers are held apart and can be of different ages, so the
+/// heading's "read … ago" is the oldest of those drawn, never the newest.
+fn older(read_at: f64, at: f64) -> f64 {
+    match (read_at > 0.0, at > 0.0) {
+        (true, true) => read_at.min(at),
+        (false, _) => at,
+        (true, false) => read_at,
+    }
 }
 
 /// A signed-in session that names no tier: a user object and nothing to
@@ -1412,6 +1422,11 @@ mod tests {
         };
         assert!(!bonus_lapsed(&bonus(now() + 3600.0)));
         assert!(bonus_lapsed(&bonus(now() - 60.0)));
+        // The heading's age is the oldest answer drawn.
+        assert_eq!(older(0.0, 100.0), 100.0);
+        assert_eq!(older(200.0, 100.0), 100.0);
+        assert_eq!(older(100.0, 200.0), 100.0);
+        assert_eq!(older(100.0, 0.0), 100.0);
         // An overdrawn balance keeps its sign.
         assert_eq!(cents(-250.0), "-250 credits");
         assert_eq!(cents(1234.0), "1,234 credits");

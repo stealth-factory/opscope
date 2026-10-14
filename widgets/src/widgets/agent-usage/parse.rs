@@ -1021,7 +1021,8 @@ pub fn parse_perplexity_subscription(text: &str) -> Option<PerplexitySubscriptio
     let ts = |k: &str| -> Option<Option<f64>> {
         match v.get(k) {
             None | Some(serde_json::Value::Null) => Some(None),
-            Some(x) => Some(x.as_f64().filter(|t| t.is_finite())?).map(|t| (t > 0.0).then_some(t)),
+            // Zero is a date left unset; below zero is a changed answer.
+            Some(x) => Some(x.as_f64().filter(|t| t.is_finite() && *t >= 0.0)?).map(|t| (t > 0.0).then_some(t)),
         }
     };
     let interval = match v.get("billing_interval") {
@@ -2151,6 +2152,9 @@ Period resets : 2026-10-06
         // reading with its date quietly missing.
         let changed = r#"{"billing_interval":"monthly","next_billing_date_ts":"2026-11-13T00:00:00Z"}"#;
         assert!(parse_perplexity_subscription(changed).is_none());
+        // A negative date is a changed answer too, not one left unset.
+        let negative = r#"{"billing_interval":"monthly","next_billing_date_ts":-5}"#;
+        assert!(parse_perplexity_subscription(negative).is_none());
     }
 
     #[test]
