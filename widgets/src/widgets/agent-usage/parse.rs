@@ -865,7 +865,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     };
     // Per pool: every grant's amount, then the amount and what is left of
     // the grants that say, so the rest is what has to be spread.
-    let (mut recurring, mut bought, mut bonus) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+    // The fourth is what grants that do not say what is left say they spent
+    // before this period, which is used and not this period's to spread.
+    let (mut recurring, mut bought, mut bonus) = ([0.0; 4], [0.0; 4], [0.0; 4]);
     let (mut said_this_period, mut grants, mut unsaid) = (0.0, 0, 0);
     // This period's spend from grants that also state their earlier spend,
     // so it is a figure the answer itself gives rather than an estimate.
@@ -937,6 +939,11 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
                 share_unknown = true;
             }
         } else {
+            // Spent before this period cannot be more than the grant held.
+            if prior_periods.is_some_and(|before| before > amount + 0.5) {
+                return None;
+            }
+            pool[3] += prior_periods.unwrap_or(0.0);
             unsaid += 1;
         }
     }
@@ -961,11 +968,14 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
     let spreadable = out.unknown_grants == 0 && !split_unknown;
-    let mut spend = |[total, said, said_left]: [f64; 3], floor: f64| {
-        let to_spread = (total - said).max(floor - said).max(0.0);
+    let mut spend = |[total, said, said_left, before]: [f64; 4], floor: f64| {
+        let to_spread = (total - said - before).max(floor - said - before).max(0.0);
         let used = if spreadable { left.min(to_spread) } else { 0.0 };
         left -= used;
-        PerplexityPool { total: total.max(floor).max(0.0), used: (said - said_left).max(0.0) + used }
+        PerplexityPool {
+            total: total.max(floor).max(0.0),
+            used: (said - said_left).max(0.0) + before + used,
+        }
     };
     // The bought total the answer states counts only while no bought grant
     // says what is left of it, as when nothing said.
@@ -2250,6 +2260,15 @@ Period resets : 2026-10-06
         assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
         assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
         assert_eq!(c.uncovered, 300.0);
+        // A grant that says only what it spent before this period has that
+        // spent, and this period's usage goes on top of it.
+        let raw = r#"{"total_usage_cents":5,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"amount_applied_prior_period_cents":90}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 100.0, used: 95.0 });
+        let raw = r#"{"total_usage_cents":0,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"amount_applied_prior_period_cents":150}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
         // Spent before this period beyond all a grant has spent is a changed answer.
         let raw = r#"{"total_usage_cents":0,"credit_grants":[
             {"type":"recurring","amount_cents":100,"remaining_cents":80,

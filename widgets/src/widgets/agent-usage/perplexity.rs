@@ -788,10 +788,13 @@ fn field_rows(label: &str, value: &str, colour: &str, w: usize, p: &Palette) -> 
     // Too narrow for a value beside its label: the label goes above it.
     if w < label_w + 4 + 16 {
         let mut rows = vec![tc::seg(&[(p.dim.as_str(), format!("  {label}"))], w - 1)];
+        // The indent gives way before the value does, and the value wraps
+        // at what is left after it, so a figure is never the part cut.
+        let indent = (w.saturating_sub(13)).min(4);
         rows.extend(
-            wrap_text(value, w.saturating_sub(6).max(8))
+            wrap_text(value, (w - 1 - indent).max(1))
                 .into_iter()
-                .map(|line| tc::seg(&[(colour, format!("    {line}"))], w - 1)),
+                .map(|line| tc::seg(&[(colour, format!("{}{line}", " ".repeat(indent)))], w - 1)),
         );
         return rows;
     }
@@ -1422,6 +1425,15 @@ mod tests {
         };
         assert!(!bonus_lapsed(&bonus(now() + 3600.0)));
         assert!(bonus_lapsed(&bonus(now() - 60.0)));
+        // In the narrowest pane a field's value still stands whole.
+        for w in 8usize..=20 {
+            let rows = plain(&field_rows("balance", "-250 credits left", "", w, &palette()));
+            for r in rows.lines() {
+                assert!(tc::display_width(r) < w, "width {w}: {r:?}");
+            }
+            let words: Vec<&str> = rows.split_whitespace().collect();
+            assert!(words.contains(&"-250") && words.contains(&"credits"), "width {w}: {rows}");
+        }
         // The heading's age is the oldest answer drawn.
         assert_eq!(older(0.0, 100.0), 100.0);
         assert_eq!(older(200.0, 100.0), 100.0);
