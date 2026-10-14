@@ -834,7 +834,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     };
     let balance = optional("balance_cents", "balanceCents")?;
     let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
-    let topup_on = field("auto_topup_enabled", "autoTopupEnabled").and_then(|x| x.as_bool());
+    let topup_on = match field("auto_topup_enabled", "autoTopupEnabled") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_bool()?),
+    };
     let auto_topup = match topup_on {
         Some(true) => Some(PerplexityTopup::On {
             adds: optional("auto_topup_amount_cents", "autoTopupAmountCents")?,

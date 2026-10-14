@@ -438,6 +438,9 @@ pub fn why_no_lane(d: &Data) -> String {
             .into();
     }
     if let Some(n) = d.credits.as_ref().map(|c| c.unknown_grants).filter(|n| *n > 0) {
+        if let Some(fault) = quota_fault(d) {
+            return format!("no quota · {fault}");
+        }
         return format!(
             "no quota · Perplexity's {n} credit grant{} {} of a type this widget does not know.",
             if n == 1 { "" } else { "s" },
@@ -1243,6 +1246,10 @@ mod tests {
         assert!(why.contains("1 credit grant is of a type this widget does not know"), "{why}");
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("published no credits") && rows.contains("500 credits left"), "{rows}");
+        // A weekly limit that failed beside them is still the actionable half.
+        let mut d = d;
+        d.quota_why = "weekly limit the request timed out".into();
+        assert!(why_no_lane(&d).contains("weekly limit not read"), "{}", why_no_lane(&d));
     }
 
     #[test]
@@ -1267,6 +1274,12 @@ mod tests {
         assert_eq!(d.credits.as_ref().unwrap().auto_topup, None);
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("auto top-up"), "{rows}");
+        // A flag that changed type is a changed answer, not an unstated one.
+        assert!(parse_perplexity_credits(
+            r#"{"total_usage_cents":0,"auto_topup_enabled":"yes","credit_grants":[]}"#,
+            now()
+        )
+        .is_none());
     }
 
     #[test]
