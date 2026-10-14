@@ -658,6 +658,9 @@ pub(crate) fn claim_terminal() {
 pub(crate) fn release_terminal() {
     OWNS_TERMINAL.store(false, Ordering::Release);
     CELL_NEED_SEND.store(false, Ordering::Release);
+    // The child can consume our replies or leave its own in the tty. Confirm
+    // the first report after reclaim rather than treating it as fresh.
+    CELL_CONFIRM.store(true, Ordering::Release);
     CELL_OUTSTANDING.store(0, Ordering::Release);
     CELL_HEARD_AT_MS.store(0, Ordering::Release);
 }
