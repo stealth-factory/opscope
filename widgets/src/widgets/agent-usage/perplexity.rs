@@ -532,6 +532,11 @@ fn cents(value: f64) -> String {
 /// A credit figure with no unit, for the first of two in one phrase.
 fn count(value: f64) -> String {
     // An overdrawn balance keeps its sign; every other figure is at least 0.
+    // Less than one credit overdrawn is still overdrawn, so it is not
+    // rounded to a 0 that reads as an account at zero.
+    if value < 0.0 && value > -1.0 {
+        return format!("-{}", format!("{:.2}", -value).trim_end_matches('0').trim_end_matches('.'));
+    }
     let whole = value.abs().floor() as u64;
     let digits = whole.to_string();
     let mut out = String::from(if value < 0.0 && whole > 0 { "-" } else { "" });
@@ -1499,6 +1504,9 @@ mod tests {
         assert_eq!(older(100.0, 0.0), 100.0);
         // An overdrawn balance keeps its sign.
         assert_eq!(cents(-250.0), "-250 credits");
+        // Less than one credit overdrawn read as an account at zero.
+        assert_eq!(cents(-0.5), "-0.5 credits");
+        assert_eq!(cents(0.5), "0 credits");
         assert_eq!(cents(1234.0), "1,234 credits");
     }
 

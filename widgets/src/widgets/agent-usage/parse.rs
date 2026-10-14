@@ -868,7 +868,7 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // The fourth is what grants that do not say what is left say they spent
     // before this period, which is used and not this period's to spread.
     let (mut recurring, mut bought, mut bonus) = ([0.0; 4], [0.0; 4], [0.0; 4]);
-    let (mut said_this_period, mut grants, mut unsaid) = (0.0, 0, 0);
+    let (mut said_this_period, mut unsaid) = (0.0, 0);
     // This period's spend from grants that also state their earlier spend,
     // so it is a figure the answer itself gives rather than an estimate.
     let mut stated_this_period = 0.0;
@@ -910,7 +910,6 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
                 Some(x) => Some(Some(finite(x)?)),
             }
         };
-        grants += 1;
         let prior_periods = num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents")?;
         out.grants.push(PerplexityGrant {
             kind: kind.to_string(),
@@ -952,7 +951,6 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // spreading it over the pools reads a grant bought last month and part
     // spent then as untouched. It is only the fallback, for the grants that
     // do not say, and only for what the ones that do say did not take.
-    let exact = grants > 0 && unsaid == 0 && out.unknown_grants == 0;
     // What the grants that say do not account for is kept, never dropped:
     // with every grant exact it is usage no grant explains.
     // Grants that state this period's spend in full and add up to more than
@@ -979,8 +977,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         }
     };
     // The bought total the answer states counts only while no bought grant
-    // says what is left of it, as when nothing said.
-    let bought_floor = if exact || bought[1] > 0.0 { 0.0 } else { bought_field };
+    // says what is left of it. Other grants saying theirs does not touch it:
+    // they are not the bought credits it counts.
+    let bought_floor = if bought[1] > 0.0 { 0.0 } else { bought_field };
     out.recurring = spend(recurring, 0.0);
     out.purchased = spend(bought, bought_floor);
     out.bonus = spend(bonus, 0.0);
@@ -2338,6 +2337,21 @@ Period resets : 2026-10-06
         let c = parse_perplexity_credits(raw, 0.0).unwrap();
         assert_eq!(c.recurring.used, 50.0);
         assert_eq!(c.uncovered, 50.0);
+    }
+
+    #[test]
+    fn a_stated_bought_total_stands_beside_grants_of_another_type_that_say_what_is_left() {
+        // An exact recurring grant made every grant exact, and that alone
+        // dropped the 500 bought credits the answer named.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100,"remaining_cents":100}],
+            "current_period_purchased_cents":500,"total_usage_cents":0}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.purchased.total, 500.0);
+        assert_eq!(c.recurring.used, 0.0);
+        // A bought grant that says what is left still takes the place of the field.
+        let raw = r#"{"credit_grants":[{"type":"purchased","amount_cents":200,"remaining_cents":150}],
+            "current_period_purchased_cents":500,"total_usage_cents":0}"#;
+        assert_eq!(parse_perplexity_credits(raw, 0.0).unwrap().purchased.total, 200.0);
     }
 
     #[test]
