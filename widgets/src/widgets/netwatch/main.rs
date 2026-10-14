@@ -491,6 +491,16 @@ where
     true
 }
 
+fn poll_refresh<F>(state: &Arc<Mutex<State>>, activity: &tc::Refresh, acquire_one: F) -> bool
+where
+    F: FnOnce() -> Reading,
+{
+    let work = activity.start();
+    let completed = poll_once(state, acquire_one);
+    drop(work);
+    completed
+}
+
 /// Fold one reading into the running totals.
 ///
 /// Split from `sample` so the arithmetic can be exercised without a machine
@@ -766,7 +776,7 @@ struct Resolver {
 }
 
 impl Resolver {
-    fn new() -> Resolver {
+    fn new(activity: tc::Refresh) -> Resolver {
         let known: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let wanted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (k, q) = (Arc::clone(&known), Arc::clone(&wanted));
@@ -779,6 +789,7 @@ impl Resolver {
                     continue;
                 }
             };
+            let work = activity.start();
             // getent rather than a resolver library: it is glibc's own
             // lookup, so it honours /etc/hosts, nsswitch and the search
             // domains exactly as everything else on the machine does.
@@ -791,6 +802,7 @@ impl Resolver {
             if let Ok(mut guard) = k.lock() {
                 guard.insert(ip, name);
             }
+            drop(work);
         });
         Resolver { known, wanted }
     }
@@ -897,7 +909,7 @@ struct DetailLoader {
 }
 
 impl DetailLoader {
-    fn new() -> DetailLoader {
+    fn new(activity: tc::Refresh) -> DetailLoader {
         let current: Arc<Mutex<Option<(i32, String)>>> = Arc::new(Mutex::new(None));
         let known: Arc<Mutex<HashMap<(i32, String), DetailSnapshot>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -908,6 +920,7 @@ impl DetailLoader {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             };
+            let work = activity.start();
             let snapshot = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (files, files_err) = match open_files(pid) {
                     Ok(files) => (files, String::new()),
@@ -933,6 +946,7 @@ impl DetailLoader {
                 guard.clear();
                 guard.insert((pid, name), snapshot);
             }
+            drop(work);
             std::thread::sleep(Duration::from_secs(1));
         });
         DetailLoader { current, known }
@@ -1357,6 +1371,7 @@ fn detail_rows(
     names: &Resolver,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, Option<(usize, usize)>) {
     // Where the cursor ended up in the body, and how many rows it owns - its
     // own row plus the chart drawn under it. The caller cannot work this out:
@@ -1364,10 +1379,11 @@ fn detail_rows(
     // position depends on how many rows every section above it drew.
     let mut cursor: Option<(usize, usize)> = None;
     let total = (row.up + row.down) as f64;
-    let mut out = vec![tc::title(
+    let mut out = vec![tc::title_busy(
         &format!("{} · pid {}", row.name, row.pid),
         w,
         &p.accent,
+        busy,
     )];
     out.push(tc::seg(
         &[
@@ -1700,16 +1716,19 @@ fn main() {
     }
 
     let p = palette();
+    let activity = tc::Refresh::default();
     let state = Arc::new(Mutex::new(State {
         started: tc::now(),
         ..Default::default()
     }));
     let poller = Arc::clone(&state);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
         // A poller that dies takes its explanation with it, and an empty
         // table looks exactly like a machine with no sockets on it.
         let began = tc::now();
-        if !poll_once(&poller, || acquire(external)) {
+        let completed = poll_refresh(&poller, &poller_activity, || acquire(external));
+        if !completed {
             return;
         }
 
@@ -1780,8 +1799,8 @@ fn main() {
     let mut notice: Option<(String, String, f64)> = None;
     // What `c` would copy: known while drawing, wanted when the key is hit.
     let mut pending_copy = String::new();
-    let names = Resolver::new();
-    let details = DetailLoader::new();
+    let names = Resolver::new(activity.clone());
+    let details = DetailLoader::new(activity.clone());
     // Input is sampled independently of painting and of source acquisition.
     // A key or wheel turn forces the next frame immediately; otherwise ten
     // frames a second are enough for resize and elapsed-time updates without
@@ -2029,6 +2048,7 @@ fn main() {
                 Some(r) => r,
                 None => {
                     detail = None;
+                    details.clear();
                     continue;
                 }
             };
@@ -2113,6 +2133,7 @@ fn main() {
                 &names,
                 &p,
                 &mut plots,
+                activity.tick(tc::animation_tick()),
             );
             // The title is pinned and everything below it is the window.
             // `cursor` addresses the whole body, so its row shifts by the
@@ -2196,7 +2217,12 @@ fn main() {
         let down: f64 = rows.iter().map(|r| r.down_rate).sum();
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
-        let mut out = vec![tc::title("netwatch", w, &p.accent)];
+        let mut out = vec![tc::title_busy(
+            "netwatch",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         let mut placed_now: Vec<(usize, usize)> = Vec::new();
         // Held open. What this line has to say depends on how many rows fit,
         // which is not known until the chart above the table has been built -
@@ -2723,6 +2749,74 @@ mod tests {
                 errors: Vec::new(),
             }
         }));
+    }
+
+    #[test]
+    fn refresh_activity_covers_blocked_success_failures_and_rewake() {
+        let state = Arc::new(Mutex::new(State::default()));
+        let activity = tc::Refresh::default();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_activity = activity.clone();
+        let worker = std::thread::spawn(move || {
+            poll_refresh(&worker_state, &worker_activity, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Reading {
+                    stamp: 1.0,
+                    counters: None,
+                    traffic: Ok(TrafficSample::Processes(Vec::new())),
+                    owners: HashMap::new(),
+                    errors: Vec::new(),
+                }
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker entered acquisition");
+        assert_eq!(activity.tick(1), Some(1));
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert_eq!(activity.tick(2), None);
+
+        assert!(poll_refresh(&state, &activity, || Reading {
+            stamp: 2.0,
+            counters: None,
+            traffic: Err("test acquisition".into()),
+            owners: HashMap::new(),
+            errors: Vec::new(),
+        }));
+        assert_eq!(activity.tick(3), None);
+        assert!(!poll_refresh(&state, &activity, || -> Reading {
+            panic!("test acquisition panic")
+        }));
+        assert_eq!(activity.tick(4), None);
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_activity = activity.clone();
+        let worker = std::thread::spawn(move || {
+            poll_refresh(&worker_state, &worker_activity, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Reading {
+                    stamp: 5.0,
+                    counters: None,
+                    traffic: Ok(TrafficSample::Processes(Vec::new())),
+                    owners: HashMap::new(),
+                    errors: Vec::new(),
+                }
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker re-entered acquisition");
+        assert_eq!(activity.tick(5), Some(5));
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert_eq!(activity.tick(6), None);
     }
 
     #[test]

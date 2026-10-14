@@ -47,7 +47,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "1 Oct 2026";
+const LIST_RATES_AS_OF: &str = "14 Oct 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -340,9 +340,20 @@ const LIST_RATES: tc::Catalogue = &[
     ("grok-4.20-0309-non-reasoning", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-4.20-multi-agent-0309", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
     ("grok-build-0.1", "xAI", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.20)]),
-    // Google bills context caching by storage - dollars per million tokens
-    // per *hour* - which is not a per-request cache write and is deliberately
-    // not carried here. Pricing it as one would invent a number.
+    // Google bills explicit context caching by storage - dollars per million
+    // tokens per *hour* - which is not a per-request cache write and is
+    // deliberately not carried here. Pricing it as one would invent a number.
+    //
+    // gemini-4-argon's row is an INTRODUCTORY price through 30 November 2026:
+    // 2.0 / 10.0 / 0.10, doubling to 4.0 / 20.0 / 0.20 on 1 December 2026.
+    // Explicit caching (and therefore hourly storage) is not supported on
+    // this model; implicit caching is on by default and discounts cached
+    // input to 0.05x input ($0.10 today, $0.20 from 1 December 2026). The
+    // full 1M context window bills at these rates with no long-context tier.
+    // As with gemini-3.8-flash below, no existing key is a substring of
+    // "gemini-4-argon", so without this row its tokens resolve to None and
+    // cost zero.
+    ("gemini-4-argon", "Google", &[("input", 2.0), ("output", 10.0), ("cache_read", 0.10)]),
     //
     // gemini-3.8-flash's row is an INTRODUCTORY price and the page dates its
     // own end: 0.75 / 3.75 / 0.075 through 31 December 2026, doubling to
@@ -382,6 +393,8 @@ const CODEX_STEPS: [(u8, u8, u8); 4] =
     [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
 #[allow(dead_code)]
 const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
+/// SpaceXSI's activity calendar, in the plan's greyscale.
+const SPACEXSI_STEPS: [(u8, u8, u8); 4] = [(62, 62, 62), (110, 110, 110), (165, 165, 165), (225, 225, 225)];
 #[allow(dead_code)]
 const CURSOR_STEPS: [(u8, u8, u8); 4] =
     [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
@@ -406,6 +419,14 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "notion" => (232, 226, 212),
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
+        // The unified Cursor and Grok plan, in greyscale: the brand is
+        // monochrome, and its black is unreadable on a dark pane (1.0 to
+        // 1.75 against the backgrounds here). A mid grey rather than white,
+        // because bars ramp this hue toward white - from white there is
+        // nothing left to ramp and the bar draws flat. From here it runs
+        // about 174 to 217. Neutral, with none of Codex's blue in it; 4.6 on
+        // the selected-row tint and 8.03 on black as text.
+        "spacexsi" => (160, 160, 160),
         _ => return None,
     })
 }
@@ -413,6 +434,11 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
 /// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
 /// only the directory's basename, uppercased like every other tab.
 fn tab_title(name: &str) -> String {
+    // Two unified accounts each get a tab, named for the product that
+    // reported it - the internal `spacexsi:cursor` is for dispatch only.
+    if let Some(product) = name.strip_prefix("spacexsi:") {
+        return format!("SPACEXSI·{}", product.to_uppercase());
+    }
     match name.strip_prefix("claude:") {
         Some(label) => label.to_uppercase(),
         None => name.to_uppercase(),
@@ -2244,7 +2270,13 @@ fn tab_bar(
     };
     for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
-        let have = installed.get(name).is_some_and(|x| x.present);
+        let present = |n: &str| installed.get(n).is_some_and(|x| x.present);
+        // A SpaceXSI tab is detected when a product behind it is.
+        let have = match name.strip_prefix("spacexsi") {
+            Some("") => present("cursor") || present("grok"),
+            Some(rest) => present(rest.trim_start_matches(':')),
+            None => present(name),
+        };
         // Both forms are the name plus two columns - `[NAME]` and ` NAME `
         // - which is what lets the brackets mark the open tab without the
         // strip shifting under them.
@@ -2313,8 +2345,8 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
+                (p.txt.as_str(), " reading usage".into()),
                 (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
-                (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
         ),
@@ -2350,15 +2382,18 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(vendors::State::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_cfg = cfg.clone();
+    let poller_activity = activity.clone();
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
         let mut asked = false;
         loop {
+            let work = poller_activity.start();
             if asked {
                 caches.asked_at = now();
             }
@@ -2404,6 +2439,7 @@ fn main() {
                     return;
                 }
             }
+            drop(work);
             let (lock, cond) = &*poller_wake;
             let mut pressed = match lock.lock() {
                 Ok(g) => g,
@@ -2427,6 +2463,10 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let mut active = 0i64;
+    // The strip the selection was made on. When the unified plan folds or
+    // unfolds tabs between frames, the selection is carried by name rather
+    // than position, or a read landing could move it to another agent.
+    let mut last_tabs: Vec<String> = Vec::new();
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
     let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
@@ -2506,8 +2546,25 @@ fn main() {
             Ok(g) => g.clone(),
             Err(_) => return,
         };
-        let mut rows = vec![tc::title("agent usage", w, &p.agent)];
-        let tabs = visible_agents(&snapshot.installed, &cfg);
+        let mut rows = vec![tc::title_busy(
+            "agent usage",
+            w,
+            &p.agent,
+            activity.tick(tick),
+        )];
+        // What discovery and config chose, and the strip drawn from it with
+        // the unified plan folded in. The summary and the hidden count read
+        // the first: a Cursor folded into SPACEXSI is not hidden, and its
+        // lanes still belong on [+].
+        let listed = visible_agents(&snapshot.installed, &cfg);
+        let tabs = vendors::spacexsi_tabs(&listed, &snapshot);
+        if !last_tabs.is_empty() && last_tabs != tabs {
+            let was = &last_tabs[step_tab(active, 0, last_tabs.len())];
+            if let Some(i) = vendors::retarget_tab(was, &tabs) {
+                active = i as i64;
+            }
+        }
+        last_tabs = tabs.clone();
         let at = step_tab(active, 0, tabs.len());
         active = at as i64;
         let name = tabs[at].clone();
@@ -2515,7 +2572,7 @@ fn main() {
             .iter()
             .filter(|n| {
                 snapshot.installed.get(**n).is_some_and(|x| x.present)
-                    && !tabs.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
+                    && !listed.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
             })
             .count();
 
@@ -2553,7 +2610,7 @@ fn main() {
             // quits.
             tc::guard_rows(&name, w, || {
                 let mut pending = Vec::new();
-                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &tabs, &mut pending);
+                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &listed, &mut pending);
                 plots = pending;
                 body
             })
@@ -2891,6 +2948,24 @@ mod tests {
                 tc::display_width(&plain(line)) <= w - 1,
                 "overflowed: {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn loading_rows_fit_and_spinner_follows_text() {
+        let p = palette();
+        for w in [20usize, 21, 24, 30, 40, 80, 120] {
+            let rows = loading_rows(w, 3, &p);
+            for row in &rows {
+                assert!(
+                    tc::display_width(&plain(row)) <= w - 1,
+                    "overflowed at {w}: {row:?}"
+                );
+            }
+            let first = plain(&rows[0]);
+            let text = first.find("reading usage").expect("text present");
+            let glyph = first.find(tc::SPINNER[3]).expect("spinner present");
+            assert!(text < glyph, "spinner must follow the text: {first:?}");
         }
     }
 
@@ -3692,6 +3767,57 @@ mod tests {
         assert_eq!(dated_five.unwrap().get("input"), Some(&2.0));
     }
 
+    /// Introductory standard rates from Google's pricing page on 14 Oct 2026
+    /// (through 30 Nov 2026; doubling to 4 / 20 / 0.20 on 1 Dec 2026).
+    ///
+    /// No existing key is a substring of `gemini-4-argon`, so without its own
+    /// row the model resolves to None and its tokens cost zero. Explicit
+    /// caching is not supported on this model; implicit caching discounts
+    /// cached input to 0.05× input ($0.10) with no cache_write fee.
+    #[test]
+    fn gemini_4_argon_is_priced_on_its_own_row() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        assert_eq!(
+            LIST_RATES.iter().filter(|(k, _, _)| *k == "gemini-4-argon").count(),
+            1,
+            "gemini-4-argon needs its own row; no existing key is a substring of it"
+        );
+
+        let (rate, origin) = rate_for("gemini-4-argon", &none);
+        let rate = rate.expect("gemini-4-argon must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
+        assert!(
+            !rate.contains_key("cache_write"),
+            "Google publishes no per-request cache-write price"
+        );
+        assert!(
+            !rate.contains_key("cache_write_1h"),
+            "Google publishes no 1h cache-write price"
+        );
+
+        // Dated or thinking-tier suffixed strings still reach this row.
+        for variant in ["gemini-4-argon-20261014", "gemini-4-argon-medium", "gemini-4-argon-high"] {
+            let (got, got_origin) = rate_for(variant, &none);
+            assert_eq!(got_origin, "list", "{variant}");
+            let got = got.unwrap_or_else(|| panic!("{variant} must resolve to gemini-4-argon"));
+            assert_eq!(got.get("input"), Some(&2.0), "{variant}");
+            assert_eq!(got.get("output"), Some(&10.0), "{variant}");
+            assert_eq!(got.get("cache_read"), Some(&0.10), "{variant}");
+        }
+
+        // Earlier Gemini families keep their own rows untouched.
+        let (flash_38, _) = rate_for("gemini-3.8-flash", &none);
+        assert_eq!(flash_38.unwrap().get("input"), Some(&0.75));
+        let (pro_31, _) = rate_for("gemini-3.1-pro-preview", &none);
+        assert_eq!(pro_31.unwrap().get("output"), Some(&12.0));
+        let (pro_25, _) = rate_for("gemini-2.5-pro", &none);
+        assert_eq!(pro_25.unwrap().get("input"), Some(&1.25));
+    }
+
     #[test]
     fn every_model_string_an_agent_writes_down_finds_a_price() {
         let none: HashMap<String, Rate> = HashMap::new();
@@ -4459,6 +4585,10 @@ mod tests {
         assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
         assert_eq!(tab_title("claude"), "CLAUDE");
         assert_eq!(tab_title("claude:bbi"), "BBI");
+        // Two unified accounts' tabs read as SpaceXSI per product, not as
+        // their internal ids.
+        assert_eq!(tab_title("spacexsi"), "SPACEXSI");
+        assert_eq!(tab_title("spacexsi:cursor"), "SPACEXSI·CURSOR");
         // The default profile's group keeps the plain heading rather than
         // stuttering `claude - CLAUDE`.
         let headings: Vec<String> = cfg

@@ -392,7 +392,7 @@ fn rtt_of(line: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
-fn prober_loop(shared: Arc<Mutex<Prober>>) {
+fn prober_loop(shared: Arc<Mutex<Prober>>, activity: tc::Refresh) {
     loop {
         let target = shared.lock().ok().and_then(|g| g.want.clone());
         let Some((machine, ip)) = target else {
@@ -421,6 +421,7 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
                 continue;
             }
         };
+        let work = activity.start();
         // It started, so whatever stopped it last time is over.
         if let Ok(mut g) = shared.lock() {
             g.err.clear();
@@ -469,6 +470,7 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
                 };
             }
         }
+        drop(work);
         if !moved_on {
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -759,13 +761,16 @@ fn main() {
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
     let prober = Arc::new(Mutex::new(Prober::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let refresh_now = Arc::new(Mutex::new(refresh));
 
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_refresh = Arc::clone(&refresh_now);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
+        let work = poller_activity.start();
         let out = tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT);
         let parsed: Option<serde_json::Value> = serde_json::from_str(&out).ok();
         // The netmap needs sudo and changes slowly, so it is asked for far
@@ -792,6 +797,7 @@ fn main() {
                 g.endpoints_at = tc::now();
             }
         }
+        drop(work);
         let wait = tc::poll_secs(poller_refresh.lock().map(|g| *g).unwrap_or(2.0), 2.0);
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -808,7 +814,8 @@ fn main() {
     });
 
     let probing = Arc::clone(&prober);
-    std::thread::spawn(move || prober_loop(probing));
+    let probing_activity = activity.clone();
+    std::thread::spawn(move || prober_loop(probing, probing_activity));
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -995,7 +1002,12 @@ fn main() {
         if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
-        let mut rows = vec![tc::title("tailnet", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "tailnet",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         let Some(data) = data else {
             rows.push(tc::seg(
                 &[(
@@ -1144,10 +1156,19 @@ fn main() {
                     .unwrap_or_default();
                 info_overlay_with_plots(
                     &chosen, &eps_now, &users, w, h, &rates, &latency, &probe_err, &stale, &derp,
-                    dscroll, &p, &mut detail_plots,
+                    dscroll, &p, &mut detail_plots, activity.tick(tc::animation_tick()),
                 )
             } else {
-                copy_overlay(&chosen, &eps_now, w, h, &note.0, dscroll, &p)
+                copy_overlay(
+                    &chosen,
+                    &eps_now,
+                    w,
+                    h,
+                    &note.0,
+                    dscroll,
+                    &p,
+                    activity.tick(tc::animation_tick()),
+                )
             };
             dscroll = at;
             tc::draw_plots(&body, w, h, &detail_plots);
@@ -1503,8 +1524,9 @@ fn info_overlay_with_plots(
     scroll: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, usize) {
-    let mut rows = vec![tc::title("machine info", w, &p.accent)];
+    let mut rows = vec![tc::title_busy("machine info", w, &p.accent, busy)];
     // Every field below is out of the same cached status as the list behind
     // this view, so it carries the same warning.
     if !stale.is_empty() {
@@ -1879,9 +1901,10 @@ fn copy_overlay(
     note: &str,
     scroll: usize,
     p: &Palette,
+    busy: Option<usize>,
 ) -> (Vec<String>, usize) {
     let pairs = addresses(peer, eps);
-    let mut rows = vec![tc::title("copy address", w, &p.accent)];
+    let mut rows = vec![tc::title_busy("copy address", w, &p.accent, busy)];
     rows.push(tc::seg(
         &[
             (p.accent.as_str(), format!(" {}", peer_name(peer))),
@@ -1999,7 +2022,7 @@ mod tests {
                     let mut plots = Vec::new();
                     let (rows, _) = info_overlay_with_plots(
                         &peer, &HashMap::new(), &HashMap::new(), width, height,
-                        &rates, &[], "", "", &HashMap::new(), scroll, &palette(), &mut plots,
+                        &rates, &[], "", "", &HashMap::new(), scroll, &palette(), &mut plots, None,
                     );
                     if height == 70 && scroll == 0 {
                         assert_eq!(plots.len(), 2);
@@ -2020,7 +2043,7 @@ mod tests {
         let mut plots = Vec::new();
         info_overlay_with_plots(
             &peer, &HashMap::new(), &HashMap::new(), 80, 70,
-            &HashMap::new(), &[], "", "", &HashMap::new(), 0, &palette(), &mut plots,
+            &HashMap::new(), &[], "", "", &HashMap::new(), 0, &palette(), &mut plots, None,
         );
         assert!(plots.is_empty(), "absent history must not become zero traffic");
     }

@@ -41,15 +41,19 @@ const AUTH: &str = ".grok/auth.json";
 const QUOTA_TIMEOUT: u64 = 6;
 /// The CLI, whose only job here is to refresh the token it owns.
 const CLI: &str = ".grok/bin/grok";
-/// Cache key for the billing reading.
-const PING_KEY: &str = "grok:billing";
+/// Cache key for the billing reading, per signed-in account: a reading
+/// held for one account must not answer for another, whose plan markers
+/// and window would then decide where SpaceXSI is drawn.
+fn ping_key(account: Option<&str>) -> String {
+    format!("grok:billing:{}", account.unwrap_or_default())
+}
 /// Cache key for the last session-end refresh, so one ending refreshes once.
 const SEEN_KEY: &str = "grok:session-seen";
 /// Cache key for the last expiry a refresh was attempted against, and
 /// whether that attempt was made before or after the lapse.
 const EXPIRY_KEY: &str = "grok:token-expiry";
 /// Cache key for the last reading the server actually gave, kept apart
-/// from `PING_KEY` because that slot is overwritten by every refusal and
+/// from `ping_key` because that slot is overwritten by every refusal and
 /// emptied by every token refresh. This one only ever holds a success,
 /// tagged with the token's account so a sign-in as someone else does not
 /// keep showing the previous account's figure.
@@ -100,7 +104,11 @@ struct Quota {
     tier: String,
     on_demand_used: Option<f64>,
     on_demand_cap: Option<f64>,
+    /// Dollars, converted from the cents x.ai sends. See `prepaid_of`.
     prepaid: Option<f64>,
+    /// The answer carries a marker only the unified Cursor and Grok plan
+    /// sends. See `unified_markers`.
+    unified: bool,
 }
 
 /// What the transcripts on this machine recorded, plus the account-wide
@@ -129,6 +137,9 @@ pub struct Data {
     /// Why the figure on screen is not the server's, when it is not. Empty
     /// when it is, or when nothing is asking.
     quota_why: String,
+    /// Where this account stands relative to the unified plan, once both
+    /// vendors have been read. Set by `vendors::link_spacexsi`.
+    pub spacexsi: Spacexsi,
 }
 
 /// The integer following `key` on a line.
@@ -207,7 +218,13 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
         // Unified-billing accounts omit `creditUsagePercent` entirely, so
         // the paid-allowance keys have to count on their own or a valid
         // on-demand lane never leaves the log.
-        if !line.contains("creditUsagePercent") && !line.contains("onDemandCap") {
+        // Unified-plan lines can carry neither - nought usage is omitted,
+        // and the plan has no x.ai cap - so its own keys admit a line too.
+        if !line.contains("creditUsagePercent")
+            && !line.contains("onDemandCap")
+            && !line.contains("prepaidBalance")
+            && !line.contains("isUnifiedBillingUser")
+        {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -234,7 +251,8 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
             tier: text(&d["ctx"], "subscriptionTier"),
             on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
             on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
-            prepaid: val_of(&cfg["prepaidBalance"]["val"]),
+            prepaid: prepaid_of(cfg),
+            unified: unified_markers(cfg),
         };
         let better = match &best {
             None => true,
@@ -269,6 +287,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
     let account = token_account();
+    let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
     let key = match usable_token() {
@@ -284,22 +303,22 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                 why
             };
             // "polled x.ai" is when we last asked, not when a success
-            // last landed. A failed poll still updates PING_KEY; a
+            // last landed. A failed poll still updates the ping slot; a
             // refresh that has just run clears it, and then the last
             // live reading's time is what remains.
             let at = caches
                 .live
-                .get(PING_KEY)
+                .get(&ping)
                 .map(|(when, _, _)| *when)
                 .unwrap_or(held_at);
             return (fresher(held, from_log()), false, at, why);
         }
     };
     let ttl = ping_ttl(cfg.grok_ping_minutes);
-    let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
+    let got = cached(caches, &ping, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
-    let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
+    let at = caches.live.get(&ping).map(|(when, _, _)| *when).unwrap_or(0.0);
     match got.as_ref() {
         None => (
             fresher(held, from_log()),
@@ -527,7 +546,7 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
             f64::MAX,
         ),
     );
-    caches.live.remove(PING_KEY);
+    caches.live.remove(&ping_key(token_account().as_deref()));
 }
 
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
@@ -618,7 +637,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             );
             // The token is new, so the reading held from before it is not
             // the best one available any more.
-            caches.live.remove(PING_KEY);
+            caches.live.remove(&ping_key(token_account().as_deref()));
         }
     }
     // One read, one spawn. The expiry helper re-reads auth.json, so a
@@ -642,6 +661,8 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         quota_at: quota_read.2,
         quota_why: quota_read.3,
         quota_every: quota_every_secs(cfg),
+        // Decided once both vendors are read; this reader sees only Grok.
+        spacexsi: Spacexsi::No,
     }
 }
 
@@ -697,6 +718,12 @@ fn parse_token_account(raw: &str) -> Option<String> {
             })
             .map(|(k, _)| k.clone())
     })
+}
+
+/// Which Grok account is signed in here, for scoping what is remembered
+/// about it between polls.
+pub fn account_id() -> Option<String> {
+    token_account()
 }
 
 fn token_account() -> Option<String> {
@@ -851,16 +878,158 @@ fn products_of(cfg: &serde_json::Value) -> Vec<(String, f64)> {
         .as_array()
         .map(|list| {
             list.iter()
-                .filter_map(|entry| {
+                .map(|entry| {
+                    // The unified plan's answer carries an entry with no
+                    // product named - 3% of a 5% week on the measured
+                    // account, beside GrokBot's 2%. Dropping it left a split
+                    // that read as the whole week and was not, so it is kept
+                    // and called what it is rather than given a name the
+                    // server did not send.
+                    // Kept as the server sent it - empty included - and named
+                    // for display by `product_name`, which knows which plan
+                    // the reading came from.
                     let name = text(entry, "product");
-                    if name.is_empty() {
-                        return None;
-                    }
-                    Some((name, val_of(&entry["usagePercent"]).unwrap_or(0.0)))
+                    (name, val_of(&entry["usagePercent"]).unwrap_or(0.0))
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The prepaid balance in dollars.
+///
+/// x.ai sends it in cents, unlike the on-demand cap beside it, which is
+/// dollars. Measured on the one account that has ever held a balance here:
+/// `prepaidBalance {val: 2000}` for the $20 paid on cursor.com, the same
+/// balance Cursor's own GetUserPrepaidBilling states as `availableCents:
+/// "2000"`. Read as dollars it said `prepaid $2000`, a hundredfold error in
+/// a figure about money.
+fn prepaid_of(cfg: &serde_json::Value) -> Option<f64> {
+    val_of(&cfg["prepaidBalance"]["val"]).map(|cents| cents / 100.0)
+}
+
+/// Whether the answer carries a marker only the unified Cursor and Grok
+/// plan sends.
+///
+/// Not `isUnifiedBillingUser`: the log carries that as true on readings
+/// from before the plans merged, on a Free tier with its own window, so it
+/// says something about x.ai's billing and nothing about Cursor. What
+/// arrived with the merge, on the credits endpoint, is a top-up method for
+/// the shared prepaid balance and a `GrokBot` product in the week's split -
+/// Grok Bot being the allowance Cursor bills. A log line has neither, which
+/// is why the window match in `vendors::link_spacexsi` exists as the
+/// second route in.
+fn unified_markers(cfg: &serde_json::Value) -> bool {
+    !text(cfg, "topUpMethod").is_empty()
+        || cfg["productUsage"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|e| text(e, "product") == "GrokBot"))
+}
+
+/// Whether the reading on hand is the server's, and recent: asked just now
+/// rather than read back from the log, not older than the window that
+/// judges a reading current, and of a week that has not yet ended - a
+/// cached answer can outlive its reset, and its split is last week's.
+pub fn reading_is_current(d: &Data) -> bool {
+    d.quota_live
+        && d.quota.as_ref().is_some_and(|q| {
+            !reading_is_old(q.taken) && iso_epoch(&q.end).is_none_or(|end| end > now())
+        })
+}
+
+/// Whether this reading says the account is on the unified plan.
+pub fn unified(d: &Data) -> bool {
+    d.quota.as_ref().is_some_and(|q| q.unified)
+}
+
+/// The credit window, as (start, end) in epoch milliseconds - the
+/// fingerprint `vendors::link_spacexsi` matches against Cursor's pool.
+///
+/// A reading may describe a week that has since rolled over - a log line,
+/// or a live answer still held in the poll cache across the reset - so a
+/// window that has ended is projected onto the current week the way the
+/// lanes project it, or the same account's two windows could never match
+/// after a reset. A window still running is taken as sent.
+pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
+    let q = d.quota.as_ref()?;
+    let (s, e) = match (iso_epoch(&q.start), iso_epoch(&q.end)) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return None,
+    };
+    match window_now(Some(s), Some(e), now()) {
+        (Some(end), true) => Some(((end - (e - s)) * 1000.0, end * 1000.0)),
+        _ => Some((s * 1000.0, e * 1000.0)),
+    }
+}
+
+/// The week split by product, one `name ~pct` entry after another, each
+/// entry whole: an entry that does not fit carries on to the next row,
+/// under the first, rather than be cut and lose its percentage.
+fn by_product_rows(entries: Vec<String>, w: usize, p: &Palette) -> Vec<String> {
+    // Later rows sit under the first entry, or at a short indent where an
+    // entry would not fit even there.
+    let head = "  by product ";
+    let under = " ".repeat(head.chars().count());
+    let short = "    ";
+    let room = |lead: &str| w.saturating_sub(1).saturating_sub(lead.chars().count()).max(1);
+    let mut lines: Vec<(String, String)> = vec![(head.to_string(), String::new())];
+    for entry in entries {
+        let (lead, last) = lines.last_mut().unwrap();
+        let joined = if last.is_empty() { entry.clone() } else { format!("{last} · {entry}") };
+        if last.is_empty() || joined.chars().count() <= room(lead) {
+            *last = joined;
+        } else {
+            let lead = if entry.chars().count() <= room(&under) { under.clone() } else { short.to_string() };
+            lines.push((lead, entry));
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(lead, text)| tc::seg(&[(p.dim.as_str(), lead), (p.txt.as_str(), text)], w - 1))
+        .collect()
+}
+
+/// A product as the split names it on screen.
+///
+/// On the unified plan the entry the server leaves unnamed is Cursor. Not a
+/// guess at a default: matched against x.ai's own usage dashboard on
+/// 2026-10-13, which listed Cursor 134,394,024 tokens, Grok Bot 137,782,665,
+/// Grok Chat 2,384,739 and Grok Build 103,749 - shares of 48.9%, 50.2%,
+/// 0.87% and 0.04% of a 10.3% week, so 5.03%, 5.16%, 0.09% and 0.004%.
+/// The endpoint answered `[{usagePercent: 5.0}, {product: "GrokBot",
+/// usagePercent: 5.0}]`: whole percents, and a product that rounds to
+/// nought absent altogether. Grok Build carries a name of its own on the
+/// account's own plan, so the unnamed one is not Build; its share is
+/// Cursor's. The other names are spaced the way the dashboard spells them.
+///
+/// On the account's own plan the names stay exactly as they were drawn
+/// before, and an unnamed entry is called what it is.
+fn product_name(raw: &str, unified: bool) -> String {
+    if !unified {
+        return if raw.is_empty() { "unnamed".to_string() } else { raw.to_string() };
+    }
+    if raw.is_empty() {
+        return "Cursor".to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in raw.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The week's pool split by product, for the SpaceXSI section: display
+/// name and whole percent, since that is all the endpoint sends, in the
+/// server's order.
+pub fn pool_split(d: &Data) -> Vec<(String, f64)> {
+    let Some(q) = d.quota.as_ref() else {
+        return Vec::new();
+    };
+    let unified = d.spacexsi.unified() || q.unified;
+    q.products.iter().map(|(name, pct)| (product_name(name, unified), *pct)).collect()
 }
 
 /// The billing body in the same shape the log parser produces, so the rest
@@ -907,9 +1076,18 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         // token.
         //
         // So nought is the real reading and not a guess, which is the only
-        // reason it may be drawn. A period this cannot parse is still
-        // unknown, and still refused above.
-        pct: Some(val_of(&cfg["creditUsagePercent"]).unwrap_or(0.0)),
+        // reason it may be drawn - and only while nothing in the same answer
+        // says otherwise. An omitted total beside a product that reports
+        // use is not nought: it is a total the answer did not give, and
+        // drawing 0% there invents a reading against the evidence in the
+        // same response. That is unknown, the same as a total never sent.
+        // A period this cannot parse is still unknown, and still refused
+        // above.
+        pct: match val_of(&cfg["creditUsagePercent"]) {
+            Some(v) => Some(v),
+            None if products_of(cfg).iter().any(|(_, used)| *used > 0.0) => None,
+            None => Some(0.0),
+        },
         products: products_of(cfg),
         taken: Some(now()),
         kind: text(period, "type"),
@@ -918,7 +1096,8 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         tier: String::new(),
         on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
         on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
-        prepaid: val_of(&cfg["prepaidBalance"]["val"]),
+        prepaid: prepaid_of(cfg),
+        unified: unified_markers(cfg),
     })
 }
 
@@ -956,8 +1135,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
     // A live reading is of the window we are in, so there is nothing to roll
-    // forward and nothing to qualify. Only the log needs either.
-    let (reset, projected) = if d.quota_live {
+    // forward and nothing to qualify - until that window ends while the
+    // answer is still held in the poll cache, when it is last week's figure
+    // as much as a log line is, and is rolled and qualified the same way.
+    let (reset, projected) = if d.quota_live && end.is_none_or(|e| e > now()) {
         (end, false)
     } else {
         window_now(begin, end, now())
@@ -977,7 +1158,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     // off the summary and would now take the paid allowance with it.
     if let Some(pct) = q.pct {
         out.push(Lane {
-            label: "credits".into(),
+            // On the unified plan this is the weekly pool Cursor draws on
+            // too, and naming it as Cursor's tab names it is what lets the
+            // two be read as one allowance.
+            label: if d.spacexsi.unified() { crate::cursor::POOL_LABEL } else { "credits" }.into(),
             pct,
             window_secs,
             reset,
@@ -1191,18 +1375,32 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // The window we are in, not the one the reading came from - the
         // heading used the raw end, so a rolled window lost its countdown
         // here while the summary still had one. Two screens, one answer.
-        let (current, rolled) = if d.quota_live {
+        // A live answer still held after its week ended is rolled too, as
+        // the summary rolls it.
+        let (current, rolled) = if d.quota_live && end.is_none_or(|e| e > now()) {
             (end, false)
         } else {
             window_now(begin, end, now())
         };
         let left = current.map(|e| e - now()).filter(|secs| *secs >= 0.0);
+        // On the unified plan the window is the pool Cursor's tab draws, so
+        // it goes under the same heading. Its own plan keeps the heading it
+        // always had.
+        let unified_here = d.spacexsi.unified();
+        let heading = if unified_here {
+            format!(" ── {} ── ", SPACEXSI)
+        } else {
+            format!(" ── {} QUOTA ── ", period_name(&q.kind).to_uppercase())
+        };
+        let via = match d.spacexsi {
+            Spacexsi::Separate => format!("via Grok · {} · ", period_name(&q.kind)),
+            Spacexsi::No => String::new(),
+            _ => format!("{} · ", period_name(&q.kind)),
+        };
         rows.push(tc::seg(
             &[
-                (
-                    p.lbl.as_str(),
-                    format!(" ── {} QUOTA ── ", period_name(&q.kind).to_uppercase()),
-                ),
+                (p.lbl.as_str(), heading),
+                (p.dim.as_str(), via),
                 (
                     p.dim.as_str(),
                     // left_span, not a decimal of a day: "~0.9 days" is
@@ -1241,7 +1439,10 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                     hue,
                     p,
                 ));
-                line.push((p.dim.clone(), "  credits used".into()));
+                line.push((
+                    p.dim.clone(),
+                    if unified_here { "  of the weekly pool" } else { "  credits used" }.into(),
+                ));
                 line.push(pace_cell(
                     lead(pct, span, reset),
                     pace_guessed(reading_is_old(q.taken), rolled, reset),
@@ -1287,6 +1488,25 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
                 ));
                 rows.push(seg_of(&line, w));
             }
+            // The unified plan has no on-demand cap of x.ai's own: extra use
+            // bills to the shared prepaid balance, under a monthly limit set
+            // on cursor.com. "No cap set" would say there is no limit when
+            // there may well be one, so the row says where the money is.
+            None if d.spacexsi == Spacexsi::Shared => rows.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    "  same account as the CURSOR tab - credits and the monthly limit are there"
+                        .into(),
+                )],
+                w - 1,
+            )),
+            None if unified_here => rows.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    "  extra use bills to prepaid credits, under a limit set on cursor.com".into(),
+                )],
+                w - 1,
+            )),
             None => rows.push(tc::seg(
                 &[(p.dim.as_str(), "  no on-demand cap set".into())],
                 w - 1,
@@ -1303,8 +1523,12 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // prepaid balance, which is money on the account rather than an
         // allowance and so has no percentage to be a bar of.
         let mut extras: Vec<String> = Vec::new();
+        // Shared, the balance is Cursor's tab's to show: it is one balance,
+        // and stating it on both tabs reads as two.
         if let Some(prepaid) = q.prepaid.filter(|v| *v != 0.0) {
-            extras.push(format!("prepaid {}", dollars(prepaid)));
+            if d.spacexsi != Spacexsi::Shared {
+                extras.push(format!("prepaid {}", dollars(prepaid)));
+            }
         }
         rows.push(tc::seg(
             &[
@@ -1324,20 +1548,21 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         // The same week split by product. Worth a row of its own because
         // the bar above is one number for three different things, and which
         // of them is spending is the part a reader can act on.
-        if !q.products.is_empty() {
-            let split = q
+        if unified_here {
+            // The unified plan's split is whole percents with Cursor's share
+            // unnamed; named and said for what it is.
+            let split = pool_split(d);
+            if !split.is_empty() {
+                let entries = split.iter().map(|(name, pct)| format!("{} ~{:.0}%", name, pct)).collect();
+                rows.extend(by_product_rows(entries, w, p));
+            }
+        } else if !q.products.is_empty() {
+            let entries = q
                 .products
                 .iter()
-                .map(|(name, pct)| format!("{} {}", name, pct_text(*pct).trim()))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            rows.push(tc::seg(
-                &[
-                    (p.dim.as_str(), "  by product ".into()),
-                    (p.txt.as_str(), split),
-                ],
-                w - 1,
-            ));
+                .map(|(name, pct)| format!("{} {}", product_name(name, false), pct_text(*pct).trim()))
+                .collect();
+            rows.extend(by_product_rows(entries, w, p));
         }
         rows.push(String::new());
     } else {
@@ -1348,6 +1573,12 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         }
     }
 
+    // SpaceXSI is drawn from the account's own figures only: the session
+    // totals below are this machine's transcripts, one machine's share of
+    // an account-wide plan.
+    if d.spacexsi.unified() {
+        return rows;
+    }
     // Everything below counts what this machine recorded, so it stops here
     // when there is nothing recorded - but the quota above has already been
     // drawn, because it is a fact about the account rather than the disk.
@@ -1476,10 +1707,13 @@ fn plan_block(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             },
         ));
     }
-    if let Some(prepaid) = q.prepaid {
+    // Shared, the balance is the CURSOR tab's to state, as on the quota
+    // block above.
+    if let Some(prepaid) = q.prepaid.filter(|_| d.spacexsi != Spacexsi::Shared) {
         pairs.push(("prepaid balance".into(), dollars(prepaid)));
     }
-    plan_rows(&q.tier, &pairs, w, "", None, "", p)
+    let note = if d.spacexsi.unified() { SPACEXSI } else { "" };
+    plan_rows(&q.tier, &pairs, w, note, None, "", p)
 }
 
 /// The whole tab: the credit window, what the transcripts recorded, and
@@ -1501,7 +1735,7 @@ mod tests {
     /// like the real thing down to the microseconds and the numeric offset
     /// on the period - a fixture that arrives in a tidier format than the
     /// server sends tests a parser nobody has.
-    const LOG_LINE: &str = concat!(
+    pub(super) const LOG_LINE: &str = concat!(
         r#"{"msg":"config","lvl":"info","ctx":{"subscriptionTier":"Test Premium","config":{"#,
         r#""creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
         r#""start":"2026-08-10T00:00:00.000000+00:00","#,
@@ -1699,10 +1933,18 @@ mod tests {
         // being discarded and an eleven-day-old log line shown instead.
         let base = newest_quota([LOG_LINE].into_iter()).expect("a reading");
 
-        // Taken a minute ago: current, and its window is the one we are in.
+        // Taken a minute ago: current, and its window is the one we are in -
+        // a live answer is of the week it was asked in, so the log line's
+        // week is moved to end after now.
+        let live_end = "2099-08-17T00:00:00.000000+00:00";
         let d = Data {
             ok: true,
-            quota: Some(Quota { taken: Some(now() - 60.0), ..base.clone() }),
+            quota: Some(Quota {
+                taken: Some(now() - 60.0),
+                start: "2099-08-10T00:00:00.000000+00:00".into(),
+                end: live_end.into(),
+                ..base.clone()
+            }),
             quota_live: true,
             ..Default::default()
         };
@@ -1714,7 +1956,7 @@ mod tests {
         assert!(got.iter().all(|l| !l.projected), "a live window was read, not worked out");
         assert_eq!(
             got[0].reset,
-            iso_epoch("2026-08-17T00:00:00.000000+00:00"),
+            iso_epoch(live_end),
             "a live window is reported as the server gave it, not rolled"
         );
 
@@ -1774,6 +2016,7 @@ mod tests {
             on_demand_used: None,
             on_demand_cap: None,
             prepaid: None,
+            unified: false,
         };
         let p = palette();
         let old = grok_tab(
@@ -1962,13 +2205,24 @@ mod tests {
             },
             "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
             "productUsage": [
-                {"product": "GrokBuild", "usagePercent": 1.0},
+                {"product": "GrokBuild"},
                 {"product": "GrokChat"},
                 {"product": "GrokImagine"}
             ],
         }});
         let q = quota_from(&body).expect("a named period is a reading");
         assert_eq!(q.pct, Some(0.0), "an omitted default read as unknown");
+
+        // But not when the same answer shows use. This fixture once had
+        // GrokBuild at 1.0 beside the omitted total and called the total
+        // nought - a total of 0% over a product at 1% contradicts itself,
+        // and the endpoint has not been seen to send it (it answers 10.0
+        // beside 5.0 and 5.0). Review flagged the 0% as fabricated; it is
+        // unknown, the same as a total never sent.
+        let mut used = body.clone();
+        used["config"]["productUsage"][0] = serde_json::json!({"product": "GrokBuild", "usagePercent": 1.0});
+        let q = quota_from(&used).expect("still a reading of the period");
+        assert_eq!(q.pct, None, "a total invented against the product beside it");
         assert_eq!(q.start, "2026-08-26T02:09:41.289406+00:00");
         assert!(q.taken.is_some(), "a live reading knows when it was taken");
 
@@ -2252,6 +2506,7 @@ mod tests {
             quota_at: 0.0,
             quota_every: 0.0,
             quota_why: String::new(),
+            spacexsi: Spacexsi::No,
         };
         for w in [40usize, 80, 200] {
             let rows = tab(&d, w, 24, &Config::default(), &p);
@@ -2361,6 +2616,360 @@ mod tests {
         };
         let note = why_no_lane(&lapsed);
         assert!(note.contains("token lapsed"), "{note}");
+    }
+
+    // The unified Cursor and Grok plan, as the credits endpoint and the log
+    // answered on 2026-10-13. Shapes and figures only.
+
+    /// The credits endpoint on the unified plan, around now.
+    fn unified_body() -> serde_json::Value {
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp_millis((at * 1000.0) as i64)
+                .expect("a stamp")
+                .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+                .to_string()
+        };
+        let (start, end) = (now() - 86400.0, now() + 6.0 * 86400.0);
+        serde_json::json!({"config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": stamp(start), "end": stamp(end)},
+            "creditUsagePercent": 5.0,
+            "productUsage": [{"usagePercent": 3.0}, {"product": "GrokBot", "usagePercent": 2.0}],
+            "prepaidBalance": {"val": 2000},
+            "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+            "billingPeriodStart": stamp(start),
+            "billingPeriodEnd": stamp(end)
+        }})
+    }
+
+    fn strip(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn unified_grok(place: Spacexsi) -> Data {
+        Data {
+            quota: quota_from(&unified_body()),
+            quota_live: true,
+            quota_every: 300.0,
+            spacexsi: place,
+            ..Data::default()
+        }
+    }
+
+    #[test]
+    fn the_credits_endpoint_marks_the_unified_plan_and_states_the_balance_in_cents() {
+        let q = quota_from(&unified_body()).expect("a reading");
+        assert!(q.unified, "topUpMethod and a GrokBot product are the unified plan's");
+        // 2000 is $20 - the balance Cursor states as availableCents "2000".
+        assert_eq!(q.prepaid, Some(20.0));
+        assert_eq!(q.pct, Some(5.0));
+        // A product with no name is kept and not guessed at, so the split
+        // still adds up to the week.
+        assert_eq!(q.products, vec![(String::new(), 3.0), ("GrokBot".to_string(), 2.0)]);
+        // On the unified plan the unnamed share is Cursor's, and the split
+        // is whole percents.
+        let d = unified_grok(Spacexsi::Shared);
+        assert_eq!(pool_split(&d), vec![("Cursor".to_string(), 3.0), ("Grok Bot".to_string(), 2.0)]);
+        // On the account's own plan nothing is renamed.
+        assert_eq!(product_name("", false), "unnamed");
+        assert_eq!(product_name("GrokBuild", false), "GrokBuild");
+        assert_eq!(product_name("GrokBuild", true), "Grok Build");
+        assert_eq!(product_name("GrokImagine", true), "Grok Imagine");
+        // Either marker is enough on its own.
+        let mut only_topup = unified_body();
+        only_topup["config"].as_object_mut().unwrap().remove("productUsage");
+        assert!(quota_from(&only_topup).unwrap().unified);
+        let mut only_bot = unified_body();
+        only_bot["config"].as_object_mut().unwrap().remove("topUpMethod");
+        assert!(quota_from(&only_bot).unwrap().unified);
+    }
+
+    #[test]
+    fn is_unified_billing_user_alone_is_not_the_unified_plan() {
+        // The log carried it as true on a Free tier, with a window of its
+        // own, before the plans merged.
+        let line = concat!(
+            r#"{"msg":"billing: fetched credits config","ctx":{"subscriptionTier":"Free","config":{"#,
+            r#""currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-07T02:09:41.289406+00:00","end":"2026-10-14T02:09:41.289406+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"#,
+            r#""prepaidBalance":{"val":0}}}}"#
+        );
+        let q = newest_quota([line].into_iter()).expect("a reading");
+        assert!(!q.unified);
+    }
+
+    #[test]
+    fn the_newest_window_wins_across_the_merge() {
+        // The log holds the account's own window and then the unified one;
+        // the second is the account now. It carries no marker - the log
+        // never does - and its balance is cents like the endpoint's.
+        let before = concat!(
+            r#"{"ts":"2026-10-12T07:46:27.663Z","ctx":{"subscriptionTier":null,"config":{"#,
+            r#""creditUsagePercent":2.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-11T04:13:45.862845+00:00","end":"2026-10-18T04:13:45.862845+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"#,
+            r#""prepaidBalance":{"val":0}}}}"#
+        );
+        let after = concat!(
+            r#"{"ts":"2026-10-13T04:16:10.188Z","ctx":{"subscriptionTier":"X Premium+","config":{"#,
+            r#""creditUsagePercent":4.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-13T02:39:23.429+00:00","end":"2026-10-20T02:39:23.429+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"prepaidBalance":{"val":2000}}}}"#
+        );
+        for lines in [[before, after], [after, before]] {
+            let q = newest_quota(lines.into_iter()).expect("a reading");
+            assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
+            assert_eq!(q.pct, Some(4.0));
+            assert_eq!(q.prepaid, Some(20.0));
+            assert!(q.on_demand_cap.is_none(), "the unified plan has no x.ai cap");
+        }
+        // The pool's window to the millisecond, which is what Cursor's is
+        // matched against.
+        let d = Data { quota: newest_quota([before, after].into_iter()), ..Data::default() };
+        let (s, e) = pool_window(&d).expect("a window");
+        assert_eq!((s.round(), e.round()), (1_791_859_163_429.0, 1_792_463_963_429.0));
+    }
+
+    #[test]
+    fn a_unified_grok_goes_under_spacexsi_and_its_own_plan_does_not() {
+        let alone = grok_tab(&unified_grok(Spacexsi::Alone), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        for want in ["SpaceXSI", "weekly", "of the weekly pool", "prepaid $20", "bills to prepaid credits"] {
+            assert!(alone.contains(want), "missing {want:?}: {alone}");
+        }
+        for gone in ["WEEKLY QUOTA", "credits used", "no on-demand cap set", "$2000"] {
+            assert!(!alone.contains(gone), "{gone:?}: {alone}");
+        }
+        // Shared, the balance and the limit are the CURSOR tab's to show.
+        let shared = grok_tab(&unified_grok(Spacexsi::Shared), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(shared.contains("same account as the CURSOR tab"), "{shared}");
+        assert!(!shared.contains("prepaid"), "the balance stated twice: {shared}");
+        let whole = tab(&unified_grok(Spacexsi::Shared), 120, 24, &Config::default(), &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(!whole.contains("prepaid balance"), "the SUBSCRIPTION block restated it: {whole}");
+        let separate = grok_tab(&unified_grok(Spacexsi::Separate), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(separate.contains("SpaceXSI ── via Grok"), "{separate}");
+        // The same reading on an account Grok cannot tell is unified, and no
+        // window match: the heading it always had.
+        let own = grok_tab(&unified_grok(Spacexsi::No), 120, &palette())
+            .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(own.contains("WEEKLY QUOTA") && !own.contains("SpaceXSI"), "{own}");
+    }
+
+    #[test]
+    fn a_spacexsi_grok_tab_draws_no_local_session_data() {
+        let mut d = Data::unified_fixture();
+        d.spacexsi = Spacexsi::Alone;
+        let text = tab(&d, 120, 24, &Config::default(), &palette()).iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("SpaceXSI"), "{text}");
+        for local in ["TOTALS", "TOKENS / DAY", "session files"] {
+            assert!(!text.contains(local), "local data {local:?} under SpaceXSI: {text}");
+        }
+        // Its own plan still draws them.
+        d.spacexsi = Spacexsi::No;
+        let own = tab(&d, 120, 24, &Config::default(), &palette()).join("\n");
+        assert!(own.contains("TOTALS") && own.contains("TOKENS / DAY"), "{own}");
+    }
+
+    #[test]
+    fn a_just_reset_unified_log_line_still_reaches_the_reader() {
+        // Review: nought usage omits creditUsagePercent and the unified plan
+        // has no onDemandCap, so the line was skipped before it was parsed.
+        let line = concat!(
+            r#"{"ts":"2026-10-13T02:40:00.000Z","ctx":{"config":{"#,
+            r#""currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","#,
+            r#""start":"2026-10-13T02:39:23.429+00:00","end":"2026-10-20T02:39:23.429+00:00"},"#,
+            r#""isUnifiedBillingUser":true,"prepaidBalance":{"val":2000}}}}"#
+        );
+        let q = newest_quota([line].into_iter()).expect("the line was skipped");
+        assert_eq!(q.start, "2026-10-13T02:39:23.429+00:00");
+        assert_eq!(q.prepaid, Some(20.0));
+    }
+
+    #[test]
+    fn the_product_split_wraps_whole_entries_on_a_narrow_pane() {
+        // Review: one joined row let `seg` clip `Grok Bot ~2%` off a
+        // 26-column pane.
+        let entries = vec!["Cursor ~3%".to_string(), "Grok Bot ~2%".to_string(), "Grok Imagine ~1%".to_string()];
+        for w in [26usize, 40, 120] {
+            let rows: Vec<String> = by_product_rows(entries.clone(), w, &palette()).iter().map(|r| strip(r)).collect();
+            let text = rows.join("\n");
+            for entry in &entries {
+                assert!(text.contains(entry.as_str()), "{entry:?} cut at {w}: {text}");
+            }
+            for row in &rows {
+                assert!(row.chars().count() <= w - 1, "{w}: {row:?}");
+            }
+        }
+        assert_eq!(by_product_rows(entries, 120, &palette()).len(), 1, "a wide pane keeps one row");
+    }
+
+    #[test]
+    fn a_cached_live_answer_past_its_reset_is_projected_like_a_log_line() {
+        // Review: a live answer held across the weekly reset kept last
+        // week's figure as an unqualified current lane in [+].
+        let mut d = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        let begun = chrono::DateTime::from_timestamp((now() - 60.0 - 7.0 * 86400.0) as i64, 0).unwrap();
+        let q = d.quota.as_mut().unwrap();
+        q.start = begun.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        q.end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        let lane = lanes(&d).into_iter().next().expect("a lane");
+        assert!(lane.projected, "last week's figure drawn as this week's");
+        assert!(lane.reset.unwrap() > now(), "the reset left in the past");
+        // Review: the tab's heading rolls it the same way, so its countdown
+        // is to the reset coming rather than gone.
+        let tab = tab_with_plots(&d, 120, 40, &Config::default(), &palette(), &mut Vec::new())
+            .iter()
+            .map(|r| strip(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tab.contains("resets in ~"), "{tab}");
+        // A live answer of the week we are in is taken as sent.
+        assert!(!lanes(&unified_grok(Spacexsi::Shared))[0].projected);
+    }
+
+    #[test]
+    fn only_a_live_recent_reading_is_current() {
+        // Review: a split from a request that has since failed was drawn
+        // under Cursor's `live` heading.
+        let d = unified_grok(Spacexsi::Shared);
+        assert!(reading_is_current(&d));
+        let log = Data { quota_live: false, ..unified_grok(Spacexsi::Shared) };
+        assert!(!reading_is_current(&log), "a log reading");
+        let mut old = unified_grok(Spacexsi::Shared);
+        old.quota.as_mut().unwrap().taken = Some(now() - GROK_FRESH_FOR - 60.0);
+        assert!(!reading_is_current(&old), "an old reading");
+        // Review: a fresh answer held in the cache past its week's reset.
+        let mut ended = unified_grok(Spacexsi::Shared);
+        let gone = chrono::DateTime::from_timestamp((now() - 60.0) as i64, 0).unwrap();
+        ended.quota.as_mut().unwrap().end = gone.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string();
+        assert!(!reading_is_current(&ended), "a week that has ended");
+    }
+
+    #[test]
+    fn an_omitted_total_beside_a_product_in_use_is_unknown_not_nought() {
+        // Review (P1): proto3 omits a total at nought, but a total omitted
+        // while a product reports use is a total the answer did not give.
+        let period = serde_json::json!({
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-10-13T02:39:23.429+00:00", "end": "2026-10-20T02:39:23.429+00:00"
+        });
+        let used = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild", "usagePercent": 1.0}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&used).unwrap().pct, None, "a fabricated 0%");
+        // Nothing reports use: nought is the real reading, as before.
+        let idle = serde_json::json!({"config": {
+            "currentPeriod": period,
+            "productUsage": [{"product": "GrokBuild"}, {"product": "GrokChat"}]
+        }});
+        assert_eq!(quota_from(&idle).unwrap().pct, Some(0.0));
+        // And no lane is drawn for an unknown total.
+        let d = Data { quota: quota_from(&used), quota_live: true, spacexsi: Spacexsi::Alone, ..Data::default() };
+        assert!(lanes(&d).is_empty(), "a lane for an unknown total");
+    }
+
+    #[test]
+    fn a_stale_window_is_rolled_onto_this_week_before_it_is_matched() {
+        // Review: an old reading's window was compared as recorded, so it
+        // could never match the same account's current Cursor window.
+        let stamp = |at: f64| {
+            chrono::DateTime::from_timestamp_millis((at * 1000.0) as i64)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+                .to_string()
+        };
+        let week = 7.0 * 86400.0;
+        let (start, end) = (now() - 2.5 * week, now() - 1.5 * week);
+        let mut d = unified_grok(Spacexsi::Shared);
+        d.quota_live = false;
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(start);
+        q.end = stamp(end);
+        let (s, e) = pool_window(&d).expect("a window");
+        assert!((e - s - week * 1000.0).abs() < 1.0, "the week's length kept");
+        assert!(s / 1000.0 <= now() && now() < e / 1000.0, "rolled onto the week we are in");
+        assert!(((e / 1000.0 - end) / week - 2.0).abs() < 1e-6, "rolled by whole weeks");
+        // Review: a live answer held in the poll cache can outlast its
+        // week too, and rolls the same way.
+        d.quota_live = true;
+        assert_eq!(pool_window(&d), Some((s, e)));
+        // A window still running is taken as sent.
+        let q = d.quota.as_mut().unwrap();
+        q.start = stamp(now() - 0.5 * week);
+        q.end = stamp(now() + 0.5 * week);
+        let (s, e) = pool_window(&d).unwrap();
+        assert!((s / 1000.0 - (now() - 0.5 * week)).abs() < 1.0 && (e / 1000.0 - (now() + 0.5 * week)).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_unified_lane_is_named_as_cursor_names_the_pool() {
+        let labels = |place| lanes(&unified_grok(place)).into_iter().map(|l| l.label).collect::<Vec<_>>();
+        assert_eq!(labels(Spacexsi::Alone), ["weekly pool"]);
+        assert_eq!(labels(Spacexsi::No), ["credits"]);
+    }
+
+    #[test]
+    fn every_unified_grok_row_fits_its_pane() {
+        for place in [Spacexsi::No, Spacexsi::Alone, Spacexsi::Shared, Spacexsi::Separate] {
+            for w in [26usize, 30, 40, 58, 80, 120] {
+                for row in grok_tab(&unified_grok(place), w, &palette()) {
+                    let n = strip(&row).chars().count();
+                    assert!(n <= w - 1, "{n} wide at {w} ({place:?}): {:?}", strip(&row));
+                }
+            }
+        }
+    }
+}
+
+/// Readings for tests outside this module: the unified plan's credits
+/// answer, and the account's own plan as its log recorded it.
+#[cfg(test)]
+impl Data {
+    pub fn unified_fixture() -> Data {
+        // With sessions on this machine, so a test can see what the merged
+        // tab does with them.
+        Data {
+            ok: true,
+            sessions: 2,
+            files: 2,
+            total: 1_000.0,
+            daily: HashMap::from([(Local::now().date_naive(), 1_000.0)]),
+            last: now(),
+            ..tests::unified_grok(Spacexsi::No)
+        }
+    }
+
+    /// The same reading with nothing polling x.ai - a log figure.
+    pub fn polling_nobody(mut d: Data) -> Data {
+        d.quota_every = 0.0;
+        d.quota_live = false;
+        d
+    }
+
+    pub fn own_plan_fixture() -> Data {
+        Data {
+            quota: newest_quota([tests::LOG_LINE].into_iter()),
+            quota_every: 300.0,
+            ..Data::default()
+        }
     }
 }
 

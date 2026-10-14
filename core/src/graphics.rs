@@ -713,6 +713,13 @@ fn delete(slot: usize) -> String {
     format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", image_id(slot))
 }
 
+/// One placement only, keeping the image data. Each upload gets a fresh
+/// placement id, and not every terminal drops the old placement when the
+/// image id is re-transmitted, so the replaced frame would stay underneath.
+fn delete_placement(slot: usize, placement: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={},p={placement},q=2\x1b\\", image_id(slot))
+}
+
 /// Also called by the signal handler: only atomics and write(2), no locks,
 /// formatting, allocation or shared references to a mutating image cache.
 /// Shared memory is not unlinked here. `shm_unlink` is not async-signal-safe;
@@ -873,6 +880,7 @@ pub(crate) fn compose(
                 }
             }
         }
+        let mut replaced = None;
         if let Some(cached) = cache.get(slot) {
             // Clear the old region before text is repainted when scrolling
             // moves/crops it. Some multiplexers retain old placements on a=T.
@@ -880,6 +888,8 @@ pub(crate) fn compose(
             // interval, and identical pixels never reach this path.
             if lost || plot.is_none_or(|p| !cached.same_region(p, cols, (cell_w, cell_h))) {
                 before.push_str(&delete(slot));
+            } else {
+                replaced = Some(PLACEMENTS[slot].load(Ordering::Acquire));
             }
             super::shm::retire_id(image_id(slot));
         }
@@ -892,6 +902,9 @@ pub(crate) fn compose(
             // frame never shows the chart covering its labels.
             if plot.under_text {
                 after.push_str(&place(plot, slot, w));
+            }
+            if let Some(old) = replaced {
+                after.push_str(&delete_placement(slot, old));
             }
             let cached = CachedPlot {
                 plot: plot.clone(),
@@ -1815,6 +1828,38 @@ mod tests {
             let (_, before, after) = compose(&rows, &[next], 40, 12, true, false, false);
             assert!(before.is_empty() && after.is_empty());
         }
+        cleanup();
+    }
+
+    #[test]
+    fn a_changed_chart_removes_the_placement_it_replaced() {
+        // Every upload gets a fresh placement id, so a terminal that keeps
+        // placements across a re-transmit showed each earlier frame through
+        // the transparent part of the new one (OPS-168).
+        let _transport = super::super::shm::guard();
+        let colour = super::super::rgb(240, 160, 110);
+        let rows = vec!["title".into()];
+        let bars = |v: f64| Plot::bars(2, 1, &[(v, colour.clone()), (1.0, colour.clone())], 3, 1.0, false);
+        let (_, _, after) = compose(&rows, &[bars(0.9)], 40, 8, true, true, false);
+        assert!(after.contains("a=T") && !after.contains("a=d"));
+        let first = PLACEMENTS[0].load(Ordering::Acquire);
+        let (_, before, after) = compose(&rows, &[bars(0.2)], 40, 8, true, false, false);
+        let second = PLACEMENTS[0].load(Ordering::Acquire);
+        assert_ne!(first, second);
+        // The new frame goes up before the old one comes down, so nothing
+        // blinks, and only that one placement goes: the image stays.
+        assert!(before.is_empty());
+        let removal = delete_placement(0, first);
+        let upload = after.find("a=T").unwrap();
+        assert!(removal.contains(",d=i,") && removal.contains(&format!(",p={first},")));
+        assert!(after.find(&removal).is_some_and(|at| at > upload));
+        assert!(!after.contains(&format!(",p={second},q=2")));
+        // A moved chart leaves nothing at its old place either.
+        let mut moved = bars(0.2);
+        moved.y += 1;
+        let (_, before, after) = compose(&rows, &[moved], 40, 8, true, false, false);
+        assert!(before.contains(&delete(0)));
+        assert!(after.contains("a=T"));
         cleanup();
     }
 

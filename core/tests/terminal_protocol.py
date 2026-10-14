@@ -31,10 +31,13 @@ COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty", image_reply="ok"):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra_env=None):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
-        env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
+        # This fixture is the terminal. A run from inside a Herdr pane would
+        # otherwise hand the probe Herdr's variables and skip shared memory.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
+        env.update(TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode, **(extra_env or {}))
         self.proc = subprocess.Popen([str(BINARY)], stdin=slave, stdout=slave,
                                      stderr=slave, env=env, start_new_session=True)
         os.close(slave)
@@ -690,6 +693,21 @@ def missing_and_late_replies_keep_their_upload_keys():
         t.close()
 
 
+def herdr_pane_sends_images_inline():
+    # Herdr's server answers the shared-memory probe OK and then draws
+    # nothing sent through t=s, so a Herdr pane never sends the probe.
+    t = Terminal(extra_env={"HERDR_ENV": "1"})
+    try:
+        t.read(0.4)
+        probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
+        assert not probes, "a Herdr pane was sent the shared-memory probe"
+        assert t.images(), "no chart under Herdr"
+        assert all(keys[b"t"] == b"d" for keys, _ in t.images()), "a Herdr pane used shared memory"
+        t.quit()
+    finally:
+        t.close()
+
+
 if __name__ == "__main__":
     scroll_clears_previous_image_region()
     moving_meter_keeps_unchanged_pixels()
@@ -697,6 +715,8 @@ if __name__ == "__main__":
     print("PASS shared-memory/success-before-failure")
     missing_and_late_replies_keep_their_upload_keys()
     print("PASS shared-memory/missing-and-late-replies")
+    herdr_pane_sends_images_inline()
+    print("PASS shared-memory/herdr-inline")
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
