@@ -925,6 +925,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
             // What this grant took this period, so it is not spread again
             // over the grants that do not say.
             let spent = (amount - r).max(0.0);
+            // Spent before this period cannot be more than spent at all.
+            if prior_periods.is_some_and(|before| before > spent + 0.5) {
+                return None;
+            }
             let this_period = (spent - prior_periods.unwrap_or(0.0)).max(0.0);
             said_this_period += this_period;
             if prior_periods.is_some() {
@@ -2231,6 +2235,11 @@ Period resets : 2026-10-06
         assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
         assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
         assert_eq!(c.uncovered, 300.0);
+        // Spent before this period beyond all a grant has spent is a changed answer.
+        let raw = r#"{"total_usage_cents":0,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":80,
+             "amount_applied_prior_period_cents":50}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
         // Grants that state more spent this period than its total disagree with it.
         let raw = r#"{"total_usage_cents":20,"credit_grants":[
             {"type":"recurring","amount_cents":100,"remaining_cents":50,

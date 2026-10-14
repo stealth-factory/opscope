@@ -324,10 +324,13 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
 /// A signed-in session that names no tier: a user object and nothing to
 /// call a plan, which is an answer and not a fault.
 fn session_names_no_plan(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("user").map(|u| u.is_object()))
-        .unwrap_or(false)
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    // A tier that is there and not text is a changed answer, not no plan.
+    v.get("user").and_then(|u| u.as_object()).is_some_and(|u| {
+        matches!(u.get("subscription_tier"), None | Some(serde_json::Value::Null))
+    })
 }
 
 /// A quota answer that is an object with no share used in it: a plan with
@@ -587,6 +590,11 @@ fn credit_rows_with_plots(
         if pace_below {
             figures -= tc::display_width(&pace.1);
         }
+        // Narrower still, the share goes to a row of its own too.
+        let pct_below = figures + 1 > w - 1;
+        if pct_below {
+            figures -= tc::display_width(&pct.1);
+        }
         let room = ((w as i64) - 38 - label_w as i64)
             .max(8)
             .min(w as i64 - 1 - figures as i64)
@@ -603,7 +611,13 @@ fn credit_rows_with_plots(
             hue,
             p,
         ));
-        line.push(pct);
+        let pct_row = match pct_below {
+            true => Some(tc::seg(&[(pct.0.as_str(), format!("  {}", pct.1.trim()))], w - 1)),
+            false => {
+                line.push(pct.clone());
+                None
+            }
+        };
         let pace_row = match pace_below {
             true => Some(tc::seg(&[(pace.0.as_str(), format!("  pace {}", pace.1.trim()))], w - 1)),
             false => {
@@ -613,6 +627,7 @@ fn credit_rows_with_plots(
         };
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
+        rows.extend(pct_row);
         rows.extend(pace_row);
         let detail = match (lane.label.as_str(), c) {
             ("weekly", _) => weekly_detail(lane.reset),
@@ -1223,6 +1238,7 @@ mod tests {
         assert!(words.contains("plan name not read · plan the request timed out"), "{rows}");
         assert!(session_names_no_plan(r#"{"user":{"email":"x"}}"#));
         assert!(!session_names_no_plan("{}"));
+        assert!(!session_names_no_plan(r#"{"user":{"subscription_tier":3}}"#));
     }
 
     #[test]
@@ -1279,7 +1295,8 @@ mod tests {
         )
         .1;
         assert!(!pace.trim().is_empty());
-        for w in 22usize..=40 {
+        // Twelve is the narrowest a lane's label and a one-cell bar fit in.
+        for w in 12usize..=40 {
             let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
             let lines: Vec<&str> = rows.lines().collect();
             let at = lines.iter().position(|r| r.trim_start().starts_with("monthly")).unwrap();
@@ -1290,12 +1307,17 @@ mod tests {
             // Beside the bar, or on its own row under it when even a
             // one-cell bar leaves no room - but never cut.
             let below = format!("pace {}", pace.trim());
+            let share = pct_text(lane.pct);
             assert!(
-                bar.trim_end().ends_with(pace.trim()) || lines[at + 1].trim() == below,
+                bar.trim_end().ends_with(pace.trim()) || lines[at + 1..=at + 2].iter().any(|r| r.trim() == below),
                 "width {w}: {bar:?} / {:?} wants {pace:?}",
+                &lines[at + 1..=at + 2]
+            );
+            assert!(
+                bar.contains(&share) || lines[at + 1].trim() == share.trim(),
+                "width {w}: {bar:?} / {:?} wants {share:?}",
                 lines[at + 1]
             );
-            assert!(bar.contains(&pct_text(lane.pct)), "width {w}: {bar:?}");
         }
     }
 
