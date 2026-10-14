@@ -632,6 +632,7 @@ def stop_child(pid):
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
+        # The child can already have exited after an earlier SIGTERM.
         pass
 
 
