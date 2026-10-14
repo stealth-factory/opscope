@@ -653,9 +653,7 @@ fn credit_rows_with_plots(
             _ => String::new(),
         };
         let indent = if w < 40 { 2 } else { label_w + 3 };
-        for line in wrap_text(&detail, w.saturating_sub(indent + 2).max(8)) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), line))], w - 1));
-        }
+        rows.extend(indented(&detail, indent, &p.dim, w));
     }
     // No weekly bar when the quota endpoint answered none: a plan without a
     // weekly limit (Max, it may be) is not something gone wrong. A request
@@ -728,8 +726,12 @@ fn pool_detail(label: &str, lane: &Lane, c: &PerplexityCredits) -> String {
                 None => {}
             },
             "bonus" => {
+                // The pool is every live bonus, and the date is the first of
+                // them to lapse, so with several it is not when all of it goes.
                 if let Some(t) = c.bonus_expires {
-                    detail.push_str(&format!(" · expires {}", day(t)));
+                    let several = c.grants.iter().filter(|g| g.kind == "promotional").count() > 1;
+                    let what = if several { "next expiry" } else { "expires" };
+                    detail.push_str(&format!(" · {what} {}", day(t)));
                 }
             }
             _ => detail.push_str(" · does not expire"),
@@ -935,14 +937,22 @@ fn token_warning(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// A word longer than the room - the cookie's name is 32 characters - is
 /// broken by hand, since wrapping alone would leave it to be cut.
 fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
-    let room = w.saturating_sub(4).max(8);
+    indented(text, 2, colour, w)
+}
+
+/// Text under an indent, wrapped at the width the indent leaves rather
+/// than at the pane's, so no line is cut by the row it lands on. The
+/// indent gives way before the text does in the narrowest panes.
+fn indented(text: &str, indent: usize, colour: &str, w: usize) -> Vec<String> {
+    let indent = indent.min(w.saturating_sub(8));
+    let room = (w.saturating_sub(1 + indent)).max(1);
     wrap_text(text, room)
         .into_iter()
         .flat_map(|line| {
             let chars: Vec<char> = line.chars().collect();
             chars.chunks(room).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>()
         })
-        .map(|line| tc::seg(&[(colour, format!("  {}", line))], w - 1))
+        .map(|line| tc::seg(&[(colour, format!("{}{line}", " ".repeat(indent)))], w - 1))
         .collect()
 }
 
@@ -1348,6 +1358,46 @@ mod tests {
             assert!(lines.contains(&pct_text(lane.pct).trim()), "width {w}: {rows}");
             assert!(lines.contains(&pace.trim()), "width {w}: {rows}");
         }
+    }
+
+    #[test]
+    fn indented_text_wraps_inside_its_indent_and_loses_no_character() {
+        // At 8 to 10 columns the wrap kept eight cells after a two-cell
+        // indent, so the row clipped "10,000" to "10,00".
+        let text = "10,000 of 10,000 used · press , to paste a fresh token";
+        for w in 8usize..=40 {
+            for indent in [2, 18] {
+                let out = plain(&indented(text, indent, "", w));
+                let rows: Vec<&str> = out.lines().collect();
+                for r in &rows {
+                    assert!(tc::display_width(r) < w, "width {w}: {r:?}");
+                }
+                let kept: String = rows.concat().split_whitespace().collect();
+                let want: String = text.split_whitespace().collect();
+                assert_eq!(kept, want, "width {w}, indent {indent}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bonus_pool_of_several_grants_dates_only_its_next_expiry() {
+        // The pool sums every live bonus but the date is the first to
+        // lapse, so "expires" read as all of it going then.
+        let later = now() + 86400.0 * 40.0;
+        let one = Data::answered(&format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":500,"expires_at_ts":{later}}}],"total_usage_cents":0}}"#
+        ));
+        let two = Data::answered(&format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":500,"expires_at_ts":{later}}},
+            {{"type":"promotional","amount_cents":300,"expires_at_ts":{}}}],"total_usage_cents":0}}"#,
+            later + 86400.0 * 30.0
+        ));
+        let detail = |d: &Data| {
+            let lane = lanes(d).into_iter().find(|l| l.label == "bonus").unwrap();
+            pool_detail("bonus", &lane, d.credits.as_ref().unwrap())
+        };
+        assert!(detail(&one).contains(" · expires "), "{}", detail(&one));
+        assert!(detail(&two).contains(" · next expiry "), "{}", detail(&two));
     }
 
     #[test]
