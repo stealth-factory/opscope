@@ -413,6 +413,21 @@ fn osc8_kept(body: &str) -> bool {
     !params.chars().any(char::is_control) && (uri.is_empty() || https_uri(uri))
 }
 
+// An internal capability, never emitted to the terminal. Source OSC 8 cannot
+// impersonate link(): even a captured widget frame has had this marker removed.
+// Entropy acquisition is the only platform-dependent part; failure is closed.
+fn link_marker() -> Option<&'static str> {
+    static MARKER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MARKER
+        .get_or_init(|| {
+            let mut nonce = [0u8; 16];
+            std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut nonce).ok()?;
+            let token: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+            Some(format!("\x1b]777;opscope-link;{token}\x1b\\"))
+        })
+        .as_deref()
+}
+
 fn keep_escape(escape: &str) -> bool {
     if let Some(body) = escape.strip_prefix("\x1b[") {
         let Some(final_byte) = body.chars().last() else {
@@ -485,6 +500,8 @@ fn close_dangling_link(s: &str) -> String {
 /// required before sending it.
 /// Clickable titles use a dashed underline when the terminal supports styled
 /// underlines, and a plain underline otherwise. Padding is outside the mark.
+/// Render the result through core: its private ownership marker is removed
+/// only at terminal output. Failure to acquire OS entropy leaves plain text.
 pub fn link(url: &str, text: &str) -> String {
     link_with_support(url, text, terminal::underline_caps().support)
 }
@@ -495,12 +512,15 @@ fn link_with_support(url: &str, text: &str, support: terminal::UnderlineSupport)
     if !https_uri(url) {
         return visible;
     }
+    let Some(marker) = link_marker() else {
+        return visible;
+    };
     let mark = if support == terminal::UnderlineSupport::Styled {
         "\x1b[4:5m"
     } else {
         "\x1b[4m"
     };
-    format!("\x1b]8;;{url}\x1b\\{mark}{visible}\x1b[24m\x1b]8;;\x1b\\")
+    format!("{marker}\x1b]8;;{url}\x1b\\{mark}{visible}\x1b[24m\x1b]8;;\x1b\\")
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
@@ -979,8 +999,8 @@ fn version_room(w: usize) -> usize {
 ///   appended after a reset, so neither the widget's text nor its colours
 ///   reach those cells.
 /// - Every row is made inert first. Colour escapes pass, and so does an
-///   OSC 8 whose target is `https://` (and the empty OSC 8 that closes
-///   it). Anything else that can move the cursor or rewrite the screen -
+///   core-generated OSC 8 whose target is `https://` (and its empty closer).
+///   Source OSC 8 is dropped. Anything that can move the cursor or rewrite the screen -
 ///   a CSI that is not colour, a bare ESC sequence, every other OSC, a
 ///   carriage return, a backspace - is dropped. Without that, a later row
 ///   could carry `ESC[1;70H` and write over the version from underneath.
@@ -1033,32 +1053,55 @@ fn put_line(buf: &mut String, line: &str) {
     // row is written cannot reach anything the row puts down.
     buf.push_str(RST);
     buf.push_str(EL);
-    buf.push_str(line);
+    if line.contains("\x1b]777;opscope-link;") {
+        if let Some(marker) = link_marker() {
+            buf.push_str(&line.replace(marker, ""));
+        } else {
+            buf.push_str(line);
+        }
+    } else {
+        buf.push_str(line);
+    }
     buf.push_str(RST);
 }
 
-/// `row`, with every escape that is not a colour or an `https` OSC 8, and
+/// `row`, with every escape that is not a colour or a core-owned link, and
 /// every control character, taken out.
 ///
 /// Colour is `ESC [` then digits, `;` and `:`, then `m`. OSC 8 is kept
-/// only when its target is `https://`, plus the empty OSC 8 that closes
-/// that link. A tab becomes a space rather than vanishing, since it was
+/// only immediately after the private marker from `link()`, with an `https`
+/// target, plus the empty OSC 8 that closes it. The marker is internal and
+/// removed before terminal output. A tab becomes a space rather than vanishing, since it was
 /// meant as a gap; everything else - C0, DEL, and C1, which includes the
 /// one-byte CSI `\u{9b}` - goes.
 fn inert(row: &str) -> String {
     let mut out = String::with_capacity(row.len());
     let mut rest = row;
+    let mut core_link = false;
     while !rest.is_empty() {
         if rest.as_bytes()[0] == 0x1b {
             let n = markup_len(rest).unwrap_or(1);
             let escape = &rest[..n];
-            if keep_escape(escape) {
+            if escape.starts_with("\x1b]777;opscope-link;")
+                && link_marker().is_some_and(|marker| escape == marker)
+            {
                 out.push_str(escape);
+                core_link = true;
+            } else {
+                let opener = osc_body(escape)
+                    .and_then(|body| body.strip_prefix("8;"))
+                    .and_then(|after| after.split_once(';'))
+                    .is_some_and(|(_, uri)| !uri.is_empty());
+                if keep_escape(escape) && (!opener || core_link) {
+                    out.push_str(escape);
+                }
+                core_link = false;
             }
             rest = &rest[n..];
             continue;
         }
         let ch = rest.chars().next().unwrap();
+        core_link = false;
         if ch == '\t' {
             out.push(' ');
         } else if !ch.is_control() {
@@ -5120,7 +5163,7 @@ mod tests {
             }
         }
         let good = "\x1b]8;id=title;https://example.com\x1b\\readable\x1b]8;;\x1b\\";
-        assert_eq!(super::inert(good), good);
+        assert_eq!(super::inert(good), "readable\x1b]8;;\x1b\\");
     }
 
     #[test]
@@ -5133,6 +5176,24 @@ mod tests {
         let notice = super::with_notice(&row, "Kitty unavailable", 80);
         assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
         assert_eq!(super::display_width(&stamped), 40);
+    }
+
+    #[test]
+    fn raw_pane_output_cannot_install_links_in_the_final_frame() {
+        for end in ["\x1b\\", "\x07"] {
+            let source = format!("\x1b]8;;https://example.com/source{end}agent output\x1b]8;;{end}");
+            let row = super::seg(&[("", source)], 80);
+            let own = super::link("https://example.com/widget", "Open detail");
+            let frame = super::frame(&["PANE".into(), row, own.clone()], 80, 3);
+            assert!(!frame.contains("https://example.com/source"), "{frame:?}");
+            assert!(frame.contains("\x1b]8;;https://example.com/widget\x1b\\"));
+            assert!(frame.contains("agent output"));
+            assert!(!frame.contains("opscope-link"), "the capability must not reach the terminal");
+            assert_eq!(super::inert(&super::inert(&own)), own);
+            // A captured frame is external data when displayed by another pane.
+            let replayed = super::frame(&["PANE".into(), frame], 80, 2);
+            assert!(!replayed.contains("https://example.com/widget"), "{replayed:?}");
+        }
     }
 
     #[test]
@@ -5164,7 +5225,10 @@ mod tests {
 
     #[test]
     fn an_unclosed_link_is_balanced_at_the_rendered_row_boundary() {
-        let row = "\x1b]8;;https://example.com/log\x1b\\\x1b[4:5mBuild finished";
+        let linked = super::link_with_support(
+            "https://example.com/log", "Build finished", super::terminal::UnderlineSupport::Styled,
+        );
+        let row = linked.strip_suffix("\x1b[24m\x1b]8;;\x1b\\").unwrap();
         let clean = super::inert(row);
         assert!(clean.ends_with("\x1b[24m\x1b]8;;\x1b\\"), "{clean:?}");
         assert_eq!(super::strip_escapes(&clean), "Build finished");
@@ -5212,8 +5276,12 @@ mod tests {
         let link = super::link(url, "Fix the parser");
         assert_eq!(super::inert(&link), link, "an https OSC 8 is the link");
         // BEL is the other terminator the protocol allows.
-        let bel = format!("\x1b]8;;{url}\x07Fix the parser\x1b]8;;\x07");
+        let bel = format!("{}\x1b]8;;{url}\x07Fix the parser\x1b]8;;\x07", super::link_marker().unwrap());
         assert_eq!(super::inert(&bel), bel);
+        let raw = format!("\x1b]8;;{url}\x1b\\Fix the parser\x1b]8;;\x1b\\");
+        assert_eq!(super::inert(&raw), "Fix the parser\x1b]8;;\x1b\\");
+        let forged = format!("\x1b]777;opscope-link;not-the-private-marker\x1b\\{raw}");
+        assert_eq!(super::inert(&forged), "Fix the parser\x1b]8;;\x1b\\");
 
         // The non-https opener goes. The empty closer stays: dropping
         // every closer would also drop the one that ends an https link.

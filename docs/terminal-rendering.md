@@ -361,9 +361,19 @@ are retained so first-line selection and text parsing keep their meaning.
 HTTP refusal text is sanitized too. This boundary covers raw fields rendered
 without `link()`, rather than relying on the detail-label helper alone.
 
-`draw` keeps that sequence, and the empty OSC 8 that closes it. OSC 8 with
-another scheme, and every other OSC, is stripped with the rest of the
-non-colour escapes. The sequence is zero width in `display_width`, `pad` and
+`link()` prefixes the opener with a private per-process capability marker
+generated from 128 bits of operating-system entropy. `inert()` accepts an
+HTTPS opener only immediately after that marker; source-provided OSC 8 is
+stripped in every widget, including copied agent-pane output. A marker is
+retained through internal row sanitization and clipping, then removed by
+`put_line()` before any bytes reach the terminal. Captured terminal output
+therefore has no capability to replay. If entropy acquisition fails, `link()`
+returns plain text. The helper's result must be rendered through core, not
+printed directly.
+
+The empty OSC 8 closer remains safe to retain. OSC 8 with another scheme,
+and every other source OSC, is stripped with the rest of the non-colour
+escapes. The sequence is zero width in `display_width`, `pad` and
 `seg`. A clip that cuts the visible text appends the closer, so the next
 column is not part of the target.
 

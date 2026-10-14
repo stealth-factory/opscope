@@ -64,7 +64,7 @@ fn main() {
             // the OSC 52 are what `inert` has to drop before the row is
             // written.
             format!(
-                "{}\x1b]8;;http://opscope.invalid\x1b\\\x1b]8;;\x1b\\\x1b]52;c;ZmFrZQ==\x07",
+                "{}\x1b]8;;http://opscope.invalid\x1b\\\x1b]8;;\x1b\\\x1b]52;c;ZmFrZQ==\x07\x1b]8;;https://example.com/source-pane\x1b\\ source pane text\x1b]8;;\x1b\\",
                 tc::link(
                     "https://example.com/opscope-probe",
                     "  axes and labels remain text",

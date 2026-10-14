@@ -736,6 +736,9 @@ def osc8(t):
     assert b"\x1b]8;;https://example.com/opscope-probe\x1b\\" in t.output
     assert b"axes and labels remain text" in t.output
     assert b"http://opscope.invalid" not in t.output
+    assert b"https://example.com/source-pane" not in t.output
+    assert b"source pane text" in t.output
+    assert b"opscope-link" not in t.output
     assert b"\x1b]52;" not in t.output
 
 
