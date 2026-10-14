@@ -1497,9 +1497,10 @@ window to pace against, so neither has a pace.
   - CodexBar's way - reads a grant bought last month and part spent then as
   untouched. Only when a grant does not say is usage spread in Perplexity's
   spending order: monthly first, then bought, then bonus. A bonus grant past
-  its expiry is gone and is not counted. Usage more than every pool holds,
+  its expiry is gone and is not counted. Usage the pools do not account for,
   and grants of a type the widget does not know, are said under the bars
-  rather than dropped.
+  rather than dropped; beside an unknown grant no usage is spread at all,
+  since that grant may hold it.
 - **Four requests, each standing alone.** The credits come from
   `/rest/billing/credits`, the weekly limit from `/rest/billing/quota`, and
   the plan from `/api/auth/session`, and how it is billed - interval and

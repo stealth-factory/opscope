@@ -608,6 +608,7 @@ fn credit_rows_with_plots(
         None => {
             let why = match d.why.as_str() {
                 "" => "credits not read · no reading from Perplexity yet.".to_string(),
+                EXPIRED => format!("credits not read · {EXPIRED} · press , to paste a fresh token"),
                 why => format!("credits not read · {why}"),
             };
             rows.push(String::new());
@@ -683,8 +684,8 @@ fn credit_notes(c: &PerplexityCredits, w: usize, p: &Palette) -> Vec<String> {
         rows.extend(note(&text, &p.warn, w));
     } else if c.uncovered > 0.0 {
         let text = format!(
-            "{} of the period's usage is more than every pool above holds, so it is \
-             not drawn on any of them.",
+            "{} of the period's usage is not accounted for by the pools above, so it \
+             is not drawn on any of them.",
             cents(c.uncovered)
         );
         rows.extend(note(&text, &p.warn, w));
@@ -879,7 +880,9 @@ pub fn tab_with_plots(
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
-    if d.expired() {
+    // A refused cookie on the credits request alone leaves whatever else
+    // answered to be drawn; the whole-tab notice is for when nothing did.
+    if d.expired() && d.quota.is_none() && d.subscription.is_none() {
         let mut rows = vec![
             tc::seg(&[(p.lbl.as_str(), " ── PERPLEXITY ──".into())], w - 1),
             tc::seg(&[(p.warn.as_str(), "  session expired".into())], w - 1),
@@ -1122,6 +1125,12 @@ mod tests {
             assert!(words.contains("weekly"), "{rows}");
             assert!(words.contains("credits not read · credits refused (500)"), "width {w}: {rows}");
         }
+        // A refused cookie on credits alone keeps the weekly bar that answered.
+        let d = Data { why: EXPIRED.into(), ..d };
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("weekly"), "{rows}");
+        assert!(words.contains("credits not read · session expired · press , to paste"), "{rows}");
     }
 
     #[test]
@@ -1336,7 +1345,7 @@ mod tests {
         );
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("300 credits of the period's usage is more than"), "{rows}");
+        assert!(words.contains("300 credits of the period's usage is not accounted for"), "{rows}");
     }
 
     #[test]

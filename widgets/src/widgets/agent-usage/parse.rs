@@ -793,8 +793,9 @@ pub struct PerplexityGrant {
 impl PerplexityGrant {
     /// Perplexity marks a grant that never lapses with a date in the year
     /// 9999 rather than leaving it out; anything past 2200 is read as that.
+    /// An expiry left out is unstated, not never.
     pub fn never_expires(&self) -> bool {
-        self.expires.is_none_or(|t| t > 7_258_118_400.0)
+        self.expires.is_some_and(|t| t > 7_258_118_400.0)
     }
 }
 
@@ -923,7 +924,9 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // spent then as untouched. It is only the fallback, for the grants that
     // do not say, and only for what the ones that do say did not take.
     let exact = grants > 0 && unsaid == 0 && out.unknown_grants == 0;
-    left = if exact { 0.0 } else { (left - said_this_period).max(0.0) };
+    // What the grants that say do not account for is kept, never dropped:
+    // with every grant exact it is usage no grant explains.
+    left = (left - said_this_period).max(0.0);
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
     let spreadable = out.unknown_grants == 0;
@@ -2184,6 +2187,14 @@ Period resets : 2026-10-06
         let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
         assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
         assert_eq!(c.uncovered, 50.0);
+        // Usage that grants which all say what is left do not explain is kept.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":100}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 100.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
+        // An expiry left out is not one that never comes.
+        assert!(!c.grants[0].never_expires());
         // A remainder below nothing or above the grant is a changed answer.
         for r in ["-1", "1001"] {
             let raw = format!(r#"{{"total_usage_cents":0,"credit_grants":[
