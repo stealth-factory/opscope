@@ -31,14 +31,14 @@ once, and you will believe the arrow. It is the same rule the PR and issue
 flow charts follow with `▲`/`▼`.
 
 ```
- ── PROCESS WATCH ── ↑ tx above · ↓ rx below  · 2m 30s of history
- ↑ 90.0 KB/s ┌───────────────────────────────────────────────────────┐
-           │   ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⢄⣀⡀               ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⠤⣀⡀  │
-           │⠔⠒⠉⠁                   ⠈⠉⠒⠤⢄⡀     ⣀⡠⠔⠒⠉⠁                ⠈⠉⠒⠢⢄⣀│
-         0 ├──────────────────────────────────────────────────────────┤
-           │  ⡠⠔⠊⠉⠑⠢⡀             ⢀⠤⠊⠉⠉⠒⢄              ⡠⠒⠉⠉⠑⠢⡀        ⢀⠔⠊⠉│
-           │⢀⠎      ⠈⠢⡀          ⡔⠁      ⠑⢄          ⡠⠊      ⠈⠢⡀      ⠔⠁ │
-  ↓ 2.0 MB/s └───────────────────────────────────────────────────────┘
+ ── PROCESS WATCH ── ↑ tx above · ↓ rx below
+ ┌↑ peak 90.0 KB/s · now 20.0 KB/s─────────────────┐
+ │          ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠒⠒⠒⠤⢄⣀⡀                 │
+ │⠔⠒⠉⠁                            ⠈⠉⠒⠤⢄⡀         │
+ ├0──────────────────────────────────────────────┤
+ │  ⡠⠔⠊⠉⠑⠢⡀                 ⢀⠤⠊⠉⠉⠒⢄             │
+ │⢀⠎      ⠈⠢⡀              ⡔⠁      ⠑⢄             │
+ └↓ peak 2.0 MB/s · now 400.0 KB/s─────────────────┘
 ```
 
 Drawn with **braille**, which is what makes it a line rather than a staircase.
@@ -49,7 +49,11 @@ steep climb draws as a line instead of a column of dots. Two samples share
 each column.
 
 **The two halves are scaled independently**, and each label names its own
-direction and peak — `↑ 90.0 KB/s` at the top, `↓ 2.0 MB/s` at the bottom.
+direction and peak in the border — `↑ peak 90.0 KB/s` at the top,
+`↓ peak 2.0 MB/s` at the bottom. There is no left-hand label gutter.
+In both text and Kitty modes the current rate sits beside its peak
+(`· now 20.0 KB/s`), keeping figures outside the plotted lines. Narrow borders wrap
+labels into a band so complete rates remain visible.
 Neither is signed. Received traffic is not negative traffic; it is simply the
 half drawn downward, and a minus sign on it would dress a fact about the
 drawing up as a fact about the number. Sharing a scale is the obvious choice and the wrong one: a
