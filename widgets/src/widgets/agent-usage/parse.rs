@@ -821,8 +821,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
     // Every amount and date here is at least zero; a negative one is a
     // changed answer, not a figure to bend to zero. The balance alone may
-    // go below, so it is read on its own.
-    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite() && *n >= 0.0);
+    // go below, so it is read on its own. Past 2^53 a figure can be neither
+    // held exactly nor drawn, so it is a changed answer too.
+    const LARGEST: f64 = 9_007_199_254_740_992.0;
+    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n < LARGEST);
     let mut left = finite(field("total_usage_cents", "totalUsageCents")?)?;
     let bought_field = match field("current_period_purchased_cents", "currentPeriodPurchasedCents") {
         None | Some(serde_json::Value::Null) => 0.0,
@@ -830,7 +832,10 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     };
     let renews = match field("renewal_date_ts", "renewalDateTs") {
         None | Some(serde_json::Value::Null) => None,
-        Some(x) => Some(finite(x)?).filter(|t| *t > 0.0),
+        // A date past any that can be drawn is a changed answer, not a
+        // renewal with no day and a countdown of millennia.
+        Some(x) => Some(finite(x).filter(|t| chrono::DateTime::from_timestamp(*t as i64, 0).is_some())?)
+            .filter(|t| *t > 0.0),
     };
     let optional = |snake: &str, camel: &str| -> Option<Option<f64>> {
         match field(snake, camel) {
@@ -840,7 +845,7 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     };
     let balance = match field("balance_cents", "balanceCents") {
         None | Some(serde_json::Value::Null) => None,
-        Some(x) => Some(x.as_f64().filter(|n| n.is_finite())?),
+        Some(x) => Some(x.as_f64().filter(|n| n.is_finite() && n.abs() < LARGEST)?),
     };
     let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
     let topup_on = match field("auto_topup_enabled", "autoTopupEnabled") {
@@ -2381,6 +2386,10 @@ Period resets : 2026-10-06
             r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring"}]}"#,
             r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring","amount_cents":1,"expires_at_ts":"x"}]}"#,
             r#"{"total_usage_cents":1,"renewal_date_ts":"soon","credit_grants":[]}"#,
+            // Past what can be held exactly or drawn as a date.
+            r#"{"total_usage_cents":1,"renewal_date_ts":1e300,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"balance_cents":1e300,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring","amount_cents":1e300}]}"#,
         ] {
             assert!(parse_perplexity_credits(bad, 0.0).is_none(), "{bad}");
         }
