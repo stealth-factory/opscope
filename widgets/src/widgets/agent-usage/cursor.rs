@@ -1530,7 +1530,7 @@ where
                     .ok_or("invalid usage count")? as usize,
             ),
         };
-        if let Some(count) = count.or_else(|| obj.is_empty().then_some(0)) {
+        if let Some(count) = count {
             if expected.is_some_and(|old| old != count) {
                 return Err("usage count changed while paging; refresh to retry".into());
             }
@@ -3271,6 +3271,20 @@ mod tests {
         assert!(collect_event_pages(|_| Ok(serde_json::json!({})), 2, 8)
             .unwrap()
             .is_empty());
+        assert_eq!(
+            collect_event_pages(
+                |page| Ok(if page == 1 {
+                    serde_json::json!({"usageEventsDisplay": [1, 2], "totalUsageEventsCount": 2})
+                } else {
+                    serde_json::json!({})
+                }),
+                2,
+                8
+            )
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]
