@@ -164,7 +164,8 @@ fn ask(token: &str, url: &str, what: &str, reads: fn(&str) -> bool) -> Result<se
         ),
         ("Cookie", cookie.as_str()),
     ];
-    let body = tc::get(url, &headers, 15).map_err(|said| {
+    // The cookie is a whole sign-in, so it is never followed off this host.
+    let body = tc::get_without_redirects(url, &headers, 15).map_err(|said| {
         if status_of(&said).is_some_and(|code| code == 401 || code == 403) {
             EXPIRED.to_string()
         } else {
@@ -281,12 +282,16 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(why) = sub.as_ref().map(|g| text(g, "why")).filter(|_| d.subscription_why.is_empty()) {
         d.subscription_why = why;
     }
-    d.subscription = sub.and_then(|g| parse_perplexity_subscription(&text(&g, "body")));
+    d.subscription = sub.as_ref().and_then(|g| parse_perplexity_subscription(&text(g, "body")));
     if let Some(got) = got.as_ref().filter(|_| d.quota_why.is_empty()) {
         d.quota = parse_perplexity_quota(&text(got, "body"));
         if d.read_at == 0.0 {
             d.read_at = num(got, "at");
         }
+    }
+    // Billing alone is still a reading, and says when it was taken.
+    if let Some(got) = sub.as_ref().filter(|_| d.read_at == 0.0 && d.subscription.is_some()) {
+        d.read_at = num(got, "at");
     }
     d
 }
@@ -460,7 +465,8 @@ fn credit_rows_with_plots(
     let read = match (d.quota.is_some(), c.is_some()) {
         (true, true) => "weekly limit · credits",
         (true, false) => "weekly limit",
-        _ => "credits",
+        (false, true) => "credits",
+        (false, false) => "billing",
     };
     let mut rows = vec![tc::seg(
         &[
@@ -816,7 +822,7 @@ pub fn tab_with_plots(
     // draw, so it is not filtered out here; it simply has no bars.
     let credits = d.credits.as_ref();
     match credits {
-        _ if credits.is_some() || d.quota.is_some() => {
+        _ if credits.is_some() || d.quota.is_some() || d.subscription.is_some() => {
             let mut rows = credit_rows_with_plots(d, credits, w, p, plots);
             rows.extend(token_warning(d, w, p));
             rows
@@ -1085,6 +1091,28 @@ mod tests {
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("plan billing not read · subscription refused (502)"), "{rows}");
+    }
+
+    #[test]
+    fn billing_alone_is_still_a_tab() {
+        // With credits failed and no weekly limit (Max, it may be), the
+        // billing that did answer fell through to the failure panel.
+        let d = Data {
+            subscription: Some(PerplexitySubscription {
+                interval: Some("yearly".into()),
+                next_bill: Some(now() + 86400.0 * 40.0),
+                cancels: None,
+            }),
+            why: "credits refused (500)".into(),
+            read_at: now() - 30.0,
+            source: "config",
+            ..Data::default()
+        };
+        let rows = plain(&tab(&d, 60, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("live · billing"), "{rows}");
+        assert!(words.contains("yearly · next bill"), "{rows}");
+        assert!(words.contains("credits not read · credits refused (500)"), "{rows}");
     }
 
     #[test]
