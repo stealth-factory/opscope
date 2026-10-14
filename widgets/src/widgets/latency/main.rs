@@ -852,23 +852,26 @@ fn graph(
         }).collect(),
     };
     plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
-    // The number is the bucket the stroke ends on, so it sits on the line.
-    // A raw reply inside that bucket is not what was plotted. Pixel mode
-    // leaves it on the chart; Braille paints over these cells, so text mode
-    // still shows the axis and the trace alone. One trace can be labelled
-    // without a selection. Several traces share the canvas, so the number
-    // is the focused line only.
+    // The number is the bucket the stroke ends on, in that bucket's column.
+    // A later loss-only bucket is a gap, so the line stops short of the
+    // right edge and the label has to stop with it. A raw reply inside the
+    // bucket is not what was plotted. Pixel mode leaves the number on the
+    // chart; Braille paints over these cells, so text mode still shows the
+    // axis and the trace alone. One trace can be labelled without a
+    // selection. Several traces share the canvas, so the number is the
+    // focused line only.
     let current_idx = focus.or_else(|| (series.len() == 1).then_some(series[0].0));
     let current = current_idx.and_then(|idx| {
-        series.iter().find(|(i, _, _)| *i == idx).and_then(|(_, values, _)| {
-            values.iter().copied().rev().find_map(|v| v)
+        series.iter().find(|(i, _, _)| *i == idx).and_then(|(_, values, positions)| {
+            values.iter().zip(positions).rev().find_map(|(v, x)| v.map(|v| (v, *x)))
         })
     });
-    let current_row = current.map(|v| {
+    let current_row = current.map(|(v, _)| {
         let frac = (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9);
         tc::line_row(frac, gh)
     });
-    let reading = current.map(|v| fmt_ms(Some(v)));
+    let current_col = current.map(|(_, x)| tc::line_col(x, gw));
+    let reading = current.map(|(v, _)| fmt_ms(Some(v)));
     let mut out = Vec::new();
     for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
@@ -883,11 +886,16 @@ fn graph(
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
         if current_row == Some(y) {
-            if let Some(reading) = reading.as_deref() {
+            if let (Some(reading), Some(end)) = (reading.as_deref(), current_col) {
                 let n = reading.chars().count();
-                if n <= gw {
-                    parts.push((p.grid.as_str(), " ".repeat(gw - n)));
+                if n <= gw && end < gw && n <= end + 1 {
+                    let lead = end + 1 - n;
+                    let trail = gw - (end + 1);
+                    parts.push((p.grid.as_str(), " ".repeat(lead)));
                     parts.push((p.txt.as_str(), reading.to_string()));
+                    if trail > 0 {
+                        parts.push((p.grid.as_str(), " ".repeat(trail)));
+                    }
                 } else {
                     parts.push((p.grid.as_str(), " ".repeat(gw)));
                 }
@@ -1929,16 +1937,39 @@ mod tests {
 
     #[test]
     fn a_later_loss_keeps_the_label_on_the_last_plotted_bucket() {
-        // NOW in the table is empty: the newest sample is a loss. The
+        // NOW in the table is empty: the newest samples are losses. The
         // stroke still ends on the last bucket that had a reply, and the
-        // label is that bucket.
+        // label ends on that column rather than the right edge.
         let now = tc::now();
         let mut target = Target::default();
-        target.record(now - 2.0, Some(40.0), 600);
+        target.record(now - 4.0, Some(40.0), 600);
+        target.record(now - 2.0, None, 600);
         target.record(now, None, 600);
         assert_eq!(target.stats().now, None);
-        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut Vec::new(), 1);
-        assert!(rows.iter().any(|row| bare(row).ends_with("40.00ms")));
+        let mut plots = Vec::new();
+        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut plots, 1);
+        let trace = &plots[0].chart.traces[0];
+        let positions = trace.positions.as_ref().expect("bucket positions");
+        let at = trace
+            .values
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, v)| v.is_some())
+            .expect("plotted bucket")
+            .0;
+        let gw = 40 - 9;
+        let col = tc::line_col(positions[at], gw);
+        assert!(col + 1 < gw, "trailing losses still reach the right edge at {col}");
+        let reading = "40.00ms";
+        let row = rows
+            .iter()
+            .find(|row| bare(row).contains(reading))
+            .expect("label");
+        let chart = bare(row).split('│').nth(1).expect("chart").to_string();
+        let start = chart.find(reading).expect("reading in the chart");
+        assert_eq!(start + reading.len() - 1, col, "label {chart:?} column {col}");
+        assert!(chart.len() > start + reading.len(), "label was pinned to the right edge");
     }
 
     #[test]

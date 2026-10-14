@@ -572,6 +572,23 @@ pub fn line_row(value: f64, rows: usize) -> usize {
     pixel_y(value, rows.saturating_mul(cell_h)) / cell_h
 }
 
+/// Terminal column of a left-to-right chart fraction.
+///
+/// The stroke rounds against `cols * cell_w - 1` pixels, the same width the
+/// line raster uses, and that pixel falls into a cell. A label that assumes
+/// the point is the rightmost cell sits past the stroke when later buckets
+/// are gaps.
+pub fn line_col(position: f64, cols: usize) -> usize {
+    if cols == 0 {
+        return 0;
+    }
+    let (cell_w, _) = super::terminal::cell_size();
+    let cell_w = cell_w.max(1);
+    let width = cols.saturating_mul(cell_w);
+    let x = (position.clamp(0.0, 1.0) * width.saturating_sub(1) as f64).round() as usize;
+    x / cell_w
+}
+
 fn segments(
     values: &[Option<f64>],
     slots: usize,
@@ -839,8 +856,12 @@ pub(crate) fn compose(
                 // Time-dependent values can change without changing a pixel.
                 // Upload acknowledgements must not start a redraw/upload loop.
                 if cached.same_pixels(plot, cols, (cell_w, cell_h), rgba) {
+                    // Pixels do not record z. Turning under_text on or off
+                    // has to re-place this id, or the stroke stays over the
+                    // label until the next heal.
+                    let z_changed = cached.plot.under_text != plot.under_text;
                     cached.plot = plot.clone();
-                    if heal {
+                    if heal || z_changed {
                         after.push_str(&place(plot, slot, w));
                     }
                     continue;
@@ -1833,6 +1854,27 @@ mod tests {
     }
 
     #[test]
+    fn an_under_text_change_replaces_the_placement_without_resending() {
+        let _transport = super::super::shm::guard();
+        let rows = vec!["title".into(), "keep".into()];
+        let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        let (_, _, first) = compose(&rows, &[plain.clone()], 40, 6, true, true, false);
+        assert!(first.contains("a=T"));
+        assert!(graphics_keys(&first).iter().all(|keys| !keys.contains("z=")));
+        let over = plain.clone().under_text();
+        let (_, _, placed) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(!placed.contains("a=T"), "{placed}");
+        assert!(placed.contains("a=p") && placed.contains("z=-1"), "{placed}");
+        let (_, _, quiet) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        assert!(quiet.is_empty(), "{quiet}");
+        let (_, _, back) = compose(&rows, &[plain], 40, 6, true, false, false);
+        assert!(!back.contains("a=T"), "{back}");
+        assert!(back.contains("a=p") && !back.contains("z="), "{back}");
+        let (_, before, after) = compose(&rows, &[], 40, 6, true, false, false);
+        assert!(before.contains("a=d") && after.is_empty());
+    }
+
+    #[test]
     fn multi_chunk_images_round_trip_with_exact_cropped_pixels() {
         let _transport = super::super::shm::guard();
         let mut c = chart(Vec::new());
@@ -1959,6 +2001,13 @@ mod tests {
         assert_eq!(inked_rows(&chart(vec![Some(0.8); 4]), 4), vec![0]);
         assert_eq!(line_row(0.5, 1), 0);
         assert_eq!(line_row(0.5, 0), 0);
+        assert_eq!(line_col(0.0, 4), 0);
+        assert_eq!(line_col(1.0, 4), 3);
+        assert_eq!(line_col(0.5, 0), 0);
+        let (cell_w, _) = super::super::terminal::cell_size();
+        let width = 4 * cell_w.max(1);
+        let x = (0.2_f64 * (width - 1) as f64).round() as usize;
+        assert_eq!(line_col(0.2, 4), x / cell_w.max(1));
     }
 
     fn inked_rows(chart: &LineChart, rows: usize) -> Vec<usize> {
