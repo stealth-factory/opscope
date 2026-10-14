@@ -12,7 +12,9 @@
 name: pr-title
 
 on:
-  pull_request_target:
+  # Reading the title needs no secrets or write token. Use the ordinary PR
+  # event so GitHub's default pull_request_target policy can stay enabled.
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
