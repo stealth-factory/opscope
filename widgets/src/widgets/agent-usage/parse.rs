@@ -870,7 +870,8 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
         };
         let remaining = match grant.get("remaining_cents").or_else(|| grant.get("remainingCents")) {
             None | Some(serde_json::Value::Null) => None,
-            Some(x) => Some(finite(x)?.clamp(0.0, amount.max(0.0))),
+            // Outside 0..=amount is a changed answer, not a figure to bend into range.
+            Some(x) => Some(Some(finite(x)?).filter(|r| (0.0..=amount.max(0.0)).contains(r))?),
         };
         let pool = match kind {
             "recurring" => &mut recurring,
@@ -921,7 +922,7 @@ pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredit
     // spreading it over the pools reads a grant bought last month and part
     // spent then as untouched. It is only the fallback, for the grants that
     // do not say, and only for what the ones that do say did not take.
-    let exact = grants > 0 && unsaid == 0;
+    let exact = grants > 0 && unsaid == 0 && out.unknown_grants == 0;
     left = if exact { 0.0 } else { (left - said_this_period).max(0.0) };
     // A grant of a type this widget does not know may have taken any of it,
     // so nothing is spread and the rest is said as not drawn on a pool.
@@ -2176,6 +2177,19 @@ Period resets : 2026-10-06
         let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
         assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
         assert_eq!(c.uncovered, 50.0);
+        // Also when every known grant says what is left of it.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":1000,"remaining_cents":1000},
+            {"type":"mystery","amount_cents":500}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
+        // A remainder below nothing or above the grant is a changed answer.
+        for r in ["-1", "1001"] {
+            let raw = format!(r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"recurring","amount_cents":1000,"remaining_cents":{r}}}]}}"#);
+            assert!(parse_perplexity_credits(&raw, 1_780_000_000.0).is_none(), "{r}");
+        }
     }
 
     #[test]
