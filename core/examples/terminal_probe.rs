@@ -33,6 +33,16 @@ fn main() {
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
+                "h" => {
+                    keyboard.restore();
+                    tc::restore_screen();
+                    std::process::Command::new("/bin/sh")
+                        .args(["-c", "printf 'CHILD_READY\\n'; sleep 0.5"])
+                        .status()
+                        .expect("run handoff fixture");
+                    keyboard.reclaim();
+                    tc::claim_screen();
+                }
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }

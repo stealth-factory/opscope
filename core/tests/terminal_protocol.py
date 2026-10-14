@@ -614,6 +614,35 @@ def resumed_cell_reply_is_quarantined(t):
     assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "resume accepted a buffered old report"
 
 
+def reclaimed_cell_reply_is_quarantined(t):
+    # Leave the startup size query unanswered, then buffer an old report while
+    # a child owns the tty. Reclaim must not relabel it as the new query's reply.
+    before = len(t.images())
+    t.send(b"h")
+    t.read(0.1)
+    assert b"CHILD_READY" in t.output, "handoff did not reach the child"
+    queries = t.output.count(b"\x1b[16t")
+    t.send(b"\x1b[6;20;10t")
+    t.read(0.15)
+    assert t.output.count(b"\x1b[16t") == queries, "cell query reached the child"
+    t.read(0.5)
+    assert t.answered == 2, "reclaim did not renegotiate"
+    assert len(t.images()) > before, "reclaim did not redraw"
+    assert all(int(keys[b"s"]) != int(keys[b"c"]) * 10
+               for keys, _ in t.images()[before:]), "reclaim accepted a buffered old report"
+    # Answer only emitted queries, including confirmation. No SIGWINCH is sent.
+    answered = queries + 1  # The buffered report consumed the reclaim query.
+    for _ in range(4):
+        pending = t.output.count(b"\x1b[16t") - answered
+        if pending:
+            t.send(b"\x1b[6;40;20t" * pending)
+            answered += pending
+        t.read(0.15)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "reclaim left stale raster without resize"
+    assert int(keys[b"v"]) == int(keys[b"r"]) * 40, "reclaim left stale raster height"
+
+
 def shm_rejected(t):
     probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
     assert probes, "no shared-memory probe"
@@ -782,6 +811,7 @@ if __name__ == "__main__":
                                ("auto", "kitty", ambiguous_cell_reply_retries),
                                ("auto", "kitty", expired_cell_reply_is_quarantined),
                                ("auto", "kitty", resumed_cell_reply_is_quarantined),
+                               ("auto", "kitty", reclaimed_cell_reply_is_quarantined),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
