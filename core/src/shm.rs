@@ -161,6 +161,16 @@ pub(crate) fn force_direct() {
     release();
 }
 
+/// Herdr hosts the pane and redraws its images in a client of its own. Its
+/// server shares this machine, so it answers the shared-memory probe `OK`,
+/// and then nothing an upload sends through `t=s` reaches the screen - while
+/// the same image sent inline does. Under Herdr the probe is not sent, so
+/// every image goes inline. Read from the environment Herdr gives its panes,
+/// because the probe's answer is the thing that cannot be believed there.
+pub(crate) fn host_relays_images(var: impl Fn(&str) -> Option<String>) -> bool {
+    var("HERDR_ENV").is_some_and(|value| value == "1")
+}
+
 /// A 1×1 query (`a=q`), not a stored transmit. `q=0` asks for the reply.
 /// The terminal checks that it can read the object and does not keep the
 /// image, so this id cannot replace another one. `None` on an OS without
@@ -748,6 +758,15 @@ mod tests {
             pos = end;
         }
         panic!("no shared transmission in {command}");
+    }
+
+    #[test]
+    fn herdr_panes_never_probe_shared_memory() {
+        let herdr = |key: &str| (key == "HERDR_ENV").then(|| "1".to_string());
+        assert!(host_relays_images(herdr));
+        assert!(!host_relays_images(|_: &str| None));
+        let other = |key: &str| (key == "HERDR_ENV").then(|| "0".to_string());
+        assert!(!host_relays_images(other));
     }
 
     #[test]

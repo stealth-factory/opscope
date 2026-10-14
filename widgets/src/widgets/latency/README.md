@@ -8,7 +8,7 @@ provided by the operating system.
 
 ```
 ╺━ NETWORK LATENCY MONITOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 4 targets · 0.5s interval · 12:13:36 · 1 ping/column
+ 4 targets · 1.0s interval · 12:13:36 · 1 ping/column
 
   HOST                       NOW     AVG  MEDIAN     MIN     MAX  JITTER   LOSS
 ▐ 1.1.1.1                 3.95ms  3.90ms  3.94ms  3.65ms  4.31ms   164µs   0.0%
@@ -95,16 +95,15 @@ A terminal without underline styles draws a plain line under the same digits.
 
 | Key | Action |
 |---|---|
-| `i` | ping interval — 0.2 / 0.5 / 1 / 2 / 5s, applied to running pings immediately |
 | `g` | how samples sharing a column combine — median / mean / min / max / p95 |
 | `c` | seconds per graph column — 1 ping/col / 2 / 5 / 10s |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
 | `q` | quit |
 
-Changing the interval kills and relaunches each `ping`, since `-i` is fixed at
-launch. Those relaunches are marked internally so they are not logged as
-outages.
+Set any interval of at least one second through `,` settings. Saving and
+leaving settings restarts the widget with the configured value; there is no
+preset interval toggle. The `-i` launch option takes precedence over config.
 
 ## Linux and macOS
 
@@ -116,9 +115,11 @@ reveal a lost packet only through a gap or total silence. The widget turns all
 three forms into the same empty samples. Replies, statistics, events and every
 part of the screen then use the same code on both systems.
 
-The 0.2-second minimum is accepted by the stock macOS ping without elevated
-permissions as well as by iputils, so the interval you set is the interval
-used on either system.
+The interval has a 1-second minimum in the settings UI and at runtime,
+including CLI arguments. Smaller or non-finite inputs cannot launch faster
+pings. A valid 5-second interval is used unchanged on both systems.
+The title spinner tracks processing new readings, not the lifetime of the
+continuous ping process or the UI redraw rate.
 
 [Acquisition details and loss semantics →](../../../../docs/latency.md)
 
@@ -142,8 +143,8 @@ link that is naturally jittery, lower it to catch smaller excursions.
 
 ## Traffic cost
 
-One 98-byte frame each way per target per interval — about **1.6 KB/s for four
-targets at 0.5s**, or 5.6 MB/hour. Negligible against an SSH session, which
+One 98-byte frame each way per target per interval — about **0.8 KB/s for four
+targets at 1s**, or 2.8 MB/hour. Negligible against an SSH session, which
 measures around 250 KB/s. The reason to slow down is politeness to the far end,
 not bandwidth.
 
@@ -157,7 +158,7 @@ baseline, not a path measurement.
 ```json
 "latency": {
   "hosts": ["1.1.1.1", "8.8.8.8", "host.internal"],
-  "interval": 0.5,
+  "interval": 1.0,
   "seconds_per_column": 0,
   "window": 600,
   "spike_factor": 3.0,
@@ -180,7 +181,7 @@ columns went unused to the right of it — the names it cut being exactly the
 ones that key exists for.
 
 ```sh
-./target/release/latency                              # config targets, 0.5s
+./target/release/latency                              # config targets, 1s
 ./target/release/latency -i 2 1.1.1.1 example.com     # override both
 ```
 

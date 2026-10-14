@@ -33,16 +33,13 @@ COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra=None):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra=None, extra_env=None):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
-        env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
-        # The parent shell may be inside tmux. Existing cases are the direct path.
-        env.pop("TMUX", None)
-        env.pop("TMUX_PANE", None)
-        env.pop("HERDR_ENV", None)
-        if extra:
-            env.update(extra)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_") and k not in ("TMUX", "TMUX_PANE")}
+        env.update(TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
+        env.update(extra or {})
+        env.update(extra_env or {})
         self.proc = subprocess.Popen([str(BINARY)], stdin=slave, stdout=slave,
                                      stderr=slave, env=env, start_new_session=True)
         os.close(slave)
@@ -174,6 +171,20 @@ def shm_read(name):
         os.close(fd)
 
 
+def wait_for(t, ready, seconds):
+    # Short reads, not one fixed pause: a busy runner can print the marker
+    # late, and the caller decides when the condition is actually true.
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if ready():
+            return True
+        slice_s = min(0.05, deadline - time.monotonic())
+        if slice_s <= 0:
+            break
+        t.read(slice_s)
+    return bool(ready())
+
+
 def run(mode, reply, check, extra=None):
     terminal = Terminal(
         mode,
@@ -183,6 +194,8 @@ def run(mode, reply, check, extra=None):
     )
     try:
         terminal.read(0.3)
+        if mode == "text":
+            assert b"\x1b[16t" not in terminal.output, "text mode queried pixel dimensions"
         check(terminal)
         terminal.quit()
     finally:
@@ -223,9 +236,47 @@ def moving_meter_keeps_unchanged_pixels():
                 t.close()
 
 
+def scroll_clears_previous_image_region():
+    # Multiplexers may keep the old placement while replacing an upload.
+    # A moved/cropped image must be explicitly cleared before text redraw.
+    for cell_w, cell_h in ((8, 16), (20, 40)):
+        for shared in (False, True):
+            t = Terminal()
+            try:
+                t.read(0.3)
+                t.send(f"\x1b[6;{cell_h};{cell_w}t".encode())
+                t.send(b"\x1b_Gi=2147483645;" + (b"OK" if shared else b"EBADF") + b"\x1b\\")
+                t.read(0.2)
+                for key in (b"\x1b[B", b"\x1b[A") * 3:
+                    old = t.images()[-1][0]
+                    start = len(t.commands())
+                    t.send(key)
+                    t.read(0.2)
+                    added = t.commands()[start:]
+                    upload = next(i for i, (k, _) in enumerate(added) if k.get(b"a") == b"T")
+                    new = added[upload][0]
+                    assert old[b"r"] != new[b"r"], "fixture did not change the visible crop"
+                    assert new[b"p"] != old[b"p"], "reply generation was reused"
+                    assert new[b"t"] == (b"s" if shared else b"d")
+                    assert any(k.get(b"a") == b"d" and k.get(b"d") == b"I"
+                               and k.get(b"i") == old[b"i"] for k, _ in added[:upload]), \
+                        "scroll replaced a cropped chart without clearing its previous placement"
+                    count = len(t.images())
+                    t.read(0.15)
+                    assert len(t.images()) == count, "unchanged chart entered a redraw loop"
+                t.quit()
+                print(f"PASS scroll-cleanup/{cell_w}x{cell_h}/{'shared' if shared else 'direct'}")
+            finally:
+                t.close()
+
+
 def supported(t):
     assert t.images(), "acknowledged Kitty did not receive images"
     assert b"\x1b[?2026h" in t.output
+    assert b"now" in t.output, "line-chart label was blanked"
+    assert any(
+        keys.get(b"a") == b"p" and keys.get(b"z") == b"-1" for keys, _ in t.commands()
+    ), "line chart was not placed under the text"
     count = len(t.images())
     t.read(0.2)
     assert len(t.images()) == count, "unchanged chart retransmitted"
@@ -248,14 +299,21 @@ def supported(t):
     assert t.commands()[-1][0].get(b"a") == b"d", "screen handoff left an image"
     t.send(b"c")
     t.read()
-    assert t.commands()[-1][0].get(b"a") == b"T"
+    placed_under_text(t.commands())
     os.kill(t.proc.pid, signal.SIGTSTP)
     t.read()
     assert t.commands()[-1][0].get(b"a") == b"d", "suspend left an image"
     os.kill(t.proc.pid, signal.SIGCONT)
     t.read(0.3)
     assert t.answered == 2, "resume did not renegotiate"
-    assert t.commands()[-1][0].get(b"a") == b"T"
+    placed_under_text(t.commands())
+
+
+def placed_under_text(commands):
+    # image() still transmits at the default z. compose() then re-places
+    # that same id under the text, so the last command is the placement.
+    assert commands[-2][0].get(b"a") == b"T", "chart was not transmitted"
+    assert commands[-1][0].get(b"a") == b"p" and commands[-1][0].get(b"z") == b"-1"
 
 
 def fallback(t):
@@ -310,6 +368,7 @@ def filled_graphics(t):
             assert any(decoded[3::4]), "empty graphic"
         else:
             assert any(decoded), "empty graphic"
+        assert b"z" not in keys, "a solid fill must not sit under text"
         formats.append(keys[b"f"])
         if n == 3:
             # Pace mark at 65% of the meter: two dark pixels, the mark, two
@@ -376,6 +435,263 @@ def plain_underlines(t):
     assert b" stale" in t.output and b" partial" in t.output and b" over" in t.output
 
 
+def image_bytes(commands, index):
+    """One transmitted image, including every continuation chunk after index."""
+    keys = commands[index][0]
+    if keys.get(b"t") == b"s":
+        data = shm_read(base64.b64decode(commands[index][1]))
+        assert data is not None, "shared image object cannot be mapped"
+        return keys, data[:int(keys[b"S"])]
+    blob = b""
+    for chunk_keys, payload in commands[index:]:
+        blob += payload
+        if chunk_keys.get(b"m", b"0") == b"0":
+            break
+    return keys, zlib.decompress(base64.b64decode(blob))
+
+
+def hidpi_shared_crops_keep_cell_layout(t):
+    initial = t.images()[0][0]
+    t.send(b"\x1b_Gi=2147483645;OK\x1b\\\x1b[6;40;20t")
+    t.read(0.4)
+    commands = t.commands()
+    index = max(i for i, (k, _) in enumerate(commands) if k.get(b"a") == b"T")
+    full, pixels = image_bytes(commands, index)
+    assert full[b"t"] == b"s" and full[b"f"] == b"32"
+    assert full[b"c"] == initial[b"c"] and full[b"r"] == initial[b"r"]
+    assert int(full[b"s"]) == int(full[b"c"]) * 20
+    assert int(full[b"v"]) == int(full[b"r"]) * 40
+    assert len(pixels) == int(full[b"s"]) * int(full[b"v"]) * 4
+    t.send(b"\x1b[B")
+    t.read(0.2)
+    commands = t.commands()
+    index = max(i for i, (k, _) in enumerate(commands) if k.get(b"a") == b"T")
+    cropped, visible = image_bytes(commands, index)
+    assert cropped[b"t"] == b"s" and cropped[b"c"] == full[b"c"]
+    assert int(cropped[b"v"]) == int(cropped[b"r"]) * 40
+    assert int(cropped[b"r"]) < int(full[b"r"])
+    offset = (int(full[b"v"]) - int(cropped[b"v"])) * int(full[b"s"]) * 4
+    assert visible == pixels[offset:], "HiDPI scroll changed the cropped pixels"
+    assert cropped[b"p"] != full[b"p"]
+    cell_queries_stay_outside_images(t.output)
+
+
+def hidpi_shared_rgb_gallery(t):
+    t.send(b"\x1b_Gi=2147483645;OK\x1b\\\x1b[6;40;20t")
+    t.read(0.3)
+    before = len(t.commands())
+    t.send(b"g")
+    t.read(0.3)
+    commands = t.commands()
+    rgb = []
+    for i, (keys, _) in enumerate(commands):
+        if i >= before and keys.get(b"a") == b"T" and keys.get(b"f") == b"24":
+            keys, data = image_bytes(commands, i)
+            assert keys[b"t"] == b"s"
+            assert int(keys[b"s"]) == int(keys[b"c"]) * 20
+            assert int(keys[b"v"]) == int(keys[b"r"]) * 40
+            assert len(data) == int(keys[b"s"]) * int(keys[b"v"]) * 3
+            rgb.append(keys)
+    assert len(rgb) == 2, "HiDPI opaque stacked bar/tile did not use RGB shared uploads"
+
+
+def cell_raster_follows_report(t):
+    assert b"\x1b[16t" in t.output
+    assert t.images(), "no image before the cell-size reply"
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    assert cols > 0 and rows > 0
+    assert int(keys[b"s"]) == cols * 8
+    assert int(keys[b"v"]) == rows * 16
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.8)
+    commands = t.commands()
+    last = max(i for i, (k, _) in enumerate(commands) if k.get(b"a") == b"T")
+    keys, decoded = image_bytes(commands, last)
+    assert int(keys[b"s"]) == cols * 20, keys
+    assert int(keys[b"v"]) == rows * 40, keys
+    assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
+
+
+def cell_raster_rejects_absurd_and_zero(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    t.send(b"\x1b[6;0;0t\x1b[6;2;500t\x1b[6;8;8t")
+    t.read(0.5)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"s"]) == cols * 8
+    assert int(keys[b"v"]) == rows * 16
+
+
+def cell_queries_stay_outside_images(output):
+    """`CSI 16 t` is sent between frames, never inside a Kitty APC chunk."""
+    rest = output
+    while True:
+        start = rest.find(b"\x1b_G")
+        if start < 0:
+            break
+        end = rest.find(b"\x1b\\", start)
+        if end < 0:
+            assert b"\x1b[16t" not in rest[start:]
+            break
+        assert b"\x1b[16t" not in rest[start:end]
+        rest = rest[end + 2:]
+
+
+def cell_raster_follows_winsize_pixels(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    assert int(keys[b"s"]) == cols * 8
+    # 20 rows, 80 cols, 1600×800 px → a 20×40 cell. Column count stays put.
+    before = t.output.count(b"\x1b[16t")
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 1600, 800))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"c"]) == cols, "pixel size changed the cell layout"
+    assert int(keys[b"r"]) == rows
+    assert int(keys[b"s"]) == cols * 20, keys
+    assert int(keys[b"v"]) == rows * 40, keys
+    assert t.output.count(b"\x1b[16t") > before, "resize did not ask for a cell size"
+    cell_queries_stay_outside_images(t.output)
+
+
+def cell_raster_drops_a_barren_resize(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"s"]) == cols * 20
+    assert int(keys[b"v"]) == rows * 40
+    # Same cell grid, no pixel fields, and no new reply. The previous 20×40
+    # must not stick; the raster returns to 8×16.
+    before = t.output.count(b"\x1b[16t")
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"c"]) == cols
+    assert int(keys[b"r"]) == rows
+    assert int(keys[b"s"]) == cols * 8, keys
+    assert int(keys[b"v"]) == rows * 16, keys
+    assert t.output.count(b"\x1b[16t") > before
+    cell_queries_stay_outside_images(t.output)
+
+
+def lost_startup_cell_reply_does_not_block_resize(t):
+    # No reply to startup's CSI 16 t. Once its timeout passes, the next
+    # resize query must stand alone and accept the new cell dimensions.
+    t.read(1.8)
+    before = t.output.count(b"\x1b[16t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.4)
+    assert t.output.count(b"\x1b[16t") > before
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "lost startup reply blocked the resize report"
+    assert int(keys[b"v"]) == int(keys[b"r"]) * 40
+    cell_queries_stay_outside_images(t.output)
+
+
+def ambiguous_cell_reply_retries(t):
+    # Startup reply is lost; the first resize reply is therefore ambiguous.
+    before = t.output.count(b"\x1b[16t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.2)
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
+    assert t.output.count(b"\x1b[16t") > before + 1, "ambiguous reply did not retry"
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "ambiguous reply left fallback raster"
+
+
+def expired_cell_reply_is_quarantined(t):
+    t.read(1.6)
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.2)
+    # Expired startup response precedes the actual current response.
+    t.send(b"\x1b[6;40;20t\x1b[6;24;12t")
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;24;12t")
+        t.read(0.2)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 12, "expired reply was relabeled current"
+
+
+def resumed_cell_reply_is_quarantined(t):
+    # Leave a resize query outstanding before suspending with a buffered reply.
+    t.send(b"\x1b[6;16;8t")
+    t.read(0.1)
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.1)
+    os.kill(t.proc.pid, signal.SIGTSTP)
+    t.read(0.1)
+    t.send(b"\x1b[6;20;10t")
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    os.kill(t.proc.pid, signal.SIGCONT)
+    t.read(0.2)
+    for _ in range(3):
+        t.send(b"\x1b[6;40;20t")
+        t.read(0.2)
+    keys = t.images()[-1][0]
+    assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "resume accepted a buffered old report"
+
+
+def stop_child(pid):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # The child can already have exited after an earlier SIGTERM.
+        pass
+
+
+def reclaimed_cell_reply_is_quarantined(t):
+    # Leave the startup size query unanswered, then buffer an old report while
+    # a child owns the tty. Reclaim must not relabel it as the new query's reply.
+    # The child prints its pid and waits for SIGTERM, so a slow runner cannot
+    # exit it before the stale report is queued.
+    before = len(t.images())
+    t.send(b"h")
+    assert wait_for(t, lambda: re.search(rb"CHILD_READY (\d+)", t.output), 2), \
+        "handoff did not reach the child"
+    child = int(re.search(rb"CHILD_READY (\d+)", t.output).group(1))
+    reclaimed = False
+    try:
+        queries = t.output.count(b"\x1b[16t")
+        t.send(b"\x1b[6;20;10t")
+        t.read(0.15)
+        assert t.output.count(b"\x1b[16t") == queries, "cell query reached the child"
+        stop_child(child)
+        assert wait_for(t, lambda: t.answered >= 2 and len(t.images()) > before, 2), \
+            "reclaim did not renegotiate"
+        reclaimed = True
+        assert t.answered == 2, "reclaim did not renegotiate"
+        assert len(t.images()) > before, "reclaim did not redraw"
+        assert all(int(keys[b"s"]) != int(keys[b"c"]) * 10
+                   for keys, _ in t.images()[before:]), "reclaim accepted a buffered old report"
+        # Answer only emitted queries, including confirmation. No SIGWINCH is sent.
+        answered = queries + 1  # The buffered report consumed the reclaim query.
+        for _ in range(4):
+            pending = t.output.count(b"\x1b[16t") - answered
+            if pending:
+                t.send(b"\x1b[6;40;20t" * pending)
+                answered += pending
+            t.read(0.15)
+        keys = t.images()[-1][0]
+        assert int(keys[b"s"]) == int(keys[b"c"]) * 20, "reclaim left stale raster without resize"
+        assert int(keys[b"v"]) == int(keys[b"r"]) * 40, "reclaim left stale raster height"
+    finally:
+        if not reclaimed:
+            stop_child(child)
+
+
 def shm_rejected(t):
     probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
     assert probes, "no shared-memory probe"
@@ -422,7 +738,9 @@ def shared_rgb_gallery(t):
              if keys.get(b"f") == b"24" and keys.get(b"t") == b"s"]
     assert tiles, "opaque RGB tile did not use shared memory"
     keys, payload = tiles[-1]
-    data = shm_read(base64.b64decode(payload))[:int(keys[b"S"])]
+    data = shm_read(base64.b64decode(payload))
+    assert data is not None, "shared image object cannot be mapped"
+    data = data[:int(keys[b"S"])]
     assert len(data) == int(keys[b"s"]) * int(keys[b"v"]) * 3
     assert data == bytes([50, 220, 170]) * (len(data) // 3), "RGB shared pixels changed"
     assert b"o" not in keys and keys[b"q"] == b"0"
@@ -640,18 +958,47 @@ def run_tmux(reply, check, termtype, passthrough="on", pane="%1"):
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def herdr_pane_sends_images_inline():
+    # Herdr's server answers the shared-memory probe OK and then draws
+    # nothing sent through t=s, so a Herdr pane never sends the probe.
+    t = Terminal(extra_env={"HERDR_ENV": "1"})
+    try:
+        t.read(0.4)
+        probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
+        assert not probes, "a Herdr pane was sent the shared-memory probe"
+        assert t.images(), "no chart under Herdr"
+        assert all(keys[b"t"] == b"d" for keys, _ in t.images()), "a Herdr pane used shared memory"
+        t.quit()
+    finally:
+        t.close()
+
+
 if __name__ == "__main__":
+    scroll_clears_previous_image_region()
     moving_meter_keeps_unchanged_pixels()
     successful_upload_before_shared_failure()
     print("PASS shared-memory/success-before-failure")
     missing_and_late_replies_keep_their_upload_keys()
     print("PASS shared-memory/missing-and-late-replies")
+    herdr_pane_sends_images_inline()
+    print("PASS shared-memory/herdr-inline")
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
                                ("auto", "kitty", shm_rejected), ("auto", "kitty", shm_accepted),
                                ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
+                               ("auto", "kitty", cell_raster_follows_report),
+                               ("auto", "kitty", hidpi_shared_crops_keep_cell_layout),
+                               ("auto", "kitty", hidpi_shared_rgb_gallery),
+                               ("auto", "kitty", cell_raster_rejects_absurd_and_zero),
+                               ("auto", "kitty", cell_raster_follows_winsize_pixels),
+                               ("auto", "kitty", cell_raster_drops_a_barren_resize),
+                               ("auto", "kitty", lost_startup_cell_reply_does_not_block_resize),
+                               ("auto", "kitty", ambiguous_cell_reply_retries),
+                               ("auto", "kitty", expired_cell_reply_is_quarantined),
+                               ("auto", "kitty", resumed_cell_reply_is_quarantined),
+                               ("auto", "kitty", reclaimed_cell_reply_is_quarantined),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

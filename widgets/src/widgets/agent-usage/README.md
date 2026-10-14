@@ -426,6 +426,134 @@ shape not recognised says `not reported` rather than being drawn as one of the
 others. Asking about the cap is best-effort: a refusal there leaves every
 other line exactly as it was.
 
+When no limit is set, Cursor's hard-limit call answers `2147483647` — INT32_MAX,
+its way of saying *no limit*. That is read as the unlimited state and is never
+drawn as a cap of two billion dollars.
+
+### SpaceXSI (the unified Cursor and Grok plan)
+
+Cursor and Grok now sell one plan between them, and an account moved onto it
+reads differently from either product's own plan:
+
+- **One weekly included pool**, shared by Cursor, Grok Bot and the Grok CLI.
+  The usage call's billing cycle becomes that week.
+- **Third-party models bill at API list price** against prepaid credits rather
+  than drawing on the pool, so `other models` would sit at nought for ever and
+  `cursor models` is the same number as the pool.
+- **Prepaid credits** — a balance you top up, with optional auto top-up.
+- **A monthly limit on additional usage**, on the monthly cycle, not the week.
+
+Whichever vendor is on this plan is drawn under one heading, **SpaceXSI**, on
+`[+]` and in the tab strip. On the same account, CURSOR and GROK fold into one
+**SPACEXSI** tab: the pool once, split by product, then an extra-usage
+report, the profile's activity, and the account's spend and plan.
+
+```
+ ── SpaceXSI ── live · weekly · resets in 6d 22h
+  14% of the week gone
+  weekly pool     ███▓▓▓░░░░░░░░░░░░░░░░░░░░░░░   10%  +9%
+                  ■ Cursor    ~5%
+                  ■ Grok Bot  ~5%
+
+ ── EXTRA USAGE ── month 13 Oct → 12 Nov
+  prepaid credits ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+                  $20.00 left of $20.00 paid · $0.00 used
+                  auto top-up $10.00 when below $2.00 · payment method saved
+                  top-ups 13 Oct $20.00 manual
+  usage limit     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+                  $0.00 of $100.00 this month · $100.00 left · resets 12 Nov
+
+ ── ACTIVITY ── profile tokens / day · peak 937.0M on Sep 16
+  streak 2 days · longest 33
+     Nov Dec Jan Feb Mar Apr May Jun Jul Aug  Sep
+ Mon               █ █    █ ██ ███ █     █████████ █
+  …
+  Less ████ More
+
+ SPEND / DAY · SPEND · METERED · SUBSCRIPTION
+```
+
+The merged tab is one report, with no Cursor or Grok headings — the plan is one
+product — and it draws **cloud figures only**. SpaceXSI is an account, so this
+machine's share of it is left out: no AI-written-code counts from Cursor's local
+tracking database, and no Grok Build session totals or second heatmap from
+`~/.grok/sessions`. A vendor still on its own plan keeps those sections. SpaceXSI is drawn in greyscale: the brand is monochrome, its black
+is unreadable on a dark pane, and a mid-grey leaves the bars a ramp to draw.
+
+**Activity** is the heatmap cursor.com/@handle shows, and on the unified plan
+grok.com shows the same one: daily token counts and streaks from the account's
+own profile (`GetViewableProfileByHandle`, by the handle `GetUserProfile`
+returns). It is headed as the *profile's* tokens because whether it counts
+Grok's side of the plan as well as Cursor's is not settled — on the day of the
+merge it was still empty while the pool had moved.
+
+The pool bar is drawn in one segment per product, each product on a line of
+its own beneath it in its segment's colour. The split is Grok's: its credits
+endpoint states each product's share of the week in whole percents, leaves
+Cursor's share unnamed, and omits any product that rounds to nought — so the
+shares are marked `~`, and a sliver of the pool the whole percents do not
+account for is drawn dim rather than handed to a product. Matched against
+x.ai's own usage dashboard on 2026-10-13: Cursor and Grok Bot at about 134M
+and 138M tokens came back as 5% and 5% of a 10% week, and Grok Chat and Grok
+Build, under 1% of it, did not come back at all. Token counts per product are
+on that dashboard only, behind a browser sign-in, so they are not shown here.
+
+The report says everything the prepaid and limit calls state that is about
+usage: what is left of what was paid and how much has been drawn, this month
+against its limit on the monthly clock, the refill rule and whether it has a
+payment method to charge, and the last five top-ups — a failed one in the
+warning colour, since that is the rule firing and the money not arriving. The
+same calls also carry cursor.com's minimum, maximum and recommended limits;
+they are settings-page hints rather than usage, and on the measured account
+the limit sat below the stated minimum, so they are left out.
+
+On `[+]` the SpaceXSI group has up to three bars, named the same way on the tab,
+as **percentages only** — the dollars and the refill rule are the tab's:
+
+- `weekly pool` — the shared included allowance, on its weekly clock.
+- `usage limit` — this month's additional usage against what cursor.com calls
+  the *Monthly additional usage limit*, on the monthly clock.
+- `prepaid credits` — what has been drawn from the prepaid balance against what
+  was paid in; X calls this balance *Additional usage credits*. No countdown
+  and no pace, since a balance has no clock.
+
+A bar shows only when its feature is in use: no `prepaid credits` for an
+account that has paid nothing in, and no `usage limit` without a limit. With
+no limit but money spent this month, the tab still states the spend, with no
+bar. A prepaid call that failed says `not reported` on the tab, because a
+failure is not the same as an unused balance.
+
+Each vendor is read on its own terms, every refresh:
+
+| Cursor | Grok | what is drawn |
+|---|---|---|
+| unified | unified, same account | one SPACEXSI tab and one SpaceXSI group on `[+]`: the pool, the credits and the limit once |
+| unified | unified, a different account | two sections and two tabs, `SpaceXSI · via Cursor` and `SpaceXSI · via Grok`, nothing merged |
+| unified | its own plan, or absent | Cursor's tab and lanes under SpaceXSI; Grok keeps its own tab, heading and lanes |
+| its own plan | unified | Grok's tab and lanes under SpaceXSI; Cursor keeps its own tab, heading and three lanes |
+| its own plan | its own plan | exactly what each drew before — no SpaceXSI heading |
+
+**How each one is told.** Cursor's plan says so outright — `isMerged`, or an
+`includedUsagePeriod` an account's own plan does not carry — and the credits
+and monthly cycle are asked for only then. Grok's credits answer carries a
+top-up method and a `GrokBot` product that only the unified plan sends; its
+`isUnifiedBillingUser` flag does not count, because the log shows it set on
+readings from before the plans merged. Grok's log never carries a marker, so
+**the same account** is recognised by the weekly window: Cursor's and Grok's
+matched to the millisecond on the measured account, and two separate accounts
+sharing a window that precisely is not a coincidence worth planning for.
+
+Shared, Cursor's reading of the pool is the one drawn, because its usage call
+is asked every two minutes where Grok's may be a log line; Grok contributes the
+pool's split by product beneath the bar, and its own pool reading when
+Cursor's usage call has not answered. Grok's `prepaidBalance` arrives in cents — the
+measured `2000` is the $20 Cursor states as `availableCents: "2000"` — and is
+read that way.
+
+**Still open:** Cursor's monthly cycle call and its plan's own monthly end
+disagreed by a day on the measured account. The monthly cycle call is the one
+used, and the plan's end is the fallback.
+
 Cursor supplies a **spend** section too: per-model input, output and cache
 tokens with Cursor's own money figure — not an estimate — over the last 30
 days. It is what the plan percentages are made of, and answers which model
@@ -652,7 +780,7 @@ with its money, its tokens, and the models underneath, and every model row
 carrying both: what it cost and what it ran.
 
 ```
- ── METERED ── this machine · at list prices · 1 Oct 2026
+ ── METERED ── this machine · at list prices · 14 Oct 2026
   Counted from transcripts, which are written where the agent ran. Claude used
   on another machine, or on claude.ai, is not in here.
   today    $172.64    74.3M tokens
@@ -687,7 +815,7 @@ off a list whose absence would read as *nothing here is unpriced*.
 And the window's money then says **at least**:
 
 ```
- ── METERED ── this machine · at list prices · 1 Oct 2026
+ ── METERED ── this machine · at list prices · 14 Oct 2026
   CLI rollouts only. Codex bills Cloud, Web, Desktop and the rest to the same
   account, and none of those leave anything on this disk to count.
   today    at least $9.79     27.3M tokens
@@ -740,10 +868,13 @@ model charges. Fable 5.1 and Mythos 5.1 read cache at a quarter of what Fable 5
 and Mythos 5 charge, a smaller multiplier than every other Anthropic model.
 `gpt-5.6-sol` is a **promotional** price, dated by OpenAI as running at least
 through 21 Nov 2026, and is carried because it is the only price published and
-the one the meter bills at. `gemini-3.8-flash` is **introductory**: input,
-output and cached input all double on 1 January 2027, and the successor figures
-are already written down, so the row moves on the day rather than being
-rediscovered after a month of half-price totals. `grok-4.7` carries the same
+the one the meter bills at. `gemini-4-argon` and `gemini-3.8-flash` are
+**introductory**: `gemini-4-argon` is 2 / 10 / 0.10 through 30 November 2026
+(with implicit-only caching at 0.05× input and no explicit cache storage) and
+doubles to 4 / 20 / 0.20 on 1 December 2026, while `gemini-3.8-flash` doubles
+on 1 January 2027, and the successor figures are already written down so each
+row moves on the day rather than being rediscovered after a month of
+half-price totals. `grok-4.7` carries the same
 below-200k rates as `grok-4.6` — 2 / 6 / 0.50 — and still needs its own row:
 no existing key is a substring of `grok-4.7`, so without one the model costs
 nothing. `gpt-6-sol` and `gpt-6-luna` are the same shape of gap against the
@@ -754,12 +885,15 @@ reads are $0.10 rather than $0.20. `claude-opus-5` is a prefix of
 `claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
 would inherit Opus 5, cache reads at $0.50 against the published $0.20.
 Codex Fast and Ultrafast are not model ids. A rollout's `service_tier` of
-`fast` bills 2× the standard row and the row says Fast; `ultrafast` bills
-6× and only for `gpt-6-astra`, and the row says Ultrafast.
-`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`. The published five
-match Sonnet 5 — 2 / 10 / 0.20 / 2.50 / 4 — so inheriting would bill the
-same today, and the row is still its own so a later move of one model does
-not reprice the other.
+`fast` bills the model's published Fast multiple of the standard row and
+the row says Fast. That is 2× for most models; `gpt-5.5` is 2.5×, and
+`gpt-5-mini`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3` and
+`o4-mini` sit between 1.67× and 1.82× (`wiki/model-prices.md` has the
+table). `ultrafast` bills 6× and only for `gpt-6-astra` and `gpt-6.1-sol`,
+and the row says Ultrafast.
+`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and without its own row
+Sonnet 5.5 would inherit Sonnet 5's cache reads at $0.20 against the
+published $0.10 (2 / 10 / 0.10 / 2.50 / 4).
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
