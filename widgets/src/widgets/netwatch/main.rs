@@ -1439,18 +1439,24 @@ fn detail_rows(
     out.push(String::new());
 
     // This process's own traffic, on the same chart as the machine's.
+    // One-line borders need five rows for a two-row plot and seven for the
+    // taller one. Wrapped borders are inside that budget: the body scrolls,
+    // but a chart taller than the rows left here starts below the pane.
     let spare = h.saturating_sub(out.len());
-    let graph_h = if spare >= 30 {
-        7
+    let plot = if spare >= 30 {
+        4
     } else if spare >= 24 {
-        5
+        2
     } else {
         0
     };
-    if graph_h > 0 && !row.hist.is_empty() {
-        out.push(chart_head(row.hist.len(), w, "THIS PROCESS", interval, p));
-        out.extend(chart(&row.hist, w, graph_h, p, plots, out.len()));
-        out.push(String::new());
+    if plot > 0 && !row.hist.is_empty() {
+        let budget = chart_rows(&row.hist, w, plot);
+        if budget + 2 <= spare {
+            out.push(chart_head(row.hist.len(), w, "THIS PROCESS", interval, p));
+            out.extend(chart(&row.hist, w, budget, p, plots, out.len()));
+            out.push(String::new());
+        }
     }
 
     if h.saturating_sub(out.len()) >= 12 {
@@ -1506,10 +1512,19 @@ fn detail_rows(
                 let pick = &spots[pick_at];
                 let mut tall = 1;
                 if !pick.hist.is_empty() && pick_at < rows.len() {
-                    let mut under = chart(&pick.hist, w, 4, p, plots, out.len() + pick_at + 1);
-                    under.push(String::new());
-                    tall += under.len();
-                    rows.splice(pick_at + 1..pick_at + 1, under);
+                    let mut under = chart(
+                        &pick.hist,
+                        w,
+                        chart_rows(&pick.hist, w, 2),
+                        p,
+                        plots,
+                        out.len() + pick_at + 1,
+                    );
+                    if !under.is_empty() {
+                        under.push(String::new());
+                        tall += under.len();
+                        rows.splice(pick_at + 1..pick_at + 1, under);
+                    }
                 }
                 cursor = Some((out.len() + pick_at, tall));
             }
@@ -1522,10 +1537,19 @@ fn detail_rows(
                 let mut tall = 1;
                 if let Some(pick) = conns.get(pick_at) {
                     if !pick.hist.is_empty() && pick_at < rows.len() {
-                        let mut under = chart(&pick.hist, w, 4, p, plots, out.len() + pick_at + 1);
-                        under.push(String::new());
-                        tall += under.len();
-                        rows.splice(pick_at + 1..pick_at + 1, under);
+                        let mut under = chart(
+                            &pick.hist,
+                            w,
+                            chart_rows(&pick.hist, w, 2),
+                            p,
+                            plots,
+                            out.len() + pick_at + 1,
+                        );
+                        if !under.is_empty() {
+                            under.push(String::new());
+                            tall += under.len();
+                            rows.splice(pick_at + 1..pick_at + 1, under);
+                        }
                     }
                 }
                 cursor = Some((out.len() + pick_at, tall));
@@ -2331,23 +2355,37 @@ fn main() {
 
         // The chart takes a share of the pane and the list takes the rest,
         // but the list is the point: below a certain height there is no
-        // chart at all rather than two rows of neither.
+        // chart at all rather than two rows of neither. Wrapped borders
+        // count toward that height. The plot shrinks to pay for them, and
+        // when even a two-row plot would leave the list fewer than five
+        // rows the chart stands down — this screen does not scroll, so a
+        // chart that overruns its budget pushes the list off the pane.
         let spare = h.saturating_sub(out.len() + 4);
-        let graph_h = if spare >= 20 {
-            9
-        } else if spare >= 15 {
-            7
-        } else if spare >= 11 {
-            5
-        } else {
-            0
-        };
         let series: Vec<(f64, f64)> = guard
             .series
             .iter()
             .map(|s| if mine { (s.0, s.1) } else { (s.2, s.3) })
             .collect();
-        if graph_h > 0 && !series.is_empty() {
+        let graph_h = if series.is_empty() || spare < 11 {
+            0
+        } else {
+            let plot = if spare >= 20 {
+                6
+            } else if spare >= 15 {
+                4
+            } else {
+                2
+            };
+            // `room` below is `spare - graph_h - 1`, and five list rows is
+            // the smallest table this screen still bothers to draw.
+            let room_for_chart = spare.saturating_sub(6);
+            if chart_rows(&series, w, 2) <= room_for_chart {
+                chart_rows(&series, w, plot).min(room_for_chart)
+            } else {
+                0
+            }
+        };
+        if graph_h > 0 {
             out.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── PROCESS WATCH ── ".into()),
@@ -2469,33 +2507,170 @@ fn main() {
     }
 }
 
-/// Put complete labels in the border, wrapping a narrow header into a band.
-fn chart_border(label: &str, width: usize, ink: &str, grid: &str, upper: bool) -> Vec<String> {
-    let inner = width.saturating_sub(2).max(1);
-    let mut labels = vec![String::new()];
-    for (i, part) in label.split(" · ").enumerate() {
-        let word = if i == 0 { part.to_string() } else { format!("· {part}") };
-        let n = labels.last().unwrap().chars().count();
-        if n > 0 && n + 1 + word.chars().count() > inner {
-            labels.push(String::new());
-        } else if n > 0 {
-            labels.last_mut().unwrap().push(' ');
+/// A rate wider than the border splits into its number and its unit, each
+/// of which still wraps whole. Only a single piece wider than the line is
+/// broken by character, which is a pane too narrow to show `MB/s` at all.
+fn rate_tokens(n: f64, inner: usize) -> Vec<String> {
+    let text = rate(n);
+    if text.chars().count() <= inner {
+        return vec![text];
+    }
+    match text.rsplit_once(' ') {
+        Some((number, unit)) => vec![number.to_string(), unit.to_string()],
+        None => vec![text],
+    }
+}
+
+fn push_token(lines: &mut Vec<String>, token: &str, inner: usize) {
+    if token.is_empty() {
+        return;
+    }
+    let count = token.chars().count();
+    let used = lines.last().map(|line| line.chars().count()).unwrap_or(0);
+    if used > 0 && used + 1 + count <= inner {
+        let line = lines.last_mut().unwrap();
+        line.push(' ');
+        line.push_str(token);
+        return;
+    }
+    if used > 0 {
+        lines.push(String::new());
+    }
+    if count <= inner {
+        lines.last_mut().unwrap().push_str(token);
+        return;
+    }
+    let mut rest = token;
+    while !rest.is_empty() {
+        if lines.last().is_some_and(|line| !line.is_empty()) {
+            lines.push(String::new());
         }
-        for c in word.chars() {
-            if labels.last().unwrap().chars().count() == inner {
-                labels.push(String::new());
-            }
-            labels.last_mut().unwrap().push(c);
+        let take: usize = rest.chars().take(inner).map(|c| c.len_utf8()).sum();
+        lines.last_mut().unwrap().push_str(&rest[..take]);
+        rest = &rest[take..];
+        if !rest.is_empty() {
+            lines.push(String::new());
         }
     }
-    let last = labels.len() - 1;
-    labels.iter().enumerate().map(|(i, label)| {
-        let edge = if upper && i == 0 { ("┌", "┐") }
-            else if !upper && i == last { ("└", "┘") }
-            else { ("│", "│") };
-        tc::seg(&[(grid, edge.0.into()), (ink, label.clone()),
-            (grid, "─".repeat(inner - label.chars().count())), (grid, edge.1.into())], width)
-    }).collect()
+}
+
+/// Wrap on clause boundaries, then before a rate. `↑ peak 100.0 MB/s` at
+/// 18 columns becomes `↑ peak` and `100.0 MB/s`, not `100.0 MB` and `/s`.
+fn wrap_clauses(clauses: &[Vec<String>], inner: usize) -> Vec<String> {
+    let inner = inner.max(1);
+    let mut lines = vec![String::new()];
+    for clause in clauses {
+        let tokens: Vec<&str> = clause.iter().map(String::as_str).filter(|t| !t.is_empty()).collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        let flat = tokens.join(" ");
+        let width = flat.chars().count();
+        let used = lines.last().unwrap().chars().count();
+        if width <= inner && (used == 0 || used + 1 + width <= inner) {
+            if used > 0 {
+                lines.last_mut().unwrap().push(' ');
+            }
+            lines.last_mut().unwrap().push_str(&flat);
+            continue;
+        }
+        if used > 0 {
+            lines.push(String::new());
+        }
+        if width <= inner {
+            lines.last_mut().unwrap().push_str(&flat);
+            continue;
+        }
+        for token in tokens {
+            push_token(&mut lines, token, inner);
+        }
+    }
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn border_clauses(arrow: &str, peak: f64, now: f64, inner: usize) -> Vec<Vec<String>> {
+    let mut peak_clause = vec![format!("{arrow} peak")];
+    peak_clause.extend(rate_tokens(peak, inner));
+    let mut now_clause = vec!["· now".to_string()];
+    now_clause.extend(rate_tokens(now, inner));
+    vec![peak_clause, now_clause]
+}
+
+struct ChartScale {
+    rx: Vec<f64>,
+    tx: Vec<f64>,
+    rx_peak: f64,
+    tx_peak: f64,
+    top_band: Vec<String>,
+    bot_band: Vec<String>,
+    plot_w: usize,
+    width: usize,
+}
+
+fn chart_scale(series: &[(f64, f64)], w: usize) -> ChartScale {
+    let width = w.saturating_sub(1).max(1);
+    let plot_w = w.saturating_sub(3).max(1);
+    let window: Vec<(f64, f64)> = series.iter().rev().take(plot_w * 2).rev().copied().collect();
+    let rx: Vec<f64> = window.iter().map(|s| s.0).collect();
+    let tx: Vec<f64> = window.iter().map(|s| s.1).collect();
+    let rx_peak = rx.iter().copied().fold(0.0, f64::max).max(1.0);
+    let tx_peak = tx.iter().copied().fold(0.0, f64::max).max(1.0);
+    let rx_now = rx.last().copied().unwrap_or(0.0);
+    let tx_now = tx.last().copied().unwrap_or(0.0);
+    let inner = width.saturating_sub(2).max(1);
+    let top_band = wrap_clauses(&border_clauses("↑", tx_peak, tx_now, inner), inner);
+    let bot_band = wrap_clauses(&border_clauses("↓", rx_peak, rx_now, inner), inner);
+    ChartScale {
+        rx,
+        tx,
+        rx_peak,
+        tx_peak,
+        top_band,
+        bot_band,
+        plot_w,
+        width,
+    }
+}
+
+/// Rows a chart needs for `plot_rows` of samples once its borders have wrapped.
+fn chart_rows(series: &[(f64, f64)], w: usize, plot_rows: usize) -> usize {
+    let scale = chart_scale(series, w);
+    scale.top_band.len() + scale.bot_band.len() + 1 + plot_rows.max(2)
+}
+
+/// Put complete labels in the border, wrapping a narrow header into a band.
+fn chart_border(labels: &[String], width: usize, ink: &str, grid: &str, upper: bool) -> Vec<String> {
+    let inner = width.saturating_sub(2).max(1);
+    let last = labels.len().saturating_sub(1);
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let edge = if upper && i == 0 {
+                ("┌", "┐")
+            } else if !upper && i == last {
+                ("└", "┘")
+            } else {
+                ("│", "│")
+            };
+            let pad = "─".repeat(inner.saturating_sub(label.chars().count()));
+            tc::seg(
+                &[
+                    (grid, edge.0.into()),
+                    (ink, label.clone()),
+                    (grid, pad),
+                    (grid, edge.1.into()),
+                ],
+                width,
+            )
+        })
+        .collect()
 }
 
 /// Sent above the line, received below it, newest on the right.
@@ -2503,25 +2678,26 @@ fn chart_border(label: &str, width: usize, ink: &str, grid: &str, upper: bool) -
 /// That way round because of the arrows: ↑ means upload and ↓ means
 /// download, so upload has to be the half that goes up.
 fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec<tc::Plot>, top: usize) -> Vec<String> {
-    let canvas = h.saturating_sub(3).max(2);
-    let up_h = (canvas / 2).max(1);
-    let down_h = canvas.saturating_sub(up_h).max(1);
-    let plot = w.saturating_sub(3).max(1);
-    let window: Vec<(f64, f64)> = series.iter().rev().take(plot * 2).rev().copied().collect();
-    let rx: Vec<f64> = window.iter().map(|s| s.0).collect();
-    let tx: Vec<f64> = window.iter().map(|s| s.1).collect();
-    let rx_peak = rx.iter().cloned().fold(0.0f64, f64::max).max(1.0);
-    let tx_peak = tx.iter().cloned().fold(0.0f64, f64::max).max(1.0);
-    // Each label carries its own direction and neither is signed: rx is not
-    // negative traffic, it is simply the half drawn downward.
-    let tx_now = *tx.last().unwrap_or(&0.0);
-    let rx_now = *rx.last().unwrap_or(&0.0);
-    let border_label = |arrow, peak, now| format!("{arrow} peak {} · now {}", rate(peak), rate(now));
-    let mut out = chart_border(&border_label("↑", tx_peak, tx_now), w.saturating_sub(1), &p.up, &p.grid, true);
+    let scale = chart_scale(series, w);
+    // Borders and the zero line come out of `h` before the plot does. A
+    // budget that cannot hold one row each way stands down rather than
+    // drawing a chart taller than the caller reserved.
+    let chrome = scale.top_band.len() + scale.bot_band.len() + 1;
+    let Some(canvas) = h.checked_sub(chrome).filter(|canvas| *canvas >= 2) else {
+        return Vec::new();
+    };
+    let up_h = canvas / 2;
+    let down_h = canvas - up_h;
+    let plot = scale.plot_w;
+    let rx = &scale.rx;
+    let tx = &scale.tx;
+    let rx_peak = scale.rx_peak;
+    let tx_peak = scale.tx_peak;
+    let mut out = chart_border(&scale.top_band, scale.width, &p.up, &p.grid, true);
     let up_top = top + out.len();
     for (values, peak, colour, height, y, inverted) in [
-        (&tx, tx_peak, &p.up, up_h, up_top, false),
-        (&rx, rx_peak, &p.down, down_h, up_top + up_h + 1, true),
+        (tx, tx_peak, &p.up, up_h, up_top, false),
+        (rx, rx_peak, &p.down, down_h, up_top + up_h + 1, true),
     ] {
         let values: Vec<_> = values.iter().rev().take(plot * 2).rev().map(|v| {
             let fraction = (v / peak).clamp(0.0, 1.0);
@@ -2560,7 +2736,7 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         out.push(tc::seg(&refs, w - 1));
     }
-    out.extend(chart_border(&border_label("↓", rx_peak, rx_now), w.saturating_sub(1), &p.down, &p.grid, false));
+    out.extend(chart_border(&scale.bot_band, scale.width, &p.down, &p.grid, false));
     out
 }
 
@@ -3127,8 +3303,60 @@ mod tests {
                         assert!(text.chars().all(|c| c == '│' || c == ' '), "{text}");
                     }
                 }
+                assert_eq!(rows.len(), 11, "w={w} drew {}", rows.len());
             }
         }
+    }
+
+    #[test]
+    fn a_border_wraps_before_a_rate_instead_of_splitting_its_unit() {
+        let mut plots = Vec::new();
+        // 18 columns cannot hold "↑ peak 100.0 MB/s" on one border line.
+        let rows = chart(&[(1e8, 1e8)], 18, 15, &palette(), &mut plots, 0);
+        let lines: Vec<String> = rows.iter().map(|row| bare(row)).collect();
+        assert!(
+            lines.iter().any(|line| line.contains("100.0 MB/s")),
+            "the rate was split: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("/s") || line.contains("B/s")),
+            "a unit was broken: {lines:?}"
+        );
+        assert!(rows.len() <= 15);
+    }
+
+    #[test]
+    fn a_chart_stays_inside_the_rows_it_was_given() {
+        let big = [(1e8, 1e8), (2e7, 5e7)];
+        let small = [(1000.0, 100.0), (200.0, 20.0)];
+        for series in [big.as_slice(), small.as_slice()] {
+            for w in [10usize, 18, 26, 40, 56, 80, 120] {
+                for h in [4usize, 5, 7, 9, 11, 15] {
+                    let mut plots = Vec::new();
+                    let rows = chart(series, w, h, &palette(), &mut plots, 3);
+                    assert!(
+                        rows.len() <= h,
+                        "w={w} h={h} drew {} rows",
+                        rows.len()
+                    );
+                    if rows.is_empty() {
+                        assert!(plots.is_empty(), "w={w} h={h} stood down but left a plot");
+                        continue;
+                    }
+                    assert_eq!(rows.len(), h, "w={w} h={h} drew a short chart");
+                    assert_eq!(plots.len(), 2, "w={w} h={h}");
+                    for plot in &plots {
+                        assert!(plot.y >= 3 && plot.y + plot.height <= 3 + rows.len());
+                    }
+                }
+            }
+        }
+        // Ten columns and a megabyte-scale rate wrap each border into a
+        // band taller than a five-row chart. The main screen's list is
+        // budgeted against that five, so the chart stands down.
+        let mut plots = Vec::new();
+        assert!(chart(&[(1e8, 1e8)], 10, 5, &palette(), &mut plots, 0).is_empty());
+        assert!(plots.is_empty());
     }
 
     #[test]

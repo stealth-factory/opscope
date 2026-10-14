@@ -53,7 +53,9 @@ direction and peak in the border — `↑ peak 90.0 KB/s` at the top,
 `↓ peak 2.0 MB/s` at the bottom. There is no left-hand label gutter.
 In both text and Kitty modes the current rate sits beside its peak
 (`· now 20.0 KB/s`), keeping figures outside the plotted lines. Narrow borders wrap
-labels into a band so complete rates remain visible.
+before a rate, so its number and unit stay on one line, and the plot gives up
+rows so the chart stays inside the height it was given. A pane too short for
+both that chart and the process list keeps the list.
 Neither is signed. Received traffic is not negative traffic; it is simply the
 half drawn downward, and a minus sign on it would dress a fact about the
 drawing up as a fact about the number. Sharing a scale is the obvious choice and the wrong one: a
