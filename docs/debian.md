@@ -48,37 +48,20 @@ sudo apt update
 sudo apt install ca-certificates curl gnupg
 ```
 
-The expected primary signing-key fingerprint is
-`95AD77762F38D1AECCD7BFC92A5C45AEC00E7388`.
-The block below checks the complete set of primary fingerprints before
-installing the key: an additional or different primary key fails the check.
-If it fails, stop and confirm any announced key rotation with the maintainers;
-do not substitute the downloaded fingerprint or disable signature verification.
+Download the signing key and add the source:
 
 ```sh
-(
-  set -eu
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT
-  curl -fsSL https://stealth-factory.github.io/apt-repo/stealth-factory.asc \
-    -o "$tmpdir/stealth-factory.asc"
-  fingerprint=$(gpg --batch --show-keys --with-colons "$tmpdir/stealth-factory.asc" \
-    | awk -F: '$1 == "pub" { primary=1; next } primary && $1 == "fpr" { print $10; primary=0 }')
-  if [ "$fingerprint" != "95AD77762F38D1AECCD7BFC92A5C45AEC00E7388" ]; then
-    echo "Unexpected signing key; stopping." >&2
-    exit 1
-  fi
-  sudo install -d -m 0755 /etc/apt/keyrings
-  sudo install -m 0644 "$tmpdir/stealth-factory.asc" /etc/apt/keyrings/stealth-factory.asc
-  printf '%s\n' 'deb [arch=amd64 signed-by=/etc/apt/keyrings/stealth-factory.asc] https://stealth-factory.github.io/apt-repo stable main' \
-    | sudo tee /etc/apt/sources.list.d/stealth-factory.list
-)
+sudo install -d -m 0755 /etc/apt/keyrings && curl -fsSL https://stealth-factory.github.io/apt-repo/stealth-factory.asc | sudo tee /etc/apt/keyrings/stealth-factory.asc >/dev/null
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/stealth-factory.asc] https://stealth-factory.github.io/apt-repo stable main' | sudo tee /etc/apt/sources.list.d/stealth-factory.list
 ```
 
-`signed-by` limits this key to this source; do not use `apt-key` or
-`trusted=yes`. Trusting the key authorizes its holder to supply packages
-installed as root. This guide pins the expected fingerprint separately from
-the key download so a changed key cannot silently become trusted.
+Before installing, verify the key with
+`gpg --show-keys --fingerprint /etc/apt/keyrings/stealth-factory.asc`.
+It should contain exactly one primary key with fingerprint
+`95AD77762F38D1AECCD7BFC92A5C45AEC00E7388`. Stop if it differs or the download
+failed. These short commands do not compare the fingerprint automatically.
+`signed-by` scopes the key to this source; never use `apt-key`, `trusted=yes`,
+or disable signature verification.
 
 ### Install and upgrade
 
