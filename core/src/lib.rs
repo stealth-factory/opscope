@@ -1944,9 +1944,25 @@ pub fn config_token_warning() -> Option<String> {
 /// handed to every user on the box for as long as the request lasts - and
 /// these widgets exist partly to keep one out of the source tree.
 pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, String> {
+    get_following(url, headers, seconds, "")
+}
+
+/// `get`, refusing any redirect rather than following it.
+///
+/// For a request carrying a sign-in cookie. A custom header goes to every
+/// request curl makes, and some curl builds forward it across hosts on a
+/// redirect, so a request that holds a whole account's session is not let
+/// leave the host it was addressed to. A redirect is an error instead,
+/// which curl words as having reached its redirect limit.
+pub fn get_without_redirects(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, String> {
+    get_following(url, headers, seconds, "--max-redirs 0\n")
+}
+
+fn get_following(url: &str, headers: &[(&str, &str)], seconds: u64, extra: &str) -> Result<String, String> {
     use std::io::Write;
     let mut config = format!(
-        "--silent\n--show-error\n--fail\n--location\n--max-time {}\n--url {}\n",
+        "--silent\n--show-error\n--fail\n--location\n{}--max-time {}\n--url {}\n",
+        extra,
         seconds,
         quoted(url)
     );

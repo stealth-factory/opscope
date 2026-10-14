@@ -16,6 +16,7 @@ The agents this widget reads:
 - Antigravity
 - CodeRabbit
 - Notion
+- Perplexity
 - Devin
 - Droid (Factory)
 
@@ -1469,6 +1470,77 @@ ends, since Notion gives the end and not the start.
 | `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
 
 These are the same two requests CodexBar makes for its Notion AI provider.
+
+### Perplexity asks its account page's endpoint, with a cookie you hand it
+
+Perplexity's usage page shows a weekly limit a plan includes and up to three
+pools of credits: the plan's monthly credits, credits bought on top
+(`credits`), and promotional bonus credits. The `perplexity` tab draws the
+weekly limit first, with its reset, then one bar per pool that has anything
+in it, and `[+]` draws them beside every other agent's. The heading names
+the plan - Pro, Max - as the sign-in's session states it. Under the bars it lists the balance,
+this period's usage and when the period ends, every credit grant on its own
+row - what is left of it, when it was added, what was spent of it before
+this period, and when it lapses - and the billing settings: auto top-up and
+the spending limit. The monthly credits are paced on the calendar month
+ending at the renewal Perplexity reports; bought and bonus credits have no
+window to pace against, so neither has a pace.
+
+- **There is no public API for it.** The widget asks
+  `/rest/billing/credits`, the endpoint perplexity.ai's own usage page
+  calls, which is internal and can change without notice. When it answers
+  in a shape the widget cannot read, the tab says so rather than drawing an
+  empty bar.
+- **Amounts are credits.** The answer's fields are named in cents, but the
+  usage page counts the same numbers as credits, one to one, so that is the
+  unit drawn.
+- **A grant that says what is left of it is believed.** Each grant carries
+  `remaining_cents`, which counts every period it has been drawn on.
+  `total_usage_cents` counts only this one, so spreading it over the pools
+  - CodexBar's way - reads a grant bought last month and part spent then as
+  untouched. Only when a grant does not say is usage spread in Perplexity's
+  spending order: monthly first, then bought, then bonus. A bonus grant past
+  its expiry is gone and is not counted. Usage the pools do not account for,
+  and grants of a type the widget does not know, are said under the bars
+  rather than dropped; beside an unknown grant no usage is spread at all,
+  since that grant may hold it.
+- **Four requests, each standing alone.** The credits come from
+  `/rest/billing/credits`, the weekly limit from `/rest/billing/quota`, and
+  the plan from `/api/auth/session`, and how it is billed - interval and
+  next billing date, or the date a cancelled plan ends - from
+  `/rest/stripe/subscription-billing-info`, whose retention-offer prices
+  are not read. The weekly limit gives a share used and
+  a reset, not the allowance's size, and is paced on the seven days before
+  its reset. A plan with no weekly limit - which may be Max - answers none,
+  so a quota answer of an empty object, or of its own fields set to null,
+  leaves the bar out rather than reporting a fault; any other answer without
+  a share is said as a fault; a session that names no plan leaves the heading bare.
+- **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
+  from perplexity.ai - developer tools, then Application (Storage in
+  Firefox), then Cookies - into `perplexity_token` through the settings
+  screen (`,`), or into the variable `perplexity_token_env` names
+  (`PERPLEXITY_SESSION_TOKEN`, the one CodexBar reads too). A whole
+  `Cookie` header copied from a request works as well, including a long
+  session split into `.0`, `.1` chunks. That cookie is a full sign-in to
+  your Perplexity account, not a scoped key, so keep `config.json`
+  `chmod 600`; the tab warns when it is not. The widget never reads it out
+  of a browser, for the reason given above.
+- **`perplexity_token` wins over the variable.** The variable is read only
+  when `perplexity_token` is empty, so a stale cookie left in `config.json`
+  is the one sent even when the variable holds a fresh one - empty the
+  field to use the variable. The tab's `token` line says which was used.
+- **Perplexity is here when a token is.** It leaves nothing on this machine
+  to discover, so with no token it has no tab, and with one it is asked
+  every five minutes - and only while it is one of the agents you chose.
+- **API (Sonar) spend is not in it.** That is billed to an API key, which
+  this does not read.
+
+| key | default | what it does |
+|---|---|---|
+| `perplexity_token` | `""` | the session cookie, or a whole `Cookie` header copied from a request |
+| `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the name of the environment variable to read the cookie from, only when `perplexity_token` is empty; `perplexity_token` wins when both are set |
+
+The credits request is the same one CodexBar makes for its Perplexity provider.
 
 ### Devin asks app.devin.ai with a bearer token and an organization
 
