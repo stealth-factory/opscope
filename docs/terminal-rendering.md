@@ -143,9 +143,12 @@ Startup sends a 1×1 probe and a frame compose on it, ahead of the capability
 tail. `OK` enables the path. `ENOENT` or `EINVAL`, or no answer, leaves it
 off, and every tick stays a full `a=T` upload. A later frame error,
 including `ENOSPC` when animation storage is exhausted, does the same and
-asks the next frame to send the image again. Graphics stay on. A reply
-that names a placement (`p=`) is the image missing or moving, not a frame
-error, so animation stays on. A rescale,
+asks the next frame to send the image again. Graphics stay on. An
+`ENOENT`, `EINVAL`, or `ENOSPC` that also names a placement (`p=`) is the
+image missing or moving, not a frame error, so animation stays on. A
+successful placement acknowledgement carries `p=` too, and is not an error.
+
+A rescale,
 a slot-count change, a resize, a scroll that changes the crop, or a screen
 loss is a full upload too. Text and Braille are unchanged.
 
