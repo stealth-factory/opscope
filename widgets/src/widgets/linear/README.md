@@ -282,6 +282,18 @@ running`. A project's `members` row reads `21+` with a trailing `…`, and its
 MILESTONES heading `25+`, when Linear says the page it returned was not the
 last. Those rows show a page, not necessarily everything.
 
+## Clickable titles
+
+Issue titles in the cycle detail view link to their Linear pages. The main
+dashboard has no title hyperlinks. Links have a dashed underline in text and
+Kitty mode, or a plain underline when the terminal does not support styled
+underlines.
+
+In Herdr, hold **Ctrl and left-click** an underlined title to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for copying the URL.
+
 ## Keys
 
 The board is longer than most panes are tall, and **every section is drawn

@@ -12,7 +12,7 @@ fn main() {
     let mut gallery = false;
     let mut moving_meter = false;
     let mut tick = 0_u64;
-    let mut selected = 0;
+    let mut selected = 0_usize;
     // Four slots on an 80-column fixture: the chart is 74 cells wide, and
     // (74 * 8 - 1) is divisible by 3, so one new sample is a whole-pixel shift.
     let mut series = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
@@ -30,6 +30,10 @@ fn main() {
                     scroll = 2;
                     selected += 1;
                 }
+                "up" => {
+                    scroll = 0;
+                    selected = selected.saturating_sub(1);
+                }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
                 "t" => {
@@ -37,6 +41,21 @@ fn main() {
                     series.push(Some(0.9));
                 }
                 "s" => series[1] = Some(0.05),
+                "h" => {
+                    keyboard.restore();
+                    tc::restore_screen();
+                    // Stay up until SIGTERM. The printed pid is the sleep
+                    // after `exec`, and sleep does not read the tty, so the
+                    // test can queue a stale cell report and only then let
+                    // the parent reclaim. The long sleep is a backstop if
+                    // that signal never arrives.
+                    std::process::Command::new("/bin/sh")
+                        .args(["-c", "printf 'CHILD_READY %s\\n' \"$$\"; exec sleep 30"])
+                        .status()
+                        .expect("run handoff fixture");
+                    keyboard.reclaim();
+                    tc::claim_screen();
+                }
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
@@ -48,7 +67,17 @@ fn main() {
                 w,
                 &tc::rgb(180, 210, 220),
             ),
-            "  axes and labels remain text".into(),
+            // The visible label is unchanged. The https OSC 8 is what a
+            // terminal that understands links opens; the http target and
+            // the OSC 52 are what `inert` has to drop before the row is
+            // written.
+            format!(
+                "{}\x1b]8;;http://opscope.invalid\x1b\\\x1b]8;;\x1b\\\x1b]52;c;ZmFrZQ==\x07\x1b]8;;https://example.com/source-pane\x1b\\ source pane text\x1b]8;;\x1b\\",
+                tc::link(
+                    "https://example.com/opscope-probe",
+                    "  axes and labels remain text",
+                )
+            ),
         ];
         // Synthetic samples so the PTY test can see underline bytes. The
         // words stay the same whether the terminal answers the query.
@@ -98,6 +127,7 @@ fn main() {
             Vec::new()
         } else {
             tc::Plot::new(3, 2, w.saturating_sub(6), 6, chart)
+                .under_text()
                 .in_viewport(scroll, 1, h.saturating_sub(2))
                 .into_iter()
                 .collect()
@@ -154,6 +184,11 @@ fn main() {
             )];
         }
         rows.resize(h, String::new());
+        // Inside the line-chart rectangle. Pixel mode keeps it; Braille
+        // paints over it, which is the text-mode chart.
+        if h > 3 {
+            rows[2] = "   now".into();
+        }
         if h > 9 {
             rows[8] = marks;
         }

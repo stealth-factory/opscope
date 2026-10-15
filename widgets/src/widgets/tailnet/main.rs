@@ -227,24 +227,6 @@ fn derp_regions() -> HashMap<String, String> {
     out
 }
 
-fn spark(values: &[f64], n: usize, peak: f64) -> String {
-    let vals = &values[values.len().saturating_sub(n)..];
-    if vals.is_empty() {
-        return String::new();
-    }
-    let hi = if peak > 0.0 {
-        peak
-    } else {
-        vals.iter().cloned().fold(0.0f64, f64::max)
-    };
-    if hi <= 0.0 {
-        return "·".repeat(vals.len());
-    }
-    vals.iter()
-        .map(|v| tc::SPARK[(((v / hi) * 7.99) as usize).min(7)])
-        .collect()
-}
-
 fn ago(s: f64) -> String {
     let s = s.max(0.0) as i64;
     if s < 3600 {
@@ -410,7 +392,7 @@ fn rtt_of(line: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
-fn prober_loop(shared: Arc<Mutex<Prober>>) {
+fn prober_loop(shared: Arc<Mutex<Prober>>, activity: tc::Refresh) {
     loop {
         let target = shared.lock().ok().and_then(|g| g.want.clone());
         let Some((machine, ip)) = target else {
@@ -439,6 +421,7 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
                 continue;
             }
         };
+        let work = activity.start();
         // It started, so whatever stopped it last time is over.
         if let Ok(mut g) = shared.lock() {
             g.err.clear();
@@ -487,6 +470,7 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
                 };
             }
         }
+        drop(work);
         if !moved_on {
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -651,7 +635,8 @@ fn activity_rows(
     w: usize,
     limit: usize,
     p: &Palette,
-) -> Vec<String> {
+    y0: usize,
+) -> (Vec<String>, Vec<tc::Plot>) {
     let mut active: Vec<(f64, &String, &Vec<(f64, f64)>)> = rates
         .iter()
         .filter_map(|(name, hist)| {
@@ -669,30 +654,37 @@ fn activity_rows(
         .collect();
     active.sort_by(|a, b| b.0.total_cmp(&a.0));
     if active.is_empty() {
-        return vec![tc::seg(
-            &[(p.dim.as_str(), " no peer traffic in the last few minutes".into())],
-            w - 1,
-        )];
+        return (
+            vec![tc::seg(
+                &[(p.dim.as_str(), " no peer traffic in the last few minutes".into())],
+                w - 1,
+            )],
+            Vec::new(),
+        );
     }
     let sw = (w.saturating_sub(42)).clamp(8, 28);
     let peak = active[0].0;
-    active
+    let mut plots = Vec::new();
+    let rows = active
         .iter()
         .take(limit)
-        .map(|(_, name, hist)| {
-            let rx: Vec<f64> = hist.iter().map(|(r, _)| *r).collect();
-            let tx: Vec<f64> = hist.iter().map(|(_, t)| *t).collect();
+        .enumerate()
+        .map(|(i, (_, name, hist))| {
+            let rx: Vec<f64> = hist.iter().map(|(r, _)| *r).rev().take(sw).rev().collect();
+            let tx: Vec<f64> = hist.iter().map(|(_, t)| *t).rev().take(sw).rev().collect();
+            let name = format!(
+                " {}",
+                tc::pad(&name.chars().take(18).collect::<String>(), 19)
+            );
+            let mut x = tc::display_width(&name) + 1;
+            let down = trace_cells(&rx, peak, x, y0 + i, &p.online, &mut plots);
+            x += tc::display_width(&down) + 2;
+            let up = trace_cells(&tx, peak, x, y0 + i, &p.relay, &mut plots);
             tc::seg(
                 &[
-                    (
-                        p.txt.as_str(),
-                        format!(
-                            " {}",
-                            tc::pad(&name.chars().take(18).collect::<String>(), 19)
-                        ),
-                    ),
-                    (p.online.as_str(), format!("↓{}", spark(&rx, sw, peak))),
-                    (p.relay.as_str(), format!(" ↑{}", spark(&tx, sw, peak))),
+                    (p.txt.as_str(), name),
+                    (p.online.as_str(), format!("↓{down}")),
+                    (p.relay.as_str(), format!(" ↑{up}")),
                     (
                         p.dim.as_str(),
                         format!(
@@ -705,7 +697,52 @@ fn activity_rows(
                 w - 1,
             )
         })
-        .collect()
+        .collect();
+    (rows, plots)
+}
+
+/// One direction of a board sparkline. A silent run stays the dotted
+/// text it always was. A run that moved becomes a line chart in those
+/// cells: pixel mode draws the trace under the row, text mode the Braille.
+fn trace_cells(
+    values: &[f64],
+    peak: f64,
+    x: usize,
+    y: usize,
+    colour: &str,
+    plots: &mut Vec<tc::Plot>,
+) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    // This direction's own samples, before the board's shared peak. That
+    // peak is the other direction as often as this one, and scaling a run
+    // of zeros by it draws a flat line where the row promised dots.
+    if values.iter().all(|v| *v <= 0.0) {
+        return "·".repeat(values.len());
+    }
+    let hi = peak.max(values.iter().copied().fold(0.0, f64::max));
+    let samples: Vec<Option<f64>> = values.iter().map(|v| Some((v / hi).clamp(0.0, 1.0))).collect();
+    plots.push(
+        tc::Plot::new(
+            x,
+            y,
+            samples.len(),
+            1,
+            tc::LineChart {
+                slots: samples.len(),
+                focus: None,
+                traces: vec![tc::Trace {
+                    values: samples,
+                    positions: None,
+                    colour: colour.to_string(),
+                    baseline: None,
+                }],
+            },
+        )
+        .under_text(),
+    );
+    " ".repeat(values.len())
 }
 
 fn main() {
@@ -724,13 +761,16 @@ fn main() {
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
     let prober = Arc::new(Mutex::new(Prober::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let refresh_now = Arc::new(Mutex::new(refresh));
 
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_refresh = Arc::clone(&refresh_now);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
+        let work = poller_activity.start();
         let out = tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT);
         let parsed: Option<serde_json::Value> = serde_json::from_str(&out).ok();
         // The netmap needs sudo and changes slowly, so it is asked for far
@@ -757,6 +797,7 @@ fn main() {
                 g.endpoints_at = tc::now();
             }
         }
+        drop(work);
         let wait = tc::poll_secs(poller_refresh.lock().map(|g| *g).unwrap_or(2.0), 2.0);
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -773,7 +814,8 @@ fn main() {
     });
 
     let probing = Arc::clone(&prober);
-    std::thread::spawn(move || prober_loop(probing));
+    let probing_activity = activity.clone();
+    std::thread::spawn(move || prober_loop(probing, probing_activity));
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -960,7 +1002,12 @@ fn main() {
         if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
-        let mut rows = vec![tc::title("tailnet", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "tailnet",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         let Some(data) = data else {
             rows.push(tc::seg(
                 &[(
@@ -1109,10 +1156,19 @@ fn main() {
                     .unwrap_or_default();
                 info_overlay_with_plots(
                     &chosen, &eps_now, &users, w, h, &rates, &latency, &probe_err, &stale, &derp,
-                    dscroll, &p, &mut detail_plots,
+                    dscroll, &p, &mut detail_plots, activity.tick(tc::animation_tick()),
                 )
             } else {
-                copy_overlay(&chosen, &eps_now, w, h, &note.0, dscroll, &p)
+                copy_overlay(
+                    &chosen,
+                    &eps_now,
+                    w,
+                    h,
+                    &note.0,
+                    dscroll,
+                    &p,
+                    activity.tick(tc::animation_tick()),
+                )
             };
             dscroll = at;
             tc::draw_plots(&body, w, h, &detail_plots);
@@ -1132,6 +1188,7 @@ fn main() {
             continue;
         }
 
+        let mut plots = Vec::new();
         if show_graph {
             rows.push(tc::seg(
                 &[
@@ -1140,7 +1197,9 @@ fn main() {
                 ],
                 w - 1,
             ));
-            rows.extend(activity_rows(&rates, w, 4, &p));
+            let (lines, graph) = activity_rows(&rates, w, 4, &p, rows.len());
+            rows.extend(lines);
+            plots.extend(graph);
             rows.push(String::new());
         }
 
@@ -1418,7 +1477,11 @@ fn main() {
         placed = rows_at;
         let foot_top = rows.len();
         rows.extend(foot.iter().cloned());
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots
+            .into_iter()
+            .filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1).max(1)))
+            .collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, indent);
         keyboard.wait(Duration::from_millis(300));
     }
@@ -1461,8 +1524,9 @@ fn info_overlay_with_plots(
     scroll: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, usize) {
-    let mut rows = vec![tc::title("machine info", w, &p.accent)];
+    let mut rows = vec![tc::title_busy("machine info", w, &p.accent, busy)];
     // Every field below is out of the same cached status as the list behind
     // this view, so it carries the same warning.
     if !stale.is_empty() {
@@ -1837,9 +1901,10 @@ fn copy_overlay(
     note: &str,
     scroll: usize,
     p: &Palette,
+    busy: Option<usize>,
 ) -> (Vec<String>, usize) {
     let pairs = addresses(peer, eps);
-    let mut rows = vec![tc::title("copy address", w, &p.accent)];
+    let mut rows = vec![tc::title_busy("copy address", w, &p.accent, busy)];
     rows.push(tc::seg(
         &[
             (p.accent.as_str(), format!(" {}", peer_name(peer))),
@@ -1896,6 +1961,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_peer_moving_in_one_direction_keeps_the_other_dotted() {
+        let p = palette();
+        for (hist, dotted_down) in [
+            (vec![(200.0, 0.0), (400.0, 0.0)], false),
+            (vec![(0.0, 200.0), (0.0, 400.0)], true),
+        ] {
+            let rates = HashMap::from([("peer".into(), hist)]);
+            let (rows, plots) = activity_rows(&rates, 80, 4, &p, 2);
+            assert_eq!(plots.len(), 1, "a silent direction is not a chart");
+            let text = bare(&rows[0]);
+            let (down, up) = text.split_once('↑').unwrap();
+            let down = down.split('↓').nth(1).unwrap();
+            if dotted_down {
+                assert!(down.contains('·'), "download stays dotted: {text}");
+                assert!(up.starts_with(' '), "upload is the chart: {text}");
+            } else {
+                assert!(down.chars().all(|c| c == ' '), "download is the chart: {text}");
+                assert!(up.starts_with('·'), "upload stays dotted: {text}");
+            }
+            let values = &plots[0].chart.traces[0].values;
+            assert!(values.iter().any(|v| v.unwrap_or(0.0) > 0.0));
+        }
+        // Both directions move, and the quieter one keeps the shared scale
+        // rather than stretching to fill its own row.
+        let rates = HashMap::from([("peer".into(), vec![(1000.0, 100.0)])]);
+        let (rows, plots) = activity_rows(&rates, 80, 4, &p, 2);
+        assert_eq!(plots.len(), 2);
+        assert!(!bare(&rows[0]).contains('·'));
+        let down = plots[0].chart.traces[0].values[0].unwrap();
+        let up = plots[1].chart.traces[0].values[0].unwrap();
+        assert!((down - 1000.0 / 1100.0).abs() < 1e-9, "{down}");
+        assert!((up - 100.0 / 1100.0).abs() < 1e-9, "{up}");
+    }
+
+    fn bare(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
     fn detail_traffic_plots_follow_scrolling_and_absent_history_stays_blank() {
         let peer = serde_json::json!({"HostName": "example", "Online": true});
         let rates = HashMap::from([("example".into(), vec![(10.0, 5.0), (20.0, 0.0)])]);
@@ -1905,7 +2022,7 @@ mod tests {
                     let mut plots = Vec::new();
                     let (rows, _) = info_overlay_with_plots(
                         &peer, &HashMap::new(), &HashMap::new(), width, height,
-                        &rates, &[], "", "", &HashMap::new(), scroll, &palette(), &mut plots,
+                        &rates, &[], "", "", &HashMap::new(), scroll, &palette(), &mut plots, None,
                     );
                     if height == 70 && scroll == 0 {
                         assert_eq!(plots.len(), 2);
@@ -1926,7 +2043,7 @@ mod tests {
         let mut plots = Vec::new();
         info_overlay_with_plots(
             &peer, &HashMap::new(), &HashMap::new(), 80, 70,
-            &HashMap::new(), &[], "", "", &HashMap::new(), 0, &palette(), &mut plots,
+            &HashMap::new(), &[], "", "", &HashMap::new(), 0, &palette(), &mut plots, None,
         );
         assert!(plots.is_empty(), "absent history must not become zero traffic");
     }

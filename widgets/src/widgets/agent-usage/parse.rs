@@ -18,6 +18,40 @@
 
 use crate::iso_epoch;
 
+/// Derive the dashboard cookie from the same Cursor token used for quota.
+/// Decoding only selects the subject; Cursor validates the token on receipt.
+pub fn parse_cursor_cookie(token: &str, now: f64) -> Option<String> {
+    use base64::Engine;
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        return None;
+    }
+    let parts: Vec<_> = token.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if payload["exp"].as_f64()? <= now + 60.0 {
+        return None;
+    }
+    let user = payload["sub"]
+        .as_str()?
+        .split('|')
+        .rfind(|s| !s.is_empty())?;
+    if !user
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    Some(format!("WorkosCursorSessionToken={user}%3A%3A{token}"))
+}
+
 /// Claude's optional `cedar_ember` usage block. A grant can hold several
 /// resets; its expiry applies to all of them. No grant identifiers are kept.
 #[derive(Debug, PartialEq)]
@@ -717,6 +751,390 @@ pub fn pick_notion_space<'a>(spaces: &'a [NotionSpace], wanted: &str) -> Option<
     spaces.iter().find(|s| s.has_allowance()).or_else(|| spaces.first())
 }
 
+/// One Perplexity credit pool, in the cents the answer counts in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityPool {
+    pub total: f64,
+    pub used: f64,
+}
+
+impl PerplexityPool {
+    /// Share used, 0–100. Only asked of a pool with something in it.
+    pub fn pct(&self) -> f64 {
+        if self.total > 0.0 {
+            (self.used / self.total * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Perplexity `GET /rest/billing/credits`: the account's credit pools.
+///
+/// The answer gives one usage figure for the period and a list of grants,
+/// not a figure per pool. The split is Perplexity's own spending order, the
+/// one CodexBar reads it in: the plan's recurring credits first, then
+/// purchased ones, then promotional. A promotional grant past its expiry is
+/// gone, so it is not counted at all.
+/// Auto top-up, kept apart from an answer that did not say: reading a
+/// missing setting as off would misstate something that buys credits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PerplexityTopup {
+    Off,
+    /// What it adds, and below what balance. Either can be missing from an
+    /// answer that still says it is on, and it stays on.
+    On { adds: Option<f64>, under: Option<f64> },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityCredits {
+    pub recurring: PerplexityPool,
+    pub purchased: PerplexityPool,
+    pub bonus: PerplexityPool,
+    /// The soonest expiry among the live promotional grants.
+    pub bonus_expires: Option<f64>,
+    /// When the recurring credits renew, as epoch seconds.
+    pub renews: Option<f64>,
+    /// Usage the three pools did not cover. Nothing should land here; when
+    /// something does, the tab says so rather than losing it.
+    pub uncovered: f64,
+    /// Grants of a type this widget does not know, left out of every pool.
+    pub unknown_grants: usize,
+    /// The account's whole balance, as Perplexity states it.
+    pub balance: Option<f64>,
+    /// `total_usage_cents`: this period's usage alone.
+    pub period_usage: f64,
+    /// Each live grant, in the order Perplexity listed them.
+    pub grants: Vec<PerplexityGrant>,
+    /// Auto top-up as the answer states it; `None` when it does not say.
+    pub auto_topup: Option<PerplexityTopup>,
+    /// `spending_limit_cents`, when the account has one.
+    pub spending_limit: Option<f64>,
+}
+
+/// One credit grant, as the answer lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexityGrant {
+    pub kind: String,
+    pub amount: f64,
+    pub remaining: Option<f64>,
+    /// What of it was spent in periods before this one.
+    pub prior_periods: Option<f64>,
+    pub effective: Option<f64>,
+    pub expires: Option<f64>,
+}
+
+impl PerplexityGrant {
+    /// Perplexity marks a grant that never lapses with a date in the year
+    /// 9999 rather than leaving it out; anything past 2200 is read as that.
+    /// An expiry left out is unstated, not never.
+    pub fn never_expires(&self) -> bool {
+        self.expires.is_some_and(never_expires)
+    }
+}
+
+impl PerplexityCredits {
+    /// No credits in any pool. Grants of a type this widget does not know
+    /// are not nothing, and neither is a balance off zero, so an answer
+    /// holding only those is not empty.
+    pub fn is_empty(&self) -> bool {
+        self.recurring.total <= 0.0
+            && self.purchased.total <= 0.0
+            && self.bonus.total <= 0.0
+            && self.unknown_grants == 0
+            && !self.balance.is_some_and(|b| b != 0.0)
+    }
+}
+
+/// `now` decides which promotional grants are still live. Anything that is
+/// not the shape Perplexity's usage page reads is `None`, so a changed
+/// endpoint is reported as one rather than drawn as an empty account.
+/// Perplexity's year-9999-style marker for a grant that does not lapse.
+fn never_expires(t: f64) -> bool {
+    t > 7_258_118_400.0
+}
+
+pub fn parse_perplexity_credits(text: &str, now: f64) -> Option<PerplexityCredits> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
+    // Every amount and date here is at least zero; a negative one is a
+    // changed answer, not a figure to bend to zero. The balance alone may
+    // go below, so it is read on its own. Past 2^53 a figure can be neither
+    // held exactly nor drawn, so it is a changed answer too.
+    const LARGEST: f64 = 9_007_199_254_740_992.0;
+    let finite = |x: &serde_json::Value| x.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n < LARGEST);
+    let mut left = finite(field("total_usage_cents", "totalUsageCents")?)?;
+    let bought_field = match field("current_period_purchased_cents", "currentPeriodPurchasedCents") {
+        None | Some(serde_json::Value::Null) => 0.0,
+        Some(x) => finite(x)?,
+    };
+    let renews = match field("renewal_date_ts", "renewalDateTs") {
+        None | Some(serde_json::Value::Null) => None,
+        // A date past any that can be drawn is a changed answer, not a
+        // renewal with no day and a countdown of millennia.
+        Some(x) => Some(finite(x).filter(|t| chrono::DateTime::from_timestamp(*t as i64, 0).is_some())?)
+            .filter(|t| *t > 0.0),
+    };
+    let optional = |snake: &str, camel: &str| -> Option<Option<f64>> {
+        match field(snake, camel) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(x) => Some(Some(finite(x)?)),
+        }
+    };
+    let balance = match field("balance_cents", "balanceCents") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_f64().filter(|n| n.is_finite() && n.abs() < LARGEST)?),
+    };
+    let spending_limit = optional("spending_limit_cents", "spendingLimitCents")?;
+    let topup_on = match field("auto_topup_enabled", "autoTopupEnabled") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_bool()?),
+    };
+    let auto_topup = match topup_on {
+        Some(true) => Some(PerplexityTopup::On {
+            adds: optional("auto_topup_amount_cents", "autoTopupAmountCents")?,
+            under: optional("auto_topup_threshold_cents", "autoTopupThresholdCents")?,
+        }),
+        Some(false) => Some(PerplexityTopup::Off),
+        None => None,
+    };
+    let mut out = PerplexityCredits {
+        renews,
+        balance,
+        spending_limit,
+        auto_topup,
+        period_usage: left,
+        ..PerplexityCredits::default()
+    };
+    // Per pool: every grant's amount, then the amount and what is left of
+    // the grants that say, so the rest is what has to be spread.
+    // The fourth is what grants that do not say what is left say they spent
+    // before this period, which is used and not this period's to spread.
+    let (mut recurring, mut bought, mut bonus) = ([0.0; 4], [0.0; 4], [0.0; 4]);
+    let (mut said_this_period, mut unsaid) = (0.0, 0);
+    // This period's spend from grants that also state their earlier spend,
+    // so it is a figure the answer itself gives rather than an estimate.
+    let mut stated_this_period = 0.0;
+    // A grant that says what is left but not what went before: its share of
+    // this period is unknown, so the period's total cannot be split by it.
+    let mut share_unknown = false;
+    // A lapsed bonus still listed may have spent some of this period before
+    // it lapsed, and it is in no pool, so that spend is not a live pool's.
+    let mut lapsed_spent = false;
+    for grant in field("credit_grants", "creditGrants")?.as_array()? {
+        let grant = grant.as_object()?;
+        let kind = grant.get("type")?.as_str()?;
+        let amount = finite(grant.get("amount_cents").or_else(|| grant.get("amountCents"))?)?;
+        let expires = match grant.get("expires_at_ts").or_else(|| grant.get("expiresAtTs")) {
+            None | Some(serde_json::Value::Null) => None,
+            // The never-expires marker is a date; one past any date is a changed answer.
+            Some(x) => Some(finite(x).filter(|t| chrono::DateTime::from_timestamp(*t as i64, 0).is_some())?),
+        };
+        let remaining = match grant.get("remaining_cents").or_else(|| grant.get("remainingCents")) {
+            None | Some(serde_json::Value::Null) => None,
+            // Outside 0..=amount is a changed answer, not a figure to bend into range.
+            Some(x) => Some(Some(finite(x)?).filter(|r| (0.0..=amount.max(0.0)).contains(r))?),
+        };
+        let pool = match kind {
+            "recurring" => &mut recurring,
+            "purchased" => &mut bought,
+            "promotional" if expires.is_none_or(|t| t > now) => {
+                // The never-expires marker is not a date anything lapses on.
+                if let Some(t) = expires.filter(|t| !never_expires(*t)) {
+                    out.bonus_expires = Some(out.bonus_expires.map_or(t, |e: f64| e.min(t)));
+                }
+                &mut bonus
+            }
+            "promotional" => {
+                lapsed_spent |= remaining.is_none_or(|r| r < amount);
+                continue;
+            }
+            _ => {
+                out.unknown_grants += 1;
+                continue;
+            }
+        };
+        // Absent or null is unsaid; present and not a number is a changed answer.
+        let num = |snake: &str, camel: &str| -> Option<Option<f64>> {
+            match grant.get(snake).or_else(|| grant.get(camel)) {
+                None | Some(serde_json::Value::Null) => Some(None),
+                Some(x) => Some(Some(finite(x)?)),
+            }
+        };
+        let prior_periods = num("amount_applied_prior_period_cents", "amountAppliedPriorPeriodCents")?;
+        out.grants.push(PerplexityGrant {
+            kind: kind.to_string(),
+            amount,
+            remaining,
+            prior_periods,
+            // A date that cannot be drawn is a changed answer, not "added" with no day.
+            effective: num("effective_at_ts", "effectiveAtTs")?
+                .map(|t| chrono::DateTime::from_timestamp(t as i64, 0).map(|_| t))
+                .map_or(Some(None), |t| t.map(Some))?,
+            expires,
+        });
+        pool[0] += amount;
+        if let Some(r) = remaining {
+            pool[1] += amount;
+            pool[2] += r;
+            // What this grant took this period, so it is not spread again
+            // over the grants that do not say.
+            let spent = (amount - r).max(0.0);
+            // Spent before this period cannot be more than spent at all.
+            if prior_periods.is_some_and(|before| before > spent + 0.5) {
+                return None;
+            }
+            let this_period = (spent - prior_periods.unwrap_or(0.0)).max(0.0);
+            said_this_period += this_period;
+            if prior_periods.is_some() {
+                stated_this_period += this_period;
+            } else {
+                share_unknown = true;
+            }
+        } else {
+            // Spent before this period cannot be more than the grant held.
+            if prior_periods.is_some_and(|before| before > amount + 0.5) {
+                return None;
+            }
+            pool[3] += prior_periods.unwrap_or(0.0);
+            unsaid += 1;
+        }
+    }
+    // A grant that says what is left of it is exact, across every period it
+    // has been drawn on. `total_usage_cents` counts this period alone, so
+    // spreading it over the pools reads a grant bought last month and part
+    // spent then as untouched. It is only the fallback, for the grants that
+    // do not say, and only for what the ones that do say did not take.
+    // What the grants that say do not account for is kept, never dropped:
+    // with every grant exact it is usage no grant explains.
+    // Grants that state this period's spend in full and add up to more than
+    // the period's total disagree with it, and neither figure can be drawn.
+    if stated_this_period > left + 0.5 {
+        return None;
+    }
+    // Beside grants that do not say, or a grant of a type this widget does
+    // not know, a grant whose share of this period is unknown leaves nothing
+    // safe to spread: what the stated grants did not take is said as not
+    // drawn on a pool rather than put on one.
+    let split_unknown = share_unknown && (unsaid > 0 || out.unknown_grants > 0 || lapsed_spent);
+    left = (left - if split_unknown { stated_this_period } else { said_this_period }).max(0.0);
+    // A grant of a type this widget does not know may have taken any of it,
+    // so nothing is spread and the rest is said as not drawn on a pool.
+    let spreadable = out.unknown_grants == 0 && !split_unknown && !lapsed_spent;
+    let mut spend = |[total, said, said_left, before]: [f64; 4], floor: f64| {
+        let to_spread = (total - said - before).max(floor - said - before).max(0.0);
+        let used = if spreadable { left.min(to_spread) } else { 0.0 };
+        left -= used;
+        PerplexityPool {
+            total: total.max(floor).max(0.0),
+            used: (said - said_left).max(0.0) + before + used,
+        }
+    };
+    // The bought total the answer states counts only while no bought grant
+    // says what is left of it. Other grants saying theirs does not touch it:
+    // they are not the bought credits it counts.
+    let bought_floor = if bought[1] > 0.0 { 0.0 } else { bought_field };
+    out.recurring = spend(recurring, 0.0);
+    out.purchased = spend(bought, bought_floor);
+    out.bonus = spend(bonus, 0.0);
+    out.uncovered = left;
+    Some(out)
+}
+
+/// Perplexity's plan, from the sign-in's own `GET /api/auth/session`:
+/// `user.subscription_tier` (`pro`, `max`, ...) and its status. `None` when
+/// the answer names no tier, so nothing is guessed from the credit amounts.
+pub fn parse_perplexity_plan(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let user = v.get("user")?;
+    let tier = user.get("subscription_tier")?.as_str()?.trim();
+    if tier.is_empty() {
+        return None;
+    }
+    let mut chars = tier.chars();
+    let mut plan: String = chars.next()?.to_uppercase().chain(chars).collect();
+    // A status that is there and not text is a changed answer, not an active plan.
+    let status = match user.get("subscription_status") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(s) => Some(s.as_str()?.trim()),
+    };
+    match status {
+        None | Some("") | Some("active") => {}
+        Some(status) => plan.push_str(&format!(" ({status})")),
+    }
+    Some(plan)
+}
+
+/// Perplexity `GET /rest/stripe/subscription-billing-info`: how the plan is
+/// billed. Only what the account is on; the retention offer the answer also
+/// carries is a price on offer, not one being paid, and is not read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PerplexitySubscription {
+    /// `monthly`, `yearly`, as sent.
+    pub interval: Option<String>,
+    pub next_bill: Option<f64>,
+    /// When a cancelled plan ends.
+    pub cancels: Option<f64>,
+}
+
+pub fn parse_perplexity_subscription(text: &str) -> Option<PerplexitySubscription> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    // A known field that is there but not the type it was is a changed
+    // answer, so it is unreadable rather than a reading with a date gone.
+    let ts = |k: &str| -> Option<Option<f64>> {
+        match v.get(k) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            // Zero is a date left unset; below zero, or past any date that
+            // can be drawn, is a changed answer.
+            Some(x) => Some(
+                x.as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.0 && *t < 1e15)
+                    .filter(|t| chrono::DateTime::from_timestamp(*t as i64, 0).is_some())?,
+            )
+            .map(|t| (t > 0.0).then_some(t)),
+        }
+    };
+    let interval = match v.get("billing_interval") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(x.as_str()?.trim()).filter(|s| !s.is_empty()).map(str::to_string),
+    };
+    let sub = PerplexitySubscription {
+        interval,
+        next_bill: ts("next_billing_date_ts")?,
+        cancels: ts("cancel_at_ts")?,
+    };
+    (sub != PerplexitySubscription::default()).then_some(sub)
+}
+
+/// Perplexity `GET /rest/billing/quota`: the weekly limit a plan includes,
+/// the bar the usage page draws above the credits. It says only a share
+/// used and when it resets; the size of the allowance is not given.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PerplexityQuota {
+    /// Share used, 0–100, as sent.
+    pub pct: f64,
+    /// When it resets, as epoch seconds.
+    pub resets: Option<f64>,
+}
+
+/// Anything without a numeric `percent_used` is `None`, so a changed
+/// endpoint is reported rather than drawn as an untouched allowance.
+pub fn parse_perplexity_quota(text: &str) -> Option<PerplexityQuota> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let v = v.as_object()?;
+    let field = |snake: &str, camel: &str| v.get(snake).or_else(|| v.get(camel));
+    // Over 100 is what the server said and is drawn as said; under 0 is no
+    // reading, and so is a share past 9999%, which no pane draws whole.
+    let pct = field("percent_used", "percentUsed")?.as_f64().filter(|n| n.is_finite() && (0.0..10_000.0).contains(n))?;
+    let resets = match field("reset_date", "resetDate") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(chrono::DateTime::parse_from_rfc3339(x.as_str()?).ok()?.timestamp() as f64),
+    };
+    Some(PerplexityQuota { pct, resets })
+}
+
 /// One Devin quota window. `pct` is the number the body sent, on a 0–100
 /// scale. `reset` is an absolute instant, when one was sent.
 #[derive(Clone, Debug, PartialEq)]
@@ -1292,6 +1710,30 @@ pub fn format_balance(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cursor_cookie_reuses_the_token_subject_without_exposing_another_session() {
+        use base64::Engine;
+        let token = |sub: &str, exp: f64| {
+            format!(
+                "header.{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::json!({"sub": sub, "exp": exp}).to_string())
+            )
+        };
+        let valid = token("auth0|user_fixture", 1000.0);
+        assert_eq!(
+            super::parse_cursor_cookie(&valid, 100.0),
+            Some(format!(
+                "WorkosCursorSessionToken=user_fixture%3A%3A{valid}"
+            ))
+        );
+        assert!(super::parse_cursor_cookie(&valid, 940.0).is_none());
+        assert!(super::parse_cursor_cookie(&token("bad;injection", 1000.0), 100.0).is_none());
+        assert!(super::parse_cursor_cookie(&token("", 1000.0), 100.0).is_none());
+        assert!(super::parse_cursor_cookie("bad", 100.0).is_none());
+        assert!(super::parse_cursor_cookie(&format!("{valid}\r\nheader"), 100.0).is_none());
+    }
+
+    #[test]
     fn claude_resets_count_usable_grants_and_expire_cached_offers() {
         let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
         let body = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
@@ -1759,6 +2201,307 @@ Period resets : 2026-10-06
         assert!(!coderabbit_signed_out("Your reviews : 3"));
         // A count that is not a number does not make a report on its own.
         assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
+    }
+
+    const PERPLEXITY: &str = r#"{
+        "balance_cents": 7250,
+        "renewal_date_ts": 1790000000,
+        "current_period_purchased_cents": 0,
+        "credit_grants": [
+            { "type": "recurring", "amount_cents": 10000, "expires_at_ts": 1790000000 },
+            { "type": "promotional", "amount_cents": 20000, "expires_at_ts": 1795000000 }
+        ],
+        "total_usage_cents": 2750
+    }"#;
+
+    #[test]
+    fn perplexity_plan_is_the_session_tier_and_any_status_not_active() {
+        let plan = |raw: &str| parse_perplexity_plan(raw);
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"pro","subscription_status":"active"}}"#).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"max","subscription_status":"past_due"}}"#).as_deref(),
+            Some("Max (past_due)")
+        );
+        assert_eq!(plan(r#"{"user":{"subscription_tier":null}}"#), None);
+        assert_eq!(plan(r#"{}"#), None);
+        // A status that changed type is a changed answer, not an active plan.
+        assert_eq!(plan(r#"{"user":{"subscription_tier":"pro","subscription_status":1}}"#), None);
+        assert_eq!(
+            plan(r#"{"user":{"subscription_tier":"pro","subscription_status":null}}"#).as_deref(),
+            Some("Pro")
+        );
+    }
+
+    #[test]
+    fn perplexity_subscription_is_its_interval_and_dates_not_the_offer() {
+        let raw = r#"{"billing_interval":"monthly","cancel_at_ts":null,
+            "next_billing_date_ts":1794544385,
+            "retention_offer":{"discounted_price":{"price_minor_units":1000}}}"#;
+        let sub = parse_perplexity_subscription(raw).unwrap();
+        assert_eq!(sub.interval.as_deref(), Some("monthly"));
+        assert_eq!((sub.next_bill, sub.cancels), (Some(1_794_544_385.0), None));
+        assert!(parse_perplexity_subscription(r#"{"retention_offer":{}}"#).is_none());
+        // A known field gone to another type is a changed answer, not a
+        // reading with its date quietly missing.
+        let changed = r#"{"billing_interval":"monthly","next_billing_date_ts":"2026-11-13T00:00:00Z"}"#;
+        assert!(parse_perplexity_subscription(changed).is_none());
+        // A negative date is a changed answer too, not one left unset.
+        let negative = r#"{"billing_interval":"monthly","next_billing_date_ts":-5}"#;
+        assert!(parse_perplexity_subscription(negative).is_none());
+        // So is a date too far off to draw, which read as a bill with no date.
+        let far = r#"{"billing_interval":"monthly","next_billing_date_ts":1e300}"#;
+        assert!(parse_perplexity_subscription(far).is_none());
+    }
+
+    #[test]
+    fn perplexity_quota_is_a_share_used_and_a_reset() {
+        let q = parse_perplexity_quota(
+            r#"{"percent_used":3,"reset_date":"2026-10-21T04:59:31.996000Z","platform":null}"#,
+        )
+        .unwrap();
+        assert_eq!(q.pct, 3.0);
+        assert_eq!(q.resets, Some(1_792_558_771.0));
+        let none = parse_perplexity_quota(r#"{"percentUsed":40,"resetDate":null}"#).unwrap();
+        assert_eq!((none.pct, none.resets), (40.0, None));
+        assert!(parse_perplexity_quota(r#"{"reset_date":"2026-10-21T04:59:31Z"}"#).is_none());
+        assert!(parse_perplexity_quota(r#"{"percent_used":3,"reset_date":"Wed"}"#).is_none());
+        // Over the limit is kept as sent; a negative share is no reading.
+        assert_eq!(parse_perplexity_quota(r#"{"percent_used":120}"#).unwrap().pct, 120.0);
+        assert!(parse_perplexity_quota(r#"{"percent_used":-5}"#).is_none());
+        // A share too large to draw whole was clipped to a different one.
+        assert!(parse_perplexity_quota(r#"{"percent_used":1e300}"#).is_none());
+        assert_eq!(parse_perplexity_quota(r#"{"percent_used":9999}"#).unwrap().pct, 9999.0);
+    }
+
+    #[test]
+    fn perplexity_usage_is_spent_from_the_recurring_pool_first() {
+        let c = parse_perplexity_credits(PERPLEXITY, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 10000.0, used: 2750.0 });
+        assert_eq!(c.bonus, PerplexityPool { total: 20000.0, used: 0.0 });
+        assert_eq!(c.purchased.total, 0.0);
+        assert_eq!(c.renews, Some(1_790_000_000.0));
+        assert_eq!(c.bonus_expires, Some(1_795_000_000.0));
+        assert!((c.recurring.pct() - 27.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perplexity_spends_recurring_then_purchased_then_bonus() {
+        // 9000 used: 5000 recurring, all 3000 purchased, 1000 of the bonus.
+        let raw = r#"{"renewal_date_ts":1790000000,"current_period_purchased_cents":3000,
+            "credit_grants":[{"type":"recurring","amount_cents":5000},
+                             {"type":"promotional","amount_cents":4000}],
+            "total_usage_cents":9000}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring.used, 5000.0);
+        assert_eq!(c.purchased, PerplexityPool { total: 3000.0, used: 3000.0 });
+        assert_eq!(c.bonus, PerplexityPool { total: 4000.0, used: 1000.0 });
+        assert_eq!(c.uncovered, 0.0);
+    }
+
+    #[test]
+    fn a_perplexity_grant_that_says_what_is_left_is_believed_beside_one_that_does_not() {
+        // One grant with no remaining_cents threw away every other grant's,
+        // and a bought grant 686 spent last month read as untouched.
+        let raw = r#"{"total_usage_cents":300,"credit_grants":[
+            {"type":"purchased","amount_cents":2000,"remaining_cents":1314,
+             "amount_applied_prior_period_cents":686},
+            {"type":"recurring","amount_cents":1000}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
+        // This period's 300 took nothing from the bought grant, so it is
+        // spread over the one that did not say.
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 300.0 });
+        assert_eq!(c.uncovered, 0.0);
+        // A prior-period figure that changed type is a changed answer, not
+        // a grant that spent everything this period.
+        let changed = raw.replace(r#""amount_applied_prior_period_cents":686"#,
+            r#""amount_applied_prior_period_cents":"686""#);
+        assert!(parse_perplexity_credits(&changed, 1_780_000_000.0).is_none());
+        // Beside a grant of an unknown type, the period's usage could be its,
+        // so it is not put on the recurring pool.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":1000},
+            {"type":"mystery","amount_cents":500}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
+        // Also when every known grant says what is left of it.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":1000,"remaining_cents":1000},
+            {"type":"mystery","amount_cents":500}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
+        // Usage that grants which all say what is left do not explain is kept.
+        let raw = r#"{"total_usage_cents":50,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":100}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 100.0, used: 0.0 });
+        assert_eq!(c.uncovered, 50.0);
+        // An expiry left out is not one that never comes.
+        assert!(!c.grants[0].never_expires());
+        // A grant that does not say what went before, beside one that does
+        // not say what is left, leaves the period's usage unsplit.
+        let raw = r#"{"total_usage_cents":300,"credit_grants":[
+            {"type":"purchased","amount_cents":2000,"remaining_cents":1314},
+            {"type":"recurring","amount_cents":1000}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.purchased, PerplexityPool { total: 2000.0, used: 686.0 });
+        assert_eq!(c.recurring, PerplexityPool { total: 1000.0, used: 0.0 });
+        assert_eq!(c.uncovered, 300.0);
+        // A grant that says only what it spent before this period has that
+        // spent, and this period's usage goes on top of it.
+        let raw = r#"{"total_usage_cents":5,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"amount_applied_prior_period_cents":90}]}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.recurring, PerplexityPool { total: 100.0, used: 95.0 });
+        let raw = r#"{"total_usage_cents":0,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"amount_applied_prior_period_cents":150}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
+        // Spent before this period beyond all a grant has spent is a changed answer.
+        let raw = r#"{"total_usage_cents":0,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":80,
+             "amount_applied_prior_period_cents":50}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
+        // Grants that state more spent this period than its total disagree with it.
+        let raw = r#"{"total_usage_cents":20,"credit_grants":[
+            {"type":"recurring","amount_cents":100,"remaining_cents":50,
+             "amount_applied_prior_period_cents":0}]}"#;
+        assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none());
+        // A negative amount or usage is a changed answer, not zero.
+        for raw in [
+            r#"{"total_usage_cents":-5,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":0,"credit_grants":[{"type":"recurring","amount_cents":-100}]}"#,
+        ] {
+            assert!(parse_perplexity_credits(raw, 1_780_000_000.0).is_none(), "{raw}");
+        }
+        // A remainder below nothing or above the grant is a changed answer.
+        for r in ["-1", "1001"] {
+            let raw = format!(r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"recurring","amount_cents":1000,"remaining_cents":{r}}}]}}"#);
+            assert!(parse_perplexity_credits(&raw, 1_780_000_000.0).is_none(), "{r}");
+        }
+    }
+
+    #[test]
+    fn an_expired_perplexity_promotion_is_not_counted() {
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":10000},
+            {"type":"promotional","amount_cents":5000,"expires_at_ts":1700000000}],
+            "total_usage_cents":1000}"#;
+        let c = parse_perplexity_credits(raw, 1_780_000_000.0).unwrap();
+        assert_eq!(c.bonus.total, 0.0);
+        assert_eq!(c.bonus_expires, None);
+    }
+
+    #[test]
+    fn perplexity_purchases_take_the_larger_of_the_grants_and_the_period_figure() {
+        let raw = |field: u32| format!(
+            r#"{{"current_period_purchased_cents":{field},
+                "credit_grants":[{{"type":"purchased","amount_cents":2000}}],
+                "total_usage_cents":0}}"#
+        );
+        assert_eq!(parse_perplexity_credits(&raw(500), 0.0).unwrap().purchased.total, 2000.0);
+        assert_eq!(parse_perplexity_credits(&raw(6000), 0.0).unwrap().purchased.total, 6000.0);
+    }
+
+    #[test]
+    fn perplexity_usage_beyond_every_pool_is_kept_and_unknown_grants_are_counted() {
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100},
+            {"type":"mystery","amount_cents":900}],"total_usage_cents":400}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        // The unknown grant could have taken any of it, so none is spread.
+        assert_eq!(c.recurring.used, 0.0);
+        assert_eq!(c.uncovered, 400.0);
+        assert_eq!(c.unknown_grants, 1);
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100}],
+            "total_usage_cents":400}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.recurring.used, 100.0);
+        assert_eq!(c.uncovered, 300.0);
+        // A known grant that says what is left but not what went before:
+        // its 50 spent may be from any period, so beside an unknown grant
+        // none of this period's 50 is taken as its.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100,"remaining_cents":50},
+            {"type":"mystery","amount_cents":900}],"total_usage_cents":50}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.recurring.used, 50.0);
+        assert_eq!(c.uncovered, 50.0);
+    }
+
+    #[test]
+    fn usage_a_lapsed_bonus_may_have_spent_is_not_put_on_a_live_pool() {
+        // A bonus that lapsed this period, still listed, could have spent
+        // the period's 100; it read as 100 monthly credits used.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000},
+            {"type":"promotional","amount_cents":100,"remaining_cents":0,"expires_at_ts":5}],
+            "total_usage_cents":100}"#;
+        let c = parse_perplexity_credits(raw, 10.0).unwrap();
+        assert_eq!(c.recurring.used, 0.0);
+        assert_eq!(c.uncovered, 100.0);
+        // Untouched when it lapsed, it spent nothing, and the usage is spread.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000},
+            {"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":5}],
+            "total_usage_cents":100}"#;
+        assert_eq!(parse_perplexity_credits(raw, 10.0).unwrap().recurring.used, 100.0);
+        // A grant date past what can be drawn is a changed answer.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":1000,"effective_at_ts":1e14}],
+            "total_usage_cents":0}"#;
+        assert!(parse_perplexity_credits(raw, 10.0).is_none());
+        let raw = r#"{"credit_grants":[{"type":"promotional","amount_cents":10,"expires_at_ts":1e14}],
+            "total_usage_cents":0}"#;
+        assert!(parse_perplexity_credits(raw, 10.0).is_none());
+        // The never-expires marker is not the bonus pool's next expiry.
+        let raw = r#"{"credit_grants":[{"type":"promotional","amount_cents":10,"expires_at_ts":253402300799}],
+            "total_usage_cents":0}"#;
+        assert_eq!(parse_perplexity_credits(raw, 10.0).unwrap().bonus_expires, None);
+    }
+
+    #[test]
+    fn a_stated_bought_total_stands_beside_grants_of_another_type_that_say_what_is_left() {
+        // An exact recurring grant made every grant exact, and that alone
+        // dropped the 500 bought credits the answer named.
+        let raw = r#"{"credit_grants":[{"type":"recurring","amount_cents":100,"remaining_cents":100}],
+            "current_period_purchased_cents":500,"total_usage_cents":0}"#;
+        let c = parse_perplexity_credits(raw, 0.0).unwrap();
+        assert_eq!(c.purchased.total, 500.0);
+        assert_eq!(c.recurring.used, 0.0);
+        // A bought grant that says what is left still takes the place of the field.
+        let raw = r#"{"credit_grants":[{"type":"purchased","amount_cents":200,"remaining_cents":150}],
+            "current_period_purchased_cents":500,"total_usage_cents":0}"#;
+        assert_eq!(parse_perplexity_credits(raw, 0.0).unwrap().purchased.total, 200.0);
+    }
+
+    #[test]
+    fn an_account_with_no_perplexity_credits_is_empty_not_unreadable() {
+        let c = parse_perplexity_credits(r#"{"credit_grants":[],"total_usage_cents":0}"#, 0.0).unwrap();
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn a_perplexity_answer_in_another_shape_is_not_a_reading() {
+        for bad in [
+            "<html>",
+            "[]",
+            r#"{"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1}"#,
+            r#"{"total_usage_cents":"1","credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"amount_cents":1}]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring"}]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring","amount_cents":1,"expires_at_ts":"x"}]}"#,
+            r#"{"total_usage_cents":1,"renewal_date_ts":"soon","credit_grants":[]}"#,
+            // Past what can be held exactly or drawn as a date.
+            r#"{"total_usage_cents":1,"renewal_date_ts":1e300,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"balance_cents":1e300,"credit_grants":[]}"#,
+            r#"{"total_usage_cents":1,"credit_grants":[{"type":"recurring","amount_cents":1e300}]}"#,
+        ] {
+            assert!(parse_perplexity_credits(bad, 0.0).is_none(), "{bad}");
+        }
+        // camelCase is the same answer.
+        let camel = r#"{"totalUsageCents":5,"creditGrants":[{"type":"recurring","amountCents":10}]}"#;
+        assert_eq!(parse_perplexity_credits(camel, 0.0).unwrap().recurring.used, 5.0);
     }
 
     const NOTION_STATUS: &str = r#"{

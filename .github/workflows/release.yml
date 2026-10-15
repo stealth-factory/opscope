@@ -29,9 +29,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'homebrew/**'
+      - 'debian/**'
+      - 'npm/platform.js'
 
 permissions:
-  contents: write
+  # PR builds and post-release smoke tests only need read access.
+  # The tag-only publish job grants its own write permissions.
+  contents: read
 
 jobs:
   build:
@@ -86,6 +90,7 @@ jobs:
           # The changelog reads the history between two tags, and the build
           # stamps the commit into --version. A shallow clone has neither.
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -286,16 +291,52 @@ jobs:
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           ls -la "$name.tar.gz"
 
+      - name: Debian package from the tagged Linux build
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && startsWith(github.ref, 'refs/tags/v')
+        run: node debian/package.js "${GITHUB_REF_NAME#v}" target/x86_64-unknown-linux-gnu/release .
+
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ matrix.target }}
           path: |
             opscope-*.tar.gz
             opscope-*.tar.gz.sha256
+            opscope_*_amd64.deb
+            opscope_*_amd64.deb.sha256
           if-no-files-found: error
 
-  publish:
+  debian-lifecycle:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'debian:12', 'debian:11']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: artifacts
+      - name: Verify and install the release package
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          (cd artifacts && sha256sum -c opscope_*_amd64.deb.sha256)
+          node -e 'console.log(require("./npm/platform").binsFromManifest(process.cwd()).join("\n"))' > /tmp/opscope-expected-binaries
+          mode=supported
+          if [ "$IMAGE" = debian:11 ]; then mode=old-glibc; fi
+          docker run --rm -v "$PWD:/work:ro" -v /tmp/opscope-expected-binaries:/expected-binaries:ro "$IMAGE" \
+            bash /work/debian/lifecycle.sh "/work/artifacts/opscope_${GITHUB_REF_NAME#v}_amd64.deb" "$mode" /expected-binaries
+
+  publish:
+    needs: [build, debian-lifecycle]
     runs-on: ubuntu-22.04
     # A tag, and only a tag - whatever started the run. Dispatching at a
     # branch exercises the whole build and stops here, so the workflow can
@@ -324,9 +365,8 @@ jobs:
     concurrency:
       group: ${{ startsWith(github.ref, 'refs/tags/v') && 'npm-release-publish' || format('npm-release-publish-{0}', github.run_id) }}
       cancel-in-progress: false
-    # Job-level permissions replace the workflow ones, so contents
-    # has to be restated. id-token is for npm trusted publishing —
-    # OIDC, no secret — which is the only path left after classic
+    # Only publication needs contents: write. id-token is for npm trusted
+    # publishing — OIDC, no secret — the only path left after classic
     # automation tokens were revoked and is the one this repo uses.
     permissions:
       contents: write
@@ -522,7 +562,23 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file CHANGELOG-release.md \
-            artifacts/*.tar.gz artifacts/*.tar.gz.sha256
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+            artifacts/*_amd64.deb artifacts/*_amd64.deb.sha256
+
+  apt-repository:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Notify the shared APT repository of this published release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.RELEASE_TOKEN }}
+        run: node debian/notify-apt.js
 
   homebrew:
     needs: publish
@@ -677,9 +733,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # This job runs the module's downloaded binaries with the
-          # workspace as cwd. The job token can write contents; do not
-          # leave it in .git for those steps.
+          # Do not leave the checkout token in .git while running the
+          # module's downloaded binaries with the workspace as cwd.
           persist-credentials: false
 
       - name: The Luvus module's build step fetches this version

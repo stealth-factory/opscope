@@ -132,6 +132,17 @@ has them all. A hundred a repo was the ceiling once, and one repo here
 reported `100 most recent of 430` on its own screen — honest, and still
 not what somebody opened the pane for.
 
+## Clickable titles
+
+The run title in the detail view links to its GitHub Actions page. Main-list
+titles are plain text. Links have a dashed underline in text and Kitty mode,
+or a plain underline when the terminal does not support styled underlines.
+
+In Herdr, hold **Ctrl and left-click** the underlined title to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for copying the URL.
+
 ## Keys
 
 | | |

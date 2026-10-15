@@ -210,7 +210,7 @@ fn short_explain(said: &str, code: u16) -> Option<String> {
     if rest.is_empty() || rest.starts_with('<') {
         return None;
     }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
+    if let Ok(v) = tc::parse_source_json(rest) {
         if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
             let m = m.trim();
             if !m.is_empty() {
@@ -238,7 +238,7 @@ fn graphql(
         45,
     )
     .map_err(|said| plain_refusal(&said))?;
-    let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
             .as_str()
@@ -503,6 +503,12 @@ fn repo_width(room: usize, prs: &[serde_json::Value]) -> usize {
 
 fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
+}
+
+/// The address `c` copies for this pull request. The title is a link to
+/// the same string, and to nothing else.
+fn pr_url(pr: &serde_json::Value) -> String {
+    text(pr, "url")
 }
 
 fn number(value: &serde_json::Value, key: &str) -> i64 {
@@ -1878,6 +1884,7 @@ fn main() {
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
     let rate = Arc::new(Mutex::new(Rate::default()));
+    let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let (tok, source) = token(&cfg);
     let env_name = {
@@ -1892,6 +1899,7 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_rate = Arc::clone(&rate);
+    let poller_activity = activity.clone();
     let poll_tok = tok.clone();
     let poll_env = env_name.clone();
     let poll_sources = sources.clone();
@@ -1905,6 +1913,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let want = poller.lock().ok().and_then(|g| {
                 let have = g.detail.as_ref().map(|d| number(d, "number"));
                 match &g.want {
@@ -1984,6 +1993,7 @@ fn main() {
                     g.loading = false;
                 }
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -2215,10 +2225,10 @@ fn main() {
                     // The URL of whatever is on screen: the open PR in the
                     // dashboard, the highlighted row in the list.
                     let url = match &detail {
-                        Some(d) => text(d, "url"),
+                        Some(d) => pr_url(d),
                         None => shown
                             .get(selected.min(shown.len().saturating_sub(1)))
-                            .map(|pr| text(pr, "url"))
+                            .map(pr_url)
                             .unwrap_or_default(),
                     };
                     if !url.is_empty() {
@@ -2280,7 +2290,12 @@ fn main() {
         // panes headed GITHUB OPS, GITHUB PRS and GITHUB ACTIONS say what
         // they have in common; PR WATCH read as a fourth unrelated thing.
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("github prs", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "github prs",
+            w,
+            &p.accent,
+            activity.tick(tick),
+        )];
         // Two rows, in the order the other GitHub widgets use them. The
         // first is the chrome every polling widget draws and is meant to
         // read identically across panes: who is being watched, when it last
@@ -3433,12 +3448,10 @@ fn list_view(
         if pr["isDraft"].as_bool().unwrap_or(false) {
             name = format!("draft · {}", name);
         }
+        let shown = name.chars().take(title_w - 1).collect::<String>();
         line.push((
             c(&p.txt),
-            tc::pad(
-                &name.chars().take(title_w - 1).collect::<String>(),
-                title_w,
-            ),
+            tc::pad(&shown, title_w),
         ));
         line.push((c(rcol), format!("{:>13}", rlabel)));
         line.push((c(ccol), format!("{:>8}", clabel)));
@@ -3549,10 +3562,13 @@ fn detail_view(
             (p.pr.as_str(), format!(" #{} ", number(pr, "number"))),
             (
                 p.txt.as_str(),
-                text(pr, "title")
-                    .chars()
-                    .take(w.saturating_sub(24).max(10))
-                    .collect::<String>(),
+                tc::link(
+                    &pr_url(pr),
+                    &text(pr, "title")
+                        .chars()
+                        .take(w.saturating_sub(24).max(10))
+                        .collect::<String>(),
+                ),
             ),
             (p.dim.as_str(), draft.into()),
         ],
@@ -4153,6 +4169,32 @@ mod tests {
     }
 
     #[test]
+    fn only_the_detail_title_links_the_url_c_copies() {
+        let p = palette();
+        let prs = a_long_list(1);
+        let url = "https://github.com/owner/repo/pull/1";
+        assert_eq!(pr_url(&prs[0]), url);
+        let (list, _, _) =
+            list_view(&prs, 0, "created", true, "", 120, false, "all", prs.len(), &p);
+        assert!(list.iter().all(|r| !r.contains("\x1b]8;")));
+        let (detail, _) = detail_view(
+            Some(&prs[0]), &[], 0, false, 120, 40, 0, &[], "", 0, &p,
+        );
+        let row = detail
+            .iter()
+            .find(|r| r.contains(url))
+            .expect("the title carries the pull request url");
+        assert!(row.contains(&format!("\x1b]8;;{url}\x1b\\")));
+        let shown = plain(row);
+        assert!(shown.contains("a change worth reading about, number 1"));
+        assert!(!shown.contains("https://"), "{shown}");
+        assert_eq!(
+            tc::display_width(&tc::link(url, "a change worth reading about, number 1")),
+            tc::display_width("a change worth reading about, number 1")
+        );
+    }
+
+    #[test]
     fn a_short_pane_scrolls_the_stats_rather_than_hiding_them() {
         let p = palette();
         let prs = a_long_list(40);
@@ -4748,9 +4790,25 @@ mod tests {
         let mut chars = row.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
+                match chars.peek() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\x1b' && chars.peek() == Some(&'\\') {
+                                chars.next();
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        for next in chars.by_ref() {
+                            if next.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {

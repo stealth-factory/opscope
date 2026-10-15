@@ -1506,6 +1506,11 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 /// So this asks for nodes, and only when an account's own screen is opened -
 /// five of them, oldest first. One request, on demand, for the question the
 /// aggregates cannot answer.
+/// The address `c` copies for one of the oldest open pull requests.
+fn pr_url(node: &serde_json::Value) -> String {
+    node["url"].as_str().unwrap_or("").to_string()
+}
+
 fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
     let q = scope_of(acc, viewer);
     let query = format!(
@@ -1693,6 +1698,7 @@ fn account_detail(
     pick: usize,
     w: usize,
     tick: usize,
+    busy: Option<usize>,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<usize>) {
@@ -1700,7 +1706,7 @@ fn account_detail(
     // scroll to it. The caller cannot work it out: how far down the page
     // that list starts depends on how many fields this account had.
     let mut cursor: Option<usize> = None;
-    let mut rows = vec![tc::title(&a.account, w, &p.accent)];
+    let mut rows = vec![tc::title_busy(&a.account, w, &p.accent, busy)];
     let label_w = 16usize;
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
         rows.push(tc::seg(
@@ -1896,6 +1902,7 @@ fn account_detail(
                     } else {
                         title
                     };
+                    let title = tc::link(&pr_url(node), &title);
                     let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                     let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
@@ -2041,7 +2048,7 @@ fn graphql(
             }
         }
     }
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
     // GraphQL answers 200 with an `errors` array, so a successful request is
     // not a successful query. Read past it and every alias the query asked
     // for is missing, which `count_at` turns into zeros - and those zeros go
@@ -2808,6 +2815,7 @@ fn main() {
         days: start_window,
         ..Default::default()
     }));
+    let activity = tc::Refresh::default();
     let scopes = Arc::new(Mutex::new(Scopes::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let (tok, source) = token(&cfg);
@@ -2823,6 +2831,7 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_scopes = Arc::clone(&scopes);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || {
         let mut viewer = String::new();
         let mut day_cache: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
@@ -2834,17 +2843,21 @@ fn main() {
                         env_name
                     ));
                 }
-            } else if let Err(said) = one_pass(
-                &tok,
-                source,
-                &mut viewer,
-                &mut day_cache,
-                &poller,
-                &poller_scopes,
-            ) {
-                if let Ok(mut g) = poller.lock() {
-                    g.err = said;
+            } else {
+                let work = poller_activity.start();
+                if let Err(said) = one_pass(
+                    &tok,
+                    source,
+                    &mut viewer,
+                    &mut day_cache,
+                    &poller,
+                    &poller_scopes,
+                ) {
+                    if let Ok(mut g) = poller.lock() {
+                        g.err = said;
+                    }
                 }
+                drop(work);
             }
             let (lock, cond) = &*poller_wake;
             let mut asked = match lock.lock() {
@@ -2990,7 +3003,7 @@ fn main() {
                         .and_then(|g| g.get(&key).cloned())
                         .and_then(|v| v.as_array().cloned())
                         .and_then(|n| n.get(osel).cloned())
-                        .map(|n| n["url"].as_str().unwrap_or("").to_string())
+                        .map(|n| pr_url(&n))
                         .unwrap_or_default();
                     if !url.is_empty() {
                         note = if tc::clipboard(&url) {
@@ -3093,7 +3106,12 @@ fn main() {
             selected = stats.len() - 1;
         }
 
-        let mut rows = vec![tc::title("github ops", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "github ops",
+            w,
+            &p.accent,
+            activity.tick(tick),
+        )];
         let mut head = vec![(
             p.dim.as_str(),
             format!(
@@ -3561,12 +3579,17 @@ fn main() {
                         .map(|mut g| g.insert(key.clone()))
                         .unwrap_or(false);
                     if start {
-                        let (oldest, asking) = (Arc::clone(&oldest), Arc::clone(&asking));
+                        let (oldest, asking, oldest_activity) = (
+                            Arc::clone(&oldest),
+                            Arc::clone(&asking),
+                            activity.clone(),
+                        );
                         // key is "@me" or the org; account is the bare
                         // login, which is what scope_of wants for "@me".
                         let (acc, viewer, tok, scopes) =
                             (a.key.clone(), a.account.clone(), ui_tok.clone(), Arc::clone(&ui_scopes));
                         std::thread::spawn(move || {
+                            let _work = oldest_activity.start();
                             let got = fetch_oldest(&acc, &viewer, &tok, &scopes);
                             if let Ok(mut g) = oldest.lock() {
                                 g.insert(acc.clone(), got);
@@ -3607,7 +3630,9 @@ fn main() {
                         );
                         let asking = Arc::clone(&timing_asking);
                         let backoff = Arc::clone(&timing_backoff);
+                        let timing_activity = activity.clone();
                         std::thread::spawn(move || {
+                            let _work = timing_activity.start();
                             match fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes) {
                                 Ok(got) => {
                                     if let Ok(mut g) = poll.lock() {
@@ -3634,7 +3659,17 @@ fn main() {
                     }
                 }
                 let mut detail_plots = Vec::new();
-                let (body, cursor) = account_detail(a, held.as_ref(), land.as_ref(), osel, w, tick, &p, &mut detail_plots);
+                let (body, cursor) = account_detail(
+                    a,
+                    held.as_ref(),
+                    land.as_ref(),
+                    osel,
+                    w,
+                    tick,
+                    activity.tick(tick),
+                    &p,
+                    &mut detail_plots,
+                );
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -4118,6 +4153,42 @@ mod tests {
     }
 
     #[test]
+    fn the_oldest_open_title_links_the_url_c_copies() {
+        let oldest = serde_json::json!([{
+            "title": "waited longest",
+            "url": "https://github.com/acme/app/pull/3",
+            "number": 3,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "repository": {"name": "app"},
+            "isDraft": false
+        }]);
+        let url = "https://github.com/acme/app/pull/3";
+        assert_eq!(pr_url(&oldest[0]), url);
+        let account = Account {
+            account: "acme".into(),
+            ..Default::default()
+        };
+        let mut plots = Vec::new();
+        let (rows, _) = account_detail(
+            &account,
+            Some(&oldest),
+            None,
+            0,
+            100,
+            0,
+            None,
+            &palette(),
+            &mut plots,
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.contains("waited longest"))
+            .expect("oldest title");
+        assert!(row.contains(&format!("\x1b]8;;{url}\x1b\\")), "{row}");
+        assert!(!plain(row).contains("https://"), "{}", plain(row));
+    }
+
+    #[test]
     fn a_mid_pass_mix_is_not_a_current_total() {
         // After the first successful pass, every row holds Some. A new
         // rolling_now starts; the first account lands with this cutoff
@@ -4533,9 +4604,29 @@ mod tests {
         let mut chars = s.chars();
         while let Some(ch) = chars.next() {
             if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
+                let mut peek = chars.clone();
+                match peek.next() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\u{1b}' {
+                                let mut end = chars.clone();
+                                if end.next() == Some('\\') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        for c in chars.by_ref() {
+                            if c.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {

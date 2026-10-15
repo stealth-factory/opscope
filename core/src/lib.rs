@@ -27,7 +27,7 @@ mod graphics;
 mod shm;
 
 pub use terminal::{capabilities, graphics_notice, Capabilities};
-pub use graphics::{braille, LineChart, Plot, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
@@ -77,6 +77,39 @@ pub const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x
 
 /// A consistent animation for work that has not finished yet.
 pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Shared by a widget's readers and renderer. Count work, not sleeping threads.
+#[derive(Clone, Default)]
+pub struct Refresh(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Refresh {
+    /// Hold the guard through acquisition and publication, but not the poll wait.
+    pub fn start(&self) -> RefreshGuard {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        RefreshGuard(self.clone())
+    }
+
+    pub fn tick(&self, tick: usize) -> Option<usize> {
+        (self.0.load(Ordering::Acquire) > 0).then_some(tick)
+    }
+}
+
+/// Ending one request must not hide another; unwinding also ends the request.
+#[must_use = "keep the guard alive until the refresh has finished"]
+pub struct RefreshGuard(Refresh);
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+const REFRESH_COLOUR: (u8, u8, u8) = (120, 220, 255);
+/// A 2×2 spinner in Braille rows 2–3, aligned with the title text.
+/// Three lit corners rotate around the four dot positions.
+const REFRESH_SPINNER: &[char] = &['⠖', '⠲', '⠴', '⠦'];
+/// Keep a full turn at one second despite using only four distinct frames.
+const REFRESH_CYCLE_TICKS: usize = 10;
 
 /// Animation time is independent of data polling and the number of input events.
 /// Only use this for decoration/loading indicators, never to invent measurements.
@@ -221,27 +254,307 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 }
 
 /// The terminal columns occupied by printable text.
+///
+/// Colour and OSC sequences are not text. A linked title has to measure
+/// the same as the plain one, or the columns beside it shift.
 pub fn display_width(s: &str) -> usize {
-    s.width()
+    strip_escapes(s).width()
+}
+
+/// Plain text from an external source, before it is wrapped or styled.
+/// Removes all terminal escapes, including source-provided OSC 8 targets.
+/// Tabs retain their separator as a space; other control characters vanish.
+/// Add widget-owned hyperlinks with `link()` only after this boundary.
+pub fn source_text(s: &str) -> String {
+    strip_escapes(s)
+        .chars()
+        .filter_map(|ch| {
+            if ch == '\t' {
+                Some(' ')
+            } else if ch.is_control() {
+                None
+            } else {
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
+/// Decode external JSON without admitting terminal markup in any string field.
+/// Preserve source whitespace so callers can still select the first line of a
+/// commit message, wrap descriptions, or parse structured source fields.
+pub fn parse_source_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+    fn clean(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                *text = strip_escapes(text)
+                    .chars()
+                    .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+                    .collect();
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(clean),
+            serde_json::Value::Object(values) => values.values_mut().for_each(clean),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::from_str(s)?;
+    clean(&mut value);
+    Ok(value)
+}
+
+/// `s` with every escape removed and the characters that were text left
+/// in order. An escape that never terminates takes the rest of the string
+/// with it: those bytes have not been shown.
+fn strip_escapes(s: &str) -> String {
+    let mut visible = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            rest = &rest[n..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        visible.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    visible
+}
+
+/// Byte length of one escape at the start of `s`.
+///
+/// Covers colour, OSC, and the short `ESC` forms. An opener with no
+/// terminator consumes whatever is left, so a cut cannot treat the tail
+/// of a link target as title text. The length is always a char boundary:
+/// a short form counted in raw bytes lands inside a glyph when the byte
+/// after ESC is a multibyte lead, and slicing there panics.
+fn markup_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&0x1b) {
+        return None;
+    }
+    if b.len() == 1 {
+        return Some(1);
+    }
+    let n = match b[1] {
+        b'[' => {
+            let mut i = 2;
+            while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
+                i += 1;
+            }
+            if i < b.len() {
+                i += 1;
+            }
+            i
+        }
+        b']' | b'P' | b'X' | b'^' | b'_' => {
+            let mut i = 2;
+            while i < b.len() {
+                if b[i] == 0x07 {
+                    return Some(char_boundary(s, i + 1));
+                }
+                if b[i] == b'\\' && b[i - 1] == 0x1b {
+                    return Some(char_boundary(s, i + 1));
+                }
+                i += 1;
+            }
+            b.len()
+        }
+        c if (0x20..=0x2f).contains(&c) => b.len().min(3),
+        _ => b.len().min(2),
+    };
+    Some(char_boundary(s, n))
+}
+
+/// `n`, moved forward until `s` can be sliced there.
+fn char_boundary(s: &str, mut n: usize) -> usize {
+    if n > s.len() {
+        n = s.len();
+    }
+    while n < s.len() && !s.is_char_boundary(n) {
+        n += 1;
+    }
+    n
+}
+
+/// OSC payload, without the introducer and without BEL or ST.
+fn osc_body(escape: &str) -> Option<&str> {
+    let rest = escape.strip_prefix("\x1b]")?;
+    rest.strip_suffix('\u{7}')
+        .or_else(|| rest.strip_suffix("\x1b\\"))
+}
+
+/// An `https://` target with no controls and no spaces.
+///
+/// Anything else is today's plain text. Terminals that do not implement
+/// OSC 8 ignore the sequence and show that text either way; a scheme
+/// other than `https` is not given the chance.
+fn https_uri(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    // `is_control` covers C0, DEL, and C1. A code point above U+007F used
+    // to pass the old `>= 0x21` check, so a C1 byte in a target was treated
+    // as a link. Space and `\` are not controls; both still end a target.
+    !rest.is_empty() && uri.chars().all(|c| !c.is_control() && c != ' ' && c != '\\')
+}
+
+/// OSC 8 whose target is `https://`, and the empty OSC 8 that closes one.
+///
+/// The closer has no scheme. Dropping it would leave the link open
+/// across the rest of the row.
+fn osc8_kept(body: &str) -> bool {
+    let Some(rest) = body.strip_prefix("8;") else {
+        return false;
+    };
+    let Some((params, uri)) = rest.split_once(';') else {
+        return false;
+    };
+    !params.chars().any(char::is_control) && (uri.is_empty() || https_uri(uri))
+}
+
+// An internal capability, never emitted to the terminal. Source OSC 8 cannot
+// impersonate link(): even a captured widget frame has had this marker removed.
+// Entropy acquisition is the only platform-dependent part; failure is closed.
+fn link_marker() -> Option<&'static str> {
+    static MARKER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MARKER
+        .get_or_init(|| {
+            let mut nonce = [0u8; 16];
+            std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut nonce).ok()?;
+            let token: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+            Some(format!("\x1b]777;opscope-link;{token}\x1b\\"))
+        })
+        .as_deref()
+}
+
+fn keep_escape(escape: &str) -> bool {
+    if let Some(body) = escape.strip_prefix("\x1b[") {
+        let Some(final_byte) = body.chars().last() else {
+            return false;
+        };
+        if final_byte != 'm' {
+            return false;
+        }
+        let params = &body[..body.len() - final_byte.len_utf8()];
+        return params
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+    }
+    osc_body(escape).is_some_and(osc8_kept)
+}
+
+/// Append the OSC 8 closer when a clip kept the opener and cut the end.
+///
+/// Links do not nest. A closer means one is not open, and an https opener
+/// means one is. Counting would let a stray closer at the start of a slice
+/// cancel the link that opens after it.
+fn close_dangling_link(s: &str) -> String {
+    let mut open = false;
+    let mut marked = false;
+    let mut rest = s;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            if open {
+                if opens_underline(&rest[..n]) {
+                    marked = true;
+                } else if matches!(&rest[..n], "\x1b[24m" | "\x1b[0m") {
+                    marked = false;
+                }
+            }
+            if let Some(body) = osc_body(&rest[..n]) {
+                if let Some(after) = body.strip_prefix("8;") {
+                    if let Some((_, uri)) = after.split_once(';') {
+                        if uri.is_empty() {
+                            open = false;
+                            marked = false;
+                        } else if https_uri(uri) {
+                            open = true;
+                            marked = false;
+                        }
+                    }
+                }
+            }
+            rest = &rest[n..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        rest = &rest[ch.len_utf8()..];
+    }
+    if open {
+        let off = if marked { "\x1b[24m" } else { "" };
+        format!("{s}{off}\x1b]8;;\x1b\\")
+    } else {
+        s.to_string()
+    }
+}
+
+/// A title that a pointer can open, as an OSC 8 hyperlink.
+///
+/// Core owns the escape. Widgets pass the URL a key already copies and
+/// the title text; they do not branch on the terminal. Only an `https://`
+/// target is wrapped. Every other target leaves the sanitized title unlinked, which is
+/// the row a terminal that ignores OSC 8 shows anyway: the sequence is
+/// defined to be skipped, so the text does not move and no probe is
+/// required before sending it.
+/// Clickable titles use a dashed underline when the terminal supports styled
+/// underlines, and a plain underline otherwise. Padding is outside the mark.
+/// Render the result through core: its private ownership marker is removed
+/// only at terminal output. Failure to acquire OS entropy leaves plain text.
+pub fn link(url: &str, text: &str) -> String {
+    link_with_support(url, text, terminal::underline_caps().support)
+}
+
+fn link_with_support(url: &str, text: &str, support: terminal::UnderlineSupport) -> String {
+    // Source titles cannot introduce their own escapes or link targets.
+    let visible = source_text(text);
+    if !https_uri(url) {
+        return visible;
+    }
+    let Some(marker) = link_marker() else {
+        return visible;
+    };
+    let mark = if support == terminal::UnderlineSupport::Styled {
+        "\x1b[4:5m"
+    } else {
+        "\x1b[4m"
+    };
+    format!("{marker}\x1b]8;;{url}\x1b\\{mark}{visible}\x1b[24m\x1b]8;;\x1b\\")
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
 ///
 /// Width is measured on each whole prefix because emoji and script ligatures
 /// can occupy fewer columns than the sum of their individual characters.
-/// The boolean says that some suffix did not fit.
-fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
+/// The boolean says that some suffix did not fit. The last number is how
+/// many source bytes that prefix took. The returned string can be longer:
+/// a clip that opens an OSC 8 link appends the closer, and those bytes are
+/// not part of `s`.
+fn clip_width(s: &str, width: usize) -> (String, usize, bool, usize) {
     let mut end = 0usize;
     let mut used = 0usize;
-    for (at, ch) in s.char_indices() {
-        let candidate_end = at + ch.len_utf8();
-        let columns = display_width(&s[..candidate_end]);
+    let mut visible = String::with_capacity(s.len());
+    let mut at = 0;
+    let mut columns = 0;
+    while at < s.len() {
+        if let Some(n) = markup_len(&s[at..]) {
+            at += n;
+        } else {
+            let ch = s[at..].chars().next().unwrap();
+            visible.push(ch);
+            at += ch.len_utf8();
+            // Preserve string-width semantics for combining/emoji sequences,
+            // without stripping all preceding escapes for every source byte.
+            columns = visible.width();
+        }
         if columns <= width {
-            end = candidate_end;
+            end = at;
             used = columns;
         }
     }
-    (s[..end].to_string(), used, end < s.len())
+    let cut = close_dangling_link(&s[..end]);
+    (cut, used, end < s.len(), end)
 }
 
 /// Break a word that is itself wider than the pane, rather than dropping it.
@@ -252,14 +565,17 @@ fn hard_wrap(t: &str, width: usize) -> Vec<String> {
     let mut rest = t;
     let mut out = Vec::new();
     while !rest.is_empty() {
-        let (chunk, _, _) = clip_width(rest, width);
-        if chunk.is_empty() {
+        let (chunk, _, _, end) = clip_width(rest, width);
+        // `end` is a source offset. `chunk.len()` counts a closer this
+        // function invented, and using that as the offset skips text or
+        // slices a code point in half.
+        if end == 0 {
             let ch = rest.chars().next().unwrap();
             out.push(ch.to_string());
             rest = &rest[ch.len_utf8()..];
             continue;
         }
-        rest = &rest[chunk.len()..];
+        rest = &rest[end..];
         out.push(chunk);
     }
     out
@@ -304,7 +620,7 @@ pub fn wrap_words(t: &str, width: usize) -> Vec<String> {
 
 /// Truncate or pad a plain string to exactly `n` cells.
 pub fn pad(s: &str, n: usize) -> String {
-    let (mut out, used, _) = clip_width(s, n);
+    let (mut out, used, _, _) = clip_width(s, n);
     out.extend(std::iter::repeat(' ').take(n - used));
     out
 }
@@ -314,8 +630,11 @@ pub fn pad(s: &str, n: usize) -> String {
 /// The colour of each segment is a prefix that costs nothing on screen, so
 /// only the text counts toward the width. Every widget's layout arithmetic
 /// depends on that, which is why escapes have to live in the colour half of
-/// the pair and never in the text. Underlines mark content, skipping its
-/// leading and trailing alignment whitespace while retaining every cell.
+/// the pair and never in the text. A `link()` in the text half is the
+/// exception that is still zero width: the escape is skipped by the same
+/// measurement, and a clip closes the link so the next column is not part
+/// of it. Underlines mark content, skipping its leading and trailing
+/// alignment whitespace while retaining every cell.
 pub fn seg(parts: &[(&str, String)], width: usize) -> String {
     let mut out = String::new();
     let mut n = 0usize;
@@ -324,7 +643,7 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
             break;
         }
         let room = width - n;
-        let (cut, used, clipped) = clip_width(text, room);
+        let (cut, used, clipped, _) = clip_width(text, room);
         out.push_str(colour);
         if opens_underline(colour) {
             let content = cut.trim_matches(char::is_whitespace);
@@ -365,18 +684,32 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 /// `draw` puts the version on the end of every frame's top row and a rule
 /// filled to the edge would lose its `╸` under it.
 pub fn title(text: &str, w: usize, colour: &str) -> String {
+    title_busy(text, w, colour, None)
+}
+
+/// Spend only rule fill on a refresh spinner; the title and version take priority.
+pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> String {
     let w = w - version_room(w);
     let left = "╺━";
     let chrome = display_width(left) + 1;
     if w <= chrome {
         let deco = format!("{left}╸");
-        let (cut, _, _) = clip_width(&deco, w);
+        let (cut, _, _, _) = clip_width(&deco, w);
         return format!("{colour}{cut}{RST}");
     }
     let room = w - chrome;
     let wanted = format!(" {} ", text.to_uppercase());
-    let (t, t_w, _) = clip_width(&wanted, room);
-    let fill = "━".repeat(room.saturating_sub(t_w));
+    let (t, t_w, _, _) = clip_width(&wanted, room);
+    let fill_room = room.saturating_sub(t_w);
+    let spinner = tick.filter(|_| display_width(&wanted) + 2 <= room);
+    let fill = if let Some(tick) = spinner {
+        let (r, g, b) = REFRESH_COLOUR;
+        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+        format!("{}{} {}{colour}{}", rgb(r, g, b), REFRESH_SPINNER[frame], RST,
+            "━".repeat(fill_room - 2))
+    } else {
+        "━".repeat(fill_room)
+    };
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
         colour,
@@ -461,6 +794,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // A font change is a SIGWINCH. Read the window's pixel fields before
+    // this frame is rasterised, unless a cell-size reply already won.
+    terminal::apply_pending_cell_size();
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
@@ -477,6 +813,10 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
+    // The resize handler only sets a flag. The query goes out here, before
+    // this frame's image chunks, so it cannot land inside one.
+    let query = terminal::take_cell_query();
+    let bytes = format!("{query}{bytes}");
     // `out` drops a failed write, which a full frame every time could
     // afford: the next one put it right. Rows that never reached the
     // terminal must not be remembered as on it, or they stay wrong until
@@ -487,6 +827,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         .and_then(|_| stdout.flush())
         .is_err()
     {
+        if !query.is_empty() {
+            terminal::restore_cell_query();
+        }
         *shown = None;
     }
 }
@@ -555,6 +898,9 @@ static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
     SCREEN_LOST.store(true, Ordering::Release);
+    if sig == libc::SIGWINCH {
+        terminal::note_resize();
+    }
     if sig == libc::SIGCONT {
         SESSION_CHANGED.store(true, Ordering::Release);
         if HAS_TERMIOS.load(Ordering::Acquire) {
@@ -652,11 +998,12 @@ fn version_room(w: usize) -> usize {
 /// - The top row is cut to what the version leaves and the version is
 ///   appended after a reset, so neither the widget's text nor its colours
 ///   reach those cells.
-/// - Every row is made inert first. Colour escapes pass; anything else
-///   that can move the cursor or rewrite the screen - a CSI that is not
-///   colour, a bare ESC sequence, an OSC, a carriage return, a backspace -
-///   is dropped. Without that, a later row could carry `ESC[1;70H` and
-///   write over the version from underneath.
+/// - Every row is made inert first. Colour escapes pass, and so does an
+///   core-generated OSC 8 whose target is `https://` (and its empty closer).
+///   Source OSC 8 is dropped. Anything that can move the cursor or rewrite the screen -
+///   a CSI that is not colour, a bare ESC sequence, every other OSC, a
+///   carriage return, a backspace - is dropped. Without that, a later row
+///   could carry `ESC[1;70H` and write over the version from underneath.
 ///
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
@@ -706,72 +1053,63 @@ fn put_line(buf: &mut String, line: &str) {
     // row is written cannot reach anything the row puts down.
     buf.push_str(RST);
     buf.push_str(EL);
-    buf.push_str(line);
+    if line.contains("\x1b]777;opscope-link;") {
+        if let Some(marker) = link_marker() {
+            buf.push_str(&line.replace(marker, ""));
+        } else {
+            buf.push_str(line);
+        }
+    } else {
+        buf.push_str(line);
+    }
     buf.push_str(RST);
 }
 
-/// `row`, with every escape that is not a colour and every control
-/// character taken out.
+/// `row`, with every escape that is not a colour or a core-owned link, and
+/// every control character, taken out.
 ///
-/// Colour is `ESC [` then digits, `;` and `:`, then `m`. A tab becomes a
-/// space rather than vanishing, since it was meant as a gap; everything
-/// else - C0, DEL, and C1, which includes the one-byte CSI `\u{9b}` - goes.
+/// Colour is `ESC [` then digits, `;` and `:`, then `m`. OSC 8 is kept
+/// only immediately after the private marker from `link()`, with an `https`
+/// target, plus the empty OSC 8 that closes it. The marker is internal and
+/// removed before terminal output. A tab becomes a space rather than vanishing, since it was
+/// meant as a gap; everything else - C0, DEL, and C1, which includes the
+/// one-byte CSI `\u{9b}` - goes.
 fn inert(row: &str) -> String {
-    let chars: Vec<char> = row.chars().collect();
     let mut out = String::with_capacity(row.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\x1b' {
-            match chars.get(i + 1) {
-                Some('[') => {
-                    // CSI: parameter and intermediate bytes, then one final
-                    // byte in `@`..`~`. Unterminated runs to the end.
-                    let mut j = i + 2;
-                    while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
-                        j += 1;
-                    }
-                    let colour = chars.get(j) == Some(&'m')
-                        && chars[i + 2..j]
-                            .iter()
-                            .all(|c| c.is_ascii_digit() || *c == ';' || *c == ':');
-                    if colour {
-                        out.extend(&chars[i..=j]);
-                    }
-                    i = j + 1;
+    let mut rest = row;
+    let mut core_link = false;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            let escape = &rest[..n];
+            if escape.starts_with("\x1b]777;opscope-link;")
+                && link_marker().is_some_and(|marker| escape == marker)
+            {
+                out.push_str(escape);
+                core_link = true;
+            } else {
+                let opener = osc_body(escape)
+                    .and_then(|body| body.strip_prefix("8;"))
+                    .and_then(|after| after.split_once(';'))
+                    .is_some_and(|(_, uri)| !uri.is_empty());
+                if keep_escape(escape) && (!opener || core_link) {
+                    out.push_str(escape);
                 }
-                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
-                    // A string: runs to BEL or to ST (`ESC \\`).
-                    let mut j = i + 2;
-                    while j < chars.len() {
-                        if chars[j] == '\x07' {
-                            j += 1;
-                            break;
-                        }
-                        if chars[j] == '\x1b' && chars.get(j + 1) == Some(&'\\') {
-                            j += 2;
-                            break;
-                        }
-                        j += 1;
-                    }
-                    i = j;
-                }
-                // `ESC 7`, `ESC 8`, `ESC M`, `ESC c` and the rest: two
-                // characters, or three when the second is an intermediate.
-                Some(n) if ('\x20'..='\x2f').contains(n) => i += 3,
-                Some(_) => i += 2,
-                None => i += 1,
+                core_link = false;
             }
+            rest = &rest[n..];
             continue;
         }
-        if c == '\t' {
+        let ch = rest.chars().next().unwrap();
+        core_link = false;
+        if ch == '\t' {
             out.push(' ');
-        } else if !c.is_control() {
-            out.push(c);
+        } else if !ch.is_control() {
+            out.push(ch);
         }
-        i += 1;
+        rest = &rest[ch.len_utf8()..];
     }
-    out
+    close_dangling_link(&out)
 }
 
 /// An inert row cut to what the version leaves of `w`, padded out to
@@ -784,16 +1122,19 @@ fn inert(row: &str) -> String {
 fn with_notice(title: &str, notice: &str, w: usize) -> String {
     let mut name_end = 0;
     let mut text = String::new();
-    let mut chars = title.char_indices();
-    while let Some((i, c)) = chars.next() {
-        if c == '\x1b' {
-            chars.by_ref().find(|(_, n)| *n == 'm');
+    let mut i = 0;
+    while i < title.len() {
+        if title.as_bytes()[i] == 0x1b {
+            i += markup_len(&title[i..]).unwrap_or(1);
             continue;
         }
+        let c = title[i..].chars().next().unwrap();
+        let n = c.len_utf8();
         text.push(c);
         if !matches!(c, '━' | '╸' | ' ') {
-            name_end = i + c.len_utf8();
+            name_end = i + n;
         }
+        i += n;
     }
     let name = display_width(text.trim_end_matches(['━', '╸', ' ']));
     let keep = w.saturating_sub(version_room(w));
@@ -802,7 +1143,7 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
         .into_iter()
         .find(|n| name + display_width(" · ") + display_width(n) <= keep)
     {
-        Some(n) => format!("{}{RST} · {n}", &title[..name_end]),
+        Some(n) => format!("{}{RST} · {n}", close_dangling_link(&title[..name_end])),
         None => title.to_string(),
     }
 }
@@ -819,18 +1160,15 @@ fn stamped(row: &str, w: usize) -> String {
     let mut cut = String::new();
     let mut text = String::new();
     let mut used = 0;
-    let mut chars = row.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            cut.push(c);
-            for n in chars.by_ref() {
-                cut.push(n);
-                if n == 'm' {
-                    break;
-                }
-            }
+    let mut rest = row;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            cut.push_str(&rest[..n]);
+            rest = &rest[n..];
             continue;
         }
+        let c = rest.chars().next().unwrap();
         text.push(c);
         let width = display_width(&text);
         if width > keep {
@@ -838,7 +1176,9 @@ fn stamped(row: &str, w: usize) -> String {
         }
         cut.push(c);
         used = width;
+        rest = &rest[c.len_utf8()..];
     }
+    let cut = close_dangling_link(&cut);
     let (r, g, b) = VERSION_INK;
     format!(
         "{cut}{RST}{}{}{}",
@@ -895,6 +1235,7 @@ pub fn setup() {
 pub fn claim_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::claim_terminal();
     out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
@@ -983,6 +1324,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 pub fn restore_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::release_terminal();
     terminal::cleanup_signal();
     out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
@@ -1882,9 +2224,25 @@ pub fn config_token_warning() -> Option<String> {
 /// handed to every user on the box for as long as the request lasts - and
 /// these widgets exist partly to keep one out of the source tree.
 pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, String> {
+    get_following(url, headers, seconds, "")
+}
+
+/// `get`, refusing any redirect rather than following it.
+///
+/// For a request carrying a sign-in cookie. A custom header goes to every
+/// request curl makes, and some curl builds forward it across hosts on a
+/// redirect, so a request that holds a whole account's session is not let
+/// leave the host it was addressed to. A redirect is an error instead,
+/// which curl words as having reached its redirect limit.
+pub fn get_without_redirects(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, String> {
+    get_following(url, headers, seconds, "--max-redirs 0\n")
+}
+
+fn get_following(url: &str, headers: &[(&str, &str)], seconds: u64, extra: &str) -> Result<String, String> {
     use std::io::Write;
     let mut config = format!(
-        "--silent\n--show-error\n--fail\n--location\n--max-time {}\n--url {}\n",
+        "--silent\n--show-error\n--fail\n--location\n{}--max-time {}\n--url {}\n",
+        extra,
         seconds,
         quoted(url)
     );
@@ -2077,7 +2435,8 @@ pub fn post_json(
 /// Squeezed onto one line and capped the way every other subprocess
 /// complaint here is, so an HTML error page cannot take the whole pane.
 pub fn refused(status: u16, body: &str) -> String {
-    let said: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = strip_escapes(body);
+    let said = source_text(&plain.split_whitespace().collect::<Vec<_>>().join(" "));
     let said: String = said.chars().take(200).collect();
     if said.is_empty() {
         format!("HTTP {}", status)
@@ -4386,6 +4745,8 @@ mod tests {
             "\x1b[?2026;2$y",
             "\x1b[?62;4;c",
             "\x1b]10;rgb:ffff/0000/0000\x1b\\",
+            "\x1b[6;40;20t",
+            "\x1b[6;0;0t",
         ] {
             for split in 1..response.len() {
                 let mut pending = response[..split].to_string();
@@ -4810,6 +5171,239 @@ mod tests {
     }
 
     #[test]
+    fn osc8_control_parameters_are_stripped() {
+        for params in ["id=\x1b[2J", "id=\r", "id=\u{9b}2J", "id=\u{7f}"] {
+            for uri in ["https://example.com", ""] {
+                let escape = format!("\x1b]8;{params};{uri}\x1b\\");
+                assert_eq!(super::inert(&format!("{escape}readable")), "readable");
+            }
+        }
+        let good = "\x1b]8;id=title;https://example.com\x1b\\readable\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(good), "readable\x1b]8;;\x1b\\");
+    }
+
+    #[test]
+    fn osc8_clips_close_before_version_and_graphics_notice() {
+        let close = "\x1b]8;;\x1b\\";
+        let row = super::link("https://example.com", &"a".repeat(100));
+        let stamped = super::stamped(&row, 40);
+        assert!(stamped.find(close).is_some_and(|at| at < stamped.find(&super::version_tag()).unwrap()));
+        let row = super::link("https://example.com", "LATENCY");
+        let notice = super::with_notice(&row, "Kitty unavailable", 80);
+        assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
+        assert_eq!(super::display_width(&stamped), 40);
+    }
+
+    #[test]
+    fn raw_pane_output_cannot_install_links_in_the_final_frame() {
+        for end in ["\x1b\\", "\x07"] {
+            let source = format!("\x1b]8;;https://example.com/source{end}agent output\x1b]8;;{end}");
+            let row = super::seg(&[("", source)], 80);
+            let own = super::link("https://example.com/widget", "Open detail");
+            let frame = super::frame(&["PANE".into(), row, own.clone()], 80, 3);
+            assert!(!frame.contains("https://example.com/source"), "{frame:?}");
+            assert!(frame.contains("\x1b]8;;https://example.com/widget\x1b\\"));
+            assert!(frame.contains("agent output"));
+            assert!(!frame.contains("opscope-link"), "the capability must not reach the terminal");
+            assert_eq!(super::inert(&super::inert(&own)), own);
+            // A captured frame is external data when displayed by another pane.
+            let replayed = super::frame(&["PANE".into(), frame], 80, 2);
+            assert!(!replayed.contains("https://example.com/widget"), "{replayed:?}");
+        }
+    }
+
+    #[test]
+    fn source_json_strips_markup_before_main_and_detail_views_receive_it() {
+        let malicious = "\x1b]8;;https://example.com/untrusted\x1b\\fix:\tparser\x1b]8;;\x1b\\\ncommit body";
+        let raw = serde_json::json!({"data": {"runs": [
+            {"display_title": malicious, "html_url": "https://example.com/run/1", "number": 42},
+            {"display_title": "\x1b[31mred\x1b[0m\r\nbody", "state": null},
+            {"display_title": "\x1b]8;;https://example.com/untrusted\x07BEL label\x1b]8;;\x07"}
+        ]}});
+        let data = super::parse_source_json(&raw.to_string()).unwrap();
+        let run = &data["data"]["runs"][0];
+        assert_eq!(run["display_title"], "fix:\tparser\ncommit body");
+        assert_eq!(run["number"], 42);
+        assert_eq!(data["data"]["runs"][1]["display_title"], "red\r\nbody");
+        assert!(data["data"]["runs"][1]["state"].is_null());
+        assert_eq!(data["data"]["runs"][2]["display_title"], "BEL label");
+        let subject = run["display_title"].as_str().unwrap().lines().next().unwrap();
+        let row = super::seg(&[("", subject.to_string())], 80);
+        assert!(!row.contains("\x1b]8;"), "{row:?}");
+        assert_eq!(super::strip_escapes(&super::inert(&row)), "fix: parser");
+        let detail = super::link(run["html_url"].as_str().unwrap(), subject);
+        assert!(detail.contains("https://example.com/run/1"));
+        assert!(!detail.contains("/untrusted"));
+        assert_eq!(super::strip_escapes(&detail), "fix: parser");
+        assert!(super::parse_source_json("not JSON").is_err());
+        assert_eq!(super::refused(403, malicious), "HTTP 403: fix: parser commit body");
+    }
+
+    #[test]
+    fn an_unclosed_link_is_balanced_at_the_rendered_row_boundary() {
+        let linked = super::link_with_support(
+            "https://example.com/log", "Build finished", super::terminal::UnderlineSupport::Styled,
+        );
+        let row = linked.strip_suffix("\x1b[24m\x1b]8;;\x1b\\").unwrap();
+        let clean = super::inert(row);
+        assert!(clean.ends_with("\x1b[24m\x1b]8;;\x1b\\"), "{clean:?}");
+        assert_eq!(super::strip_escapes(&clean), "Build finished");
+    }
+
+    #[test]
+    fn adding_a_link_preserves_tab_separators_in_the_visible_label() {
+        let title = "fix:\tparser";
+        let linked = super::link("https://example.com/pr/1", title);
+        assert_eq!(super::strip_escapes(&linked), super::inert(title));
+        let source = "\x1b]8;;https://example.com/untrusted\x1b\\title\x1b]8;;\x1b\\";
+        assert_eq!(super::link("", source), "title");
+        let linked = super::link("https://example.com/pr/1", source);
+        assert!(!linked.contains("/untrusted"));
+        assert_eq!(super::strip_escapes(&linked), "title");
+    }
+
+    #[test]
+    fn clickable_titles_are_marked_without_underlining_neighbouring_columns() {
+        use super::terminal::UnderlineSupport;
+        let url = "https://example.com/pr/1";
+        for (support, mark) in [
+            (UnderlineSupport::Styled, "\x1b[4:5m"),
+            (UnderlineSupport::Plain, "\x1b[4m"),
+            (UnderlineSupport::Unknown, "\x1b[4m"),
+        ] {
+            let linked = super::link_with_support(url, "Clickable title", support);
+            assert!(linked.contains(&format!("{mark}Clickable title\x1b[24m")));
+            assert_eq!(super::display_width(&linked), 15);
+            let padded = super::pad(&linked, 20);
+            assert!(padded.ends_with("\x1b[24m\x1b]8;;\x1b\\     "));
+            let clipped = super::clip_width(&linked, 5).0;
+            assert!(clipped.ends_with("Click\x1b[24m\x1b]8;;\x1b\\"));
+            assert_eq!(super::strip_escapes(&clipped), "Click");
+            assert_eq!(
+                super::link_with_support("http://example.com", "title", support),
+                "title"
+            );
+        }
+    }
+
+    #[test]
+    fn osc8_https_passes_and_every_other_osc_is_stripped() {
+        let url = "https://github.com/example/repo/pull/1";
+        let link = super::link(url, "Fix the parser");
+        assert_eq!(super::inert(&link), link, "an https OSC 8 is the link");
+        // BEL is the other terminator the protocol allows.
+        let bel = format!("{}\x1b]8;;{url}\x07Fix the parser\x1b]8;;\x07", super::link_marker().unwrap());
+        assert_eq!(super::inert(&bel), bel);
+        let raw = format!("\x1b]8;;{url}\x1b\\Fix the parser\x1b]8;;\x1b\\");
+        assert_eq!(super::inert(&raw), "Fix the parser\x1b]8;;\x1b\\");
+        let forged = format!("\x1b]777;opscope-link;not-the-private-marker\x1b\\{raw}");
+        assert_eq!(super::inert(&forged), "Fix the parser\x1b]8;;\x1b\\");
+
+        // The non-https opener goes. The empty closer stays: dropping
+        // every closer would also drop the one that ends an https link.
+        let http = "\x1b]8;;http://github.com/example\x1b\\title\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(http), "title\x1b]8;;\x1b\\");
+        let file = "\x1b]8;;file:///etc/passwd\x1b\\x\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(file), "x\x1b]8;;\x1b\\");
+        let script = "\x1b]8;;javascript:alert(1)\x1b\\x\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(script), "x\x1b]8;;\x1b\\");
+        // The closer on its own stays, so a link split across a clip can end.
+        assert_eq!(super::inert("\x1b]8;;\x1b\\"), "\x1b]8;;\x1b\\");
+        // OSC 52, and an OSC 8 that is not two parameters, do not.
+        assert_eq!(super::inert("\x1b]52;c;AQID\x1b\\title"), "title");
+        assert_eq!(super::inert("\x1b]8;https://example.com/a\x1b\\t"), "t");
+        assert_eq!(super::link("http://example.com/a", "t"), "t");
+        assert_eq!(super::link("https://", "t"), "t");
+        // A source escape cannot close the link early; ESC b is removed whole.
+        let guarded = super::link(url, "a\x1bb");
+        assert_eq!(super::strip_escapes(&guarded), "a");
+        assert_eq!(super::inert(&guarded), guarded);
+    }
+
+    #[test]
+    fn a_short_escape_before_a_multibyte_glyph_does_not_split_it() {
+        // A build log reaches `seg` with the line intact. ESC then `é`
+        // is three bytes, and a two-byte guess lands inside the glyph.
+        assert_eq!(super::inert("\x1b"), "");
+        assert_eq!(super::strip_escapes("\x1b"), "");
+        assert_eq!(super::inert("\x1bé still here"), " still here");
+        assert_eq!(super::strip_escapes("\x1bé still here"), " still here");
+        // ESC, an intermediate byte, then the same glyph.
+        assert_eq!(super::inert("\x1b é still here"), " still here");
+        assert_eq!(super::strip_escapes("\x1b é still here"), " still here");
+        let logged = super::seg(&[("", "  \x1bé still here".into())], 40);
+        assert!(super::strip_escapes(&logged).contains("still here"), "{logged:?}");
+    }
+
+    #[test]
+    fn an_https_target_rejects_a_c1_control() {
+        assert!(super::https_uri("https://example.com/ok"));
+        let nel = "https://example.com/\u{85}x";
+        assert!(!super::https_uri(nel), "U+0085 is a C1 control");
+        assert_eq!(super::link(nel, "title"), "title");
+        let csi = "https://example.com/\u{9b}x";
+        assert!(!super::https_uri(csi), "U+009B is a C1 control");
+        assert_eq!(super::link(csi, "title"), "title");
+        assert!(!super::https_uri("https://example.com/a b"));
+    }
+
+    #[test]
+    fn a_stray_closer_does_not_cancel_the_link_opened_after_it() {
+        // A clip can start on the closer of a link that was cut away.
+        // That closer is not a nesting level, so the opener after it
+        // still has to be closed.
+        let url = "https://example.com/opscope";
+        let opener = format!("\x1b]8;;{url}\x1b\\title");
+        let sliced = format!("\x1b]8;;\x1b\\{opener}");
+        assert_eq!(
+            super::close_dangling_link(&sliced),
+            format!("{sliced}\x1b]8;;\x1b\\")
+        );
+        let balanced = super::link(url, "title");
+        assert_eq!(super::close_dangling_link(&balanced), balanced);
+        assert_eq!(
+            super::close_dangling_link(&opener),
+            format!("{opener}\x1b]8;;\x1b\\")
+        );
+    }
+
+    #[test]
+    fn an_https_osc8_occupies_only_its_title() {
+        // The target is longer than the title. Counting those bytes as
+        // columns would shove the rest of the row. The sequence itself
+        // stays: dropping it would close the link by deleting it.
+        let title = "ship the pane";
+        let url = "https://example.com/opscope/deployments/1";
+        assert!(url.len() > title.len());
+        let linked = super::link(url, title);
+        assert_eq!(super::inert(&linked), linked);
+        assert_eq!(super::display_width(&linked), super::display_width(title));
+        assert!(linked.contains(url));
+    }
+
+    #[test]
+    fn a_linked_title_measures_the_same_as_the_plain_one() {
+        let title = "Fix the parser";
+        let url = "https://github.com/example/repo/pull/1";
+        let linked = super::link(url, title);
+        assert_eq!(super::display_width(&linked), super::display_width(title));
+        assert_eq!(super::strip_escapes(&linked), title);
+        let padded = super::pad(&linked, 20);
+        assert_eq!(super::display_width(&padded), 20);
+        assert_eq!(super::strip_escapes(&padded).trim_end(), title);
+        // Clipping keeps the visible prefix and closes the link, so the
+        // next column is not part of the target.
+        let clipped = super::seg(&[("", linked.clone())], 4);
+        assert_eq!(super::display_width(&clipped), 4);
+        assert_eq!(super::strip_escapes(&clipped), "Fix ");
+        assert!(clipped.ends_with("\x1b]8;;\x1b\\"), "{clipped:?}");
+        assert_eq!(
+            super::display_width(&super::seg(&[("", title.into())], 4)),
+            super::display_width(&clipped)
+        );
+    }
+
+    #[test]
     fn an_unfiltered_pane_says_nothing_about_filters() {
         // A pane that always announces "no filters" is noise, and the
         // widget's own count line already reads correctly without help.
@@ -4900,6 +5494,20 @@ mod tests {
         let lines = super::wrap_words("supercalifragilistic", 8);
         assert!(lines.iter().all(|l| super::display_width(l) <= 8), "{lines:?}");
         assert_eq!(lines.concat(), "supercalifragilistic");
+    }
+
+    #[test]
+    fn a_hard_break_of_a_linked_word_keeps_a_multibyte_glyph() {
+        // Width 1 cuts before `é`. The closer appended to that chunk is
+        // seven bytes, which is enough to land inside `é` if the wrap
+        // advances by the chunk's length instead of the source it read.
+        let word = "X123456éY";
+        let linked = super::link("https://example.com/opscope", word);
+        let lines = super::wrap_words(&linked, 1);
+        let shown: String = lines.iter().map(|l| super::strip_escapes(l)).collect();
+        assert_eq!(shown, word);
+        assert!(lines.iter().all(|l| super::display_width(l) <= 1), "{lines:?}");
+        assert!(lines.iter().any(|l| super::strip_escapes(l) == "é"));
     }
 
     #[test]
@@ -5631,6 +6239,94 @@ mod tests {
         assert_eq!(display_width(&pad("🙂", 3)), 3);
         assert_eq!(pad("👩‍💻", 4), "👩‍💻  ");
         assert_eq!(pad("لا", 2), "لا ");
+    }
+
+    #[test]
+    fn refresh_tracks_overlapping_work_and_unwinding() {
+        let refresh = Refresh::default();
+        assert_eq!(refresh.tick(0), None);
+        let first = refresh.start();
+        let second = refresh.clone().start();
+        assert_eq!(refresh.tick(3), Some(3));
+        drop(first);
+        assert_eq!(refresh.tick(4), Some(4));
+        drop(second);
+        assert_eq!(refresh.tick(5), None);
+        let failed: Result<(), ()> = (|| {
+            let _work = refresh.start();
+            Err(())
+        })();
+        assert!(failed.is_err());
+        assert_eq!(refresh.tick(6), None);
+        let worker = refresh.clone();
+        assert!(std::thread::spawn(move || {
+            let _work = worker.start();
+            panic!("failed acquisition");
+        }).join().is_err());
+        assert_eq!(refresh.tick(7), None);
+    }
+
+    #[test]
+    fn busy_title_preserves_text_width_and_version_room() {
+        let colour = rgb(0, 255, 170);
+        for text in ["agent usage", "network latency monitor", "月界", ""] {
+            for w in 0..=160 {
+                let idle = title(text, w, &colour);
+                assert_eq!(title_busy(text, w, &colour, None), idle);
+                let wanted = format!(" {} ", text.to_uppercase());
+                let fits = display_width(&wanted) + 5 <= w - version_room(w);
+                for tick in 0..=REFRESH_CYCLE_TICKS {
+                    let busy = title_busy(text, w, &colour, Some(tick));
+                    assert_eq!(display_width(&strip(&busy)) + version_room(w), w);
+                    if fits {
+                        let frame = (tick % REFRESH_CYCLE_TICKS) * REFRESH_SPINNER.len() / REFRESH_CYCLE_TICKS;
+                        assert!(strip(&busy).contains(&format!("{wanted}{} ", REFRESH_SPINNER[frame])));
+                    } else {
+                        assert_eq!(busy, idle, "spinner displaced title at {w}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn busy_title_frame_keeps_the_version_and_spends_only_rule_fill() {
+        let colour = rgb(0, 255, 170);
+        let tag = format!("v{}", super::version_number());
+        for w in 26usize..=160 {
+            let top = shown(&frame_rows(&super::frame(
+                &[super::title_busy("network latency monitor", w, &colour, Some(2))],
+                w,
+                1,
+            ))[0]);
+            assert_eq!(super::display_width(&top), w, "the busy row is not {w} wide");
+            assert!(top.ends_with(&tag), "the version was cut at {w}: {top:?}");
+        }
+        let wide = shown(&frame_rows(&super::frame(
+            &[super::title_busy("network latency monitor", 80, &colour, Some(2))],
+            80,
+            1,
+        ))[0]);
+        assert!(wide.contains("NETWORK LATENCY MONITOR"));
+        assert!(wide.contains(REFRESH_SPINNER[0]));
+        assert!(wide.ends_with(&tag));
+    }
+
+    #[test]
+    fn refresh_colour_clears_aa_on_backdrop_and_selection_tints() {
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let fg = luminance(REFRESH_COLOUR);
+        for bg in [(16, 20, 26), (28, 44, 62), (38, 56, 76), (46, 26, 30), (22, 46, 34)] {
+            let bg_lum = luminance(bg);
+            let contrast = (fg.max(bg_lum) + 0.05) / (fg.min(bg_lum) + 0.05);
+            assert!(contrast >= 4.5, "refresh colour on {bg:?}: {contrast:.2}");
+        }
     }
 
     #[test]
