@@ -59,7 +59,17 @@ fn main() {
                 w,
                 &tc::rgb(180, 210, 220),
             ),
-            "  axes and labels remain text".into(),
+            // The visible label is unchanged. The https OSC 8 is what a
+            // terminal that understands links opens; the http target and
+            // the OSC 52 are what `inert` has to drop before the row is
+            // written.
+            format!(
+                "{}\x1b]8;;http://opscope.invalid\x1b\\\x1b]8;;\x1b\\\x1b]52;c;ZmFrZQ==\x07\x1b]8;;https://example.com/source-pane\x1b\\ source pane text\x1b]8;;\x1b\\",
+                tc::link(
+                    "https://example.com/opscope-probe",
+                    "  axes and labels remain text",
+                )
+            ),
         ];
         // Synthetic samples so the PTY test can see underline bytes. The
         // words stay the same whether the terminal answers the query.

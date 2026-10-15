@@ -1506,6 +1506,11 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 /// So this asks for nodes, and only when an account's own screen is opened -
 /// five of them, oldest first. One request, on demand, for the question the
 /// aggregates cannot answer.
+/// The address `c` copies for one of the oldest open pull requests.
+fn pr_url(node: &serde_json::Value) -> String {
+    node["url"].as_str().unwrap_or("").to_string()
+}
+
 fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
     let q = scope_of(acc, viewer);
     let query = format!(
@@ -1897,6 +1902,7 @@ fn account_detail(
                     } else {
                         title
                     };
+                    let title = tc::link(&pr_url(node), &title);
                     let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                     let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
@@ -2042,7 +2048,7 @@ fn graphql(
             }
         }
     }
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
     // GraphQL answers 200 with an `errors` array, so a successful request is
     // not a successful query. Read past it and every alias the query asked
     // for is missing, which `count_at` turns into zeros - and those zeros go
@@ -2997,7 +3003,7 @@ fn main() {
                         .and_then(|g| g.get(&key).cloned())
                         .and_then(|v| v.as_array().cloned())
                         .and_then(|n| n.get(osel).cloned())
-                        .map(|n| n["url"].as_str().unwrap_or("").to_string())
+                        .map(|n| pr_url(&n))
                         .unwrap_or_default();
                     if !url.is_empty() {
                         note = if tc::clipboard(&url) {
@@ -4147,6 +4153,42 @@ mod tests {
     }
 
     #[test]
+    fn the_oldest_open_title_links_the_url_c_copies() {
+        let oldest = serde_json::json!([{
+            "title": "waited longest",
+            "url": "https://github.com/acme/app/pull/3",
+            "number": 3,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "repository": {"name": "app"},
+            "isDraft": false
+        }]);
+        let url = "https://github.com/acme/app/pull/3";
+        assert_eq!(pr_url(&oldest[0]), url);
+        let account = Account {
+            account: "acme".into(),
+            ..Default::default()
+        };
+        let mut plots = Vec::new();
+        let (rows, _) = account_detail(
+            &account,
+            Some(&oldest),
+            None,
+            0,
+            100,
+            0,
+            None,
+            &palette(),
+            &mut plots,
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.contains("waited longest"))
+            .expect("oldest title");
+        assert!(row.contains(&format!("\x1b]8;;{url}\x1b\\")), "{row}");
+        assert!(!plain(row).contains("https://"), "{}", plain(row));
+    }
+
+    #[test]
     fn a_mid_pass_mix_is_not_a_current_total() {
         // After the first successful pass, every row holds Some. A new
         // rolling_now starts; the first account lands with this cutoff
@@ -4562,9 +4604,29 @@ mod tests {
         let mut chars = s.chars();
         while let Some(ch) = chars.next() {
             if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
+                let mut peek = chars.clone();
+                match peek.next() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\u{1b}' {
+                                let mut end = chars.clone();
+                                if end.next() == Some('\\') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        for c in chars.by_ref() {
+                            if c.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {

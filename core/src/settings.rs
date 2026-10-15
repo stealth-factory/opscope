@@ -1442,12 +1442,14 @@ fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
     let mut rest: Vec<char> = text.trim().chars().collect();
     while !rest.is_empty() && lines.len() < limit {
         let remaining: String = rest.iter().collect();
-        let (fitted, _, clipped) = crate::clip_width(&remaining, width);
+        let (_, _, clipped, end) = crate::clip_width(&remaining, width);
         if !clipped {
             lines.push(remaining);
             break;
         }
-        let fit = fitted.chars().count();
+        // `end` is the source prefix. The fitted string may also carry an
+        // OSC 8 closer that was not in `remaining`.
+        let fit = remaining[..end].chars().count();
         let cut = (0..fit)
             .rev()
             .find(|at| {

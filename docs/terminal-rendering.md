@@ -335,6 +335,59 @@ and intentional text presentation, not unimplemented widget migrations.
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
+## OSC 8 hyperlinks
+
+`tc::link(url, text)` wraps a title when `url` is an `https://` target with
+no spaces and no controls. Any other target leaves the sanitized title
+unlinked.
+
+Clickable titles have a dashed underline when styled underline support has
+been negotiated, or a plain underline otherwise, in both text and Kitty
+mode. The mark ends before alignment padding and adjacent columns. A clip
+closes both the underline and hyperlink so neither reaches the next column.
+
+External build output is not widget markup. Vercel passes log lines and log
+errors through `tc::source_text()` before wrapping: all terminal escapes,
+including source-provided OSC 8 targets, are removed. Tabs become spaces.
+`link()` sanitizes its visible label the same way, then adds the widget-owned
+target. The final row sanitizer also closes any dangling link before the next
+row, since an SGR reset alone does not end OSC 8.
+
+All JSON API responses in the five linked widgets use `parse_source_json()`
+at acquisition. It removes terminal escapes recursively from string values
+before either main or detail views receive them, including commit subjects,
+PR titles, issue names and API error messages. Source line breaks and tabs
+are retained so first-line selection and text parsing keep their meaning.
+HTTP refusal text is sanitized too. This boundary covers raw fields rendered
+without `link()`, rather than relying on the detail-label helper alone.
+
+`link()` prefixes the opener with a private per-process capability marker
+generated from 128 bits of operating-system entropy. `inert()` accepts an
+HTTPS opener only immediately after that marker; source-provided OSC 8 is
+stripped in every widget, including copied agent-pane output. A marker is
+retained through internal row sanitization and clipping, then removed by
+`put_line()` before any bytes reach the terminal. Captured terminal output
+therefore has no capability to replay. If entropy acquisition fails, `link()`
+returns plain text. The helper's result must be rendered through core, not
+printed directly.
+
+The empty OSC 8 closer remains safe to retain. OSC 8 with another scheme,
+and every other source OSC, is stripped with the rest of the non-colour
+escapes. The sequence is zero width in `display_width`, `pad` and
+`seg`. A clip that cuts the visible text appends the closer, so the next
+column is not part of the target.
+
+Widgets call `link` only in detail views where a key already copies that same
+URL. Main dashboards and lists keep their titles as plain text. In Herdr,
+Ctrl + left-click activates a link; regular clicks keep widget behaviour.
+Widgets do not probe for OSC 8 and they do not branch on Kitty. A terminal that ignores
+the sequence shows the same text; that is the defined fallback, so there is
+nothing to negotiate first. Kitty, Ghostty, WezTerm, iTerm2, Konsole and
+tmux 3.4+ are the protocol's audience. This workspace has no attached
+graphical terminal. The PTY check reads the bytes on the label row, and
+where a link sits in a real pane stays a release check, the same limit as
+the graphics path above.
+
 ## Verification and compatibility limits
 
 Run:
@@ -361,7 +414,7 @@ signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
 Ctrl-Z or Ctrl-\, and pushed again after resume. Cell-size checks verify reported dimensions,
 window-pixel fallback, invalid/zero reports and a barren resize returning to
-8×16; cell queries stay outside image chunks. Unit tests
+8×16; cell queries stay outside image chunks. They also check that HTTPS OSC 8 links are kept while HTTP OSC 8 and OSC 52 are stripped. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation,
 plus the cell-size parser and the byte cap.
