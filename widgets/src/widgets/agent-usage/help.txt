@@ -13,6 +13,11 @@ discovery off keeps those tabs up while the first read is still running.
 
     agent-usage [-n SECONDS]
 
+The top status line says "Checked ... ago" for the last completed collection
+pass, not the age of every reading. A pass can reuse cached data; each quota
+section reports its own source/freshness. Before the first pass completes it
+says "Not checked yet". The title spinner shows a check in progress.
+
 Most of this is read from local state files. The exception is the remaining
 quota, which no agent writes to disk in a current form: Claude, Codex, Cursor
 and Copilot each publish one over an endpoint, fetched with the credential
