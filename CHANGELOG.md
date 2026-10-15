@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.9.0] - 2026-10-15
+
+### Bug Fixes
+
+- **agent-usage**: Align Cursor metering with dashboard events (#433)
+
+### Features
+
+- **core**: Add underlined detail-view hyperlinks (OPS-150) (#359)
+
 ## [1.8.0] - 2026-10-14
 
 ### Bug Fixes
