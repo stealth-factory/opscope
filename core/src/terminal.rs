@@ -269,7 +269,14 @@ impl Session {
             // until the next full upload replaces them. Clearing them on
             // the first reply made the next one look like a bad image and
             // turned graphics off.
-            if id.is_some_and(super::graphics::frame_edit_pending) && frame_refused(message) {
+            // A placement (`a=p`) echoes `p=`. That reply is the image
+            // missing or moving, even while the slot's last upload was a
+            // frame edit. Frame commands themselves carry no placement key.
+            let placement_reply = keys.split(',').any(|key| key.starts_with("p="));
+            if !placement_reply
+                && id.is_some_and(super::graphics::frame_edit_pending)
+                && frame_refused(message)
+            {
                 super::graphics::set_animation(false);
                 super::screen_lost();
                 return false;
@@ -995,6 +1002,33 @@ mod tests {
         crate::shm::mark_direct(slot(0), 2);
         s.reply(&format!("\x1b_Gi={},p=2;EINVAL:bad\x1b\\", slot(0)), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+        crate::graphics::reset_animation();
+        crate::graphics::clear_frame_edits();
+    }
+
+    #[test]
+    fn a_placement_error_keeps_animation() {
+        let _transport = crate::shm::guard();
+        let _slots = crate::graphics::test_lock();
+        crate::graphics::clear_frame_edits();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let probe = crate::graphics::probe_id();
+        s.reply(&format!("\x1b_Gi={probe};OK\x1b\\"), now);
+        assert!(crate::graphics::animation_ready());
+        crate::graphics::testing_mark_frame(0);
+        let id = crate::graphics::image_id(0);
+        // The periodic re-place echoes p=. The image is gone; the frame op is not.
+        s.reply(&format!("\x1b_Gi={id},p=7;ENOENT:no such image\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(crate::graphics::animation_ready());
+        s.reply(&format!("\x1b_Gi={id};EINVAL:overlap\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(!crate::graphics::animation_ready());
         crate::graphics::reset_animation();
         crate::graphics::clear_frame_edits();
     }
