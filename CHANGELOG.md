@@ -3,6 +3,121 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.9.0] - 2026-10-15
+
+### Bug Fixes
+
+- **agent-usage**: Align Cursor metering with dashboard events (#433)
+
+### Features
+
+- **core**: Add underlined detail-view hyperlinks (OPS-150) (#359)
+
+## [1.8.0] - 2026-10-14
+
+### Bug Fixes
+
+- **core**: Send Kitty images inline inside Herdr panes (OPS-171) (#412)
+- **agent-usage**: Correct Sonnet 5.5 cache reads and OpenAI speed-tier rates (OPS-174) (#421)
+- **latency**: Bound intervals and stop idle refresh animation (OPS-176) (#426)
+- **core**: Quarantine first cell reply after child handoff (#425)
+
+### CI
+
+- Replace privileged PR trigger and narrow release permissions (#418)
+
+### Documentation
+
+- Document signed APT installation (#432)
+
+### Features
+
+- **core**: Rasterise charts at the reported cell size (OPS-149) (#360)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175) (#423)
+- **agent-usage**: Add a Perplexity tab for weekly limit, credits and billing (OPS-173) (#416)
+
+### Miscellaneous
+
+- Preserve latest main in netwatch restoration
+
+### Reverted
+
+- Restore main pending netwatch border-label review
+
+## [1.7.0] - 2026-10-13
+
+### Features
+
+- **agent-usage**: Price gemini-4-argon on its own row (OPS-170) (#409)
+
+## [1.6.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Order Antigravity windows by model (#410)
+
+### Features
+
+- **agent-usage**: Price gemini-4-argon on its own row (OPS-170)
+
+### Reverted
+
+- Feat(agent-usage): price gemini-4-argon on its own row (OPS-170) (#408)
+
+## [1.5.1] - 2026-10-13
+
+### Bug Fixes
+
+- **refresh**: Preserve pending work and discovered scopes (#402)
+- **apt**: Notify repository after every tagged release (#403)
+- **vercel-deployments**: Clarify discovered team coverage (#405)
+- **homebrew**: Preserve installed launcher checks in generated formula (#401)
+
+## [1.5.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Say "reading usage" on first load, spinner after the text (OPS-169) (#399)
+- **core**: Remove the replaced Kitty placement so old chart frames do not linger (OPS-168) (#397)
+
+### Features
+
+- **core**: Show refresh activity in widget titles (#390)
+
+## [1.4.0] - 2026-10-13
+
+### Features
+
+- **packaging**: Ship Debian packages and signed APT integration (OPS-67) (#392)
+
+## [1.3.0] - 2026-10-13
+
+### Bug Fixes
+
+- **agent-usage**: Compress reset timestamps (#384)
+- **core**: Stop Kitty upload feedback loops for unchanged pixels (#391)
+- **agent-usage**: Align Claude reset cache freshness (#394)
+
+### Documentation
+
+- Recommend npm as the default installation method (#380)
+- Retire present-tense Python port narration (#385)
+
+### Features
+
+- **core**: Send local chart images through shared memory (OPS-154) (#362)
+- **agent-usage**: Support Cursor and Grok's unified SpaceXSI plan beside their own plans (OPS-162)
+- **agent-usage**: Support the unified SpaceXSI plan for Cursor and Grok (OPS-162) (#387)
+
+### Performance
+
+- **core**: Rasterise only the visible chart crop (OPS-148) (#358)
+
+### Reverted
+
+- Feat(agent-usage): support Cursor and Grok's unified SpaceXSI plan (OPS-162) (#386)
+
 ## [1.2.0] - 2026-10-13
 
 ### Features

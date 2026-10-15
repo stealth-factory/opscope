@@ -119,7 +119,7 @@ fn graphql(
         45,
     )?;
     take_rate(rate, &headers);
-    let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     graphql_payload(&data)
 }
 
@@ -170,7 +170,7 @@ fn rest_get(
         30,
     )?;
     take_rate(rate, &headers);
-    serde_json::from_str(&body).map_err(|e| e.to_string())
+    tc::parse_source_json(&body).map_err(|e| e.to_string())
 }
 
 /// Remaining/limit from GitHub's rate-limit headers. GraphQL and REST
@@ -1450,6 +1450,11 @@ fn sparkline(values: &[f64], width: usize) -> String {
         .collect()
 }
 
+/// The address `c` copies for a workflow run. The title links to it.
+fn run_url(run: &serde_json::Value) -> String {
+    text(run, "html_url")
+}
+
 fn copy_items(run: &serde_json::Value) -> Vec<(String, String)> {
     let mut items = Vec::new();
     let mut push = |label: &str, value: String| {
@@ -1457,7 +1462,7 @@ fn copy_items(run: &serde_json::Value) -> Vec<(String, String)> {
             items.push((label.to_string(), value));
         }
     };
-    push("Run URL", text(run, "html_url"));
+    push("Run URL", run_url(run));
     push("Commit SHA", text(run, "head_sha"));
     push("Branch", text(run, "branch"));
     items
@@ -1469,9 +1474,10 @@ fn info_overlay(
     w: usize,
     repeats: usize,
     note: &str,
+    busy: Option<usize>,
     p: &Palette,
 ) -> Vec<String> {
-    let mut rows = vec![tc::title(
+    let mut rows = vec![tc::title_busy(
         &format!(
             "{} / {}",
             text(run, "repo"),
@@ -1479,6 +1485,7 @@ fn info_overlay(
         ),
         w,
         &p.accent,
+        busy,
     )];
     let kind = outcome(run);
     let colour = outcome_colour(&kind, p);
@@ -1517,7 +1524,14 @@ fn info_overlay(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!("  {}", &sha[..sha.len().min(7)])),
-                (p.txt.as_str(), if title.is_empty() { String::new() } else { format!("  {}", title) }),
+                (
+                    p.txt.as_str(),
+                    if title.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", tc::link(&run_url(run), &title))
+                    },
+                ),
             ],
             w - 1,
         ));
@@ -1662,9 +1676,11 @@ fn main() {
         window_hours: start_window,
         ..Default::default()
     }));
+    let refresh_activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_activity = refresh_activity.clone();
     let poll_tok = tok.clone();
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
@@ -1679,6 +1695,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 one_pass(
                     &poll_tok,
@@ -1714,6 +1731,7 @@ fn main() {
                     return;
                 }
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -1993,7 +2011,9 @@ fn main() {
                 if start {
                     let (details, fetching) = (Arc::clone(&details), Arc::clone(&fetching));
                     let (chosen, tok) = (chosen.clone(), tok.clone());
+                    let detail_activity = refresh_activity.clone();
                     std::thread::spawn(move || {
+                        let _work = detail_activity.start();
                         let got = fetch_jobs(&chosen, &tok);
                         if let Ok(mut g) = details.lock() {
                             g.insert(id, got);
@@ -2012,7 +2032,15 @@ fn main() {
                         && is_failed(r)
                 })
                 .count();
-            let body = info_overlay(&chosen, held.as_ref(), w, repeats, &note.0, &p);
+            let body = info_overlay(
+                &chosen,
+                held.as_ref(),
+                w,
+                repeats,
+                &note.0,
+                refresh_activity.tick(tick),
+                &p,
+            );
             let foot = 2;
             let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
@@ -2059,7 +2087,12 @@ fn main() {
             continue;
         }
 
-        let mut rows = vec![tc::title("github actions", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "github actions",
+            w,
+            &p.accent,
+            refresh_activity.tick(tick),
+        )];
         let mut meta = vec![(
             p.dim.as_str(),
             format!(
@@ -2353,7 +2386,11 @@ fn main() {
             if cols.single {
                 line.push((
                     c(if here { &p.txt } else { &p.msg }),
-                    format!("  {} · {}", text(run, "workflow"), subject),
+                    format!(
+                        "  {} · {}",
+                        text(run, "workflow"),
+                        subject
+                    ),
                 ));
             }
             if here {
@@ -2745,6 +2782,15 @@ mod tests {
         assert_eq!(got["repo_fetched"], 30);
         assert_eq!(got["attempt"], 2);
         assert!(is_failed(&got));
+        let url = "https://github.com/acme/app/actions/runs/9";
+        assert_eq!(run_url(&got), url);
+        assert_eq!(copy_items(&got)[0].1, url);
+        let rows = info_overlay(&got, None, 80, 0, "", None, &palette());
+        assert!(
+            rows.iter().any(|r| r.contains(&format!("\x1b]8;;{url}\x1b\\"))),
+            "the run title links the url the copy sheet lists"
+        );
+        assert!(rows.iter().any(|r| r.contains("fix: the thing")));
     }
 
     #[test]

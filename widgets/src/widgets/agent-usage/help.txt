@@ -35,6 +35,14 @@ sent only to app.notion.com, only while Notion is one of the agents shown,
 and never read out of a browser. It is a full sign-in to your Notion
 account, so keep config.json chmod 600; the tab warns when it is not.
 
+Perplexity is read the same way: its credits come from the endpoint
+perplexity.ai's usage page uses, signed in with a session cookie you paste
+into agent_usage.perplexity_token or the PERPLEXITY_SESSION_TOKEN
+environment variable (agent_usage.perplexity_token_env renames it). When
+both are set, perplexity_token wins; the variable is read only when it is
+empty. It is sent only to www.perplexity.ai, only while
+Perplexity is one of the agents shown, and never read out of a browser.
+
 Devin is the same kind of reading. Its daily and weekly quota, the resets
 that came with them, and the extra-usage balance come from app.devin.ai.
 The bearer token goes in agent_usage.devin_token or DEVIN_BEARER_TOKEN

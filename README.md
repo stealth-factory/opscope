@@ -123,6 +123,42 @@ the coreutils command of that name.
 Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
+### APT on Debian / Ubuntu
+
+APT is an alternative for Linux amd64 users on Ubuntu 22.04 / Debian 12 or
+newer (glibc 2.35+). **npm/npx remains the recommended method.**
+
+First complete the [one-time signing-key and source setup](docs/debian.md#signed-repository)
+for the Stealth Factory repository; Opscope is not in the default Debian/Ubuntu
+archives. Then install:
+
+```sh
+sudo apt update
+sudo apt install opscope
+opscope clocks
+```
+
+Update with `sudo apt update && sudo apt install --only-upgrade opscope`.
+No Node or Rust installation is needed. APT installs the required runtime
+libraries, but widget tools must currently be installed manually. Run
+`opscope doctor` to see which tools are missing and how to install them.
+Only `opscope` goes on PATH; widget binaries remain private and coreutils
+`link` is untouched. Linux arm64 packages are not available.
+
+For a manual installation without adding the repository, download the `.deb`
+and matching `.sha256` from a [GitHub release](https://github.com/stealth-factory/opscope/releases),
+verify the checksum, and install locally:
+
+```sh
+sha256sum -c opscope_X.Y.Z_amd64.deb.sha256
+sudo apt install ./opscope_X.Y.Z_amd64.deb
+opscope clocks
+```
+
+Replace `X.Y.Z` with the downloaded release version. Without the repository,
+download and install each newer package manually. See
+[Debian installation and upgrades](docs/debian.md) for details.
+
 ### Homebrew on macOS
 
 Homebrew is an alternative for Mac users who prefer a package-managed

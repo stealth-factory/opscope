@@ -93,7 +93,7 @@ fn graphql(
             }
         }
     }
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
             .as_str()
@@ -342,6 +342,11 @@ struct Issue {
     age: f64,
     /// None when nobody has pointed it, which is not the same as zero.
     points: Option<f64>,
+}
+
+/// The address `c` copies for an issue. The title on that row links to it.
+fn issue_url(issue: &Issue) -> String {
+    issue.url.clone()
 }
 
 /// One project, as much of it as a team's screen needs.
@@ -917,6 +922,7 @@ fn cycle_detail_with_plots(
     h: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, Option<usize>) {
     let team = text(&c["team"], "name");
     // Linear cycles are often unnamed - the board falls back to their
@@ -927,7 +933,7 @@ fn cycle_detail_with_plots(
         n => n,
     };
     let title = if team.is_empty() { named } else { format!("{} · {}", named, team) };
-    let mut rows = vec![tc::title(&title, w, &p.accent)];
+    let mut rows = vec![tc::title_busy(&title, w, &p.accent, busy)];
     let label_w = 18usize;
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
         rows.push(tc::seg(
@@ -1185,7 +1191,7 @@ fn cycle_detail_with_plots(
                 ),
                 (
                     if here { p.accent.as_str() } else { p.txt.as_str() },
-                    format!("  {}", tc::pad(&first, title_w)),
+                    format!("  {}", tc::pad(&tc::link(&issue_url(it), &first), title_w)),
                 ),
                 (p.dim.as_str(), format!("  {:>6}", dur(Some(it.age)))),
                 // Nothing rather than "0 pts" when nobody has pointed it.
@@ -1203,7 +1209,11 @@ fn cycle_detail_with_plots(
             rows.push(tc::seg(
                 &[(
                     if here { p.accent.as_str() } else { p.txt.as_str() },
-                    format!("{}{}", " ".repeat(2 + ident_w + 2 + state_w + 2), line),
+                    format!(
+                        "{}{}",
+                        " ".repeat(2 + ident_w + 2 + state_w + 2),
+                        tc::link(&issue_url(it), line)
+                    ),
                 )],
                 w - 1,
             ));
@@ -1226,8 +1236,14 @@ fn team_detail_with_plots(
     h: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> (Vec<String>, Option<usize>) {
-    let mut rows = vec![tc::title(&format!("{} · {}", key, name), w, &p.accent)];
+    let mut rows = vec![tc::title_busy(
+        &format!("{} · {}", key, name),
+        w,
+        &p.accent,
+        busy,
+    )];
     let label_w = 18usize;
     let get = |k: &str| counts.get(k).copied().unwrap_or(0);
     let open = get("open");
@@ -1431,13 +1447,14 @@ fn project_detail_with_plots(
     w: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    busy: Option<usize>,
 ) -> Vec<String> {
     let title = if team.is_empty() {
         q.name.clone()
     } else {
         format!("{} · {}", q.name, team)
     };
-    let mut rows = vec![tc::title(&title, w, &p.accent)];
+    let mut rows = vec![tc::title_busy(&title, w, &p.accent, busy)];
     let label_w = 18usize;
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
         rows.push(tc::seg(
@@ -1895,6 +1912,7 @@ fn main() {
     let quota = Arc::new(Mutex::new(Quota::default()));
     let days = Arc::new(Mutex::new(start_window));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
+    let activity = tc::Refresh::default();
 
     let (tok, source) = token(&cfg);
     // The poller takes ownership of the key; the project screen fetches on
@@ -1908,6 +1926,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_days = Arc::clone(&days);
     let poller_quota = Arc::clone(&quota);
+    let poller_activity = activity.clone();
     std::thread::spawn(move || loop {
         if tok.is_empty() {
             if let Ok(mut guard) = poller.lock() {
@@ -1917,6 +1936,7 @@ fn main() {
                 ));
             }
         } else {
+            let work = poller_activity.start();
             let want = poller_days.lock().map(|g| *g).unwrap_or(14);
             if let Err(said) = one_pass(
                 &tok,
@@ -1931,6 +1951,7 @@ fn main() {
                     guard.err = said;
                 }
             }
+            drop(work);
         }
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
@@ -2272,7 +2293,8 @@ fn main() {
         let left = quota.lock().map(|g| g.requests).unwrap_or(None);
 
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("linear ops", w, &p.new)];
+        let busy = activity.tick(tick);
+        let mut rows = vec![tc::title_busy("linear ops", w, &p.new, busy)];
         // Where the focused section's cursor landed, so the board can be
         // scrolled to keep it on screen.
         let mut cursor: Option<usize> = None;
@@ -2997,6 +3019,7 @@ fn main() {
                         w,
                         &p,
                         &mut detail_plots,
+                        busy,
                     ),
                     None,
                 )
@@ -3011,8 +3034,18 @@ fn main() {
                         let issues = s.cycle_issues.get(&id).unwrap_or(&none);
                         list_len = issues.len();
                         copy_url = issues.get(pick.min(issues.len().saturating_sub(1)))
-                            .map(|i| (i.url.clone(), i.ident.clone()));
-                        cycle_detail_with_plots(c, states, issues, pick, w, h, &p, &mut detail_plots)
+                            .map(|i| (issue_url(i), i.ident.clone()));
+                        cycle_detail_with_plots(
+                            c,
+                            states,
+                            issues,
+                            pick,
+                            w,
+                            h,
+                            &p,
+                            &mut detail_plots,
+                            busy,
+                        )
                     })
                     .unwrap_or_default()
             } else {
@@ -3021,7 +3054,20 @@ fn main() {
                         let empty = HashMap::new();
                         let counts = s.by_team.get(key).unwrap_or(&empty);
                         let opens = s.proj_open.get(key).unwrap_or(&empty);
-                        team_detail_with_plots(key, name, counts, &projects, opens, pick, s.window, w, h, &p, &mut detail_plots)
+                        team_detail_with_plots(
+                            key,
+                            name,
+                            counts,
+                            &projects,
+                            opens,
+                            pick,
+                            s.window,
+                            w,
+                            h,
+                            &p,
+                            &mut detail_plots,
+                            busy,
+                        )
                     })
                     .unwrap_or_default()
             };
@@ -3043,7 +3089,9 @@ fn main() {
                     }
                     let (id, tok, quota) = (q.id.clone(), ui_tok.clone(), Arc::clone(&ui_quota));
                     let (held, asking) = (Arc::clone(&held), Arc::clone(&asking));
+                    let project_activity = activity.clone();
                     std::thread::spawn(move || {
+                        let _work = project_activity.start();
                         let got = fetch_project(&id, &tok, &quota);
                         if let Ok(mut g) = held.lock() {
                             g.insert(id.clone(), (got, tc::now()));
@@ -3277,9 +3325,29 @@ mod tests {
         let mut chars = joined.chars();
         while let Some(c) = chars.next() {
             if c == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
+                let mut peek = chars.clone();
+                match peek.next() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\u{1b}' {
+                                let mut end = chars.clone();
+                                if end.next() == Some('\\') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        for c in chars.by_ref() {
+                            if c == 'm' {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {
@@ -3329,6 +3397,13 @@ mod tests {
         // And a cursor, on the row it named.
         assert!(plain(&[rows[at.unwrap()].clone()]).contains("ABC-1"));
         assert_eq!(out.matches('▸').count(), 1);
+        let url = "https://linear.app/x/issue/ABC-1";
+        assert_eq!(issue_url(&issues[0]), url);
+        assert!(
+            rows.iter().any(|r| r.contains(&format!("\x1b]8;;{url}\x1b\\"))),
+            "the issue title links the url c copies"
+        );
+        assert!(!out.contains("https://"), "{out}");
     }
 
     #[test]
@@ -3533,7 +3608,17 @@ mod tests {
         // already knew are on the first frame, and the screen says a
         // request is out rather than looking empty.
         let mut plots = Vec::new();
-        let rows = project_detail_with_plots(&q, "ABC", None, &states, None, 100, &palette(), &mut plots);
+        let rows = project_detail_with_plots(
+            &q,
+            "ABC",
+            None,
+            &states,
+            None,
+            100,
+            &palette(),
+            &mut plots,
+            None,
+        );
         assert_eq!(plots.len(), 2);
         let meter = &plots[0];
         let progress = plain(&[rows[meter.y].clone()]);
@@ -3964,7 +4049,7 @@ fn cycle_detail(
     h: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
-    cycle_detail_with_plots(c, states, issues, pick, w, h, p, &mut Vec::new())
+        cycle_detail_with_plots(c, states, issues, pick, w, h, p, &mut Vec::new(), None)
 }
 
 #[cfg(test)]
@@ -3980,7 +4065,20 @@ fn team_detail(
     h: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
-    team_detail_with_plots(key, name, counts, projects, opens, pick, window, w, h, p, &mut Vec::new())
+        team_detail_with_plots(
+            key,
+            name,
+            counts,
+            projects,
+            opens,
+            pick,
+            window,
+            w,
+            h,
+            p,
+            &mut Vec::new(),
+            None,
+        )
 }
 
 #[cfg(test)]
@@ -3993,5 +4091,5 @@ fn project_detail(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    project_detail_with_plots(q, team, held, states, oldest, w, p, &mut Vec::new())
+    project_detail_with_plots(q, team, held, states, oldest, w, p, &mut Vec::new(), None)
 }

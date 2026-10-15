@@ -12,7 +12,7 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 1 Oct 2026 the two agree — see
+As of 14 Oct 2026 the two agree — see
 [what this collection changed](#what-this-collection-changed) for what moved.
 
 ## The two rules that shape every table here
@@ -48,7 +48,7 @@ record which was taken, so both are carried.
 | `claude-opus-4-5` | 5 | 25 | 0.50 | 6.25 | 10 |
 | `claude-opus-4-1` | 15 | 75 | 1.50 | 18.75 | 30 |
 | `claude-opus-4` | 15 | 75 | 1.50 | 18.75 | 30 |
-| `claude-sonnet-5-5` | 2 | 10 | 0.20 | 2.50 | 4 |
+| `claude-sonnet-5-5` | 2 | 10 | 0.10 | 2.50 | 4 |
 | `claude-sonnet-5` | 2 | 10 | 0.20 | 2.50 | 4 |
 | `claude-sonnet-4-6` | 3 | 15 | 0.30 | 3.75 | 6 |
 | `claude-sonnet-4-5` | 3 | 15 | 0.30 | 3.75 | 6 |
@@ -64,10 +64,11 @@ record which was taken, so both are carried.
 - **Opus 5.5 reads cache at 0.05× input**, $0.20. The pricing page footnotes
   it. `claude-opus-5` is a prefix of `claude-opus-5-5`, so the 5.5 row has to
   exist or 5.5 inherits Opus 5 — $5/$25 and cache reads at $0.50.
-- **Sonnet 5.5 publishes the same five as Sonnet 5**, 2 / 10 / 0.20 / 2.50 / 4.
-  Cache reads are the standard 0.1×, not Opus 5.5's 0.05×. `claude-sonnet-5`
-  is a prefix of `claude-sonnet-5-5`, so the 5.5 row has to exist or a later
-  move of one model reprices the other. Fast mode is not offered.
+- **Sonnet 5.5 reads cache at 0.05× input**, $0.10, where Sonnet 5 reads at
+  the standard 0.1×, $0.20. The other four match Sonnet 5: 2 / 10 / 2.50 / 4.
+  `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, so the 5.5 row has to
+  exist or 5.5 inherits Sonnet 5's reads at twice the price. Fast mode is not
+  offered.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
 - Fast mode, where offered, is a different rate — `claude-opus-5-5` is
@@ -153,12 +154,27 @@ record which was taken, so both are carried.
   inference are separate tables, out of scope.
 - **Fast and Ultrafast are multipliers, not rows.** Codex records the speed
   beside the model, as `service_tier` on `thread_settings`. `fast`, and the
-  API's `priority` (the value a Fast response reports), bill at 2× the
-  standard short-context row and the pane names the row Fast.
-  `gpt-6.1-sol` Fast is therefore 4 / 20 / 0.20 / 5. `ultrafast` is 6× and
-  published for `gpt-6-astra` only: 60 / 300 / 6 / 75 short context, and the
-  row says Ultrafast. Any other model with `ultrafast` stays on its standard
-  row — the meter does not invent an Ultrafast rate. Missing, `default` and
+  API's `priority` (the value a Fast response reports), bill at the
+  published Fast multiple of the standard short-context row and the pane
+  names the row Fast. That multiple is 2× for most models, so `gpt-6.1-sol`
+  Fast is 4 / 20 / 0.20 / 5. Eight publish a different one, every kind
+  scaled alike:
+
+  | model | Fast | input | output | cache_read |
+  |---|--:|--:|--:|--:|
+  | `gpt-5.5` | 2.5× | 12.50 | 75 | 1.25 |
+  | `gpt-5-mini` | 1.8× | 0.45 | 3.60 | 0.045 |
+  | `gpt-4.1` | 1.75× | 3.50 | 14 | 0.875 |
+  | `gpt-4.1-mini` | 1.75× | 0.70 | 2.80 | 0.175 |
+  | `gpt-4o` | 1.7× | 4.25 | 17 | 2.125 |
+  | `gpt-4o-mini` | 5/3× | 0.25 | 1 | 0.125 |
+  | `o3` | 1.75× | 3.50 | 14 | 0.875 |
+  | `o4-mini` | 2/1.1× | 2 | 8 | 0.50 |
+
+  `ultrafast` is 6× and published for `gpt-6-astra` (60 / 300 / 6 / 75) and
+  `gpt-6.1-sol` (12 / 60 / 0.60 / 15), short context, and the row says
+  Ultrafast. Any other model with `ultrafast` stays on its standard row —
+  the meter does not invent an Ultrafast rate. Missing, `default` and
   `auto` stay on the standard row. These are published API list dollars.
   Codex credit multipliers (included usage 2.5× Fast / 8× Ultrafast) are a
   different bill and are not applied.
@@ -190,6 +206,7 @@ record which was taken, so both are carried.
 
 | model | input | output | cache_read |
 |---|--:|--:|--:|
+| `gemini-4-argon` | 2 | 10 | 0.10 |
 | `gemini-3.8-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.7-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.6-flash` | 0.75 | 3.75 | 0.075 |
@@ -202,8 +219,13 @@ record which was taken, so both are carried.
 | `gemini-2.5-flash` | 0.30 | 2.50 | 0.03 |
 | `gemini-2.5-flash-lite` | 0.10 | 0.40 | 0.01 |
 
-- **3.7 and 3.6 Flash are introductory prices through 31 Dec 2026**, doubling
-  on 1 Jan 2027 to 1.50 / 7.50 / 0.15. This page goes stale on that date.
+- **`gemini-4-argon` is an introductory price through 30 Nov 2026**, doubling
+  on 1 Dec 2026 to 4 / 20 / 0.20. Implicit caching only, at 0.05× input
+  (95% discount) with no explicit cache storage fee, and the full 1M context
+  window bills at these rates with no long-context tier.
+- **3.8, 3.7 and 3.6 Flash are introductory prices through 31 Dec 2026**,
+  doubling on 1 Jan 2027 to 1.50 / 7.50 / 0.15. This page goes stale on that
+  date.
 - **Context caching is billed by storage — $/1M tokens per *hour*** — which is
   not a per-request `cache_write` and is deliberately not carried. Pricing it
   as one would be inventing a number.
@@ -239,6 +261,64 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 14 Oct 2026
+
+**Corrected `claude-sonnet-5-5` cache reads to $0.10,** 0.05× input, from the
+$0.20 the row shipped with. Confirmed on the
+[pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
+The other four were right.
+
+**Fast is the published ratio per model, not a blanket 2×.** OpenAI's
+[pricing page](https://developers.openai.com/api/docs/pricing) Fast table
+prices eight models off 2× — `gpt-5.5` at 2.5×, and `gpt-5-mini`,
+`gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3` and `o4-mini`
+under it. The ratios are in `SPEED_TIERS` in `main.rs`; every other model
+keeps 2×. A dated snapshot (`gpt-4.1-2025-04-14`) takes its model's ratio, a
+longer name (`gpt-4.1-nano`, `o3-mini`) does not.
+
+**`gpt-6.1-sol` Ultrafast is priced, at 6×:** 12 / 60 / 0.60 / 15. It is in
+the same Ultrafast table as `gpt-6-astra`, and until now those turns stayed
+on the Standard row at a sixth of the bill.
+
+A config price still wins kind by kind: a bare-id price is scaled by the
+model's own ratio, and a key on the `· Fast` or `· Ultrafast` row is taken
+as written.
+
+**Added `gemini-4-argon`,** at 2 / 10 / 0.10 (input, output including thinking
+tokens, cached input). Confirmed 14 Oct 2026 on Google's
+[pricing page](https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon)
+and [model page](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon).
+
+`rate_for` matches by longest substring, and no existing key in `LIST_RATES` is
+a substring of `gemini-4-argon`, so without this row the model resolves to no
+price and its tokens cost zero.
+
+**These are introductory prices through 30 November 2026.** From **1 December
+2026** all three double:
+
+| model | input | output | cached input | from |
+| --- | --- | --- | --- | --- |
+| `gemini-4-argon` | 4.00 | 20.00 | 0.20 | 1 Dec 2026 |
+
+Recorded here rather than in the code for the same reason `gemini-3.8-flash`
+and `gpt-5.6-sol` are: `LIST_RATES` carries what the meter bills today, and the
+successor figures sit here so the row can be moved on the day rather than
+rediscovered after a month of half-price totals.
+
+**Implicit caching only, at 0.05× input.** Explicit context caching
+(`cachedContents` / `caches.create`) and its hourly storage charge are not
+supported on `gemini-4-argon`. Implicit caching is enabled by default for
+prompts of at least 4,096 tokens and discounts cached input by 95% ($0.10
+through 30 Nov 2026, $0.20 from 1 Dec 2026), with no `cache_write` or storage
+fee.
+
+**Flat 1M context window, and no sibling variants.** The full 1,048,576-token
+unified input+output window bills at the standard rate (no >200k doubling).
+Batch and Flex ($1 / $5 / $0.05 introductory; $2 / $10 / $0.10 from 1 Dec
+2026) and Priority ($3.60 / $18 / $0.18 introductory; $7.20 / $36 / $0.36 from
+1 Dec 2026) are consumption modes rather than model ids and stay off the card.
+Not available on the Free tier or on Google AI Pro.
 
 ### 1 Oct 2026
 

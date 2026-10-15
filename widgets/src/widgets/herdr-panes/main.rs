@@ -895,9 +895,11 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
+    let activity = tc::Refresh::default();
     let wake = refresh_wake::new();
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_activity = activity.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let poller_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
@@ -907,6 +909,7 @@ fn main() {
             ..Default::default()
         };
         loop {
+            let work = poller_activity.start();
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a Herdr with nothing running in it.
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -918,6 +921,7 @@ fn main() {
                 }
                 return;
             }
+            drop(work);
             if poller_stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1129,7 +1133,12 @@ fn main() {
             agents.iter().map(|a| a.workspace_id.as_str()).collect();
 
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("herdr panes", w, &p.accent)];
+        let mut rows = vec![tc::title_busy(
+            "herdr panes",
+            w,
+            &p.accent,
+            activity.tick(tc::animation_tick()),
+        )];
         // The span each pane covers, taken from where its rows started and
         // ended: a pane is one row, or several once its detail is drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();

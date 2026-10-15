@@ -94,6 +94,10 @@ press were then reliably scrolled off the screen you were pressing them from.
 
 ## The build log
 
+Build output is shown as plain source text. Terminal escape sequences,
+including hyperlinks supplied by a build step, are removed before wrapping.
+Only the deployment detail's widget-owned subject link is clickable.
+
 The detail view ends with the deployment's own build output, which arrives
 with the rest of the detail. The line above it says a build failed and names
 a code; the log says which line of somebody's config did it, which is the
@@ -108,6 +112,18 @@ The last 200 lines are requested. A long build runs to thousands and the
 pane shows a few dozen, so asking for all of them would spend the wait on
 text nobody reads; the tail is the useful end, since a build explains itself
 on the way out rather than on the way in.
+
+## Clickable titles
+
+The commit subject in the deployment detail view links to that deployment's
+Vercel page, using the same URL as the copy sheet. Main-list subjects are
+plain text. Links have a dashed underline in text and Kitty mode, or a plain
+underline when the terminal does not support styled underlines.
+
+In Herdr, hold **Ctrl and left-click** the underlined subject to open the page
+in your local browser. A regular click keeps the widget's selection and
+detail behaviour. Other terminals use their own hyperlink gesture and must
+support OSC 8. `c` remains the keyboard route for opening the copy sheet.
 
 ## Keys
 
