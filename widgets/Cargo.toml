@@ -12,6 +12,7 @@ license.workspace = true
 opscope-core = { path = "../core", version = "1.8.0" }
 libc = "0.2"
 serde_json = "1"
+base64 = "0.22"
 # clocks needs these; nothing else does yet, and an unused dependency costs
 # nothing at run time because LTO drops what no binary reaches.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
