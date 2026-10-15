@@ -148,9 +148,10 @@ asks the next frame to send the image again. Graphics stay on. An
 image missing or moving, not a frame error, so animation stays on. A
 successful placement acknowledgement carries `p=` too, and is not an error.
 
-A rescale,
+A rescale, a cell-size change, a move to another cell,
 a slot-count change, a resize, a scroll that changes the crop, or a screen
-loss is a full upload too. Text and Braille are unchanged.
+loss is a full upload too. Changing only whether the image sits under the
+text re-places it, and the pixels stay. Text and Braille are unchanged.
 
 The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
 pixels only for some shapes. A netwatch trace on an 80-column pane is 64
