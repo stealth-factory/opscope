@@ -9,6 +9,10 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
+const GRAPHICS_QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+/// Sync, then the keyboard query, then device attributes. The keyboard
+/// query goes out before device attributes.
+const QUERY_TAIL: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// Raster used when the terminal never reports a cell, or reports one that
 /// is not a character cell. Today's charts are this size.
 pub(crate) const FALLBACK_CELL_W: usize = 8;
@@ -17,9 +21,6 @@ pub(crate) const FALLBACK_CELL_H: usize = 16;
 /// so the uncompressed RGBA bytes of a plot stay at or under this times
 /// 8×16×4.
 pub(crate) const MAX_PLOT_CELLS: usize = 20_000;
-/// `CSI ? u` stays immediately before `CSI c`. `CSI 16 t` follows `CSI c`.
-const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c\x1b[16t";
-const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
@@ -141,6 +142,7 @@ pub(crate) fn start() {
         ..Session::default()
     };
     SYNC_SUPPORTED.store(false, Ordering::Release);
+    super::graphics::reset_animation();
     if unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1 {
         return;
     }
@@ -177,14 +179,16 @@ pub(crate) fn start() {
         let (w, h) = cell_from_winsize().unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
         publish_cell(w, h);
     }
-    let mut bytes = format!(
-        "{}{UNDERLINE_QUERY}",
-        if mode == GraphicsMode::Text {
-            TEXT_QUERY
-        } else {
-            QUERY
-        }
-    );
+    // Probe frames before the query tail; keep keyboard/DA adjacent and the
+    // cell-size request after DA, as required by current negotiation.
+    let mut bytes = if mode == GraphicsMode::Text {
+        format!("{QUERY_TAIL}{UNDERLINE_QUERY}")
+    } else {
+        format!(
+            "{GRAPHICS_QUERY}{}{QUERY_TAIL}\x1b[16t{UNDERLINE_QUERY}",
+            super::graphics::animation_probe()
+        )
+    };
     if let Some(probe) = probe {
         bytes.push_str(&probe);
     }
@@ -247,6 +251,36 @@ impl Session {
             let id = keys
                 .split(',')
                 .find_map(|key| key.strip_prefix("i=")?.parse::<u32>().ok());
+            if id == Some(super::graphics::probe_id()) {
+                if message.starts_with("OK") {
+                    super::graphics::set_animation(true);
+                } else if message.starts_with("ENOENT") || message.starts_with("EINVAL") {
+                    super::graphics::set_animation(false);
+                }
+                // Same path as every other write outside `draw`, so the
+                // delete stays ordered with the frame bytes.
+                super::out(&super::graphics::discard_probe());
+                super::flush();
+                return false;
+            }
+            // A frame edit the terminal rejects is not a broken image.
+            // Kitty answers ENOSPC when animation storage is exhausted.
+            // One edit can draw several of these, so the slot bits stay
+            // until the next full upload replaces them. Clearing them on
+            // the first reply made the next one look like a bad image and
+            // turned graphics off.
+            // A placement (`a=p`) echoes `p=`. That reply is the image
+            // missing or moving, even while the slot's last upload was a
+            // frame edit. Frame commands themselves carry no placement key.
+            let placement_reply = keys.split(',').any(|key| key.starts_with("p="));
+            if !placement_reply
+                && id.is_some_and(super::graphics::frame_edit_pending)
+                && frame_refused(message)
+            {
+                super::graphics::set_animation(false);
+                super::screen_lost();
+                return false;
+            }
             if let Some(id) = id.filter(|id| super::graphics::owns_image(*id)) {
                 // ENOENT means the terminal dropped the placement. Only a
                 // replaced object is collected; the current one reused the id.
@@ -343,6 +377,12 @@ impl Session {
             false
         }
     }
+}
+
+fn frame_refused(message: &str) -> bool {
+    message.starts_with("ENOENT")
+        || message.starts_with("EINVAL")
+        || message.starts_with("ENOSPC")
 }
 
 pub(crate) fn reply(sequence: &str) {
@@ -897,6 +937,100 @@ mod tests {
             s.reply(&format!("\x1b_Gi={ours},p=1;EINVAL:bad\x1b\\"), now);
             assert!(!s.capabilities.kitty_graphics && s.image_rejected);
         }
+    }
+
+    #[test]
+    fn a_refused_frame_probe_keeps_full_uploads() {
+        let _slots = crate::graphics::test_lock();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let probe = crate::graphics::probe_id();
+        s.reply(&format!("\x1b_Gi={probe};EINVAL:no animation\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(!crate::graphics::animation_ready());
+        s.reply(&format!("\x1b_Gi={probe};OK\x1b\\"), now);
+        assert!(crate::graphics::animation_ready());
+        crate::graphics::reset_animation();
+    }
+
+    #[test]
+    fn repeated_frame_errors_keep_graphics() {
+        let _transport = crate::shm::guard();
+        let _slots = crate::graphics::test_lock();
+        crate::graphics::clear_frame_edits();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let slot = |n: usize| crate::graphics::image_id(n);
+        // A direct image error that was not a frame edit still ends graphics.
+        // The reply has to name the placement: an unmatched one is ignored.
+        crate::shm::mark_direct(slot(0), 1);
+        s.reply(
+            &format!("\x1b_Gi={},p=1;ENOSPC:animation storage exhausted\x1b\\", slot(0)),
+            now,
+        );
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        crate::graphics::testing_mark_frame(0);
+        crate::graphics::testing_mark_frame(1);
+        for message in [
+            format!("\x1b_Gi={};EINVAL:overlap\x1b\\", slot(0)),
+            format!("\x1b_Gi={};EINVAL:overlap\x1b\\", slot(0)),
+            format!("\x1b_Gi={};ENOSPC:animation storage exhausted\x1b\\", slot(1)),
+        ] {
+            s.reply(&message, now);
+            assert!(
+                s.capabilities.kitty_graphics && !s.image_rejected,
+                "{message}"
+            );
+        }
+        assert!(!crate::graphics::animation_ready());
+        // Once the fallback upload clears the bits, a real image error still ends graphics.
+        crate::graphics::clear_frame_edits();
+        crate::shm::mark_direct(slot(0), 2);
+        s.reply(&format!("\x1b_Gi={},p=2;EINVAL:bad\x1b\\", slot(0)), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+        crate::graphics::reset_animation();
+        crate::graphics::clear_frame_edits();
+    }
+
+    #[test]
+    fn a_placement_error_keeps_animation() {
+        let _transport = crate::shm::guard();
+        let _slots = crate::graphics::test_lock();
+        crate::graphics::clear_frame_edits();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let probe = crate::graphics::probe_id();
+        s.reply(&format!("\x1b_Gi={probe};OK\x1b\\"), now);
+        assert!(crate::graphics::animation_ready());
+        crate::graphics::testing_mark_frame(0);
+        let id = crate::graphics::image_id(0);
+        // The periodic re-place echoes p=. The image is gone; the frame op is not.
+        s.reply(&format!("\x1b_Gi={id},p=7;ENOENT:no such image\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(crate::graphics::animation_ready());
+        s.reply(&format!("\x1b_Gi={id};EINVAL:overlap\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(!crate::graphics::animation_ready());
+        crate::graphics::reset_animation();
+        crate::graphics::clear_frame_edits();
     }
 
     #[test]
