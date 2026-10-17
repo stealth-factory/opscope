@@ -28,6 +28,23 @@ all `agent-usage` vendor quota views use fractional progress/quota meters.
 and `clocks` adds countdown and pomodoro meters. These use shared text fallbacks:
 block bars, Braille traces and reference marks.
 
+Notifications and text sizing are negotiated in the same window, separately
+from graphics. A terminal advertising OSC 99 title and body support gets one
+notification per alert, with a stable replacement id. `report` is requested
+only when the query listed it, and advertised `focus` is turned off with
+`-focus`, so a click report does not also focus the pane. An action the
+terminal did not list is left off, because an unknown `a` value can drop the
+notification. Every other terminal, including one that only speaks OSC 9
+(Ghostty among them), still gets the OSC 9 and OSC 777 bytes clocks has always
+sent. A semicolon in that fallback is dropped, because OSC 777 uses it to
+split the command, the title and the body. Text sizing is OSC 66, detected by
+a cursor-position round trip: the width probe must move two columns and the
+scale probe two more. `clocks` and
+`months` use it only when a scale from 2× to 4× fits the pane. A block that
+does not fit stays the block digits or the ordinary heading. `draw` keeps an
+OSC 66 block, and that block occupies scale times the width of its text.
+Core emits the sequences; widgets do not branch on the terminal.
+
 ## Choosing a renderer
 
 ```sh
@@ -375,8 +392,8 @@ and intentional text presentation, not unimplemented widget migrations.
 | `agent-usage` | Pixel quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
 | `herdr-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Keep status, selection and navigation as text; no invented progress |
 | `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
-| `clocks` | Pixel countdown and pomodoro progress/overtime bars | Keep clock digits as text; native scaled text needs separate capability negotiation |
-| `months` | Synchronized text presentation | Date cells are discrete and benefit from stable text; no reason to animate static dates |
+| `clocks` | Pixel countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
+| `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
@@ -458,9 +475,14 @@ does not unlink, because that call is not async-signal-safe), cached
 frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
 signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
-Ctrl-Z or Ctrl-\, and pushed again after resume. Cell-size checks verify reported dimensions,
+Ctrl-Z or Ctrl-\, and pushed again after resume. They also emulate an OSC 99
+answer and the three cursor reports of the text-sizing probe: a repeat
+notification reuses one id, a terminal that did not answer still receives
+OSC 9 and OSC 777, and a resize that makes the scaled sample wider than the
+pane drops OSC 66. Cell-size checks verify reported dimensions,
 window-pixel fallback, invalid/zero reports and a barren resize returning to
 8×16; cell queries stay outside image chunks. They also check that HTTPS OSC 8 links are kept while HTTP OSC 8 and OSC 52 are stripped. Unit tests
+
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation,
 plus the cell-size parser and the byte cap.
@@ -538,8 +560,8 @@ those signals in any other thread.
 
 The PTY fixture answers the query and checks the push and the pop. It does
 not stand in for a real Kitty, Ghostty, WezTerm, iTerm2, foot, Alacritty or
-Windows Terminal, which are the terminals that implement this flag. The
-text-sizing protocol is not enabled.
+Windows Terminal, which are the terminals that implement this flag. Text
+sizing is negotiated in the same window and is covered below.
 
 ## Underlines
 
@@ -562,6 +584,25 @@ Startup sends an XTGETTCAP query for `Smulx` and `Setulc` with the graphics and 
 `seg()` underlines the content of a marked segment, leaving its leading and trailing whitespace unmarked without removing any alignment cells. For ` -35% `, only `-35%` takes the mark. Internal spaces in a phrase remain underlined, and the following segment never inherits the mark. The core regression test checks the SGR state at each character, including clipped values, all-padding segments and Unicode whitespace.
 
 The PTY fixture checks the query, a positive reply (curly, dashed, and the coloured underline around the same three words) and a negative reply (a plain underline, same words). That is a byte check, not a Kitty window. Visual confirmation in Kitty, SSH, Herdr, Luvus and tmux is still outstanding.
+
+Text sizing is enabled only after the cursor-position probe, and only for the
+clock face and month headings. Legacy keyboard bindings remain the input
+contract. These PTY checks verify emitted bytes, not a live Kitty drawing of
+the scaled glyphs.
+
+The sizing probe begins with a carriage return: column reports must be
+1, 3, 5, so a buffered report beginning elsewhere cannot enable it.
+OSC 99 is enabled only when our query identifier is echoed and the terminal
+advertises both `title` and `body` payloads. A title-only or incomplete reply
+keeps OSC 9/777 delivery. `a=report,-focus` is sent only for the actions
+that reply listed, so an unadvertised `report` is not requested and
+advertised focus is turned off.
+
+Core-generated OSC 66 blocks carry the same private provenance marker as
+core links; the marker is stripped before output. Raw or replayed source
+sizing is discarded. Clipping counts the entire scaled block atomically,
+and a block that extends beyond the frame width or height falls back to plain
+text so it cannot wrap or scroll the pinned title.
 
 Cell size is the xterm `CSI 16 t` report. It is separate from the keyboard
 protocol above and from font sizing. Legacy keyboard bindings remain the

@@ -34,7 +34,10 @@ timezones.
 ## Sections
 
 **Server time** — a big-digit clock in the machine's own timezone, with the
-date and UTC offset beneath it. Set `TZ` in the source to pin it to a fixed
+date and UTC offset beneath it. On a terminal that answered the text-sizing
+probe, the time is drawn at the largest scale from 2× to 4× that fits the
+pane. Anywhere else, and when that block would not fit, it stays five rows
+of block digits. Set `TZ` in the source to pin it to a fixed
 offset instead of following the system.
 
 **Countdown** — three bars that are always running:
@@ -83,8 +86,9 @@ nothing but a terminal:
 | Channel | Reaches |
 |---|---|
 | BEL | every terminal |
-| OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty |
-| OSC 777 | urxvt and others |
+| OSC 99 | A terminal advertising both title and body support. One id lets the next alert replace the last. A click report is requested only when the query listed `report`, and advertised focus is turned off |
+| OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty, and any terminal without the required OSC 99 payload support |
+| OSC 777 | urxvt and the same fallback path as OSC 9 |
 | Herdr toast + sound | only under Herdr; additive, skipped elsewhere |
 | Luvus notification | only under Luvus; additive, skipped elsewhere |
 

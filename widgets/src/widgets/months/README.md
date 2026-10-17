@@ -35,7 +35,10 @@ that came off a network.
 ```
 
 Today is the lit square; the week it is in is the lit number in the gutter.
-Days belonging to the months either side are dimmed. `clocks` owns the time of
+Days belonging to the months either side are dimmed. Month names stay the
+full name. On a terminal that answered the text-sizing probe they are drawn
+larger when every name in that row fits the block, from 2× to 4×; September
+is long enough that a row containing it stays ordinary size. `clocks` owns the time of
 day — the server clock, the countdowns, the pomodoro, the world clock — and
 this owns dates. They meet only at the header line `clocks` already prints.
 

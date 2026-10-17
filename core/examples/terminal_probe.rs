@@ -36,6 +36,10 @@ fn main() {
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
+                "n" => {
+                    tc::notify("Pomodoro", "Focus elapsed");
+                    tc::notify("Pomodoro", "Focus elapsed, 0:01:00 over");
+                }
                 "t" => {
                     series.remove(0);
                     series.push(Some(0.9));
@@ -112,6 +116,19 @@ fn main() {
                 (over.as_str(), " over".into()),
             ],
             w.saturating_sub(1),
+        );
+        // Eight columns, plus the space in front of the sequence. Scale 2
+        // needs 16 for the time. A narrow pane keeps the line off the frame.
+        // The underline sample owns the first row under the chart, so the
+        // sized face starts on the next one. A plot spliced into the sized
+        // row would make that row wider than the pane, and the frame would
+        // drop the sizing.
+        let sample = "12:34:56";
+        let scale = tc::text_scale(
+            sample.len(),
+            w.saturating_sub(3),
+            h.saturating_sub(9),
+            4,
         );
         let chart = tc::LineChart {
             slots: series.len(),
@@ -191,6 +208,18 @@ fn main() {
         }
         if h > 9 {
             rows[8] = marks;
+        }
+        // The last row is the selection label. The sized face needs `scale`
+        // rows under the underline sample and must not cover that label.
+        if scale > 1 && 9 + usize::from(scale) < h {
+            rows[9] = format!(
+                "{} {}",
+                tc::rgb(120, 255, 200),
+                tc::sized_text(sample, scale)
+            );
+            for extra in 1..scale {
+                rows[9 + extra as usize] = String::new();
+            }
         }
         rows[h - 1] = format!("SELECTED:{selected}");
         tc::draw_plots(&rows, w, h, &plots);

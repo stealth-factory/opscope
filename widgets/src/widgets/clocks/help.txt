@@ -13,7 +13,8 @@ showing how far over you are, and the bar rescales so a growing red section
 represents the overrun — the longer you ignore it, the more of the bar is red.
 The whole panel also flashes twice, a second apart, on every alert - visible
 with the sound muted. The terminal is alerted when the phase elapses and again
-every minute it keeps running: BEL plus OSC 9 and OSC 777 desktop notifications, which are the only
+every minute it keeps running: BEL, plus one OSC 99 notification on Kitty that
+replaces itself, or OSC 9 and OSC 777 on every other terminal. Those escapes are the only
 channels that survive SSH. Under Herdr it additionally raises a native toast
 with a sound — additive, never required, and skipped entirely elsewhere.
 
