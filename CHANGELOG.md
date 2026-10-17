@@ -3,6 +3,20 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.10.0] - 2026-10-17
+
+### Bug Fixes
+
+- **agent-usage**: Clarify the last-check status (#436)
+
+### Features
+
+- **core**: Add Kitty notifications and large text for clocks and months (OPS-152) (#357)
+
+### Performance
+
+- **core**: Append chart samples with Kitty frame edits (OPS-155) (#364)
+
 ## [1.9.0] - 2026-10-15
 
 ### Bug Fixes
