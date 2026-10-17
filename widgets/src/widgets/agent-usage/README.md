@@ -1543,16 +1543,29 @@ window to pace against, so neither has a pace.
   so a quota answer of an empty object, or of its own fields set to null,
   leaves the bar out rather than reporting a fault; any other answer without
   a share is said as a fault; a session that names no plan leaves the heading bare.
-- **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
-  from perplexity.ai - developer tools, then Application (Storage in
-  Firefox), then Cookies - into `perplexity_token` through the settings
-  screen (`,`), or into the variable `perplexity_token_env` names
-  (`PERPLEXITY_SESSION_TOKEN`, the one CodexBar reads too). A whole
-  `Cookie` header copied from a request works as well, including a long
-  session split into `.0`, `.1` chunks. That cookie is a full sign-in to
-  your Perplexity account, not a scoped key, so keep `config.json`
-  `chmod 600`; the tab warns when it is not. The widget never reads it out
-  of a browser, for the reason given above.
+- **It needs your session cookie.** To find it:
+
+  1. Sign in at perplexity.ai and open developer tools: F12, or
+     Cmd-Option-I on a Mac. Safari needs Settings, Advanced, *Show
+     features for web developers* turned on first.
+  2. Open the cookies for `https://www.perplexity.ai`: the **Application**
+     tab in Chrome, Edge, Arc or Brave, the **Storage** tab in Firefox and
+     Safari.
+  3. Copy the Value of `__Secure-next-auth.session-token`. The console
+     cannot read it, since the cookie is HttpOnly. If it is split into
+     `.0` and `.1` cookies, copy the whole `cookie` request header from a
+     request to `www.perplexity.ai` that includes the session cookie, in the
+     **Network** tab instead.
+  4. Press `,` and paste it into `perplexity_token`, or put it in the
+     variable `perplexity_token_env` names (`PERPLEXITY_SESSION_TOKEN`, the
+     one CodexBar reads too).
+
+  The no-token panel, the expired-session panel, and the settings help for
+  `perplexity_token` show these same steps; a test keeps those three in sync.
+  That cookie is a full sign-in to your
+  Perplexity account, not a scoped key, so keep `config.json` `chmod 600`;
+  the tab warns when it is not. The widget never reads it out of a
+  browser, for the reason given above.
 - **`perplexity_token` wins over the variable.** The variable is read only
   when `perplexity_token` is empty, so a stale cookie left in `config.json`
   is the one sent even when the variable holds a fresh one - empty the
@@ -1560,6 +1573,9 @@ window to pace against, so neither has a pace.
 - **Perplexity is here when a token is.** It leaves nothing on this machine
   to discover, so with no token it has no tab, and with one it is asked
   every five minutes - and only while it is one of the agents you chose.
+  So that discovery does not hide it altogether, the `[+]` overview ends
+  with a line naming Notion AI and Perplexity while either has no token -
+  unless you named your agents yourself or excluded it.
 - **API (Sonar) spend is not in it.** That is billed to an API key, which
   this does not read.
 

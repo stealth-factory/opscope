@@ -47,6 +47,12 @@ environment variable (agent_usage.perplexity_token_env renames it). When
 both are set, perplexity_token wins; the variable is read only when it is
 empty. It is sent only to www.perplexity.ai, only while
 Perplexity is one of the agents shown, and never read out of a browser.
+Where to find the cookie is in perplexity_token's help on the settings
+screen (press ,), and on the tab whenever it has none.
+
+While discovery is on, the [+] overview ends with a line naming Notion AI
+and Perplexity until each has a token, since nothing on this machine shows
+they could be here.
 
 Devin is the same kind of reading. Its daily and weekly quota, the resets
 that came with them, and the extra-usage balance come from app.devin.ai.
