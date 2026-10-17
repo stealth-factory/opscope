@@ -462,18 +462,43 @@ fn var_name(d: &Data) -> &str {
     }
 }
 
-fn replace_token(d: &Data) -> String {
-    let find = "Sign in at perplexity.ai, open developer tools, then Application (Storage in \
-                Firefox), Cookies, https://www.perplexity.ai, and copy the Value of \
-                __Secure-next-auth.session-token.";
-    match d.source {
+/// Where the session cookie is, in the one wording every place that asks
+/// for it uses: the no-token panel, the expired-session panel and the
+/// settings screen's help. A test holds the settings text to these lines,
+/// so the three cannot drift apart again.
+pub const FIND_STEPS: [&str; 3] = [
+    "Sign in at perplexity.ai and open developer tools: F12, or Cmd-Option-I on a Mac. \
+     Safari needs Settings, Advanced, Show features for web developers turned on first.",
+    "Open the cookies for https://www.perplexity.ai: the Application tab in Chrome, Edge, \
+     Arc or Brave, the Storage tab in Firefox and Safari.",
+    "Copy the Value of __Secure-next-auth.session-token. The console cannot read it, \
+     since the cookie is HttpOnly. If it is split into .0 and .1 cookies, copy the whole \
+     cookie request header from any request in the Network tab instead.",
+];
+
+/// The steps, numbered, ending with where to put the cookie: back where
+/// the old one came from when that was the variable.
+fn find_steps(d: &Data) -> Vec<String> {
+    let put = match d.source {
         "env" => format!(
-            "{find} Put it in {} and restart this widget, or press , and paste it into \
+            "Put it in {} and restart this widget, or press , and paste it into \
              perplexity_token.",
             var_name(d)
         ),
-        _ => format!("{find} Then press , and paste it into perplexity_token."),
-    }
+        _ => "Press , and paste it into perplexity_token.".to_string(),
+    };
+    FIND_STEPS
+        .iter()
+        .map(|step| step.to_string())
+        .chain([put])
+        .enumerate()
+        .map(|(i, step)| format!("{}. {step}", i + 1))
+        .collect()
+}
+
+/// The steps as rows, each wrapped under its own number.
+fn step_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    find_steps(d).iter().flat_map(|step| note(step, &p.txt, w)).collect()
 }
 
 pub fn why_no_lane(d: &Data) -> String {
@@ -997,7 +1022,7 @@ pub fn tab_with_plots(
             w,
         ));
         rows.push(String::new());
-        rows.extend(note(&replace_token(d), &p.txt, w));
+        rows.extend(step_rows(d, w, p));
         rows.extend(token_warning(d, w, p));
         return rows;
     }
@@ -1011,20 +1036,20 @@ pub fn tab_with_plots(
             rows
         }
         _ => {
-            let what = if d.source.is_empty() && d.why.is_empty() {
-                format!(
+            if d.source.is_empty() && d.why.is_empty() {
+                let what = format!(
                     "No Perplexity token. Perplexity publishes no API for account credits, \
                      so this reads the one its usage page uses, signed in with your session \
-                     cookie. Copy __Secure-next-auth.session-token from perplexity.ai \
-                     (developer tools, cookies) into perplexity_token in config.json, or \
-                     into {}. It is a full sign-in to your Perplexity account, so keep \
-                     config.json chmod 600. Press , to open settings and paste it into \
-                     perplexity_token.",
+                     cookie - a full sign-in to your Perplexity account, so keep config.json \
+                     chmod 600. It can also come from {}.",
                     var_name(d)
-                )
-            } else {
-                why_no_lane(d).trim_start_matches("no quota · ").to_string()
-            };
+                );
+                let mut rows = no_local(&what, "", w, p);
+                rows.push(String::new());
+                rows.extend(step_rows(d, w, p));
+                return rows;
+            }
+            let what = why_no_lane(d).trim_start_matches("no quota · ").to_string();
             let mut rows = no_local(&what, "", w, p);
             rows.extend(token_warning(d, w, p));
             rows
@@ -1189,7 +1214,7 @@ mod tests {
 
     #[test]
     fn an_expired_session_says_so_and_where_to_paste_a_fresh_one() {
-        for (source, place) in [("config", "press , and paste it into perplexity_token"), ("env", TOKEN_ENV)] {
+        for (source, place) in [("config", "Press , and paste it into perplexity_token"), ("env", TOKEN_ENV)] {
             let d = Data { why: EXPIRED.into(), source, ..Data::default() };
             assert!(lanes(&d).is_empty());
             assert!(why_no_lane(&d).contains("session expired"), "{}", why_no_lane(&d));
@@ -1576,6 +1601,37 @@ mod tests {
         assert!(why_no_lane(&d).contains("perplexity_token"));
         let all = plain(&tab(&d, 60, 20, &cfg, &palette()));
         assert!(all.contains("perplexity_token") && all.contains("session-token"), "{all}");
+    }
+
+    #[test]
+    fn the_no_token_and_expired_panels_give_the_same_steps_and_fit_every_width() {
+        let solid = |t: &str| t.split_whitespace().collect::<String>();
+        let none = Data::default();
+        let expired = Data { why: EXPIRED.into(), source: "config", ..Data::default() };
+        for w in [30usize, 40, 60, 100] {
+            for d in [&none, &expired] {
+                let rows = plain(&tab(d, w, 30, &Config::default(), &palette()));
+                for r in rows.lines() {
+                    assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+                }
+                // Compared with whitespace gone: a narrow pane breaks the
+                // cookie's 32-character name across lines by hand.
+                let all = solid(&rows);
+                for (i, step) in FIND_STEPS.iter().enumerate() {
+                    assert!(all.contains(&solid(&format!("{}. {step}", i + 1))), "width {w}: {rows}");
+                }
+                assert!(all.contains(&solid("4. Press , and paste it into perplexity_token.")), "{rows}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_settings_help_gives_the_same_steps_as_the_tab() {
+        let settings: serde_json::Value = serde_json::from_str(include_str!("settings.json")).unwrap();
+        let help = settings["_perplexity_token_comment"].as_str().unwrap();
+        for (i, step) in FIND_STEPS.iter().enumerate() {
+            assert!(help.contains(&format!("{}. {step}", i + 1)), "step {}:\n{help}", i + 1);
+        }
     }
 
     #[test]
