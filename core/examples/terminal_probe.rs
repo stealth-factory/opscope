@@ -13,6 +13,9 @@ fn main() {
     let mut moving_meter = false;
     let mut tick = 0_u64;
     let mut selected = 0_usize;
+    // Four slots on an 80-column fixture: the chart is 74 cells wide, and
+    // (74 * 8 - 1) is divisible by 3, so one new sample is a whole-pixel shift.
+    let mut series = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -37,6 +40,11 @@ fn main() {
                     tc::notify("Pomodoro", "Focus elapsed");
                     tc::notify("Pomodoro", "Focus elapsed, 0:01:00 over");
                 }
+                "t" => {
+                    series.remove(0);
+                    series.push(Some(0.9));
+                }
+                "s" => series[1] = Some(0.05),
                 "h" => {
                     keyboard.restore();
                     tc::restore_screen();
@@ -101,7 +109,7 @@ fn main() {
         );
         // Row 2 is the chart. These words sit on the first row under it,
         // which the chart does not paint over.
-        let samples = tc::seg(
+        let marks = tc::seg(
             &[
                 (stale.as_str(), " stale".into()),
                 (partial.as_str(), " partial".into()),
@@ -123,24 +131,11 @@ fn main() {
             4,
         );
         let chart = tc::LineChart {
-            slots: 12,
+            slots: series.len(),
             focus: None,
             traces: vec![tc::Trace {
-                positions: Some((0..12).map(|i| i as f64 / 11.0).collect()),
-                values: vec![
-                    Some(0.1),
-                    Some(0.6),
-                    Some(0.4),
-                    None,
-                    None,
-                    Some(0.2),
-                    Some(0.5),
-                    Some(0.9),
-                    Some(0.6),
-                    Some(0.7),
-                    Some(0.3),
-                    Some(0.5),
-                ],
+                positions: None,
+                values: series.clone(),
                 colour: tc::rgb(50, 220, 170),
                 baseline: None,
             }],
@@ -212,7 +207,7 @@ fn main() {
             rows[2] = "   now".into();
         }
         if h > 9 {
-            rows[8] = samples;
+            rows[8] = marks;
         }
         // The last row is the selection label. The sized face needs `scale`
         // rows under the underline sample and must not cover that label.

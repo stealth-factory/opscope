@@ -86,8 +86,8 @@ nothing but a terminal:
 | Channel | Reaches |
 |---|---|
 | BEL | every terminal |
-| OSC 99 | Kitty, when it answers the notification query. One id, so the next alert replaces the last, and a click can focus the pane |
-| OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty, and any terminal that did not answer OSC 99 |
+| OSC 99 | A terminal advertising both title and body support. One id lets the next alert replace the last; clicks report back without requesting automatic focus |
+| OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty, and any terminal without the required OSC 99 payload support |
 | OSC 777 | urxvt and the same fallback path as OSC 9 |
 | Herdr toast + sound | only under Herdr; additive, skipped elsewhere |
 | Luvus notification | only under Luvus; additive, skipped elsewhere |

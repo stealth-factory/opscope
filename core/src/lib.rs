@@ -787,9 +787,9 @@ const NOTIFICATION_ID: &str = "opscope-pomodoro";
 
 /// Announce `body` under `title`.
 ///
-/// Kitty that answered the notification query gets one OSC 99 notification
-/// with a stable id, so the next alert replaces it, and `a=report` so a
-/// click focuses the pane. Every other terminal gets the OSC 9 and OSC 777
+/// A terminal advertising both title and body gets one OSC 99 notification
+/// with a stable id, so the next alert replaces it. `a=report` requests a
+/// click report without automatic focus. Other terminals get OSC 9 and OSC 777
 /// bytes clocks has always sent.
 pub fn notify(title: &str, body: &str) {
     out(&notify_bytes(
@@ -7812,7 +7812,9 @@ mod tests {
     fn a_child_that_never_answers_is_given_up_on() {
         const SH: &str = "/bin/sh";
         let began = std::time::Instant::now();
-        let why = run_input(&[SH, "-c", "sleep 30"], "ignored\n", 1)
+        // Another test temporarily replaces PATH. This fixture must still
+        // sleep, and exec keeps the timed-out process itself as the sleeper.
+        let why = run_input(&[SH, "-c", "exec /bin/sleep 30"], "ignored\n", 1)
             .expect_err("a sleeping child is a timeout");
         assert!(why.contains("did not answer in 1s"), "{:?}", why);
         // And it actually gave up rather than waiting the full thirty.
@@ -7831,7 +7833,7 @@ mod tests {
         const SH: &str = "/bin/sh";
         let big = "x".repeat(200_000);
         let began = std::time::Instant::now();
-        let why = run_input(&[SH, "-c", "sleep 30"], &big, 1)
+        let why = run_input(&[SH, "-c", "exec /bin/sleep 30"], &big, 1)
             .expect_err("a child that never reads is a timeout");
         assert!(why.contains("did not answer in 1s"), "{:?}", why);
         assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
