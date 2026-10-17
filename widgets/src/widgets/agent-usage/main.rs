@@ -2420,6 +2420,14 @@ fn step_tab(at: i64, by: i64, count: usize) -> usize {
     (at + by).rem_euclid(count as i64) as usize
 }
 
+fn check_status(fetched: f64) -> String {
+    if fetched <= 0.0 {
+        " Not checked yet".into()
+    } else {
+        format!(" Checked {} ago", ago(fetched))
+    }
+}
+
 /// What to show before the first poll lands.
 ///
 /// Every tab's empty state is a statement of fact - no stats cache, no
@@ -2751,7 +2759,7 @@ fn main() {
         };
         // The scroll position goes last on this line but matters most, so
         // the legend stands down to make room rather than being clipped.
-        let base = format!(" local state · live quota · read {} ago", ago(snapshot.fetched));
+        let base = check_status(snapshot.fetched);
         let hidden_txt = if hidden > 0 {
             format!("   {} hidden by config", hidden)
         } else {
@@ -2825,6 +2833,12 @@ mod vendors;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn check_status_distinguishes_first_load_from_a_completed_pass() {
+        assert_eq!(check_status(0.0), " Not checked yet");
+        assert_eq!(check_status(now() - 125.0), " Checked 2m ago");
+    }
 
     fn paced_bar(
         used: f64,

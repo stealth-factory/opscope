@@ -22,7 +22,7 @@ The agents this widget reads:
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- local state · live quota · read 16s ago   · = installed
+ Checked 16s ago   · = detected
  [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
 
  ── QUOTA ── live · account-wide, not this machine   max
@@ -69,6 +69,12 @@ The agents this widget reads:
   rate limit tier  default_claude_max_20x
   billing          stripe subscription
 ```
+
+The dim status line below the title says `Checked 16s ago`: time since the
+widget completed its last collection pass, not the age of every provider's
+data. A pass can reuse cached readings; each provider's quota section keeps
+its own live, cached or unavailable status. Before the first pass completes,
+the line says `Not checked yet`. The title's spinner shows a check in progress.
 
 ## The `+` tab
 
@@ -1892,7 +1898,7 @@ is rarely that tall. `↑` `↓` move through the body while the title, the tab 
 and the footer stay put, so you never lose which agent you are looking at.
 
 ```
- local state · live quota · read 2s ago   · = detected   9-27 of 45 ▲▼
+ Checked 2s ago   · = detected   9-27 of 45 ▲▼
 ```
 
 The header says which rows you are on out of how many, and the arrows say which
