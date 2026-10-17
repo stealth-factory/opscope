@@ -788,24 +788,50 @@ const NOTIFICATION_ID: &str = "opscope-pomodoro";
 /// Announce `body` under `title`.
 ///
 /// A terminal advertising both title and body gets one OSC 99 notification
-/// with a stable id, so the next alert replaces it. `a=report` requests a
-/// click report without automatic focus. Other terminals get OSC 9 and OSC 777
-/// bytes clocks has always sent.
+/// with a stable id, so the next alert replaces it. `report` is requested
+/// only when the query listed it, and advertised `focus` is turned off, so
+/// a click report does not also focus the pane. Other terminals get OSC 9
+/// and OSC 777 bytes clocks has always sent.
 pub fn notify(title: &str, body: &str) {
-    out(&notify_bytes(
-        title,
-        body,
-        capabilities().kitty_notifications,
-    ));
+    let caps = capabilities();
+    let kitty = caps.kitty_notifications.then_some(NotifyKitty {
+        report: caps.notification_report,
+        focus: caps.notification_focus,
+    });
+    out(&notify_bytes(title, body, kitty));
     flush();
 }
 
-fn notify_bytes(title: &str, body: &str, kitty: bool) -> String {
-    if kitty {
+/// Actions the query listed. `focus` is the protocol default, so listing it
+/// is what makes `-focus` a value the terminal already understands.
+#[derive(Clone, Copy)]
+struct NotifyKitty {
+    report: bool,
+    focus: bool,
+}
+
+fn notify_actions(kitty: NotifyKitty) -> String {
+    let mut actions = Vec::new();
+    if kitty.report {
+        actions.push("report");
+    }
+    if kitty.focus {
+        actions.push("-focus");
+    }
+    if actions.is_empty() {
+        String::new()
+    } else {
+        format!(":a={}", actions.join(","))
+    }
+}
+
+fn notify_bytes(title: &str, body: &str, kitty: Option<NotifyKitty>) -> String {
+    if let Some(kitty) = kitty {
         let title = escape_safe(title);
         let body = escape_safe(body);
+        let actions = notify_actions(kitty);
         format!(
-            "\x1b]99;i={NOTIFICATION_ID}:a=report:d=0;{title}\x1b\\\x1b]99;i={NOTIFICATION_ID}:p=body;{body}\x1b\\"
+            "\x1b]99;i={NOTIFICATION_ID}{actions}:d=0;{title}\x1b\\\x1b]99;i={NOTIFICATION_ID}:p=body;{body}\x1b\\"
         )
     } else {
         let title = plain_notify(title);
@@ -5232,27 +5258,53 @@ mod tests {
 
     #[test]
     fn a_notification_keeps_todays_bytes_until_kitty_answers() {
-        let plain = super::notify_bytes("Pomodoro", "Focus elapsed", false);
+        let plain = super::notify_bytes("Pomodoro", "Focus elapsed", None);
         assert_eq!(
             plain,
             "\x1b]9;Focus elapsed\x07\x1b]777;notify;Pomodoro;Focus elapsed\x07"
         );
-        let first = super::notify_bytes("Pomodoro", "Focus elapsed", true);
-        let second = super::notify_bytes("Pomodoro", "Focus elapsed, 0:01:00 over", true);
-        assert!(first.contains("\x1b]99;i=opscope-pomodoro:a=report:d=0;Pomodoro\x1b\\"));
+        let offered = Some(super::NotifyKitty {
+            report: true,
+            focus: true,
+        });
+        let first = super::notify_bytes("Pomodoro", "Focus elapsed", offered);
+        let second = super::notify_bytes("Pomodoro", "Focus elapsed, 0:01:00 over", offered);
+        assert!(first.contains("\x1b]99;i=opscope-pomodoro:a=report,-focus:d=0;Pomodoro\x1b\\"));
         assert!(first.contains("\x1b]99;i=opscope-pomodoro:p=body;Focus elapsed\x1b\\"));
         assert!(second.contains("i=opscope-pomodoro"));
         assert!(!first.contains("\x1b]9;"));
         assert!(!second.contains("\x1b]777;"));
+        // Title and body without `report` still replace in place. Requesting
+        // an action the terminal did not list can drop the whole notification.
+        let quiet = super::notify_bytes(
+            "Pomodoro",
+            "Focus elapsed",
+            Some(super::NotifyKitty {
+                report: false,
+                focus: false,
+            }),
+        );
+        assert!(quiet.contains("\x1b]99;i=opscope-pomodoro:d=0;Pomodoro\x1b\\"));
+        assert!(!quiet.contains("a="));
+        let unfocus = super::notify_bytes(
+            "Pomodoro",
+            "Focus elapsed",
+            Some(super::NotifyKitty {
+                report: false,
+                focus: true,
+            }),
+        );
+        assert!(unfocus.contains(":a=-focus:d=0;"));
+        assert!(!unfocus.contains("report"));
         // A semicolon is OSC 777's field separator. Controls end OSC 9.
         // The Kitty path still carries the semicolon: its payload is not
         // split that way.
-        let messy = super::notify_bytes("Po;mo\x1b", "line;one\x07", false);
+        let messy = super::notify_bytes("Po;mo\x1b", "line;one\x07", None);
         assert_eq!(
             messy,
             "\x1b]9;lineone\x07\x1b]777;notify;Pomo;lineone\x07"
         );
-        let kitty = super::notify_bytes("Po;mo", "line;one", true);
+        let kitty = super::notify_bytes("Po;mo", "line;one", offered);
         assert!(kitty.contains("Po;mo"), "{kitty:?}");
         assert!(kitty.contains("line;one"), "{kitty:?}");
     }

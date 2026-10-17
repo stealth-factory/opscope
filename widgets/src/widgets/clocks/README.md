@@ -86,7 +86,7 @@ nothing but a terminal:
 | Channel | Reaches |
 |---|---|
 | BEL | every terminal |
-| OSC 99 | A terminal advertising both title and body support. One id lets the next alert replace the last; clicks report back without requesting automatic focus |
+| OSC 99 | A terminal advertising both title and body support. One id lets the next alert replace the last. A click report is requested only when the query listed `report`, and advertised focus is turned off |
 | OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty, and any terminal without the required OSC 99 payload support |
 | OSC 777 | urxvt and the same fallback path as OSC 9 |
 | Herdr toast + sound | only under Herdr; additive, skipped elsewhere |

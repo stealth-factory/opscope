@@ -106,6 +106,10 @@ pub struct Capabilities {
     pub underline_colour: bool,
     /// OSC 99, so a repeat can replace one notification instead of stacking.
     pub kitty_notifications: bool,
+    /// The query listed `report`. An unlisted action is not sent.
+    pub notification_report: bool,
+    /// The query listed `focus`, which is the click default and is turned off.
+    pub notification_focus: bool,
     /// OSC 66 scale (`s=`), from the cursor moving on the sizing probe.
     pub text_sizing: bool,
 }
@@ -150,6 +154,8 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
         styled_underlines: false,
         underline_colour: false,
         kitty_notifications: false,
+        notification_report: false,
+        notification_focus: false,
         text_sizing: false,
     },
     deadline: None,
@@ -424,7 +430,10 @@ impl Session {
             }
             false
         } else if notification_query_answer(sequence) {
+            let (report, focus) = notification_actions(sequence);
             self.capabilities.kitty_notifications = true;
+            self.capabilities.notification_report = report;
+            self.capabilities.notification_focus = focus;
             false
         } else {
             false
@@ -452,21 +461,53 @@ fn scale_supported(columns: [Option<usize>; 3]) -> bool {
 
 /// The answer to our OSC 99 query, not a click report and not some other id.
 fn notification_query_answer(sequence: &str) -> bool {
-    let Some(body) = sequence.strip_prefix("\x1b]99;") else {
-        return false;
+    notification_payload(sequence).is_some_and(|payload| {
+        payload
+            .split(':')
+            .filter_map(|field| field.strip_prefix("p="))
+            .any(|types| {
+                types.split(',').any(|kind| kind == "title")
+                    && types.split(',').any(|kind| kind == "body")
+            })
+    })
+}
+
+/// Actions the query listed. `report` and `focus` are the only ones sent.
+fn notification_actions(sequence: &str) -> (bool, bool) {
+    let Some(payload) = notification_payload(sequence) else {
+        return (false, false);
     };
-    let Some(body) = body.strip_suffix("\x1b\\").or_else(|| body.strip_suffix('\x07')) else {
-        return false;
-    };
-    let Some((metadata, payload)) = body.split_once(';') else {
-        return false;
-    };
-    metadata.split(':').any(|field| field == "i=opscope")
+    let mut report = false;
+    let mut focus = false;
+    for field in payload.split(':') {
+        let Some(list) = field.strip_prefix("a=") else {
+            continue;
+        };
+        for action in list.split(',') {
+            match action {
+                "report" => report = true,
+                "focus" => focus = true,
+                _ => {}
+            }
+        }
+    }
+    (report, focus)
+}
+
+/// Payload of our OSC 99 query answer. The metadata has to name this query.
+fn notification_payload(sequence: &str) -> Option<&str> {
+    let body = sequence.strip_prefix("\x1b]99;")?;
+    let body = body
+        .strip_suffix("\x1b\\")
+        .or_else(|| body.strip_suffix('\x07'))?;
+    let (metadata, payload) = body.split_once(';')?;
+    if metadata.split(':').any(|field| field == "i=opscope")
         && metadata.split(':').any(|field| field == "p=?")
-        && payload.split(':').filter_map(|field| field.strip_prefix("p=")).any(|types| {
-            types.split(',').any(|kind| kind == "title")
-                && types.split(',').any(|kind| kind == "body")
-        })
+    {
+        Some(payload)
+    } else {
+        None
+    }
 }
 
 fn frame_refused(message: &str) -> bool {
@@ -1206,6 +1247,8 @@ mod tests {
         assert!(!width_only.capabilities.text_sizing);
         s.reply("\x1b]99;i=opscope:p=?;a=report,focus:p=title,body\x1b\\", now);
         assert!(s.capabilities.kitty_notifications);
+        assert!(s.capabilities.notification_report);
+        assert!(s.capabilities.notification_focus);
         // A click report for the pomodoro id is not the query answer.
         let mut other = Session {
             deadline: Some(now + TIMEOUT),
@@ -1233,7 +1276,13 @@ mod tests {
             "\x1b]99;p=?:i=opscope;p=body,title:future=ok\x07",
         ] {
             assert!(notification_query_answer(response), "{response:?}");
+            assert_eq!(notification_actions(response), (false, false), "{response:?}");
         }
+        let listed = "\x1b]99;i=opscope:p=?;a=report,focus:p=title,body\x1b\\";
+        assert_eq!(notification_actions(listed), (true, true));
+        let report_only = "\x1b]99;i=opscope:p=?;p=title,body:a=report\x07";
+        assert!(notification_query_answer(report_only));
+        assert_eq!(notification_actions(report_only), (true, false));
         for response in [
             "\x1b]99;i=opscope:p=?;p=title\x1b\\",
             "\x1b]99;i=opscope:p=?;p=body\x1b\\",

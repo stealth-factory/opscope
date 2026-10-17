@@ -30,8 +30,11 @@ block bars, Braille traces and reference marks.
 
 Notifications and text sizing are negotiated in the same window, separately
 from graphics. A terminal advertising OSC 99 title and body support gets one
-notification per alert, with a stable replacement id and `a=report` for click
-reports without automatic focus. Every other terminal, including one that only speaks OSC 9
+notification per alert, with a stable replacement id. `report` is requested
+only when the query listed it, and advertised `focus` is turned off with
+`-focus`, so a click report does not also focus the pane. An action the
+terminal did not list is left off, because an unknown `a` value can drop the
+notification. Every other terminal, including one that only speaks OSC 9
 (Ghostty among them), still gets the OSC 9 and OSC 777 bytes clocks has always
 sent. A semicolon in that fallback is dropped, because OSC 777 uses it to
 split the command, the title and the body. Text sizing is OSC 66, detected by
@@ -591,8 +594,9 @@ The sizing probe begins with a carriage return: column reports must be
 1, 3, 5, so a buffered report beginning elsewhere cannot enable it.
 OSC 99 is enabled only when our query identifier is echoed and the terminal
 advertises both `title` and `body` payloads. A title-only or incomplete reply
-keeps OSC 9/777 delivery; `a=report` requests a click report without automatic
-pane focus.
+keeps OSC 9/777 delivery. `a=report,-focus` is sent only for the actions
+that reply listed, so an unadvertised `report` is not requested and
+advertised focus is turned off.
 
 Core-generated OSC 66 blocks carry the same private provenance marker as
 core links; the marker is stripped before output. Raw or replayed source

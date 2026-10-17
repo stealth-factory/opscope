@@ -755,7 +755,8 @@ def notifications(t):
     t.read(0.45)
     ids = re.findall(rb"i=opscope-pomodoro", t.output)
     assert len(ids) >= 4, "a repeat did not reuse the notification id"
-    assert b"a=report" in t.output
+    assert b"a=report,-focus" in t.output
+    assert b"a=report:d=0" not in t.output
     assert b"\x1b]9;" not in t.output
     assert b"\x1b]777;notify;" not in t.output
 
