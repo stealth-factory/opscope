@@ -880,11 +880,12 @@ fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec
         missing.join(" and "),
         if missing.len() == 1 { "is" } else { "are" },
     );
+    let content_width = w.saturating_sub(3);
     let mut rows = vec![String::new()];
     rows.extend(
-        wrap_text(&text, w.saturating_sub(4).max(8))
+        tc::wrap_words(&text, content_width)
             .into_iter()
-            .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1)),
+            .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1))),
     );
     rows
 }
@@ -996,15 +997,15 @@ mod tests {
     #[test]
     fn the_overview_names_the_pasted_token_agents_discovery_cannot_find() {
         let p = palette();
-        let text = |cfg: &Config, shown: &[&str]| {
-            token_agents_hint(cfg, shown, 60, &p).iter().map(|r| plain(&[r.clone()]).join("")).collect::<Vec<_>>().join(" ")
+        let text = |cfg: &Config, shown: &[&str], w: usize| {
+            token_agents_hint(cfg, shown, w, &p).iter().map(|r| plain(&[r.clone()]).join("")).collect::<Vec<_>>().join(" ")
         };
         let found = Config::default();
-        let both = text(&found, &["claude"]);
+        let both = text(&found, &["claude"], 60);
         assert!(both.contains("Notion AI and Perplexity are read with a session token"), "{both}");
         assert!(both.contains("press , to add one"), "{both}");
         // One already has its tab: only the other is named.
-        let one = text(&found, &["claude", "notion"]);
+        let one = text(&found, &["claude", "notion"], 60);
         assert!(one.contains("Perplexity is read with") && !one.contains("Notion"), "{one}");
         // Both have tabs, or the reader named their agents: nothing.
         assert!(token_agents_hint(&found, &["notion", "perplexity"], 60, &p).is_empty());
@@ -1012,12 +1013,16 @@ mod tests {
         assert!(token_agents_hint(&named, &["claude"], 60, &p).is_empty());
         // An excluded agent is not offered back.
         let excluded = Config { exclude_agents: vec!["notion".into()], ..Config::default() };
-        let rest = text(&excluded, &["claude"]);
+        let rest = text(&excluded, &["claude"], 60);
         assert!(!rest.contains("Notion") && rest.contains("Perplexity"), "{rest}");
-        for w in [30usize, 40, 60, 100] {
-            for r in token_agents_hint(&found, &[], w, &p) {
+        let expected = "Notion AI and Perplexity are read with a session token you paste: press , to add one.";
+        let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for w in [8usize, 9, 10, 11, 12, 30, 40, 60, 100] {
+            let rows = token_agents_hint(&found, &[], w, &p);
+            for r in &rows {
                 assert!(tc::display_width(&plain(&[r.clone()]).join("")) <= w - 1, "width {w}: {r:?}");
             }
+            assert_eq!(compact(&plain(&rows).join(" ")), compact(expected), "width {w}: {rows:?}");
         }
     }
 

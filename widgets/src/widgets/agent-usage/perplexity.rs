@@ -473,7 +473,8 @@ pub const FIND_STEPS: [&str; 3] = [
      Arc or Brave, the Storage tab in Firefox and Safari.",
     "Copy the Value of __Secure-next-auth.session-token. The console cannot read it, \
      since the cookie is HttpOnly. If it is split into .0 and .1 cookies, copy the whole \
-     cookie request header from any request in the Network tab instead.",
+     cookie request header from a request to www.perplexity.ai that includes \
+     the session cookie, in the Network tab instead.",
 ];
 
 /// The steps, numbered, ending with where to put the cookie: back where

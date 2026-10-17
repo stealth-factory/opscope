@@ -1547,15 +1547,16 @@ window to pace against, so neither has a pace.
      Safari.
   3. Copy the Value of `__Secure-next-auth.session-token`. The console
      cannot read it, since the cookie is HttpOnly. If it is split into
-     `.0` and `.1` cookies, copy the whole `cookie` request header from any
-     request in the **Network** tab instead.
+     `.0` and `.1` cookies, copy the whole `cookie` request header from a
+     request to `www.perplexity.ai` that includes the session cookie, in the
+     **Network** tab instead.
   4. Press `,` and paste it into `perplexity_token`, or put it in the
      variable `perplexity_token_env` names (`PERPLEXITY_SESSION_TOKEN`, the
      one CodexBar reads too).
 
-  These are the steps the tab shows when there is no token or it has
-  expired, and the settings screen's help for `perplexity_token`; a test
-  keeps the three the same. That cookie is a full sign-in to your
+  The no-token panel, the expired-session panel, and the settings help for
+  `perplexity_token` show these same steps; a test keeps those three in sync.
+  That cookie is a full sign-in to your
   Perplexity account, not a scoped key, so keep `config.json` `chmod 600`;
   the tab warns when it is not. The widget never reads it out of a
   browser, for the reason given above.
