@@ -1000,31 +1000,65 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let Some(bank) = d.bank.as_ref() else {
         return Vec::new();
     };
+    let body: Vec<BankRow> = if bank.credits.is_empty() {
+        vec![BankRow::Note(bank_count(bank.left))]
+    } else {
+        bank.credits
+            .iter()
+            .flat_map(|credit| {
+                let title = credit.title.clone().map(BankRow::Title);
+                title.into_iter().chain([BankRow::Note(expires_row(credit.expiry))])
+            })
+            .collect()
+    };
+    bank_section(&body, w, p)
+}
+
+/// One row under a `BANK RESET` title. A title is drawn in the text colour
+/// and everything else dim, which is how the Codex credits have always read.
+pub(crate) enum BankRow {
+    Title(String),
+    Note(String),
+}
+
+/// The `── BANK RESET ──` section, for every agent that has one.
+///
+/// Codex and Claude both draw theirs through here, so the title, the
+/// two-space inset and the wrapping cannot drift apart between the tabs
+/// again. The caller decides what the rows say - the inventories are not
+/// the same shape - and an unread inventory is the caller returning no
+/// section at all rather than calling this with nothing to put in it.
+pub(crate) fn bank_section(body: &[BankRow], w: usize, p: &Palette) -> Vec<String> {
     let room = w.saturating_sub(1);
     let mut rows = vec![tc::seg(
         &[(p.lbl.as_str(), " ── BANK RESET ── ".into())],
         room,
     )];
-    if bank.credits.is_empty() {
-        let line = if bank.left == 0 {
-            "None in the account.".to_string()
-        } else {
-            format!("{} reset available", bank.left)
-        };
-        push_visible(&mut rows, &line, room, p.dim.as_str());
-        return rows;
-    }
-    for credit in &bank.credits {
-        if let Some(title) = &credit.title {
-            push_visible(&mut rows, title, room, p.txt.as_str());
+    for row in body {
+        match row {
+            BankRow::Title(text) => push_visible(&mut rows, text, room, p.txt.as_str()),
+            BankRow::Note(text) => push_visible(&mut rows, text, room, p.dim.as_str()),
         }
-        let when = match credit.expiry.and_then(local_expiry) {
-            Some(stamp) => format!("Expires {stamp}"),
-            None => "Expires date unknown".to_string(),
-        };
-        push_visible(&mut rows, &when, room, p.dim.as_str());
     }
     rows
+}
+
+/// The count row. An inventory that answered with none says so in words,
+/// because `0 reset available` reads like a reading that failed.
+pub(crate) fn bank_count(left: u64) -> String {
+    if left == 0 {
+        "None in the account.".to_string()
+    } else {
+        format!("{left} reset available")
+    }
+}
+
+/// `Expires` and the local datetime, or that the date is unknown.
+pub(crate) fn expires_row(at: Option<f64>) -> String {
+    match at.and_then(local_expiry) {
+        Some(stamp) => format!("Expires {stamp}"),
+        None => "Expires date unknown".to_string(),
+    }
 }
 
 /// `expires_at` as a local datetime, with the zone named.

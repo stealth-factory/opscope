@@ -58,6 +58,11 @@ pub fn parse_cursor_cookie(token: &str, now: f64) -> Option<String> {
 pub struct ClaudeResets {
     pub left: u64,
     pub soonest: Option<f64>,
+    /// The latest expiry among the counted grants. Equal to `soonest` when
+    /// every counted reset ends at the same instant, which is what lets the
+    /// tab say `Expires` rather than `Soonest expires`. `None` whenever
+    /// `soonest` is.
+    pub latest: Option<f64>,
 }
 
 /// Wire fields verified against Claude Code 2.1.296's grant schema.
@@ -72,6 +77,7 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
     let grants = block.get("grants")?.as_array()?;
     let mut left = 0u64;
     let mut soonest: Option<f64> = None;
+    let mut latest: Option<f64> = None;
     let mut undated = false;
     for grant in grants {
         let grant = grant.as_object()?;
@@ -91,11 +97,17 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
         }
         left = left.checked_add(count)?;
         match expiry {
-            Some(at) => soonest = Some(soonest.map_or(at, |old| old.min(at))),
+            Some(at) => {
+                soonest = Some(soonest.map_or(at, |old| old.min(at)));
+                latest = Some(latest.map_or(at, |old| old.max(at)));
+            }
             None => undated = true,
         }
     }
-    Some(ClaudeResets { left, soonest: if undated { None } else { soonest } })
+    if undated {
+        return Some(ClaudeResets { left, soonest: None, latest: None });
+    }
+    Some(ClaudeResets { left, soonest, latest })
 }
 
 /// One reset credit still usable on a Codex account.
@@ -1747,10 +1759,12 @@ mod tests {
             {"resets_left": 0, "usable_now": true}
         ]}}).to_string();
         assert_eq!(parse_claude_resets(&body, now), Some(ClaudeResets {
-            left: 3, soonest: iso_epoch("2026-10-11T00:00:00Z")
+            left: 3, soonest: iso_epoch("2026-10-11T00:00:00Z"),
+            latest: iso_epoch("2026-10-12T00:00:00Z")
         }));
         assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ClaudeResets {
-            left: 2, soonest: iso_epoch("2026-10-12T00:00:00Z")
+            left: 2, soonest: iso_epoch("2026-10-12T00:00:00Z"),
+            latest: iso_epoch("2026-10-12T00:00:00Z")
         }));
     }
 
@@ -1764,7 +1778,7 @@ mod tests {
             assert_eq!(parse_claude_resets(body, now), None, "{body}");
         }
         let mut body = serde_json::json!({"cedar_ember":{"eligible":true,"grants":[]}});
-        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:0, soonest:None}));
+        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:0, soonest:None, latest:None}));
         for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null] {
             body["cedar_ember"]["grants"] = serde_json::json!([{"resets_left":count,"usable_now":true}]);
             assert_eq!(parse_claude_resets(&body.to_string(), now), None);
@@ -1774,7 +1788,7 @@ mod tests {
                 {"resets_left":1,"usable_now":true,"ends_at":"2026-10-12T00:00:00Z"},
                 {"resets_left":2,"usable_now":true,"ends_at":date}
             ]);
-            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:3, soonest:None}));
+            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:3, soonest:None, latest:None}));
         }
     }
 

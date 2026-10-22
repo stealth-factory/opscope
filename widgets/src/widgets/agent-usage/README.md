@@ -219,6 +219,21 @@ inventory adds no line. Multiple profiles keep their own counts, including
 when an account has no quota lanes. Cached availability carries its age,
 and a grant whose expiry has passed is no longer counted.
 
+The Claude tab carries the same **BANK RESET** section as the Codex tab,
+under the quota windows, with the same title, inset and wording: the count
+as `N reset available`, then `Expires` and the expiry in this machine's local
+zone with the year, and `cached 5m ago` when the reading is old. Grants
+ending at different times show `Soonest expires`, since one date is not
+the expiry of all of them; a counted grant with no readable expiry makes it
+`Expires date unknown`, the same case that leaves the date off the `[+]`
+line. An inventory that answered with no resets shows `None in the
+account.`, as Codex does. A reading with no inventory in it - no quota yet,
+or a block that is absent, ineligible or unreadable - draws no section,
+again as Codex does when its inventory request fails, so an unread bank is
+never shown as an empty one. Each profile's tab shows its own bank, and the
+section says what the `[+]` line says for the same profile, because both
+are built from the same parse of the same reading.
+
 This comes from the optional `cedar_ember` block on
 `GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
 credential, poll interval, and account-bound snapshot. There is no second
