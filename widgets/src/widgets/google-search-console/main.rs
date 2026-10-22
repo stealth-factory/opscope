@@ -622,8 +622,15 @@ fn main() {
                     }
                 }
                 "/" => typing = true,
+                // An accepted filter is cleared the way a typed one is.
+                "esc" if !needle.is_empty() => {
+                    needle.clear();
+                    selected = 0;
+                    starts = [0; 6];
+                    moved = true;
+                }
                 "c" | "C" => {
-                    if let Some(text) = items.get(selected).and_then(|(item, _)| copy_text(item, site)) {
+                    if let Some(text) = items.get(selected).and_then(|(item, _)| copy_text(item, &snapshot, at)) {
                         let ok = tc::clipboard(&text);
                         if let Ok(mut n) = note.lock() {
                             *n = (if ok { format!("✓ copied {}", text) } else { "! no clipboard here; select the text instead".into() }, tc::now() + 3.0);
