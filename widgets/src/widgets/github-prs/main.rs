@@ -455,13 +455,8 @@ fn on_legacy_section() -> bool {
     !tc::config_has_section("github_prs") && tc::config_has_section("pr")
 }
 
-/// And said out loud, because a silent fallback is how a rename becomes
-/// permanent: nothing ever tells anyone the old name is still doing the
-/// work.
-fn legacy_section_note() -> Option<String> {
-    on_legacy_section()
-        .then(|| "config: reading the old `pr` section — rename it to `github_prs`".into())
-}
+// Said out loud, because a silent fallback is how a rename becomes
+// permanent: main raises it as the `legacy-config-section` notice.
 
 /// Said when the file and the screen would otherwise disagree in silence.
 ///
@@ -1400,7 +1395,6 @@ fn publish(
 
 fn fetch_list(
     tok: &str,
-    source: &str,
     sources: &[(String, String)],
     extra: &[String],
     limit: usize,
@@ -1569,21 +1563,10 @@ fn fetch_list(
             .map(|(n, _)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        let mut said = if source == "config" {
-            tc::config_token_warning().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        for note in [legacy_section_note(), refilled_sources_note()]
-            .into_iter()
-            .flatten()
-        {
-            said = if said.is_empty() {
-                note
-            } else {
-                format!("{} · {}", said, note)
-            };
-        }
+        // The config file's permissions and the old section name are
+        // notices now, raised once rather than glued onto every pass; the
+        // refilled sources stay here because they explain the board itself.
+        let said = refilled_sources_note().unwrap_or_default();
         settle(&mut g, nodes, &counted, served, deepened.as_deref(), said);
     }
     Ok(())
@@ -1847,6 +1830,7 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("github-prs");
     if !tc::dependencies_available(
         "github-prs",
         include_str!("dependencies.json"),
@@ -1859,6 +1843,20 @@ fn main() {
     } else {
         tc::load_config("github_prs")
     };
+    // Said out loud, because a silent fallback is how a rename becomes
+    // permanent - but as a notice, not glued onto the status line of a
+    // board that is working.
+    tc::notices::when(on_legacy_section(), || {
+        tc::notices::Notice::info(
+            "legacy-config-section",
+            "config: reading the old `pr` section — rename it to `github_prs`",
+        )
+        .detail(
+            "github-prs reads the old name until the section is renamed; saving \
+             from settings (,) or editing config.json renames it.",
+        )
+        .source("config")
+    });
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 25);
     let sources = sources_from(&cfg);
@@ -1886,7 +1884,7 @@ fn main() {
     let rate = Arc::new(Mutex::new(Rate::default()));
     let activity = tc::Refresh::default();
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
-    let (tok, source) = token(&cfg);
+    let (tok, _source) = token(&cfg);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
         if name.is_empty() {
@@ -1977,7 +1975,6 @@ fn main() {
             if failed.is_none() {
                 if let Err(said) = fetch_list(
                     &poll_tok,
-                    source,
                     &poll_sources,
                     &poll_extra,
                     limit,
@@ -2135,6 +2132,10 @@ fn main() {
             }
             if key == "," {
                 tc::run_settings(&mut keyboard, SETTINGS);
+                continue;
+            }
+            if key == "!" {
+                tc::notices::run(&mut keyboard);
                 continue;
             }
             match key.as_str() {
@@ -2409,6 +2410,7 @@ fn main() {
                 (p.dim.as_str(), "/[esc] back".into()),
             ]);
             hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
+            hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints
@@ -2455,7 +2457,7 @@ fn main() {
             // one - list_view numbers them from its own first row.
             placed = list_at.into_iter().map(|(row, i)| (top + row, i)).collect();
             rows.extend(list);
-            vec![
+            let mut hints: Vec<Vec<(&str, String)>> = vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
                 vec![(p.dim.as_str(), "[↵] open".into())],
                 vec![(p.dim.as_str(), "[/]filter".into())],
@@ -2483,9 +2485,11 @@ fn main() {
                 )],
                 vec![(p.dim.as_str(), "[c]opy url".into())],
                 vec![(p.dim.as_str(), "[r]efresh".into())],
-                vec![(p.dim.as_str(), "[,] settings".into())],
-                vec![(p.dim.as_str(), "[q]uit".into())],
-            ]
+            ];
+            hints.extend(tc::notices::hint(w - 2));
+            hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+            hints
         };
         let hints = if typing {
             vec![
@@ -2497,8 +2501,12 @@ fn main() {
             hints
         };
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let banner = tc::notices::banner_rows(w);
+        let footer: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: scrolled away, either screen stops saying what it is
         // describing. Both screens work this way - the list's body is the
@@ -2542,7 +2550,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = frame.len();
+        let foot_top = frame.len() + banner.len();
         frame.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(off, head.len(), room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);
