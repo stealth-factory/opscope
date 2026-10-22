@@ -366,20 +366,38 @@ pub fn parse_key_event_list(text: &str) -> Result<(Vec<String>, Option<String>),
     Ok((names, next))
 }
 
-/// One reading this widget took itself: active users over the last 30
-/// minutes, page views over the same window, and each key event's count.
+/// One reading this widget took itself. Realtime totals and the event
+/// breakdown arrive on separate clocks, so each is a sample of its own,
+/// stamped when *it* was read: a totals sample carries `active` and
+/// `views`, an events sample carries `events`, and a field that was not
+/// read is `None` - never zero, because a baseline built from an unread
+/// zero says traffic or a key event was absent when it was only not asked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sample {
     /// Unix seconds.
     pub t: f64,
-    pub active: f64,
-    pub views: f64,
-    pub events: Vec<(String, f64)>,
+    /// Active users over the last 30 minutes.
+    pub active: Option<f64>,
+    /// Page views over the same window.
+    pub views: Option<f64>,
+    /// Each key event's count over the same window; `Some(empty)` is a
+    /// read that found none.
+    pub events: Option<Vec<(String, f64)>>,
 }
 
-/// The sample file, one reading a line: `<unix> <active> <views>` and then
-/// `name=count` for each key event. A line that does not read is skipped,
-/// so a half-written last line costs one reading rather than the file.
+fn reading(s: &str) -> Option<Option<f64>> {
+    if s == "-" {
+        return Some(None);
+    }
+    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some)
+}
+
+/// The sample file, one reading a line: `<unix> <active> <views>`, `-` for
+/// one not read, then `|` and `name=count` for each key event when the
+/// events were read. A line that does not read is skipped, so a
+/// half-written last line costs one reading rather than the file; an
+/// event list torn inside a `name=count` is dropped whole rather than
+/// read as a shorter list.
 pub fn parse_samples(text: &str) -> Vec<Sample> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -387,17 +405,27 @@ pub fn parse_samples(text: &str) -> Vec<Sample> {
         let (Some(t), Some(active), Some(views)) = (parts.next(), parts.next(), parts.next()) else {
             continue;
         };
-        let (Ok(t), Ok(active), Ok(views)) = (t.parse::<f64>(), active.parse::<f64>(), views.parse::<f64>())
-        else {
-            continue;
-        };
-        if !t.is_finite() || !active.is_finite() || !views.is_finite() {
+        let Ok(t) = t.parse::<f64>() else { continue };
+        let (Some(active), Some(views)) = (reading(active), reading(views)) else { continue };
+        if !t.is_finite() {
             continue;
         }
-        let events = parts
-            .filter_map(|p| p.rsplit_once('='))
-            .filter_map(|(n, c)| c.parse::<f64>().ok().map(|c| (n.to_string(), c)))
-            .collect();
+        let events = match parts.next() {
+            Some("|") => {
+                let read: Option<Vec<(String, f64)>> = parts
+                    .map(|p| {
+                        let (n, c) = p.rsplit_once('=')?;
+                        let c = c.parse::<f64>().ok().filter(|c| c.is_finite())?;
+                        Some((n.to_string(), c))
+                    })
+                    .collect();
+                read
+            }
+            _ => None,
+        };
+        if active.is_none() && views.is_none() && events.is_none() {
+            continue;
+        }
         out.push(Sample { t, active, views, events });
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -408,13 +436,17 @@ pub fn parse_samples(text: &str) -> Vec<Sample> {
 /// letters, digits and underscores, so nothing here needs escaping; any
 /// whitespace or `=` that did arrive is replaced rather than trusted.
 pub fn format_sample(s: &Sample) -> String {
-    let mut line = format!("{:.0} {} {}", s.t, s.active, s.views);
-    for (name, count) in &s.events {
-        let clean: String = name
-            .chars()
-            .map(|c| if c.is_whitespace() || c == '=' { '_' } else { c })
-            .collect();
-        line.push_str(&format!(" {}={}", clean, count));
+    let field = |v: Option<f64>| v.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+    let mut line = format!("{:.0} {} {}", s.t, field(s.active), field(s.views));
+    if let Some(events) = &s.events {
+        line.push_str(" |");
+        for (name, count) in events {
+            let clean: String = name
+                .chars()
+                .map(|c| if c.is_whitespace() || c == '=' { '_' } else { c })
+                .collect();
+            line.push_str(&format!(" {}={}", clean, count));
+        }
     }
     line
 }
@@ -561,15 +593,31 @@ mod tests {
 
     #[test]
     fn samples_round_trip_and_skip_a_torn_line() {
-        let s = Sample { t: 1_790_000_000.0, active: 71.0, views: 540.0, events: vec![("purchase".into(), 3.0), ("sign up".into(), 1.0)] };
-        let line = format_sample(&s);
-        assert_eq!(line, "1790000000 71 540 purchase=3 sign_up=1");
-        let text = format!("{}\n1789999940 60 500\ngarbage\n1790000060 7", line);
+        let totals = Sample { t: 1_790_000_000.0, active: Some(71.0), views: Some(540.0), events: None };
+        let events = Sample {
+            t: 1_790_000_030.0,
+            active: None,
+            views: None,
+            events: Some(vec![("purchase".into(), 3.0), ("sign up".into(), 1.0)]),
+        };
+        let none = Sample { t: 1_790_000_090.0, active: None, views: None, events: Some(vec![]) };
+        assert_eq!(format_sample(&totals), "1790000000 71 540");
+        assert_eq!(format_sample(&events), "1790000030 - - | purchase=3 sign_up=1");
+        assert_eq!(format_sample(&none), "1790000090 - - |");
+        let text = format!(
+            "{}\n{}\n{}\n1789999940 60 500\ngarbage\n1790000060 7\n1790000070 - - | purchase=3 sign_u",
+            format_sample(&totals),
+            format_sample(&events),
+            format_sample(&none)
+        );
         let back = parse_samples(&text);
-        assert_eq!(back.len(), 2, "the torn last line and the garbage are skipped");
+        assert_eq!(back.len(), 4, "the torn lines and the garbage are skipped");
         assert_eq!(back[0].t, 1_789_999_940.0, "sorted by time");
-        assert_eq!(back[1].events, vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 1.0)]);
+        assert_eq!(back[1], totals);
+        assert_eq!(back[2].events, Some(vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 1.0)]));
+        assert_eq!(back[2].active, None, "an events sample read no totals");
+        assert_eq!(back[3].events, Some(vec![]), "a read that found no key events is not an unread one");
         assert!(parse_samples("").is_empty());
-        assert!(parse_samples("NaN 1 2\n1 inf 2").is_empty());
+        assert!(parse_samples("NaN 1 2\n1 inf 2\n5 - -").is_empty());
     }
 }

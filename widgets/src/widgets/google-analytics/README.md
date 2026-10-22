@@ -128,7 +128,13 @@ baseline is built for them:
   week - labelled as hourly processed data, not realtime.
 
 Key events in the realtime window are sampled the same way, so each gets its
-own baseline.
+own baseline - but as readings of their own, written when the once-a-minute
+event breakdown arrives and stamped with that time, not copied onto every
+totals reading. A reading that did not ask for events is not a reading of
+zero events, so a week counts toward an event's baseline only if events were
+read near that minute. Two panes on one property share the file; appends and
+the daily prune take a lock beside it, and the prune works from what is on
+disk, so neither pane drops the other's readings.
 
 ## Detail views
 

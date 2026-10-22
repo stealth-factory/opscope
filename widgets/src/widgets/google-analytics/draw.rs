@@ -478,9 +478,7 @@ fn push_item(f: &mut Frame, v: &View, item: Item, lines: impl FnOnce(bool) -> Ve
 }
 
 fn event_base(prop: &Prop, v: &View, tz: chrono_tz::Tz, name: &str) -> Baseline {
-    model::baseline(&prop.samples, v.now, v.weeks, tz, &|s| {
-        s.events.iter().filter(|(n, _)| n == name).map(|e| e.1).sum()
-    })
+    model::baseline(&prop.samples, v.now, v.weeks, tz, &|s| model::event_reading(s, name))
 }
 
 fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz, p: &Palette) {
@@ -1463,8 +1461,8 @@ mod tests {
             interval: 60,
             interval_why: "backed off: 0 active for 5m+".into(),
             samples: vec![
-                Sample { t: NOW - 2.0 * WEEK, active: 48.0, views: 1.0, events: vec![("purchase".into(), 2.0)] },
-                Sample { t: NOW - WEEK, active: 50.0, views: 1.0, events: vec![] },
+                Sample { t: NOW - 2.0 * WEEK, active: Some(48.0), views: Some(1.0), events: Some(vec![("purchase".into(), 2.0)]) },
+                Sample { t: NOW - WEEK, active: Some(50.0), views: Some(1.0), events: Some(vec![]) },
             ],
             sample_path: "/home/someone/.local/state/opscope/google-analytics/123.samples".into(),
             rt_err: "403 no access: add reader@example-project.iam.gserviceaccount.com as Viewer under Property access management · Google said: User does not have sufficient permissions for this property.".into(),
