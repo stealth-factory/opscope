@@ -108,6 +108,8 @@ struct Region {
     new_count: usize,
     /// The fetch this one was compared with; `None` is a first check.
     since: Option<f64>,
+    /// The previous fetch, when it was too old to compare with.
+    stale: Option<f64>,
     left: Vec<Left>,
     /// The last fetch that returned a feed.
     fetched: f64,
@@ -125,16 +127,23 @@ struct Shared {
     err: String,
 }
 
+/// How many refresh intervals may pass between two fetches of a region
+/// before the earlier one is too old to compare with. Two missed fetches
+/// are a blip; more is a widget that was not watching - closed, asleep or
+/// offline - and cannot say what ran on or when anything left.
+const COMPARE_WITHIN: f64 = 3.0;
+
 /// Fold one fetch's answer into a region and its memory.
 fn apply(region: &mut Region, answer: Answer, memory: &mut Memory, now: f64, refresh: f64) {
     region.next_at = now + refresh;
     match answer {
         Answer::Items(items) => {
-            let seen = memory.observe(&items, now);
+            let seen = memory.observe(&items, now, refresh * COMPARE_WITHIN);
             region.items = items;
             region.seen = seen.seen;
             region.new_count = seen.new_count;
             region.since = seen.since;
+            region.stale = seen.stale;
             region.left = memory.left.clone();
             region.fetched = now;
             region.failure = None;
@@ -386,6 +395,10 @@ struct Body {
 }
 
 /// Widths of the trending table's columns, or `0` for a dropped one.
+///
+/// `stacked` is the layout below every table: too narrow for SEARCH and
+/// TRAFFIC side by side, so each trend is its term with its bucket under
+/// it, in one column `search` wide.
 #[derive(Debug, PartialEq)]
 struct Columns {
     search: usize,
@@ -393,6 +406,7 @@ struct Columns {
     started: usize,
     seen: usize,
     news: usize,
+    stacked: bool,
 }
 
 const LEAD: usize = 2;
@@ -411,6 +425,9 @@ fn columns(
     news_want: usize,
 ) -> Columns {
     let gap = 1usize;
+    // A column is never narrower than its heading, or the heading is cut.
+    let search_want = search_want.max("SEARCH".len());
+    let news_want = news_want.max("NEWS".len());
     let search_min = search_want.min(12);
     let traffic = traffic.max("TRAFFIC".len());
     let started = started.max("STARTED".len());
@@ -430,6 +447,7 @@ fn columns(
             started,
             seen,
             news: fit[1],
+            stacked: false,
         };
     }
     for (with_seen, with_started) in [(true, true), (false, true), (false, false)] {
@@ -437,17 +455,27 @@ fn columns(
             + gap
             + if with_started { started + gap } else { 0 }
             + if with_seen { seen + gap } else { 0 };
-        if room >= fixed + search_min || !with_started {
+        // The last table needs only SEARCH's heading, since its terms wrap.
+        let least = if with_started { search_min } else { "SEARCH".len() };
+        if room >= fixed + least {
             return Columns {
-                search: room.saturating_sub(fixed).max(1),
+                search: room - fixed,
                 traffic,
                 started: if with_started { started } else { 0 },
                 seen: if with_seen { seen } else { 0 },
                 news: 0,
+                stacked: false,
             };
         }
     }
-    unreachable!("the last layout always returns")
+    Columns {
+        search: room.max(1),
+        traffic: 0,
+        started: 0,
+        seen: 0,
+        news: 0,
+        stacked: true,
+    }
 }
 
 /// The list screen's body, below the pinned title.
@@ -529,7 +557,13 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
     if region.fetched > 0.0 {
         match region.since {
             Some(at) => about.push(format!("{} new since {}", region.new_count, clock(at, now))),
-            None => about.push("first check, nothing to compare yet".to_string()),
+            None => match region.stale {
+                Some(at) => about.push(format!(
+                    "previous fetch {} ago, too long to compare; starting over",
+                    tc::age(now - at)
+                )),
+                None => about.push("first check, nothing to compare yet".to_string()),
+            },
         }
     }
     for l in pack(&about, cw.saturating_sub(1)) {
@@ -655,6 +689,53 @@ fn on(p: &Palette, colour: &str, selected: bool) -> String {
     }
 }
 
+/// The title of item `i` of section `s` in a region, for the two trend
+/// sections.
+fn title_of(region: &Region, s: usize, i: usize) -> Option<&str> {
+    match s {
+        TRENDING => region.items.get(i).map(|t| t.title.as_str()),
+        LEFT => region.left.get(i).map(|l| l.title.as_str()),
+        _ => None,
+    }
+}
+
+/// What the cursor is on in each trend section: the region, and the title
+/// per section. A refresh reorders the feed, and the cursor follows this,
+/// not its row number.
+type Picked = (usize, [Option<String>; 2]);
+
+fn picked(shared: &Shared, view: &View, body: &Body) -> Picked {
+    let titles = [TRENDING, LEFT].map(|s| {
+        let region = shared.regions.get(view.region)?;
+        let &i = body.visible[s].get(view.at[s])?;
+        title_of(region, s, i).map(str::to_string)
+    });
+    (view.region, titles)
+}
+
+/// Put the cursor back on the titles it was on, wherever the new fetch
+/// moved them. A title that has gone keeps the row number instead, the
+/// only position left to keep.
+fn follow_titles(view: &mut View, shared: &Shared, body: &Body, was: &Picked) {
+    if was.0 != view.region {
+        return;
+    }
+    let Some(region) = shared.regions.get(view.region) else {
+        return;
+    };
+    for (k, s) in [TRENDING, LEFT].into_iter().enumerate() {
+        let Some(title) = was.1[k].as_deref() else {
+            continue;
+        };
+        if let Some(pos) = body.visible[s]
+            .iter()
+            .position(|&i| title_of(region, s, i) == Some(title))
+        {
+            view.at[s] = pos;
+        }
+    }
+}
+
 /// Lay cells out side by side; each cell is a column of wrapped lines.
 fn table_row(
     cells: &[(String, usize, Vec<String>)],
@@ -726,6 +807,31 @@ fn trending_rows(
     let search_want = w_of(&|i| region.items[i].title.clone());
     let news_want = w_of(&|i| sources(&region.items[i].news).join(SEP));
     let c = columns(cw, traffic_w, started_w, seen_w, search_want, news_want);
+    if c.stacked {
+        let w = c.search;
+        let head: Vec<(String, String)> = tc::wrap_words("SEARCH / TRAFFIC", w)
+            .into_iter()
+            .map(|l| (p.dim.clone(), l))
+            .collect();
+        b.rows.extend(stacked(head, p, false, cw));
+        let selected = (view.focus == TRENDING).then(|| view.at[TRENDING]);
+        for (k, &i) in vis.iter().enumerate() {
+            let t = &region.items[i];
+            let mut lines: Vec<(String, String)> = tc::wrap_words(&t.title, w)
+                .into_iter()
+                .map(|l| (p.text.clone(), l))
+                .collect();
+            lines.extend(
+                tc::wrap_words(&t.traffic, w)
+                    .into_iter()
+                    .map(|l| (p.traffic.clone(), l)),
+            );
+            let sel = selected == Some(k);
+            let rows = stacked(lines, p, sel, cw);
+            push_item(b, TRENDING, k, rows, sel);
+        }
+        return;
+    }
 
     let mut head: Vec<(String, usize, Vec<String>)> =
         vec![(p.dim.clone(), c.search, vec!["SEARCH".into()])];
@@ -1237,6 +1343,18 @@ fn main() {
                     }
                 }));
                 drop(work);
+                // Every region's next fetch follows the wait below, which
+                // starts now, at the end of the round - not when its own
+                // fetch finished, or a slow round reads "retrying now" while
+                // the poller is still asleep.
+                if round.is_ok() {
+                    let due = tc::now() + refresh;
+                    if let Ok(mut g) = poller.lock() {
+                        for r in g.regions.iter_mut() {
+                            r.next_at = due;
+                        }
+                    }
+                }
                 if round.is_err() {
                     if let Ok(mut g) = poller.lock() {
                         g.err = tc::take_panic_reason()
@@ -1264,6 +1382,7 @@ fn main() {
     let mut slots: Vec<(usize, usize)> = Vec::new();
     let mut room = 1usize;
     let mut note_at = 0.0f64;
+    let mut was: Picked = (0, [None, None]);
     const HEAD: usize = 1;
 
     loop {
@@ -1287,6 +1406,7 @@ fn main() {
         // The body as it stands before this frame's keys, for resolving
         // what a key or click refers to.
         let before = list_body(&snapshot, &view, refresh, cw, now, &p);
+        follow_titles(&mut view, &snapshot, &before, &was);
 
         let mut keys = keyboard.poll();
         let current = match &detail {
@@ -1527,6 +1647,7 @@ fn main() {
         for s in 0..3 {
             view.at[s] = view.at[s].min(body.lens[s].saturating_sub(1));
         }
+        was = picked(&snapshot, &view, &body);
         let region_geo = snapshot
             .regions
             .get(view.region)
@@ -1638,6 +1759,7 @@ mod tests {
                 items[0].clone(),
             ],
             NOW - 600.0,
+            f64::INFINITY,
         );
         let mut us = Region {
             geo: "US".into(),
@@ -1770,6 +1892,94 @@ mod tests {
         let tiny = columns(29, 5, 9, 3, 30, 40);
         assert_eq!((tiny.news, tiny.seen, tiny.started), (0, 0, 0));
         assert!(tiny.search >= 12 && tiny.traffic >= 5);
+        assert!(!tiny.stacked);
+        // SEARCH and TRAFFIC side by side need 2 + 6 + 1 + 7 cells.
+        assert!(!columns(16, 5, 9, 3, 30, 40).stacked);
+        let under = columns(15, 5, 9, 3, 30, 40);
+        assert!(under.stacked);
+        assert_eq!(under.search, 13);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selected_trend_not_its_row() {
+        let p = palette();
+        let mut shared = sample();
+        let mut view = View::default();
+        view.at[TRENDING] = 2; // quux
+        let body = list_body(&shared, &view, 300.0, 99, NOW, &p);
+        let was = picked(&shared, &view, &body);
+        assert_eq!(was.1[0].as_deref(), Some("quux"));
+        // Google puts a new term at the top.
+        shared.regions[0]
+            .items
+            .insert(0, trend("brand new", "200+", None, &[]));
+        let body = list_body(&shared, &view, 300.0, 99, NOW, &p);
+        follow_titles(&mut view, &shared, &body, &was);
+        assert_eq!(view.at[TRENDING], 3, "still on quux");
+        // A title that has gone keeps the row number.
+        shared.regions[0].items.retain(|t| t.title != "quux");
+        let body = list_body(&shared, &view, 300.0, 99, NOW, &p);
+        follow_titles(&mut view, &shared, &body, &was);
+        assert_eq!(view.at[TRENDING], 3);
+    }
+
+    #[test]
+    fn a_stale_previous_fetch_says_why_nothing_is_compared() {
+        let p = palette();
+        let mut memory = Memory::default();
+        memory.observe(&[trend("alpha", "200+", None, &[])], NOW - 86_400.0, f64::INFINITY);
+        let mut us = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut us,
+            Answer::Items(vec![trend("beta", "200+", None, &[])]),
+            &mut memory,
+            NOW,
+            300.0,
+        );
+        assert!(us.left.is_empty(), "alpha did not leave just now");
+        let shared = Shared {
+            regions: vec![us],
+            err: String::new(),
+        };
+        let text = plain(&list_body(&shared, &View::default(), 300.0, 140, NOW, &p).rows);
+        assert!(text.contains("too long to compare"), "{text}");
+        assert!(!text.contains("new since"), "{text}");
+    }
+
+    #[test]
+    fn short_terms_still_leave_room_for_the_heading() {
+        for cw in [16, 20, 30, 45, 60, 140] {
+            let c = columns(cw, 4, 9, 2, 3, 4);
+            if !c.stacked {
+                assert!(c.search >= "SEARCH".len(), "{cw}: {c:?}");
+            }
+            if c.news > 0 {
+                assert!(c.news >= "NEWS".len(), "{cw}: {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_two_columns_stacks_them() {
+        let p = palette();
+        let shared = sample();
+        for w in [8, 10, 12, 15] {
+            let rows = list_body(&shared, &View::default(), 300.0, w, NOW, &p).rows;
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= w,
+                    "{w}: {:?} is too wide",
+                    tc::source_text(row)
+                );
+            }
+            let text = plain(&rows);
+            for t in &shared.regions[0].items {
+                assert!(text.contains(&t.traffic), "{w}: {} missing", t.traffic);
+            }
+        }
     }
 
     #[test]

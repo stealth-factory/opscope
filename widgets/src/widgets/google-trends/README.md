@@ -70,6 +70,11 @@ That history is kept per region in
 `~/.local/state/...`), and trends not seen for **seven days** are pruned. A
 missing file is a first check. A file that will not read is replaced, and the
 pane says the history started fresh rather than quietly resetting the counts.
+A previous fetch more than three refresh intervals old - the widget was closed,
+asleep or offline in between - is not compared with either: the widget cannot
+say a trend ran on through the gap or when one left it, so that fetch is a
+first check too, and the header says `previous fetch <age> ago, too long to
+compare`.
 Two panes watching the same region share that file and will each count a
 fetch, so run one per region.
 

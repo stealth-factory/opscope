@@ -76,6 +76,9 @@ pub struct Observation {
     pub new_count: usize,
     /// The fetch this one was compared with, or `None` on a first check.
     pub since: Option<f64>,
+    /// A previous fetch too old to compare with, when that is why this
+    /// is a first check.
+    pub stale: Option<f64>,
 }
 
 /// One region's memory.
@@ -98,9 +101,19 @@ impl Memory {
     /// A trend counts as continuing only if it was in the fetch directly
     /// before this one: SEEN is consecutive fetches, so a term that drops
     /// out and comes back starts again at one and is `new` again.
-    pub fn observe(&mut self, items: &[Trend], now: f64) -> Observation {
-        let before: HashSet<&str> = self.previous.iter().map(String::as_str).collect();
-        let since = self.previous_fetch;
+    ///
+    /// A previous fetch more than `max_gap` seconds old is not compared
+    /// with: the widget was not watching in between, so it cannot say a
+    /// trend ran on through the gap or when one left. That fetch is
+    /// reported as `stale` and this one starts afresh, as a first check.
+    pub fn observe(&mut self, items: &[Trend], now: f64, max_gap: f64) -> Observation {
+        let since = self.previous_fetch.filter(|&at| now - at <= max_gap);
+        let stale = self.previous_fetch.filter(|_| since.is_none());
+        let before: HashSet<&str> = if since.is_some() {
+            self.previous.iter().map(String::as_str).collect()
+        } else {
+            HashSet::new()
+        };
         let mut seen = Vec::with_capacity(items.len());
         let mut new_count = 0usize;
         let mut counted: HashSet<String> = HashSet::new();
@@ -171,6 +184,7 @@ impl Memory {
             seen,
             new_count: if since.is_some() { new_count } else { 0 },
             since,
+            stale,
         }
     }
 
@@ -325,6 +339,9 @@ pub fn file_stem(geo: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Wider than every step these tests take between fetches.
+    const GAP: f64 = 900.0;
+
     fn trend(title: &str, traffic: &str) -> Trend {
         Trend {
             title: title.into(),
@@ -341,7 +358,7 @@ mod tests {
     #[test]
     fn the_first_check_has_nothing_to_compare_with() {
         let mut m = Memory::default();
-        let o = m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0);
+        let o = m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
         assert_eq!(o.seen, vec![1, 1]);
         assert_eq!(o.since, None);
         assert_eq!(o.new_count, 0, "a first check is not a count of new trends");
@@ -351,14 +368,14 @@ mod tests {
     #[test]
     fn seen_counts_consecutive_fetches_and_new_ones_start_at_one() {
         let mut m = Memory::default();
-        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0);
-        let o = m.observe(&[trend("alpha", "1000+"), trend("gamma", "200+")], 1300.0);
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
+        let o = m.observe(&[trend("alpha", "1000+"), trend("gamma", "200+")], 1300.0, GAP);
         assert_eq!(o.seen, vec![2, 1]);
         assert_eq!(o.new_count, 1);
         assert_eq!(o.since, Some(1000.0));
         assert_eq!(m.trends["alpha"].traffic, "1000+");
         assert_eq!(m.trends["alpha"].first_seen, 1000.0);
-        let o = m.observe(&[trend("alpha", "1000+"), trend("gamma", "200+")], 1600.0);
+        let o = m.observe(&[trend("alpha", "1000+"), trend("gamma", "200+")], 1600.0, GAP);
         assert_eq!(o.seen, vec![3, 2]);
         assert_eq!(o.new_count, 0);
     }
@@ -366,9 +383,9 @@ mod tests {
     #[test]
     fn a_trend_missing_from_this_fetch_has_left_the_feed() {
         let mut m = Memory::default();
-        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0);
-        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1300.0);
-        m.observe(&[trend("alpha", "200+")], 1600.0);
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1300.0, GAP);
+        m.observe(&[trend("alpha", "200+")], 1600.0, GAP);
         assert_eq!(m.left.len(), 1);
         let gone = &m.left[0];
         assert_eq!(gone.title, "beta");
@@ -383,17 +400,17 @@ mod tests {
             "its stories are kept while the process runs"
         );
         // Still gone on the next fetch: listed once, not twice.
-        m.observe(&[trend("alpha", "200+")], 1900.0);
+        m.observe(&[trend("alpha", "200+")], 1900.0, GAP);
         assert_eq!(m.left.len(), 1);
     }
 
     #[test]
     fn a_trend_that_comes_back_is_new_again_and_no_longer_left() {
         let mut m = Memory::default();
-        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0);
-        m.observe(&[trend("alpha", "200+")], 1300.0);
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
+        m.observe(&[trend("alpha", "200+")], 1300.0, GAP);
         assert_eq!(m.left.len(), 1);
-        let o = m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1600.0);
+        let o = m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1600.0, GAP);
         assert_eq!(o.seen, vec![3, 1]);
         assert_eq!(o.new_count, 1);
         assert!(m.left.is_empty());
@@ -403,14 +420,14 @@ mod tests {
     #[test]
     fn departures_are_kept_an_hour_and_old_trends_a_week() {
         let mut m = Memory::default();
-        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0);
-        m.observe(&[trend("alpha", "200+")], 1300.0);
-        m.observe(&[trend("alpha", "200+")], 1300.0 + LEFT_KEPT - 1.0);
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
+        m.observe(&[trend("alpha", "200+")], 1300.0, GAP);
+        m.observe(&[trend("alpha", "200+")], 1300.0 + LEFT_KEPT - 1.0, f64::INFINITY);
         assert_eq!(m.left.len(), 1);
-        m.observe(&[trend("alpha", "200+")], 1300.0 + LEFT_KEPT + 1.0);
+        m.observe(&[trend("alpha", "200+")], 1300.0 + LEFT_KEPT + 1.0, f64::INFINITY);
         assert!(m.left.is_empty());
         assert!(m.trends.contains_key("beta"), "a week has not passed");
-        m.observe(&[trend("alpha", "200+")], 1000.0 + FORGET_AFTER + 1.0);
+        m.observe(&[trend("alpha", "200+")], 1000.0 + FORGET_AFTER + 1.0, f64::INFINITY);
         assert!(!m.trends.contains_key("beta"));
         assert!(
             m.trends.contains_key("alpha"),
@@ -419,10 +436,29 @@ mod tests {
     }
 
     #[test]
+    fn a_previous_fetch_too_old_to_compare_is_a_fresh_start() {
+        let mut m = Memory::default();
+        m.observe(&[trend("alpha", "200+"), trend("beta", "500+")], 1000.0, GAP);
+        // Hours later, as after a restart: beta is absent, alpha is back.
+        let later = 1000.0 + 6.0 * 3_600.0;
+        let o = m.observe(&[trend("alpha", "200+")], later, GAP);
+        assert_eq!(o.since, None, "nothing was watched in between");
+        assert_eq!(o.stale, Some(1000.0));
+        assert_eq!(o.seen, vec![1], "a run does not carry across the gap");
+        assert_eq!(o.new_count, 0);
+        assert!(m.left.is_empty(), "beta left at some unknown time, not now");
+        // And the fetch after that compares normally again.
+        let o = m.observe(&[trend("alpha", "200+")], later + 300.0, GAP);
+        assert_eq!(o.since, Some(later));
+        assert_eq!(o.stale, None);
+        assert_eq!(o.seen, vec![2]);
+    }
+
+    #[test]
     fn an_empty_fetch_counts_as_a_fetch() {
         let mut m = Memory::default();
-        m.observe(&[trend("alpha", "200+")], 1000.0);
-        let o = m.observe(&[], 1300.0);
+        m.observe(&[trend("alpha", "200+")], 1000.0, GAP);
+        let o = m.observe(&[], 1300.0, GAP);
         assert!(o.seen.is_empty());
         assert_eq!(m.left.len(), 1);
         assert_eq!(m.previous_fetch, Some(1300.0));
@@ -431,9 +467,9 @@ mod tests {
     #[test]
     fn a_term_listed_twice_is_one_fetch() {
         let mut m = Memory::default();
-        let o = m.observe(&[trend("alpha", "200+"), trend("alpha", "200+")], 1000.0);
+        let o = m.observe(&[trend("alpha", "200+"), trend("alpha", "200+")], 1000.0, GAP);
         assert_eq!(o.seen, vec![1, 1]);
-        let o = m.observe(&[trend("alpha", "200+"), trend("alpha", "200+")], 1300.0);
+        let o = m.observe(&[trend("alpha", "200+"), trend("alpha", "200+")], 1300.0, GAP);
         assert_eq!(o.seen, vec![2, 2]);
     }
 
@@ -443,8 +479,9 @@ mod tests {
         m.observe(
             &[trend("alpha", "200+"), trend("beta \"q\"", "500+")],
             1000.0,
+            GAP,
         );
-        m.observe(&[trend("alpha", "200+")], 1300.0);
+        m.observe(&[trend("alpha", "200+")], 1300.0, GAP);
         let back = parse_state(&m.to_json()).unwrap();
         assert_eq!(back.previous_fetch, m.previous_fetch);
         assert_eq!(back.previous, m.previous);
@@ -454,7 +491,7 @@ mod tests {
         assert!(back.left[0].news.is_empty(), "stories are not saved");
         // And it carries on counting from where it was.
         let mut back = back;
-        let o = back.observe(&[trend("alpha", "200+")], 1600.0);
+        let o = back.observe(&[trend("alpha", "200+")], 1600.0, GAP);
         assert_eq!(o.seen, vec![3]);
     }
 
