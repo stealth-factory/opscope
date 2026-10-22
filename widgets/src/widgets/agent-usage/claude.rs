@@ -3911,6 +3911,33 @@ mod tests {
         assert_eq!(num(&got[1].stats, "totalSessions") as i64, 9);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// The whole tab, colour escapes removed, one string per row.
+    fn tab_text(c: &Data, w: usize) -> Vec<String> {
+        tab_with_plots(c, w, 40, &Config::default(), &palette(), &mut Vec::new())
+            .iter()
+            .map(|row| bare(row).trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_shows_the_bank_the_summary_counts() {
+        let data = Data::with_reset_grants(
+            "",
+            Some(25),
+            serde_json::json!([{
+                "resets_left": 2, "usable_now": true,
+                "ends_at": "2126-01-02T00:00:00Z"
+            }]),
+            true,
+        );
+        let rows = tab_text(&data, 100);
+        assert!(
+            rows.iter().any(|row| row == " ── BANK RESET ──"),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row == "  2 reset available"), "{rows:#?}");
+    }
 }
 
 #[cfg(test)]
