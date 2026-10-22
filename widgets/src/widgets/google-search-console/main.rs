@@ -329,12 +329,16 @@ fn detail_job(site: &SiteData, item: &Item) -> Option<(String, String)> {
 /// and the parameters and window it was read for, so a page asked about
 /// for another window, or before the day moved on, is not answered from
 /// the wrong one.
-fn detail_key(site: &SiteData, item: &Item, params: &Params) -> Option<String> {
+///
+/// The parameters are the reading's own, not the ones just asked for: in
+/// the moment after `w`, `d` or `t`, the rows and window on screen are
+/// still the old reading's, and a detail mixing them with new parameters
+/// would be read for one thing and labelled as another. It follows the
+/// new ones when the reading does.
+fn detail_key(site: &SiteData, item: &Item) -> Option<String> {
     let (kind, value) = detail_job(site, item)?;
-    Some(format!(
-        "{}|{}|{}|{:?}|{}|{}|{}",
-        site.site, kind, value, site.windows, params.fresh, params.days, params.kind
-    ))
+    let p = &site.params;
+    Some(format!("{}|{}|{}|{:?}|{}|{}|{}", site.site, kind, value, site.windows, p.fresh, p.days, p.kind))
 }
 
 /// What `c` copies for an item.
@@ -519,7 +523,7 @@ fn main() {
                             inspect_now(&cfg, site.map(|s| s.site.clone()).unwrap_or_default(), url, &caches, &note, &activity);
                         }
                     }
-                    "r" | "R" => match site.and_then(|s| detail_key(s, &item, &params)) {
+                    "r" | "R" => match site.and_then(|s| detail_key(s, &item)) {
                         Some(key) => {
                             if let Ok(mut g) = details.lock() {
                                 g.remove(&key);
@@ -676,10 +680,10 @@ fn main() {
         if let Some(item) = open.clone() {
             // Detail: fetch on demand, once per item and parameters.
             let fetched = sites.get(at).and_then(|site| {
-                let key = detail_key(site, &item, &params)?;
+                let key = detail_key(site, &item)?;
                 let held = details.lock().ok().and_then(|g| g.get(&key).cloned());
                 if held.is_none() {
-                    start_detail(&cfg, site, &item, &params, key, &details, &fetching, &activity);
+                    start_detail(&cfg, site, &item, key, &details, &fetching, &activity);
                 }
                 held
             });
@@ -848,13 +852,12 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
     });
 }
 
-/// Fetch a detail screen's data once, on a thread.
-#[allow(clippy::too_many_arguments)]
+/// Fetch a detail screen's data once, on a thread, for the parameters the
+/// site's reading was made with - the same ones its key and labels use.
 fn start_detail(
     cfg: &Config,
     site: &SiteData,
     item: &Item,
-    params: &Params,
     key: String,
     details: &Arc<Mutex<HashMap<String, Result<Detail, String>>>>,
     fetching: &Arc<Mutex<HashSet<String>>>,
@@ -866,7 +869,7 @@ fn start_detail(
     }
     let window = site.windows.map(|(cur, _)| cur);
     let (cfg, site_name, params, details, fetching, activity) =
-        (cfg.clone(), site.site.clone(), params.clone(), Arc::clone(details), Arc::clone(fetching), activity.clone());
+        (cfg.clone(), site.site.clone(), site.params.clone(), Arc::clone(details), Arc::clone(fetching), activity.clone());
     std::thread::spawn(move || {
         let work = activity.start();
         let got = match signed_in(&cfg) {
@@ -962,13 +965,13 @@ mod tests {
         let p28 = Params { days: 28, ..p7.clone() };
         let d = SiteData::new("sc-domain:example.com", &p7);
         let item = Item::Page("https://example.com/".into());
-        assert_ne!(detail_key(&d, &item, &p7), detail_key(&d, &item, &p28));
+        assert_ne!(detail_key(&d, &item), detail_key(&SiteData::new("sc-domain:example.com", &p28), &item));
         // The day moving on moves the window, and with it the key.
         let mut later = d.clone();
         later.windows = Some(windows(parse_date("2026-10-18").unwrap(), 7));
-        assert_ne!(detail_key(&d, &item, &p7), detail_key(&later, &item, &p7));
+        assert_ne!(detail_key(&d, &item), detail_key(&later, &item));
         // Nothing is fetched for a property, so there is nothing to file.
-        assert_eq!(detail_key(&d, &Item::Site(0), &p7), None);
+        assert_eq!(detail_key(&d, &Item::Site(0)), None);
     }
 
     fn term(query: &str) -> Term {
@@ -983,8 +986,8 @@ mod tests {
         let mut after = before.clone();
         after.terms = Part::ok(vec![term("example tool"), term("example widget")], 2.0);
         // Row 0 is another query after the refresh, so its detail is too.
-        assert_ne!(detail_key(&before, &Item::Term(0), &p), detail_key(&after, &Item::Term(0), &p));
-        assert_eq!(detail_key(&before, &Item::Term(0), &p), detail_key(&after, &Item::Term(1), &p));
+        assert_ne!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(0)));
+        assert_eq!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(1)));
     }
 
     #[test]
