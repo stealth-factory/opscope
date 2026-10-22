@@ -570,7 +570,10 @@ pub fn hourly_fallback(prop: &Prop, now: f64, tz: chrono_tz::Tz) -> Option<Strin
     let week = h.weeks.first()?.as_ref()?;
     let today = h.today[last].unwrap_or(0.0);
     let then = week[last];
-    let (_, _, day) = model::local_now(now, tz);
+    if proc_.date != model::local_now(now, tz).0 {
+        return None;
+    }
+    let day = model::weekday(proc_.date);
     let change = model::pct(today, then).map(model::pct_label).unwrap_or_else(|| "no change to measure".into());
     Some(format!(
         "hourly instead: sessions {:02}:00-{:02}:59 today {} vs last {} {} ({}) · processed hourly data, not realtime",
@@ -656,8 +659,16 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
         return;
     };
     let h = model::hourly(&proc_.hourly, "sessions");
-    let (_, _, day) = model::local_now(v.now, tz);
+    let day = model::weekday(proc_.date);
     let last_label = format!("last {}", day);
+    if proc_.date != model::local_now(v.now, tz).0 {
+        f.lines.extend(prose(
+            &p.warn,
+            &format!("these are {}'s reports, asked for before midnight - today's arrive with the next refresh", day),
+            budget,
+            " ",
+        ));
+    }
     let week: Vec<Option<f64>> = match h.weeks.first().and_then(|w| w.as_ref()) {
         Some(w) => w.iter().map(|x| Some(*x)).collect(),
         None => vec![None; 24],
@@ -730,8 +741,16 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
 
 #[allow(clippy::too_many_arguments)]
 fn key_events(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz, p: &Palette, counts: &mut (usize, usize)) {
-    let (date, _, day) = model::local_now(v.now, tz);
     let proc_ = prop.processed.as_ref();
+    // The reports' own date, so the events are read for the same day the
+    // sessions above are.
+    let (date, day) = match proc_ {
+        Some(x) => (x.date, model::weekday(x.date)),
+        None => {
+            let (d, _, day) = model::local_now(v.now, tz);
+            (d, day)
+        }
+    };
     let h = proc_.map(|x| model::hourly(&x.hourly, "sessions"));
     let upto = h.as_ref().and_then(|h| h.last);
     let says = match upto {
@@ -864,7 +883,7 @@ fn mover_rows(
     budget: usize,
     list: &[model::Mover],
     m: usize,
-    window: usize,
+    end: chrono::NaiveDate,
     make: &dyn Fn(String) -> Item,
     spark: bool,
     limit: usize,
@@ -901,8 +920,8 @@ fn mover_rows(
         let colour = if label == "new" { p.good.clone() } else if label == "gone" { p.bad.clone() } else { delta_colour(p, d).to_string() };
         cells.push((colour, left(&format!("  {}{}", label, if label.ends_with('%') { arrow(d) } else { "" }), dw)));
         if spark {
-            let days: Vec<f64> = mv.daily.iter().map(|(_, x)| x.get(m).copied().unwrap_or(0.0)).collect();
-            let tail: Vec<Option<f64>> = days.iter().rev().take(14).rev().map(|x| Some(*x)).collect();
+            let days: Vec<(String, f64)> = mv.daily.iter().map(|(d, x)| (d.clone(), x.get(m).copied().unwrap_or(0.0))).collect();
+            let tail: Vec<Option<f64>> = model::day_grid(&days, end, 14).into_iter().map(Some).collect();
             let hi = tail.iter().flatten().cloned().fold(0.0, f64::max);
             cells.push((p.good.clone(), format!("  {}", bar(&tail, hi))));
         }
@@ -910,7 +929,6 @@ fn mover_rows(
         let item_name = mv.name.clone();
         push_item(f, v, make(item_name), |here| table_row(p, true, here, &name, &p.txt, name_w, &cells, budget));
     }
-    let _ = window;
 }
 
 fn mover_head(p: &Palette, budget: usize, first: &str, window: usize, spark: bool) -> Vec<Line> {
@@ -954,6 +972,19 @@ fn organic(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, cou
         f.lines.extend(prose(&p.dim, said, budget, " "));
         return;
     };
+    if let Some(proc_) = &prop.processed {
+        if let Some(line) = kept_since(proc_, prop) {
+            f.lines.extend(prose(&p.warn, &line, budget, " "));
+        }
+    }
+    if !v.configured.is_empty() {
+        f.lines.extend(prose(
+            &p.dim,
+            "KEY EV here counts the events GA flags as key events, not the key_events list in config - GA cannot count chosen events per landing page without narrowing the sessions to them",
+            budget,
+            " ",
+        ));
+    }
     let mut list = model::movers(r, &|r, row| r.d(row, "landingPage").to_string(), &["sessions", "keyEvents"]);
     model::sort_movers(&mut list, 0, Sort::Size);
     if list.is_empty() {
@@ -993,10 +1024,24 @@ fn organic(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, cou
         let item = mv.name.clone();
         push_item(f, v, Item::Organic(item), |here| table_row(p, true, here, &name, &p.txt, name_w, &cells, budget));
     }
-    let notes = meta_note(r);
+    let mut notes: Vec<String> = meta_note(r).into_iter().map(str::to_string).collect();
+    notes.extend(cut_note(r, "landing-page rows", "pages near the bottom may read new or gone only because GA left out their other window"));
     if !notes.is_empty() {
         f.lines.extend(prose(&p.warn, &notes.join(" · "), budget, " "));
     }
+}
+
+/// When a report stopped short of all its rows: GA's `rowCount` beyond
+/// what came back. Said, because a sum over a cut report is not a total.
+fn cut_note(r: &Report, rows: &str, so: &str) -> Option<String> {
+    (r.row_count > r.rows.len()).then(|| format!("GA returned {} of {} {}, so {}", r.rows.len(), r.row_count, rows, so))
+}
+
+/// The window reports' age, when their last refresh failed and an older
+/// answer is on screen.
+fn kept_since(proc_: &crate::poll::Processed, prop: &Prop) -> Option<String> {
+    (proc_.window_at > 0.0 && proc_.window_at + 1.0 < prop.core_at)
+        .then(|| format!("window totals and organic pages read {} ago - the latest refresh of them failed, reason above", tc::ago(proc_.window_at)))
 }
 
 fn movers(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, counts: &mut (usize, usize)) {
@@ -1007,7 +1052,16 @@ fn movers(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, coun
     };
     let (metric, word) = METRICS[v.metric % METRICS.len()];
     let m = v.metric % METRICS.len();
-    let mut pages = model::movers(&proc_.pages, &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+    const MET: &[&str] = &["screenPageViews", "totalUsers", "sessions"];
+    let by_day = model::movers(&proc_.pages, &|r, row| r.d(row, "pagePath").to_string(), MET);
+    let mut pages = match &proc_.page_totals {
+        Some(t) => {
+            let mut v = model::movers(t, &|r, row| r.d(row, "pagePath").to_string(), MET);
+            model::attach_daily(&mut v, &by_day);
+            v
+        }
+        None => Vec::new(),
+    };
     model::sort_movers(&mut pages, m, v.sort);
     let _ = metric;
     let n = pages.len();
@@ -1026,41 +1080,44 @@ fn movers(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, coun
         ),
         budget,
     ));
-    let mut notes: Vec<String> = meta_note(&proc_.pages).into_iter().map(str::to_string).collect();
-    if proc_.pages.row_count > proc_.pages.rows.len() {
-        notes.push(format!(
-            "GA returned {} of {} page-day rows, so the smallest pages may be missing",
-            proc_.pages.rows.len(),
-            proc_.pages.row_count
-        ));
+    if let Some(line) = kept_since(proc_, prop) {
+        f.lines.extend(prose(&p.warn, &line, budget, " "));
     }
+    let Some(totals) = &proc_.page_totals else {
+        f.lines.extend(prose(&p.dim, "no window totals yet - the reason is above", budget, " "));
+        return;
+    };
+    let mut notes: Vec<String> = meta_note(totals).into_iter().map(str::to_string).collect();
+    notes.extend(cut_note(totals, "page rows", "the smallest pages may be missing"));
+    notes.extend(cut_note(&proc_.pages, "page-day rows", "the charts of the smallest pages may be missing days"));
     if !notes.is_empty() {
         f.lines.extend(prose(&p.warn, &notes.join(" · "), budget, " "));
     }
+    let end = proc_.date.pred_opt().unwrap_or(proc_.date);
     if pages.is_empty() {
-        let why = if proc_.pages.meta.empty_reason.is_empty() { "no page views in either window".to_string() } else { format!("GA: {}", proc_.pages.meta.empty_reason) };
+        let why = if totals.meta.empty_reason.is_empty() { "no page views in either window".to_string() } else { format!("GA: {}", totals.meta.empty_reason) };
         f.lines.extend(prose(&p.dim, &why, budget, " "));
     } else {
         let spark = budget >= 120;
         f.lines.extend(mover_head(p, budget, "PAGE", proc_.window, spark));
-        mover_rows(f, v, p, budget, &pages, m, proc_.window, &Item::Page, spark, 10, counts);
+        mover_rows(f, v, p, budget, &pages, m, end, &Item::Page, spark, 10, counts);
     }
-    for (dim, title, make) in [
-        ("sessionDefaultChannelGroup", "CHANNEL", &Item::Channel as &dyn Fn(String) -> Item),
-        ("sessionSourceMedium", "SOURCE / MEDIUM", &Item::Source as &dyn Fn(String) -> Item),
-    ] {
-        let mut list = model::movers(&proc_.channels, &|r, row| r.d(row, dim).to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+    let channel = proc_.channels.as_ref().map(|r| (r, "sessionDefaultChannelGroup", "CHANNEL", &Item::Channel as &dyn Fn(String) -> Item));
+    let source = Some((&proc_.source_movers, "sessionSourceMedium", "SOURCE / MEDIUM", &Item::Source as &dyn Fn(String) -> Item));
+    for (r, dim, title, make) in [channel, source].into_iter().flatten() {
+        let mut list = model::movers(r, &|r, row| r.d(row, dim).to_string(), MET);
         model::sort_movers(&mut list, m, v.sort);
         if list.is_empty() {
             continue;
         }
         f.lines.push(Vec::new());
         f.lines.extend(mover_head(p, budget, title, proc_.window, false));
-        mover_rows(f, v, p, budget, &list, m, proc_.window, make, false, 8, counts);
-    }
-    let notes = meta_note(&proc_.channels);
-    if !notes.is_empty() {
-        f.lines.extend(prose(&p.warn, &notes.join(" · "), budget, " "));
+        mover_rows(f, v, p, budget, &list, m, end, make, false, 8, counts);
+        let mut notes: Vec<String> = meta_note(r).into_iter().map(str::to_string).collect();
+        notes.extend(cut_note(r, "rows", "the smallest may be missing"));
+        if !notes.is_empty() {
+            f.lines.extend(prose(&p.warn, &notes.join(" · "), budget, " "));
+        }
     }
 }
 
@@ -1076,12 +1133,15 @@ fn property_cells(prop: &Prop, v: &View) -> (String, String, String, String, Str
         _ => "–".into(),
     };
     let (today, key) = match &prop.processed {
+        // Reports asked for before the property's midnight are
+        // yesterday's; until the next refresh, today has nothing yet.
+        Some(proc_) if proc_.date != model::local_now(v.now, tz).0 => ("not yet".into(), "not yet".into()),
         Some(proc_) => {
             let h = model::hourly(&proc_.hourly, "sessions");
             match model::versus(&h) {
                 Some(vs) => {
                     let t = vs.last.and_then(|l| model::pct(vs.today, l)).map(model::pct_label).unwrap_or_else(|| "–".into());
-                    let (date, _, _) = model::local_now(v.now, tz);
+                    let date = proc_.date;
                     let names = if v.configured.is_empty() { prop.key_names.clone().unwrap_or_default() } else { v.configured.clone() };
                     let metric = if v.configured.is_empty() { "keyEvents" } else { "eventCount" };
                     let lines = model::key_events(&proc_.key_events, &names, date, Some(vs.upto), metric);
@@ -1157,12 +1217,21 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     if let Some(proc_) = &prop.processed {
         for (name, r) in [
             ("hourly", &proc_.hourly),
-            ("sources", &proc_.sources),
+            ("sources today", &proc_.sources),
             ("key events", &proc_.key_events),
-            ("pages", &proc_.pages),
-            ("channels", &proc_.channels),
-        ] {
-            let n = meta_note(r);
+            ("pages by day", &proc_.pages),
+            ("sources by window", &proc_.source_movers),
+        ]
+        .into_iter()
+        .chain(
+            [("page totals", &proc_.page_totals), ("channels", &proc_.channels), ("organic", &proc_.organic)]
+                .into_iter()
+                .filter_map(|(n, r)| r.as_ref().map(|r| (n, r))),
+        ) {
+            let mut n: Vec<String> = meta_note(r).into_iter().map(str::to_string).collect();
+            if r.row_count > r.rows.len() {
+                n.push(format!("cut at {} of {} rows", r.rows.len(), r.row_count));
+            }
             flags.push(format!("{}: {}", name, if n.is_empty() { "complete, not thresholded or sampled".into() } else { n.join(", ") }));
         }
     } else {
@@ -1425,6 +1494,10 @@ mod tests {
             {{"dimensionValues":[{{"value":"/pricing"}},{{"value":"20261019"}},{{"value":"cur"}}],"metricValues":[{{"value":"9120"}},{{"value":"800"}},{{"value":"700"}}]}},
             {{"dimensionValues":[{{"value":"/pricing"}},{{"value":"20261010"}},{{"value":"prev"}}],"metricValues":[{{"value":"6480"}},{{"value":"600"}},{{"value":"500"}}]}},
             {{"dimensionValues":[{{"value":"{}"}},{{"value":"20261019"}},{{"value":"cur"}}],"metricValues":[{{"value":"890"}},{{"value":"80"}},{{"value":"60"}}]}}]}}"#, lp));
+        let page_totals = rep(&format!(r#"{{"dimensionHeaders":[{{"name":"pagePath"}},{{"name":"dateRange"}}],"metricHeaders":[{{"name":"screenPageViews"}},{{"name":"totalUsers"}},{{"name":"sessions"}}],"metadata":{{"subjectToThresholding":true,"dataLossFromOtherRow":true}},"rows":[
+            {{"dimensionValues":[{{"value":"/pricing"}},{{"value":"cur"}}],"metricValues":[{{"value":"9120"}},{{"value":"700"}},{{"value":"700"}}]}},
+            {{"dimensionValues":[{{"value":"/pricing"}},{{"value":"prev"}}],"metricValues":[{{"value":"6480"}},{{"value":"550"}},{{"value":"500"}}]}},
+            {{"dimensionValues":[{{"value":"{}"}},{{"value":"cur"}}],"metricValues":[{{"value":"890"}},{{"value":"80"}},{{"value":"60"}}]}}]}}"#, long_path()));
         let channels = rep(r#"{"dimensionHeaders":[{"name":"sessionDefaultChannelGroup"},{"name":"sessionSourceMedium"},{"name":"dateRange"}],"metricHeaders":[{"name":"screenPageViews"},{"name":"totalUsers"},{"name":"sessions"}],"rows":[
             {"dimensionValues":[{"value":"Organic Search"},{"value":"google / organic"},{"value":"cur"}],"metricValues":[{"value":"5000"},{"value":"400"},{"value":"300"}]},
             {"dimensionValues":[{"value":"Direct"},{"value":"(direct) / (none)"},{"value":"prev"}],"metricValues":[{"value":"100"},{"value":"40"},{"value":"30"}]}]}"#);
@@ -1456,7 +1529,19 @@ mod tests {
             rt_at: NOW - 9.0,
             breakdown: Some(Breakdown { pages: realtime_pages, devices, countries, events }),
             breakdown_at: NOW - 30.0,
-            processed: Some(Processed { hourly, sources, key_events, pages, channels, organic: Some(organic), window: 7 }),
+            processed: Some(Processed {
+                hourly,
+                sources,
+                key_events,
+                pages,
+                source_movers: channels.clone(),
+                page_totals: Some(page_totals),
+                channels: Some(channels),
+                organic: Some(organic),
+                window_at: NOW - 180.0,
+                window: 7,
+                date: chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap(),
+            }),
             core_at: NOW - 180.0,
             quota_rt: Some(quota.clone()),
             quota_core: Some(quota),
@@ -1651,6 +1736,31 @@ mod tests {
         assert!(all.contains("not processed"), "{}", all);
         assert!(all.contains("today: no hour processed yet"), "{}", all);
         assert!(!all.contains("none today"));
+    }
+
+    #[test]
+    fn reports_from_before_midnight_are_not_called_today() {
+        let mut prop = full_prop();
+        prop.processed.as_mut().unwrap().date = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let s = shared(vec![prop.clone(), prop]);
+        let all = text(&body(&s, &view(), 100).lines);
+        assert!(all.contains("these are Mon's reports, asked for before midnight"), "{}", all);
+        assert!(all.contains("last Mon"), "the comparison names the reports' weekday, not today's");
+        assert!(!all.contains("hourly instead"), "no fallback built from yesterday's hours");
+    }
+
+    #[test]
+    fn a_failed_window_refresh_keeps_the_last_answer_and_says_how_old() {
+        let mut prop = full_prop();
+        prop.processed.as_mut().unwrap().window_at = NOW - 900.0;
+        prop.core_err = "page and channel totals, organic landing pages: could not reach GA: timed out".into();
+        let mut v = view();
+        v.configured = vec!["purchase".into()];
+        let all = text(&body(&shared(vec![prop]), &v, 100).lines);
+        assert!(all.contains("window totals and organic pages read "), "{}", all);
+        assert!(all.contains("the latest refresh of them failed"), "{}", all);
+        assert!(all.contains("/pricing"), "the last answer is still drawn");
+        assert!(all.contains("KEY EV here counts the events GA flags"), "{}", all);
     }
 
     #[test]

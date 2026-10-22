@@ -57,17 +57,31 @@ pub struct Breakdown {
     pub events: Report,
 }
 
-/// The processed reports, in the order `processed_body` asks for them.
+/// The processed reports: the first batch in the order `processed_body`
+/// asks for them, then the second batch from `window_body`.
 #[derive(Clone, Debug, Default)]
 pub struct Processed {
     pub hourly: Report,
     pub sources: Report,
     pub key_events: Report,
+    /// Pages by day, for the charts only - never summed into a window.
     pub pages: Report,
-    pub channels: Report,
+    /// Source/medium over each whole window.
+    pub source_movers: Report,
+    /// The second batch: pages and channels over each whole window, and
+    /// organic landing pages. `None` until it has answered once; when it
+    /// fails, the last answer for the same window is kept and `window_at`
+    /// says how old it is.
+    pub page_totals: Option<Report>,
+    pub channels: Option<Report>,
     pub organic: Option<Report>,
+    pub window_at: f64,
     /// The window the movers were asked for.
     pub window: usize,
+    /// The property's date when the reports were asked for: what their
+    /// `today` meant. After midnight it is yesterday until the next
+    /// refresh, and the screen says so rather than relabel it.
+    pub date: chrono::NaiveDate,
 }
 
 /// One property and everything known about it.
@@ -460,18 +474,29 @@ fn run_reports(
         }
         if next_core <= now && core_paused <= now {
             let work = activity.start();
-            let got = processed(cred, &id, grant, window, &cfg.key_events);
+            let (tz, previous) = with(shared, i, |p| (p.time_zone.clone(), p.processed.clone())).unwrap_or_default();
+            let got = processed(cred, &id, grant, window, &cfg.key_events, &tz, previous.as_ref());
             let at = tc::now();
             with(shared, i, |p| {
                 match got {
-                    Ok((proc_, quota, organic_err)) => {
+                    Ok((proc_, quota, second)) => {
                         if quota.is_some() {
                             p.quota_core = quota;
                         }
                         p.processed = Some(proc_);
                         p.core_at = at;
-                        p.core_err = organic_err;
+                        p.core_err.clear();
                         p.core_banner.clear();
+                        match second {
+                            None => {}
+                            Some(f) if f.quota => {
+                                p.core_banner = f.text;
+                                core_paused = at + 300.0;
+                            }
+                            Some(f) => {
+                                p.core_err = format!("page and channel totals, organic landing pages: {}", f.text)
+                            }
+                        }
                     }
                     Err(f) if f.quota => {
                         p.core_banner = f.text;
@@ -541,33 +566,76 @@ fn breakdown(cred: &Credential, id: &str, grant: &str, configured: &[String]) ->
     Ok((Breakdown { pages, devices, countries, events }, quota))
 }
 
-/// The processed reports. The organic report is a separate request; if it
-/// alone fails, the rest still land and its failure is the returned line.
+/// The processed reports: two batches. If the second alone fails, the
+/// first still lands, the second's last answer for the same window is
+/// kept, and its failure - a 429 included - is returned beside them.
 fn processed(
     cred: &Credential,
     id: &str,
     grant: &str,
     window: usize,
     configured: &[String],
-) -> Result<(Processed, Option<Quota>, String), Fail> {
+    tz_name: &str,
+    previous: Option<&Processed>,
+) -> Result<(Processed, Option<Quota>, Option<Fail>), Fail> {
+    let started = tc::now();
     let mut reports = parse::parse_batch(&api::batch(cred, id, &api::processed_body(window, configured), grant)?)
         .map_err(bad)?;
     if reports.len() < 5 {
         return Err(bad(format!("GA answered {} of the 5 reports asked for", reports.len())));
     }
-    let quota = reports.iter().rev().find_map(|r| r.quota.clone());
-    let (organic, organic_err) = match api::report(cred, id, &api::organic_body(window), grant)
-        .and_then(|t| parse::parse_report(&t).map_err(bad))
-    {
-        Ok(r) => (Some(r), String::new()),
-        Err(f) => (None, format!("organic landing pages: {}", f.text)),
-    };
-    let channels = reports.remove(4);
+    let mut quota = reports.iter().rev().find_map(|r| r.quota.clone());
+    let source_movers = reports.remove(4);
     let pages = reports.remove(3);
     let key_events = reports.remove(2);
     let sources = reports.remove(1);
     let hourly = reports.remove(0);
-    Ok((Processed { hourly, sources, key_events, pages, channels, organic, window }, quota, organic_err))
+    // GA reads `today` in the property's timezone, which every report
+    // carries; the Admin API's is the fallback.
+    let tz = model::tz_of(if hourly.meta.time_zone.is_empty() { tz_name } else { &hourly.meta.time_zone });
+    let (date, _, _) = model::local_now(started, tz);
+    let mut out = Processed {
+        hourly,
+        sources,
+        key_events,
+        pages,
+        source_movers,
+        page_totals: None,
+        channels: None,
+        organic: None,
+        window_at: 0.0,
+        window,
+        date,
+    };
+    let second = api::batch(cred, id, &api::window_body(window), grant).and_then(|t| {
+        let r = parse::parse_batch(&t).map_err(bad)?;
+        if r.len() < 3 {
+            return Err(bad(format!("GA answered {} of the 3 window reports asked for", r.len())));
+        }
+        Ok(r)
+    });
+    let failed = match second {
+        Ok(mut r) => {
+            if let Some(q) = r.iter().rev().find_map(|x| x.quota.clone()) {
+                quota = Some(q);
+            }
+            out.organic = Some(r.remove(2));
+            out.channels = Some(r.remove(1));
+            out.page_totals = Some(r.remove(0));
+            out.window_at = tc::now();
+            None
+        }
+        Err(f) => {
+            if let Some(old) = previous.filter(|o| o.window == window) {
+                out.page_totals = old.page_totals.clone();
+                out.channels = old.channels.clone();
+                out.organic = old.organic.clone();
+                out.window_at = old.window_at;
+            }
+            Some(f)
+        }
+    };
+    Ok((out, quota, failed))
 }
 
 /// Every property the account can see, through Admin `accountSummaries`.

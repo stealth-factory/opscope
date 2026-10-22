@@ -219,7 +219,13 @@ pub fn key_event_filter(names: &[String]) -> (&'static str, Value) {
 }
 
 /// The five processed reports one `batchRunReports` carries, in order:
-/// hourly, sources today, key events, page movers, channel movers.
+/// hourly, sources today, key events, pages by day (the charts), and
+/// source/medium over each whole window.
+///
+/// Users are a distinct count, so a figure for a window has to be asked
+/// for over the window: summing daily users counts a visitor once for
+/// every day they came. Pages by day are for drawing days; the window
+/// totals for pages and channels come from `window_body`.
 pub fn processed_body(window: usize, configured: &[String]) -> Value {
     let (filter_key, filter) = key_event_filter(configured);
     let mut key_events = json!({
@@ -256,11 +262,35 @@ pub fn processed_body(window: usize, configured: &[String]) -> Value {
         },
         {
             "dateRanges": windows(window),
-            "dimensions": dims(&["sessionDefaultChannelGroup", "sessionSourceMedium"]),
+            "dimensions": dims(&["sessionSourceMedium"]),
+            "metrics": mets(&["screenPageViews", "totalUsers", "sessions"]),
+            "orderBys": [{ "metric": { "metricName": "screenPageViews" }, "desc": true }],
+            "limit": 10000,
+            "returnPropertyQuota": true,
+        },
+    ]})
+}
+
+/// The second batch, in order: pages and channels over each whole window,
+/// and organic landing pages.
+pub fn window_body(window: usize) -> Value {
+    json!({ "requests": [
+        {
+            "dateRanges": windows(window),
+            "dimensions": dims(&["pagePath"]),
+            "metrics": mets(&["screenPageViews", "totalUsers", "sessions"]),
+            "orderBys": [{ "metric": { "metricName": "screenPageViews" }, "desc": true }],
+            "limit": 10000,
+            "returnPropertyQuota": true,
+        },
+        {
+            "dateRanges": windows(window),
+            "dimensions": dims(&["sessionDefaultChannelGroup"]),
             "metrics": mets(&["screenPageViews", "totalUsers", "sessions"]),
             "limit": 1000,
             "returnPropertyQuota": true,
         },
+        organic_body(window),
     ]})
 }
 
@@ -273,7 +303,7 @@ pub fn organic_body(window: usize) -> Value {
         "dimensionFilter": { "filter": { "fieldName": "sessionDefaultChannelGroup",
             "stringFilter": { "matchType": "EXACT", "value": "Organic Search" } } },
         "orderBys": [{ "metric": { "metricName": "sessions" }, "desc": true }],
-        "limit": 1000,
+        "limit": 10000,
         "returnPropertyQuota": true,
     })
 }
@@ -372,6 +402,7 @@ mod tests {
             realtime_breakdown_body("unifiedScreenName", &["activeUsers"], 5),
             realtime_events_body(&[]),
             processed_body(7, &[]),
+            window_body(7),
             organic_body(14),
             page_detail_body("/pricing"),
             event_detail_body("purchase", "keyEvents"),
@@ -396,6 +427,22 @@ mod tests {
         assert!(named["requests"][2].get("metricFilter").is_none());
         let p = page_detail_body("/x");
         assert_eq!(p["requests"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn window_figures_are_asked_for_without_a_date() {
+        // A distinct count summed over days counts a returning visitor
+        // once a day, so no window figure may be built from `date` rows.
+        let b = window_body(7);
+        let r = b["requests"].as_array().unwrap();
+        assert_eq!(r.len(), 3);
+        for req in r.iter().chain(processed_body(7, &[])["requests"].as_array().unwrap()[4..].iter()) {
+            let names: Vec<&str> = req["dimensions"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+            assert!(!names.contains(&"date"), "{:?}", names);
+        }
+        assert_eq!(r[0]["dimensions"][0]["name"], "pagePath");
+        assert_eq!(r[1]["dimensions"][0]["name"], "sessionDefaultChannelGroup");
+        assert_eq!(r[2]["dimensions"][0]["name"], "landingPage");
     }
 
     #[test]
