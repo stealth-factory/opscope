@@ -3,6 +3,25 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.10.0] - 2026-10-22
+
+### Bug Fixes
+
+- **agent-usage**: Clarify the last-check status (#436)
+- **agent-usage**: Show Claude's banked resets on its tab, as Codex does (OPS-190) (#452)
+
+### Features
+
+- **core**: Add Kitty notifications and large text for clocks and months (OPS-152) (#357)
+
+### Performance
+
+- **core**: Append chart samples with Kitty frame edits (OPS-155) (#364)
+
+### Tests
+
+- **agent-usage**: Read the Grok pool window at a fixed moment, not today (#450)
+
 ## [1.9.0] - 2026-10-15
 
 ### Bug Fixes
