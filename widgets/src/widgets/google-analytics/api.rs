@@ -308,9 +308,18 @@ pub fn organic_body(window: usize) -> Value {
     })
 }
 
+/// An exact match, case and all: GA's `StringFilter` ignores case unless
+/// told otherwise, which would fold `/Shop` and `/shop` - two rows in the
+/// movers - into one page detail. Event names are case-sensitive in GA too.
 fn exact(field: &str, value: &str) -> Value {
-    json!({ "filter": { "fieldName": field, "stringFilter": { "matchType": "EXACT", "value": value } } })
+    json!({ "filter": { "fieldName": field,
+        "stringFilter": { "matchType": "EXACT", "value": value, "caseSensitive": true } } })
 }
+
+/// How many flagged key events a page detail asks for. GA lets a property
+/// flag far fewer than this, so the table is the whole list; the screen
+/// still says so if GA ever counts more rows than it returned.
+pub const FLAGGED_EVENT_LIMIT: usize = 250;
 
 /// A page's detail: 28 days by day against the 28 before, then its
 /// sources, countries, devices and key events over the last 28 days. The
@@ -330,8 +339,13 @@ pub fn page_detail_body(path: &str, configured: &[String]) -> Value {
             "returnPropertyQuota": true,
         })
     };
+    // Every key event on the page, not the top ten: the table is a list
+    // of what was asked for, and a configured name missing from it would
+    // read as none on this page.
     let events = if configured.is_empty() {
-        one("eventName", "keyEvents")
+        let mut e = one("eventName", "keyEvents");
+        e["limit"] = json!(FLAGGED_EVENT_LIMIT);
+        e
     } else {
         json!({
             "dateRanges": last28.clone(),
@@ -342,7 +356,7 @@ pub fn page_detail_body(path: &str, configured: &[String]) -> Value {
                 { "filter": { "fieldName": "eventName", "inListFilter": { "values": configured } } },
             ] } },
             "orderBys": [{ "metric": { "metricName": "eventCount" }, "desc": true }],
-            "limit": 10,
+            "limit": configured.len().max(1),
             "returnPropertyQuota": true,
         })
     };
@@ -468,6 +482,9 @@ mod tests {
         let named = page_detail_body("/x", &["purchase".into()]);
         let ev = &named["requests"][4];
         assert_eq!(ev["metrics"][0]["name"], "eventCount", "a configured list is counted the way the main view counts it");
+        let many: Vec<String> = (0..15).map(|i| format!("event_{}", i)).collect();
+        assert_eq!(page_detail_body("/x", &many)["requests"][4]["limit"], 15, "every configured event, not the top ten");
+        assert_eq!(p["requests"][4]["limit"], FLAGGED_EVENT_LIMIT);
         let both = ev["dimensionFilter"]["andGroup"]["expressions"].as_array().unwrap();
         assert_eq!(both[0]["filter"]["fieldName"], "pagePath");
         assert_eq!(both[1]["filter"]["inListFilter"]["values"][0], "purchase");
@@ -487,6 +504,23 @@ mod tests {
         assert_eq!(r[0]["dimensions"][0]["name"], "pagePath");
         assert_eq!(r[1]["dimensions"][0]["name"], "sessionDefaultChannelGroup");
         assert_eq!(r[2]["dimensions"][0]["name"], "landingPage");
+    }
+
+    #[test]
+    fn page_and_event_matches_keep_case() {
+        // /Shop and /shop are two movers; the detail of one must not
+        // fold in the other.
+        let p = page_detail_body("/Shop", &[]);
+        for r in p["requests"].as_array().unwrap() {
+            assert_eq!(r["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true, "{}", r);
+        }
+        let named = page_detail_body("/Shop", &["purchase".into()]);
+        assert_eq!(named["requests"][4]["dimensionFilter"]["andGroup"]["expressions"][0]["filter"]["stringFilter"]["caseSensitive"], true);
+        let t = page_totals_body("/Shop");
+        assert_eq!(t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true);
+        assert_eq!(t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["value"], "/Shop");
+        let e = event_detail_body("Purchase", "keyEvents");
+        assert_eq!(e["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true);
     }
 
     #[test]
