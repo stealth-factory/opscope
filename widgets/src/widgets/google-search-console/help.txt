@@ -21,7 +21,7 @@ metric (impressions, clicks, CTR, position). w toggles the window between
 7 and 28 days. d toggles final and fresh data. t cycles the search type
 (web, image, video, news, discover). press i to inspect the selected page
 now, which spends one of the property's 2,000 daily inspections; Enter
-never does. / filters by text, c copies the selected URL or query,
+never does. / filters by text and esc clears it, c copies the selected row,
 r refreshes, comma opens settings, q quits. In a detail view, l copies the
 page's Search Console link, and esc or left closes it.
 

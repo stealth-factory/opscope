@@ -204,9 +204,9 @@ then say *Google may still change this*. `d` again goes back.
 | `d` | data: final or fresh |
 | `t` | search type: web, image, video, news, discover |
 | `i` | inspect the selected page now (spends one inspection) |
-| `/` | filter rows by text; `esc` clears it |
+| `/` | filter rows by text; `esc` clears it, while typing or after |
 | `c` | copy the selected URL, query or sitemap |
-| `r` | refresh now; in a detail view, ask again for its data |
+| `r` | refresh now; in a detail view, ask again for its data (a property's or a plain sitemap's comes from the refresh, so it refreshes) |
 | `l` | in a page's detail, copy its Search Console link |
 | `esc` | close a detail view (`←` too) |
 | `,` | settings |
