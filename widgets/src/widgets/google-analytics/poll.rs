@@ -16,9 +16,10 @@
 
 //! What the pollers hold, and the pollers.
 //!
-//! One thread per property, each on three clocks: realtime every 15, 30
-//! or 60 seconds (stretched when idle or short of quota), the realtime
-//! breakdowns every minute, and the processed reports every `refresh`.
+//! Two threads per property. One reads realtime every 15, 30 or 60
+//! seconds (stretched when idle or short of quota) and the realtime
+//! breakdowns every minute; the other reads the processed reports every
+//! `refresh`, so a slow report never delays a live reading.
 //! Each records why it stopped, and every failure lands in a field the
 //! screen draws, because a poller that dies quietly leaves a pane that
 //! looks exactly like a site nobody is visiting.
@@ -89,6 +90,8 @@ pub struct Prop {
     pub quota_rt: Option<Quota>,
     pub quota_core: Option<Quota>,
     pub rt_err: String,
+    /// The breakdowns' own failure, cleared only when they next succeed.
+    pub bd_err: String,
     pub core_err: String,
     pub admin_err: String,
     /// A 429, kept on screen while the last data stays under it.
@@ -231,7 +234,9 @@ pub fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
     })
 }
 
-/// Start the poller for property `i`, recording why it stopped.
+/// Start the pollers for property `i`: one for realtime and the Admin
+/// API, one for the processed reports, so a slow batch of reports never
+/// holds up a live reading. Each records why it stopped.
 pub fn spawn_property(
     shared: Arc<Mutex<Shared>>,
     i: usize,
@@ -240,23 +245,36 @@ pub fn spawn_property(
     cfg: Cfg,
     activity: tc::Refresh,
 ) {
+    let (s2, c2, g2, cfg2, a2) = (Arc::clone(&shared), cred.clone(), grant.clone(), cfg.clone(), activity.clone());
     std::thread::spawn(move || {
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_property(&shared, i, &cred, &grant, &cfg, &activity)
+            run_live(&shared, i, &cred, &grant, &cfg, &activity)
         }));
-        let why = match run {
-            Ok(()) => "the poller returned".to_string(),
-            Err(payload) => panic_reason(payload.as_ref()),
-        };
-        if let Ok(mut g) = shared.lock() {
-            if let Some(p) = g.props.get_mut(i) {
-                p.died = format!("poller stopped: {}", why);
-            }
-        }
+        record_death(&shared, i, "realtime", run);
+    });
+    std::thread::spawn(move || {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_reports(&s2, i, &c2, &g2, &cfg2, &a2)
+        }));
+        record_death(&s2, i, "reports", run);
     });
 }
 
-fn run_property(
+fn record_death(shared: &Arc<Mutex<Shared>>, i: usize, which: &str, run: std::thread::Result<()>) {
+    let why = match run {
+        Ok(()) => "the poller returned".to_string(),
+        Err(payload) => panic_reason(payload.as_ref()),
+    };
+    if let Ok(mut g) = shared.lock() {
+        if let Some(p) = g.props.get_mut(i) {
+            let line = format!("{} poller stopped: {}", which, why);
+            p.died = if p.died.is_empty() { line } else { format!("{} · {}", p.died, line) };
+        }
+    }
+}
+
+/// Realtime totals, the realtime breakdowns and the Admin API.
+fn run_live(
     shared: &Arc<Mutex<Shared>>,
     i: usize,
     cred: &Credential,
@@ -272,30 +290,25 @@ fn run_property(
         p.sample_path = path.clone();
         p.sample_err = sample_err;
     });
-    let (mut next_admin, mut next_rt, mut next_bd, mut next_core) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    let (mut rt_paused, mut core_paused) = (0.0f64, 0.0f64);
+    let (mut next_admin, mut next_rt, mut next_bd) = (0.0f64, 0.0f64, 0.0f64);
+    let mut rt_paused = 0.0f64;
     let mut seen_force = 0u64;
-    let mut seen_window = 0usize;
     let mut last_prune = tc::now();
+    let configured = !cfg.key_events.is_empty();
     loop {
         let now = tc::now();
-        let (chosen, window, force) = match shared.lock() {
-            Ok(g) => (g.chosen, g.window, g.force),
+        let (chosen, force) = match shared.lock() {
+            Ok(g) => (g.chosen, g.force),
             Err(_) => return,
         };
         if force != seen_force {
             seen_force = force;
-            (next_rt, next_bd, next_core) = (now, now, now);
+            (next_rt, next_bd) = (now, now);
             if next_admin > now {
                 next_admin = now;
             }
-            (rt_paused, core_paused) = (0.0, 0.0);
+            rt_paused = 0.0;
         }
-        if window != seen_window {
-            seen_window = window;
-            next_core = now;
-        }
-        let configured = !cfg.key_events.is_empty();
 
         if next_admin <= now {
             let work = activity.start();
@@ -376,7 +389,7 @@ fn run_property(
 
         if next_bd <= now && rt_paused <= now {
             let work = activity.start();
-            let got = breakdown(cred, &id, grant);
+            let got = breakdown(cred, &id, grant, &cfg.key_events);
             let at = tc::now();
             let mut sample: Option<Sample> = None;
             let interval = with(shared, i, |p| {
@@ -390,6 +403,7 @@ fn run_property(
                         sample = Some(s);
                         p.breakdown = Some(b);
                         p.breakdown_at = at;
+                        p.bd_err.clear();
                         if quota.is_some() {
                             p.quota_rt = quota;
                         }
@@ -398,7 +412,9 @@ fn run_property(
                         p.rt_banner = f.text;
                         rt_paused = at + 300.0;
                     }
-                    Err(f) => p.rt_err = f.text,
+                    // Its own field: a totals read that succeeds says
+                    // nothing about whether the breakdowns did.
+                    Err(f) => p.bd_err = format!("realtime breakdowns: {}", f.text),
                 }
                 p.interval
             })
@@ -409,7 +425,39 @@ fn run_property(
             }
             drop(work);
         }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
 
+/// The processed reports, on their own clock.
+fn run_reports(
+    shared: &Arc<Mutex<Shared>>,
+    i: usize,
+    cred: &Credential,
+    grant: &str,
+    cfg: &Cfg,
+    activity: &tc::Refresh,
+) {
+    let Some(id) = with(shared, i, |p| p.id.clone()) else { return };
+    let mut next_core = 0.0f64;
+    let mut core_paused = 0.0f64;
+    let mut seen_force = 0u64;
+    let mut seen_window = 0usize;
+    loop {
+        let now = tc::now();
+        let (window, force) = match shared.lock() {
+            Ok(g) => (g.window, g.force),
+            Err(_) => return,
+        };
+        if force != seen_force {
+            seen_force = force;
+            next_core = now;
+            core_paused = 0.0;
+        }
+        if window != seen_window {
+            seen_window = window;
+            next_core = now;
+        }
         if next_core <= now && core_paused <= now {
             let work = activity.start();
             let got = processed(cred, &id, grant, window, &cfg.key_events);
@@ -481,15 +529,14 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
     ))
 }
 
-fn breakdown(cred: &Credential, id: &str, grant: &str) -> Result<(Breakdown, Option<Quota>), Fail> {
-    let one = |dim: &str, metrics: &[&str], limit: u32| -> Result<Report, Fail> {
-        parse::parse_report(&api::realtime(cred, id, &api::realtime_breakdown_body(dim, metrics, limit), grant)?)
-            .map_err(bad)
+fn breakdown(cred: &Credential, id: &str, grant: &str, configured: &[String]) -> Result<(Breakdown, Option<Quota>), Fail> {
+    let one = |body: serde_json::Value| -> Result<Report, Fail> {
+        parse::parse_report(&api::realtime(cred, id, &body, grant)?).map_err(bad)
     };
-    let pages = one("unifiedScreenName", &["activeUsers"], 10)?;
-    let devices = one("deviceCategory", &["activeUsers"], 10)?;
-    let countries = one("country", &["activeUsers"], 10)?;
-    let events = one("eventName", &["eventCount", "keyEvents"], 250)?;
+    let pages = one(api::realtime_breakdown_body("unifiedScreenName", &["activeUsers"], 10))?;
+    let devices = one(api::realtime_breakdown_body("deviceCategory", &["activeUsers"], 10))?;
+    let countries = one(api::realtime_breakdown_body("country", &["activeUsers"], 10))?;
+    let events = one(api::realtime_events_body(configured))?;
     let quota = events.quota.clone();
     Ok((Breakdown { pages, devices, countries, events }, quota))
 }
