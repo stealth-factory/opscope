@@ -533,7 +533,10 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         .collect();
     b.visible[LEFT] = (0..region.left.len())
         .filter(|&i| now - region.left[i].left_at <= state::LEFT_KEPT)
-        .filter(|&i| matches(&view.needle, &region.left[i].title, &region.left[i].news))
+        .filter(|&i| {
+            let l = &region.left[i];
+            matches(&view.needle, &l.title, l.news.as_deref().unwrap_or_default())
+        })
         .collect();
     if several {
         b.visible[REGIONS] = (0..shared.regions.len()).collect();
@@ -1044,6 +1047,11 @@ struct Detail {
     /// gone, when it went.
     seen: String,
     news: Vec<NewsItem>,
+    /// A trend that has left the feed: its start time is not kept.
+    gone: bool,
+    /// Whether `news` is what Google attached, or the stories were not
+    /// kept (a departure from before a restart). Not kept is not none.
+    news_kept: bool,
     at: usize,
 }
 
@@ -1067,6 +1075,7 @@ fn detail_body(d: &Detail, cw: usize, now: f64, p: &Palette) -> Body {
             tc::age(now - at as f64)
         ),
         (None, false) => format!("started \"{}\", which would not parse", d.started_raw),
+        (None, true) if d.gone => "start time not kept once a trend leaves".to_string(),
         (None, true) => "no start time in the feed".to_string(),
     });
     facts.push(d.seen.clone());
@@ -1075,6 +1084,15 @@ fn detail_body(d: &Detail, cw: usize, now: f64, p: &Palette) -> Body {
         b.rows.extend(line(&p.dim, 1, &l, cw));
     }
     b.rows.push(String::new());
+    if !d.news_kept {
+        b.rows.extend(line(&p.head, 1, &format!("NEWS{SEP}not kept"), cw));
+        let why = "stories are kept only while the widget runs, and it has \
+                   restarted since this trend left";
+        for l in tc::wrap_words(why, room) {
+            b.rows.extend(line(&p.dim, 1, &l, cw));
+        }
+        return b;
+    }
     b.rows.extend(line(
         &p.head,
         1,
@@ -1144,6 +1162,8 @@ fn detail_for(shared: &Shared, view: &View, body: &Body, now: f64) -> Option<Det
                 started_raw: t.started_raw.clone(),
                 seen,
                 news: t.news.clone(),
+                gone: false,
+                news_kept: true,
                 at: 0,
             })
         }
@@ -1161,7 +1181,9 @@ fn detail_for(shared: &Shared, view: &View, body: &Body, now: f64) -> Option<Det
                     l.polls,
                     if l.polls == 1 { "" } else { "es" }
                 ),
-                news: l.news.clone(),
+                news: l.news.clone().unwrap_or_default(),
+                gone: true,
+                news_kept: l.news.is_some(),
                 at: 0,
             })
         }
@@ -1947,6 +1969,45 @@ mod tests {
         let text = plain(&list_body(&shared, &View::default(), 300.0, 140, NOW, &p).rows);
         assert!(text.contains("too long to compare"), "{text}");
         assert!(!text.contains("new since"), "{text}");
+    }
+
+    #[test]
+    fn a_departure_from_before_a_restart_does_not_claim_google_said_nothing() {
+        let p = palette();
+        let gone = |news: Option<Vec<NewsItem>>| Left {
+            title: "gone term".into(),
+            traffic: "1000+".into(),
+            first_seen: NOW - 900.0,
+            last_seen: NOW - 600.0,
+            left_at: NOW - 300.0,
+            polls: 2,
+            news,
+        };
+        let text_of = |l: Left| {
+            let shared = Shared {
+                regions: vec![Region {
+                    geo: "US".into(),
+                    left: vec![l],
+                    ..Region::default()
+                }],
+                err: String::new(),
+            };
+            let view = View {
+                focus: LEFT,
+                wanted: LEFT,
+                ..View::default()
+            };
+            let body = list_body(&shared, &view, 300.0, 99, NOW, &p);
+            let d = detail_for(&shared, &view, &body, NOW).unwrap();
+            plain(&detail_body(&d, 99, NOW, &p).rows)
+        };
+        let restarted = text_of(gone(None));
+        assert!(restarted.contains("not kept"), "{restarted}");
+        assert!(!restarted.contains("Google lists no stories"), "{restarted}");
+        assert!(restarted.contains("start time not kept"), "{restarted}");
+        assert!(!restarted.contains("no start time in the feed"), "{restarted}");
+        let empty = text_of(gone(Some(Vec::new())));
+        assert!(empty.contains("Google lists no stories"), "{empty}");
     }
 
     #[test]

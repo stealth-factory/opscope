@@ -63,8 +63,9 @@ pub struct Left {
     pub left_at: f64,
     pub polls: u32,
     /// Its news, while this process still has it. Not saved: a restart
-    /// keeps the fact that it left and not the stories.
-    pub news: Vec<NewsItem>,
+    /// keeps the fact that it left and not the stories, so `None` is
+    /// "not kept", which is not the same as Google listing none.
+    pub news: Option<Vec<NewsItem>>,
 }
 
 /// What one fetch looked like against the ones before it.
@@ -168,7 +169,7 @@ impl Memory {
                     last_seen: s.last_seen,
                     left_at: now,
                     polls: s.polls,
-                    news: self.news.get(title).cloned().unwrap_or_default(),
+                    news: self.news.get(title).cloned(),
                 });
             }
         }
@@ -314,7 +315,7 @@ pub fn parse_state(text: &str) -> Result<Memory, String> {
             last_seen: num(l, "last_seen")?,
             left_at: num(l, "left_at")?,
             polls: l.get("polls").and_then(|n| n.as_u64()).unwrap_or(1) as u32,
-            news: Vec::new(),
+            news: None,
         });
     }
     Ok(Memory {
@@ -395,8 +396,8 @@ mod tests {
         assert_eq!(gone.last_seen, 1300.0);
         assert_eq!(gone.left_at, 1600.0);
         assert_eq!(
-            gone.news.len(),
-            1,
+            gone.news.as_ref().map(Vec::len),
+            Some(1),
             "its stories are kept while the process runs"
         );
         // Still gone on the next fetch: listed once, not twice.
@@ -488,7 +489,7 @@ mod tests {
         assert_eq!(back.trends, m.trends);
         assert_eq!(back.left.len(), 1);
         assert_eq!(back.left[0].title, "beta \"q\"");
-        assert!(back.left[0].news.is_empty(), "stories are not saved");
+        assert_eq!(back.left[0].news, None, "stories are not saved");
         // And it carries on counting from where it was.
         let mut back = back;
         let o = back.observe(&[trend("alpha", "200+")], 1600.0, GAP);
