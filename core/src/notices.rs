@@ -698,8 +698,9 @@ fn hints_for(screen: &Screen, dismissed: bool, room: usize) -> Vec<Vec<(&'static
         hints.push(vec![(DIM, "esc / [!] back".to_string())]);
         return hints;
     }
-    hints.push(hint_pair("↑↓", " select"));
+    // Nothing to select in an empty list, so no keys that select.
     if screen.count > 0 {
+        hints.push(hint_pair("↑↓", " select"));
         hints.push(vec![(DIM, "[↵] detail".to_string())]);
     }
     match screen.view {
