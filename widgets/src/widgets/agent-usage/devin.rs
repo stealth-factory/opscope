@@ -482,13 +482,6 @@ fn account_rows(quota: &DevinQuota, w: usize, p: &Palette) -> Vec<String> {
     plan_rows(plan, &[], w, "", None, "", p)
 }
 
-fn token_warning(data: &Data, w: usize, p: &Palette) -> Vec<String> {
-    tc::config_token_warning()
-        .filter(|_| data.source == "config")
-        .map(|warn| note(&warn, &p.warn, w))
-        .unwrap_or_default()
-}
-
 fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
     wrap_text(text, w.saturating_sub(4).max(20))
         .into_iter()
@@ -499,8 +492,7 @@ fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
 pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     match data.quota.as_ref() {
         Some(quota) => {
-            let mut rows = quota_rows_with_plots(data, quota, w, p, plots);
-            rows.extend(token_warning(data, w, p));
+            let rows = quota_rows_with_plots(data, quota, w, p, plots);
             add_section(rows, account_rows(quota, w, p))
         }
         None => {
@@ -518,8 +510,7 @@ pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palet
                     .trim_start_matches("no quota · ")
                     .to_string()
             };
-            let mut rows = no_local(&what, "", w, p);
-            rows.extend(token_warning(data, w, p));
+            let rows = no_local(&what, "", w, p);
             rows
         }
     }
