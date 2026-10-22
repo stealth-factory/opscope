@@ -2403,6 +2403,17 @@ mod tests {
     }
 
     impl Data {
+        /// A profile whose live reading is `quota`, as the poller stores it.
+        pub(crate) fn with_quota(label: &str, quota: serde_json::Value) -> Self {
+            Self {
+                label: label.into(),
+                quota: Some(quota),
+                quota_live: true,
+                quota_at: now(),
+                ..Self::default()
+            }
+        }
+
         pub(crate) fn with_reset_grants(label: &str, pct: Option<i64>, grants: serde_json::Value, live: bool) -> Self {
             let mut data = Self::with_session_quota(label, pct.unwrap_or(0));
             let quota = data.quota.as_mut().unwrap();
