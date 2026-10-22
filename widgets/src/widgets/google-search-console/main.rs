@@ -210,11 +210,17 @@ fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize
         Err(_) => return,
     };
     for url in due {
-        // Checked before every request, not only when the list was made:
-        // `i` spends from the same budget while this runs.
-        let left = caches.lock().map(|g| g.get(&data.site).map_or(0, |c| c.left())).unwrap_or(0);
-        if left == 0 {
-            break;
+        // Reserved under the lock before every request, not only checked
+        // when the list was made: `i` spends from the same budget while
+        // this runs, and a page `i` is already asking about is skipped.
+        let reserved = match caches.lock() {
+            Ok(mut g) => g.entry(data.site.clone()).or_default().reserve(&url),
+            Err(_) => return,
+        };
+        match reserved {
+            Ok(()) => {}
+            Err(_) if caches.lock().map(|g| g.get(&data.site).map_or(0, |c| c.left())).unwrap_or(0) > 0 => continue,
+            Err(_) => break,
         }
         let answer = api::inspect(client, &data.site, &url);
         let Ok(mut g) = caches.lock() else { return };
@@ -222,6 +228,12 @@ fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize
         match answer {
             Ok((raw, i)) => c.record(&url, tc::now(), raw, Ok(i)),
             Err(f) if f.status == 429 || f.status == 401 || f.status == 403 || f.status == 0 => {
+                // Google never reached is a request never counted.
+                if f.status == 0 {
+                    c.release(&url);
+                } else {
+                    c.abandon(&url);
+                }
                 data.inspect_error = Some(format!("inspection stopped for this round: {}", f.said));
                 break;
             }
@@ -736,17 +748,18 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
         say(note, "! inspection is off while inspect_top is 0".into());
         return;
     }
-    let spent = caches
+    // Reserved under the lock, so a second press - or the poller's own
+    // round - cannot spend the same last inspection or ask twice at once.
+    let reserved = caches
         .lock()
-        .ok()
-        .map(|mut g| {
+        .map_err(|_| "the inspection cache is unavailable".to_string())
+        .and_then(|mut g| {
             let c = g.entry(site.clone()).or_insert_with(|| load_cache(&site));
             c.roll(&google_today().format("%Y-%m-%d").to_string(), tc::now());
-            c.left() == 0
-        })
-        .unwrap_or(true);
-    if spent {
-        say(note, "! budget spent: today's 2,000 inspections are used".into());
+            c.reserve(&url)
+        });
+    if let Err(why) = reserved {
+        say(note, format!("! {}", why));
         return;
     }
     say(note, format!("inspecting {}…", url));
@@ -754,7 +767,12 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
     std::thread::spawn(move || {
         let work = activity.start();
         let said = match signed_in(&cfg) {
-            Err(why) => format!("! {}", why),
+            Err(why) => {
+                if let Ok(mut g) = caches.lock() {
+                    g.entry(site.clone()).or_default().release(&url);
+                }
+                format!("! {}", why)
+            }
             Ok((_, client)) => {
                 let answer = api::inspect(&client, &site, &url);
                 match caches.lock() {
@@ -766,6 +784,10 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
                                 let verdict = i.verdict.clone();
                                 c.record(&url, tc::now(), raw, Ok(i));
                                 format!("✓ inspected: {}", verdict)
+                            }
+                            Err(f) if f.status == 0 => {
+                                c.release(&url);
+                                format!("! {}", f.said)
                             }
                             Err(f) => {
                                 c.record(&url, tc::now(), String::new(), Err(f.said.clone()));
