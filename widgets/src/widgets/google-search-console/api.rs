@@ -33,11 +33,16 @@ const INSPECT: &str = "https://searchconsole.googleapis.com/v1/urlInspection/ind
 /// the comparison needs seven days plus the last twenty-four hours.
 pub const HOURLY_DAYS: i64 = 9;
 
+/// The status a 2xx answer that could not be read is given: Google was
+/// reached, and counted the request, so it is not 0.
+pub const UNREADABLE: u16 = 200;
+
 /// A refused or failed request, worded, with its status kept so the caller
 /// can tell a 403 that ends the site's round from a 400 on one row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fail {
-    /// 0 when Google was never reached.
+    /// 0 when Google was never reached; `UNREADABLE` when it answered
+    /// 2xx with something that could not be read.
     pub status: u16,
     pub said: String,
 }
@@ -165,7 +170,10 @@ pub fn query(c: &Client, site: &str, q: &Query) -> Result<Analytics, Fail> {
 pub fn inspect(c: &Client, site: &str, page: &str) -> Result<(String, Inspection), Fail> {
     let body = serde_json::json!({ "inspectionUrl": page, "siteUrl": site }).to_string();
     let raw = post(c, INSPECT, &body, site)?;
-    let parsed = parse_inspection(&raw).map_err(|said| Fail { status: 0, said })?;
+    // Google answered 2xx and counted the request; only the reading
+    // failed. Status 0 means never reached and gives the reservation back,
+    // so this must not be 0.
+    let parsed = parse_inspection(&raw).map_err(|said| Fail { status: UNREADABLE, said })?;
     Ok((raw, parsed))
 }
 
