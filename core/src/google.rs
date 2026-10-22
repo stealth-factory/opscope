@@ -36,6 +36,15 @@ pub const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 /// `gcloud auth print-access-token` users already reach for.
 pub const DEFAULT_TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
 
+/// Read-only Google Analytics: the Data API's reports and the Admin API's
+/// reads. What `google-analytics` asks for.
+pub const SCOPE_ANALYTICS_READONLY: &str = "https://www.googleapis.com/auth/analytics.readonly";
+
+/// Read-only Search Console: search analytics, URL Inspection, sites and
+/// sitemaps, and nothing that changes a property. What
+/// `google-search-console` asks for.
+pub const SCOPE_WEBMASTERS_READONLY: &str = "https://www.googleapis.com/auth/webmasters.readonly";
+
 /// How long Google lets an assertion, and the token it buys, live.
 pub const TOKEN_LIFETIME: u64 = 3600;
 
@@ -49,8 +58,13 @@ pub const REMINT_EARLY: u64 = 300;
 /// panic message or a test failure.
 #[derive(Clone, PartialEq)]
 pub struct ServiceAccountKey {
+    /// The service account's address: the JWT's issuer, and the address
+    /// access is granted to on each property.
     pub client_email: String,
+    /// The PKCS#8 PEM private key the JWT is signed with.
     pub private_key: String,
+    /// Where the signed JWT is traded for a token; `DEFAULT_TOKEN_URI`
+    /// when the file does not say.
     pub token_uri: String,
 }
 
@@ -187,9 +201,11 @@ pub enum Source {
 /// An access token and when it stops working.
 #[derive(Clone, PartialEq)]
 pub struct Token {
+    /// The bearer token itself. `Debug` prints `<redacted>` in its place.
     pub value: String,
     /// Unix seconds; `None` for a pasted token, whose expiry nobody told us.
     pub expires_at: Option<f64>,
+    /// Where it came from, which decides what the screen says about it.
     pub from: Source,
 }
 
@@ -320,9 +336,17 @@ pub fn access_token_with(
 #[derive(Clone, PartialEq)]
 pub enum Credential {
     /// A service-account key file, re-minted every hour indefinitely.
-    KeyFile { path: String },
+    KeyFile {
+        /// The path as config wrote it; `~/` is expanded when it is read.
+        path: String,
+    },
     /// A pasted access token, good for the hour it was minted for.
-    Token { value: String, from: Source },
+    Token {
+        /// The token. `Debug` prints `<redacted>` in its place.
+        value: String,
+        /// `token` in config, or the variable `token_env` named.
+        from: Source,
+    },
 }
 
 impl std::fmt::Debug for Credential {
@@ -336,18 +360,55 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-/// Pick the credential a widget's config names, or `None` when it names
-/// none.
+/// The variable a pasted token is read from: `token_env` as config gave
+/// it, or `DEFAULT_TOKEN_ENV` when that is blank.
 ///
-/// The key file wins when it is set, because it is the one that keeps
-/// working; the pasted token is a testing aid. A `token` in config wins
-/// over the variable named by `token_env`, which is the order every other
-/// widget here reads a token in.
+/// A blank `token_env` means "the usual one", not "read no variable", so
+/// a field somebody cleared on the settings screen does not quietly stop
+/// a token in `$GOOGLE_OAUTH_ACCESS_TOKEN` from being read.
+pub fn token_env_or_default(token_env: &str) -> &str {
+    match token_env.trim() {
+        "" => DEFAULT_TOKEN_ENV,
+        var => var,
+    }
+}
+
+/// The line every Google widget shows when its config names no
+/// credential, built by [`crate::missing_config`] so it ends in
+/// [`crate::SET_IN_SETTINGS`].
+///
+/// `section` is the widget's config section (`google_analytics`), and
+/// `token_env` the variable it reads a pasted token from, as config gave
+/// it; blank names `DEFAULT_TOKEN_ENV`. One wording for every Google
+/// widget, so two panes side by side ask for the same thing the same way:
+///
+/// ```text
+/// no credential: set google_analytics.credentials_file to a service-account
+/// key file (docs/google-setup.md), or paste a token in google_analytics.token
+/// or $GOOGLE_OAUTH_ACCESS_TOKEN — press `,` to set it here
+/// ```
+pub fn missing_credential(section: &str, token_env: &str) -> String {
+    crate::missing_config(&format!(
+        "no credential: set {section}.credentials_file to a service-account key file \
+         (docs/google-setup.md), or paste a token in {section}.token or ${}",
+        token_env_or_default(token_env)
+    ))
+}
+
+/// Pick the credential a widget's config names, or `None` when it names
+/// none - and then show `missing_credential`.
+///
+/// The order is the key file, then `token`, then the variable `token_env`
+/// names (`DEFAULT_TOKEN_ENV` when blank). The key file wins when it is
+/// set, because it is the one that keeps working; the pasted token is a
+/// testing aid. A `token` in config wins over the variable, which is the
+/// order every other widget here reads a token in. Pass the three
+/// settings exactly as `cfg_str` read them.
 pub fn credential(credentials_file: &str, token: &str, token_env: &str) -> Option<Credential> {
     credential_from(credentials_file, token, token_env, |name| std::env::var(name).ok())
 }
 
-/// `credential` with the environment handed in.
+/// `credential` with the environment handed in, for tests.
 pub fn credential_from(
     credentials_file: &str,
     token: &str,
@@ -360,16 +421,11 @@ pub fn credential_from(
     if !token.trim().is_empty() {
         return Some(Credential::Token { value: token.trim().to_string(), from: Source::Config });
     }
-    let var = token_env.trim();
-    if !var.is_empty() {
-        if let Some(value) = env(var).filter(|v| !v.trim().is_empty()) {
-            return Some(Credential::Token {
-                value: value.trim().to_string(),
-                from: Source::Env(var.to_string()),
-            });
-        }
-    }
-    None
+    let var = token_env_or_default(token_env);
+    env(var).filter(|v| !v.trim().is_empty()).map(|value| Credential::Token {
+        value: value.trim().to_string(),
+        from: Source::Env(var.to_string()),
+    })
 }
 
 impl Credential {
@@ -600,7 +656,7 @@ mod tests {
     #[test]
     fn the_signature_verifies_with_the_public_half() {
         let k = key("widget@example-project.iam.gserviceaccount.com");
-        let jwt = jwt_assertion(&k, &["https://www.googleapis.com/auth/analytics.readonly"], 1_700_000_000)
+        let jwt = jwt_assertion(&k, &[SCOPE_ANALYTICS_READONLY], 1_700_000_000)
             .unwrap();
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3);
@@ -699,7 +755,7 @@ mod tests {
         // A distinct account per test so the process-wide cache is not
         // shared with another test running in parallel.
         let k = key("cache-test@example-project.iam.gserviceaccount.com");
-        let scopes = ["https://www.googleapis.com/auth/analytics.readonly"];
+        let scopes = [SCOPE_ANALYTICS_READONLY];
         let mut calls = 0;
         let mut exchange = |uri: &str, form: &str| -> Result<(u16, String), String> {
             calls += 1;
@@ -866,7 +922,41 @@ mod tests {
         assert!(!format!("{:?}", pasted).contains("pasted"), "nor the credential holding it");
         assert!(format!("{:?}", pasted).contains("<redacted>"));
         assert_eq!(credential_from("", "", "OTHER_VAR", env), None);
-        assert_eq!(credential_from(" ", " ", "", env), None);
+        // A blank token_env is the usual variable, not no variable.
+        assert_eq!(
+            credential_from(" ", " ", "", env),
+            Some(Credential::Token {
+                value: "pasted".into(),
+                from: Source::Env("GOOGLE_OAUTH_ACCESS_TOKEN".into())
+            })
+        );
+        assert_eq!(credential_from("", "", " ", |_: &str| None), None);
+    }
+
+    #[test]
+    fn a_missing_credential_is_worded_once_for_every_google_widget() {
+        assert_eq!(
+            missing_credential("google_analytics", "GOOGLE_OAUTH_ACCESS_TOKEN"),
+            "no credential: set google_analytics.credentials_file to a service-account key file \
+             (docs/google-setup.md), or paste a token in google_analytics.token or \
+             $GOOGLE_OAUTH_ACCESS_TOKEN — press `,` to set it here"
+        );
+        // A blank token_env names the variable that is actually read.
+        assert_eq!(
+            missing_credential("google_search_console", " "),
+            missing_credential("google_search_console", DEFAULT_TOKEN_ENV)
+        );
+        assert!(missing_credential("s", "MY_VAR").contains("s.token or $MY_VAR — "));
+        assert!(missing_credential("s", "").ends_with(crate::SET_IN_SETTINGS));
+    }
+
+    #[test]
+    fn the_scopes_are_the_read_only_ones() {
+        assert_eq!(SCOPE_ANALYTICS_READONLY, "https://www.googleapis.com/auth/analytics.readonly");
+        assert_eq!(SCOPE_WEBMASTERS_READONLY, "https://www.googleapis.com/auth/webmasters.readonly");
+        assert!([SCOPE_ANALYTICS_READONLY, SCOPE_WEBMASTERS_READONLY]
+            .iter()
+            .all(|s| s.ends_with(".readonly")));
     }
 
     #[test]

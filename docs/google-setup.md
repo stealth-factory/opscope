@@ -8,6 +8,7 @@ on this machine, Google trades it for an access token that lasts an hour,
 and the widget mints the next one five minutes before that runs out. No
 browser, no refresh token that lapses after a week, no `gcloud`. The code is
 `core/src/google.rs`; this page is what has to exist on Google's side first.
+Writing a new Google widget is [its own page](google-widgets.md).
 
 One key serves both widgets. Each asks only for its own scope -
 `analytics.readonly` and `webmasters.readonly` - so each holds a token that
