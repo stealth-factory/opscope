@@ -423,12 +423,14 @@ own copy key.
 
 ### Credentials
 
-**Five widgets define their own token settings:** `vercel-deployments` wants
+**Six widgets define their own credential settings:** `vercel-deployments` wants
 a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
-`linear` a personal API key from Settings → Security & access, and
+`linear` a personal API key from Settings → Security & access,
 `github-prs` and `github-actions` each hold their own GitHub token rather
-than borrowing one. Every other widget needs no configuration to start.
+than borrowing one, and `google-search-console` takes the path to a Google
+service-account key file ([Google setup](docs/google-setup.md)), never the
+key itself. Every other widget needs no configuration to start.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
