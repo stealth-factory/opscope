@@ -292,18 +292,23 @@ impl SiteData {
 
     /// Fold a new round over the last one. Values for different
     /// parameters are never kept: a 28-day reading is not a stale 7-day
-    /// one.
+    /// one. Nor are movers and terms kept across a window that moved on:
+    /// they would be drawn under the new window's dates, which they never
+    /// covered, so a failed section after the day turns over shows its
+    /// error alone.
     pub fn after(self, old: SiteData) -> SiteData {
         if old.params != self.params || old.site != self.site {
             return self;
         }
+        let same_window = self.windows.is_none() || self.windows == old.windows;
+        let keep = |new: Part<_>, old: Part<_>| if same_window { new.after(old) } else { new };
         SiteData {
             hours: self.hours.after(old.hours),
             days: self.days.after(old.days),
             windows: self.windows.or(old.windows),
-            pages: self.pages.after(old.pages),
-            queries: self.queries.after(old.queries),
-            terms: self.terms.after(old.terms),
+            pages: keep(self.pages, old.pages),
+            queries: keep(self.queries, old.queries),
+            terms: if same_window { self.terms.after(old.terms) } else { self.terms },
             sitemaps: self.sitemaps.after(old.sitemaps),
             ..self
         }
@@ -581,6 +586,28 @@ mod tests {
         let mut same = SiteData::new("sc-domain:example.com", &p7);
         same.sitemaps = Part::failed("HTTP 500");
         assert_eq!(same.after(old).sitemaps.value, Some(Vec::new()));
+    }
+
+    #[test]
+    fn movers_are_never_kept_under_a_window_they_did_not_cover() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let movers = Movers { rows: Vec::new(), capped: false };
+        let mut old = SiteData::new("sc-domain:example.com", &p);
+        old.windows = Some(windows(parse_date("2026-10-17").unwrap(), 7));
+        old.pages = Part::ok(movers.clone(), 1.0);
+        old.terms = Part::ok(Vec::new(), 1.0);
+        // The day moved on and the movers request failed.
+        let mut new = SiteData::new("sc-domain:example.com", &p);
+        new.windows = Some(windows(parse_date("2026-10-18").unwrap(), 7));
+        new.pages = Part::failed("HTTP 500");
+        new.terms = Part::failed("HTTP 500");
+        let folded = new.clone().after(old.clone());
+        assert_eq!(folded.pages.value, None);
+        assert_eq!(folded.terms.value, None);
+        assert_eq!(folded.pages.error.as_deref(), Some("HTTP 500"));
+        // The same window keeps the old reading behind its error.
+        new.windows = old.windows;
+        assert_eq!(new.after(old).pages.value, Some(movers));
     }
 
     #[test]
