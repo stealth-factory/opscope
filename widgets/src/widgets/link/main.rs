@@ -416,6 +416,7 @@ fn store_poll(state: &mut State, reading: Result<Reading, String>, history_len: 
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("link");
     if !tc::dependencies_available("link", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -561,6 +562,10 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 // Up and down mean "move through what is in front of you"
@@ -875,7 +880,7 @@ fn main() {
             ));
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
@@ -893,12 +898,22 @@ fn main() {
                 format!("[o]{} idle", if hide_idle { "show" } else { "hide" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend(tc::notices::hint(w - 2));
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         drop(guard);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // The notices banner sits directly above the hints and counts as
+        // footer, so the body never scrolls under it.
+        let banner = tc::notices::banner_rows(w);
+        let foot: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         // A window onto the body rather than a cut of it, and the title
         // stays put above it: on a pane too short for every session the
         // table and the chart under it used to run off the bottom with
@@ -924,7 +939,7 @@ fn main() {
         // Each screen registers its own footer as it draws, and the last
         // draw wins - which is right, because the last draw is what is on
         // screen when the next click arrives.
-        let foot_top = frame.len();
+        let foot_top = frame.len() + banner.len();
         frame.extend(foot);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(lscroll, 1, room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);
