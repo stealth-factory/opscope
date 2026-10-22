@@ -875,14 +875,19 @@ pub fn inspection_set(movers: &[Mover], top: usize) -> (Vec<String>, usize, usiz
     (set, a, b)
 }
 
-/// A file name for a property. `sc-domain:example.com` and
-/// `https://example.com/` must not collide, so the form is kept.
+/// A file name for a property: the name made safe to read, then a hash of
+/// the whole name, since making it safe is not reversible -
+/// `https://example.com/a/b/` and `https://example.com/a_b/` read alike and
+/// must not share a cache or its count.
 pub fn cache_name(site: &str) -> String {
     let safe: String = site
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
         .collect();
-    format!("{}.inspections.json", safe)
+    // FNV-1a, spelled out: std's hasher may change between Rust releases,
+    // and a file name has to stay the same across them.
+    let hash = site.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3));
+    format!("{}-{:016x}.inspections.json", safe, hash)
 }
 
 // ------------------------------------------------------------------ sites --
@@ -1347,6 +1352,8 @@ mod tests {
         assert!(site_form_problem("example.com").unwrap().contains("sc-domain:example.com"));
         assert!(site_form_problem("sc-domain:https://example.com/").is_some());
         assert_ne!(cache_name("sc-domain:example.com"), cache_name("https://example.com/"));
+        assert_ne!(cache_name("https://example.com/a/b/"), cache_name("https://example.com/a_b/"));
+        assert!(cache_name("sc-domain:example.com").starts_with("sc-domain_example.com-"));
         assert_eq!(site_host("https://www.example.com/blog/"), "example.com");
         assert_eq!(site_host("sc-domain:Example.com"), "example.com");
     }

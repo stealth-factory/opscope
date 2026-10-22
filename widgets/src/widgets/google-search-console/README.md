@@ -137,7 +137,7 @@ not a sum of rows), pages not passing inspection, and sitemap errors.
 Google allows 2,000 inspections a day per property, on Pacific days. This
 widget inspects each page in its set at most once a day and keeps the answers
 for 14 days in
-`$XDG_STATE_HOME/opscope/google-search-console/<property>.inspections.json`
+`$XDG_STATE_HOME/opscope/google-search-console/<property>-<hash>.inspections.json`
 (falling back to `~/.local/state`). The count against 2,000 is this widget's
 own - Google does not report usage - and stops at the limit. Once it is spent
 the section says *budget spent* and every row shows how long ago it was
