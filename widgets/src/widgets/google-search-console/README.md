@@ -81,8 +81,11 @@ Google's `first_incomplete_hour` are drawn hatched (`░`) and labelled *still
 collecting*, so an hour Google has not finished counting never reads as a
 drop. A complete hour with no clicks is a dot (`·`), which is a real zero.
 The comparison uses complete hours only, against the same hours seven days
-earlier from the same answer; when Google's lookback (about ten days) does
-not reach back that far, it says so instead of comparing. Google reports
+earlier from the same answer - the same Pacific wall-clock hours a calendar
+week back, which across a clock change is not exactly 168 hours. When
+Google's lookback (about ten days) does not reach back that far, or a clock
+change leaves an hour with no single counterpart, it says which instead of
+comparing. Google reports
 hours in Pacific time; they are drawn in this machine's local time.
 
 A property with no hourly rows at all - usual for a new one - says so in
@@ -94,7 +97,9 @@ change in either direction, with `new` and `gone` rows. Impressions by
 default; `m` cycles impressions, clicks, CTR and position. Position falls as
 it improves, so `▲` means it got better. The `INDEX` column (wide panes) is
 the page's last inspection. When either window hit the 1,000-row limit the
-header says `top 1,000 of more`.
+header says `top 1,000 of more`, and a row missing from that window is not
+taken as zero: it may sit just below the cut, so it shows `–` there and is
+never called `new` or `gone`.
 
 **MOVERS · QUERIES** is the same for queries. Google leaves rare and
 anonymised queries out of query rows, so they add up to less than the

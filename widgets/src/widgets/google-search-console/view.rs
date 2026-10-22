@@ -959,7 +959,14 @@ pub fn hours_rows(h: &HourView, p: &Palette, w: usize) -> Vec<String> {
         }
         None => {
             cmp.push((p.dim.as_str(), format!("impressions {}", compact(h.now.impressions))));
-            cmp.push((p.dim.as_str(), "no week-ago comparison: Google's hourly lookback does not reach that far back".into()));
+            cmp.push((
+                p.dim.as_str(),
+                if h.clock_change {
+                    "no week-ago comparison: a Pacific clock change leaves these hours with no like-for-like hours a week back".into()
+                } else {
+                    "no week-ago comparison: Google's hourly lookback does not reach that far back".into()
+                },
+            ));
         }
     }
     rows.extend(flow(" ", &cmp, "  ", w));
@@ -983,6 +990,12 @@ fn tone(good: Option<bool>) -> &'static str {
     }
 }
 
+/// What a mover's missing side is drawn as: zero when Google's answer was
+/// whole, `–` when its row limit cut it and the row may sit just below.
+fn absent(m: &Mover) -> String {
+    if m.unknown { "–".into() } else { "0".into() }
+}
+
 /// Columns for a width: the metric and its change always, then the prior
 /// value, the other count, position and the index state as the pane
 /// allows. Extra width is spent on columns, never on padding.
@@ -997,7 +1010,7 @@ pub fn mover_columns(metric: Metric, pages: bool, w: usize) -> Vec<Col> {
         Col {
             label,
             width: 8,
-            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(metric, &c)).unwrap_or_else(|| "0".into()))),
+            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m)))),
         },
         Col {
             label: "Δ",
@@ -1014,7 +1027,7 @@ pub fn mover_columns(metric: Metric, pages: bool, w: usize) -> Vec<Col> {
             Col {
                 label: "PRIOR",
                 width: 8,
-                cell: Box::new(move |m, _, _| ("dim", m.prior.map(|c| value(metric, &c)).unwrap_or_else(|| "0".into()))),
+                cell: Box::new(move |m, _, _| ("dim", m.prior.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m)))),
             },
         );
     }
@@ -1024,7 +1037,7 @@ pub fn mover_columns(metric: Metric, pages: bool, w: usize) -> Vec<Col> {
         cols.push(Col {
             label: other_label,
             width: 8,
-            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(other, &c)).unwrap_or_else(|| "0".into()))),
+            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(other, &c)).unwrap_or_else(|| absent(m)))),
         });
         cols.push(Col {
             label: "Δ",
@@ -1472,8 +1485,9 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
 fn mover_fields(rows: &mut Vec<String>, mv: &Mover, p: &Palette, w: usize) {
     for metric in METRICS {
         let (t, g) = moved(mv, metric);
-        let now = mv.cur.map(|c| value(metric, &c)).unwrap_or_else(|| "none".into());
-        let before = mv.prior.map(|c| value(metric, &c)).unwrap_or_else(|| "none".into());
+        let missing = || if mv.unknown { format!("below the top {}", thousands(MOVER_ROWS as f64)) } else { "none".into() };
+        let now = mv.cur.map(|c| value(metric, &c)).unwrap_or_else(missing);
+        let before = mv.prior.map(|c| value(metric, &c)).unwrap_or_else(missing);
         rows.extend(flow(
             " ",
             &[
@@ -1851,7 +1865,7 @@ mod tests {
 
     #[test]
     fn deltas_read_the_right_way_round() {
-        let mv = Mover { key: "/a".into(), cur: Some(metrics(10.0, 1000.0, 4.1)), prior: Some(metrics(8.0, 800.0, 4.7)) };
+        let mv = Mover { key: "/a".into(), cur: Some(metrics(10.0, 1000.0, 4.1)), prior: Some(metrics(8.0, 800.0, 4.7)), unknown: false };
         assert_eq!(moved(&mv, Metric::Impressions), ("+25%".to_string(), Some(true)));
         assert_eq!(moved(&mv, Metric::Position), ("▲0.6".to_string(), Some(true)));
         assert_eq!(thousands(41200.0), "41,200");
