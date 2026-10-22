@@ -165,10 +165,10 @@ fn report(cred: &google::Credential, bearer: &str, url: &str, body: &str) -> Res
 }
 ```
 
-Both widgets are fuller worked examples: `google-analytics` keeps it in
-`api.rs` (one `bearer` call per request, a 401 on a pasted token carrying
-the one-hour note), and `google-search-console` in `main.rs`'s
-`signed_in()`.
+The two widgets stacked on this helper are fuller worked examples once
+they land (OPS-186 and OPS-187): `google-analytics` keeps it in `api.rs`
+(one `bearer` call per request, a 401 on a pasted token carrying the
+one-hour note), and `google-search-console` in `main.rs`'s `signed_in()`.
 
 ## Testing
 

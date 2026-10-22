@@ -115,8 +115,12 @@ mint a token as it, which carries exactly the access the account was given:
 ```sh
 export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth print-access-token \
   --impersonate-service-account=<service-account-email> \
-  --scopes=https://www.googleapis.com/auth/analytics.readonly)"
+  --scopes=https://www.googleapis.com/auth/analytics.readonly,\
+https://www.googleapis.com/auth/webmasters.readonly)"
 ```
+
+Both scopes are asked for there so one token serves either widget; drop
+the one you do not need.
 
 The widget reads the variable named by `token_env` (that one by default), or
 `token` in its config section. It cannot renew it, so the screen says
