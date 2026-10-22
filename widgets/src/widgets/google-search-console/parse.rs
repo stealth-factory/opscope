@@ -741,6 +741,9 @@ pub struct InspectionCache {
     /// Inspections this widget spent on `day`.
     pub used: usize,
     pub pages: BTreeMap<String, Inspected>,
+    /// Pages with a request out now, already counted in `used`. Never
+    /// written to disk: it lives only as long as the requests do.
+    pub inflight: BTreeSet<String>,
 }
 
 /// Read `<site>.inspections.json`. A missing or damaged file is an empty
@@ -765,6 +768,7 @@ pub fn parse_inspection_cache(text: &str) -> InspectionCache {
         day: v.get("day").and_then(|d| d.as_str()).unwrap_or("").to_string(),
         used: v.get("used").and_then(|u| u.as_u64()).unwrap_or(0) as usize,
         pages,
+        inflight: BTreeSet::new(),
     }
 }
 
@@ -803,16 +807,48 @@ impl InspectionCache {
     pub fn due(&self, wanted: &[String], now: f64) -> Vec<String> {
         wanted
             .iter()
+            .filter(|u| !self.inflight.contains(*u))
             .filter(|u| self.pages.get(*u).is_none_or(|e| now - e.at >= REINSPECT_AFTER))
             .take(self.left())
             .cloned()
             .collect()
     }
 
-    /// Record one inspection: it counts against the day whatever Google
-    /// answered, since a refused inspection still spent the request.
-    pub fn record(&mut self, url: &str, at: f64, raw: String, result: Result<Inspection, String>) {
+    /// Take one of today's inspections for `url` before asking Google, so
+    /// two requests started together cannot both spend the last one, and
+    /// a page already being asked about is not asked about again.
+    pub fn reserve(&mut self, url: &str) -> Result<(), String> {
+        if self.inflight.contains(url) {
+            return Err("already being inspected".into());
+        }
+        if self.left() == 0 {
+            return Err(format!("budget spent: today's {} inspections are used", DAILY_INSPECTIONS));
+        }
         self.used += 1;
+        self.inflight.insert(url.to_string());
+        Ok(())
+    }
+
+    /// Give a reservation back: the request was never sent.
+    pub fn release(&mut self, url: &str) {
+        if self.inflight.remove(url) {
+            self.used = self.used.saturating_sub(1);
+        }
+    }
+
+    /// End a reservation whose request was sent but left nothing to keep:
+    /// it stays counted, since Google counted it.
+    pub fn abandon(&mut self, url: &str) {
+        self.inflight.remove(url);
+    }
+
+    /// Record one inspection: it counts against the day whatever Google
+    /// answered, since a refused inspection still spent the request - once,
+    /// whether or not it was reserved first.
+    pub fn record(&mut self, url: &str, at: f64, raw: String, result: Result<Inspection, String>) {
+        if !self.inflight.remove(url) {
+            self.used += 1;
+        }
         self.pages.insert(url.to_string(), Inspected { at, result, raw });
     }
 }
@@ -1258,6 +1294,27 @@ mod tests {
         c.roll("2026-10-22", 1_000_000.0 + 15.0 * 86400.0);
         assert_eq!(c.used, 0);
         assert!(c.pages.is_empty());
+    }
+
+    #[test]
+    fn a_reservation_holds_the_last_inspection_and_the_page() {
+        let mut c = InspectionCache::default();
+        c.roll("2026-10-21", 10.0);
+        c.used = DAILY_INSPECTIONS - 1;
+        assert_eq!(c.reserve("https://example.com/a"), Ok(()));
+        // Two presses, or a press and the poller: the second is refused.
+        assert!(c.reserve("https://example.com/b").unwrap_err().contains("budget spent"));
+        assert!(c.due(&["https://example.com/a".to_string()], 10.0).is_empty());
+        // The answer is counted once.
+        c.record("https://example.com/a", 11.0, INSPECTED.into(), parse_inspection(INSPECTED));
+        assert_eq!(c.used, DAILY_INSPECTIONS);
+        assert!(c.inflight.is_empty());
+        // A request never sent gives its reservation back.
+        c.used = 0;
+        c.reserve("https://example.com/c").unwrap();
+        assert_eq!(c.reserve("https://example.com/c"), Err("already being inspected".to_string()));
+        c.release("https://example.com/c");
+        assert_eq!(c.used, 0);
     }
 
     #[test]
