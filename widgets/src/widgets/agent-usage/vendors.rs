@@ -854,6 +854,42 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
     rows
 }
 
+/// Agents read with a token the reader pastes, which discovery cannot find
+/// on this machine, with the setting that takes it.
+const PASTED_TOKEN_AGENTS: [(&str, &str); 2] = [("notion", "Notion AI"), ("perplexity", "Perplexity")];
+
+/// A line under the overview naming the agents discovery cannot find: the
+/// ones signed in with a pasted token that has not been pasted. Without it
+/// a reader on discovery has no way to learn they could be here at all.
+/// Nothing when the reader named the agents themselves, since that list is
+/// already their choice, and nothing for one they excluded.
+fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec<String> {
+    if !discovers(cfg) {
+        return Vec::new();
+    }
+    let missing: Vec<&str> = PASTED_TOKEN_AGENTS
+        .iter()
+        .filter(|(id, _)| !shown.contains(id) && !cfg.exclude_agents.iter().any(|x| x == id))
+        .map(|(_, name)| *name)
+        .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let text = format!(
+        "{} {} read with a session token you paste: press , to add one.",
+        missing.join(" and "),
+        if missing.len() == 1 { "is" } else { "are" },
+    );
+    let content_width = w.saturating_sub(3);
+    let mut rows = vec![String::new()];
+    rows.extend(
+        tc::wrap_words(&text, content_width)
+            .into_iter()
+            .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1))),
+    );
+    rows
+}
+
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let listed = |vendor: &str| tabs.iter().any(|t| t == vendor);
     match name {
@@ -870,7 +906,9 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
             // excluded every one it found. Walking ORDER here would name
             // agents that have no tab, which is the same claim a tab would
             // have made.
-            summary_with_plots(s, w, p, &shown, plots)
+            let mut rows = summary_with_plots(s, w, p, &shown, plots);
+            rows.extend(token_agents_hint(cfg, &shown, w, p));
+            rows
         }
         name if agent_family(name) == "claude" => {
             let fallback = crate::claude::Data::default();
@@ -955,6 +993,38 @@ fn unknown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overview_names_the_pasted_token_agents_discovery_cannot_find() {
+        let p = palette();
+        let text = |cfg: &Config, shown: &[&str], w: usize| {
+            token_agents_hint(cfg, shown, w, &p).iter().map(|r| plain(&[r.clone()]).join("")).collect::<Vec<_>>().join(" ")
+        };
+        let found = Config::default();
+        let both = text(&found, &["claude"], 60);
+        assert!(both.contains("Notion AI and Perplexity are read with a session token"), "{both}");
+        assert!(both.contains("press , to add one"), "{both}");
+        // One already has its tab: only the other is named.
+        let one = text(&found, &["claude", "notion"], 60);
+        assert!(one.contains("Perplexity is read with") && !one.contains("Notion"), "{one}");
+        // Both have tabs, or the reader named their agents: nothing.
+        assert!(token_agents_hint(&found, &["notion", "perplexity"], 60, &p).is_empty());
+        let named = Config { agents: vec!["claude".into()], ..Config::default() };
+        assert!(token_agents_hint(&named, &["claude"], 60, &p).is_empty());
+        // An excluded agent is not offered back.
+        let excluded = Config { exclude_agents: vec!["notion".into()], ..Config::default() };
+        let rest = text(&excluded, &["claude"], 60);
+        assert!(!rest.contains("Notion") && rest.contains("Perplexity"), "{rest}");
+        let expected = "Notion AI and Perplexity are read with a session token you paste: press , to add one.";
+        let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for w in [8usize, 9, 10, 11, 12, 30, 40, 60, 100] {
+            let rows = token_agents_hint(&found, &[], w, &p);
+            for r in &rows {
+                assert!(tc::display_width(&plain(&[r.clone()]).join("")) <= w - 1, "width {w}: {r:?}");
+            }
+            assert_eq!(compact(&plain(&rows).join(" ")), compact(expected), "width {w}: {rows:?}");
+        }
+    }
 
     #[test]
     fn an_excluded_coderabbit_is_never_asked_even_when_every_agent_is_excluded() {
