@@ -1,0 +1,27 @@
+{
+  "_comment": "Google Search Console through a service-account key: hourly search traffic, the pages and queries that moved, the search terms that land on the site, URL Inspection of the pages that matter, and sitemaps. Read-only (webmasters.readonly). docs/google-setup.md is the Google side.",
+  "_schema": {
+    "token": { "secret": true },
+    "sites": { "items": "string" },
+    "refresh": { "minimum": 120 },
+    "window_days": { "minimum": 1, "maximum": 180 },
+    "inspect_top": { "minimum": 0, "maximum": 200 },
+    "search_type": { "choices": ["web", "image", "video", "news", "discover"] }
+  },
+  "_credentials_file_comment": "Path to the service-account JSON key, the same file google_analytics uses. Keep it chmod 600 and outside any repository. Wins over token and token_env.",
+  "credentials_file": "",
+  "_token_comment": "A pre-minted access token, for an hour of testing; Google tokens last one hour and this one is not renewed. Leave empty to read token_env.",
+  "token": "",
+  "_token_env_comment": "Environment variable holding a pre-minted access token.",
+  "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN",
+  "_sites_comment": "Properties exactly as Search Console names them: sc-domain:example.com for a domain property, or https://example.com/ with its trailing slash for a URL prefix. Empty reads every property the account can see.",
+  "sites": [],
+  "_refresh_comment": "Seconds between refreshes, at least 120. Google's data moves hourly at best.",
+  "refresh": 600.0,
+  "_window_days_comment": "Complete days in each movers window, compared with the equal window before it. w switches between 7 and 28 while running.",
+  "window_days": 7,
+  "_inspect_top_comment": "How many top pages by impressions are inspected once a day, plus as many pages that dropped to zero. 0 turns inspection off. Google allows 2,000 inspections a day per property.",
+  "inspect_top": 25,
+  "_search_type_comment": "Which Google results to read: web, image, video, news or discover. t steps through them while running.",
+  "search_type": "web"
+}

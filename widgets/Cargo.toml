@@ -103,3 +103,7 @@ path = "src/widgets/agent-usage/main.rs"
 [[bin]]
 name = "luvus-panes"
 path = "src/widgets/luvus-panes/main.rs"
+
+[[bin]]
+name = "google-search-console"
+path = "src/widgets/google-search-console/main.rs"
