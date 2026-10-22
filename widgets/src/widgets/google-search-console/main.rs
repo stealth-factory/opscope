@@ -305,21 +305,48 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
     }
 }
 
-/// The key a fetched detail is filed under, so a page asked about for
-/// another window is not answered from the wrong one.
-fn detail_key(site: &str, item: &Item, params: &Params) -> String {
-    format!("{}|{:?}|{}|{}|{}", site, item, params.fresh, params.days, params.kind)
+/// What a detail fetches for an item, as (kind, value): a page or query's
+/// 28 days, or a sitemap index's children. `None` for a property or a plain
+/// sitemap, whose detail is drawn from what the main round already read.
+fn detail_job(site: &SiteData, item: &Item) -> Option<(String, String)> {
+    match item {
+        Item::Page(u) | Item::Inspected(u) => Some(("page".into(), u.clone())),
+        Item::Query(q) => Some(("query".into(), q.clone())),
+        Item::Term(n) => site.terms.value.as_ref().and_then(|t| t.get(*n)).map(|t| ("query".to_string(), t.query.clone())),
+        Item::Sitemap(n) => site
+            .sitemaps
+            .value
+            .as_ref()
+            .and_then(|m| m.get(*n))
+            .filter(|m| m.index)
+            .map(|m| ("sitemap".to_string(), m.path.clone())),
+        Item::Site(_) => None,
+    }
+}
+
+/// The key a fetched detail is filed under: what it is about by value, not
+/// by its row's place - a refresh can put another query at the same row -
+/// and the parameters and window it was read for, so a page asked about
+/// for another window, or before the day moved on, is not answered from
+/// the wrong one.
+fn detail_key(site: &SiteData, item: &Item, params: &Params) -> Option<String> {
+    let (kind, value) = detail_job(site, item)?;
+    Some(format!(
+        "{}|{}|{}|{:?}|{}|{}|{}",
+        site.site, kind, value, site.windows, params.fresh, params.days, params.kind
+    ))
 }
 
 /// What `c` copies for an item.
-fn copy_text(item: &Item, site: Option<&SiteData>) -> Option<String> {
-    let site = site?;
+fn copy_text(item: &Item, sites: &[SiteData], at: usize) -> Option<String> {
+    let site = sites.get(at)?;
     Some(match item {
         Item::Page(u) | Item::Inspected(u) => u.clone(),
         Item::Query(q) => q.clone(),
         Item::Term(n) => site.terms.value.as_ref()?.get(*n)?.query.clone(),
         Item::Sitemap(n) => site.sitemaps.value.as_ref()?.get(*n)?.path.clone(),
-        Item::Site(_) => site.site.clone(),
+        // The property the row names, which need not be the one on screen.
+        Item::Site(n) => sites.get(*n)?.site.clone(),
     })
 }
 
@@ -466,7 +493,7 @@ fn main() {
                     "home" => oscroll = 0,
                     "end" => oscroll = usize::MAX / 2,
                     "c" | "C" => {
-                        if let Some(text) = copy_text(&item, site) {
+                        if let Some(text) = copy_text(&item, &snapshot, at) {
                             let ok = tc::clipboard(&text);
                             if let Ok(mut n) = note.lock() {
                                 *n = (if ok { "✓ copied".into() } else { "! no clipboard here; select the text instead".into() }, tc::now() + 3.0);
@@ -492,11 +519,16 @@ fn main() {
                             inspect_now(&cfg, site.map(|s| s.site.clone()).unwrap_or_default(), url, &caches, &note, &activity);
                         }
                     }
-                    "r" | "R" => {
-                        if let (Some(site), Ok(mut g)) = (site, details.lock()) {
-                            g.remove(&detail_key(&site.site, &item, &params));
+                    "r" | "R" => match site.and_then(|s| detail_key(s, &item, &params)) {
+                        Some(key) => {
+                            if let Ok(mut g) = details.lock() {
+                                g.remove(&key);
+                            }
                         }
-                    }
+                        // A property or a plain sitemap is drawn from the
+                        // main round, so asking again is a refresh of it.
+                        None => poke(&wake),
+                    },
                     _ => {}
                 }
                 continue;
@@ -637,7 +669,7 @@ fn main() {
         if let Some(item) = open.clone() {
             // Detail: fetch on demand, once per item and parameters.
             let fetched = sites.get(at).and_then(|site| {
-                let key = detail_key(&site.site, &item, &params);
+                let key = detail_key(site, &item, &params)?;
                 let held = details.lock().ok().and_then(|g| g.get(&key).cloned());
                 if held.is_none() {
                     start_detail(&cfg, site, &item, &params, key, &details, &fetching, &activity);
@@ -821,20 +853,7 @@ fn start_detail(
     fetching: &Arc<Mutex<HashSet<String>>>,
     activity: &tc::Refresh,
 ) {
-    let job: Option<(String, String)> = match item {
-        Item::Page(u) | Item::Inspected(u) => Some(("page".into(), u.clone())),
-        Item::Query(q) => Some(("query".into(), q.clone())),
-        Item::Term(n) => site.terms.value.as_ref().and_then(|t| t.get(*n)).map(|t| ("query".to_string(), t.query.clone())),
-        Item::Sitemap(n) => site
-            .sitemaps
-            .value
-            .as_ref()
-            .and_then(|m| m.get(*n))
-            .filter(|m| m.index)
-            .map(|m| ("sitemap".to_string(), m.path.clone())),
-        Item::Site(_) => None,
-    };
-    let Some((dim, value)) = job else { return };
+    let Some((dim, value)) = detail_job(site, item) else { return };
     if !fetching.lock().map(|mut g| g.insert(key.clone())).unwrap_or(false) {
         return;
     }
@@ -934,7 +953,38 @@ mod tests {
     fn a_detail_is_filed_under_its_parameters() {
         let p7 = Params { fresh: false, days: 7, kind: "web".into() };
         let p28 = Params { days: 28, ..p7.clone() };
+        let d = SiteData::new("sc-domain:example.com", &p7);
         let item = Item::Page("https://example.com/".into());
-        assert_ne!(detail_key("sc-domain:example.com", &item, &p7), detail_key("sc-domain:example.com", &item, &p28));
+        assert_ne!(detail_key(&d, &item, &p7), detail_key(&d, &item, &p28));
+        // The day moving on moves the window, and with it the key.
+        let mut later = d.clone();
+        later.windows = Some(windows(parse_date("2026-10-18").unwrap(), 7));
+        assert_ne!(detail_key(&d, &item, &p7), detail_key(&later, &item, &p7));
+        // Nothing is fetched for a property, so there is nothing to file.
+        assert_eq!(detail_key(&d, &Item::Site(0), &p7), None);
+    }
+
+    fn term(query: &str) -> Term {
+        Term { query: query.into(), page: "https://example.com/".into(), m: Metrics::default(), prior_clicks: None, others: Vec::new() }
+    }
+
+    #[test]
+    fn a_detail_is_filed_under_what_its_row_names_not_where_it_sits() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let mut before = SiteData::new("sc-domain:example.com", &p);
+        before.terms = Part::ok(vec![term("example widget"), term("example tool")], 1.0);
+        let mut after = before.clone();
+        after.terms = Part::ok(vec![term("example tool"), term("example widget")], 2.0);
+        // Row 0 is another query after the refresh, so its detail is too.
+        assert_ne!(detail_key(&before, &Item::Term(0), &p), detail_key(&after, &Item::Term(0), &p));
+        assert_eq!(detail_key(&before, &Item::Term(0), &p), detail_key(&after, &Item::Term(1), &p));
+    }
+
+    #[test]
+    fn copying_a_site_row_copies_that_property() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let sites = vec![SiteData::new("https://example.org/", &p), SiteData::new("sc-domain:example.com", &p)];
+        assert_eq!(copy_text(&Item::Site(1), &sites, 0).as_deref(), Some("sc-domain:example.com"));
+        assert_eq!(copy_text(&Item::Site(0), &sites, 1).as_deref(), Some("https://example.org/"));
     }
 }
