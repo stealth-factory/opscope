@@ -408,42 +408,107 @@ struct Cells<'a> {
     cells: Vec<(&'a str, String, usize)>,
 }
 
+/// The narrowest a name column is drawn beside its cells. Narrower than
+/// this and the cells go on lines of their own under the name instead.
+const MIN_NAME: usize = 8;
+
+/// Each cell as drawn: right-aligned in its column, or wider when what it
+/// holds is wider than the column, so a long number is never cut.
+fn cell_texts(cells: &[(&str, String, usize)]) -> Vec<String> {
+    cells.iter().map(|(_, text, n)| format!(" {:>width$}", text, width = n)).collect()
+}
+
+/// Cells too wide to sit beside a name, packed onto as few lines as hold
+/// them whole and right-aligned, each line as (colour, text) pieces.
+fn stacked<'a>(cells: &[(&'a str, String, usize)], avail: usize) -> Vec<Vec<(&'a str, String)>> {
+    let mut lines: Vec<Vec<(&str, String)>> = Vec::new();
+    let mut used = 0;
+    for ((colour, _, _), text) in cells.iter().zip(cell_texts(cells)) {
+        let n = tc::display_width(&text);
+        if lines.is_empty() || used + n > avail {
+            lines.push(Vec::new());
+            used = 0;
+        }
+        // A cell opening a line needs no gap before it.
+        let text = if used == 0 { text.trim_start().to_string() } else { text };
+        // A cell wider than a whole line is broken across lines rather
+        // than cut; no number here is, but the rule holds anyway.
+        for (k, piece) in chunks(&text, avail.max(1)).into_iter().enumerate() {
+            if k > 0 {
+                lines.push(Vec::new());
+                used = 0;
+            }
+            used += tc::display_width(&piece);
+            lines.last_mut().expect("a line was pushed").push((*colour, piece));
+        }
+    }
+    lines
+}
+
 fn table(row: Cells, w: usize) -> Vec<String> {
     let room = w.saturating_sub(1).max(1);
     let tint = if row.here { tc::bg(28, 44, 62) } else { String::new() };
     let c = |colour: &str| format!("{}{}", tint, colour);
     let lead_w = tc::display_width(&row.lead.1);
-    let cells_w: usize = row.cells.iter().map(|(_, _, n)| n + 1).sum();
-    let name_w = room.saturating_sub(lead_w + cells_w).max(8);
+    let texts = cell_texts(&row.cells);
+    let cells_w: usize = texts.iter().map(|t| tc::display_width(t)).sum();
+    // Side by side only when the name keeps a usable column; otherwise the
+    // name takes the width and the cells follow it, so nothing is cut.
+    let beside = lead_w + MIN_NAME + cells_w <= room;
+    let name_w = if beside { room - lead_w - cells_w } else { room.saturating_sub(lead_w).max(1) };
     let parts = wrapped(&row.name.1, name_w);
+    let finish = |mut line: Vec<(String, String)>| {
+        line.push((tint.clone(), " ".repeat(room)));
+        let refs: Vec<(&str, String)> = line.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+        tc::seg(&refs, room)
+    };
     let mut out = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         let mut line: Vec<(String, String)> = vec![
             (c(row.lead.0), if i == 0 { row.lead.1.clone() } else { " ".repeat(lead_w) }),
             (c(row.name.0), tc::pad(part, name_w)),
         ];
-        if i == 0 {
-            for (colour, text, n) in &row.cells {
-                line.push((c(colour), format!(" {:>width$}", text, width = n)));
+        if i == 0 && beside {
+            for ((colour, _, _), text) in row.cells.iter().zip(&texts) {
+                line.push((c(colour), text.clone()));
             }
         }
-        line.push((tint.clone(), " ".repeat(room)));
-        let refs: Vec<(&str, String)> = line.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
-        out.push(tc::seg(&refs, room));
+        out.push(finish(line));
+    }
+    if !beside {
+        let avail = room.saturating_sub(lead_w).max(1);
+        for pieces in stacked(&row.cells, avail) {
+            let n: usize = pieces.iter().map(|(_, t)| tc::display_width(t)).sum();
+            let mut line: Vec<(String, String)> = vec![(tint.clone(), " ".repeat(room.saturating_sub(n)))];
+            line.extend(pieces.into_iter().map(|(colour, t)| (c(colour), t)));
+            out.push(finish(line));
+        }
     }
     out
 }
 
-fn header_row(lead: &str, name: &str, cells: &[(&str, usize)], p: &Palette, w: usize) -> String {
+/// A table's header, laid out by the same rule as its rows: labels beside
+/// the name column when the rows' cells fit there, on their own line under
+/// it when they do not.
+fn header_row(lead: &str, name: &str, cells: &[(&str, usize)], p: &Palette, w: usize) -> Vec<String> {
     let room = w.saturating_sub(1).max(1);
     let lead_w = tc::display_width(lead);
-    let cells_w: usize = cells.iter().map(|(_, n)| n + 1).sum();
-    let name_w = room.saturating_sub(lead_w + cells_w).max(8);
-    let mut parts: Vec<(&str, String)> = vec![(p.lbl.as_str(), format!("{}{}", lead, tc::pad(name, name_w)))];
-    for (label, n) in cells {
-        parts.push((p.lbl.as_str(), format!(" {:>width$}", label, width = n)));
+    let labelled: Vec<(&str, String, usize)> = cells.iter().map(|(label, n)| (p.lbl.as_str(), label.to_string(), *n)).collect();
+    let cells_w: usize = cell_texts(&labelled).iter().map(|t| tc::display_width(t)).sum();
+    if lead_w + MIN_NAME + cells_w <= room {
+        let name_w = room - lead_w - cells_w;
+        let mut parts: Vec<(&str, String)> = vec![(p.lbl.as_str(), format!("{}{}", lead, tc::pad(name, name_w)))];
+        parts.extend(cell_texts(&labelled).into_iter().map(|t| (p.lbl.as_str(), t)));
+        return vec![tc::seg(&parts, room)];
     }
-    tc::seg(&parts, room)
+    let mut out = vec![tc::seg(&[(p.lbl.as_str(), format!("{}{}", lead, name))], room)];
+    for pieces in stacked(&labelled, room.saturating_sub(lead_w).max(1)) {
+        let n: usize = pieces.iter().map(|(_, t)| tc::display_width(t)).sum();
+        let mut line: Vec<(&str, String)> = vec![("", " ".repeat(room.saturating_sub(n)))];
+        line.extend(pieces);
+        out.push(tc::seg(&line, room));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- frame --
@@ -709,7 +774,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         }
         let cols = mover_columns(s.metric, slot == 0, w);
         let labels: Vec<(&str, usize)> = cols.iter().map(|c| (c.label, c.width)).collect();
-        rows.push(header_row("  ", if slot == 0 { "PAGE" } else { "QUERY" }, &labels, p, w));
+        rows.extend(header_row("  ", if slot == 0 { "PAGE" } else { "QUERY" }, &labels, p, w));
         for (i, mv) in list_.iter().enumerate().take(to).skip(from) {
             let here = at_in[slot] == Some(i);
             let start = rows.len();
@@ -1705,6 +1770,32 @@ mod tests {
                 assert!(!b.items.is_empty());
                 assert!(b.placed.iter().all(|(row, _)| *row < b.rows.len()));
             }
+        }
+    }
+
+    #[test]
+    fn a_table_row_keeps_every_cell_at_every_width() {
+        let p = palette();
+        for w in 12..=140 {
+            for here in [false, true] {
+                let cells = vec![(p.txt.as_str(), "12,345".to_string(), 7), (p.dim.as_str(), "1,234,567".to_string(), 8), (p.dim.as_str(), "4.1".to_string(), 5)];
+                let rows = table(Cells { here, lead: (p.dim.as_str(), "  ".into()), name: (p.txt.as_str(), "/docs/a-page".into()), cells }, w);
+                assert_fits(&rows, w + 1, "a table row");
+                let text: Vec<String> = rows.iter().map(|r| plain(r)).collect();
+                for cell in ["12,345", "1,234,567", "4.1"] {
+                    assert!(text.iter().any(|r| r.contains(cell)), "{cell} lost at {w}: {text:?}");
+                }
+                let mut name: String = text.concat();
+                for cell in ["12,345", "1,234,567", "4.1"] {
+                    name = name.replacen(cell, "", 1);
+                }
+                let name: String = name.split_whitespace().collect();
+                assert!(name.contains("/docs/a-page"), "the name lost at {w}: {text:?}");
+            }
+            let head = header_row("  ", "PAGE", &[("IMPR", 8), ("Δ", 7)], &p, w);
+            assert_fits(&head, w + 1, "a header");
+            let text: String = head.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
+            assert!(text.contains("PAGE") && text.contains("IMPR") && text.contains('Δ'), "header lost at {w}: {text}");
         }
     }
 
