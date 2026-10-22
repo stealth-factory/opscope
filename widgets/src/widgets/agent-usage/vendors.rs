@@ -2188,6 +2188,81 @@ mod tests {
         link_spacexsi(&mut s);
         assert_eq!((s.cursor.spacexsi, s.grok.spacexsi), (Spacexsi::No, Spacexsi::No));
     }
+
+    /// The usage response as a Max account on an exhausted extra-usage
+    /// balance sends it: every key and value type of the reset block as
+    /// the live endpoint returned it, with made-up values. The grant
+    /// carries far more than the parser reads - ids, labels, what it
+    /// clears, per-window percentages - and the block carries cooldown and
+    /// exhaustion fields beside `eligible`.
+    fn max_account_quota() -> serde_json::Value {
+        serde_json::json!({
+            "limits": [
+                {"group": "session", "is_active": true, "kind": "session", "percent": 12,
+                 "resets_at": "2126-01-01T00:00:00Z", "scope": null, "severity": "normal"},
+                {"group": "weekly", "is_active": true, "kind": "weekly_all", "percent": 40,
+                 "resets_at": "2126-01-05T00:00:00Z", "scope": null, "severity": "normal"},
+                {"group": "weekly", "is_active": false, "kind": "weekly_scoped", "percent": 3,
+                 "resets_at": "2126-01-05T00:00:00Z", "scope": {"model": "fixture"}, "severity": "normal"}
+            ],
+            "extra_usage": {
+                "credits_ever_enabled": true, "currency": "USD", "daily": null,
+                "decimal_places": 2, "disabled_reason": "out_of_credits", "is_enabled": false,
+                "monthly_limit": 5000, "spend_limit_reached": true, "used_credits": 5000.0,
+                "user_disabled": false, "utilization": 100.0, "weekly": null
+            },
+            "cedar_ember": {
+                "at_limit": false,
+                "cooldown_until": null,
+                "eligible": true,
+                "event_props": {"billing_path": "x", "billing_period": "x", "extra_usage_state": "x",
+                                "surface": "x", "tenure_bucket": "x", "tier": "x"},
+                "exhausted": [],
+                "grants": [{
+                    "arm": null, "blocking": [], "clears": ["five_hour", "seven_day", "seven_day_opus"],
+                    "ends_at": "2126-01-03T00:00:00Z", "gives_back_weekly": true,
+                    "id": "fixture-grant", "label": "Fixture grant", "paused": false,
+                    "percent_used": {"five_hour": 0, "seven_day": 0, "seven_day_overage_included": 0},
+                    "resets_left": 1, "resets_total": 1, "starts_at": "2025-01-01T00:00:00Z",
+                    "type": "full", "unavailable_reason": null, "usable_now": true,
+                    "use_requires_limit": false
+                }],
+                "ineligible_reason": null,
+                "next_grant_id": "fixture-next",
+                "paused_held": false,
+                "weekly_resets_at": "2126-01-05T00:00:00Z"
+            }
+        })
+    }
+
+    /// Both screens drawn through the functions the running widget calls -
+    /// the tab dispatch for `claude` and for `[+]` - from one profile with
+    /// a live-shaped reading, so the section and the line are compared as
+    /// they appear, not as their builders return them.
+    #[test]
+    fn a_live_shaped_claude_reading_draws_the_bank_on_the_tab_and_the_line_on_plus() {
+        let s = State {
+            claude: vec![crate::claude::Data::with_quota("", max_account_quota())],
+            ..Default::default()
+        };
+        let cfg = Config::default();
+        let tabs = vec![SUMMARY_TAB.to_string(), "claude".to_string()];
+        let tab = plain(&tab_body_with_plots("claude", &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
+        let plus = plain(&tab_body_with_plots(SUMMARY_TAB, &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
+        let stamp = crate::codex::local_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
+        let at = tab.iter().position(|row| row.trim_end() == " ── 1 BANK RESET ──")
+            .unwrap_or_else(|| panic!("no bank on the tab: {tab:#?}"));
+        assert_eq!(tab[at + 1].trim_end(), format!("  Full reset · expires {stamp}"), "{tab:#?}");
+        assert!(tab[at + 2].trim().is_empty(), "{tab:#?}");
+        let line = s.claude[0].reset_summary_line().expect("the [+] line");
+        assert!(plus.iter().any(|row| row.trim() == line), "{plus:#?}");
+        let compact = crate::codex::summary_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
+        assert_eq!(line, format!("1 reset available {compact}"));
+        // The tab's date is the line's date with the year added.
+        for part in compact.split_whitespace() {
+            assert!(stamp.split_whitespace().any(|p| p == part), "{part} / {stamp}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -52,27 +52,36 @@ pub fn parse_cursor_cookie(token: &str, now: f64) -> Option<String> {
     Some(format!("WorkosCursorSessionToken={user}%3A%3A{token}"))
 }
 
-/// Claude's optional `cedar_ember` usage block. A grant can hold several
-/// resets; its expiry applies to all of them. No grant identifiers are kept.
-#[derive(Debug, PartialEq)]
-pub struct ClaudeResets {
-    pub left: u64,
-    pub soonest: Option<f64>,
-}
+/// The most resets one inventory is believed to hold.
+///
+/// Every reset is drawn as its own row, and Claude states a grant's resets
+/// as a count, so a count is turned into that many rows. A count past this
+/// is not an inventory any account holds; it makes the body unusable
+/// rather than a pane of a million rows or an allocation sized by the JSON.
+pub const MOST_RESETS: u64 = 1000;
 
+/// Claude's optional `cedar_ember` usage block, as one entry per reset.
+///
+/// A grant holds `resets_left` resets and its `ends_at` applies to every
+/// one of them, so a grant of two is two entries with the same expiry:
+/// nothing is merged. A grant's `type` of `full` is a full reset, which is
+/// what Codex calls its credits, and is named the same way; any other type
+/// is not guessed at and the entry has no kind. The grant's `label` is a
+/// sentence of marketing copy rather than a kind and is not kept, nor are
+/// grant identifiers.
+///
 /// Wire fields verified against Claude Code 2.1.296's grant schema.
 /// Unknown/ineligible blocks are absent, not a guessed empty inventory.
 /// Recheck dates at render time so cached offers cannot outlive their expiry.
-pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
+pub fn parse_claude_resets(text: &str, now: f64) -> Option<ResetBank> {
     let body: serde_json::Value = serde_json::from_str(text).ok()?;
     let block = body.get("cedar_ember")?.as_object()?;
     if !block.get("eligible")?.as_bool()? {
         return None;
     }
     let grants = block.get("grants")?.as_array()?;
+    let mut listed = Vec::new();
     let mut left = 0u64;
-    let mut soonest: Option<f64> = None;
-    let mut undated = false;
     for grant in grants {
         let grant = grant.as_object()?;
         if grant.get("usable_now").and_then(|v| v.as_bool()) != Some(true)
@@ -89,16 +98,32 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
         if expiry.is_some_and(|at| at <= now) || start.is_some_and(|at| at > now) {
             continue;
         }
-        left = left.checked_add(count)?;
-        match expiry {
-            Some(at) => soonest = Some(soonest.map_or(at, |old| old.min(at))),
-            None => undated = true,
+        left = left.checked_add(count).filter(|n| *n <= MOST_RESETS)?;
+        let title = match grant.get("type").and_then(|v| v.as_str()) {
+            Some("full") => Some("Full reset".to_string()),
+            _ => None,
+        };
+        for _ in 0..count {
+            listed.push(ResetCredit { title: title.clone(), expiry });
         }
     }
-    Some(ClaudeResets { left, soonest: if undated { None } else { soonest } })
+    soonest_first(&mut listed);
+    Some(ResetBank { left, credits: listed })
 }
 
-/// One reset credit still usable on a Codex account.
+/// Soonest expiry first, and a reset with no readable expiry after every
+/// dated one. The sort is stable, so equal instants keep the order the
+/// inventory gave them.
+fn soonest_first(credits: &mut [ResetCredit]) {
+    credits.sort_by(|a, b| match (a.expiry, b.expiry) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// One reset still usable on an account, Codex or Claude.
 ///
 /// `title` is the credit's own `title`. Absent, blank, or not a string is
 /// no title, and nothing is put in its place. `expiry` is `expires_at`.
@@ -109,11 +134,13 @@ pub struct ResetCredit {
     pub expiry: Option<f64>,
 }
 
-/// Reset credits still usable on a Codex account.
+/// Reset credits still usable on an account, Codex or Claude.
 ///
-/// `left` is a count the body supports. `credits` is one entry per credit
-/// that count was taken from, soonest first. An empty `credits` is a count
-/// the server stated without listing the credits, so no date row is drawn.
+/// `left` is a count the body supports, and `credits` is one entry per
+/// reset in it, soonest first with undated entries last, so `left` is
+/// always `credits.len()`. A count the server stated without listing the
+/// resets is that many entries with no expiry: each is still a reset, and
+/// none of them is given a date.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResetBank {
     pub left: u64,
@@ -149,10 +176,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     // Null is a count with no list, same as the key being absent. An
     // unreadable list falls through to the count alone below.
     let Some(credits) = obj.get("credits").filter(|value| !value.is_null()) else {
-        return Some(ResetBank {
-            left: reported?,
-            credits: Vec::new(),
-        });
+        return count_only(reported);
     };
     let Some(credits) = credits.as_array() else {
         return count_only(reported);
@@ -160,10 +184,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     // An empty list published a count and no credits to classify. The
     // count is the bank. Zero, when that is the count, is a real empty bank.
     if credits.is_empty() {
-        return Some(ResetBank {
-            left: reported.unwrap_or(0),
-            credits: Vec::new(),
-        });
+        return count_only(Some(reported.unwrap_or(0)));
     }
     let mut listed = Vec::new();
     for credit in credits {
@@ -188,12 +209,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
             expiry,
         });
     }
-    listed.sort_by(|a, b| match (a.expiry, b.expiry) {
-        (Some(left), Some(right)) => left.total_cmp(&right),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    soonest_first(&mut listed);
     // The list was readable, so the bank is the credits still in it. A
     // reported count that disagrees is not drawn beside them: the lines
     // under the number have to be that number.
@@ -303,11 +319,14 @@ fn skip_string_sequence(chars: &[char], mut i: usize) -> usize {
     chars.len()
 }
 
-/// The count alone, once the list can no longer be trusted credit by credit.
+/// The count alone, once the list can no longer be trusted credit by credit
+/// or was never sent: that many resets, none of them with a date.
 fn count_only(reported: Option<u64>) -> Option<ResetBank> {
+    let left = reported.filter(|n| *n <= MOST_RESETS)?;
+    let undated = ResetCredit { title: None, expiry: None };
     Some(ResetBank {
-        left: reported?,
-        credits: Vec::new(),
+        left,
+        credits: vec![undated; left as usize],
     })
 }
 
@@ -1733,12 +1752,16 @@ mod tests {
         assert!(super::parse_cursor_cookie(&format!("{valid}\r\nheader"), 100.0).is_none());
     }
 
+    fn grant_of(title: Option<&str>, expiry: Option<f64>) -> ResetCredit {
+        ResetCredit { title: title.map(str::to_string), expiry }
+    }
+
     #[test]
-    fn claude_resets_count_usable_grants_and_expire_cached_offers() {
+    fn claude_resets_list_every_usable_reset_and_expire_cached_offers() {
         let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
         let body = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
-            {"resets_left": 2, "usable_now": true, "ends_at": "2026-10-12T00:00:00Z"},
-            {"resets_left": 1, "usable_now": true, "ends_at": "2026-10-11T00:00:00Z"},
+            {"resets_left": 2, "usable_now": true, "type": "full", "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "full", "ends_at": "2026-10-11T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "ends_at": "2026-10-10T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "starts_at": "2026-10-13T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "paused": true},
@@ -1746,11 +1769,16 @@ mod tests {
             {"resets_left": 9},
             {"resets_left": 0, "usable_now": true}
         ]}}).to_string();
-        assert_eq!(parse_claude_resets(&body, now), Some(ClaudeResets {
-            left: 3, soonest: iso_epoch("2026-10-11T00:00:00Z")
+        let full = Some("Full reset");
+        let (d11, d12) = (iso_epoch("2026-10-11T00:00:00Z"), iso_epoch("2026-10-12T00:00:00Z"));
+        // A grant of two is two entries with the same expiry, soonest first.
+        assert_eq!(parse_claude_resets(&body, now), Some(ResetBank {
+            left: 3,
+            credits: vec![grant_of(full, d11), grant_of(full, d12), grant_of(full, d12)],
         }));
-        assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ClaudeResets {
-            left: 2, soonest: iso_epoch("2026-10-12T00:00:00Z")
+        assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ResetBank {
+            left: 2,
+            credits: vec![grant_of(full, d12), grant_of(full, d12)],
         }));
     }
 
@@ -1764,17 +1792,23 @@ mod tests {
             assert_eq!(parse_claude_resets(body, now), None, "{body}");
         }
         let mut body = serde_json::json!({"cedar_ember":{"eligible":true,"grants":[]}});
-        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:0, soonest:None}));
-        for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null] {
+        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ResetBank {left:0, credits: Vec::new()}));
+        for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null,
+                      serde_json::json!(MOST_RESETS + 1)] {
             body["cedar_ember"]["grants"] = serde_json::json!([{"resets_left":count,"usable_now":true}]);
             assert_eq!(parse_claude_resets(&body.to_string(), now), None);
         }
+        // An undated grant is kept, after every dated one, and an unknown
+        // type is not named.
         for date in [serde_json::Value::Null, serde_json::json!("bad date")] {
             body["cedar_ember"]["grants"] = serde_json::json!([
-                {"resets_left":1,"usable_now":true,"ends_at":"2026-10-12T00:00:00Z"},
-                {"resets_left":2,"usable_now":true,"ends_at":date}
+                {"resets_left":1,"usable_now":true,"type":"mystery","ends_at":date},
+                {"resets_left":1,"usable_now":true,"type":"full","ends_at":"2026-10-12T00:00:00Z"}
             ]);
-            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:3, soonest:None}));
+            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ResetBank {
+                left: 2,
+                credits: vec![grant_of(Some("Full reset"), iso_epoch("2026-10-12T00:00:00Z")), grant_of(None, None)],
+            }));
         }
     }
 
@@ -1903,7 +1937,7 @@ mod tests {
         let bank = parse_codex_reset_credits(r#"{"available_count":2,"credits":null}"#, 0.0)
             .expect("the count");
         assert_eq!(bank.left, 2);
-        assert!(bank.credits.is_empty(), "null is not a list of credits");
+        assert_eq!(bank.credits, vec![undated(); 2], "null is not a list of credits");
         assert!(parse_codex_reset_credits(r#"{"credits":null}"#, 0.0).is_none());
     }
 
@@ -1945,9 +1979,10 @@ mod tests {
         let stated = parse_codex_reset_credits(r#"{"credits":[],"available_count":2}"#, now)
             .expect("a count without the credits listed");
         assert_eq!(stated.left, 2);
-        assert!(
-            stated.credits.is_empty(),
-            "no expiry was sent, so none is drawn"
+        assert_eq!(
+            stated.credits,
+            vec![undated(); 2],
+            "two resets, and no expiry was sent for either"
         );
     }
 
@@ -1955,7 +1990,31 @@ mod tests {
     fn a_summary_with_only_a_count_is_a_bank_without_expiries() {
         let bank = parse_codex_reset_credits(r#"{"available_count":4}"#, 0.0).expect("a summary");
         assert_eq!(bank.left, 4);
-        assert!(bank.credits.is_empty());
+        assert_eq!(bank.credits, vec![undated(); 4]);
+        // A count no inventory holds is not turned into that many rows.
+        let most = format!(r#"{{"available_count":{}}}"#, MOST_RESETS);
+        assert_eq!(parse_codex_reset_credits(&most, 0.0).map(|b| b.credits.len() as u64), Some(MOST_RESETS));
+        let past = format!(r#"{{"available_count":{}}}"#, MOST_RESETS + 1);
+        assert_eq!(parse_codex_reset_credits(&past, 0.0), None);
+    }
+
+    fn undated() -> ResetCredit {
+        ResetCredit { title: None, expiry: None }
+    }
+
+    #[test]
+    fn two_codex_credits_ending_together_stay_two_entries() {
+        let now = at("2026-07-01T00:00:00Z");
+        let bank = parse_codex_reset_credits(
+            r#"{"available_count":2,"credits":[
+                {"status":"available","title":"Full reset","expires_at":"2026-07-12T00:00:00Z"},
+                {"status":"available","title":"Full reset","expires_at":"2026-07-12T00:00:00Z"}
+            ]}"#,
+            now,
+        )
+        .expect("a list");
+        let one = ResetCredit { title: Some("Full reset".into()), expiry: Some(at("2026-07-12T00:00:00Z")) };
+        assert_eq!(bank, ResetBank { left: 2, credits: vec![one.clone(), one] });
     }
 
     #[test]
