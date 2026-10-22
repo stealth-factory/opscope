@@ -1350,9 +1350,11 @@ fn top_of(values: &[&[f64]]) -> f64 {
     values.iter().flat_map(|v| v.iter()).cloned().fold(0.0, f64::max)
 }
 
-fn small_table(p: &Palette, title: &str, r: &Report, dim: &str, metric: &str, budget: usize) -> Vec<Line> {
+/// A titled two-column table of the top `n` rows of `r`.
+#[allow(clippy::too_many_arguments)]
+fn small_table(p: &Palette, title: &str, r: &Report, dim: &str, metric: &str, n: usize, budget: usize) -> Vec<Line> {
     let mut out = vec![vec![part(&p.head, format!(" {}", title))]];
-    let rows = model::top(r, dim, metric, 10);
+    let rows = model::top(r, dim, metric, n);
     if rows.is_empty() {
         let why = if r.meta.empty_reason.is_empty() { "none in this window".to_string() } else { format!("GA: {}", r.meta.empty_reason) };
         out.extend(prose(&p.dim, &why, budget, "   "));
@@ -1433,13 +1435,19 @@ pub fn page_detail(
         ));
     }
     out.push(Vec::new());
-    out.extend(small_table(&p, "SOURCES (views, 28d)", &reports[1], "sessionSourceMedium", "screenPageViews", budget));
-    out.extend(small_table(&p, "COUNTRIES (views, 28d)", &reports[2], "country", "screenPageViews", budget));
-    out.extend(small_table(&p, "DEVICES (views, 28d)", &reports[3], "deviceCategory", "screenPageViews", budget));
+    out.extend(small_table(&p, "SOURCES (views, 28d)", &reports[1], "sessionSourceMedium", "screenPageViews", 10, budget));
+    out.extend(small_table(&p, "COUNTRIES (views, 28d)", &reports[2], "country", "screenPageViews", 10, budget));
+    out.extend(small_table(&p, "DEVICES (views, 28d)", &reports[3], "deviceCategory", "screenPageViews", 10, budget));
+    // Every event GA returned, not a top ten: the list is what was asked
+    // for, and one left off would read as none on this page.
+    let all = reports[4].rows.len();
     if configured {
-        out.extend(small_table(&p, "CONFIGURED KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "eventCount", budget));
+        out.extend(small_table(&p, "CONFIGURED KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "eventCount", all, budget));
     } else {
-        out.extend(small_table(&p, "KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "keyEvents", budget));
+        out.extend(small_table(&p, "KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "keyEvents", all, budget));
+    }
+    if let Some(cut) = cut_note(&reports[4], "event rows", "events with the fewest on this page are missing") {
+        out.extend(prose(&p.warn, &cut, budget, " "));
     }
     out.push(Vec::new());
     out.extend(prose(
@@ -1488,8 +1496,8 @@ pub fn event_detail(
         out.extend(prose(&p.dim, &format!("{} in 28 days", model::thousands(vals.iter().sum())), budget, " "));
     }
     out.push(Vec::new());
-    out.extend(small_table(&p, "BY SOURCE TODAY", &reports[1], "sessionSourceMedium", metric, budget));
-    out.extend(small_table(&p, "BY PAGE (28d)", &reports[2], "pagePath", metric, budget));
+    out.extend(small_table(&p, "BY SOURCE TODAY", &reports[1], "sessionSourceMedium", metric, 10, budget));
+    out.extend(small_table(&p, "BY PAGE (28d)", &reports[2], "pagePath", metric, 10, budget));
     out
 }
 
@@ -1945,6 +1953,28 @@ mod tests {
         let views = chart("views");
         assert!(!views.contains('█'), "the smaller window does not: {}", views);
         assert_eq!(views.matches('·').count(), 15, "Sep 29-30 and the odd days of October are drawn as zero: {}", views);
+    }
+
+    #[test]
+    fn a_page_detail_lists_every_configured_event_and_says_when_cut() {
+        let rows: Vec<String> = (0..12)
+            .map(|i| format!(r#"{{"dimensionValues":[{{"value":"event_{:02}"}}],"metricValues":[{{"value":"{}"}}]}}"#, i, 20 - i))
+            .collect();
+        let events = |count: usize| {
+            format!(r#"{{"dimensionHeaders":[{{"name":"eventName"}}],"metricHeaders":[{{"name":"eventCount"}}],"rowCount":{},"rows":[{}]}}"#, count, rows.join(","))
+        };
+        let empty = r#"{"dimensionHeaders":[{"name":"x"}],"metricHeaders":[{"name":"screenPageViews"}]}"#;
+        let batch = |count: usize| {
+            parse_batch(&format!(r#"{{"reports":[{},{},{},{},{},{}]}}"#, empty, empty, empty, empty, events(count), empty)).unwrap()
+        };
+        let all = text(&page_detail("/p", Some(&Ok(batch(12))), true, day(), 100));
+        assert!(all.contains("CONFIGURED KEY EVENTS ON THIS PAGE"), "{}", all);
+        for i in 0..12 {
+            assert!(all.contains(&format!("event_{:02}", i)), "event_{:02} missing past the tenth row\n{}", i, all);
+        }
+        assert!(!all.contains("GA returned"), "nothing was cut");
+        let cut = text(&page_detail("/p", Some(&Ok(batch(14))), true, day(), 100));
+        assert!(cut.contains("GA returned 12 of 14 event rows"), "{}", cut);
     }
 
     #[test]
