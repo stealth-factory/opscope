@@ -1001,7 +1001,9 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// The `BANK RESET` section, the one layout Codex and Claude both draw.
 ///
 /// The title carries the count - `── 1 BANK RESET ──`, `── 2 BANK RESETS ──`,
-/// `── 0 BANK RESETS ──` - and under it is one row per reset, each with its
+/// `── 0 BANK RESETS ──` - and drops its rules and wraps on its words in a
+/// pane too narrow for it, so the count is never what gets cut. Under it
+/// is one row per reset, each with its
 /// own expiry, soonest first and undated last, exactly as the parser
 /// ordered them. Two resets that end at the same moment are still two
 /// rows: nothing is merged or counted together, so the rows under the
@@ -1025,8 +1027,15 @@ pub(crate) fn bank_section(
 ) -> Vec<String> {
     let room = w.saturating_sub(1);
     let n = bank.credits.len();
-    let title = format!(" ── {n} BANK {} ── ", if n == 1 { "RESET" } else { "RESETS" });
-    let mut rows = vec![tc::seg(&[(p.lbl.as_str(), title)], room)];
+    let words = format!("{n} BANK {}", if n == 1 { "RESET" } else { "RESETS" });
+    let title = format!(" ── {words} ── ");
+    let mut rows = Vec::new();
+    if tc::display_width(&title) <= room {
+        rows.push(tc::seg(&[(p.lbl.as_str(), title)], room));
+    } else {
+        // The rules go before a word does: clipping the title took the count.
+        push_wrapped(&mut rows, &words, room, p.lbl.as_str(), 1);
+    }
     if n == 0 {
         push_visible(&mut rows, "None in the account.", room, p.dim.as_str());
     }
@@ -2284,6 +2293,36 @@ mod tests {
             2,
             "a reset lost its row: {count_only:#?}"
         );
+    }
+
+    #[test]
+    fn a_heading_too_wide_for_the_pane_wraps_and_keeps_its_count() {
+        let p = palette();
+        let d = Data {
+            bank: crate::parse::parse_codex_reset_credits(r#"{"available_count":12}"#, 0.0),
+            ..Data::default()
+        };
+        // From 8, where `Reset` itself still fits whole and so marks where
+        // the heading ends.
+        for w in 8..=24 {
+            let rows = shown(&codex_bank_rows(&d, w, &p));
+            let heading: Vec<&str> = rows
+                .iter()
+                .take_while(|row| !row.contains("Reset"))
+                .flat_map(|row| row.split_whitespace())
+                .collect();
+            assert_eq!(
+                heading.concat().replace('─', ""),
+                "12BANKRESETS",
+                "the heading lost a word at {w} columns: {rows:#?}"
+            );
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) < w,
+                    "a row is wider than the pane at {w} columns: {rows:#?}"
+                );
+            }
+        }
     }
 
     #[test]

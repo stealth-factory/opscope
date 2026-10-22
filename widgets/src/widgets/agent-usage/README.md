@@ -232,9 +232,12 @@ account.`, as Codex does. A reading with no inventory in it - no quota yet,
 or a block that is absent, ineligible or unreadable - draws no section,
 again as Codex does when its inventory request fails, so an unread bank is
 never shown as an empty one. Each profile's tab shows its own bank. The
-`[+]` line stays one line, and it agrees with the section for the same
-profile: the same count as the title, and the soonest date of the first row
-without its year. A count past 1000 resets is not read as an inventory.
+`[+]` line agrees with the section for the same profile: the same count as
+the title and, when every reset has a readable expiry, the first row's date
+without its year. When any reset is undated the line gives the count alone,
+and in a pane too narrow for it the line wraps onto the next rows, its date
+moving below the count. A count past 1000 resets is not read
+as an inventory.
 
 This comes from the optional `cedar_ember` block on
 `GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
