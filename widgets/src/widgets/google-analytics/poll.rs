@@ -661,15 +661,23 @@ pub fn spawn_detail(
     cred: Credential,
     grant: String,
     id: String,
-    body: serde_json::Value,
+    bodies: Vec<serde_json::Value>,
     activity: tc::Refresh,
 ) {
     std::thread::spawn(move || {
         let work = activity.start();
+        // The batches' reports, end to end; any one failing fails the
+        // detail, since a detail drawn from part of its reports would
+        // read as complete.
         let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            api::batch(&cred, &id, &body, &grant)
-                .map_err(|f| f.text)
-                .and_then(|t| parse::parse_batch(&t))
+            let mut all = Vec::new();
+            for body in &bodies {
+                let r = api::batch(&cred, &id, body, &grant)
+                    .map_err(|f| f.text)
+                    .and_then(|t| parse::parse_batch(&t))?;
+                all.extend(r);
+            }
+            Ok(all)
         }));
         let reports = match got {
             Ok(r) => r,

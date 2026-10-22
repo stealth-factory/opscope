@@ -156,7 +156,9 @@ disk, so neither pane drops the other's readings.
 `↵` opens the selected row:
 
 - **a page** (a mover or an organic landing page): 28 days of views and users
-  by day with the previous 28 days drawn under them, and the page's sources,
+  by day with the previous 28 days drawn under them on the same scale (a
+  quiet day GA left out is drawn as zero in its place), the 28-day totals
+  asked for over each window so a returning visitor is one user, and the page's sources,
   countries, devices and key events. Realtime names pages by title, not path,
   so a page is not matched to a live count - the detail says so;
 - **a key event**: by day over 28 days, by source today, and by page;
