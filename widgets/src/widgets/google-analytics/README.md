@@ -147,7 +147,10 @@ own baseline - but as readings of their own, written when the once-a-minute
 event breakdown arrives and stamped with that time, not copied onto every
 totals reading. A reading that did not ask for events is not a reading of
 zero events, so a week counts toward an event's baseline only if events were
-read near that minute. Two panes on one property share the file; appends and
+read near that minute. Each events reading lists every event it covered,
+at 0 when there were none, so an event added to `key_events` or newly
+flagged in GA starts its own baseline rather than inheriting zeros from
+readings that never asked about it. Two panes on one property share the file; appends and
 the daily prune take a lock beside it, and the prune works from what is on
 disk, so neither pane drops the other's readings.
 
@@ -159,7 +162,8 @@ disk, so neither pane drops the other's readings.
   by day with the previous 28 days drawn under them on the same scale (a
   quiet day GA left out is drawn as zero in its place), the 28-day totals
   asked for over each window so a returning visitor is one user, and the page's sources,
-  countries, devices and key events. Realtime names pages by title, not path,
+  countries, devices and key events (the `key_events` list by count when one
+  is set, as everywhere else). Realtime names pages by title, not path,
   so a page is not matched to a live count - the detail says so;
 - **a key event**: by day over 28 days, by source today, and by page;
 - **a property**: the full quota table for realtime and core reports,

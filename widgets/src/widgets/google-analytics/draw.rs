@@ -716,6 +716,9 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
         ]);
     }
     f.lines.extend(flow(chunks, budget, "  "));
+    if let Some(cut) = cut_note(&proc_.sources, "source-hour rows", "the sources and channels below may be partial") {
+        f.lines.extend(prose(&p.warn, &cut, budget, " "));
+    }
     for (dim, word) in [("sessionSourceMedium", "top sources today"), ("sessionDefaultChannelGroup", "channels today")] {
         let split = model::split_to_hour(&proc_.sources, dim, "sessions", vs.upto);
         if split.is_empty() {
@@ -1367,7 +1370,13 @@ fn small_table(p: &Palette, title: &str, r: &Report, dim: &str, metric: &str, bu
 /// 28 before drawn under them on the same scale, the window totals asked
 /// for over each window, then where its visitors came from. `asked_on` is
 /// the property's date when the detail was read.
-pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, asked_on: chrono::NaiveDate, w: usize) -> Vec<Line> {
+pub fn page_detail(
+    path: &str,
+    reports: Option<&Result<Vec<Report>, String>>,
+    configured: bool,
+    asked_on: chrono::NaiveDate,
+    w: usize,
+) -> Vec<Line> {
     let p = palette();
     let budget = w.saturating_sub(1).max(1);
     let mut out = prose(&p.txt, path, budget, " ");
@@ -1427,7 +1436,11 @@ pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, as
     out.extend(small_table(&p, "SOURCES (views, 28d)", &reports[1], "sessionSourceMedium", "screenPageViews", budget));
     out.extend(small_table(&p, "COUNTRIES (views, 28d)", &reports[2], "country", "screenPageViews", budget));
     out.extend(small_table(&p, "DEVICES (views, 28d)", &reports[3], "deviceCategory", "screenPageViews", budget));
-    out.extend(small_table(&p, "KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "keyEvents", budget));
+    if configured {
+        out.extend(small_table(&p, "CONFIGURED KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "eventCount", budget));
+    } else {
+        out.extend(small_table(&p, "KEY EVENTS ON THIS PAGE (28d)", &reports[4], "eventName", "keyEvents", budget));
+    }
     out.push(Vec::new());
     out.extend(prose(
         &p.dim,
@@ -1572,7 +1585,7 @@ mod tests {
             interval_why: "backed off: 0 active for 5m+".into(),
             samples: vec![
                 Sample { t: NOW - 2.0 * WEEK, active: Some(48.0), views: Some(1.0), events: Some(vec![("purchase".into(), 2.0)]) },
-                Sample { t: NOW - WEEK, active: Some(50.0), views: Some(1.0), events: Some(vec![]) },
+                Sample { t: NOW - WEEK, active: Some(50.0), views: Some(1.0), events: Some(vec![("purchase".into(), 0.0)]) },
             ],
             sample_path: "/home/someone/.local/state/opscope/google-analytics/123.samples".into(),
             rt_err: "403 no access: add reader@example-project.iam.gserviceaccount.com as Viewer under Property access management · Google said: User does not have sufficient permissions for this property.".into(),
@@ -1626,7 +1639,7 @@ mod tests {
                 }
                 let details = [
                     property_detail(&s.props[0], &v, w),
-                    page_detail("/pricing", None, day(), w),
+                    page_detail("/pricing", None, false, day(), w),
                     event_detail("purchase", Some(&Err("HTTP 500".into())), "keyEvents", day(), w),
                 ];
                 for d in details.iter().flatten() {
@@ -1923,7 +1936,7 @@ mod tests {
         // Asked on Oct 27: the current window ends Oct 26 and the prior
         // Sep 28, so prior holds Sep 1-28 and current Sep 29-Oct 26.
         let on = chrono::NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
-        let lines = page_detail("/p", Some(&Ok(batch)), on, 200);
+        let lines = page_detail("/p", Some(&Ok(batch)), false, on, 200);
         let chart = |label: &str| {
             lines.iter().map(plain).find(|l| l.trim_start().starts_with(label)).unwrap_or_default()
         };
@@ -1948,7 +1961,7 @@ mod tests {
             {"dimensionValues":[{"value":"cur"}],"metricValues":[{"value":"100"},{"value":"8"}]},
             {"dimensionValues":[{"value":"prev"}],"metricValues":[{"value":"50"},{"value":"5"}]}]}
         ]}"#).unwrap();
-        let all = text(&page_detail("/pricing", Some(&Ok(batch)), day(), 100));
+        let all = text(&page_detail("/pricing", Some(&Ok(batch)), false, day(), 100));
         assert!(all.contains("views 28d 100 vs prior 50 (+100%)"), "{}", all);
         assert!(all.contains("users 28d 8 vs prior 5"), "users over the window, not a sum of days: {}", all);
         assert!(all.contains("google / organic"));
