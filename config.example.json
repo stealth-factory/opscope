@@ -163,6 +163,27 @@
     "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
     "refresh": 60.0
   },
+  "google_analytics": {
+    "_comment": "GA4 properties through a Google service-account key: realtime against a baseline this widget records itself, today against the same weekday, key events, organic landing pages and movers. Setup on Google's side is docs/google-setup.md. Keep the key file and config.json chmod 600.",
+    "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded). The widget signs in with it and re-mints its hour-long token on its own, indefinitely. The key stays in its own file and never goes in config.json; the screen warns when the file is readable by anyone but you.",
+    "credentials_file": "",
+    "_token_comment": "A pre-minted access token, for an hour of testing without a key (for example from gcloud auth print-access-token). Google tokens last 1h and this widget cannot renew one; credentials_file wins when both are set.",
+    "token": "",
+    "_token_env_comment": "Environment variable holding a pre-minted access token, read when token is empty.",
+    "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN",
+    "_properties_comment": "Numeric GA4 property ids - the number after p in GA's admin URLs. Empty lists every property the service account can see (Admin API account summaries).",
+    "properties": [],
+    "_realtime_refresh_comment": "Seconds between realtime readings: 15, 30 or 60; anything else means 15. The l key cycles them while running. It backs off to 60 s after 5 minutes at 0 active users and slows to 120 s under 10% of quota left, and the title says which.",
+    "realtime_refresh": 15,
+    "_refresh_comment": "Seconds between processed reports (hourly, sources, key events, movers, organic landing pages); minimum 60. GA's processed data is 2-6 hours behind, so faster gains nothing.",
+    "refresh": 300,
+    "_window_days_comment": "Days in the movers and organic landing page window, compared with the equal window before it. The w key cycles 7, 14 and 28.",
+    "window_days": 7,
+    "_baseline_weeks_comment": "How many past weeks the realtime baseline is the median of. Samples older than this plus one week are pruned from the sample file.",
+    "baseline_weeks": 4,
+    "_key_events_comment": "Event names to treat as key events, counted by event count. Empty uses every event GA flags as a key event.",
+    "key_events": []
+  },
   "herdr_panes": {
     "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
     "refresh": 4.0

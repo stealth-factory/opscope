@@ -74,6 +74,13 @@ title = "github-prs"
 placement = "split"
 command = ["./luvus/bin/opscope", "github-prs"]
 
+# Google Analytics 4: is traffic normal right now, and did the last change hurt key events?
+[[panes]]
+id = "google-analytics"
+title = "google-analytics"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-analytics"]
+
 # Everything running in Herdr, across every workspace.
 [[panes]]
 id = "herdr-panes"
