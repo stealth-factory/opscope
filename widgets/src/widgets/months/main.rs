@@ -474,7 +474,7 @@ fn band_scale(months: &[Month], width: usize, height: usize) -> u8 {
 /// to fit in; the terminal's full height counts rows the footer already owns.
 fn pane_room(w: usize, neighbours: bool, p: &Palette) -> usize {
     let (_, h) = tc::size();
-    let foot = footer(w, neighbours, p).0.lines.len();
+    let foot = footer(w, neighbours, p).0.lines.len() + tc::notices::banner_rows(w).len();
     h.saturating_sub(foot).saturating_sub(1).max(1)
 }
 
@@ -627,14 +627,21 @@ fn hints(p: &Palette, neighbours: bool) -> Vec<Vec<(&str, String)>> {
 /// padding that pushes it to the bottom. One of the two is known here and
 /// the other there, so they meet in the call.
 fn footer(w: usize, neighbours: bool, p: &Palette) -> (tc::Footer, usize) {
-    let hints = hints(p, neighbours);
+    let mut hints = hints(p, neighbours);
     let widest = hints
         .iter()
         .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0);
     let indent = usize::from(widest + 1 <= w);
-    let mut packed = tc::pack_hints_placed(&hints, w.saturating_sub(indent + 1).max(1), "  ");
+    let room = w.saturating_sub(indent + 1).max(1);
+    // The notices counter goes just before `[,] settings`, sized to the
+    // room the footer is packed to, so it never makes the margin give way.
+    if let Some(notices) = tc::notices::hint(room) {
+        let at = hints.len().saturating_sub(2);
+        hints.insert(at, notices);
+    }
+    let mut packed = tc::pack_hints_placed(&hints, room, "  ");
     packed.lines = packed
         .lines
         .into_iter()
@@ -860,6 +867,7 @@ fn frame(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("months");
     if !tc::dependencies_available("months", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -896,6 +904,10 @@ fn main() {
                 // read again rather than held from the launch.
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -936,7 +948,10 @@ fn main() {
         let view = anchor.unwrap_or_else(|| Month::of(today));
         let body = frame(w, today, view, start, &zone.label(now), zone_note.as_deref(), neighbours, weeks, &p);
         let (packed, indent) = footer(w, neighbours, &p);
-        let foot = &packed.lines;
+        // The notices banner sits directly above the hints and counts as
+        // footer: the body window shrinks for it rather than running under.
+        let banner = tc::notices::banner_rows(w);
+        let foot: Vec<String> = banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: on a wall of panes it is the only row saying which
         // widget this is.
@@ -959,7 +974,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len();
+        let foot_top = rows.len() + banner.len();
         rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, indent);

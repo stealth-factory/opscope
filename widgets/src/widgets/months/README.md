@@ -148,6 +148,7 @@ not something you configure.
 | `s` | this month on its own, and back again — the footer says which way it goes |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, as in vim |
 | `,` | open settings — the week start, the week numbers, and the zone, on the shared screen |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit |
 
 Paging has no ceiling of its own. It stops where the calendar does — some
