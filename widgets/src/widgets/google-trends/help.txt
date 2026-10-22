@@ -14,10 +14,10 @@ command line replace google_trends.geos for that run.
 Keys while running: up/down select a row, tab moves between TRENDING NOW,
 LEFT THE FEED and REGIONS, left/right step between regions, Enter opens the
 news for the selected trend (or switches to the selected region), / filters
-by term or news source, esc clears the filter. In the list c copies the
-trend's Google Trends Explore link; in the news view c copies the selected
-story's URL, and esc, left or backspace go back. r refreshes now, comma
-opens settings, q quits.
+by term, story headline or news source, esc clears the filter. In the list c
+copies the trend's Google Trends Explore link; in the news view c copies the
+selected story's URL, and esc, left or backspace go back. r refreshes now,
+comma opens settings, q quits.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it. If your
 terminal blocks OSC 52, the link is shown on screen instead.
