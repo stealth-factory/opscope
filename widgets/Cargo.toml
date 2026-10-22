@@ -103,3 +103,7 @@ path = "src/widgets/agent-usage/main.rs"
 [[bin]]
 name = "luvus-panes"
 path = "src/widgets/luvus-panes/main.rs"
+
+[[bin]]
+name = "google-trends"
+path = "src/widgets/google-trends/main.rs"

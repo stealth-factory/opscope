@@ -163,6 +163,15 @@
     "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
     "refresh": 60.0
   },
+  "google_trends": {
+    "_comment": "Google's Trending Now feed for one or more regions, read from trends.google.com/trending/rss with no account or key. Traffic is Google's bucket, shown as written; SEEN and LEFT THE FEED are this widget's own counts across fetches.",
+    "_geos_comment": "Region codes to show, as Google's feed takes them in ?geo= - two-letter country codes such as \"US\", \"GB\", \"JP\". The first is shown at start; ←/→ steps through the rest. A code Google does not know is shown as rejected rather than dropped.",
+    "geos": [
+      "US"
+    ],
+    "_refresh_comment": "Seconds between fetches of each region's feed; minimum 60. Google refreshes the feed every few minutes, so faster polling shows nothing new.",
+    "refresh": 300
+  },
   "herdr_panes": {
     "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
     "refresh": 4.0
