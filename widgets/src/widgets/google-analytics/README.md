@@ -8,7 +8,7 @@ change hurt key events?
 ```text
 ╺━ GOOGLE ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   reports 3m ago   live 15s
- quota realtime 1.2k/14k h 31k/200k d
+ quota realtime used 1.2k/14k h 31k/200k d
 
  ── RIGHT NOW ── last 30 min · GA realtime · hits land within seconds
  active users 71   baseline 48 · from 2 of 4 weeks   +48% ▲
@@ -181,7 +181,12 @@ not fit their column wrap onto the next line. Nothing is cut.
 ## Quota
 
 Every request asks for `returnPropertyQuota`, and the header shows what is
-left. At the defaults a property costs about 720 realtime requests and 24
+used of each bucket. Google's answer gives only what the one request cost
+and what is left after it, so the bucket's size comes from Google's
+documented limits (200k a day, 40k an hour, 14k an hour per project for a
+standard property, ten times that for Analytics 360), and *used* is that
+limit less what is left - everything the property has spent, by every app
+reading it. At the defaults a property costs about 720 realtime requests and 24
 batches of reports an hour - roughly 0.8-2.5k of GA's 14k tokens an hour -
 which is why the widget reads the quota and slows down: under a tenth of a
 token bucket left, realtime goes to 120 s and reports to twice their

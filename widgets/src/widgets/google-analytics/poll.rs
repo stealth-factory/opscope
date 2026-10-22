@@ -76,6 +76,8 @@ pub struct Prop {
     pub name: String,
     pub time_zone: String,
     pub currency: String,
+    /// Analytics 360, whose documented quota is ten times larger.
+    pub premium: bool,
     /// GA's flagged key events, once the Admin API has answered.
     pub key_names: Option<Vec<String>>,
     pub rt: Option<Rt>,
@@ -275,6 +277,7 @@ fn run_property(
                     }
                     p.time_zone = info.time_zone;
                     p.currency = info.currency;
+                    p.premium = info.premium;
                     p.key_names = Some(names);
                     p.admin_err.clear();
                     next_admin = f64::INFINITY;
@@ -325,7 +328,7 @@ fn run_property(
                     Err(f) => p.rt_err = f.text,
                 }
                 let idle_for = p.idle_since.map_or(0.0, |s| at - s);
-                let left = p.quota_rt.as_ref().and_then(|q| q.tightest()).map(|t| t.1);
+                let left = p.quota_rt.as_ref().and_then(|q| q.tightest(p.premium)).map(|t| t.1);
                 let (secs, why) = model::realtime_interval(chosen, idle_for, left);
                 p.interval = secs;
                 p.interval_why = why;
@@ -401,7 +404,7 @@ fn run_property(
                 let low = p
                     .quota_core
                     .as_ref()
-                    .and_then(|q| q.tightest())
+                    .and_then(|q| q.tightest(p.premium))
                     .is_some_and(|t| t.1 < 0.10);
                 next_core = at + cfg.refresh * if low { 2.0 } else { 1.0 };
             });

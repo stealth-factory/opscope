@@ -35,22 +35,54 @@ pub struct Row {
 }
 
 /// One quota bucket as `propertyQuota` reports it.
+///
+/// Google defines `consumed` as what *the request that carried it* cost
+/// and `remaining` as the bucket's balance after it - not usage so far
+/// and not the bucket's size. The size comes from the documented limits,
+/// in `documented_limit`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Bucket {
+    /// Tokens the one request cost.
     pub consumed: f64,
+    /// Tokens left in the bucket after it.
     pub remaining: f64,
 }
 
-impl Bucket {
-    /// The bucket's size: what was used plus what is left.
-    pub fn size(&self) -> f64 {
-        self.consumed + self.remaining
-    }
+/// Google's documented size for a token bucket: standard properties, or
+/// Analytics 360 at ten times that. Realtime and core reports have the
+/// same limits in separate buckets. `None` for a bucket that is not
+/// counted in tokens.
+pub fn documented_limit(name: &str, premium: bool) -> Option<f64> {
+    let standard = match name {
+        "tokensPerDay" => 200_000.0,
+        "tokensPerHour" => 40_000.0,
+        "tokensPerProjectPerHour" => 14_000.0,
+        _ => return None,
+    };
+    Some(if premium { standard * 10.0 } else { standard })
+}
 
-    /// The fraction left, or `None` for a bucket Google reported as empty
-    /// on both sides.
-    pub fn left(&self) -> Option<f64> {
-        (self.size() > 0.0).then(|| self.remaining / self.size())
+/// One token bucket read against its limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// The bucket's size.
+    pub limit: f64,
+    /// Left after the last request.
+    pub left: f64,
+    /// Spent so far in this bucket's period, by every caller of the
+    /// property: the limit less what is left.
+    pub used: f64,
+    /// What the last request alone cost.
+    pub last: f64,
+}
+
+impl Level {
+    pub fn fraction_left(&self) -> f64 {
+        if self.limit > 0.0 {
+            (self.left / self.limit).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -69,16 +101,27 @@ impl Quota {
         self.buckets.iter().find(|(n, _)| n == name).map(|(_, b)| *b)
     }
 
+    /// Token bucket `name` against its documented limit. A balance above
+    /// the standard limit can only be a 360 property, so it is read as
+    /// one even before the Admin API has said so.
+    pub fn level(&self, name: &str, premium: bool) -> Option<Level> {
+        let b = self.get(name)?;
+        let mut limit = documented_limit(name, premium)?;
+        if b.remaining > limit {
+            limit = documented_limit(name, true)?.max(b.remaining);
+        }
+        Some(Level { limit, left: b.remaining, used: (limit - b.remaining).max(0.0), last: b.consumed })
+    }
+
     /// The token bucket with the least left, as `(name, fraction left)`.
     ///
     /// Only token buckets: `concurrentRequests` is empty between requests
     /// and full during one, and slowing down over it would mean slowing
     /// down for having made a request.
-    pub fn tightest(&self) -> Option<(String, f64)> {
+    pub fn tightest(&self, premium: bool) -> Option<(String, f64)> {
         self.buckets
             .iter()
-            .filter(|(n, _)| n.starts_with("tokensPer"))
-            .filter_map(|(n, b)| b.left().map(|f| (n.clone(), f)))
+            .filter_map(|(n, _)| self.level(n, premium).map(|l| (n.clone(), l.fraction_left())))
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 }
@@ -286,12 +329,19 @@ pub struct PropertyInfo {
     pub name: String,
     pub time_zone: String,
     pub currency: String,
+    /// Analytics 360, whose quota is ten times a standard property's.
+    pub premium: bool,
 }
 
 pub fn parse_property(text: &str) -> Result<PropertyInfo, String> {
     let v = json(text, "GA's property")?;
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Ok(PropertyInfo { name: s("displayName"), time_zone: s("timeZone"), currency: s("currencyCode") })
+    Ok(PropertyInfo {
+        name: s("displayName"),
+        time_zone: s("timeZone"),
+        currency: s("currencyCode"),
+        premium: s("serviceLevel") == "GOOGLE_ANALYTICS_360",
+    })
 }
 
 /// One page of Admin `properties/{id}/keyEvents`: the event names, and the
@@ -404,22 +454,39 @@ mod tests {
         let q = r.quota.unwrap();
         assert_eq!(q.get("tokensPerHour"), Some(Bucket { consumed: 30.0, remaining: 13970.0 }));
         assert_eq!(q.get("concurrentRequests"), Some(Bucket { consumed: 0.0, remaining: 10.0 }));
-        let (name, left) = q.tightest().unwrap();
-        assert!(name == "tokensPerHour" || name == "tokensPerProjectPerHour");
-        assert!((left - 13970.0 / 14000.0).abs() < 1e-9);
+        // 13,970 left of the property's hourly 40,000 is the tightest;
+        // the same balance is nearly all of the per-project 14,000.
+        assert_eq!(q.tightest(false).map(|t| t.0).as_deref(), Some("tokensPerHour"));
+        let l = q.level("tokensPerProjectPerHour", false).unwrap();
+        assert_eq!((l.limit, l.left, l.used, l.last), (14_000.0, 13_970.0, 30.0, 30.0));
     }
 
     #[test]
     fn the_tightest_bucket_ignores_concurrency() {
         let q = Quota {
             buckets: vec![
-                ("concurrentRequests".into(), Bucket { consumed: 10.0, remaining: 0.0 }),
-                ("tokensPerDay".into(), Bucket { consumed: 190_000.0, remaining: 10_000.0 }),
-                ("tokensPerHour".into(), Bucket { consumed: 100.0, remaining: 13_900.0 }),
+                ("concurrentRequests".into(), Bucket { consumed: 1.0, remaining: 0.0 }),
+                ("tokensPerDay".into(), Bucket { consumed: 10.0, remaining: 10_000.0 }),
+                ("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 39_000.0 }),
             ],
         };
-        assert_eq!(q.tightest(), Some(("tokensPerDay".into(), 0.05)));
-        assert_eq!(Quota::default().tightest(), None);
+        assert_eq!(q.tightest(false), Some(("tokensPerDay".into(), 0.05)));
+        assert_eq!(Quota::default().tightest(false), None);
+    }
+
+    #[test]
+    fn consumed_is_one_request_not_the_bucket() {
+        // A 10-token request with 100 left is a bucket all but empty, not
+        // one that is 91% full.
+        let q = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 100.0 })] };
+        let l = q.level("tokensPerHour", false).unwrap();
+        assert_eq!((l.limit, l.used, l.last), (40_000.0, 39_900.0, 10.0));
+        assert!(q.tightest(false).unwrap().1 < 0.01);
+        // 360 is ten times the size, said or inferred from the balance.
+        assert_eq!(q.level("tokensPerHour", true).unwrap().limit, 400_000.0);
+        let big = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 390_000.0 })] };
+        assert_eq!(big.level("tokensPerHour", false).unwrap().limit, 400_000.0);
+        assert_eq!(q.level("concurrentRequests", false), None);
     }
 
     #[test]
@@ -483,7 +550,8 @@ mod tests {
     #[test]
     fn a_property_and_its_key_events_read() {
         let p = parse_property(r#"{"name":"properties/123","displayName":"Example Site","timeZone":"Europe/Berlin","currencyCode":"EUR"}"#).unwrap();
-        assert_eq!(p, PropertyInfo { name: "Example Site".into(), time_zone: "Europe/Berlin".into(), currency: "EUR".into() });
+        assert_eq!(p, PropertyInfo { name: "Example Site".into(), time_zone: "Europe/Berlin".into(), currency: "EUR".into(), premium: false });
+        assert!(parse_property(r#"{"serviceLevel":"GOOGLE_ANALYTICS_360"}"#).unwrap().premium);
         let (names, next) = parse_key_event_list(r#"{"keyEvents":[{"name":"properties/123/keyEvents/1","eventName":"purchase","createTime":"2026-01-01T00:00:00Z"},{"eventName":"sign_up"}]}"#).unwrap();
         assert_eq!(names, vec!["purchase", "sign_up"]);
         assert!(next.is_none());

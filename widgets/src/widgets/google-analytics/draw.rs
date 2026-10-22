@@ -280,20 +280,25 @@ fn header(p: &Palette, first: &str, name_w: usize, cells: Vec<String>, budget: u
 }
 
 /// Quota as the title shows it: the category nearest its limit, by hour
-/// and by day.
-pub fn quota_words(rt: Option<&Quota>, core: Option<&Quota>) -> Option<(String, bool)> {
+/// and by day, as used of the documented limit. The hourly figure is the
+/// tighter of the property's and this project's hourly buckets.
+pub fn quota_words(rt: Option<&Quota>, core: Option<&Quota>, premium: bool) -> Option<(String, bool)> {
     let pick = [("realtime", rt), ("core", core)]
         .into_iter()
-        .filter_map(|(n, q)| q.and_then(|q| q.tightest().map(|t| (n, q, t.1))))
+        .filter_map(|(n, q)| q.and_then(|q| q.tightest(premium).map(|t| (n, q, t.1))))
         .min_by(|a, b| a.2.total_cmp(&b.2))?;
     let (name, q, left) = pick;
-    let b = |k: &str| q.get(k).map(|b| format!("{}/{}", model::short(b.consumed), model::short(b.size())));
-    let mut s = format!("quota {}", name);
-    if let Some(h) = b("tokensPerHour") {
-        s.push_str(&format!(" {} h", h));
+    let words = |l: crate::parse::Level| format!("{}/{}", model::short(l.used), model::short(l.limit));
+    let mut s = format!("quota {} used", name);
+    let hour = ["tokensPerHour", "tokensPerProjectPerHour"]
+        .iter()
+        .filter_map(|k| q.level(k, premium))
+        .min_by(|a, b| a.fraction_left().total_cmp(&b.fraction_left()));
+    if let Some(h) = hour {
+        s.push_str(&format!(" {} h", words(h)));
     }
-    if let Some(d) = b("tokensPerDay") {
-        s.push_str(&format!(" {} d", d));
+    if let Some(d) = q.level("tokensPerDay", premium) {
+        s.push_str(&format!(" {} d", words(d)));
     }
     Some((s, left < 0.10))
 }
@@ -363,7 +368,7 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
             live.push(part(&p.warn, format!(" ({})", prop.interval_why)));
         }
         chunks.push(live);
-        if let Some((q, low)) = quota_words(prop.quota_rt.as_ref(), prop.quota_core.as_ref()) {
+        if let Some((q, low)) = quota_words(prop.quota_rt.as_ref(), prop.quota_core.as_ref(), prop.premium) {
             chunks.push(vec![part(if low { &p.warn } else { &p.dim }, q)]);
         }
     }
@@ -1170,21 +1175,30 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     }
     for (title, q) in [("QUOTA: REALTIME", &prop.quota_rt), ("QUOTA: CORE REPORTS", &prop.quota_core)] {
         out.push(Vec::new());
-        out.extend(heading(&p, title, "from propertyQuota on the last response", budget));
+        out.extend(heading(
+            &p,
+            title,
+            "from propertyQuota on the last response · used = Google's documented limit less what is left",
+            budget,
+        ));
         match q {
             None => out.extend(prose(&p.dim, "no response read yet", budget, " ")),
             Some(q) => {
-                let name_w = budget.saturating_sub(1 + 30).max(10);
-                if budget >= 1 + 30 + 10 {
+                let name_w = budget.saturating_sub(1 + 40).max(10);
+                let wide = budget >= 1 + 40 + 10;
+                if wide {
                     out.push(vec![
                         part(&p.head, format!(" {}", left("BUCKET", name_w))),
                         part(&p.head, right("USED", 10)),
                         part(&p.head, right("LEFT", 10)),
-                        part(&p.head, right("OF", 10)),
+                        part(&p.head, right("LIMIT", 10)),
+                        part(&p.head, right("LAST REQ", 10)),
                     ]);
                 }
                 for (name, b) in &q.buckets {
-                    if budget >= 1 + 30 + 10 {
+                    let level = q.level(name, prop.premium);
+                    let cell = |x: Option<f64>| x.map(model::thousands).unwrap_or_else(|| "–".into());
+                    if wide {
                         out.extend(table_row(
                             &p,
                             false,
@@ -1193,19 +1207,26 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
                             &p.txt,
                             name_w,
                             &[
-                                (p.txt.clone(), right(&model::thousands(b.consumed), 10)),
+                                (p.txt.clone(), right(&cell(level.map(|l| l.used)), 10)),
                                 (p.dim.clone(), right(&model::thousands(b.remaining), 10)),
-                                (p.dim.clone(), right(&model::thousands(b.size()), 10)),
+                                (p.dim.clone(), right(&cell(level.map(|l| l.limit)), 10)),
+                                (p.dim.clone(), right(&model::thousands(b.consumed), 10)),
                             ],
                             budget,
                         ));
                     } else {
-                        out.extend(prose(
-                            &p.txt,
-                            &format!("{}: {} used, {} left", name, model::thousands(b.consumed), model::thousands(b.remaining)),
-                            budget,
-                            " ",
-                        ));
+                        let said = match level {
+                            Some(l) => format!(
+                                "{}: {} used of {}, {} left, last request {}",
+                                name,
+                                model::thousands(l.used),
+                                model::thousands(l.limit),
+                                model::thousands(l.left),
+                                model::thousands(l.last)
+                            ),
+                            None => format!("{}: {} left, last request {}", name, model::thousands(b.remaining), model::thousands(b.consumed)),
+                        };
+                        out.extend(prose(&p.txt, &said, budget, " "));
                     }
                 }
             }
@@ -1418,8 +1439,9 @@ mod tests {
         let events = rep(r#"{"dimensionHeaders":[{"name":"eventName"}],"metricHeaders":[{"name":"eventCount"},{"name":"keyEvents"}],"rows":[{"dimensionValues":[{"value":"purchase"}],"metricValues":[{"value":"3"},{"value":"3"}]}]}"#);
         let quota = Quota {
             buckets: vec![
-                ("tokensPerDay".into(), Bucket { consumed: 31_000.0, remaining: 169_000.0 }),
-                ("tokensPerHour".into(), Bucket { consumed: 1_200.0, remaining: 12_800.0 }),
+                ("tokensPerDay".into(), Bucket { consumed: 30.0, remaining: 169_000.0 }),
+                ("tokensPerHour".into(), Bucket { consumed: 30.0, remaining: 38_800.0 }),
+                ("tokensPerProjectPerHour".into(), Bucket { consumed: 30.0, remaining: 12_800.0 }),
                 ("concurrentRequests".into(), Bucket { consumed: 0.0, remaining: 10.0 }),
                 ("potentiallyThresholdedRequestsPerHour".into(), Bucket { consumed: 1.0, remaining: 119.0 }),
             ],
@@ -1552,7 +1574,7 @@ mod tests {
             "── MOVERS ── views · last 7 days vs prior 7",
             "sources: not in GA realtime",
             "live 60s (backed off: 0 active for 5m+)",
-            "quota realtime 1.2k/14k h 31k/200k d",
+            "quota realtime used 1.2k/14k h 31k/200k d",
             "token from $GOOGLE_OAUTH_ACCESS_TOKEN · Google tokens last 1h",
             "429 quota: property tokens per hour exhausted",
             "realtime paused 5m, last reading kept below",
