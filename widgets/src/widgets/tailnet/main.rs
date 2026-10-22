@@ -747,6 +747,7 @@ fn trace_cells(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("tailnet");
     if !tc::dependencies_available("tailnet", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -933,6 +934,10 @@ fn main() {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
+                    continue;
+                }
                 "r" | "R" => nudge(&wake),
                 "o" | "O" => {
                     hide_offline = !hide_offline;
@@ -1016,16 +1021,19 @@ fn main() {
                 )],
                 w - 1,
             ));
-            let hints = vec![
-                vec![(p.dim.as_str(), "[,] settings".into())],
-                vec![(p.dim.as_str(), "[q]uit".into())],
-            ];
+            let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
+            hints.extend(tc::notices::hint(w.saturating_sub(2).max(1)));
+            hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let (packed, indent) = pack_footer(&hints, w);
-            let foot = &packed.lines;
+            // The notices banner sits above the hints and counts as footer.
+            let banner = tc::notices::banner_rows(w);
+            let foot: Vec<String> =
+                banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
-            let foot_top = rows.len();
+            let foot_top = rows.len() + banner.len();
             rows.extend(foot.iter().cloned());
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, indent);
@@ -1280,7 +1288,7 @@ fn main() {
         if !listed.is_empty() && selected >= listed.len() {
             selected = listed.len() - 1;
         }
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→".into()),
@@ -1304,9 +1312,12 @@ fn main() {
                 format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
         ];
+        // The notices counter, sized to the room the footer packs to - one
+        // less than the pane for the indent `pack_footer` keeps when it can.
+        hints.extend(tc::notices::hint(w.saturating_sub(2).max(1)));
+        hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         // The footer is built before the body, not after it, because it
         // wraps: how many rows it takes depends on the width, and nothing
         // below can budget for itself until that is settled. Two was the
@@ -1314,7 +1325,11 @@ fn main() {
         // frame one row over the pane - which `draw` cuts from the bottom,
         // taking `[q]uit` with it. A route row costs one more.
         let (packed, indent) = pack_footer(&hints, w);
-        let foot = &packed.lines;
+        // The notices banner sits above the hints and counts as footer, so
+        // the body budget below leaves room for it.
+        let banner = tc::notices::banner_rows(w);
+        let foot: Vec<String> =
+            banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
         // The emptied-filter line is part of the body budget, not a row
         // pushed after it: with the graph up on a short pane the self row
         // already spent the last slot, and appending then grew the frame
@@ -1475,11 +1490,12 @@ fn main() {
             ));
         }
         placed = rows_at;
-        let foot_top = rows.len();
+        let body_end = rows.len();
+        let foot_top = body_end + banner.len();
         rows.extend(foot.iter().cloned());
         let plots: Vec<_> = plots
             .into_iter()
-            .filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1).max(1)))
+            .filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1).max(1)))
             .collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, indent);
