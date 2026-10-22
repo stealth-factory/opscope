@@ -255,6 +255,7 @@ snapshot before its cursor is reset.
 | `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit |
 
 `luvus pane focus` jumps to the pane's workspace and tab as well, so one
