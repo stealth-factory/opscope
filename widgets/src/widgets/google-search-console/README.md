@@ -67,9 +67,12 @@ A round asks, per property:
 | `sites.list` | which properties there are, and the permission on each |
 | `urlInspection/index:inspect` | INDEX HEALTH, bounded as below |
 
-That is ten requests per property per refresh (every 600 seconds by
-default), against Google's 1,200 a minute per property. Opening a page or a
-query asks two more, once.
+That is nine requests per property per refresh, plus one `sites.list` for
+the round (every 600 seconds by default), against Google's 1,200 a minute
+per property. Eight of the nine are the hourly, movers, terms and sitemaps
+requests above; the ninth is the `date` grouping, which is the only answer
+that says where final data ends. Opening a page or a query asks two more,
+once.
 
 ## Sections
 
