@@ -951,12 +951,19 @@ pub fn unified(d: &Data) -> bool {
 /// lanes project it, or the same account's two windows could never match
 /// after a reset. A window still running is taken as sent.
 pub fn pool_window(d: &Data) -> Option<(f64, f64)> {
+    pool_window_at(d, now())
+}
+
+/// `pool_window` as it reads at `at`, so a test can fix the clock: a
+/// window that has closed by then is rolled forward, and one that has not
+/// is taken as it is.
+fn pool_window_at(d: &Data, at: f64) -> Option<(f64, f64)> {
     let q = d.quota.as_ref()?;
     let (s, e) = match (iso_epoch(&q.start), iso_epoch(&q.end)) {
         (Some(s), Some(e)) if e > s => (s, e),
         _ => return None,
     };
-    match window_now(Some(s), Some(e), now()) {
+    match window_now(Some(s), Some(e), at) {
         (Some(end), true) => Some(((end - (e - s)) * 1000.0, end * 1000.0)),
         _ => Some((s * 1000.0, e * 1000.0)),
     }
@@ -2737,9 +2744,11 @@ mod tests {
             assert!(q.on_demand_cap.is_none(), "the unified plan has no x.ai cap");
         }
         // The pool's window to the millisecond, which is what Cursor's is
-        // matched against.
+        // matched against. Read at a moment inside that week: the clock
+        // rolls a closed window forward, and this one closed on Oct 20.
         let d = Data { quota: newest_quota([before, after].into_iter()), ..Data::default() };
-        let (s, e) = pool_window(&d).expect("a window");
+        let inside = 1_792_000_000.0; // 2026-10-14, between start and end
+        let (s, e) = pool_window_at(&d, inside).expect("a window");
         assert_eq!((s.round(), e.round()), (1_791_859_163_429.0, 1_792_463_963_429.0));
     }
 
