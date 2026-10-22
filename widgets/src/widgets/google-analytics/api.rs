@@ -344,6 +344,24 @@ pub fn page_detail_body(path: &str) -> Value {
     ]})
 }
 
+/// A page's 28-day views and users against the 28 before, asked for over
+/// each whole window: users are distinct, so the by-day rows cannot be
+/// summed into them. A batch of its own, because the page detail's first
+/// batch already holds the five a request may carry.
+pub fn page_totals_body(path: &str) -> Value {
+    json!({ "requests": [{
+        "dateRanges": [range("28daysAgo", "yesterday", "cur"), range("56daysAgo", "29daysAgo", "prev")],
+        "metrics": mets(&["screenPageViews", "totalUsers"]),
+        "dimensionFilter": exact("pagePath", path),
+        "returnPropertyQuota": true,
+    }]})
+}
+
+/// Everything a page's detail asks for, as the batches it is sent in.
+pub fn page_detail_bodies(path: &str) -> Vec<Value> {
+    vec![page_detail_body(path), page_totals_body(path)]
+}
+
 /// A key event's detail: by day over 28 days, by source today, and by
 /// page over 28 days.
 pub fn event_detail_body(name: &str, metric: &str) -> Value {
@@ -405,6 +423,7 @@ mod tests {
             window_body(7),
             organic_body(14),
             page_detail_body("/pricing"),
+            page_totals_body("/pricing"),
             event_detail_body("purchase", "keyEvents"),
         ];
         for body in bodies {

@@ -1324,8 +1324,10 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     out
 }
 
-fn spark_line(p: &Palette, label: &str, values: &[f64], colour: &str, budget: usize) -> Vec<Line> {
-    let hi = values.iter().cloned().fold(0.0, f64::max);
+/// A one-line chart. `hi` is the top of the scale: pass one shared by
+/// charts drawn to be compared, or a fall of 90% draws as two identical
+/// full-height lines.
+fn spark_line(p: &Palette, label: &str, values: &[f64], hi: f64, colour: &str, budget: usize) -> Vec<Line> {
     let drawn = bar(&values.iter().map(|x| Some(*x)).collect::<Vec<_>>(), hi);
     let lw = 12usize;
     if lw + values.len() <= budget {
@@ -1339,6 +1341,10 @@ fn spark_line(p: &Palette, label: &str, values: &[f64], colour: &str, budget: us
         }
         out
     }
+}
+
+fn top_of(values: &[&[f64]]) -> f64 {
+    values.iter().flat_map(|v| v.iter()).cloned().fold(0.0, f64::max)
 }
 
 fn small_table(p: &Palette, title: &str, r: &Report, dim: &str, metric: &str, budget: usize) -> Vec<Line> {
@@ -1358,8 +1364,10 @@ fn small_table(p: &Palette, title: &str, r: &Report, dim: &str, metric: &str, bu
 }
 
 /// The detail for a page: views and users by day over 28 days with the
-/// 28 before drawn under them, then where its visitors came from.
-pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, w: usize) -> Vec<Line> {
+/// 28 before drawn under them on the same scale, the window totals asked
+/// for over each window, then where its visitors came from. `asked_on` is
+/// the property's date when the detail was read.
+pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, asked_on: chrono::NaiveDate, w: usize) -> Vec<Line> {
     let p = palette();
     let budget = w.saturating_sub(1).max(1);
     let mut out = prose(&p.txt, path, budget, " ");
@@ -1373,13 +1381,16 @@ pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, w:
             out.extend(prose(&p.bad, e, budget, " ! "));
             return out;
         }
-        Some(Ok(r)) if r.len() < 5 => {
-            out.extend(prose(&p.bad, &format!("GA answered {} of the 5 reports asked for", r.len()), budget, " ! "));
+        Some(Ok(r)) if r.len() < 6 => {
+            out.extend(prose(&p.bad, &format!("GA answered {} of the 6 reports asked for", r.len()), budget, " ! "));
             return out;
         }
         Some(Ok(r)) => r,
     };
-    out.extend(heading(&p, "28 DAYS", "by day, oldest first · the prior 28 days under it", budget));
+    out.extend(heading(&p, "28 DAYS", "by day, oldest first · the prior 28 days under it, same scale", budget));
+    let yesterday = asked_on - chrono::Duration::days(1);
+    let prior_end = asked_on - chrono::Duration::days(29);
+    let totals = &reports[5];
     for (metric, word) in [("screenPageViews", "views"), ("totalUsers", "users")] {
         let mut cur: Vec<(String, f64)> = Vec::new();
         let mut prev: Vec<(String, f64)> = Vec::new();
@@ -1390,13 +1401,20 @@ pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, w:
                 _ => cur.push(pair),
             }
         }
-        cur.sort_by(|a, b| a.0.cmp(&b.0));
-        prev.sort_by(|a, b| a.0.cmp(&b.0));
-        let c: Vec<f64> = cur.iter().map(|x| x.1).collect();
-        let pv: Vec<f64> = prev.iter().map(|x| x.1).collect();
-        let (sc, sp): (f64, f64) = (c.iter().sum(), pv.iter().sum());
-        out.extend(spark_line(&p, word, &c, &p.good, budget));
-        out.extend(spark_line(&p, "prior", &pv, &p.dim, budget));
+        let c = model::day_grid(&cur, yesterday, 28);
+        let pv = model::day_grid(&prev, prior_end, 28);
+        let hi = top_of(&[&c, &pv]);
+        out.extend(spark_line(&p, word, &c, hi, &p.good, budget));
+        out.extend(spark_line(&p, "prior", &pv, hi, &p.dim, budget));
+        let window = |name: &str| {
+            totals
+                .rows
+                .iter()
+                .filter(|r| totals.d(r, "dateRange") == name)
+                .map(|r| totals.m(r, metric))
+                .sum::<f64>()
+        };
+        let (sc, sp) = (window("cur"), window("prev"));
         let d = model::pct(sc, sp);
         out.extend(prose(
             &p.dim,
@@ -1421,7 +1439,13 @@ pub fn page_detail(path: &str, reports: Option<&Result<Vec<Report>, String>>, w:
 }
 
 /// The detail for a key event: by day, by source today, by page.
-pub fn event_detail(name: &str, reports: Option<&Result<Vec<Report>, String>>, metric: &str, w: usize) -> Vec<Line> {
+pub fn event_detail(
+    name: &str,
+    reports: Option<&Result<Vec<Report>, String>>,
+    metric: &str,
+    asked_on: chrono::NaiveDate,
+    w: usize,
+) -> Vec<Line> {
     let p = palette();
     let budget = w.saturating_sub(1).max(1);
     let mut out = prose(&p.txt, name, budget, " ");
@@ -1442,13 +1466,12 @@ pub fn event_detail(name: &str, reports: Option<&Result<Vec<Report>, String>>, m
         Some(Ok(r)) => r,
     };
     out.extend(heading(&p, "BY DAY", "28 days, oldest first · today is still being processed", budget));
-    let mut days: Vec<(String, f64)> = reports[0].rows.iter().map(|r| (reports[0].d(r, "date").to_string(), reports[0].m(r, metric))).collect();
-    days.sort_by(|a, b| a.0.cmp(&b.0));
-    let vals: Vec<f64> = days.iter().map(|d| d.1).collect();
-    if vals.is_empty() {
+    let days: Vec<(String, f64)> = reports[0].rows.iter().map(|r| (reports[0].d(r, "date").to_string(), reports[0].m(r, metric))).collect();
+    let vals = model::day_grid(&days, asked_on, 28);
+    if days.is_empty() {
         out.extend(prose(&p.dim, "none in 28 days", budget, " "));
     } else {
-        out.extend(spark_line(&p, "per day", &vals, &p.good, budget));
+        out.extend(spark_line(&p, "per day", &vals, top_of(&[&vals]), &p.good, budget));
         out.extend(prose(&p.dim, &format!("{} in 28 days", model::thousands(vals.iter().sum())), budget, " "));
     }
     out.push(Vec::new());
@@ -1603,8 +1626,8 @@ mod tests {
                 }
                 let details = [
                     property_detail(&s.props[0], &v, w),
-                    page_detail("/pricing", None, w),
-                    event_detail("purchase", Some(&Err("HTTP 500".into())), "keyEvents", w),
+                    page_detail("/pricing", None, day(), w),
+                    event_detail("purchase", Some(&Err("HTTP 500".into())), "keyEvents", day(), w),
                 ];
                 for d in details.iter().flatten() {
                     assert!(width_of(d) <= w - 1, "{} cols: {:?}", w, plain(d));
@@ -1878,6 +1901,39 @@ mod tests {
         }
     }
 
+    fn day() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap()
+    }
+
+    #[test]
+    fn paired_charts_share_a_scale_and_keep_quiet_days() {
+        // The prior window is ten times the current one, flat on both
+        // sides: the current line must sit low, not full height.
+        let mut rows = Vec::new();
+        for d in 1..=28 {
+            rows.push(format!(r#"{{"dimensionValues":[{{"value":"202609{:02}"}},{{"value":"prev"}}],"metricValues":[{{"value":"100"}},{{"value":"1"}}]}}"#, d));
+        }
+        // Current window: 10 a day, but GA left out every other day.
+        for d in (2..=26).step_by(2) {
+            rows.push(format!(r#"{{"dimensionValues":[{{"value":"202610{:02}"}},{{"value":"cur"}}],"metricValues":[{{"value":"10"}},{{"value":"1"}}]}}"#, d));
+        }
+        let first = format!(r#"{{"dimensionHeaders":[{{"name":"date"}},{{"name":"dateRange"}}],"metricHeaders":[{{"name":"screenPageViews"}},{{"name":"totalUsers"}}],"rows":[{}]}}"#, rows.join(","));
+        let empty = r#"{"dimensionHeaders":[{"name":"x"}],"metricHeaders":[{"name":"screenPageViews"}]}"#;
+        let batch = parse_batch(&format!(r#"{{"reports":[{},{},{},{},{},{}]}}"#, first, empty, empty, empty, empty, empty)).unwrap();
+        // Asked on Oct 27: the current window ends Oct 26 and the prior
+        // Sep 28, so prior holds Sep 1-28 and current Sep 29-Oct 26.
+        let on = chrono::NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let lines = page_detail("/p", Some(&Ok(batch)), on, 200);
+        let chart = |label: &str| {
+            lines.iter().map(plain).find(|l| l.trim_start().starts_with(label)).unwrap_or_default()
+        };
+        let prior = chart("prior");
+        assert!(prior.contains('█'), "the larger window reaches the top: {}", prior);
+        let views = chart("views");
+        assert!(!views.contains('█'), "the smaller window does not: {}", views);
+        assert_eq!(views.matches('·').count(), 15, "Sep 29-30 and the odd days of October are drawn as zero: {}", views);
+    }
+
     #[test]
     fn the_details_show_what_they_fetched() {
         let batch = parse_batch(r#"{"reports":[
@@ -1887,10 +1943,14 @@ mod tests {
           {"dimensionHeaders":[{"name":"sessionSourceMedium"}],"metricHeaders":[{"name":"screenPageViews"}],"rows":[{"dimensionValues":[{"value":"google / organic"}],"metricValues":[{"value":"70"}]}]},
           {"dimensionHeaders":[{"name":"country"}],"metricHeaders":[{"name":"screenPageViews"}]},
           {"dimensionHeaders":[{"name":"deviceCategory"}],"metricHeaders":[{"name":"screenPageViews"}],"rows":[{"dimensionValues":[{"value":"desktop"}],"metricValues":[{"value":"60"}]}]},
-          {"dimensionHeaders":[{"name":"eventName"}],"metricHeaders":[{"name":"keyEvents"}]}
+          {"dimensionHeaders":[{"name":"eventName"}],"metricHeaders":[{"name":"keyEvents"}]},
+          {"dimensionHeaders":[{"name":"dateRange"}],"metricHeaders":[{"name":"screenPageViews"},{"name":"totalUsers"}],"rows":[
+            {"dimensionValues":[{"value":"cur"}],"metricValues":[{"value":"100"},{"value":"8"}]},
+            {"dimensionValues":[{"value":"prev"}],"metricValues":[{"value":"50"},{"value":"5"}]}]}
         ]}"#).unwrap();
-        let all = text(&page_detail("/pricing", Some(&Ok(batch)), 100));
+        let all = text(&page_detail("/pricing", Some(&Ok(batch)), day(), 100));
         assert!(all.contains("views 28d 100 vs prior 50 (+100%)"), "{}", all);
+        assert!(all.contains("users 28d 8 vs prior 5"), "users over the window, not a sum of days: {}", all);
         assert!(all.contains("google / organic"));
         assert!(all.contains("not matched to a live count"));
         let prop = full_prop();

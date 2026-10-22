@@ -444,10 +444,10 @@ fn main() {
             }
             if let Some(k) = key.as_ref().filter(|k| !asked.contains(*k)) {
                 let body = match &open {
-                    Item::Page(path) => Some(api::page_detail_body(path)),
-                    Item::Organic(path) => Some(api::page_detail_body(&landing_path(path))),
+                    Item::Page(path) => Some(api::page_detail_bodies(path)),
+                    Item::Organic(path) => Some(api::page_detail_bodies(&landing_path(path))),
                     Item::Event(name) => {
-                        Some(api::event_detail_body(name, if configured.is_empty() { "keyEvents" } else { "eventCount" }))
+                        Some(vec![api::event_detail_body(name, if configured.is_empty() { "keyEvents" } else { "eventCount" })])
                     }
                     _ => None,
                 };
@@ -458,11 +458,14 @@ fn main() {
             }
             let held = key.as_ref().and_then(|k| shared.lock().ok().and_then(|g| g.details.get(k).cloned()));
             let reports = held.as_ref().map(|d| d.reports.clone());
+            // The property's date when the detail was read: what its
+            // `today` and `yesterday` meant, for laying out its days.
+            let asked_on = model::local_now(held.as_ref().map_or(view.now, |d| d.at), model::tz_of(&prop.time_zone)).0;
             let lines = match &open {
                 Item::Property(_) => draw::property_detail(&prop, &view, w),
-                Item::Page(path) => draw::page_detail(path, reports.as_ref(), w),
+                Item::Page(path) => draw::page_detail(path, reports.as_ref(), asked_on, w),
                 Item::Organic(path) => {
-                    let mut l = draw::page_detail(&landing_path(path), reports.as_ref(), w);
+                    let mut l = draw::page_detail(&landing_path(path), reports.as_ref(), asked_on, w);
                     l.insert(1, vec![(p.hint.clone(), format!(" landing page {} as Google Search visitors arrived on it", path))]);
                     l
                 }
@@ -470,6 +473,7 @@ fn main() {
                     name,
                     reports.as_ref(),
                     if configured.is_empty() { "keyEvents" } else { "eventCount" },
+                    asked_on,
                     w,
                 ),
                 _ => Vec::new(),
