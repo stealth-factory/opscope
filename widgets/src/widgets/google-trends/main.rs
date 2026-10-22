@@ -357,7 +357,12 @@ const REGIONS: usize = 2;
 #[derive(Clone, Debug, Default)]
 struct View {
     region: usize,
+    /// The section the cursor is in this frame.
     focus: usize,
+    /// The section the reader last chose. Focus falls back to another
+    /// section while this one is empty - before the first fetch, or under a
+    /// filter - and returns here as soon as it has rows again.
+    wanted: usize,
     at: [usize; 3],
     needle: String,
     typing: bool,
@@ -1296,6 +1301,7 @@ fn main() {
                 None => {
                     if let Some(&(section, index)) = slots.get(at) {
                         view.focus = section;
+                        view.wanted = section;
                         view.at[section] = index;
                     }
                 }
@@ -1409,6 +1415,7 @@ fn main() {
                         .or_else(|| tc::next_section(None, &before.lens))
                     {
                         view.focus = next;
+                        view.wanted = next;
                         moved = true;
                     }
                 }
@@ -1421,6 +1428,9 @@ fn main() {
                     };
                     view.at[TRENDING] = 0;
                     view.at[LEFT] = 0;
+                    // REGIONS follows, so a fallback into it lands on the
+                    // region being shown rather than the first one.
+                    view.at[REGIONS] = view.region;
                     scroll = 0;
                 }
                 "up" | "k" | "down" | "j" => {
@@ -1440,6 +1450,7 @@ fn main() {
                             tc::step_across_sections(focus, at, &before.lens, down)
                         {
                             view.focus = s;
+                            view.wanted = s;
                             view.at[s] = i;
                         }
                     }
@@ -1449,12 +1460,14 @@ fn main() {
                     scroll = 0;
                     if let Some(first) = tc::next_section(None, &before.lens) {
                         view.focus = first;
+                        view.wanted = first;
                         view.at[first] = 0;
                     }
                 }
                 "end" => {
                     if let Some(last) = (0..3).rev().find(|&s| before.lens[s] > 0) {
                         view.focus = last;
+                        view.wanted = last;
                         view.at[last] = before.lens[last] - 1;
                         moved = true;
                     }
@@ -1506,11 +1519,11 @@ fn main() {
 
         // Keep the cursor on something that exists after the data moved.
         let body = list_body(&snapshot, &view, refresh, cw, now, &p);
-        if body.lens[view.focus] == 0 {
-            if let Some(first) = tc::next_section(None, &body.lens) {
-                view.focus = first;
-            }
-        }
+        view.focus = if body.lens[view.wanted] > 0 {
+            view.wanted
+        } else {
+            tc::next_section(None, &body.lens).unwrap_or(view.wanted)
+        };
         for s in 0..3 {
             view.at[s] = view.at[s].min(body.lens[s].saturating_sub(1));
         }

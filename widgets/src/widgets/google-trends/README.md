@@ -6,24 +6,24 @@ What a region is searching for right now — Google's own Trending Now feed,
 shown as Google states it, with what changed since the last look.
 
 ```text
-╺━ TRENDS US ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ TRENDS US ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v1.9.0
  fetched 2m ago · Google's Trending Now feed, every 5 min · ←→ 1 of 2
 
  TRENDING NOW · US
  Google's "approx traffic" is a bucket, not a count · 4 of 4 · 1 new since 14:05
-  SEARCH                  TRAFFIC STARTED  SEEN NEWS
-▸ zorblax festival        5000+   13:10 1h 4×   Example News · Sample Gazette
-  flumbo cup final        2000+   13:40 34m 3×   Example Times
-  quux launch             500+    14:02 12m new  Sample Gazette
-  widgetcon keynote       200+    12:55 1h 6×   Example News
+  SEARCH              TRAFFIC STARTED   SEEN NEWS
+▸ zorblax festival    5000+   13:10 65m 4×   Example News · Sample Gazette
+  flumbo cup final    2000+   13:40 34m 3×   Example Times
+  quux launch         500+    14:02 12m new  Sample Gazette
+  widgetcon keynote   200+    12:15 2h  6×   Example News
 
  LEFT THE FEED
- this widget's own observation · gone since the fetch before, kept 1h
-  old example term   was 1000+ · in 9 fetches over 40m · gone 7m ago
+ this widget's own observation · gone since the fetch before, kept an hour
+  old example term  was 1000+ · in 9 fetches over 40m · gone 7m ago
 
  REGIONS
-  US ◂   newest: quux launch 500+ · fetched 2m ago
-  GB     newest: example derby 1000+ · fetched 2m ago
+  US ◂ newest: quux launch 500+ · fetched 2m ago
+  GB   newest: example derby 1000+ · fetched 2m ago
  ↑↓ select  tab section  ←→ region  [↵] news  [/] filter  [c] copy link
  [r] refresh  [,] settings  [q]uit
 ```
