@@ -1335,6 +1335,20 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
     let field = |rows: &mut Vec<String>, name: &str, text: String, colour: &str| {
         rows.extend(flow(" ", &[(p.lbl.as_str(), format!("{:<11}", name)), (colour, text)], " ", w));
     };
+    // Which days the comparison and the top rows cover, and whether Google
+    // may still change them: a detail is read away from the list headers
+    // that say so.
+    let current = site.windows.map(|((a, b), _)| span_label(a, b));
+    let window_fields = |rows: &mut Vec<String>| {
+        if let Some(((a, b), (c, d))) = site.windows {
+            field(rows, "window", format!("{} complete days, {} vs prior {}", site.params.days, span_label(a, b), span_label(c, d)), &p.txt);
+        }
+        if site.params.fresh {
+            field(rows, "data", "fresh: Google may still change this".into(), &p.warn);
+        } else {
+            field(rows, "data", "final, 2-3 days behind".into(), &p.txt);
+        }
+    };
     let series_rows = |rows: &mut Vec<String>, d: &Detail| {
         if d.series.is_empty() {
             rows.extend(note_rows(&p.dim, "no days with data in the last 28", w));
@@ -1364,7 +1378,8 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
     };
     let top_rows = |rows: &mut Vec<String>, d: &Detail, title: &str, pages: bool| {
         rows.push(String::new());
-        rows.extend(heading(title, vec![(p.dim.as_str(), "current window, by clicks".into())], p, w));
+        let span = current.as_ref().map(|c| format!("{}, by clicks", c)).unwrap_or_else(|| "current window, by clicks".into());
+        rows.extend(heading(title, vec![(p.dim.as_str(), span)], p, w));
         if d.top.is_empty() {
             rows.extend(note_rows(&p.dim, "none in this window", w));
         }
@@ -1399,6 +1414,7 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
         Item::Page(url) | Item::Inspected(url) => {
             rows.extend(heading("PAGE", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), url.clone())], "", w));
+            window_fields(&mut rows);
             if let Some(mv) = site.pages.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *url)) {
                 mover_fields(&mut rows, mv, p, w);
             }
@@ -1426,6 +1442,7 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
         Item::Query(q) => {
             rows.extend(heading("QUERY", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), q.clone())], "", w));
+            window_fields(&mut rows);
             if let Some(mv) = site.queries.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *q)) {
                 mover_fields(&mut rows, mv, p, w);
             }
@@ -1438,6 +1455,7 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
             let Some(t) = site.terms.value.as_ref().and_then(|t| t.get(*n)) else { return rows };
             rows.extend(heading("SEARCH TERM", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), t.query.clone())], "", w));
+            window_fields(&mut rows);
             rows.push(String::new());
             rows.extend(heading(
                 "LANDING PAGES",
