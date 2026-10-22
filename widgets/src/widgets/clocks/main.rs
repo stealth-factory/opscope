@@ -1173,6 +1173,7 @@ struct City {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("clocks");
     if !tc::dependencies_available("clocks", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -1213,6 +1214,10 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -1361,7 +1366,10 @@ fn main() {
         // west to east by this frame's offsets, not the order at load:
         // a pane left up across DST has to keep being a map.
         let ordered = cities_west_to_east(&cities, &now);
-        let room = h.saturating_sub(rows.len() + 3);
+        // The notices banner sits above the footer and is never clipped, so
+        // the world clock gives up its rows rather than the banner.
+        let banner = tc::notices::banner_rows(w);
+        let room = h.saturating_sub(rows.len() + 3 + banner.len());
         if room >= 2 && !ordered.is_empty() {
             let shown = room.saturating_sub(1).min(ordered.len());
             if scroll + shown > ordered.len() {
@@ -1473,11 +1481,15 @@ fn main() {
                 ),
             )]);
         }
+        hints.extend(tc::notices::hint(w - 2));
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let foot: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         while rows.len() < h.saturating_sub(foot.len()) {
             rows.push(String::new());
         }
@@ -1487,12 +1499,14 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len();
+        // The body ends where the banner starts; the hints start below it.
+        let body_end = rows.len();
+        let foot_top = body_end + banner.len();
         rows.extend(foot);
         if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
             tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
         } else {
-            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1))).collect();
             tc::draw_plots(&rows, w, h, &plots);
         }
         keyboard.footer_at(&packed, foot_top, 1);
