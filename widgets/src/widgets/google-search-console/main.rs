@@ -225,22 +225,45 @@ fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize
         let answer = api::inspect(client, &data.site, &url);
         let Ok(mut g) = caches.lock() else { return };
         let c = g.entry(data.site.clone()).or_default();
-        match answer {
-            Ok((raw, i)) => c.record(&url, tc::now(), raw, Ok(i)),
-            Err(f) if f.status == 429 || f.status == 401 || f.status == 403 || f.status == 0 => {
-                // Google never reached is a request never counted.
-                if f.status == 0 {
-                    c.release(&url);
-                } else {
-                    c.abandon(&url);
-                }
-                data.inspect_error = Some(format!("inspection stopped for this round: {}", f.said));
-                break;
-            }
-            Err(f) => c.record(&url, tc::now(), String::new(), Err(f.said)),
-        }
+        let stop = settle(c, &url, answer, tc::now());
+        // Saved before stopping as well: a refused request still counted
+        // against the day, and a restart must not read a lower total.
         if let Err(why) = save_cache(&data.site, c) {
             data.inspect_error = Some(format!("inspections are not being kept: {}", why));
+        }
+        if let Some(why) = stop {
+            data.inspect_error = Some(format!("inspection stopped for this round: {}", why));
+            break;
+        }
+    }
+}
+
+/// Fold one answer from the poller's inspection round into the cache, and
+/// say why the round has to stop, if it does: a 429, 401 or 403 refuses
+/// every page alike, and Google never reached refuses the rest too.
+fn settle(c: &mut InspectionCache, url: &str, answer: Result<(String, Inspection), Fail>, now: f64) -> Option<String> {
+    match answer {
+        Ok((raw, i)) => c.record(url, now, raw, Ok(i)),
+        Err(f) if f.status == 429 || f.status == 401 || f.status == 403 || f.status == 0 => {
+            // Google never reached is a request never counted.
+            if f.status == 0 {
+                c.release(url);
+            } else {
+                c.abandon(url);
+            }
+            return Some(f.said);
+        }
+        Err(f) => c.record(url, now, String::new(), Err(f.said)),
+    }
+    None
+}
+
+/// Put one site's reading on screen, folded over what was there.
+fn publish(shared: &Arc<Mutex<Shared>>, params: &Params, data: &SiteData) {
+    if let Ok(mut g) = shared.lock() {
+        if let Some(slot) = g.sites.iter_mut().find(|o| o.site == data.site) {
+            let old = std::mem::replace(slot, SiteData::new(&data.site, params));
+            *slot = data.clone().after(old);
         }
     }
 }
@@ -293,14 +316,13 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             fetch_site(&client, &site, params, google_today(), Utc::now())
         };
         data.permission = permission;
+        // The reading goes on screen first: inspections are one request a
+        // page, and a cold cache must not hold the numbers back behind
+        // every one of them. Then again with what inspecting had to say.
+        publish(shared, params, &data);
         if data.problem.is_none() && cfg.inspect_top > 0 {
             inspect_due(&client, &mut data, caches, cfg.inspect_top);
-        }
-        if let Ok(mut g) = shared.lock() {
-            if let Some(slot) = g.sites.iter_mut().find(|o| o.site == site) {
-                let old = std::mem::replace(slot, SiteData::new(&site, params));
-                *slot = data.after(old);
-            }
+            publish(shared, params, &data);
         }
     }
 }
@@ -988,6 +1010,47 @@ mod tests {
         // Row 0 is another query after the refresh, so its detail is too.
         assert_ne!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(0)));
         assert_eq!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(1)));
+    }
+
+    #[test]
+    fn a_refused_inspection_stops_the_round_and_stays_counted() {
+        let mut c = InspectionCache::default();
+        c.roll("2026-10-21", 10.0);
+        c.reserve("https://example.com/a").unwrap();
+        let refused = Err(Fail { status: 429, said: "429 quota".into() });
+        assert_eq!(settle(&mut c, "https://example.com/a", refused, 11.0).as_deref(), Some("429 quota"));
+        // Counted, and so in what the save that follows writes to disk.
+        assert_eq!(c.used, 1);
+        assert!(c.inflight.is_empty());
+        assert_eq!(parse_inspection_cache(&c.to_json()).used, 1);
+        // Never reached: the slot comes back and the round still stops.
+        c.reserve("https://example.com/b").unwrap();
+        let unreached = Err(Fail { status: 0, said: "could not reach Google".into() });
+        assert!(settle(&mut c, "https://example.com/b", unreached, 12.0).is_some());
+        assert_eq!(c.used, 1);
+        // A refusal about one page is that page's answer, and the round goes on.
+        c.reserve("https://example.com/c").unwrap();
+        let one = Err(Fail { status: 400, said: "HTTP 400 · outside the property".into() });
+        assert_eq!(settle(&mut c, "https://example.com/c", one, 13.0), None);
+        assert_eq!(c.used, 2);
+        assert!(c.pages.contains_key("https://example.com/c"));
+    }
+
+    #[test]
+    fn a_reading_is_on_screen_before_its_inspections_and_after_them() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let shared = Arc::new(Mutex::new(Shared { sites: vec![SiteData::new("sc-domain:example.com", &p)], ..Shared::default() }));
+        let mut data = SiteData::new("sc-domain:example.com", &p);
+        data.sitemaps = Part::ok(Vec::new(), 5.0);
+        // Before any inspection: the numbers are already there.
+        publish(&shared, &p, &data);
+        assert_eq!(shared.lock().unwrap().sites[0].sitemaps.value, Some(Vec::new()));
+        // After: the same reading, now with what inspecting said.
+        data.inspect_error = Some("inspection stopped for this round: 429 quota".into());
+        publish(&shared, &p, &data);
+        let on_screen = &shared.lock().unwrap().sites[0];
+        assert_eq!(on_screen.sitemaps.value, Some(Vec::new()));
+        assert_eq!(on_screen.inspect_error.as_deref(), Some("inspection stopped for this round: 429 quota"));
     }
 
     #[test]
