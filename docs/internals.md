@@ -21,7 +21,15 @@ test gated by `cfg(target_os)` (which would vanish from the macOS CI run), an
 invalid or unwired `dependencies.json`, a widget that does not answer the
 wheel, a footer that is drawn and never registered so nobody can click it,
 a widget with a cursor that ignores a click,
-and a widget that opens `/proc` with no macOS path and no explanation.
+a widget that opens `/proc` with no macOS path and no explanation, a notice
+id that is not a literal or a const or a Core-scope notice raised by a
+widget (`every_notice_has_a_stable_id`), a widget that can hold a notice and
+does not start the channel, draw its banner and counter, and answer `!` with
+the screen (`a_widget_that_raises_a_notice_shows_it`), and a widget with a
+notices type, module or function of its own
+(`only_core_draws_the_notices_screen`). A widget that puts
+`tc::notices::hint(` in its footer is read as hinting `!`, so the key and
+README checks cover that key like any other.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -45,6 +53,33 @@ command, range, platform, and optional reason in their owned
 `dependencies.json`; they never choose or invoke a package manager. Core also
 owns the shared per-widget settings screen and its order-preserving, private
 atomic writer.
+
+### Notices
+
+`core/src/notices.rs`, used as `tc::notices`, is the one place a warning
+that is not about a number goes. `start(widget)` names the widget once in
+`main`; `raise(Notice)`, `clear(id)` and `when(cond, || Notice)` work from
+any thread, against a process-global registry that recovers a poisoned lock
+rather than propagating it, so nothing in the module panics or returns an
+error. A notice is keyed by a stable id: raising the same id again updates
+it in place, and a change to its title or detail — hashed with FNV-1a, so the
+number is the same in every build — banners it again and voids a dismissal.
+
+The widget draws two things and answers one key. `hint(room)` is the footer
+hint, `[!] 1 error, 2 warnings`, worst level first and coloured by it, or
+`None` when nothing is outstanding; it shortens to `[!] 3 notices` rather
+than overflowing a narrow footer, and `hint_key` reads its `[!]`, so it is
+clickable through `footer_at` with nothing more done. `banner_rows(w)` is up
+to two notices, newest first, for sixty seconds each, wrapped by
+`error_rows()` — drawn above the footer and counted in it, not injected by
+`draw()`, which would move the footer out from under the placements
+`footer_at` registered. `run(keyboard)` is the screen, on `!`.
+
+Core raises three of its own: `config-world-readable` (Core scope, from
+`load_config()`), and one Info per recommended tool `dependencies_available()`
+finds missing. Dismissals are for the session and live in memory, keyed
+`core/<id>` or `<widget>/<id>` with the hash they were taken against, which
+is the shape a persisted dismissal for N days will need.
 
 ### The mouse
 

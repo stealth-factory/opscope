@@ -151,6 +151,18 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   when configurable. It also has a row in the root README table.
 - Every configurable widget opens the shared settings screen with `,`.
   `CONFIGURE.md` is plain AI-facing documentation, not an executable skill.
+- **A warning that explains a missing or partial number stays in the body;
+  everything else goes through `tc::notices`.** A token's missing scope, an
+  unread page of jobs, a poller that stopped: beside the number. A config
+  file others can read, an old section name, a recommended tool that is
+  missing: a notice, raised by a stable id with `tc::notices::when(cond, ||
+  Notice::warn("id", ..))` from any thread. Never glue one onto a fetch
+  error with `·` - that made a working pane read as a failing one - and
+  never drop one. Every widget that can hold a notice calls
+  `tc::notices::start()` in `main`, puts `tc::notices::hint()` in its footer
+  and `tc::notices::banner_rows()` above it, and answers `!` with
+  `tc::notices::run()`, as `,` opens settings. A dead poller keeps its body
+  row and raises no notice.
 - `widgets/src/launcher/` is the source for the public `opscope` command.
   It is the launcher, not a widget, and does not count as one.
 
@@ -217,6 +229,20 @@ screen, exactly like "there is no data":
   empty table on a Mac looks like a machine with nothing listening. The
   widget needs a `macos.rs` beside `main.rs`, a call to `unsupported()`, or a row on the
   allowlist that names the issue still open.
+- **a notice id built at run time, or a Core notice raised by a widget**
+  (`every_notice_has_a_stable_id`) — the id is what de-duplicates a notice
+  and keys its dismissal, so a `format!` id raises a new one each time its
+  input moves and a dismissal never holds;
+- **a widget that can hold a notice and never shows it**
+  (`a_widget_that_raises_a_notice_shows_it`) — one that loads config,
+  declares a recommended tool, or raises its own must start the channel,
+  draw the banner and the `[!]` hint, and answer `!` with the screen. A
+  call to `tc::notices::hint(` counts as hinting `!`, so the key and README
+  checks hold that key like any other;
+- **a widget with a notices screen of its own**
+  (`only_core_draws_the_notices_screen`) — a type called `Notice`, or a
+  module or function with `notices` in its name. ports' kill confirmation is
+  a `Toast` for that reason.
 
 The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
 `[::1]`, `[[bin]]` and `args[0]` out; the glyphs `↵ → ← ↑ ↓`; the names
@@ -365,8 +391,10 @@ that also says where each hint landed, `follow()` for a window
 that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `filter_row()` and `filtered_to_nothing()` for the one wording every pane
-says its filters in, `config_token_warning()` for widgets holding a secret,
-non-blocking
+says its filters in, `config_token_warning()` for widgets holding a secret
+(raised for them as the Core notice `config-world-readable` by
+`load_config()`), `notices` (`tc::notices`) for warnings not tied to a row -
+the 60 s banner, the `[!]` footer counter and the `!` screen - non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only

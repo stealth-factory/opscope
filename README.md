@@ -380,6 +380,18 @@ the answer even when a later release changes it.
 Writes are atomic and owner-only. **The widget reloads itself as you leave
 the screen**, so nothing needs restarting.
 
+### Notices
+
+Press `!` in any widget to read its notices, as `,` opens settings. A notice
+is a warning that is not about a number on screen — `config.json` readable
+by other users, an old section name still being read, a recommended tool
+that is not installed. A new one shows above the footer for a minute, then
+as a coloured `[!] 1 warning` in the footer for as long as it is still
+true. The screen shows each in full with what to do about it, and dismisses
+one, or all of them, for this session; dismissed notices are listed there
+and can be restored. A warning that explains a missing or partial number is
+never a notice — it stays beside the number.
+
 ### Editing `config.json` by hand
 
 [`config.example.json`](config.example.json) is the reference, and it is
