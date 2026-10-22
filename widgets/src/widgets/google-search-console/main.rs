@@ -46,7 +46,8 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-/// The variable a pasted token is read from when `token_env` is unset.
+/// The variable a pasted token is read from when `token_env` is unset;
+/// spelled out for the settings check, and held to core's by a test.
 const TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
 /// The shortest wait between refreshes. The data moves hourly at best, so
 /// anything shorter only spends quota.
@@ -110,16 +111,13 @@ fn google_today() -> chrono::NaiveDate {
 
 type Caches = Arc<Mutex<BTreeMap<String, InspectionCache>>>;
 
-/// Sign in, or say why not. The wording for a missing credential names
-/// both routes and the settings key.
+/// Sign in, or say why not, in the wording every Google widget shares.
 fn signed_in(cfg: &Config) -> Result<(google::Credential, Client), String> {
     let Some(cred) = google::credential(&cfg.credentials_file, &cfg.token, &cfg.token_env) else {
-        return Err(tc::missing_config(&format!(
-            "no credential: set google_search_console.credentials_file to a service-account key file, or put a token in ${}",
-            cfg.token_env
-        )));
+        return Err(google::missing_credential(SETTINGS.section, &cfg.token_env));
     };
-    let token = cred.bearer(&[SCOPE])?;
+    // Read-only: it cannot submit a sitemap or change a property.
+    let token = cred.bearer(&[google::SCOPE_WEBMASTERS_READONLY])?;
     let client = Client { bearer: token.value, email: cred.client_email() };
     Ok((cred, client))
 }
@@ -324,11 +322,10 @@ fn page_of(item: &Item, site: &SiteData) -> Option<String> {
 
 fn read_config() -> Config {
     let cfg = tc::load_config("google_search_console");
-    let token_env = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
     Config {
         credentials_file: tc::cfg_str(&cfg, "credentials_file", ""),
         token: tc::cfg_str(&cfg, "token", ""),
-        token_env: if token_env.trim().is_empty() { TOKEN_ENV.to_string() } else { token_env },
+        token_env: tc::cfg_str(&cfg, "token_env", TOKEN_ENV),
         sites: tc::cfg_strings(&cfg, "sites", &[]),
         refresh: tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 600.0), 600.0).max(MIN_REFRESH),
         inspect_top: tc::cfg_usize(&cfg, "inspect_top", 25).min(200),
@@ -845,6 +842,23 @@ fn start_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_is_worded_by_core_for_this_section() {
+        assert_eq!(TOKEN_ENV, google::DEFAULT_TOKEN_ENV);
+        let cfg = Config {
+            credentials_file: String::new(),
+            token: String::new(),
+            token_env: "OPSCOPE_TEST_UNSET_TOKEN_VARIABLE".into(),
+            sites: Vec::new(),
+            refresh: 600.0,
+            inspect_top: 25,
+        };
+        let Err(row) = signed_in(&cfg) else { panic!("no credential must not sign in") };
+        assert_eq!(row, google::missing_credential("google_search_console", "OPSCOPE_TEST_UNSET_TOKEN_VARIABLE"));
+        assert!(row.starts_with("no credential: set google_search_console.credentials_file "), "{row}");
+        assert!(row.ends_with(tc::SET_IN_SETTINGS), "{row}");
+    }
 
     fn site(url: &str, permission: &str) -> Site {
         Site { url: url.into(), permission: permission.into() }

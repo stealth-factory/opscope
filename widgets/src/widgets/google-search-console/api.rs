@@ -27,9 +27,6 @@ use opscope_core::google;
 
 use crate::parse::*;
 
-/// The one scope this widget asks for. Read-only: it cannot submit a
-/// sitemap or change a property.
-pub const SCOPE: &str = "https://www.googleapis.com/auth/webmasters.readonly";
 const API: &str = "https://www.googleapis.com/webmasters/v3";
 const INSPECT: &str = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect";
 /// Hours of hourly data asked for. Google keeps about ten days of it, and
