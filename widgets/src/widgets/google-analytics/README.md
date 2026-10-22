@@ -92,12 +92,26 @@ sessions, key events and the change against the previous window. GA4 does
 not give the search terms themselves: Google withholds them as "not
 provided", and the Data API has no Search Console query dimension. The
 `google-search-console` widget shows the terms and the page each lands on.
+The key event column counts the events GA flags as key events, even when
+`key_events` names a list - GA cannot count chosen events per landing page
+without narrowing the sessions to them - and the section says so when a
+list is set.
 
 **Movers** - pages, then channels, then sources, comparing the window with
 the equal window before it, sorted by absolute change (or size, or
-percentage), with `new` and `gone` rows. When GA folds rows into `(other)`,
-withholds rows below its privacy thresholds, samples the data, or returns
-fewer rows than it counted, the section says so in one line.
+percentage), with `new` and `gone` rows. Users are a distinct count, so
+each window's figure is asked of GA over the whole window - a visitor who
+came on five days is one user, not five - and the 14-day sparkline is
+drawn from a separate by-day report, one slot per calendar day, with days
+GA left out drawn as zero rather than closed up. When GA folds rows into
+`(other)`, withholds rows below its privacy thresholds, samples the data,
+or returns fewer rows than it counted, the section says so in one line. If
+the window totals fail to refresh, the last answer for the same window stays
+on screen with its age.
+
+Processed reports carry the property's date they were asked on. After the
+property's midnight and before the next refresh they are yesterday's, and
+the screen says so instead of calling them today.
 
 **Properties** (when more than one is shown) - one row each: active users
 now, the change against the baseline, sessions and key events today against

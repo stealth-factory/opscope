@@ -454,6 +454,35 @@ pub fn movers(report: &Report, key: &dyn Fn(&Report, &Row) -> String, metrics: &
     out
 }
 
+/// Give each window-total mover the days of the same name from a report
+/// grouped by `date` as well. The days are for drawing only; the window
+/// figures stay the ones asked for over the whole window.
+pub fn attach_daily(totals: &mut [Mover], by_day: &[Mover]) {
+    let days: std::collections::HashMap<&str, &Vec<(String, Vec<f64>)>> =
+        by_day.iter().map(|m| (m.name.as_str(), &m.daily)).collect();
+    for m in totals {
+        if let Some(d) = days.get(m.name.as_str()) {
+            m.daily = (*d).clone();
+        }
+    }
+}
+
+/// `n` calendar days ending `end`, oldest first, from `(YYYYMMDD, value)`
+/// pairs. GA leaves out a day with nothing in it, so a day it did not
+/// return is a zero - and it has to be drawn as one, or the days around
+/// it slide together and a chart of "14 days" spans three weeks.
+pub fn day_grid(days: &[(String, f64)], end: NaiveDate, n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for (d, v) in days {
+        let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") else { continue };
+        let back = (end - date).num_days();
+        if back >= 0 && (back as usize) < n {
+            out[n - 1 - back as usize] += v;
+        }
+    }
+    out
+}
+
 /// How the movers are ordered; `s` cycles them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sort {
@@ -833,6 +862,28 @@ mod tests {
         // By users, the docs page is now the largest mover.
         sort_movers(&mut v, 1, Sort::Size);
         assert_eq!(v[0].name, "/docs/getting-started");
+    }
+
+    #[test]
+    fn window_users_come_from_the_window_not_the_sum_of_days() {
+        // One visitor on two days: two daily users, one window user.
+        let by_day = movers(&movers_fixture(), &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+        let totals_report = parse_report(r#"{"dimensionHeaders":[{"name":"pagePath"},{"name":"dateRange"}],
+          "metricHeaders":[{"name":"screenPageViews"},{"name":"totalUsers"},{"name":"sessions"}],
+          "rows":[{"dimensionValues":[{"value":"/pricing"},{"value":"cur"}],"metricValues":[{"value":"9120"},{"value":"10"},{"value":"6"}]}]}"#).unwrap();
+        let mut totals = movers(&totals_report, &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+        attach_daily(&mut totals, &by_day);
+        assert_eq!(by_day.iter().find(|m| m.name == "/pricing").unwrap().cur[1], 11.0, "the daily sum overcounts");
+        assert_eq!(totals[0].cur[1], 10.0);
+        assert_eq!(totals[0].daily.len(), 3, "the days come along for the chart");
+    }
+
+    #[test]
+    fn a_day_ga_left_out_is_drawn_as_zero_in_its_place() {
+        let end = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let days = vec![("20261019".to_string(), 5.0), ("20261016".to_string(), 3.0), ("20260901".to_string(), 99.0)];
+        assert_eq!(day_grid(&days, end, 5), vec![0.0, 3.0, 0.0, 0.0, 5.0]);
+        assert_eq!(day_grid(&[], end, 3), vec![0.0; 3]);
     }
 
     #[test]
