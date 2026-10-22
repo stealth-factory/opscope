@@ -21,6 +21,7 @@
 //! where a choice existed this kept the earlier behaviour.
 
 mod dependencies;
+pub mod google;
 mod settings;
 mod terminal;
 mod graphics;
@@ -2748,6 +2749,31 @@ pub fn post_json(
     body: &str,
     seconds: u64,
 ) -> Result<(String, Vec<(String, String)>), String> {
+    let (status, body, found) = post_answer(url, headers, body, seconds)?;
+    if !(200..300).contains(&status) {
+        return Err(refused(status, &body));
+    }
+    Ok((body, found))
+}
+
+/// One HTTPS POST that hands back every answer, refusals included, whole.
+///
+/// `post_json`'s twin of `get_answer`. `refused()` squeezes a refusal onto
+/// one line capped at 200 characters, which is right for showing it and
+/// wrong for reading it: Google puts the quota bucket, the API that is not
+/// enabled and the `error_description` of a refused sign-in inside a JSON
+/// body that routinely runs past the cap. Only a failure to reach the
+/// server at all is an `Err` here.
+///
+/// The body goes in with `--data`, so a caller sending a form passes its
+/// own `Content-Type: application/x-www-form-urlencoded`; nothing here
+/// assumes JSON beyond the name of the function that usually calls it.
+pub fn post_answer(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+) -> Result<(u16, String, Vec<(String, String)>), String> {
     use std::io::Write;
     let mut config = format!(
         "--silent\n--show-error\n--request POST\n--dump-header -\n\
@@ -2795,10 +2821,7 @@ pub fn post_json(
         .filter_map(|line| line.split_once(':'))
         .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
         .collect();
-    if !(200..300).contains(&status) {
-        return Err(refused(status, &body));
-    }
-    Ok((body, found))
+    Ok((status, body, found))
 }
 
 /// What a refused POST says: the status, and the body that explains it.
