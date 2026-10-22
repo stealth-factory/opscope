@@ -4172,3 +4172,547 @@ fn no_widget_moves_the_cursor_itself() {
         wrong.join("\n  ")
     );
 }
+
+fn is_ident_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_'
+}
+
+fn is_ident_cont(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// End index after a comment, string, raw string, character or lifetime
+/// that starts at `i`. `None` when `i` is ordinary code.
+fn skip_non_code(src: &str, i: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    if i >= b.len() {
+        return None;
+    }
+    if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+        let mut j = i + 2;
+        while j < b.len() && b[j] != b'\n' {
+            j += 1;
+        }
+        return Some(j);
+    }
+    if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+        let mut j = i + 2;
+        while j + 1 < b.len() && !(b[j] == b'*' && b[j + 1] == b'/') {
+            j += 1;
+        }
+        return Some((j + 2).min(b.len()));
+    }
+    if let Some(end) = raw_string_end(src, i) {
+        return Some(end);
+    }
+    if b[i] == b'"' {
+        let mut j = i + 1;
+        while j < b.len() {
+            if b[j] == b'\\' {
+                j += 2;
+                continue;
+            }
+            if b[j] == b'"' {
+                return Some(j + 1);
+            }
+            j += 1;
+        }
+        return Some(b.len());
+    }
+    if b[i] == b'\'' {
+        return Some(skip_tick(src, i));
+    }
+    None
+}
+
+fn raw_string_end(src: &str, i: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    if i > 0 && is_ident_cont(b[i - 1]) {
+        return None;
+    }
+    let mut j = i;
+    if b[j] == b'b' && j + 1 < b.len() && b[j + 1] == b'r' {
+        j += 1;
+    }
+    if j >= b.len() || b[j] != b'r' {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0usize;
+    while j < b.len() && b[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+    if j >= b.len() || b[j] != b'"' {
+        return None;
+    }
+    j += 1;
+    while j < b.len() {
+        if b[j] == b'"' {
+            let mut seen = 0usize;
+            let mut k = j + 1;
+            while seen < hashes && k < b.len() && b[k] == b'#' {
+                seen += 1;
+                k += 1;
+            }
+            if seen == hashes {
+                return Some(k);
+            }
+        }
+        j += 1;
+    }
+    Some(b.len())
+}
+
+fn skip_tick(src: &str, i: usize) -> usize {
+    let b = src.as_bytes();
+    // 'x' is a character, not a lifetime. Leaving the closing quote for a
+    // second scan treats the next byte as the character and can swallow a
+    // `}` that closes the function.
+    if b.get(i + 1).is_some_and(|c| *c != b'\\') {
+        if let Some(ch) = src[i + 1..].chars().next() {
+            let closing = i + 1 + ch.len_utf8();
+            if b.get(closing) == Some(&b'\'') {
+                return closing + 1;
+            }
+        }
+    }
+    if i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_') {
+        let mut j = i + 1;
+        while j < b.len() && is_ident_cont(b[j]) {
+            j += 1;
+        }
+        return j;
+    }
+    let mut j = i + 1;
+    if j < b.len() && b[j] == b'\\' {
+        j += 2;
+    } else if j < b.len() {
+        j += src[j..].chars().next().unwrap().len_utf8();
+    }
+    if j < b.len() && b[j] == b'\'' {
+        j += 1;
+    }
+    j
+}
+
+fn code_contains(src: &str, needle: &str) -> bool {
+    let b = src.as_bytes();
+    let n = needle.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            i = j;
+            continue;
+        }
+        if i + n.len() <= b.len() && &b[i..i + n.len()] == n {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `(name, body)` for every `fn`, body including its braces.
+fn function_bodies(src: &str) -> Vec<(String, String)> {
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut depth = 0i32;
+    let mut stack: Vec<(String, i32, usize)> = Vec::new();
+    let mut out = Vec::new();
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            i = j;
+            continue;
+        }
+        // Byte slice, not `src[i..]`: a block glyph is three bytes, and
+        // stepping one byte at a time lands inside it.
+        let at_fn = (i == 0 || !is_ident_cont(b[i - 1]))
+            && b[i..].starts_with(b"fn")
+            && i + 2 < b.len()
+            && b[i + 2].is_ascii_whitespace();
+        if at_fn {
+            let mut j = i + 3;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let name_start = j;
+            while j < b.len() && is_ident_cont(b[j]) {
+                j += 1;
+            }
+            if j > name_start {
+                let name = src[name_start..j].to_string();
+                let mut k = j;
+                let mut open = None;
+                while k < b.len() {
+                    if let Some(n) = skip_non_code(src, k) {
+                        k = n;
+                        continue;
+                    }
+                    if b[k] == b'{' {
+                        open = Some(k);
+                        break;
+                    }
+                    k += 1;
+                }
+                if let Some(open) = open {
+                    stack.push((name, depth + 1, open));
+                    depth += 1;
+                    i = open + 1;
+                    continue;
+                }
+            }
+        }
+        if b[i] == b'{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'}' {
+            depth -= 1;
+            if let Some((name, open_depth, open)) = stack.last().cloned() {
+                if depth == open_depth - 1 {
+                    stack.pop();
+                    out.push((name, src[open..=i].to_string()));
+                }
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn called_functions(body: &str) -> Vec<String> {
+    let b = body.as_bytes();
+    let mut i = 0;
+    let mut names = Vec::new();
+    while i < b.len() {
+        if let Some(j) = skip_non_code(body, i) {
+            i = j;
+            continue;
+        }
+        if is_ident_start(b[i]) && (i == 0 || !is_ident_cont(b[i - 1])) {
+            let start = i;
+            i += 1;
+            while i < b.len() && is_ident_cont(b[i]) {
+                i += 1;
+            }
+            let mut k = start;
+            while k > 0 && b[k - 1].is_ascii_whitespace() {
+                k -= 1;
+            }
+            let method = k > 0 && b[k - 1] == b'.';
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if !method && j < b.len() && b[j] == b'(' {
+                names.push(body[start..i].to_string());
+            }
+            continue;
+        }
+        i += 1;
+    }
+    names
+}
+
+fn call_count(src: &str, name: &str) -> usize {
+    let b = src.as_bytes();
+    let n = name.as_bytes();
+    let mut i = 0;
+    let mut count = 0;
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            i = j;
+            continue;
+        }
+        if i + n.len() <= b.len()
+            && &b[i..i + n.len()] == n
+            && (i == 0 || !is_ident_cont(b[i - 1]))
+        {
+            let mut j = i + n.len();
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'(' {
+                count += 1;
+            }
+            i += n.len();
+            continue;
+        }
+        i += 1;
+    }
+    count
+}
+
+fn link_call_count(src: &str, name: &str) -> usize {
+    link_sites(src)
+        .iter()
+        .filter(|site| matches!(site, Ok(got) if got == name))
+        .count()
+}
+
+/// `Ok(getter)` for `tc::link(&getter(`, `Err` for any other `tc::link`.
+fn link_sites(src: &str) -> Vec<Result<String, String>> {
+    let needle = b"tc::link";
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            i = j;
+            continue;
+        }
+        let boundary = i == 0 || !is_ident_cont(b[i - 1]);
+        if boundary
+            && i + needle.len() <= b.len()
+            && &b[i..i + needle.len()] == needle
+            && (i + needle.len() == b.len() || !is_ident_cont(b[i + needle.len()]))
+        {
+            let mut j = i + needle.len();
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let mut good = None;
+            if j < b.len() && b[j] == b'(' {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'&' {
+                    j += 1;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < b.len() && is_ident_start(b[j]) {
+                        let start = j;
+                        j += 1;
+                        while j < b.len() && is_ident_cont(b[j]) {
+                            j += 1;
+                        }
+                        let name = src[start..j].to_string();
+                        while j < b.len() && b[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j < b.len() && b[j] == b'(' {
+                            good = Some(name);
+                        }
+                    }
+                }
+            }
+            if let Some(name) = good {
+                out.push(Ok(name));
+                i = j;
+                continue;
+            }
+            let mut end = (i + 48).min(src.len());
+            while end < src.len() && !src.is_char_boundary(end) {
+                end += 1;
+            }
+            out.push(Err(src[i..end].replace('\n', " ")));
+            i += needle.len();
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn clipboard_zone(src: &str) -> String {
+    let fns = function_bodies(src);
+    let mut index: BTreeMap<String, String> = BTreeMap::new();
+    for (name, body) in &fns {
+        index.insert(name.clone(), body.clone());
+    }
+    let mut zone_names = BTreeSet::new();
+    for (name, body) in &fns {
+        if code_contains(body, "tc::clipboard") {
+            zone_names.insert(name.clone());
+            for called in called_functions(body) {
+                if index.contains_key(&called) {
+                    zone_names.insert(called);
+                }
+            }
+        }
+    }
+    let mut zone = String::new();
+    for name in zone_names {
+        if let Some(body) = index.get(&name) {
+            zone.push_str(body);
+            zone.push('\n');
+        }
+    }
+    zone
+}
+
+/// A `tc::link` whose URL getter is not also called from a function that
+/// copies to the clipboard, or from a function that one calls.
+fn links_missing_a_copied_url(src: &str) -> Vec<String> {
+    let mut missing = Vec::new();
+    let mut getters = BTreeSet::new();
+    for site in link_sites(src) {
+        match site {
+            Ok(name) => {
+                getters.insert(name);
+            }
+            Err(snippet) => missing.push(format!("tc::link is not a url getter call: {snippet}")),
+        }
+    }
+    if getters.is_empty() {
+        return missing;
+    }
+    let zone = clipboard_zone(src);
+    for name in getters {
+        let calls = call_count(&zone, &name);
+        let linked = link_call_count(&zone, &name);
+        if calls.saturating_sub(linked) == 0 {
+            missing.push(format!("tc::link(&{name}( is not a url a key copies"));
+        }
+    }
+    missing
+}
+
+#[test]
+fn link_matcher_rejects_a_url_no_key_copies() {
+    let bad = r#"
+fn other_url(pr: &V) -> String { String::new() }
+fn pr_url(pr: &V) -> String { String::new() }
+fn row() {
+    tc::link(&other_url(pr), "title");
+}
+fn copy() {
+    let url = pr_url(pr);
+    tc::clipboard(&url);
+}
+"#;
+    let missed = links_missing_a_copied_url(bad);
+    assert!(
+        missed.iter().any(|m| m.contains("other_url")),
+        "{missed:?}"
+    );
+    assert!(
+        !missed.iter().any(|m| m.contains("pr_url")),
+        "{missed:?}"
+    );
+
+    let good = r##"
+fn pr_url(pr: &V) -> String { String::new() }
+fn row() {
+    let s = r#"{"a":1}"#;
+    tc::link(
+        &pr_url(pr),
+        "title",
+    );
+}
+fn copy() {
+    let url = pr_url(pr);
+    tc::clipboard(&url);
+}
+"##;
+    assert!(
+        links_missing_a_copied_url(good).is_empty(),
+        "{:?}",
+        links_missing_a_copied_url(good)
+    );
+
+    let hop = r#"
+fn run_url(run: &V) -> String { String::new() }
+fn copy_items(run: &V) -> Vec<(String, String)> {
+    vec![("Run URL".into(), run_url(run))]
+}
+fn key() {
+    let items = copy_items(run);
+    tc::clipboard(value);
+}
+fn row() {
+    tc::link(&run_url(run), "title");
+}
+"#;
+    assert!(
+        links_missing_a_copied_url(hop).is_empty(),
+        "{:?}",
+        links_missing_a_copied_url(hop)
+    );
+
+    let indirect = r#"
+fn pr_url(pr: &V) -> String { String::new() }
+fn row() {
+    let u = pr_url(pr);
+    tc::link(&u, "title");
+}
+fn copy() {
+    tc::clipboard(&pr_url(pr));
+}
+"#;
+    assert!(
+        !links_missing_a_copied_url(indirect).is_empty(),
+        "a link through a local is not the getter"
+    );
+
+    let only_the_link = r#"
+fn pr_url(pr: &V) -> String { String::new() }
+fn row() {
+    tc::link(&pr_url(pr), "title");
+    tc::clipboard("something else");
+}
+"#;
+    assert!(
+        !links_missing_a_copied_url(only_the_link).is_empty(),
+        "the link call itself is not the copy"
+    );
+
+    // A block glyph is wider than one byte. Walking the source a byte at
+    // a time used to slice the string in the middle of it.
+    let blocks = "fn row() {\n    let mark = \"█\";\n    tc::link(&pr_url(x), \"t\");\n}\nfn copy() {\n    let u = pr_url(x);\n    tc::clipboard(&u);\n}\n";
+    assert!(
+        links_missing_a_copied_url(blocks).is_empty(),
+        "{:?}",
+        links_missing_a_copied_url(blocks)
+    );
+}
+
+#[test]
+fn a_character_literal_does_not_swallow_the_brace_after_it() {
+    assert_eq!(skip_tick("'x'}", 0), 3);
+    assert_eq!(&"'x'}"[3..], "}");
+    // A lifetime has no closing quote on the next byte. An escape still
+    // consumes the escaped byte and its own closing quote.
+    assert_eq!(skip_tick("'a>", 0), 2);
+    assert_eq!(skip_tick("'\\n'}", 0), 4);
+    assert_eq!(skip_tick("'\\''}", 0), 4);
+    let src = "fn row() { 'x'}\nfn next() { tc::clipboard(&u); }";
+    let names: Vec<_> = function_bodies(src).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["row", "next"]);
+}
+
+#[test]
+fn a_link_names_a_url_a_key_already_copies() {
+    // A clickable title that no key can hand over is a URL the pane never
+    // admitted to. The getter at `tc::link` has to be the same call the
+    // clipboard path makes, in that function or in one function it calls.
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        for item in links_missing_a_copied_url(&src) {
+            wrong.push(format!("{name}: {item}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a title link whose url no key copies:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
+fn a_unicode_character_literal_keeps_its_closing_quote_out_of_code() {
+    for glyph in ["█", "▸", "●", "✖", "○"] {
+        let literal = format!("'{glyph}'}}");
+        assert_eq!(skip_tick(&literal, 0), literal.len() - 1);
+        assert_eq!(literal.as_bytes()[skip_tick(&literal, 0)], b'}');
+    }
+    assert_eq!(skip_tick("'a}", 0), 2);
+    assert_eq!(skip_tick("'x'}", 0), 3);
+    assert_eq!(skip_tick("'\\n'}", 0), 4);
+}

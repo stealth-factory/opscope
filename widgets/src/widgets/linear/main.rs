@@ -93,7 +93,7 @@ fn graphql(
             }
         }
     }
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
             .as_str()
@@ -342,6 +342,11 @@ struct Issue {
     age: f64,
     /// None when nobody has pointed it, which is not the same as zero.
     points: Option<f64>,
+}
+
+/// The address `c` copies for an issue. The title on that row links to it.
+fn issue_url(issue: &Issue) -> String {
+    issue.url.clone()
 }
 
 /// One project, as much of it as a team's screen needs.
@@ -1186,7 +1191,7 @@ fn cycle_detail_with_plots(
                 ),
                 (
                     if here { p.accent.as_str() } else { p.txt.as_str() },
-                    format!("  {}", tc::pad(&first, title_w)),
+                    format!("  {}", tc::pad(&tc::link(&issue_url(it), &first), title_w)),
                 ),
                 (p.dim.as_str(), format!("  {:>6}", dur(Some(it.age)))),
                 // Nothing rather than "0 pts" when nobody has pointed it.
@@ -1204,7 +1209,11 @@ fn cycle_detail_with_plots(
             rows.push(tc::seg(
                 &[(
                     if here { p.accent.as_str() } else { p.txt.as_str() },
-                    format!("{}{}", " ".repeat(2 + ident_w + 2 + state_w + 2), line),
+                    format!(
+                        "{}{}",
+                        " ".repeat(2 + ident_w + 2 + state_w + 2),
+                        tc::link(&issue_url(it), line)
+                    ),
                 )],
                 w - 1,
             ));
@@ -3025,7 +3034,7 @@ fn main() {
                         let issues = s.cycle_issues.get(&id).unwrap_or(&none);
                         list_len = issues.len();
                         copy_url = issues.get(pick.min(issues.len().saturating_sub(1)))
-                            .map(|i| (i.url.clone(), i.ident.clone()));
+                            .map(|i| (issue_url(i), i.ident.clone()));
                         cycle_detail_with_plots(
                             c,
                             states,
@@ -3316,9 +3325,29 @@ mod tests {
         let mut chars = joined.chars();
         while let Some(c) = chars.next() {
             if c == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
+                let mut peek = chars.clone();
+                match peek.next() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\u{1b}' {
+                                let mut end = chars.clone();
+                                if end.next() == Some('\\') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        for c in chars.by_ref() {
+                            if c == 'm' {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {
@@ -3368,6 +3397,13 @@ mod tests {
         // And a cursor, on the row it named.
         assert!(plain(&[rows[at.unwrap()].clone()]).contains("ABC-1"));
         assert_eq!(out.matches('▸').count(), 1);
+        let url = "https://linear.app/x/issue/ABC-1";
+        assert_eq!(issue_url(&issues[0]), url);
+        assert!(
+            rows.iter().any(|r| r.contains(&format!("\x1b]8;;{url}\x1b\\"))),
+            "the issue title links the url c copies"
+        );
+        assert!(!out.contains("https://"), "{out}");
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub struct State {
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
     pub notion: crate::notion::Data,
+    pub perplexity: crate::perplexity::Data,
     pub devin: crate::devin::Data,
     pub droid: crate::droid::Data,
     pub installed: HashMap<String, Presence>,
@@ -58,6 +59,12 @@ fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool
 /// count as a choice.
 fn notion_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
     chosen_agents(installed, cfg).iter().any(|t| t == "notion")
+}
+
+/// Whether Perplexity may be asked, on the same terms: it sends the reader's
+/// own session to Perplexity.
+fn perplexity_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "perplexity")
 }
 
 /// Whether Devin may be asked. It sends the reader's token to Devin, so a
@@ -82,6 +89,7 @@ pub fn read_all(
     // answer could disagree with the map the tabs were drawn from.
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
     let notion_shown = notion_asked(&installed, cfg);
+    let perplexity_shown = perplexity_asked(&installed, cfg);
     let devin_shown = devin_asked(&installed, cfg);
     let droid_shown = droid_asked(&installed, cfg);
     let mut state = State {
@@ -93,6 +101,7 @@ pub fn read_all(
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown, &cfg.coderabbit_repo),
         notion: crate::notion::read(caches, cfg, notion_shown),
+        perplexity: crate::perplexity::read(caches, cfg, perplexity_shown),
         devin: crate::devin::read(caches, cfg, devin_shown),
         droid: crate::droid::read(caches, cfg, droid_shown),
         installed,
@@ -331,6 +340,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
         "notion" => crate::notion::lanes(&s.notion),
+        "perplexity" => crate::perplexity::lanes(&s.perplexity),
         "devin" => crate::devin::lanes(&s.devin),
         "droid" => crate::droid::lanes(&s.droid),
         _ => Vec::new(),
@@ -398,6 +408,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
         "notion" => crate::notion::why_no_lane(&s.notion),
+        "perplexity" => crate::perplexity::why_no_lane(&s.perplexity),
         "devin" => crate::devin::why_no_lane(&s.devin),
         "droid" => crate::droid::why_no_lane(&s.droid),
         _ => String::new(),
@@ -654,9 +665,10 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
         // Devin's daily sits inside its weekly, and Droid's five-hour window
         // sits inside weekly inside monthly. Percentage order would reshuffle
         // that on every refresh and disagree with the agent's own tab.
+        // Perplexity's pools are listed in the order they are spent.
         if !matches!(
             group_agent(name).as_str(),
-            "claude" | "cursor" | "devin" | "droid" | "spacexsi" | "antigravity"
+            "claude" | "cursor" | "devin" | "droid" | "spacexsi" | "antigravity" | "perplexity"
         ) {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }
@@ -842,6 +854,42 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
     rows
 }
 
+/// Agents read with a token the reader pastes, which discovery cannot find
+/// on this machine, with the setting that takes it.
+const PASTED_TOKEN_AGENTS: [(&str, &str); 2] = [("notion", "Notion AI"), ("perplexity", "Perplexity")];
+
+/// A line under the overview naming the agents discovery cannot find: the
+/// ones signed in with a pasted token that has not been pasted. Without it
+/// a reader on discovery has no way to learn they could be here at all.
+/// Nothing when the reader named the agents themselves, since that list is
+/// already their choice, and nothing for one they excluded.
+fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec<String> {
+    if !discovers(cfg) {
+        return Vec::new();
+    }
+    let missing: Vec<&str> = PASTED_TOKEN_AGENTS
+        .iter()
+        .filter(|(id, _)| !shown.contains(id) && !cfg.exclude_agents.iter().any(|x| x == id))
+        .map(|(_, name)| *name)
+        .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let text = format!(
+        "{} {} read with a session token you paste: press , to add one.",
+        missing.join(" and "),
+        if missing.len() == 1 { "is" } else { "are" },
+    );
+    let content_width = w.saturating_sub(3);
+    let mut rows = vec![String::new()];
+    rows.extend(
+        tc::wrap_words(&text, content_width)
+            .into_iter()
+            .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1))),
+    );
+    rows
+}
+
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let listed = |vendor: &str| tabs.iter().any(|t| t == vendor);
     match name {
@@ -858,7 +906,9 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
             // excluded every one it found. Walking ORDER here would name
             // agents that have no tab, which is the same claim a tab would
             // have made.
-            summary_with_plots(s, w, p, &shown, plots)
+            let mut rows = summary_with_plots(s, w, p, &shown, plots);
+            rows.extend(token_agents_hint(cfg, &shown, w, p));
+            rows
         }
         name if agent_family(name) == "claude" => {
             let fallback = crate::claude::Data::default();
@@ -899,6 +949,7 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
         "antigravity" => crate::antigravity::tab_with_plots(&s.antigravity, w, h, cfg, p, plots),
         "coderabbit" => crate::coderabbit::tab_with_plots(&s.coderabbit, w, h, cfg, p, plots),
         "notion" => crate::notion::tab_with_plots(&s.notion, w, h, cfg, p, plots),
+        "perplexity" => crate::perplexity::tab_with_plots(&s.perplexity, w, h, cfg, p, plots),
         "devin" => crate::devin::tab_with_plots(&s.devin, w, h, cfg, p, plots),
         "droid" => crate::droid::tab_with_plots(&s.droid, w, h, cfg, p, plots),
         other => unknown(other, &s.installed, w, p),
@@ -942,6 +993,38 @@ fn unknown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overview_names_the_pasted_token_agents_discovery_cannot_find() {
+        let p = palette();
+        let text = |cfg: &Config, shown: &[&str], w: usize| {
+            token_agents_hint(cfg, shown, w, &p).iter().map(|r| plain(&[r.clone()]).join("")).collect::<Vec<_>>().join(" ")
+        };
+        let found = Config::default();
+        let both = text(&found, &["claude"], 60);
+        assert!(both.contains("Notion AI and Perplexity are read with a session token"), "{both}");
+        assert!(both.contains("press , to add one"), "{both}");
+        // One already has its tab: only the other is named.
+        let one = text(&found, &["claude", "notion"], 60);
+        assert!(one.contains("Perplexity is read with") && !one.contains("Notion"), "{one}");
+        // Both have tabs, or the reader named their agents: nothing.
+        assert!(token_agents_hint(&found, &["notion", "perplexity"], 60, &p).is_empty());
+        let named = Config { agents: vec!["claude".into()], ..Config::default() };
+        assert!(token_agents_hint(&named, &["claude"], 60, &p).is_empty());
+        // An excluded agent is not offered back.
+        let excluded = Config { exclude_agents: vec!["notion".into()], ..Config::default() };
+        let rest = text(&excluded, &["claude"], 60);
+        assert!(!rest.contains("Notion") && rest.contains("Perplexity"), "{rest}");
+        let expected = "Notion AI and Perplexity are read with a session token you paste: press , to add one.";
+        let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for w in [8usize, 9, 10, 11, 12, 30, 40, 60, 100] {
+            let rows = token_agents_hint(&found, &[], w, &p);
+            for r in &rows {
+                assert!(tc::display_width(&plain(&[r.clone()]).join("")) <= w - 1, "width {w}: {r:?}");
+            }
+            assert_eq!(compact(&plain(&rows).join(" ")), compact(expected), "width {w}: {rows:?}");
+        }
+    }
 
     #[test]
     fn an_excluded_coderabbit_is_never_asked_even_when_every_agent_is_excluded() {
@@ -2174,6 +2257,81 @@ mod tests {
         };
         link_spacexsi(&mut s);
         assert_eq!((s.cursor.spacexsi, s.grok.spacexsi), (Spacexsi::No, Spacexsi::No));
+    }
+
+    /// The usage response as a Max account on an exhausted extra-usage
+    /// balance sends it: every key and value type of the reset block as
+    /// the live endpoint returned it, with made-up values. The grant
+    /// carries far more than the parser reads - ids, labels, what it
+    /// clears, per-window percentages - and the block carries cooldown and
+    /// exhaustion fields beside `eligible`.
+    fn max_account_quota() -> serde_json::Value {
+        serde_json::json!({
+            "limits": [
+                {"group": "session", "is_active": true, "kind": "session", "percent": 12,
+                 "resets_at": "2126-01-01T00:00:00Z", "scope": null, "severity": "normal"},
+                {"group": "weekly", "is_active": true, "kind": "weekly_all", "percent": 40,
+                 "resets_at": "2126-01-05T00:00:00Z", "scope": null, "severity": "normal"},
+                {"group": "weekly", "is_active": false, "kind": "weekly_scoped", "percent": 3,
+                 "resets_at": "2126-01-05T00:00:00Z", "scope": {"model": "fixture"}, "severity": "normal"}
+            ],
+            "extra_usage": {
+                "credits_ever_enabled": true, "currency": "USD", "daily": null,
+                "decimal_places": 2, "disabled_reason": "out_of_credits", "is_enabled": false,
+                "monthly_limit": 5000, "spend_limit_reached": true, "used_credits": 5000.0,
+                "user_disabled": false, "utilization": 100.0, "weekly": null
+            },
+            "cedar_ember": {
+                "at_limit": false,
+                "cooldown_until": null,
+                "eligible": true,
+                "event_props": {"billing_path": "x", "billing_period": "x", "extra_usage_state": "x",
+                                "surface": "x", "tenure_bucket": "x", "tier": "x"},
+                "exhausted": [],
+                "grants": [{
+                    "arm": null, "blocking": [], "clears": ["five_hour", "seven_day", "seven_day_opus"],
+                    "ends_at": "2126-01-03T00:00:00Z", "gives_back_weekly": true,
+                    "id": "fixture-grant", "label": "Fixture grant", "paused": false,
+                    "percent_used": {"five_hour": 0, "seven_day": 0, "seven_day_overage_included": 0},
+                    "resets_left": 1, "resets_total": 1, "starts_at": "2025-01-01T00:00:00Z",
+                    "type": "full", "unavailable_reason": null, "usable_now": true,
+                    "use_requires_limit": false
+                }],
+                "ineligible_reason": null,
+                "next_grant_id": "fixture-next",
+                "paused_held": false,
+                "weekly_resets_at": "2126-01-05T00:00:00Z"
+            }
+        })
+    }
+
+    /// Both screens drawn through the functions the running widget calls -
+    /// the tab dispatch for `claude` and for `[+]` - from one profile with
+    /// a live-shaped reading, so the section and the line are compared as
+    /// they appear, not as their builders return them.
+    #[test]
+    fn a_live_shaped_claude_reading_draws_the_bank_on_the_tab_and_the_line_on_plus() {
+        let s = State {
+            claude: vec![crate::claude::Data::with_quota("", max_account_quota())],
+            ..Default::default()
+        };
+        let cfg = Config::default();
+        let tabs = vec![SUMMARY_TAB.to_string(), "claude".to_string()];
+        let tab = plain(&tab_body_with_plots("claude", &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
+        let plus = plain(&tab_body_with_plots(SUMMARY_TAB, &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
+        let stamp = crate::codex::local_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
+        let at = tab.iter().position(|row| row.trim_end() == " ── 1 BANK RESET ──")
+            .unwrap_or_else(|| panic!("no bank on the tab: {tab:#?}"));
+        assert_eq!(tab[at + 1].trim_end(), format!("  Full reset · expires {stamp}"), "{tab:#?}");
+        assert!(tab[at + 2].trim().is_empty(), "{tab:#?}");
+        let line = s.claude[0].reset_summary_line().expect("the [+] line");
+        assert!(plus.iter().any(|row| row.trim() == line), "{plus:#?}");
+        let compact = crate::codex::summary_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
+        assert_eq!(line, format!("1 reset available {compact}"));
+        // The tab's date is the line's date with the year added.
+        for part in compact.split_whitespace() {
+            assert!(stamp.split_whitespace().any(|p| p == part), "{part} / {stamp}");
+        }
     }
 }
 

@@ -16,12 +16,13 @@ The agents this widget reads:
 - Antigravity
 - CodeRabbit
 - Notion
+- Perplexity
 - Devin
 - Droid (Factory)
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- local state · live quota · read 16s ago   · = installed
+ Checked 16s ago   · = detected
  [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
 
  ── QUOTA ── live · account-wide, not this machine   max
@@ -68,6 +69,12 @@ The agents this widget reads:
   rate limit tier  default_claude_max_20x
   billing          stripe subscription
 ```
+
+The dim status line below the title says `Checked 16s ago`: time since the
+widget completed its last collection pass, not the age of every provider's
+data. A pass can reuse cached readings; each provider's quota section keeps
+its own live, cached or unavailable status. Before the first pass completes,
+the line says `Not checked yet`. The title's spinner shows a check in progress.
 
 ## The `+` tab
 
@@ -211,6 +218,26 @@ grant has no readable expiry, only the count is shown. Zero or unavailable
 inventory adds no line. Multiple profiles keep their own counts, including
 when an account has no quota lanes. Cached availability carries its age,
 and a grant whose expiry has passed is no longer counted.
+
+The Claude tab carries the same **BANK RESET** section as the Codex tab,
+drawn by the same code: the count in the title, then one row per reset,
+soonest first. A grant of two is two rows with the same expiry - nothing is
+merged. A grant whose `type` is `full` is a `Full reset`, the name Codex's
+credits carry; any other type is a plain `Reset`, and the grant's `label`, a
+sentence rather than a kind, is not shown. A grant with no readable expiry is
+`Reset · expiry not given` (or `Full reset · …`) and comes last. When the
+reading is old the section ends with `cached 5m ago`. An inventory that
+answered with no resets shows `── 0 BANK RESETS ──` and `None in the
+account.`, as Codex does. A reading with no inventory in it - no quota yet,
+or a block that is absent, ineligible or unreadable - draws no section,
+again as Codex does when its inventory request fails, so an unread bank is
+never shown as an empty one. Each profile's tab shows its own bank. The
+`[+]` line agrees with the section for the same profile: the same count as
+the title and, when every reset has a readable expiry, the first row's date
+without its year. When any reset is undated the line gives the count alone,
+and in a pane too narrow for it the line wraps onto the next rows, its date
+moving below the count. A count past 1000 resets is not read
+as an inventory.
 
 This comes from the optional `cedar_ember` block on
 `GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
@@ -1006,10 +1033,32 @@ in the heading.
 
 ### Where each agent's numbers come from
 
-**Cursor** needs no rate card — it publishes both sides. Its own events carry
-vendor rates, Cursor says what it actually metered, and the gap is the discount
-the plan applied. Its header reads `at vendor rates · Cursor meters $762.64
-of it`.
+**Cursor** uses the same dashboard event endpoint as CodexBar:
+`POST https://cursor.com/api/dashboard/get-filtered-usage-events`. Both numbers
+cover one snapshot, from local midnight 29 days ago through the fetch time:
+
+- **30 days** sums `tokenUsage.totalCents` for events with tokens. Missing/null
+  costs use Opscope's published list-rate table when it covers every token kind;
+  explicit zero is retained and invalid costs are not estimated. Input, output,
+  cache reads and cache writes are counted separately.
+- **cursor meters** sums `chargedCents` from those same fetched events, including
+  metered-only events with no tokens. A missing/invalid charge withholds the total.
+- Request, unpriced and estimated counts and the snapshot time are shown. Unknown
+  prices are not silently free. Partial priced windows say `at least`.
+
+The fetch pages to completion (up to the same 200 × 1,000 safety ceiling as
+CodexBar). Failed, inconsistent or capped histories show an error, not a total.
+Only boundary duplicates proven by the API's total count are removed. The
+existing Cursor CLI token supplies the subject and signed token for the dashboard
+cookie, without importing browser cookies, switching accounts or refreshing
+credentials. If the dashboard refuses it, the cost section says so. Other quota
+and aggregate SPEND calls keep their existing Connect API transport.
+
+This aligns the data source and arithmetic, not a guarantee of exact CodexBar
+parity: accounts, refresh time, timezone and versions must match. CodexBar can
+use a cached models.dev catalog and date-sensitive bundled rates; Opscope uses
+its own bundled rates for omitted costs. Those estimates may differ. Neither
+number is the subscription fee plus extra-usage payments.
 
 **Claude** is costed from the **transcripts** rather than from Claude Code's
 own summary file. That file holds one total per model per day, and input,
@@ -1053,8 +1102,9 @@ by a `"*"` entry.
 
 ### What the plan saves
 
-Cursor computes it from its own two figures. Everyone else needs one number
-that no machine here knows — what you actually pay — so it is configured:
+Cursor does not show savings: subtracting its two usage values does not account
+for subscription fees or extra-usage payments. Other supported agents use a
+configured plan cost:
 
 ```json
 "agent_usage": {
@@ -1081,12 +1131,11 @@ simply absent.
  Jul 18                                                Aug 16
 ```
 
-The chart is built from Cursor's **individual charge events**, each with its
-own timestamp and its own money figure, rather than from the per-model totals
-the tab above uses — those carry no timestamp at all, so no per-day view can
-be built from them. Only the window on screen is read, and it is refreshed on
-a slower cadence of its own, so the chart can be up to half an hour behind the
-figures above it.
+The chart uses the same Cursor **dashboard event snapshot** and API-rate costs
+as METERED. Partial/estimated pricing is labelled. It refreshes every half hour,
+or on `r` subject to the shared refresh floor. The separate aggregate SPEND
+section still uses Cursor's Connect API and can differ in coverage and freshness;
+it is not used as the metered total or to calculate savings.
 
 It is a bar chart rather than the calendar the token tabs use. Thirty days in a
 year-wide grid is six columns of colour in a field of dots; money over a month
@@ -1240,15 +1289,28 @@ reading is missing the separately-metered lanes entirely — which is why the
 source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
-Under the windows, **BANK RESET** is the unused rate-limit reset credits
-still in the account. Each credit the inventory listed is its own title,
-from that credit's `title`, and then `Expires` with the expiry as a date
-and time in this machine's local zone, the zone named. A credit with no
-title is not given one. A credit with no readable `expires_at` still counts
-and the expiry line says the date is unknown. A body that states a count
-and no list shows `N reset available` and no date rows. It is not another
-usage window, and it is not the `resets in` countdown on the quota rows.
-Every one of these numbers and dates comes from
+Under the windows, the **BANK RESET** section is the unused rate-limit
+reset credits still in the account, in the one layout the Claude tab uses
+too. The title carries the count, as in `── 1 BANK RESET ──` or
+`── 2 BANK RESETS ──`, and under it is one row per credit, soonest expiry
+first:
+
+```text
+ ── 2 BANK RESETS ──
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+```
+
+A row is the credit's `title` when it has one and `Reset` when it does not,
+then the expiry as a date and time in this machine's local zone, the zone
+named. Two credits ending at the same moment are still two rows. A credit
+with no readable `expires_at` still counts, sorts after every dated one, and
+says `· expiry not given`. A body that states a count and no list is that
+many `Reset · expiry not given` rows, since no date was sent for any of
+them. When a row is too wide for the pane its words stay together and the
+datetime moves to the following lines, broken between its parts. It is not
+another usage window, and it is not the `resets in` countdown on the quota
+rows. Every one of these numbers and dates comes from
 `GET /wham/rate-limit-reset-credits` on the same host and credential. A
 credit counts only while it is still available and its expiry, when one
 can be read, is still ahead. An inventory that answers `0` shows that none
@@ -1261,7 +1323,8 @@ rows, with a blank line above it. The soonest expiry is added in the same compac
 form as Claude (`23 Oct 04:58 +08:00`) only
 when every listed credit has a readable expiry. Zero and an unread
 inventory add nothing. The Codex tab's per-credit expiry keeps the full year
-but also omits parentheses around the offset.
+but also omits parentheses around the offset. Both tabs leave one empty
+row between the section and whatever follows it.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
@@ -1469,6 +1532,93 @@ ends, since Notion gives the end and not the start.
 | `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
 
 These are the same two requests CodexBar makes for its Notion AI provider.
+
+### Perplexity asks its account page's endpoint, with a cookie you hand it
+
+Perplexity's usage page shows a weekly limit a plan includes and up to three
+pools of credits: the plan's monthly credits, credits bought on top
+(`credits`), and promotional bonus credits. The `perplexity` tab draws the
+weekly limit first, with its reset, then one bar per pool that has anything
+in it, and `[+]` draws them beside every other agent's. The heading names
+the plan - Pro, Max - as the sign-in's session states it. Under the bars it lists the balance,
+this period's usage and when the period ends, every credit grant on its own
+row - what is left of it, when it was added, what was spent of it before
+this period, and when it lapses - and the billing settings: auto top-up and
+the spending limit. The monthly credits are paced on the calendar month
+ending at the renewal Perplexity reports; bought and bonus credits have no
+window to pace against, so neither has a pace.
+
+- **There is no public API for it.** The widget asks
+  `/rest/billing/credits`, the endpoint perplexity.ai's own usage page
+  calls, which is internal and can change without notice. When it answers
+  in a shape the widget cannot read, the tab says so rather than drawing an
+  empty bar.
+- **Amounts are credits.** The answer's fields are named in cents, but the
+  usage page counts the same numbers as credits, one to one, so that is the
+  unit drawn.
+- **A grant that says what is left of it is believed.** Each grant carries
+  `remaining_cents`, which counts every period it has been drawn on.
+  `total_usage_cents` counts only this one, so spreading it over the pools
+  - CodexBar's way - reads a grant bought last month and part spent then as
+  untouched. Only when a grant does not say is usage spread in Perplexity's
+  spending order: monthly first, then bought, then bonus. A bonus grant past
+  its expiry is gone and is not counted. Usage the pools do not account for,
+  and grants of a type the widget does not know, are said under the bars
+  rather than dropped; beside an unknown grant no usage is spread at all,
+  since that grant may hold it.
+- **Four requests, each standing alone.** The credits come from
+  `/rest/billing/credits`, the weekly limit from `/rest/billing/quota`, and
+  the plan from `/api/auth/session`, and how it is billed - interval and
+  next billing date, or the date a cancelled plan ends - from
+  `/rest/stripe/subscription-billing-info`, whose retention-offer prices
+  are not read. The weekly limit gives a share used and
+  a reset, not the allowance's size, and is paced on the seven days before
+  its reset. A plan with no weekly limit - which may be Max - answers none,
+  so a quota answer of an empty object, or of its own fields set to null,
+  leaves the bar out rather than reporting a fault; any other answer without
+  a share is said as a fault; a session that names no plan leaves the heading bare.
+- **It needs your session cookie.** To find it:
+
+  1. Sign in at perplexity.ai and open developer tools: F12, or
+     Cmd-Option-I on a Mac. Safari needs Settings, Advanced, *Show
+     features for web developers* turned on first.
+  2. Open the cookies for `https://www.perplexity.ai`: the **Application**
+     tab in Chrome, Edge, Arc or Brave, the **Storage** tab in Firefox and
+     Safari.
+  3. Copy the Value of `__Secure-next-auth.session-token`. The console
+     cannot read it, since the cookie is HttpOnly. If it is split into
+     `.0` and `.1` cookies, copy the whole `cookie` request header from a
+     request to `www.perplexity.ai` that includes the session cookie, in the
+     **Network** tab instead.
+  4. Press `,` and paste it into `perplexity_token`, or put it in the
+     variable `perplexity_token_env` names (`PERPLEXITY_SESSION_TOKEN`, the
+     one CodexBar reads too).
+
+  The no-token panel, the expired-session panel, and the settings help for
+  `perplexity_token` show these same steps; a test keeps those three in sync.
+  That cookie is a full sign-in to your
+  Perplexity account, not a scoped key, so keep `config.json` `chmod 600`;
+  the tab warns when it is not. The widget never reads it out of a
+  browser, for the reason given above.
+- **`perplexity_token` wins over the variable.** The variable is read only
+  when `perplexity_token` is empty, so a stale cookie left in `config.json`
+  is the one sent even when the variable holds a fresh one - empty the
+  field to use the variable. The tab's `token` line says which was used.
+- **Perplexity is here when a token is.** It leaves nothing on this machine
+  to discover, so with no token it has no tab, and with one it is asked
+  every five minutes - and only while it is one of the agents you chose.
+  So that discovery does not hide it altogether, the `[+]` overview ends
+  with a line naming Notion AI and Perplexity while either has no token -
+  unless you named your agents yourself or excluded it.
+- **API (Sonar) spend is not in it.** That is billed to an API key, which
+  this does not read.
+
+| key | default | what it does |
+|---|---|---|
+| `perplexity_token` | `""` | the session cookie, or a whole `Cookie` header copied from a request |
+| `perplexity_token_env` | `PERPLEXITY_SESSION_TOKEN` | the name of the environment variable to read the cookie from, only when `perplexity_token` is empty; `perplexity_token` wins when both are set |
+
+The credits request is the same one CodexBar makes for its Perplexity provider.
 
 ### Devin asks app.devin.ai with a bearer token and an organization
 
@@ -1798,7 +1948,7 @@ is rarely that tall. `↑` `↓` move through the body while the title, the tab 
 and the footer stay put, so you never lose which agent you are looking at.
 
 ```
- local state · live quota · read 2s ago   · = detected   9-27 of 45 ▲▼
+ Checked 2s ago   · = detected   9-27 of 45 ▲▼
 ```
 
 The header says which rows you are on out of how many, and the arrows say which

@@ -3,6 +3,67 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.10.0] - 2026-10-22
+
+### Bug Fixes
+
+- **agent-usage**: Clarify the last-check status (#436)
+- **agent-usage**: Show Claude's banked resets on its tab, as Codex does (OPS-190) (#452)
+
+### Features
+
+- **core**: Add Kitty notifications and large text for clocks and months (OPS-152) (#357)
+
+### Performance
+
+- **core**: Append chart samples with Kitty frame edits (OPS-155) (#364)
+
+### Tests
+
+- **agent-usage**: Read the Grok pool window at a fixed moment, not today (#450)
+
+## [1.9.0] - 2026-10-15
+
+### Bug Fixes
+
+- **agent-usage**: Align Cursor metering with dashboard events (#433)
+
+### Features
+
+- **core**: Add underlined detail-view hyperlinks (OPS-150) (#359)
+
+## [1.8.0] - 2026-10-14
+
+### Bug Fixes
+
+- **core**: Send Kitty images inline inside Herdr panes (OPS-171) (#412)
+- **agent-usage**: Correct Sonnet 5.5 cache reads and OpenAI speed-tier rates (OPS-174) (#421)
+- **latency**: Bound intervals and stop idle refresh animation (OPS-176) (#426)
+- **core**: Quarantine first cell reply after child handoff (#425)
+
+### CI
+
+- Replace privileged PR trigger and narrow release permissions (#418)
+
+### Documentation
+
+- Document signed APT installation (#432)
+
+### Features
+
+- **core**: Rasterise charts at the reported cell size (OPS-149) (#360)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175)
+- **netwatch**: Move throughput labels onto chart borders (OPS-175) (#423)
+- **agent-usage**: Add a Perplexity tab for weekly limit, credits and billing (OPS-173) (#416)
+
+### Miscellaneous
+
+- Preserve latest main in netwatch restoration
+
+### Reverted
+
+- Restore main pending netwatch border-label review
+
 ## [1.7.0] - 2026-10-13
 
 ### Features

@@ -1,8 +1,7 @@
 //! Shared chart geometry and optional inline Kitty images. Widgets never emit
 //! protocol bytes and the same normalized measurements drive both backends.
 use base64::Engine;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -419,8 +418,28 @@ impl Plot {
         track: &str,
         mark: &str,
     ) -> Self {
-        let fraction = finite_fraction(fraction);
         let (start, end) = gradient_stops(rgb(colour).unwrap_or([180, 200, 220]));
+        Self::gradient_meter_between(x, y, width, fraction, marker, start, end, track, mark)
+    }
+
+    /// `gradient_meter` between two stops the caller chooses, for a hue the
+    /// shared ramp would wash toward white. Each stop is still lifted to AA
+    /// on the selected-row tint when it falls short, so a dark brand colour
+    /// cannot make a bar unreadable where `gradient_meter`'s would not be.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradient_meter_between(
+        x: usize,
+        y: usize,
+        width: usize,
+        fraction: f64,
+        marker: Option<f64>,
+        start: [u8; 3],
+        end: [u8; 3],
+        track: &str,
+        mark: &str,
+    ) -> Self {
+        let fraction = finite_fraction(fraction);
+        let (start, end) = (readable_on_tint(start, 0.0), readable_on_tint(end, 0.0));
         let filled = (fraction * width as f64).round() as usize;
         let cells: Vec<_> = (0..filled.max(usize::from(fraction > 0.0)).min(width))
             .map(|i| colour_at(start, end, i as f64 / filled.saturating_sub(1).max(1) as f64))
@@ -731,10 +750,95 @@ fn passthrough_enabled() -> bool {
     PASSTHROUGH.load(Ordering::Acquire)
 }
 
+/// 0 unknown, 1 the terminal accepted a frame compose, 2 it refused.
+static ANIMATION: AtomicU8 = AtomicU8::new(0);
+/// Slots whose latest transmission was a frame edit. An error for one of
+/// those is the frame op failing, which drops back to full uploads.
+static FRAME_SLOTS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FRAMES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn image_id(slot: usize) -> u32 {
     // Five slot bits support a dense quota overview. A separate prefix
     // keeps these IDs clear of older 16-slot widgets in the same mux.
     0x60000000 | (((unsafe { libc::getpid() } as u32) & 0x1fffff) << 5) | slot as u32
+}
+
+/// Not a chart slot. A frame op on this image is the animation probe.
+pub(crate) fn probe_id() -> u32 {
+    0x20000000 | ((unsafe { libc::getpid() } as u32) & 0x0fff_ffff)
+}
+
+pub(crate) fn reset_animation() {
+    ANIMATION.store(0, Ordering::Release);
+}
+
+pub(crate) fn set_animation(yes: bool) {
+    ANIMATION.store(if yes { 1 } else { 2 }, Ordering::Release);
+}
+
+pub(crate) fn animation_ready() -> bool {
+    ANIMATION.load(Ordering::Acquire) == 1
+}
+
+fn frames_ready() -> bool {
+    #[cfg(test)]
+    {
+        return FRAMES.with(|cell| cell.get());
+    }
+    #[cfg(not(test))]
+    {
+        animation_ready()
+    }
+}
+
+fn note_frame(slot: usize) {
+    FRAME_SLOTS.fetch_or(1u32 << slot, Ordering::Release);
+}
+
+fn note_full(slot: usize) {
+    FRAME_SLOTS.fetch_and(!(1u32 << slot), Ordering::Release);
+}
+
+pub(crate) fn frame_edit_pending(id: u32) -> bool {
+    let slots = FRAME_SLOTS.load(Ordering::Acquire);
+    (0..MAX_PLOTS).any(|slot| image_id(slot) == id && slots & (1u32 << slot) != 0)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_frame_edits() {
+    FRAME_SLOTS.store(0, Ordering::Release);
+}
+
+/// `compose` and the frame-error replies share `FRAME_SLOTS`. Tests that
+/// touch either hold this for the whole test.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn testing_mark_frame(slot: usize) {
+    note_frame(slot);
+}
+
+/// One-pixel image, a second frame copied from it, then a compose of that
+/// frame onto the root. Terminals without animation answer ENOENT or EINVAL.
+pub(crate) fn animation_probe() -> String {
+    let id = probe_id();
+    format!(
+        "\x1b_Ga=t,f=24,t=d,s=1,v=1,i={id},q=1;AAAA\x1b\\\
+         \x1b_Ga=f,f=24,t=d,s=1,v=1,i={id},c=1,X=1,z=-1,q=1;AAAA\x1b\\\
+         \x1b_Ga=c,i={id},r=2,c=1,w=1,h=1,C=1\x1b\\"
+    )
+}
+
+pub(crate) fn discard_probe() -> String {
+    format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", probe_id())
 }
 
 pub(crate) fn owns_image(id: u32) -> bool {
@@ -960,6 +1064,37 @@ pub(crate) fn compose(
                 }
             }
         }
+        // A one-sample slide edits the held image. Identical pixels already
+        // returned above, so this only runs when the raster changed.
+        let edit = if !lost && frames_ready() {
+            match (cache.get(slot), plot, rgba.as_deref()) {
+                (Some(cached), Some(next), Some(bytes))
+                    if cached.same_region(next, cols, (cell_w, cell_h)) =>
+                    frame_edit(&cached.plot, next, slot, w, (cell_w, cell_h), bytes),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(edit) = edit {
+            note_frame(slot);
+            after.push_str(&edit);
+            if let Some(next) = plot {
+                if heal {
+                    after.push_str(&place(next, slot, w));
+                }
+                if let Some(previous) = cache.get_mut(slot) {
+                    previous.plot = next.clone();
+                    previous.cols = cols;
+                    previous.cell_size = (cell_w, cell_h);
+                    if let Some(bytes) = rgba {
+                        previous.rgba = (bytes.len() <= MAX_CACHED_RGBA).then_some(bytes);
+                    }
+                }
+            }
+            continue;
+        }
+        note_full(slot);
         let mut replaced = None;
         if let Some(cached) = cache.get(slot) {
             // Clear the old region before text is repainted when scrolling
@@ -1106,18 +1241,22 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
     let mut out = String::new();
     let mut column = 0;
     let mut inserted = false;
-    let mut chars = row.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            out.push(c);
-            for c in chars.by_ref() {
-                out.push(c);
-                if c == 'm' {
-                    break;
-                }
-            }
+    let mut rest = row.as_str();
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            // An https OSC 8 has no `m` of its own; stopping at the first
+            // one cuts the URL and counts the rest as columns. `markup_len`
+            // is the same scan `inert` uses, and it consumes the whole
+            // sequence.
+            let n = super::markup_len(rest).unwrap_or(1);
+            out.push_str(&rest[..n]);
+            rest = &rest[n..];
             continue;
         }
+        let c = rest.chars().next().unwrap();
+        rest = &rest[c.len_utf8()..];
+        // A placeholder cell is one column whatever unicode-width says of
+        // U+10EEEE, and the diacritics after it are part of that cell.
         let placeholder = c == super::placeholder::PLACEHOLDER;
         let size = if placeholder {
             1
@@ -1134,12 +1273,12 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
             out.push(c);
         }
         if placeholder {
-            while chars
-                .peek()
-                .copied()
-                .is_some_and(super::placeholder::is_placeholder_diacritic)
+            while let Some(mark) = rest
+                .chars()
+                .next()
+                .filter(|m| super::placeholder::is_placeholder_diacritic(*m))
             {
-                let mark = chars.next().unwrap();
+                rest = &rest[mark.len_utf8()..];
                 if keep {
                     out.push(mark);
                 }
@@ -1190,12 +1329,25 @@ fn gradient_stops(hue: [u8; 3]) -> ([u8; 3], [u8; 3]) {
     // Clocks' brighter ramp, shared by every horizontal bar. Lift a darker
     // provider/category hue just enough for AA on the selected-row tint;
     // the terminal background is darker and clears the same threshold.
+    let t = lift_for_tint(hue, 0.15);
+    (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
+}
+
+/// How far toward white `hue` has to go, starting from `from`, to reach AA
+/// on the selected-row tint.
+fn lift_for_tint(hue: [u8; 3], from: f64) -> f64 {
     let minimum = 4.5 * (luminance([38, 56, 76]) + 0.05) - 0.05;
-    let mut t = 0.15;
-    while luminance(mix_rgb(hue, [255; 3], t)) < minimum {
+    let mut t = from;
+    while t < 1.0 && luminance(mix_rgb(hue, [255; 3], t)) < minimum {
         t = (t + 0.01_f64).min(1.0);
     }
-    (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
+    t
+}
+
+/// `hue` itself when it already reads on the tint, otherwise lifted only as
+/// far as it must be.
+fn readable_on_tint(hue: [u8; 3], from: f64) -> [u8; 3] {
+    mix_rgb(hue, [255; 3], lift_for_tint(hue, from))
 }
 
 #[cfg(test)]
@@ -1407,6 +1559,303 @@ fn emit_graphics(bytes: &str, wrap: bool) -> String {
     }
 }
 
+/// A slide of the same chart: same scale, same slot count, N new samples on
+/// the right. `None` keeps today's full upload.
+fn frame_edit(
+    prev: &Plot, next: &Plot, slot: usize, pane_width: usize,
+    cell_size: (usize, usize), rgba: &[u8],
+) -> Option<String> {
+    if prev.fill.is_some()
+        || next.fill.is_some()
+        || prev.x != next.x
+        || prev.y != next.y
+        || prev.width != next.width
+        || prev.height != next.height
+        || prev.first_row != next.first_row
+        || prev.visible_rows != next.visible_rows
+        || prev.under_text != next.under_text
+        || prev.chart.slots != next.chart.slots
+        || prev.chart.focus != next.chart.focus
+        || prev.chart.traces.len() != next.chart.traces.len()
+    {
+        return None;
+    }
+    let cols = next.width.min(pane_width.saturating_sub(next.x));
+    // A pane that clips the right edge is a different image width. The new
+    // samples sit on the full chart, so a shift of the crop is not one column.
+    if cols == 0 || cols != next.width || prev.width != next.width {
+        return None;
+    }
+    let slots = next.chart.slots;
+    let (cell_w, cell_h) = cell_size;
+    let pixel_w = next.width * cell_w;
+    let n = shared_slide(&prev.chart.traces, &next.chart.traces, slots)?;
+    let dx = slide_dx(&prev.chart.traces, &next.chart.traces, slots, pixel_w, n)?;
+    let img_w = pixel_w;
+    let img_h = next.visible_rows * cell_h;
+    // The join pixel sits one left of a dx-wide strip. Uploading dx columns
+    // would leave that pixel as the old endpoint, missing the new segment.
+    let col_w = dx.checked_add(1)?;
+    if col_w >= img_w || img_h == 0 || dx == 0 {
+        return None;
+    }
+    let col_x = img_w - col_w;
+    if rgba.len() != img_w * img_h * 4 {
+        return None;
+    }
+    let column = column_rgba(&rgba, img_w, col_x, col_w);
+    // The sample that just became oldest keeps the tail of the segment that
+    // fell off the left. That stroke stays inside the sample's own column, so
+    // one pixel there, taken from the new raster, makes the shift match.
+    let edge = column_rgba(&rgba, img_w, 0, 1);
+    let id = image_id(slot);
+    let mut out = format!("\x1b_Ga=d,d=f,i={id},r=2,q=2\x1b\\");
+    // Kitty returns EINVAL when a frame is composed onto itself and the
+    // rectangles overlap, which a one-slot shift always does. The source is
+    // a copy of the root. Its single replaced pixel is in the strip the
+    // shift discards, so the copy matches the root where it is read.
+    out.push_str(&format!(
+        "\x1b_Ga=f,f=32,t=d,s=1,v=1,x=0,y=0,i={id},r=2,c=1,X=1,z=-1,q=1,m=0;AAAAAA==\x1b\\"
+    ));
+    let copied = img_w - dx;
+    out.push_str(&format!(
+        "\x1b_Ga=c,i={id},r=2,c=1,X={dx},Y=0,x=0,y=0,w={copied},h={img_h},C=1,q=1\x1b\\"
+    ));
+    out.push_str(&frame_payload(id, 0, 1, img_h, &edge));
+    out.push_str(&frame_payload(id, col_x, col_w, img_h, &column));
+    Some(out)
+}
+
+enum Slide {
+    No,
+    Unique(usize),
+    /// Every shift that matches. A repeated series has more than one.
+    Any(Vec<usize>),
+}
+
+fn shared_slide(old: &[Trace], new: &[Trace], slots: usize) -> Option<usize> {
+    if old.is_empty() || slots < 2 {
+        return None;
+    }
+    let mut unique = None;
+    // Shifts a repeated trace actually matches. The unique shift is used
+    // only when it is one of them; otherwise the chart is uploaded whole.
+    let mut ambiguous = Vec::new();
+    for (prev, next) in old.iter().zip(new) {
+        if prev.colour != next.colour || prev.baseline != next.baseline {
+            return None;
+        }
+        if prev.positions.is_some() != next.positions.is_some() {
+            return None;
+        }
+        // Explicit positions plot every sample, not the last `slots`.
+        let window = if prev.positions.is_some() {
+            prev.values.len().max(next.values.len()).max(slots)
+        } else {
+            slots
+        };
+        if !note_slide(
+            &mut unique,
+            &mut ambiguous,
+            value_slide(&prev.values, &next.values, window),
+        ) {
+            return None;
+        }
+        if let (Some(old_at), Some(new_at)) = (&prev.positions, &next.positions) {
+            let window = old_at.len().max(new_at.len()).max(slots);
+            if !note_slide(
+                &mut unique,
+                &mut ambiguous,
+                value_slide_f64(old_at, new_at, window),
+            ) {
+                return None;
+            }
+        }
+    }
+    let n = unique?;
+    if ambiguous.iter().any(|candidates| !candidates.contains(&n)) {
+        return None;
+    }
+    Some(n)
+}
+
+fn note_slide(unique: &mut Option<usize>, ambiguous: &mut Vec<Vec<usize>>, slide: Slide) -> bool {
+    match slide {
+        Slide::No => false,
+        Slide::Unique(n) => {
+            if unique.unwrap_or(n) != n {
+                return false;
+            }
+            *unique = Some(n);
+            true
+        }
+        Slide::Any(candidates) => {
+            ambiguous.push(candidates);
+            true
+        }
+    }
+}
+
+fn value_slide(old: &[Option<f64>], new: &[Option<f64>], slots: usize) -> Slide {
+    let old = &old[old.len().saturating_sub(slots)..];
+    let new = &new[new.len().saturating_sub(slots)..];
+    if old.is_empty() || new.is_empty() {
+        return Slide::No;
+    }
+    if new.len() > old.len() && new.len() <= slots && old == &new[..old.len()] {
+        return Slide::Unique(new.len() - old.len());
+    }
+    if new.len() != old.len() {
+        return Slide::No;
+    }
+    let found: Vec<usize> = (1..old.len())
+        .filter(|&n| new[..old.len() - n] == old[n..])
+        .collect();
+    match found.as_slice() {
+        [] => Slide::No,
+        [n] => Slide::Unique(*n),
+        _ => Slide::Any(found),
+    }
+}
+
+fn value_slide_f64(old: &[f64], new: &[f64], slots: usize) -> Slide {
+    let old: Vec<_> = old.iter().map(|v| v.is_finite().then_some(*v)).collect();
+    let new: Vec<_> = new.iter().map(|v| v.is_finite().then_some(*v)).collect();
+    value_slide(&old, &new, slots)
+}
+
+fn slide_dx(old: &[Trace], new: &[Trace], slots: usize, pixel_w: usize, n: usize) -> Option<usize> {
+    if n == 0 || pixel_w < 2 {
+        return None;
+    }
+    if old.iter().all(|t| t.positions.is_none()) {
+        let steps = slots - 1;
+        let span = pixel_w - 1;
+        if steps == 0 || span % steps != 0 {
+            return None;
+        }
+        return Some(n * (span / steps));
+    }
+    let mut dx = None;
+    for (prev, next) in old.iter().zip(new) {
+        let d = if prev.positions.is_none() {
+            let steps = slots - 1;
+            let span = pixel_w - 1;
+            if steps == 0 || span % steps != 0 {
+                return None;
+            }
+            n * (span / steps)
+        } else {
+            position_dx(prev, next, slots, pixel_w, n)?
+        };
+        if dx.unwrap_or(d) != d {
+            return None;
+        }
+        dx = Some(d);
+    }
+    dx.filter(|d| *d > 0)
+}
+
+fn position_dx(old: &Trace, new: &Trace, slots: usize, pixel_w: usize, n: usize) -> Option<usize> {
+    let old_x = point_xs(old, slots, pixel_w);
+    let new_x = point_xs(new, slots, pixel_w);
+    if old_x.len() != new_x.len() || n >= old_x.len() {
+        return None;
+    }
+    let mut dx = None;
+    for (left, right) in new_x[..old_x.len() - n].iter().zip(&old_x[n..]) {
+        match (left, right) {
+            (None, None) => {}
+            (Some(left), Some(right)) => {
+                let d = right.checked_sub(*left)?;
+                if d == 0 {
+                    return None;
+                }
+                if *dx.get_or_insert(d) != d {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    let dx = dx?;
+    let origin = pixel_w.checked_sub(dx + 1)?;
+    for x in new_x[old_x.len() - n..].iter().flatten() {
+        if *x < origin {
+            return None;
+        }
+    }
+    Some(dx)
+}
+
+fn point_xs(trace: &Trace, slots: usize, pixel_w: usize) -> Vec<Option<usize>> {
+    if slots == 0 || pixel_w == 0 {
+        return Vec::new();
+    }
+    let start = if trace.positions.is_some() {
+        0
+    } else {
+        trace.values.len().saturating_sub(slots)
+    };
+    let values = &trace.values[start..];
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, value)| {
+            value.filter(|v| v.is_finite()).and_then(|_| {
+                if let Some(positions) = &trace.positions {
+                    let x = *positions.get(start + i)?;
+                    if !x.is_finite() || !(0.0..=1.0).contains(&x) {
+                        return None;
+                    }
+                    Some((x * (pixel_w - 1) as f64).round() as usize)
+                } else {
+                    let age = values.len() - 1 - i;
+                    Some(
+                        pixel_w
+                            - 1
+                            - ((age as f64 * (pixel_w - 1) as f64)
+                                / slots.saturating_sub(1).max(1) as f64)
+                                .round() as usize,
+                    )
+                }
+            })
+        })
+        .collect()
+}
+
+fn column_rgba(rgba: &[u8], img_w: usize, col_x: usize, col_w: usize) -> Vec<u8> {
+    let row = img_w * 4;
+    let h = rgba.len() / row;
+    let mut out = Vec::with_capacity(col_w * h * 4);
+    for y in 0..h {
+        let start = y * row + col_x * 4;
+        out.extend_from_slice(&rgba[start..start + col_w * 4]);
+    }
+    out
+}
+
+fn frame_payload(id: u32, x: usize, w: usize, h: usize, raw: &[u8]) -> String {
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(raw, ZLIB_LEVEL);
+    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
+    let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
+    let mut out = String::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let more = usize::from(i + 1 < chunks.len());
+        if i == 0 {
+            out.push_str(&format!(
+                "\x1b_Ga=f,f=32,t=d,o=z,s={w},v={h},x={x},y=0,i={id},r=1,X=1,q=1,m={more};"
+            ));
+        } else {
+            // Later chunks of a frame still name the action.
+            out.push_str(&format!("\x1b_Ga=f,m={more};"));
+        }
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        out.push_str("\x1b\\");
+    }
+    out
+}
+
 fn image_rgba(
     plot: &Plot,
     slot: usize,
@@ -1559,6 +2008,20 @@ pub(crate) fn cropped_chart_command(plot: &Plot, pane_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_meter_between_chosen_stops_keeps_them_unless_they_would_not_read() {
+        let floor = 4.5 * (luminance([38, 56, 76]) + 0.05) - 0.05;
+        // Readable already: kept exactly, not washed toward white.
+        assert_eq!(readable_on_tint([60, 180, 166], 0.0), [60, 180, 166]);
+        // Perplexity's own brand teal is too dark for the tint: lifted to it.
+        let lifted = readable_on_tint([32, 128, 141], 0.0);
+        assert_ne!(lifted, [32, 128, 141]);
+        assert!(luminance(lifted) >= floor, "{lifted:?}");
+        let plot = Plot::gradient_meter_between(0, 0, 10, 0.5, None, [32, 128, 141], [112, 214, 198], "", "");
+        let fill = plot.fill.as_ref().unwrap();
+        assert_eq!(fill.gradients, vec![(1, [112, 214, 198])]);
+    }
     fn chart(values: Vec<Option<f64>>) -> LineChart {
         LineChart {
             slots: values.len(),
@@ -2033,6 +2496,22 @@ mod tests {
     }
 
     #[test]
+    fn an_https_link_does_not_move_the_cells_a_plot_replaces() {
+        // The URL contains `m`. A scan that stops there treats the rest of
+        // the target as columns, so the plot lands early and splits the
+        // escape. The four dots are still the cells that get replaced.
+        let visible = "axis│....│unit";
+        let linked = super::super::link("https://example.com/opscope", visible);
+        let replaced = replace_cells(&linked, 5, 4, "plot");
+        assert_eq!(super::super::strip_escapes(&replaced), "axis│plot│unit");
+        assert!(
+            replaced.contains("\x1b]8;;https://example.com/opscope\x1b\\"),
+            "the opener was split: {replaced:?}"
+        );
+        assert!(replaced.contains("\x1b]8;;\x1b\\"), "{replaced:?}");
+    }
+
+    #[test]
     fn an_idle_run_stays_blank_but_activity_reaches_the_baseline() {
         let mut c = chart(vec![Some(0.0); 5]);
         c.traces[0].baseline = Some(0.0);
@@ -2162,6 +2641,7 @@ mod tests {
     #[test]
     fn image_cache_reuses_unchanged_plots_and_deletes_on_fallback_or_screen_change() {
         let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
         let p = Plot::new(2, 1, 10, 3, chart(vec![Some(0.2), Some(0.8)]));
         let rows = vec!["protected title".into(), "axis".into()];
         let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, false, true, false);
@@ -2605,5 +3085,389 @@ mod tests {
             eprintln!("captured {w}x{h} RGBA raw={} level={level} bytes={bytes} mean={:?}",
                 pixels.len(), started.elapsed() / 20);
         }
+    }
+
+    /// `compose` keeps one process-wide image cache. Tests that drive it
+    /// hold this for the whole test so a parallel run cannot swap the cache
+    /// between two of their calls.
+    fn compose_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::test_lock()
+    }
+
+    /// Turns frames on for this thread and off again, including on panic.
+    struct FramesOn;
+    impl FramesOn {
+        fn new() -> Self {
+            FRAMES.with(|cell| cell.set(true));
+            Self
+        }
+    }
+    impl Drop for FramesOn {
+        fn drop(&mut self) {
+            FRAMES.with(|cell| cell.set(false));
+        }
+    }
+
+    fn slide(values: Vec<Option<f64>>, extra: Option<f64>) -> (Plot, Plot) {
+        let old = Plot::new(2, 1, 8, 3, chart(values.clone()));
+        let mut next = values;
+        next.remove(0);
+        next.push(extra);
+        let new = Plot::new(2, 1, 8, 3, chart(next));
+        (old, new)
+    }
+
+    fn assert_pixels_match(got: &[u8], want: &[u8]) {
+        assert_eq!(got.len(), want.len());
+        let row = 64 * 4;
+        for (i, (a, b)) in got.iter().zip(want).enumerate() {
+            if a != b {
+                panic!(
+                    "pixel mismatch at x={} y={} byte {}: got {a} want {b}",
+                    (i % row) / 4,
+                    i / row,
+                    i % 4
+                );
+            }
+        }
+    }
+
+    fn spliced(old: &[u8], new: &[u8], img_w: usize, dx: usize) -> Vec<u8> {
+        let col_w = dx + 1;
+        let col_x = img_w - col_w;
+        let row = img_w * 4;
+        let h = new.len() / row;
+        let mut out = vec![0u8; new.len()];
+        for y in 0..h {
+            let row_at = y * row;
+            out[row_at..row_at + 4].copy_from_slice(&new[row_at..row_at + 4]);
+            for x in 1..col_x {
+                let src = (y * img_w + x + dx) * 4;
+                let dst = (y * img_w + x) * 4;
+                out[dst..dst + 4].copy_from_slice(&old[src..src + 4]);
+            }
+            let at = (y * img_w + col_x) * 4;
+            out[at..at + col_w * 4].copy_from_slice(&new[at..at + col_w * 4]);
+        }
+        out
+    }
+
+    fn trace_of(values: &[f64]) -> Trace {
+        Trace {
+            positions: None,
+            values: values.iter().copied().map(Some).collect(),
+            colour: super::super::rgb(30, 220, 180),
+            baseline: None,
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_trace_does_not_borrow_another_traces_shift() {
+        // Eight slots. The repeated trace matches shifts of two, four and
+        // six samples, not one. A sibling that uniquely slid by one must
+        // not drag it along: a nine-pixel shift is not that trace.
+        let repeating = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.2, 0.8];
+        let repeating_next = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.3, 0.4];
+        let unique: Vec<f64> = (1..=8).map(|i| i as f64 / 10.0).collect();
+        let mut unique_next = unique[1..].to_vec();
+        unique_next.push(0.9);
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&repeating), trace_of(&unique)],
+                &[trace_of(&repeating_next), trace_of(&unique_next)],
+                8,
+            ),
+            None
+        );
+        let old = Plot::new(2, 1, 8, 3, chart(repeating.into_iter().map(Some).collect()));
+        let new = Plot::new(
+            2,
+            1,
+            8,
+            3,
+            chart(repeating_next.into_iter().map(Some).collect()),
+        );
+        assert!(spliced(&pixels(&old), &pixels(&new), 64, 9) != pixels(&new));
+
+        // [0, 1, 0, 1, 0, 1] → [0, 1, 0, 1, 0.2, 0.3] matches two and four, not three.
+        let periodic = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let periodic_next = [0.0, 1.0, 0.0, 1.0, 0.2, 0.3];
+        let six: Vec<f64> = (1..=6).map(|i| i as f64 / 10.0).collect();
+        let six_next = vec![0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&periodic), trace_of(&six)],
+                &[trace_of(&periodic_next), trace_of(&six_next)],
+                6,
+            ),
+            None
+        );
+
+        // A constant series matches every shift, including the unique one.
+        let flat = [0.5; 8];
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&flat), trace_of(&unique)],
+                &[trace_of(&flat), trace_of(&unique_next)],
+                8,
+            ),
+            Some(1)
+        );
+
+        // Positions keep their own candidate shifts. These match two and
+        // four, while the values uniquely match one.
+        let mut old_pos = trace_of(&unique);
+        let mut new_pos = trace_of(&unique_next);
+        old_pos.positions = Some(repeating.to_vec());
+        new_pos.positions = Some(repeating_next.to_vec());
+        assert_eq!(shared_slide(&[old_pos], &[new_pos], 8), None);
+    }
+
+    #[test]
+    fn an_ambiguous_chart_is_uploaded_whole_and_a_constant_trace_may_slide() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["protected title".into(), "axis".into()];
+        let repeating = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.2, 0.8];
+        let repeating_next = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.3, 0.4];
+        let unique: Vec<f64> = (1..=8).map(|i| i as f64 / 10.0).collect();
+        let mut unique_next = unique[1..].to_vec();
+        unique_next.push(0.9);
+        let old = Plot::new(2, 1, 8, 3, chart_of(&[&repeating[..], &unique]));
+        let new = Plot::new(
+            2,
+            1,
+            8,
+            3,
+            chart_of(&[&repeating_next[..], unique_next.as_slice()]),
+        );
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, _, bytes) = compose(&rows, &[new], 40, 8, true, false, false, false);
+        assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+
+        let flat = [0.5; 8];
+        let old = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], &unique]));
+        let new = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], unique_next.as_slice()]));
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, false, false);
+        assert!(
+            before.is_empty()
+                && after.contains("a=c")
+                && after.contains("a=f")
+                && !after.contains("a=T")
+        );
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    fn chart_of(traces: &[&[f64]]) -> LineChart {
+        let mut chart = chart(traces[0].iter().copied().map(Some).collect());
+        for values in &traces[1..] {
+            chart.traces.push(trace_of(values));
+        }
+        chart
+    }
+
+    #[test]
+    fn a_one_sample_shift_matches_a_full_raster() {
+        // 8 cells, 8 slots: (64 - 1) / 7 = 9, a whole number of pixels.
+        let samples = vec![
+            Some(0.2),
+            Some(0.5),
+            None,
+            Some(0.8),
+            Some(0.15),
+            Some(0.6),
+            Some(0.35),
+            Some(0.9),
+        ];
+        let (old, new) = slide(samples, Some(0.4));
+        let dx = slide_dx(&old.chart.traces, &new.chart.traces, 8, 64, 1).unwrap();
+        assert_eq!(dx, 9);
+        assert_pixels_match(
+            &spliced(&pixels(&old), &pixels(&new), 64, dx),
+            &pixels(&new),
+        );
+
+        let mut flat = chart(vec![Some(0.5); 8]);
+        flat.traces[0].baseline = Some(0.0);
+        let old = Plot::new(0, 1, 8, 3, flat.clone());
+        let mut next = flat;
+        next.traces[0].values.remove(0);
+        next.traces[0].values.push(Some(0.7));
+        let new = Plot::new(0, 1, 8, 3, next);
+        let dx = slide_dx(&old.chart.traces, &new.chart.traces, 8, 64, 1).unwrap();
+        assert_eq!(dx, 9);
+        assert_pixels_match(
+            &spliced(&pixels(&old), &pixels(&new), 64, dx),
+            &pixels(&new),
+        );
+    }
+
+    #[test]
+    fn frame_edits_match_full_rasters_at_reported_cell_sizes() {
+        let old = Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.5)]));
+        let new = Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.5), Some(0.9)]));
+        for cell in [(8, 16), (20, 40)] {
+            let w = new.width * cell.0;
+            let h = new.visible_rows * cell.1;
+            let before = raster_pixels(&old, old.width, cell.0, cell.1);
+            let after = raster_pixels(&new, new.width, cell.0, cell.1);
+            let dx = (w - 1) / 3;
+            let edit = frame_edit(&old, &new, 0, 40, cell, &after).expect("whole-pixel slide");
+            assert!(edit.contains(&format!("w={},h={h}", w - dx)));
+            assert_eq!(frame_column(&edit, 0), column_rgba(&after, w, 0, 1));
+            assert_eq!(frame_column(&edit, w - dx - 1), column_rgba(&after, w, w - dx - 1, dx + 1));
+            assert_eq!(spliced(&before, &after, w, dx), after);
+        }
+        let mut moved = new.clone();
+        moved.y += 1;
+        assert!(frame_edit(&old, &moved, 0, 40, (8, 16), &pixels(&moved)).is_none());
+        assert!(frame_edit(&old, &new.clone().under_text(), 0, 40, (8, 16), &pixels(&new)).is_none());
+    }
+
+    #[test]
+    fn a_sample_tick_sends_a_frame_edit_and_a_rescale_sends_the_image() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["protected title".into(), "axis".into()];
+        let (old, new) = slide(
+            vec![
+                Some(0.2),
+                Some(0.5),
+                Some(0.1),
+                Some(0.8),
+                Some(0.4),
+                Some(0.6),
+                Some(0.3),
+                Some(0.9),
+            ],
+            Some(0.15),
+        );
+        // Until the probe succeeds, a tick is still a full upload.
+        FRAMES.with(|cell| cell.set(false));
+        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, false, true, false);
+        assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
+        let (_, _, bytes) = compose(&rows, &[new.clone()], 40, 8, true, false, false, false);
+        assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+
+        FRAMES.with(|cell| cell.set(true));
+        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, false, true, false);
+        assert!(bytes.contains("a=T"));
+        let (_, before, after) = compose(&rows, &[new.clone()], 40, 8, true, false, false, false);
+        assert!(
+            before.is_empty()
+                && after.contains("a=c")
+                && after.contains("a=f")
+                && !after.contains("a=T"),
+            "tick should edit the held image"
+        );
+        assert!(after.contains("r=1"), "the column edits the root frame");
+        let rgba = pixels(&new);
+        assert_eq!(frame_column(&after, 0), column_rgba(&rgba, 64, 0, 1));
+        assert_eq!(frame_column(&after, 54), column_rgba(&rgba, 64, 54, 10));
+
+        let mut scaled = new.clone();
+        scaled.chart.traces[0].values[3] = Some(0.05);
+        let (_, before, after) = compose(&rows, &[scaled], 40, 8, true, false, false, false);
+        // A replacement upload does not delete the image first. That gap is
+        // what an acknowledgement would paint over while the new pixels arrive.
+        assert!(before.is_empty() && after.contains("a=T") && !after.contains("a=c"));
+
+        let (old, new) = slide(
+            vec![
+                Some(0.2),
+                Some(0.5),
+                Some(0.1),
+                Some(0.8),
+                Some(0.4),
+                Some(0.6),
+                Some(0.3),
+                Some(0.9),
+            ],
+            Some(0.15),
+        );
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, true, false);
+        assert!(before.contains("a=d") && after.contains("a=T") && !after.contains("a=c"));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn netwatch_bytes_drop_only_when_the_slot_pitch_is_whole_pixels() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["title".into()];
+        // 64 cells is one netwatch trace on an 80-column pane. A full window
+        // is two samples per cell, and (512 - 1) is not divisible by 127.
+        let steady = netwatch_plot(64, 4, 128);
+        let steady_next = slid_plot(&steady);
+        compose(&rows, &[steady], 80, 12, true, false, true, false);
+        let (_, _, today) = compose(&rows, &[steady_next], 80, 12, true, false, false, false);
+        assert!(today.contains("a=T") && !today.contains("a=c"));
+        compose(&rows, &[], 80, 12, true, false, false, false);
+
+        // 74 samples on that same width: (512 - 1) / 73 = 7.
+        let early = netwatch_plot(64, 4, 74);
+        let early_next = slid_plot(&early);
+        let (_, _, full) = compose(&rows, &[early], 80, 12, true, false, true, false);
+        let full_bytes = full.len();
+        let (_, _, edit) = compose(&rows, &[early_next], 80, 12, true, false, false, false);
+        assert!(edit.contains("a=c") && edit.contains("a=f") && !edit.contains("a=T"));
+        assert!(edit.len() < full_bytes);
+        compose(&rows, &[], 80, 12, true, false, false, false);
+    }
+
+    fn netwatch_plot(width: usize, height: usize, slots: usize) -> Plot {
+        // Prime modulus wider than the window, so the one-sample slide is the
+        // only match. A short period also matches a longer shift and the
+        // frame path refuses to guess.
+        let values: Vec<_> = (0..slots)
+            .map(|i| Some((i as f64 * 37.0 % 251.0) / 250.0))
+            .collect();
+        let mut plot = chart(values);
+        plot.traces[0].baseline = Some(0.0);
+        Plot::new(12, 2, width, height, plot)
+    }
+
+    fn slid_plot(plot: &Plot) -> Plot {
+        let mut next = plot.clone();
+        next.chart.traces[0].values.remove(0);
+        next.chart.traces[0].values.push(Some(0.42));
+        next
+    }
+
+    fn frame_column(command: &str, x: usize) -> Vec<u8> {
+        let mut payload = String::new();
+        let mut taking = false;
+        let origin = format!("x={x}");
+        for chunk in command.split("\x1b_G").skip(1) {
+            let (keys, data) = chunk
+                .split_once(';')
+                .unwrap_or((chunk.trim_end_matches("\x1b\\"), ""));
+            let data = data.trim_end_matches("\x1b\\");
+            if keys.contains("a=f")
+                && keys.contains("r=1")
+                && keys.split(',').any(|key| key == origin)
+            {
+                taking = true;
+            } else if taking && !keys.contains("a=f") {
+                break;
+            }
+            if taking {
+                payload.push_str(data);
+                if keys.contains("m=0") {
+                    break;
+                }
+            }
+        }
+        let encoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap()
     }
 }

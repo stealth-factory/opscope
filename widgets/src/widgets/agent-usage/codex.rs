@@ -136,15 +136,14 @@ impl Data {
             }),
             bank: bank.map(|(left, soonest)| crate::parse::ResetBank {
                 left,
-                credits: match soonest {
-                    Some(expiry) if left > 0 => (0..left)
-                        .map(|i| crate::parse::ResetCredit {
-                            title: None,
-                            expiry: Some(expiry + i as f64 * 86_400.0),
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                },
+                // One entry per reset, as the parser always gives: dated a
+                // day apart from `soonest`, or undated when it is not set.
+                credits: (0..left)
+                    .map(|i| crate::parse::ResetCredit {
+                        title: None,
+                        expiry: soonest.map(|at| at + i as f64 * 86_400.0),
+                    })
+                    .collect(),
             }),
             ..Self::default()
         }
@@ -988,43 +987,82 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     )
 }
 
-/// Unused reset credits still in the account.
+/// Unused reset credits still in the account, under the quota windows.
 ///
-/// Drawn under the quota windows. The section is one row pair per credit the
-/// inventory listed: that credit's `title`, then `Expires` and the local
-/// datetime. A credit with no title gets no title line. A credit with no
-/// readable expiry still has its row, and the date says it is unknown.
-/// Rows inside a section sit together, the same way the quota lanes do, so
-/// there is no blank line between credits.
+/// An inventory that was not read draws no section at all; see
+/// `bank_section` for everything else.
 fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let Some(bank) = d.bank.as_ref() else {
-        return Vec::new();
-    };
+    match d.bank.as_ref() {
+        Some(bank) => bank_section(bank, &[], w, p),
+        None => Vec::new(),
+    }
+}
+
+/// The `BANK RESET` section, the one layout Codex and Claude both draw.
+///
+/// The title carries the count - `── 1 BANK RESET ──`, `── 2 BANK RESETS ──`,
+/// `── 0 BANK RESETS ──` - and drops its rules and wraps on its words in a
+/// pane too narrow for it, so the count is never what gets cut. Under it
+/// is one row per reset, each with its
+/// own expiry, soonest first and undated last, exactly as the parser
+/// ordered them. Two resets that end at the same moment are still two
+/// rows: nothing is merged or counted together, so the rows under the
+/// number are that number. A row is the reset's kind when the inventory
+/// names one (`Full reset`) and `Reset` when it does not, then
+/// `· expires` and the local datetime with the year and the zone, or
+/// `· expiry not given`. A row too wide for the pane keeps its words
+/// together and moves the datetime to the following lines, broken between
+/// its parts, the way the `[+]` line does. Zero is the title and
+/// `None in the account.` `notes` follow the rows; Claude passes its
+/// reading's age there.
+///
+/// Codex and Claude both draw theirs through here, so the two tabs cannot
+/// drift apart again. An unread inventory is the caller drawing no section
+/// rather than calling this with nothing to put in it.
+pub(crate) fn bank_section(
+    bank: &crate::parse::ResetBank,
+    notes: &[String],
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     let room = w.saturating_sub(1);
-    let mut rows = vec![tc::seg(
-        &[(p.lbl.as_str(), " ── BANK RESET ── ".into())],
-        room,
-    )];
-    if bank.credits.is_empty() {
-        let line = if bank.left == 0 {
-            "None in the account.".to_string()
-        } else {
-            format!("{} reset available", bank.left)
-        };
-        push_visible(&mut rows, &line, room, p.dim.as_str());
-        return rows;
+    let n = bank.credits.len();
+    let words = format!("{n} BANK {}", if n == 1 { "RESET" } else { "RESETS" });
+    let title = format!(" ── {words} ── ");
+    let mut rows = Vec::new();
+    if tc::display_width(&title) <= room {
+        rows.push(tc::seg(&[(p.lbl.as_str(), title)], room));
+    } else {
+        // The rules go before a word does: clipping the title took the count.
+        push_wrapped(&mut rows, &words, room, p.lbl.as_str(), 1);
+    }
+    if n == 0 {
+        push_visible(&mut rows, "None in the account.", room, p.dim.as_str());
     }
     for credit in &bank.credits {
-        if let Some(title) = &credit.title {
-            push_visible(&mut rows, title, room, p.txt.as_str());
+        let kind = credit.title.as_deref().unwrap_or("Reset");
+        match credit.expiry.and_then(local_expiry) {
+            Some(stamp) => push_split(&mut rows, &format!("{kind} · expires"), &stamp, room, p.txt.as_str(), 2),
+            None => push_visible(&mut rows, &format!("{kind} · expiry not given"), room, p.txt.as_str()),
         }
-        let when = match credit.expiry.and_then(local_expiry) {
-            Some(stamp) => format!("Expires {stamp}"),
-            None => "Expires date unknown".to_string(),
-        };
-        push_visible(&mut rows, &when, room, p.dim.as_str());
+    }
+    for note in notes {
+        push_visible(&mut rows, note, room, p.dim.as_str());
     }
     rows
+}
+
+/// `head stamp` on one line when it fits; otherwise `head` wrapped on its
+/// words and the stamp after it, broken between its parts.
+fn push_split(rows: &mut Vec<String>, head: &str, stamp: &str, room: usize, colour: &str, indent: usize) {
+    let indent_now = if room > indent { indent } else { 0 };
+    let whole = format!("{}{head} {stamp}", " ".repeat(indent_now));
+    if room > 0 && tc::display_width(&whole) <= room {
+        rows.push(tc::seg(&[(colour, whole)], room));
+        return;
+    }
+    push_wrapped(rows, head, room, colour, indent);
+    push_wrapped(rows, stamp, room, colour, indent);
 }
 
 /// `expires_at` as a local datetime, with the zone named.
@@ -1155,7 +1193,7 @@ fn split_summary(line: &str) -> (String, Option<String>) {
 ///
 /// An empty list is a count with no dates. The first dated credit is not
 /// called the soonest while a later credit's date is unknown.
-fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank) -> Option<String> {
+pub(crate) fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank) -> Option<String> {
     if bank.credits.is_empty() {
         return None;
     }
@@ -1321,7 +1359,13 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
             rows.push(String::new());
         }
     }
-    rows = add_section(rows, codex_bank_rows(d, w, p));
+    let bank = codex_bank_rows(d, w, p);
+    if !bank.is_empty() {
+        // One empty row before whatever follows, as on the Claude tab, so
+        // the next line is not read as part of the bank.
+        rows = add_section(rows, bank);
+        rows.push(String::new());
+    }
     if !d.ok {
         // The quota above is the account's and is true whatever this machine
         // has on disk, so it stays; only the local half is missing.
@@ -2012,17 +2056,15 @@ mod tests {
         };
         let wide = shown(&codex_bank_rows(&d, 200, &p));
         assert_eq!(wide, vec![
-            " ── BANK RESET ──".to_string(),
-            "  Full reset".to_string(),
-            format!("  Expires {soon_row}"),
-            "  Full reset".to_string(),
-            format!("  Expires {later_row}"),
-            "  Expires date unknown".to_string(),
+            " ── 3 BANK RESETS ──".to_string(),
+            format!("  Full reset · expires {soon_row}"),
+            format!("  Full reset · expires {later_row}"),
+            "  Reset · expiry not given".to_string(),
         ]);
         let on_tab = tab(&d, 200, 40, &cfg, &p).join("\n");
         let soon_at = on_tab.find(&soon_row).expect("the soon expiry");
         let later_at = on_tab.find(&later_row).expect("the later expiry");
-        let unknown_at = on_tab.find("date unknown").expect("the unknown date");
+        let unknown_at = on_tab.find("expiry not given").expect("the unknown date");
         assert!(soon_at < later_at && later_at < unknown_at);
         assert!(!on_tab.contains("⏱"), "{on_tab}");
         assert!(!on_tab.contains("does not expire"), "{on_tab}");
@@ -2045,16 +2087,14 @@ mod tests {
         );
 
         let count_only = Data {
-            bank: Some(crate::parse::ResetBank {
-                left: 2,
-                credits: Vec::new(),
-            }),
+            bank: crate::parse::parse_codex_reset_credits(r#"{"available_count":2}"#, 0.0),
             ..d.clone()
         };
         let count_only = shown(&codex_bank_rows(&count_only, 200, &p));
         assert_eq!(count_only, vec![
-            " ── BANK RESET ──".to_string(),
-            "  2 reset available".to_string(),
+            " ── 2 BANK RESETS ──".to_string(),
+            "  Reset · expiry not given".to_string(),
+            "  Reset · expiry not given".to_string(),
         ]);
 
         let unreadable = Data {
@@ -2068,7 +2108,8 @@ mod tests {
             ..d.clone()
         };
         let unreadable = shown(&codex_bank_rows(&unreadable, 200, &p)).join("\n");
-        assert!(unreadable.contains("Expires date unknown"), "{unreadable}");
+        assert!(unreadable.contains(" ── 1 BANK RESET ──"), "{unreadable}");
+        assert!(unreadable.contains("Reset · expiry not given"), "{unreadable}");
         assert!(
             !unreadable.contains("Full reset"),
             "a missing title was invented: {unreadable}"
@@ -2086,8 +2127,13 @@ mod tests {
             }),
             ..d.clone()
         };
-        let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
-        assert!(rows.contains("BANK RESET"), "{rows}");
+        let lines: Vec<String> = shown(&tab(&bare, 80, 40, &cfg, &p));
+        let rows = lines.join("\n");
+        assert!(rows.contains(" ── 0 BANK RESETS ──"), "{rows}");
+        // One empty row between the bank and what follows it, as on Claude's tab.
+        let none_at = lines.iter().position(|l| l.contains("None in the account")).expect("the zero");
+        assert!(lines[none_at + 1].is_empty(), "{rows}");
+        assert!(lines[none_at + 2].contains("No session rollouts"), "{rows}");
         assert!(rows.contains("None in the account"), "{rows}");
         assert!(
             !rows.contains("reset available"),
@@ -2098,7 +2144,7 @@ mod tests {
             "a real zero is not described as still available: {rows}"
         );
         assert!(rows.contains("No session rollouts"), "{rows}");
-        assert!(!rows.contains("date unknown"), "{rows}");
+        assert!(!rows.contains("expiry not given"), "{rows}");
         assert!(!rows.contains("expires in"), "{rows}");
     }
 
@@ -2237,17 +2283,67 @@ mod tests {
         );
 
         let count_only = Data {
-            bank: Some(crate::parse::ResetBank {
-                left: 2,
-                credits: Vec::new(),
-            }),
+            bank: crate::parse::parse_codex_reset_credits(r#"{"available_count":2}"#, 0.0),
             ..Data::default()
         };
         let count_only = shown(&codex_bank_rows(&count_only, 8, &p));
         let flat: String = count_only.iter().map(|row| row.trim()).collect();
-        assert!(
-            flat.contains("2resetavailable"),
-            "the count lost its label: {count_only:#?}"
+        assert_eq!(
+            flat.matches("Reset·expirynotgiven").count(),
+            2,
+            "a reset lost its row: {count_only:#?}"
+        );
+    }
+
+    #[test]
+    fn a_heading_too_wide_for_the_pane_wraps_and_keeps_its_count() {
+        let p = palette();
+        let d = Data {
+            bank: crate::parse::parse_codex_reset_credits(r#"{"available_count":12}"#, 0.0),
+            ..Data::default()
+        };
+        // From 8, where `Reset` itself still fits whole and so marks where
+        // the heading ends.
+        for w in 8..=24 {
+            let rows = shown(&codex_bank_rows(&d, w, &p));
+            let heading: Vec<&str> = rows
+                .iter()
+                .take_while(|row| !row.contains("Reset"))
+                .flat_map(|row| row.split_whitespace())
+                .collect();
+            assert_eq!(
+                heading.concat().replace('─', ""),
+                "12BANKRESETS",
+                "the heading lost a word at {w} columns: {rows:#?}"
+            );
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) < w,
+                    "a row is wider than the pane at {w} columns: {rows:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_credits_ending_together_are_two_rows_and_agree_with_the_summary() {
+        let p = palette();
+        let inventory = r#"{"available_count":2,"credits":[
+            {"status":"available","title":"Full reset","expires_at":"2126-01-02T00:00:00Z"},
+            {"status":"available","title":"Full reset","expires_at":"2126-01-02T00:00:00Z"}
+        ]}"#;
+        let d = Data { bank: bank_of(Some(inventory), 0.0), ..Data::default() };
+        let at = iso_epoch("2126-01-02T00:00:00Z").unwrap();
+        let row = format!("  Full reset · expires {}", local_expiry(at).unwrap());
+        assert_eq!(shown(&codex_bank_rows(&d, 120, &p)), vec![
+            " ── 2 BANK RESETS ──".to_string(),
+            row.clone(),
+            row,
+        ]);
+        // The [+] line is the same count and the same soonest date.
+        assert_eq!(
+            d.reset_summary_line().as_deref(),
+            Some(format!("2 reset available {}", summary_expiry(at).unwrap()).as_str())
         );
     }
 
@@ -2300,7 +2396,7 @@ mod tests {
         assert!(missed.get("usage_miss").is_some());
         let bank = bank_of(missed["bank"].as_str(), 0.0).expect("the count");
         assert_eq!(bank.left, 2);
-        assert!(bank.credits.is_empty());
+        assert!(bank.credits.iter().all(|c| c.expiry.is_none()), "a count is not given dates");
 
         let usage = serde_json::json!({"plan_type": "pro"});
         let both = live_payload(Some(usage), Some(inventory.to_string())).expect("both");

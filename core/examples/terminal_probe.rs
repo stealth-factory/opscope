@@ -13,6 +13,9 @@ fn main() {
     let mut moving_meter = false;
     let mut tick = 0_u64;
     let mut selected = 0_usize;
+    // Four slots on an 80-column fixture: the chart is 74 cells wide, and
+    // (74 * 8 - 1) is divisible by 3, so one new sample is a whole-pixel shift.
+    let mut series = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -33,6 +36,15 @@ fn main() {
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
+                "n" => {
+                    tc::notify("Pomodoro", "Focus elapsed");
+                    tc::notify("Pomodoro", "Focus elapsed, 0:01:00 over");
+                }
+                "t" => {
+                    series.remove(0);
+                    series.push(Some(0.9));
+                }
+                "s" => series[1] = Some(0.05),
                 "h" => {
                     keyboard.restore();
                     tc::restore_screen();
@@ -59,7 +71,17 @@ fn main() {
                 w,
                 &tc::rgb(180, 210, 220),
             ),
-            "  axes and labels remain text".into(),
+            // The visible label is unchanged. The https OSC 8 is what a
+            // terminal that understands links opens; the http target and
+            // the OSC 52 are what `inert` has to drop before the row is
+            // written.
+            format!(
+                "{}\x1b]8;;http://opscope.invalid\x1b\\\x1b]8;;\x1b\\\x1b]52;c;ZmFrZQ==\x07\x1b]8;;https://example.com/source-pane\x1b\\ source pane text\x1b]8;;\x1b\\",
+                tc::link(
+                    "https://example.com/opscope-probe",
+                    "  axes and labels remain text",
+                )
+            ),
         ];
         // Synthetic samples so the PTY test can see underline bytes. The
         // words stay the same whether the terminal answers the query.
@@ -87,7 +109,7 @@ fn main() {
         );
         // Row 2 is the chart. These words sit on the first row under it,
         // which the chart does not paint over.
-        let samples = tc::seg(
+        let marks = tc::seg(
             &[
                 (stale.as_str(), " stale".into()),
                 (partial.as_str(), " partial".into()),
@@ -95,25 +117,25 @@ fn main() {
             ],
             w.saturating_sub(1),
         );
+        // Eight columns, plus the space in front of the sequence. Scale 2
+        // needs 16 for the time. A narrow pane keeps the line off the frame.
+        // The underline sample owns the first row under the chart, so the
+        // sized face starts on the next one. A plot spliced into the sized
+        // row would make that row wider than the pane, and the frame would
+        // drop the sizing.
+        let sample = "12:34:56";
+        let scale = tc::text_scale(
+            sample.len(),
+            w.saturating_sub(3),
+            h.saturating_sub(9),
+            4,
+        );
         let chart = tc::LineChart {
-            slots: 12,
+            slots: series.len(),
             focus: None,
             traces: vec![tc::Trace {
-                positions: Some((0..12).map(|i| i as f64 / 11.0).collect()),
-                values: vec![
-                    Some(0.1),
-                    Some(0.6),
-                    Some(0.4),
-                    None,
-                    None,
-                    Some(0.2),
-                    Some(0.5),
-                    Some(0.9),
-                    Some(0.6),
-                    Some(0.7),
-                    Some(0.3),
-                    Some(0.5),
-                ],
+                positions: None,
+                values: series.clone(),
                 colour: tc::rgb(50, 220, 170),
                 baseline: None,
             }],
@@ -185,7 +207,19 @@ fn main() {
             rows[2] = "   now".into();
         }
         if h > 9 {
-            rows[8] = samples;
+            rows[8] = marks;
+        }
+        // The last row is the selection label. The sized face needs `scale`
+        // rows under the underline sample and must not cover that label.
+        if scale > 1 && 9 + usize::from(scale) < h {
+            rows[9] = format!(
+                "{} {}",
+                tc::rgb(120, 255, 200),
+                tc::sized_text(sample, scale)
+            );
+            for extra in 1..scale {
+                rows[9 + extra as usize] = String::new();
+            }
         }
         rows[h - 1] = format!("SELECTED:{selected}");
         tc::draw_plots(&rows, w, h, &plots);

@@ -315,14 +315,13 @@ The receiver verifies the tag's commit, `.deb` checksum and metadata, retains
 immutable versions, rejects stale updates, signs indexes, tests APT installation,
 and publishes a complete Pages snapshot. A scheduled job refreshes metadata
 for existing packages before its 90-day expiry; it never polls for new releases.
-The current test schedule is daily at 19:30 Asia/Taipei; the intended steady
-schedule is monthly after live refresh validation.
+The refresh runs on the 1st of each month at 19:30 Asia/Taipei.
 Every successful tagged release sends the notification without an enable flag.
 The receiver runs on main and retains its publishing environment and signing
 checks. Missing signing or hosting configuration fails visibly instead of
 silently skipping publication.
-Signing credentials and Pages activation are managed in that repository and
-were not configured by these changes. Its operations guide documents the exact
+Signing credentials and Pages hosting are managed in that repository.
+Its operations guide documents the exact
 approval requirements, scoped key trust, expiration, rotation, and recovery.
 
 A failed APT import leaves GitHub/npm and the downloadable `.deb` available,
@@ -332,9 +331,9 @@ version; do not replace an existing version's bytes. A published old release
 without Debian assets is not backfilled automatically. The existing release
 retry behavior still skips an already published GitHub release.
 
-See [Debian installation](debian.md) for direct package use. Public tagged
-asset delivery and signed repository installation remain acceptance checks
-for the first approved activation/release, not claims made by PR-only tests.
+See [Debian installation](debian.md) for signed APT setup and direct package
+use. Public tagged asset delivery and signed repository installation are
+validated by publication workflows, not by PR-only tests.
 
 ## If something goes wrong
 

@@ -116,7 +116,7 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     if !(200..300).contains(&status) {
         return Err(vercel_refusal(status, &body));
     }
-    serde_json::from_str(&body).map_err(|e| e.to_string())
+    tc::parse_source_json(&body).map_err(|e| e.to_string())
 }
 
 /// What Vercel's refusal actually means, in words worth reading.
@@ -161,7 +161,7 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
     if !flat.contains("\"saml\":true") {
         return None;
     }
-    let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let body = tc::parse_source_json(body).unwrap_or_default();
     let message = body["error"]["message"].as_str().unwrap_or("");
     let slug = message
         .split_once("scope \"")
@@ -606,6 +606,12 @@ fn when(ms: Option<f64>) -> String {
     }
 }
 
+/// The dashboard address the copy list's first key copies. The commit
+/// subject, which is the deployment's title, links to the same URL.
+fn deployment_url(dep: &serde_json::Value) -> String {
+    text(dep, "inspectorUrl")
+}
+
 /// Everything worth copying out of a deployment.
 fn copy_items(dep: &serde_json::Value, detail: Option<&serde_json::Value>) -> Vec<(String, String)> {
     let meta = &dep["meta"];
@@ -615,7 +621,7 @@ fn copy_items(dep: &serde_json::Value, detail: Option<&serde_json::Value>) -> Ve
             items.push((label.to_string(), value));
         }
     };
-    push("Deployment dashboard", text(dep, "inspectorUrl"));
+    push("Deployment dashboard", deployment_url(dep));
     let branch_alias = text(meta, "branchAlias");
     if !branch_alias.is_empty() {
         push("Branch preview", format!("https://{}", branch_alias));
@@ -887,7 +893,7 @@ fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
         return vec![
             String::new(),
             tc::seg(&[(p.lbl.as_str(), " ── BUILD LOG ──".into())], w - 1),
-            tc::seg(&[(p.dim.as_str(), format!("  {}", err))], w - 1),
+            tc::seg(&[(p.dim.as_str(), format!("  {}", tc::source_text(err)))], w - 1),
         ];
     }
     let Some(lines) = events.as_array() else {
@@ -910,7 +916,9 @@ fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
         ),
     ];
     for event in lines {
-        let said = text(event, "text");
+        // Build output is source data, never widget-owned terminal markup.
+        // Sanitize before wrapping so even split escapes cannot survive.
+        let said = tc::source_text(&text(event, "text"));
         let said = said.trim_end();
         if said.is_empty() {
             continue;
@@ -1074,7 +1082,13 @@ fn info_overlay(
         let subject = text(meta, "githubCommitMessage");
         let subject = subject.lines().next().unwrap_or("");
         for line in wrap(subject, w.saturating_sub(4).max(10)) {
-            rows.push(tc::seg(&[(p.msg.as_str(), format!("  {}", line))], w - 1));
+            rows.push(tc::seg(
+                &[(
+                    p.msg.as_str(),
+                    format!("  {}", tc::link(&deployment_url(dep), &line)),
+                )],
+                w - 1,
+            ));
         }
         let who = match text(meta, "githubCommitAuthorName") {
             name if !name.is_empty() => name,
@@ -2421,6 +2435,25 @@ mod tests {
     /// it arrives on stderr among dozens of stdout lines that all look the
     /// same. Vercel marks them; this checks we keep the mark.
     #[test]
+    fn build_log_cannot_supply_hyperlinks_or_terminal_markup() {
+        let detail = serde_json::json!({"_events": [
+            {"type": "stdout", "text": "\u{1b}]8;;https://example.com/untrusted\u{1b}\\Build finished\u{1b}]8;;\u{1b}\\"},
+            {"type": "stderr", "text": "\u{1b}]8;;https://example.com/untrusted\u{7}Check failed"},
+            {"type": "stdout", "text": "\u{1b}[31mfix:\tparser\u{1b}[0m"}
+        ]});
+        for width in [20, 90] {
+            let rows = build_log(&detail, width, &palette());
+            let joined = rows.join("\n");
+            assert!(!joined.contains("\u{1b}]8;"), "{joined:?}");
+            assert!(!joined.contains("example.com"), "{joined:?}");
+            assert!(!joined.contains("\u{1b}[31m"), "{joined:?}");
+            assert!(joined.contains("Build finished"), "{joined:?}");
+            assert!(joined.contains("Check failed"), "{joined:?}");
+            assert!(joined.contains("fix: parser"), "{joined:?}");
+        }
+    }
+
+    #[test]
     fn the_build_log_picks_stderr_out_of_stdout() {
         let p = palette();
         let detail = serde_json::json!({
@@ -2551,6 +2584,36 @@ mod tests {
         // No branch alias, so no branch preview - an empty row would be a
         // key that copies nothing.
         assert!(!labels.contains(&"Branch preview"));
+        assert_eq!(items[0].1, deployment_url(&dep));
+    }
+
+    #[test]
+    fn the_commit_subject_links_the_dashboard_a_key_copies() {
+        let dep = serde_json::json!({
+            "inspectorUrl": "https://vercel.com/x",
+            "name": "app",
+            "state": "READY",
+            "meta": {
+                "githubCommitMessage": "ship the pane",
+                "githubCommitSha": "0123456789abcdef"
+            }
+        });
+        let url = "https://vercel.com/x";
+        assert_eq!(deployment_url(&dep), url);
+        assert_eq!(copy_items(&dep, None)[0].1, url);
+        // The fetched detail has no inspector URL. The subject still links
+        // the deployment the copy sheet lists first.
+        let detail = serde_json::json!({"readyState": "READY"});
+        let rows = info_overlay(&dep, Some(&detail), 80, 24, "", &palette(), None);
+        let subject = rows
+            .iter()
+            .find(|r| r.contains("ship the pane"))
+            .expect("commit subject");
+        assert!(subject.contains(&format!("\x1b]8;;{url}\x1b\\")), "{subject}");
+        assert_eq!(
+            tc::display_width(&tc::link(url, "ship the pane")),
+            tc::display_width("ship the pane")
+        );
     }
 
     #[test]

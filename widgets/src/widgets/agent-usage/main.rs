@@ -407,6 +407,18 @@ fn agent_family(name: &str) -> &str {
     name.split_once(':').map(|(head, _)| head).unwrap_or(name)
 }
 
+/// Perplexity's hue. Named, because its bars are drawn between their own
+/// two teals rather than on the shared ramp - see `bar_stops`.
+const PERPLEXITY_HUE: (u8, u8, u8) = (60, 180, 166);
+
+/// Bar stops for a hue the shared ramp washes out. The ramp mixes every hue
+/// 15% to 60% toward white, which took Perplexity's dark teal to a pale
+/// mint at the full end; its bars instead run from the hue to a brighter
+/// teal of the same family. Every other hue keeps the shared ramp.
+fn bar_stops(hue: (u8, u8, u8)) -> Option<([u8; 3], [u8; 3])> {
+    (hue == PERPLEXITY_HUE).then_some(([60, 180, 166], [112, 214, 198]))
+}
+
 fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
     Some(match agent_family(name) {
         "claude" => (240, 132, 84),
@@ -417,6 +429,10 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
+        // Perplexity's dark teal, its brand #20808D lifted only as far as
+        // reading needs: the brand measures 2.59 on the selected-row tint,
+        // this 4.72 there and 8.27 on black.
+        "perplexity" => PERPLEXITY_HUE,
         "devin" => (148, 214, 255),
         "droid" => (196, 214, 140),
         // The unified Cursor and Grok plan, in greyscale: the brand is
@@ -458,7 +474,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
     "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
-    "devin", "droid",
+    "perplexity", "devin", "droid",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -882,8 +898,15 @@ fn paced_bar_with_plot(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
-    let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
-    let plot = tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark);
+    let plot = match hue.and_then(bar_stops) {
+        Some((start, end)) => {
+            tc::Plot::gradient_meter_between(x, row, room, used, elapsed, start, end, &p.grid, &p.pace_mark)
+        }
+        None => {
+            let colour = hue.map(|h| tc::rgb(h.0, h.1, h.2)).unwrap_or_else(|| tc::heat(used));
+            tc::Plot::gradient_meter(x, row, room, used, elapsed, &colour, &p.grid, &p.pace_mark)
+        }
+    };
     let parts = plot.text_row(0).to_vec();
     plots.push(plot);
     parts
@@ -1890,6 +1913,11 @@ struct Config {
     /// The workspace to report, by id. Empty picks the first on a plan
     /// that has an allowance.
     notion_workspace: String,
+    /// Perplexity's web session cookie. Empty reads `perplexity_token_env`.
+    perplexity_token: String,
+    /// The environment variable holding that cookie when `perplexity_token`
+    /// is empty. Empty means `PERPLEXITY_SESSION_TOKEN`.
+    perplexity_token_env: String,
     /// Devin's bearer token. Empty reads `devin_token_env`.
     devin_token: String,
     /// The environment variable holding that token when `devin_token` is
@@ -1961,6 +1989,8 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
         notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
+        perplexity_token: tc::cfg_str(&raw, "perplexity_token", ""),
+        perplexity_token_env: tc::cfg_str(&raw, "perplexity_token_env", crate::perplexity::TOKEN_ENV),
         devin_token: tc::cfg_str(&raw, "devin_token", ""),
         devin_token_env: tc::cfg_str(&raw, "devin_token_env", crate::devin::TOKEN_ENV),
         devin_org: tc::cfg_str(&raw, "devin_org", ""),
@@ -2072,6 +2102,7 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
+        "perplexity" => ("Perplexity", vec![], vec![]),
         // Same shape: a credential the reader pasted or the CLI stored,
         // not a binary and not a browser. `detect_agents` resolves both.
         "devin" => ("Devin", vec![], vec![]),
@@ -2142,6 +2173,12 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
         "notion".into(),
         Presence {
             present: !crate::notion::token(cfg).0.is_empty(),
+        },
+    );
+    found.insert(
+        "perplexity".into(),
+        Presence {
+            present: !crate::perplexity::token(cfg).0.is_empty(),
         },
     );
     let (devin_token, _) = crate::devin::token(cfg);
@@ -2381,6 +2418,14 @@ fn step_tab(at: i64, by: i64, count: usize) -> usize {
         return 0;
     }
     (at + by).rem_euclid(count as i64) as usize
+}
+
+fn check_status(fetched: f64) -> String {
+    if fetched <= 0.0 {
+        " Not checked yet".into()
+    } else {
+        format!(" Checked {} ago", ago(fetched))
+    }
 }
 
 /// What to show before the first poll lands.
@@ -2714,7 +2759,7 @@ fn main() {
         };
         // The scroll position goes last on this line but matters most, so
         // the legend stands down to make room rather than being clipped.
-        let base = format!(" local state · live quota · read {} ago", ago(snapshot.fetched));
+        let base = check_status(snapshot.fetched);
         let hidden_txt = if hidden > 0 {
             format!("   {} hidden by config", hidden)
         } else {
@@ -2777,6 +2822,7 @@ mod antigravity;
 mod claude;
 mod coderabbit;
 mod notion;
+mod perplexity;
 mod devin;
 mod droid;
 mod codex;
@@ -2787,6 +2833,12 @@ mod vendors;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn check_status_distinguishes_first_load_from_a_completed_pass() {
+        assert_eq!(check_status(0.0), " Not checked yet");
+        assert_eq!(check_status(now() - 125.0), " Checked 2m ago");
+    }
 
     fn paced_bar(
         used: f64,

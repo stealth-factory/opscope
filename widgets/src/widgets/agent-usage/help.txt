@@ -13,18 +13,28 @@ discovery off keeps those tabs up while the first read is still running.
 
     agent-usage [-n SECONDS]
 
+The top status line says "Checked ... ago" for the last completed collection
+pass, not the age of every reading. A pass can reuse cached data; each quota
+section reports its own source/freshness. Before the first pass completes it
+says "Not checked yet". The title spinner shows a check in progress.
+
 Most of this is read from local state files. The exception is the remaining
 quota, which no agent writes to disk in a current form: Claude, Codex, Cursor
 and Copilot each publish one over an endpoint, fetched with the credential
 that agent already holds and sent only to that agent's own host. Codex also
 publishes how many reset credits are still available, and each credit's
 own title and expiry as a date and time in this machine's local zone.
+The BANK RESET section titles itself with the count, then lists one row
+per reset, soonest first; a reset with no date says expiry not given.
 That is separate from the usage-window countdown. Nothing here is inferred
 from a number that was not published.
 
 On [+], Claude accounts also show available usage-limit resets and the
 soonest known expiry beneath their quota rows. Each profile keeps its own
 count; cached availability is labelled, and expired grants are excluded.
+Each Claude tab repeats it as a BANK RESET section in Codex's layout, one
+row per reset with the year on its expiry; zero says none are in the
+account, and an inventory that could not be read draws no section.
 This display reads availability only and never uses a reset.
 
 Notion AI is the one remote reading that uses a credential no agent here
@@ -34,6 +44,20 @@ agent_usage.notion_token or the NOTION_TOKEN_V2 environment variable. It is
 sent only to app.notion.com, only while Notion is one of the agents shown,
 and never read out of a browser. It is a full sign-in to your Notion
 account, so keep config.json chmod 600; the tab warns when it is not.
+
+Perplexity is read the same way: its credits come from the endpoint
+perplexity.ai's usage page uses, signed in with a session cookie you paste
+into agent_usage.perplexity_token or the PERPLEXITY_SESSION_TOKEN
+environment variable (agent_usage.perplexity_token_env renames it). When
+both are set, perplexity_token wins; the variable is read only when it is
+empty. It is sent only to www.perplexity.ai, only while
+Perplexity is one of the agents shown, and never read out of a browser.
+Where to find the cookie is in perplexity_token's help on the settings
+screen (press ,), and on the tab whenever it has none.
+
+While discovery is on, the [+] overview ends with a line naming Notion AI
+and Perplexity until each has a token, since nothing on this machine shows
+they could be here.
 
 Devin is the same kind of reading. Its daily and weekly quota, the resets
 that came with them, and the extra-usage balance come from app.devin.ai.
