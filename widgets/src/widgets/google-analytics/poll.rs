@@ -147,27 +147,52 @@ pub fn sample_path(id: &str) -> String {
     format!("{}/opscope/google-analytics/{}.samples", base, id)
 }
 
-fn load_samples(path: &str, weeks: usize) -> (Vec<Sample>, String) {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let mut s = parse::parse_samples(&text);
-            let before = s.len();
-            model::prune(&mut s, tc::now(), weeks);
-            let mut err = String::new();
-            if s.len() != before {
-                if let Err(e) = rewrite_samples(path, &s) {
-                    err = format!("could not prune the sample file {}: {}", path, e);
-                }
-            }
-            (s, err)
+/// Two panes on one property share its sample file, so every change to
+/// it - an append, and the read, prune and rewrite - happens under an
+/// exclusive lock on a file beside it. Without it a prune would replace
+/// the file with this pane's own copy and drop what the other appended.
+fn locked<R>(path: &str, f: impl FnOnce() -> std::io::Result<R>) -> std::io::Result<R> {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(format!("{}.lock", path))?;
+    lock.lock()?;
+    let out = f();
+    let _ = lock.unlock();
+    out
+}
+
+/// Read the file, prune it, and write it back if anything went - all
+/// under the lock, from what is on disk rather than what this pane holds,
+/// so readings another pane appended survive. Returns what is kept.
+fn prune_file(path: &str, now: f64, weeks: usize) -> std::io::Result<Vec<Sample>> {
+    locked(path, || {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let mut s = parse::parse_samples(&text);
+        let before = s.len();
+        model::prune(&mut s, now, weeks);
+        if s.len() != before {
+            rewrite_samples(path, &s)?;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), String::new()),
-        Err(e) => (Vec::new(), format!("could not read the sample file {}: {}", path, e)),
+        Ok(s)
+    })
+}
+
+fn load_samples(path: &str, weeks: usize) -> (Vec<Sample>, String) {
+    match prune_file(path, tc::now(), weeks) {
+        Ok(s) => (s, String::new()),
+        Err(e) => (Vec::new(), format!("could not read or prune the sample file {}: {}", path, e)),
     }
 }
 
+/// Call with the lock held. The temporary name carries the process id so
+/// two panes never write the same one.
 fn rewrite_samples(path: &str, samples: &[Sample]) -> std::io::Result<()> {
-    let tmp = format!("{}.tmp", path);
+    let tmp = format!("{}.{}.tmp", path, std::process::id());
     let mut text = String::new();
     for s in samples {
         text.push_str(&parse::format_sample(s));
@@ -178,11 +203,16 @@ fn rewrite_samples(path: &str, samples: &[Sample]) -> std::io::Result<()> {
 }
 
 fn append_sample(path: &str, s: &Sample) -> std::io::Result<()> {
-    if let Some(dir) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(dir)?;
+    locked(path, || {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(f, "{}", parse::format_sample(s))
+    })
+}
+
+fn save(shared: &Arc<Mutex<Shared>>, i: usize, path: &str, s: &Sample) {
+    if let Err(e) = append_sample(path, s) {
+        with(shared, i, |p| p.sample_err = format!("could not write the sample file {}: {}", path, e));
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(f, "{}", parse::format_sample(s))
 }
 
 fn with<R>(shared: &Arc<Mutex<Shared>>, i: usize, f: impl FnOnce(&mut Prop) -> R) -> Option<R> {
@@ -303,14 +333,7 @@ fn run_property(
                         } else if p.idle_since.is_none() {
                             p.idle_since = Some(at);
                         }
-                        let events = p
-                            .breakdown
-                            .as_ref()
-                            .map(|b| {
-                                model::realtime_key_events(&b.events, if configured { &cfg.key_events } else { &[] })
-                            })
-                            .unwrap_or_default();
-                        let s = Sample { t: at, active: rt.active, views: rt.views, events };
+                        let s = Sample { t: at, active: Some(rt.active), views: Some(rt.views), events: None };
                         p.samples.push(s.clone());
                         sample = Some(s);
                         if quota.is_some() {
@@ -335,21 +358,18 @@ fn run_property(
                 next_rt = at + secs as f64;
             });
             if let Some(s) = sample {
-                if let Err(e) = append_sample(&path, &s) {
-                    with(shared, i, |p| p.sample_err = format!("could not write the sample file {}: {}", path, e));
-                }
+                save(shared, i, &path, &s);
             }
             if at - last_prune > 86_400.0 {
                 last_prune = at;
-                let kept = with(shared, i, |p| {
-                    model::prune(&mut p.samples, at, cfg.baseline_weeks);
-                    p.samples.clone()
-                });
-                if let Some(kept) = kept {
-                    if let Err(e) = rewrite_samples(&path, &kept) {
-                        with(shared, i, |p| p.sample_err = format!("could not prune the sample file {}: {}", path, e));
-                    }
-                }
+                match prune_file(&path, at, cfg.baseline_weeks) {
+                    // What is on disk includes any other pane's readings.
+                    Ok(kept) => with(shared, i, |p| p.samples = kept),
+                    Err(e) => with(shared, i, |p| {
+                        model::prune(&mut p.samples, at, cfg.baseline_weeks);
+                        p.sample_err = format!("could not prune the sample file {}: {}", path, e);
+                    }),
+                };
             }
             drop(work);
         }
@@ -358,9 +378,16 @@ fn run_property(
             let work = activity.start();
             let got = breakdown(cred, &id, grant);
             let at = tc::now();
+            let mut sample: Option<Sample> = None;
             let interval = with(shared, i, |p| {
                 match got {
                     Ok((b, quota)) => {
+                        // The event counts are a reading of their own,
+                        // stamped now, when they were read.
+                        let events = model::realtime_key_events(&b.events, if configured { &cfg.key_events } else { &[] });
+                        let s = Sample { t: at, active: None, views: None, events: Some(events) };
+                        p.samples.push(s.clone());
+                        sample = Some(s);
                         p.breakdown = Some(b);
                         p.breakdown_at = at;
                         if quota.is_some() {
@@ -377,6 +404,9 @@ fn run_property(
             })
             .unwrap_or(60);
             next_bd = at + (interval.max(60)) as f64;
+            if let Some(s) = sample {
+                save(shared, i, &path, &s);
+            }
             drop(work);
         }
 

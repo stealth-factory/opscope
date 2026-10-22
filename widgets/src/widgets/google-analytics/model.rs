@@ -163,42 +163,42 @@ pub fn weeks_back(now: f64, k: i64, tz: Tz) -> f64 {
     }
 }
 
-/// The sample nearest `target`, if one is within `BASELINE_SLACK`.
-fn nearest(samples: &[Sample], target: f64) -> Option<&Sample> {
-    let at = samples.partition_point(|s| s.t < target);
-    let mut best: Option<&Sample> = None;
-    for i in [at.checked_sub(1), Some(at)].into_iter().flatten() {
-        if let Some(s) = samples.get(i) {
-            if (s.t - target).abs() <= BASELINE_SLACK
-                && best.is_none_or(|b| (s.t - target).abs() < (b.t - target).abs())
-            {
-                best = Some(s);
+/// The reading nearest `target` among samples that carry one, if one is
+/// within `BASELINE_SLACK`.
+fn nearest(samples: &[Sample], target: f64, pick: &dyn Fn(&Sample) -> Option<f64>) -> Option<f64> {
+    let from = samples.partition_point(|s| s.t < target - BASELINE_SLACK);
+    let mut best: Option<(f64, f64)> = None;
+    for s in &samples[from..] {
+        let off = (s.t - target).abs();
+        if s.t > target + BASELINE_SLACK {
+            break;
+        }
+        if let Some(v) = pick(s) {
+            if best.is_none_or(|(b, _)| off < b) {
+                best = Some((off, v));
             }
         }
     }
-    best
+    best.map(|(_, v)| v)
 }
 
 /// The baseline at `now`: the median of `pick` over the past `weeks` weeks
 /// at this minute of the week, using only weeks with a sample within five
-/// minutes of it. `samples` must be sorted by time.
+/// minutes of it that read this figure. `samples` must be sorted by time.
 pub fn baseline(
     samples: &[Sample],
     now: f64,
     weeks: usize,
     tz: Tz,
-    pick: &dyn Fn(&Sample) -> f64,
+    pick: &dyn Fn(&Sample) -> Option<f64>,
 ) -> Baseline {
-    let Some(first) = samples.first().map(|s| s.t) else {
+    let Some(first) = samples.iter().find(|s| pick(s).is_some()).map(|s| s.t) else {
         return Baseline::Collecting { since: now };
     };
     if first > weeks_back(now, 1, tz) + BASELINE_SLACK {
         return Baseline::Collecting { since: first };
     }
-    let found: Vec<f64> = (1..=weeks as i64)
-        .filter_map(|k| nearest(samples, weeks_back(now, k, tz)))
-        .map(pick)
-        .collect();
+    let found: Vec<f64> = (1..=weeks as i64).filter_map(|k| nearest(samples, weeks_back(now, k, tz), pick)).collect();
     if found.is_empty() {
         let label = tz
             .timestamp_opt(now.floor() as i64, 0)
@@ -214,6 +214,12 @@ pub fn baseline(
         of: weeks,
         since: short.then_some(first),
     }
+}
+
+/// One key event's count in an events sample: `None` for a sample that
+/// did not read events, `0` for one that read them and found none of it.
+pub fn event_reading(s: &Sample, name: &str) -> Option<f64> {
+    s.events.as_ref().map(|e| e.iter().filter(|(n, _)| n == name).map(|e| e.1).sum())
 }
 
 /// Samples older than the baseline can reach, plus a week's grace.
@@ -595,7 +601,11 @@ mod tests {
     use crate::parse::{parse_batch, parse_report, Sample};
 
     fn sample(t: f64, active: f64) -> Sample {
-        Sample { t, active, views: active * 2.0, events: vec![("purchase".into(), active / 10.0)] }
+        Sample { t, active: Some(active), views: Some(active * 2.0), events: Some(vec![("purchase".into(), active / 10.0)]) }
+    }
+
+    fn active(s: &Sample) -> Option<f64> {
+        s.active
     }
 
     const WEEK: f64 = 604_800.0;
@@ -610,7 +620,7 @@ mod tests {
             sample(NOW - 2.0 * WEEK, 48.0),
             sample(NOW - WEEK + 299.0, 52.0),
         ];
-        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &|s| s.active);
+        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
         assert_eq!(b, Baseline::Ready { median: 49.0, found: 4, of: 4, since: None });
     }
 
@@ -624,29 +634,29 @@ mod tests {
             sample(NOW - 2.0 * WEEK + 360.0, 999.0),
             sample(NOW - WEEK - 10.0, 50.0),
         ];
-        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &|s| s.active);
+        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
         assert_eq!(b, Baseline::Ready { median: 40.0, found: 2, of: 4, since: None });
     }
 
     #[test]
     fn no_week_covering_this_minute_says_so() {
         let samples = vec![sample(NOW - 2.0 * WEEK - 7200.0, 10.0), sample(NOW - WEEK + 3600.0, 10.0)];
-        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &|s| s.active);
+        let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
         assert_eq!(b, Baseline::Uncovered { label: "Tue 14:35".into() });
     }
 
     #[test]
     fn under_a_week_of_samples_is_still_collecting() {
         let since = NOW - 3.0 * 86_400.0;
-        let b = baseline(&[sample(since, 10.0), sample(NOW - 60.0, 12.0)], NOW, 4, chrono_tz::UTC, &|s| s.active);
+        let b = baseline(&[sample(since, 10.0), sample(NOW - 60.0, 12.0)], NOW, 4, chrono_tz::UTC, &active);
         assert_eq!(b, Baseline::Collecting { since });
-        assert_eq!(baseline(&[], NOW, 4, chrono_tz::UTC, &|s| s.active), Baseline::Collecting { since: NOW });
+        assert_eq!(baseline(&[], NOW, 4, chrono_tz::UTC, &active), Baseline::Collecting { since: NOW });
     }
 
     #[test]
     fn a_short_history_says_since_when() {
         let first = NOW - WEEK - 60.0;
-        let b = baseline(&[sample(first, 20.0)], NOW, 4, chrono_tz::UTC, &|s| s.active);
+        let b = baseline(&[sample(first, 20.0)], NOW, 4, chrono_tz::UTC, &active);
         assert_eq!(b, Baseline::Ready { median: 20.0, found: 1, of: 4, since: Some(first) });
     }
 
@@ -664,11 +674,28 @@ mod tests {
     #[test]
     fn key_event_baselines_read_zero_for_a_week_without_that_event() {
         let mut quiet = sample(NOW - WEEK, 10.0);
-        quiet.events.clear();
-        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| {
-            s.events.iter().find(|(n, _)| n == "purchase").map(|e| e.1).unwrap_or(0.0)
-        });
+        quiet.events = Some(Vec::new());
+        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
         assert_eq!(b, Baseline::Ready { median: 0.0, found: 1, of: 1, since: None });
+    }
+
+    #[test]
+    fn an_unread_figure_is_skipped_not_counted_as_zero() {
+        // Last week the totals were read at the minute, the events 40 s
+        // later; a totals-only sample says nothing about events.
+        let totals = Sample { t: NOW - WEEK, active: Some(30.0), views: Some(60.0), events: None };
+        let events = Sample { t: NOW - WEEK + 40.0, active: None, views: None, events: Some(vec![("purchase".into(), 4.0)]) };
+        let both = [totals.clone(), events];
+        assert_eq!(
+            baseline(&both, NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase")),
+            Baseline::Ready { median: 4.0, found: 1, of: 1, since: None }
+        );
+        assert_eq!(baseline(&both, NOW, 1, chrono_tz::UTC, &active), Baseline::Ready { median: 30.0, found: 1, of: 1, since: None });
+        // Events never read: still collecting, not a baseline of zero.
+        assert_eq!(
+            baseline(&[totals], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase")),
+            Baseline::Collecting { since: NOW }
+        );
     }
 
     #[test]
