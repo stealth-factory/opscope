@@ -714,6 +714,232 @@ fn only_core_draws_the_settings_screen() {
     );
 }
 
+/// The source of every file in `core/src`, tests dropped, by file name.
+fn core_sources() -> BTreeMap<String, String> {
+    let dir = root().join("core/src");
+    let mut found = BTreeMap::new();
+    for entry in std::fs::read_dir(&dir).expect("core/src").flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        found.insert(
+            name,
+            without_tests(&std::fs::read_to_string(&path).unwrap_or_default()),
+        );
+    }
+    found
+}
+
+/// What each notice constructor in `src` is handed as its id, in order.
+///
+/// Reads `Notice::info(`, `Notice::warn(` and `Notice::error(` - the three
+/// ways in - and returns the first argument as written, whitespace and a
+/// line break between the paren and the id included, because rustfmt puts
+/// one there as soon as the title is long.
+fn notice_ids(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for ctor in ["Notice::info(", "Notice::warn(", "Notice::error("] {
+        let mut rest = src;
+        while let Some(at) = rest.find(ctor) {
+            let after = rest[at + ctor.len()..].trim_start();
+            let arg: String = if let Some(lit) = after.strip_prefix('"') {
+                match lit.find('"') {
+                    Some(end) => format!("\"{}\"", &lit[..end]),
+                    None => after.to_string(),
+                }
+            } else {
+                after
+                    .chars()
+                    .take_while(|c| *c != ',' && *c != ')')
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            };
+            found.push(arg);
+            rest = &rest[at + ctor.len()..];
+        }
+    }
+    found
+}
+
+/// Whether an id as written is stable: a string literal, or a const.
+fn is_stable_id(arg: &str) -> bool {
+    (arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') && !arg.contains('{'))
+        || (!arg.is_empty()
+            && arg
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == ':'))
+}
+
+#[test]
+fn notice_id_reader_sees_literals_consts_and_a_wrapped_call() {
+    let src = "tc::notices::raise(Notice::warn(\n    \"a-b\",\n    \"t\"));\n\
+               Notice::info(LEGACY_ID, x); Notice::error(name, y);\n\
+               Notice::info(&format!(\"{}\", z), w);";
+    let ids = notice_ids(src);
+    assert!(ids.contains(&"\"a-b\"".to_string()), "{ids:?}");
+    assert!(ids.contains(&"LEGACY_ID".to_string()), "{ids:?}");
+    assert!(ids.iter().any(|i| i == "name"), "{ids:?}");
+    assert!(is_stable_id("\"a-b\"") && is_stable_id("LEGACY_ID"));
+    assert!(!is_stable_id("name") && !is_stable_id("&format!(\"{}\""));
+}
+
+#[test]
+fn every_notice_has_a_stable_id() {
+    // A notice's id is what de-duplicates it and what a dismissal is keyed
+    // by. An id built at run time - a format!, a variable - raises a new
+    // notice every time its input moves, so the banner never collapses and
+    // a dismissal never holds. Two raise sites sharing a literal in one
+    // widget fight over one slot, and the footer count is a guess.
+    //
+    // And Core scope is a promise that the fact is the same in every pane;
+    // a widget that raised one would be making it on core's behalf.
+    let mut wrong = Vec::new();
+    let mut sources: Vec<(String, String, bool)> = widgets()
+        .into_iter()
+        .map(|(name, src)| (name, src, false))
+        .collect();
+    let core: String = core_sources().into_values().collect::<Vec<_>>().join("\n");
+    sources.push(("core".into(), core, true));
+    for (name, src, is_core) in &sources {
+        let mut seen = BTreeSet::new();
+        for id in notice_ids(src) {
+            // Core's one computed id: a match over its own Tool enum that
+            // returns a literal per arm.
+            let core_lookup = *is_core && id.ends_with("recommended_notice_id()");
+            if !is_stable_id(&id) && !core_lookup {
+                wrong.push(format!("{name}: notice id {id} is neither a literal nor a const"));
+            }
+            if is_stable_id(&id) && !seen.insert(id.clone()) {
+                wrong.push(format!("{name}: notice id {id} is raised from two places"));
+            }
+        }
+        if !is_core {
+            for line in src.lines() {
+                let t = line.trim();
+                if t.starts_with("//") {
+                    continue;
+                }
+                if t.contains("Scope::Core") || t.contains(".core()") {
+                    wrong.push(format!("{name}: raises a Core-scope notice - {t}"));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "every notice needs a stable id:\n  {}\n\
+         Give each one a literal (`Notice::warn(\"legacy-config-section\", ..)`) \
+         or a const, unique within the widget; a condition that comes and \
+         goes is one id with `tc::notices::when(cond, || ..)`. Core scope is \
+         for facts that are the same in every pane, and only core raises it.",
+        wrong.join("\n  ")
+    );
+}
+
+/// Whether a widget can have a notice to show: it raises one itself, it
+/// loads config (whose permissions core raises on), or it declares a
+/// recommended tool (whose absence core raises on).
+fn can_hold_a_notice(name: &str, src: &str) -> bool {
+    let recommended = std::fs::read_to_string(
+        root().join("widgets/src/widgets").join(name).join("dependencies.json"),
+    )
+    .ok()
+    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    .and_then(|v| v.get("recommended").and_then(|r| r.as_object()).map(|r| !r.is_empty()))
+    .unwrap_or(false);
+    calls(src, "tc::notices::") || calls(src, "load_config(") || recommended
+}
+
+#[test]
+fn a_widget_that_raises_a_notice_shows_it() {
+    // A notice nobody can see is a warning dropped on purpose, which is the
+    // thing this channel replaced. Core raises on behalf of every widget
+    // that loads config or declares a recommended tool, so nearly every
+    // widget can hold one - and each must name itself, draw the banner and
+    // the counter, and open the screen on `!`.
+    let mut missing = Vec::new();
+    for (name, src) in widgets() {
+        if !can_hold_a_notice(&name, &src) {
+            continue;
+        }
+        for (token, what) in [
+            ("tc::notices::start(", "never calls tc::notices::start in main"),
+            ("tc::notices::hint(", "never puts tc::notices::hint in its footer"),
+            ("tc::notices::banner_rows(", "never draws tc::notices::banner_rows"),
+            ("tc::notices::run(", "never opens the notices screen"),
+        ] {
+            if !calls(&src, token) {
+                missing.push(format!("{name}: {what}"));
+            }
+        }
+        if !handled_keys(&src).contains("!") {
+            missing.push(format!("{name}: no match arm answers `!`"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "a widget that can hold a notice has to show it:\n  {}\n\
+         \n    tc::notices::start(\"name\");                 // in main\n\
+         \u{20}   \"!\" => tc::notices::run(&mut keyboard),     // beside \",\"\n\
+         \u{20}   hints.extend(tc::notices::hint(w - 2));     // beside [,] settings\n\
+         \u{20}   let banner = tc::notices::banner_rows(w);   // above the footer\n",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn only_core_draws_the_notices_screen() {
+    // The settings rule again, for the same reason: sixteen widgets each
+    // with their own idea of how a warning is listed and dismissed is the
+    // drift being prevented. Named shapes only - a type called Notice, a
+    // module or function with notices in its name - so a widget that draws
+    // a word "notice" in its body is not flagged.
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        for line in src.lines() {
+            let t = line.trim();
+            if t.starts_with("//") {
+                continue;
+            }
+            let own_type = ["struct Notice", "enum Notice", "type Notice"].iter().any(|d| {
+                t.find(d).is_some_and(|at| {
+                    let next = t[at + d.len()..].chars().next();
+                    next.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+                        || t[at + d.len()..].starts_with('s')
+                })
+            });
+            let own_module = t.starts_with("mod notices") || t.starts_with("pub mod notices");
+            let own_fn = t
+                .split_once("fn ")
+                .map(|(before, after)| {
+                    !before.ends_with('.')
+                        && after
+                            .split(['(', '<', ' '])
+                            .next()
+                            .is_some_and(|n| n.contains("notices"))
+                })
+                .unwrap_or(false);
+            if own_type || own_module || own_fn {
+                wrong.push(format!(
+                    "{name}: defines its own notices - {}",
+                    t.chars().take(60).collect::<String>()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "notices belong to core, not to a widget:\n  {}\n\
+         Raise them through tc::notices and open tc::notices::run on `!`. A \
+         transient message of a widget's own - ports' kill confirmation - is \
+         a toast, and is named one.",
+        wrong.join("\n  ")
+    );
+}
+
 /// The header the generated file carries, naming what regenerates it.
 const CONFIG_EXAMPLE_COMMENT: &str = "Generated from each widget's \
 settings.json by widgets/tests/check.rs - \
@@ -1334,6 +1560,12 @@ const NAMED: &[&str] = &["esc", "tab", "enter", "backspace", "pgup", "pgdn", "ho
 /// away every hint with a space in it.
 fn hinted_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
+    // The notices counter is built in core, so its `[!]` is in no string
+    // here - but a widget that puts it in its footer is hinting `!` all the
+    // same, and has to answer it and document it.
+    if calls(src, "notices::hint(") {
+        found.insert("!".to_string());
+    }
     for text in string_lines(src) {
         let chars: Vec<char> = text.chars().collect();
         // A footer separates its hints with `·` AND names at least one key

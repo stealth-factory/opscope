@@ -2004,7 +2004,7 @@ fn detail_rows(
 }
 
 /// Something to say at the bottom of the screen until a moment passes.
-type Notice = (String, String, f64);
+type Toast = (String, String, f64);
 
 /// A SIGTERM that has been sent and not yet answered for.
 struct Watch {
@@ -2018,7 +2018,7 @@ struct Watch {
 struct Working {
     kind: String,
     row: Row,
-    done: Arc<Mutex<Vec<Notice>>>,
+    done: Arc<Mutex<Vec<Toast>>>,
 }
 
 /// The second screen's own state: which port, and which address is picked.
@@ -2037,7 +2037,7 @@ fn start_work(kind: &str, row: Row) -> Working {
     let (what, port) = (kind.to_string(), row.port);
     let p = rgb_ok();
     std::thread::spawn(move || {
-        let said: Notice = match what.as_str() {
+        let said: Toast = match what.as_str() {
             "serve" | "funnel" => {
                 let failed = serve_port(port, what == "funnel");
                 if failed.is_empty() {
@@ -2098,7 +2098,7 @@ fn footer(
     confirm: &Option<(String, Row)>,
     watch: &Option<Watch>,
     working: &Option<Working>,
-    notice: &Option<Notice>,
+    notice: &Option<Toast>,
     w: usize,
     hints: &[Vec<(String, String)>],
     p: &Palette,
@@ -2352,7 +2352,7 @@ fn main() {
     let mut confirm: Option<(String, Row)> = None;
     let mut watch: Option<Watch> = None;
     let mut working: Option<Working> = None;
-    let mut notice: Option<Notice> = None;
+    let mut notice: Option<Toast> = None;
     let mut detail: Option<Detail> = None;
     // How far the detail screen has been scrolled. It had none: the body
     // was built at whatever height it needed and then truncated to the
