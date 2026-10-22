@@ -216,10 +216,29 @@ pub fn baseline(
     }
 }
 
-/// One key event's count in an events sample: `None` for a sample that
-/// did not read events, `0` for one that read them and found none of it.
+/// One key event's count in an events sample, or `None` when the sample
+/// did not cover that event - it read no events, or read them before the
+/// event was configured or flagged. A covered event with none is listed
+/// at `0` (see `covered_events`), so a missing name is never a zero.
 pub fn event_reading(s: &Sample, name: &str) -> Option<f64> {
-    s.events.as_ref().map(|e| e.iter().filter(|(n, _)| n == name).map(|e| e.1).sum())
+    let found: Vec<f64> = s.events.as_ref()?.iter().filter(|(n, _)| n == name).map(|e| e.1).collect();
+    (!found.is_empty()).then(|| found.iter().sum())
+}
+
+/// What an events sample records: every event the read covered, at `0`
+/// when it had none. With a configured list that is the list; otherwise
+/// the events GA flags, from the Admin API's list when it has answered -
+/// before then only the events seen are known to have been covered.
+pub fn covered_events(report: &Report, configured: &[String], flagged: Option<&[String]>) -> Vec<(String, f64)> {
+    let mut out = realtime_key_events(report, configured);
+    if configured.is_empty() {
+        for name in flagged.unwrap_or(&[]) {
+            if !out.iter().any(|(n, _)| n == name) {
+                out.push((name.clone(), 0.0));
+            }
+        }
+    }
+    out
 }
 
 /// Samples older than the baseline can reach, plus a week's grace.
@@ -703,9 +722,26 @@ mod tests {
     #[test]
     fn key_event_baselines_read_zero_for_a_week_without_that_event() {
         let mut quiet = sample(NOW - WEEK, 10.0);
-        quiet.events = Some(Vec::new());
-        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
+        quiet.events = Some(vec![("purchase".into(), 0.0)]);
+        let b = baseline(&[quiet.clone()], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
         assert_eq!(b, Baseline::Ready { median: 0.0, found: 1, of: 1, since: None });
+        // A sample from before `purchase` was asked for did not cover it.
+        quiet.events = Some(vec![("sign_up".into(), 2.0)]);
+        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
+        assert_eq!(b, Baseline::Collecting { since: NOW });
+    }
+
+    #[test]
+    fn an_events_sample_lists_every_event_it_covered() {
+        let events = parse_report(r#"{"dimensionHeaders":[{"name":"eventName"}],"metricHeaders":[{"name":"eventCount"},{"name":"keyEvents"}],
+          "rows":[{"dimensionValues":[{"value":"purchase"}],"metricValues":[{"value":"3"},{"value":"3"}]}]}"#).unwrap();
+        let flagged = ["purchase".to_string(), "sign_up".to_string()];
+        assert_eq!(
+            covered_events(&events, &[], Some(&flagged)),
+            vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 0.0)]
+        );
+        assert_eq!(covered_events(&events, &[], None), vec![("purchase".to_string(), 3.0)]);
+        assert_eq!(covered_events(&events, &["refund".into()], Some(&flagged)), vec![("refund".to_string(), 0.0)]);
     }
 
     #[test]

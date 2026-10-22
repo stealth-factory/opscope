@@ -444,8 +444,8 @@ fn main() {
             }
             if let Some(k) = key.as_ref().filter(|k| !asked.contains(*k)) {
                 let body = match &open {
-                    Item::Page(path) => Some(api::page_detail_bodies(path)),
-                    Item::Organic(path) => Some(api::page_detail_bodies(&landing_path(path))),
+                    Item::Page(path) => Some(api::page_detail_bodies(path, &configured)),
+                    Item::Organic(path) => Some(api::page_detail_bodies(&landing_path(path), &configured)),
                     Item::Event(name) => {
                         Some(vec![api::event_detail_body(name, if configured.is_empty() { "keyEvents" } else { "eventCount" })])
                     }
@@ -463,9 +463,9 @@ fn main() {
             let asked_on = model::local_now(held.as_ref().map_or(view.now, |d| d.at), model::tz_of(&prop.time_zone)).0;
             let lines = match &open {
                 Item::Property(_) => draw::property_detail(&prop, &view, w),
-                Item::Page(path) => draw::page_detail(path, reports.as_ref(), asked_on, w),
+                Item::Page(path) => draw::page_detail(path, reports.as_ref(), !configured.is_empty(), asked_on, w),
                 Item::Organic(path) => {
-                    let mut l = draw::page_detail(&landing_path(path), reports.as_ref(), asked_on, w);
+                    let mut l = draw::page_detail(&landing_path(path), reports.as_ref(), !configured.is_empty(), asked_on, w);
                     l.insert(1, vec![(p.hint.clone(), format!(" landing page {} as Google Search visitors arrived on it", path))]);
                     l
                 }

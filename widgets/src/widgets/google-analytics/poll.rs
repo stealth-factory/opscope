@@ -411,7 +411,11 @@ fn run_live(
                     Ok((b, quota)) => {
                         // The event counts are a reading of their own,
                         // stamped now, when they were read.
-                        let events = model::realtime_key_events(&b.events, if configured { &cfg.key_events } else { &[] });
+                        let events = model::covered_events(
+                            &b.events,
+                            if configured { &cfg.key_events } else { &[] },
+                            p.key_names.as_deref(),
+                        );
                         let s = Sample { t: at, active: None, views: None, events: Some(events) };
                         p.samples.push(s.clone());
                         sample = Some(s);

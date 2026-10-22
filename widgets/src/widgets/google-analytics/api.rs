@@ -313,8 +313,10 @@ fn exact(field: &str, value: &str) -> Value {
 }
 
 /// A page's detail: 28 days by day against the 28 before, then its
-/// sources, countries, devices and key events over the last 28 days.
-pub fn page_detail_body(path: &str) -> Value {
+/// sources, countries, devices and key events over the last 28 days. The
+/// key events are the configured list by `eventCount` when one is set, as
+/// everywhere else, or the events GA flags by `keyEvents`.
+pub fn page_detail_body(path: &str, configured: &[String]) -> Value {
     let filter = exact("pagePath", path);
     let last28 = json!([range("28daysAgo", "yesterday", "cur")]);
     let one = |dim: &str, metric: &str| {
@@ -324,6 +326,22 @@ pub fn page_detail_body(path: &str) -> Value {
             "metrics": mets(&[metric]),
             "dimensionFilter": filter.clone(),
             "orderBys": [{ "metric": { "metricName": metric }, "desc": true }],
+            "limit": 10,
+            "returnPropertyQuota": true,
+        })
+    };
+    let events = if configured.is_empty() {
+        one("eventName", "keyEvents")
+    } else {
+        json!({
+            "dateRanges": last28.clone(),
+            "dimensions": dims(&["eventName"]),
+            "metrics": mets(&["eventCount"]),
+            "dimensionFilter": { "andGroup": { "expressions": [
+                filter.clone(),
+                { "filter": { "fieldName": "eventName", "inListFilter": { "values": configured } } },
+            ] } },
+            "orderBys": [{ "metric": { "metricName": "eventCount" }, "desc": true }],
             "limit": 10,
             "returnPropertyQuota": true,
         })
@@ -340,7 +358,7 @@ pub fn page_detail_body(path: &str) -> Value {
         one("sessionSourceMedium", "screenPageViews"),
         one("country", "screenPageViews"),
         one("deviceCategory", "screenPageViews"),
-        one("eventName", "keyEvents"),
+        events,
     ]})
 }
 
@@ -358,8 +376,8 @@ pub fn page_totals_body(path: &str) -> Value {
 }
 
 /// Everything a page's detail asks for, as the batches it is sent in.
-pub fn page_detail_bodies(path: &str) -> Vec<Value> {
-    vec![page_detail_body(path), page_totals_body(path)]
+pub fn page_detail_bodies(path: &str, configured: &[String]) -> Vec<Value> {
+    vec![page_detail_body(path, configured), page_totals_body(path)]
 }
 
 /// A key event's detail: by day over 28 days, by source today, and by
@@ -422,7 +440,7 @@ mod tests {
             processed_body(7, &[]),
             window_body(7),
             organic_body(14),
-            page_detail_body("/pricing"),
+            page_detail_body("/pricing", &[]),
             page_totals_body("/pricing"),
             event_detail_body("purchase", "keyEvents"),
         ];
@@ -444,8 +462,15 @@ mod tests {
         let named = processed_body(7, &["purchase".into()]);
         assert_eq!(named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
         assert!(named["requests"][2].get("metricFilter").is_none());
-        let p = page_detail_body("/x");
+        let p = page_detail_body("/x", &[]);
         assert_eq!(p["requests"].as_array().unwrap().len(), 5);
+        assert_eq!(p["requests"][4]["metrics"][0]["name"], "keyEvents");
+        let named = page_detail_body("/x", &["purchase".into()]);
+        let ev = &named["requests"][4];
+        assert_eq!(ev["metrics"][0]["name"], "eventCount", "a configured list is counted the way the main view counts it");
+        let both = ev["dimensionFilter"]["andGroup"]["expressions"].as_array().unwrap();
+        assert_eq!(both[0]["filter"]["fieldName"], "pagePath");
+        assert_eq!(both[1]["filter"]["inListFilter"]["values"][0], "purchase");
     }
 
     #[test]
