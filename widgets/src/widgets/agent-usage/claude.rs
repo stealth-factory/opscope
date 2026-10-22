@@ -87,7 +87,7 @@ impl Data {
     /// there is no reading or it carries no inventory that could be read.
     /// Both the `[+]` line and the tab's section are built from this one
     /// call, so the two cannot count differently.
-    fn reset_bank(&self) -> Option<crate::parse::ClaudeResets> {
+    fn reset_bank(&self) -> Option<crate::parse::ResetBank> {
         let quota = self.quota.as_ref()?;
         crate::parse::parse_claude_resets(&quota.to_string(), now())
     }
@@ -103,7 +103,7 @@ impl Data {
         if bank.left == 0 {
             return None;
         }
-        let mut line = match bank.soonest.and_then(crate::codex::summary_expiry) {
+        let mut line = match crate::codex::soonest_when_every_credit_is_dated(&bank) {
             Some(stamp) => format!("{} reset available {stamp}", bank.left),
             None => format!("{} reset available", bank.left),
         };
@@ -1762,40 +1762,19 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
 
 /// The account's banked rate-limit resets, under the quota windows.
 ///
-/// The same section, title, inset and wording as Codex's, drawn through
-/// the same `bank_section`. Claude's inventory is grants rather than
-/// credits, and a grant names no title, so the rows are the count, the
-/// expiry and - when the reading is old - its age, which is exactly what the
-/// `[+]` line says about the same profile. The expiry carries the year here
-/// as it does on the Codex tab. Several grants ending at different times
-/// are `Soonest expires`, since one date is not the expiry of all of them;
-/// any counted grant without a readable date makes it `date unknown`, the
-/// same rule that leaves the date off the `[+]` line.
-///
-/// Zero is `None in the account.`, as on Codex. A reading with no inventory
-/// in it - no quota yet, or an absent, ineligible or unreadable block - draws
-/// no section at all, as Codex does when its inventory request fails; that
-/// is what keeps an unread bank from looking like an empty one.
+/// Codex's section, drawn by the same `bank_section`: the count in the
+/// title, one row per reset with its own expiry, and - when the reading is
+/// old - its age under them, which is what the `[+]` line adds for the same
+/// profile. A reading with no inventory in it - no quota yet, or an absent,
+/// ineligible or unreadable block - draws no section at all, as Codex does
+/// when its inventory request fails; that is what keeps an unread bank
+/// from looking like an empty one.
 fn claude_bank_rows(c: &Data, w: usize, p: &Palette) -> Vec<String> {
-    use crate::codex::{bank_count, bank_section, expires_row, local_expiry, BankRow};
     let Some(bank) = c.reset_bank() else {
         return Vec::new();
     };
-    let mut body = vec![BankRow::Note(bank_count(bank.left))];
-    if bank.left > 0 {
-        let when = match (bank.soonest, bank.latest) {
-            (Some(soonest), Some(latest)) if latest > soonest => match local_expiry(soonest) {
-                Some(stamp) => format!("Soonest expires {stamp}"),
-                None => expires_row(None),
-            },
-            (soonest, _) => expires_row(soonest),
-        };
-        body.push(BankRow::Note(when));
-    }
-    if let Some(note) = c.reset_cache_note() {
-        body.push(BankRow::Note(note));
-    }
-    bank_section(&body, w, p)
+    let notes: Vec<String> = c.reset_cache_note().into_iter().collect();
+    crate::codex::bank_section(&bank, &notes, w, p)
 }
 
 fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
@@ -3990,9 +3969,9 @@ mod tests {
             .collect()
     }
 
-    /// One grant of `left` resets, usable now, ending at `ends_at`.
+    /// One full-reset grant of `left` resets, usable now, ending at `ends_at`.
     fn grant(left: u64, ends_at: Option<&str>) -> serde_json::Value {
-        let mut g = serde_json::json!({"resets_left": left, "usable_now": true});
+        let mut g = serde_json::json!({"resets_left": left, "usable_now": true, "type": "full"});
         if let Some(at) = ends_at {
             g["ends_at"] = serde_json::json!(at);
         }
@@ -4001,7 +3980,7 @@ mod tests {
 
     /// The rows of the section alone, title included.
     fn bank_section_of(rows: &[String]) -> Vec<String> {
-        let Some(at) = rows.iter().position(|row| row == " ── BANK RESET ──") else {
+        let Some(at) = rows.iter().position(|row| row.starts_with(" ── ") && row.contains(" BANK RESET")) else {
             return Vec::new();
         };
         rows[at..].iter().take_while(|row| !row.is_empty()).cloned().collect()
@@ -4010,24 +3989,42 @@ mod tests {
     const SOON: &str = "2126-01-02T00:00:00Z";
     const LATER: &str = "2126-01-09T00:00:00Z";
 
+    fn full_row(iso: &str) -> String {
+        let stamp = crate::codex::local_expiry(iso_epoch(iso).unwrap()).unwrap();
+        format!("  Full reset · expires {stamp}")
+    }
+
     #[test]
     fn the_tab_shows_the_bank_the_summary_counts() {
         let data = Data::with_reset_grants("", Some(25), serde_json::json!([grant(2, Some(SOON))]), true);
-        let stamp = crate::codex::local_expiry(iso_epoch(SOON).unwrap()).unwrap();
         let rows = tab_text(&data, 100);
-        // Codex's layout, row for row: the title, then the two-space inset.
+        // Codex's layout, row for row: the count in the title, then one row
+        // per reset - a grant of two is two rows, though they end together.
         assert_eq!(bank_section_of(&rows), vec![
-            " ── BANK RESET ──".to_string(),
-            "  2 reset available".to_string(),
-            format!("  Expires {stamp}"),
+            " ── 2 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
         ], "{rows:#?}");
         // Under the quota windows and above the machine's own half, as on
-        // the Codex tab, and set apart from both by one empty row.
-        let bank_at = rows.iter().position(|row| row == " ── BANK RESET ──").unwrap();
+        // the Codex tab, with one empty row on each side.
+        let bank_at = rows.iter().position(|row| row == " ── 2 BANK RESETS ──").unwrap();
         let quota_at = rows.iter().position(|row| row.contains("session")).expect("a quota lane");
         let local_at = rows.iter().position(|row| row.contains("No stats cache")).expect("the local note");
         assert!(quota_at < bank_at && bank_at < local_at, "{rows:#?}");
         assert!(rows[bank_at - 1].is_empty(), "{rows:#?}");
+        assert!(rows[bank_at + 3].is_empty() && local_at == bank_at + 4, "{rows:#?}");
+    }
+
+    #[test]
+    fn two_grants_ending_together_are_two_rows() {
+        let data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(SOON)), grant(1, Some(SOON))]), true,
+        );
+        assert_eq!(bank_section_of(&tab_text(&data, 100)), vec![
+            " ── 2 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
+        ]);
     }
 
     #[test]
@@ -4035,12 +4032,12 @@ mod tests {
         let data = Data::with_reset_grants("", Some(25), serde_json::json!([]), true);
         let rows = tab_text(&data, 100);
         assert_eq!(bank_section_of(&rows), vec![
-            " ── BANK RESET ──".to_string(),
+            " ── 0 BANK RESETS ──".to_string(),
             "  None in the account.".to_string(),
         ], "{rows:#?}");
         let all = rows.join("\n");
-        assert!(!all.contains("reset available"), "a real zero is not described as available: {all}");
-        assert!(!all.contains("Expires"), "{all}");
+        assert!(!all.contains("expires"), "{all}");
+        assert!(!all.contains("expiry not given"), "{all}");
         // And the [+] line adds nothing for a zero, as it does for Codex.
         assert_eq!(data.reset_summary_line(), None);
     }
@@ -4071,105 +4068,97 @@ mod tests {
     }
 
     #[test]
-    fn grants_ending_apart_name_the_soonest_and_an_undated_one_says_so() {
-        let soon = crate::codex::local_expiry(iso_epoch(SOON).unwrap()).unwrap();
-        let apart = Data::with_reset_grants(
-            "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON))]), true,
+    fn rows_run_soonest_first_and_an_undated_reset_comes_last() {
+        let undated = serde_json::json!({"resets_left": 1, "usable_now": true});
+        let data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(LATER)), undated, grant(2, Some(SOON))]), true,
         );
-        assert_eq!(bank_section_of(&tab_text(&apart, 100)), vec![
-            " ── BANK RESET ──".to_string(),
-            "  3 reset available".to_string(),
-            format!("  Soonest expires {soon}"),
+        assert_eq!(bank_section_of(&tab_text(&data, 100)), vec![
+            " ── 4 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
+            full_row(LATER),
+            // No type and no date: neither is guessed.
+            "  Reset · expiry not given".to_string(),
         ]);
-        let together = Data::with_reset_grants(
-            "", Some(25), serde_json::json!([grant(1, Some(SOON)), grant(2, Some(SOON))]), true,
-        );
-        assert!(bank_section_of(&tab_text(&together, 100)).contains(&format!("  Expires {soon}")));
-        let undated = Data::with_reset_grants(
-            "", Some(25), serde_json::json!([grant(1, Some(SOON)), grant(2, None)]), true,
-        );
-        assert_eq!(bank_section_of(&tab_text(&undated, 100)), vec![
-            " ── BANK RESET ──".to_string(),
-            "  3 reset available".to_string(),
-            "  Expires date unknown".to_string(),
-        ]);
-        // The [+] line drops the date in exactly the same case.
-        assert_eq!(undated.reset_summary_line().as_deref(), Some("3 reset available"));
+        // The [+] line drops the date in exactly this case.
+        assert_eq!(data.reset_summary_line().as_deref(), Some("4 reset available"));
     }
 
     #[test]
     fn the_section_says_what_the_summary_line_says() {
         let soon = iso_epoch(SOON).unwrap();
         for old in [false, true] {
-            let mut data = Data::with_reset_grants("", Some(25), serde_json::json!([grant(2, Some(SOON))]), !old);
+            let mut data = Data::with_reset_grants(
+                "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON))]), !old,
+            );
             if old {
                 data.quota_at = now() - (CLAUDE_FRESH_FOR + 120.0);
             }
             let line = data.reset_summary_line().expect("a summary line");
             let section = bank_section_of(&tab_text(&data, 140));
-            let body: Vec<&str> = section.iter().skip(1).map(|row| row.trim()).collect();
-            // The same count, in the same words.
-            assert!(line.starts_with(body[0]), "{line} / {body:?}");
-            // The same instant: every part of the compact stamp is in the
-            // tab's fuller one, which adds only the year.
+            // The same count.
+            assert!(line.starts_with("3 reset available "), "{line}");
+            assert_eq!(section[0], " ── 3 BANK RESETS ──");
+            // The same soonest date: every part of the compact stamp is in
+            // the first row, which adds only the year.
             let compact = crate::codex::summary_expiry(soon).unwrap();
             assert!(line.contains(&compact), "{line}");
-            let full: Vec<&str> = body[1].split_whitespace().collect();
+            let first: Vec<&str> = section[1].split_whitespace().collect();
             for part in compact.split_whitespace() {
-                assert!(full.contains(&part), "{part} missing from {body:?}");
+                assert!(first.contains(&part), "{part} missing from {section:?}");
             }
             // The same age, only when the reading is old.
-            let note = format!("cached {} ago", ago(data.quota_at));
-            assert_eq!(line.ends_with(&format!(" · {note}")), old, "{line}");
-            assert_eq!(body.contains(&note.as_str()), old, "{body:?}");
-            assert_eq!(body.len(), if old { 3 } else { 2 }, "{body:?}");
+            let note = format!("  cached {} ago", ago(data.quota_at));
+            assert_eq!(line.ends_with(note.trim_start()), old, "{line}");
+            assert_eq!(section.last() == Some(&note), old, "{section:?}");
+            assert_eq!(section.len(), if old { 5 } else { 4 }, "{section:?}");
         }
     }
 
     #[test]
     fn the_section_fits_every_width_and_keeps_every_word() {
-        let data = {
-            let mut d = Data::with_reset_grants(
-                "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON))]), false,
-            );
-            d.quota_at = now() - (CLAUDE_FRESH_FOR + 120.0);
-            d
-        };
-        let wide = bank_section_of(&tab_text(&data, 400));
+        let undated = serde_json::json!({"resets_left": 1, "usable_now": true});
+        let mut data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON)), undated]), false,
+        );
+        data.quota_at = now() - (CLAUDE_FRESH_FOR + 120.0);
         let words = |rows: &[String]| -> Vec<String> {
             rows.iter().flat_map(|row| row.split_whitespace().map(str::to_string).collect::<Vec<_>>()).collect()
         };
+        let wide: Vec<String> = claude_bank_rows(&data, 400, &palette()).iter().map(|row| bare(row)).collect();
         for w in [30, 40, 60, 100, 140] {
-            let rows = claude_bank_rows(&data, w, &palette());
-            for row in &rows {
-                let shown = bare(row);
+            let shown: Vec<String> = claude_bank_rows(&data, w, &palette()).iter().map(|row| bare(row)).collect();
+            for row in &shown {
                 assert!(
-                    tc::display_width(&shown) <= w - 1,
-                    "{w} columns: {shown:?} is {} wide",
-                    tc::display_width(&shown)
+                    tc::display_width(row) <= w - 1,
+                    "{w} columns: {row:?} is {} wide",
+                    tc::display_width(row)
                 );
             }
-            let shown: Vec<String> = rows.iter().map(|row| bare(row)).collect();
             assert_eq!(words(&shown), words(&wide), "{w} columns lost or broke a word: {shown:#?}");
             assert!(!shown.join("").contains('…'), "{shown:#?}");
-            // The clock is never split across rows.
-            assert!(shown.iter().any(|row| row.split_whitespace().any(|part| part.contains(':'))));
+            assert_eq!(shown[0].trim_end(), " ── 4 BANK RESETS ──");
         }
+        // At 30 a dated row does not fit, so its datetime moves under it.
+        let narrow: Vec<String> = claude_bank_rows(&data, 30, &palette()).iter().map(|row| bare(row)).collect();
+        assert_eq!(narrow[1].trim_end(), "  Full reset · expires", "{narrow:#?}");
     }
 
     #[test]
     fn each_profile_shows_its_own_bank() {
         let main = Data::with_reset_grants("main", Some(25), serde_json::json!([grant(2, Some(SOON))]), true);
-        let overflow = Data::with_reset_grants("overflow", Some(60), serde_json::json!([grant(5, Some(LATER))]), true);
+        let overflow = Data::with_reset_grants("overflow", Some(60), serde_json::json!([grant(1, Some(LATER))]), true);
         let none = Data::with_reset_grants("spare", Some(10), serde_json::json!([]), true);
-        let soon = crate::codex::local_expiry(iso_epoch(SOON).unwrap()).unwrap();
-        let later = crate::codex::local_expiry(iso_epoch(LATER).unwrap()).unwrap();
-        let main_rows = bank_section_of(&tab_text(&main, 100));
-        let overflow_rows = bank_section_of(&tab_text(&overflow, 100));
-        let none_rows = bank_section_of(&tab_text(&none, 100));
-        assert_eq!(main_rows[1..], ["  2 reset available".to_string(), format!("  Expires {soon}")]);
-        assert_eq!(overflow_rows[1..], ["  5 reset available".to_string(), format!("  Expires {later}")]);
-        assert_eq!(none_rows[1..], ["  None in the account.".to_string()]);
+        assert_eq!(bank_section_of(&tab_text(&main, 100)), vec![
+            " ── 2 BANK RESETS ──".to_string(), full_row(SOON), full_row(SOON),
+        ]);
+        assert_eq!(bank_section_of(&tab_text(&overflow, 100)), vec![
+            " ── 1 BANK RESET ──".to_string(), full_row(LATER),
+        ]);
+        assert_eq!(bank_section_of(&tab_text(&none, 100)), vec![
+            " ── 0 BANK RESETS ──".to_string(), "  None in the account.".to_string(),
+        ]);
     }
 }
 

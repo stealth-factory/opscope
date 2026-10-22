@@ -24,15 +24,17 @@ and Copilot each publish one over an endpoint, fetched with the credential
 that agent already holds and sent only to that agent's own host. Codex also
 publishes how many reset credits are still available, and each credit's
 own title and expiry as a date and time in this machine's local zone.
+The BANK RESET section titles itself with the count, then lists one row
+per reset, soonest first; a reset with no date says expiry not given.
 That is separate from the usage-window countdown. Nothing here is inferred
 from a number that was not published.
 
 On [+], Claude accounts also show available usage-limit resets and the
 soonest known expiry beneath their quota rows. Each profile keeps its own
 count; cached availability is labelled, and expired grants are excluded.
-Each Claude tab repeats it as a BANK RESET section laid out like Codex's,
-with the year on the expiry; zero says none are in the account, and an
-inventory that could not be read draws no section.
+Each Claude tab repeats it as a BANK RESET section in Codex's layout, one
+row per reset with the year on its expiry; zero says none are in the
+account, and an inventory that could not be read draws no section.
 This display reads availability only and never uses a reset.
 
 Notion AI is the one remote reading that uses a credential no agent here

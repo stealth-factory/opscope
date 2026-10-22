@@ -2250,10 +2250,10 @@ mod tests {
         let tab = plain(&tab_body_with_plots("claude", &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
         let plus = plain(&tab_body_with_plots(SUMMARY_TAB, &s, 100, 60, &cfg, &palette(), &tabs, &mut Vec::new()));
         let stamp = crate::codex::local_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
-        let at = tab.iter().position(|row| row.trim_end() == " ── BANK RESET ──")
+        let at = tab.iter().position(|row| row.trim_end() == " ── 1 BANK RESET ──")
             .unwrap_or_else(|| panic!("no bank on the tab: {tab:#?}"));
-        assert_eq!(tab[at + 1].trim_end(), "  1 reset available", "{tab:#?}");
-        assert_eq!(tab[at + 2].trim_end(), format!("  Expires {stamp}"), "{tab:#?}");
+        assert_eq!(tab[at + 1].trim_end(), format!("  Full reset · expires {stamp}"), "{tab:#?}");
+        assert!(tab[at + 2].trim().is_empty(), "{tab:#?}");
         let line = s.claude[0].reset_summary_line().expect("the [+] line");
         assert!(plus.iter().any(|row| row.trim() == line), "{plus:#?}");
         let compact = crate::codex::summary_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();

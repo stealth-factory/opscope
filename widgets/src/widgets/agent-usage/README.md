@@ -220,19 +220,21 @@ when an account has no quota lanes. Cached availability carries its age,
 and a grant whose expiry has passed is no longer counted.
 
 The Claude tab carries the same **BANK RESET** section as the Codex tab,
-under the quota windows, with the same title, inset and wording: the count
-as `N reset available`, then `Expires` and the expiry in this machine's local
-zone with the year, and `cached 5m ago` when the reading is old. Grants
-ending at different times show `Soonest expires`, since one date is not
-the expiry of all of them; a counted grant with no readable expiry makes it
-`Expires date unknown`, the same case that leaves the date off the `[+]`
-line. An inventory that answered with no resets shows `None in the
+drawn by the same code: the count in the title, then one row per reset,
+soonest first. A grant of two is two rows with the same expiry - nothing is
+merged. A grant whose `type` is `full` is a `Full reset`, the name Codex's
+credits carry; any other type is a plain `Reset`, and the grant's `label`, a
+sentence rather than a kind, is not shown. A grant with no readable expiry is
+`Reset · expiry not given` (or `Full reset · …`) and comes last. When the
+reading is old the section ends with `cached 5m ago`. An inventory that
+answered with no resets shows `── 0 BANK RESETS ──` and `None in the
 account.`, as Codex does. A reading with no inventory in it - no quota yet,
 or a block that is absent, ineligible or unreadable - draws no section,
 again as Codex does when its inventory request fails, so an unread bank is
-never shown as an empty one. Each profile's tab shows its own bank, and the
-section says what the `[+]` line says for the same profile, because both
-are built from the same parse of the same reading.
+never shown as an empty one. Each profile's tab shows its own bank. The
+`[+]` line stays one line, and it agrees with the section for the same
+profile: the same count as the title, and the soonest date of the first row
+without its year. A count past 1000 resets is not read as an inventory.
 
 This comes from the optional `cedar_ember` block on
 `GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
@@ -1284,15 +1286,28 @@ reading is missing the separately-metered lanes entirely — which is why the
 source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
-Under the windows, **BANK RESET** is the unused rate-limit reset credits
-still in the account. Each credit the inventory listed is its own title,
-from that credit's `title`, and then `Expires` with the expiry as a date
-and time in this machine's local zone, the zone named. A credit with no
-title is not given one. A credit with no readable `expires_at` still counts
-and the expiry line says the date is unknown. A body that states a count
-and no list shows `N reset available` and no date rows. It is not another
-usage window, and it is not the `resets in` countdown on the quota rows.
-Every one of these numbers and dates comes from
+Under the windows, the **BANK RESET** section is the unused rate-limit
+reset credits still in the account, in the one layout the Claude tab uses
+too. The title carries the count, as in `── 1 BANK RESET ──` or
+`── 2 BANK RESETS ──`, and under it is one row per credit, soonest expiry
+first:
+
+```text
+ ── 2 BANK RESETS ──
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+```
+
+A row is the credit's `title` when it has one and `Reset` when it does not,
+then the expiry as a date and time in this machine's local zone, the zone
+named. Two credits ending at the same moment are still two rows. A credit
+with no readable `expires_at` still counts, sorts after every dated one, and
+says `· expiry not given`. A body that states a count and no list is that
+many `Reset · expiry not given` rows, since no date was sent for any of
+them. When a row is too wide for the pane its words stay together and the
+datetime moves to the following lines, broken between its parts. It is not
+another usage window, and it is not the `resets in` countdown on the quota
+rows. Every one of these numbers and dates comes from
 `GET /wham/rate-limit-reset-credits` on the same host and credential. A
 credit counts only while it is still available and its expiry, when one
 can be read, is still ahead. An inventory that answers `0` shows that none
@@ -1305,7 +1320,8 @@ rows, with a blank line above it. The soonest expiry is added in the same compac
 form as Claude (`23 Oct 04:58 +08:00`) only
 when every listed credit has a readable expiry. Zero and an unread
 inventory add nothing. The Codex tab's per-credit expiry keeps the full year
-but also omits parentheses around the offset.
+but also omits parentheses around the offset. Both tabs leave one empty
+row between the section and whatever follows it.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
