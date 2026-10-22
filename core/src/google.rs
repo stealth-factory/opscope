@@ -239,8 +239,11 @@ pub fn parse_token_response(status: u16, body: &str, now: f64) -> Result<(String
     if !said.is_empty() {
         out.push_str(&format!(" - {}", said));
     }
+    // Whole words: `exp` is inside "expired" and "expected", and a revoked
+    // key ("Token has been expired or revoked.") is not a clock problem.
     let lower = said.to_lowercase();
-    if lower.contains("iat") || lower.contains("exp") || lower.contains("timeframe") {
+    let words: Vec<&str> = lower.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if words.iter().any(|w| matches!(*w, "iat" | "exp" | "timeframe")) {
         out.push_str(" (check this machine's clock)");
     }
     Err(out)
@@ -311,12 +314,26 @@ pub fn access_token_with(
 }
 
 /// How a widget signs in, as its config says.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Debug` is written by hand so a pasted token never reaches a log, a
+/// panic message or a test failure.
+#[derive(Clone, PartialEq)]
 pub enum Credential {
     /// A service-account key file, re-minted every hour indefinitely.
     KeyFile { path: String },
     /// A pasted access token, good for the hour it was minted for.
     Token { value: String, from: Source },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credential::KeyFile { path } => f.debug_struct("KeyFile").field("path", path).finish(),
+            Credential::Token { from, .. } => {
+                f.debug_struct("Token").field("value", &"<redacted>").field("from", from).finish()
+            }
+        }
+    }
 }
 
 /// Pick the credential a widget's config names, or `None` when it names
@@ -746,6 +763,13 @@ mod tests {
         assert!(skew.starts_with("Google refused the sign-in: invalid_grant - Invalid JWT: Token must be"));
         assert!(skew.contains("Check your iat and exp values in the JWT claim."), "whole, not capped");
         assert!(skew.ends_with("(check this machine's clock)"));
+        let revoked = parse_token_response(
+            400,
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(!revoked.contains("clock"), "a revoked key is not a clock problem: {}", revoked);
         let html = parse_token_response(502, "<html>Bad Gateway</html>", 0.0).unwrap_err();
         assert_eq!(html, "Google's sign-in refused: HTTP 502: <html>Bad Gateway</html>");
         let empty = parse_token_response(200, "{}", 0.0).unwrap_err();
@@ -839,6 +863,8 @@ mod tests {
         assert_eq!(bearer.value, "pasted");
         assert_eq!(bearer.expires_at, None);
         assert!(!format!("{:?}", bearer).contains("pasted"), "Debug must not print the token");
+        assert!(!format!("{:?}", pasted).contains("pasted"), "nor the credential holding it");
+        assert!(format!("{:?}", pasted).contains("<redacted>"));
         assert_eq!(credential_from("", "", "OTHER_VAR", env), None);
         assert_eq!(credential_from(" ", " ", "", env), None);
     }

@@ -90,10 +90,30 @@ Each widget's own `CONFIGURE.md` names its section and its other settings.
 
 ## For an hour of testing: a pasted token
 
-Without a key, a token minted elsewhere works until it expires:
+Without a key, a token minted elsewhere works until it expires. It has to
+carry the widget's scope - `analytics.readonly` for `google-analytics`,
+`webmasters.readonly` for `google-search-console` - and a plain
+`gcloud auth print-access-token` for your own account cannot ask for
+either: for a user account gcloud only accepts a fixed list of scopes. The
+scope has to be granted at login first, through Application Default
+Credentials:
+
+```sh
+gcloud auth application-default login --scopes=\
+https://www.googleapis.com/auth/cloud-platform,\
+https://www.googleapis.com/auth/analytics.readonly,\
+https://www.googleapis.com/auth/webmasters.readonly
+export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth application-default print-access-token)"
+```
+
+Google can refuse those scopes for gcloud's own sign-in client on some
+accounts; if it does, the service-account key above is the way in. Someone
+holding *Service Account Token Creator* on the service account can instead
+mint a token as it, which carries exactly the access the account was given:
 
 ```sh
 export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth print-access-token \
+  --impersonate-service-account=<service-account-email> \
   --scopes=https://www.googleapis.com/auth/analytics.readonly)"
 ```
 
@@ -119,8 +139,10 @@ expired one is reported as a refused token rather than as a quiet site. A
   allow the `analytics.readonly` or `webmasters.readonly` scopes, a refresh
   token expires after seven days while the consent screen is in "Testing",
   and it puts a client secret in config.
-- **`gcloud auth print-access-token`.** The same scope limits, plus a
-  300 MB tool on every machine that runs a pane.
+- **`gcloud auth print-access-token`.** Its own sign-in cannot ask for
+  these scopes without a scoped `application-default` login first, its
+  tokens still last an hour, and it is a 300 MB tool on every machine that
+  runs a pane. Fine for an hour of testing, as above; not for a wall.
 - **A JWT crate.** `jsonwebtoken` brings `aws-lc-rs`, which needs a C
   compiler, and `ring` needs `cc`. The JWT is forty lines over `rsa` and
   `sha2`, both pure Rust, so `ldd` on a release binary still shows only libc,
