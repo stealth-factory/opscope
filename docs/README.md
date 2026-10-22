@@ -23,6 +23,7 @@ navigation, not itself a widget.
 | [`github`](../widgets/src/widgets/github/README.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |
 | [`github-actions`](../widgets/src/widgets/github-actions/README.md) | GitHub Actions across those same accounts — what is running, what is failing, and how long it sat in the queue. |
 | [`github-prs`](../widgets/src/widgets/github-prs/README.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
+| [`google-search-console`](../widgets/src/widgets/google-search-console/README.md) | Which pages and queries moved in Google Search, what people search to arrive, and which pages that earn the traffic are broken in the index. |
 | [`linear`](../widgets/src/widgets/linear/README.md) | Linear across every team at once — what is outstanding, which cycles are running, and whether issues are being closed faster than they arrive. |
 | [`agent-usage`](../widgets/src/widgets/agent-usage/README.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
 | [`ports`](../widgets/src/widgets/ports/README.md) | What is listening on this machine, what started it, and who can reach it. |

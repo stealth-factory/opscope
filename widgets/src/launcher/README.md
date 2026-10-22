@@ -6,7 +6,7 @@ The front door: every widget, what it does, and a preview before it runs.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v0.17.0
- 16 widgets   ↵ or → starts one, q leaves
+ 17 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
    clocks       Server clock, countdowns, a pomodoro…
@@ -23,7 +23,7 @@ The front door: every widget, what it does, and a preview before it runs.
  ↑↓ select  ↵ launch  [q]uit
 ```
 
-Sixteen widget binaries in a directory are a list you have to already know. Pick one
+Seventeen widget binaries in a directory are a list you have to already know. Pick one
 and it runs; quit it and you are back here.
 
 ## Nothing is described twice
