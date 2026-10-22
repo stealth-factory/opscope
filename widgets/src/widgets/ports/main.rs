@@ -2208,6 +2208,7 @@ impl Store {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("ports");
     if !tc::dependencies_available("ports", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -2571,6 +2572,10 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "up" => {
@@ -2989,7 +2994,10 @@ fn main() {
             w - 1,
         ));
 
-        let visible = std::cmp::max(1, h.saturating_sub(rows.len() + 3));
+        // The notices banner sits above the footer and is part of it, so
+        // the list is sized with it already taken.
+        let banner = tc::notices::banner_rows(w);
+        let visible = std::cmp::max(1, h.saturating_sub(rows.len() + 3 + banner.len()));
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -3172,32 +3180,33 @@ fn main() {
             rows.push(tc::seg(&line, w - 1));
         }
 
-        let foot = footer(
-            &confirm,
-            &watch,
-            &working,
-            &notice,
-            w,
-            &[
-                vec![
-                    (ok.accent.clone(), "↑↓".into()),
-                    (ok.dim.clone(), " select".into()),
-                ],
-                vec![
-                    (ok.accent.clone(), "→/↵".into()),
-                    (ok.dim.clone(), " details".into()),
-                ],
-                vec![(ok.dim.clone(), "[k]ill".into())],
-                vec![(
-                    ok.dim.clone(),
-                    format!("[o]{} system", if hide_system { "show" } else { "hide" }),
-                )],
-                vec![(ok.dim.clone(), "[r]efresh".into())],
-                vec![(ok.dim.clone(), "[,] settings".into())],
-                vec![(ok.dim.clone(), "[q]uit".into())],
+        let mut hints: Vec<Vec<(String, String)>> = vec![
+            vec![
+                (ok.accent.clone(), "↑↓".into()),
+                (ok.dim.clone(), " select".into()),
             ],
-            &ok,
-        );
+            vec![
+                (ok.accent.clone(), "→/↵".into()),
+                (ok.dim.clone(), " details".into()),
+            ],
+            vec![(ok.dim.clone(), "[k]ill".into())],
+            vec![(
+                ok.dim.clone(),
+                format!("[o]{} system", if hide_system { "show" } else { "hide" }),
+            )],
+            vec![(ok.dim.clone(), "[r]efresh".into())],
+        ];
+        hints.extend(tc::notices::hint(w - 2).map(|hint| {
+            hint.into_iter()
+                .map(|(c, t)| (c.to_string(), t))
+                .collect::<Vec<_>>()
+        }));
+        hints.extend([
+            vec![(ok.dim.clone(), "[,] settings".into())],
+            vec![(ok.dim.clone(), "[q]uit".into())],
+        ]);
+        let mut foot = banner;
+        foot.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
         while rows.len() < h.saturating_sub(foot.len() + 1) {
             rows.push(String::new());
         }
