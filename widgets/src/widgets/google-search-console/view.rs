@@ -1739,7 +1739,8 @@ mod tests {
         let base = site("sc-domain:example.com");
         let caches = BTreeMap::new();
         let mut cases: Vec<(&str, SiteData, &str, &str)> = Vec::new();
-        cases.push(("no credential", base.clone(), "no credential: set google_search_console.credentials_file — press `,` to set it here", "no credential"));
+        let no_credential = opscope_core::google::missing_credential("google_search_console", "");
+        cases.push(("no credential", base.clone(), no_credential.as_str(), "no credential"));
         let mut not_enabled = base.clone();
         not_enabled.problem = Some("API not enabled: turn on searchconsole.googleapis.com in the key's Cloud project (APIs & Services)".into());
         cases.push(("api not enabled", not_enabled, "", "API not enabled"));
