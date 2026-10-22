@@ -131,11 +131,7 @@ fn main() {
     match &cred {
         None => {
             if let Ok(mut g) = shared.lock() {
-                g.discovery_err = tc::missing_config(&format!(
-                    "no credential: set google_analytics.credentials_file to a service-account key \
-                     (docs/google-setup.md), or paste a token in google_analytics.token or ${}",
-                    if token_env.is_empty() { TOKEN_ENV } else { token_env.as_str() }
-                ));
+                g.discovery_err = google::missing_credential(SETTINGS.section, &token_env);
             }
         }
         Some(cred) if !ids.is_empty() => {
@@ -596,5 +592,13 @@ mod tests {
     #[test]
     fn the_token_variable_is_the_one_google_tooling_uses() {
         assert_eq!(TOKEN_ENV, google::DEFAULT_TOKEN_ENV);
+    }
+
+    #[test]
+    fn no_credential_is_worded_by_core_for_this_section() {
+        let row = google::missing_credential(SETTINGS.section, "");
+        assert!(row.starts_with("no credential: set google_analytics.credentials_file "), "{row}");
+        assert!(row.contains("google_analytics.token or $GOOGLE_OAUTH_ACCESS_TOKEN"), "{row}");
+        assert!(row.ends_with(tc::SET_IN_SETTINGS), "{row}");
     }
 }
