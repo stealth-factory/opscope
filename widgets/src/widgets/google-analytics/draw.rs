@@ -362,6 +362,7 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
             }
         };
         chunks.push(vec![part(&p.dim, ago("realtime", prop.rt_at))]);
+        chunks.push(vec![part(&p.dim, ago("breakdowns", prop.breakdown_at))]);
         chunks.push(vec![part(&p.dim, ago("reports", prop.core_at))]);
         let mut live = vec![part(&p.accent, format!("live {}s", prop.interval.max(1)))];
         if !prop.interval_why.is_empty() {
@@ -397,6 +398,7 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
             say(&p.bad, &format!("{} - reports paused 5m, last reports kept below", prop.core_banner));
         }
         say(&p.bad, &prop.rt_err);
+        say(&p.bad, &prop.bd_err);
         say(&p.bad, &prop.core_err);
         say(&p.bad, &prop.admin_err);
         say(&p.warn, &prop.sample_err);
@@ -1096,7 +1098,7 @@ fn property_cells(prop: &Prop, v: &View) -> (String, String, String, String, Str
         "stopped".to_string()
     } else if !prop.rt_banner.is_empty() || !prop.core_banner.is_empty() {
         "429".into()
-    } else if !prop.rt_err.is_empty() || !prop.core_err.is_empty() || !prop.admin_err.is_empty() {
+    } else if !prop.rt_err.is_empty() || !prop.bd_err.is_empty() || !prop.core_err.is_empty() || !prop.admin_err.is_empty() {
         "error".into()
     } else if !prop.interval_why.is_empty() {
         format!("{}s", prop.interval)
@@ -1662,6 +1664,7 @@ mod tests {
         prop.admin_err = "Google refused the sign-in: invalid_grant - Invalid JWT Signature.".into();
         prop.core_banner = "429 quota: property tokens per day exhausted (daily bucket, resets at midnight Pacific time)".into();
         prop.sample_err = "could not write the sample file /x: permission denied".into();
+        prop.bd_err = "realtime breakdowns: could not reach GA: timed out".into();
         let mut s = shared(vec![prop]);
         s.discovery_err = "no GA4 properties visible to reader@example-project.iam.gserviceaccount.com".into();
         let mut v = view();
@@ -1675,6 +1678,7 @@ mod tests {
             "reports paused 5m",
             "daily bucket",
             "could not write the sample file",
+            "realtime breakdowns: could not reach GA",
             "no GA4 properties visible",
             "chmod 600",
             "no realtime reading - the reason is above",

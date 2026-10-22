@@ -167,6 +167,16 @@ pub fn realtime_breakdown_body(dim: &str, metrics: &[&str], limit: u32) -> Value
     })
 }
 
+/// The realtime event breakdown, asked only for the events on screen -
+/// the configured list, or those GA flags - so a low-volume key event is
+/// never cut off below the limit by busier ordinary events.
+pub fn realtime_events_body(configured: &[String]) -> Value {
+    let mut body = realtime_breakdown_body("eventName", &["eventCount", "keyEvents"], 250);
+    let (key, filter) = key_event_filter(configured);
+    body[key] = filter;
+    body
+}
+
 fn range(start: &str, end: &str, name: &str) -> Value {
     json!({ "startDate": start, "endDate": end, "name": name })
 }
@@ -360,6 +370,7 @@ mod tests {
             realtime_totals_body(),
             realtime_minutes_body(),
             realtime_breakdown_body("unifiedScreenName", &["activeUsers"], 5),
+            realtime_events_body(&[]),
             processed_body(7, &[]),
             organic_body(14),
             page_detail_body("/pricing"),
@@ -385,6 +396,15 @@ mod tests {
         assert!(named["requests"][2].get("metricFilter").is_none());
         let p = page_detail_body("/x");
         assert_eq!(p["requests"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn realtime_events_ask_only_for_the_events_shown() {
+        let flagged = realtime_events_body(&[]);
+        assert_eq!(flagged["metricFilter"]["filter"]["fieldName"], "keyEvents");
+        let named = realtime_events_body(&["purchase".into()]);
+        assert_eq!(named["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
+        assert!(named.get("metricFilter").is_none());
     }
 
     #[test]

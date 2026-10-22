@@ -7,7 +7,7 @@ change hurt key events?
 
 ```text
 ╺━ GOOGLE ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   reports 3m ago   live 15s
+ Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   breakdowns 40s ago   reports 3m ago   live 15s
  quota realtime used 1.2k/14k h 31k/200k d
 
  ── RIGHT NOW ── last 30 min · GA realtime · hits land within seconds
@@ -56,7 +56,8 @@ the widget has to have been watching.
 
 ## Sections
 
-**Header.** The property, how old the realtime and report readings are, the
+**Header.** The property, how old the realtime totals, the realtime
+breakdowns and the reports are, the
 realtime interval in force and why it is not the one chosen, and the
 property's quota (`propertyQuota`) for whichever of the realtime and core
 quotas is nearer its limit, by hour and by day. A poller that stopped, a key
