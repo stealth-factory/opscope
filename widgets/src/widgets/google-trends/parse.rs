@@ -101,7 +101,13 @@ fn decode_entities(raw: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         let after = &rest[at..];
-        let Some(end) = after[..after.len().min(12)].find(';') else {
+        // Bytes, not a `&str` slice: byte 12 can fall inside a multibyte
+        // character after the entity, and `;` is ASCII, so its index is
+        // always a character boundary.
+        let Some(end) = after.as_bytes()[..after.len().min(12)]
+            .iter()
+            .position(|&b| b == b';')
+        else {
             out.push('&');
             rest = &after[1..];
             continue;
@@ -258,7 +264,22 @@ fn parse_document(text: &str) -> Result<Node, String> {
         let open = stack.last().map(|n| n.name.clone()).unwrap_or_default();
         return Err(format!("the document ends with <{}> still open", open));
     }
-    Ok(stack.pop().unwrap_or_default())
+    let doc = stack.pop().unwrap_or_default();
+    // One root and nothing beside it. Two documents run together would
+    // otherwise read as the first alone, and the trends in the second
+    // would be recorded as having left the feed.
+    if doc.children.len() > 1 {
+        return Err(format!(
+            "{} root elements where XML allows one (<{}> then <{}>)",
+            doc.children.len(),
+            doc.children[0].name,
+            doc.children[1].name
+        ));
+    }
+    if !doc.text.trim().is_empty() {
+        return Err("text outside the root element".into());
+    }
+    Ok(doc)
 }
 
 /// `<pubDate>` as Unix seconds. RFC 2822, as RSS specifies.
@@ -479,6 +500,25 @@ mod tests {
             decode_entities("fish &chips; & more"),
             "fish &chips; & more"
         );
+        // Byte 12 lands inside a multibyte character; this panicked.
+        assert_eq!(decode_entities("&amp;日本語日本語"), "&日本語日本語");
+        assert_eq!(decode_entities("&amp;éééé"), "&éééé");
+        assert_eq!(decode_entities("&éééééééé;"), "&éééééééé;");
+    }
+
+    #[test]
+    fn a_document_with_two_roots_or_stray_text_is_refused() {
+        let one = "<rss><channel></channel></rss>";
+        assert!(parse_document(one).is_ok());
+        let two = format!("{one}{one}");
+        let err = parse_document(&two).unwrap_err();
+        assert!(err.contains("2 root elements"), "{err}");
+        let stray = format!("{one}trailing");
+        assert_eq!(
+            parse_document(&stray).unwrap_err(),
+            "text outside the root element"
+        );
+        assert!(parse_trending_rss(&two).is_err());
     }
 
     #[test]
