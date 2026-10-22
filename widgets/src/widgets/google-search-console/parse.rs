@@ -22,9 +22,10 @@
 //! tested on every target. The clock comes in as an argument wherever an
 //! answer depends on what time it is.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono_tz::America::Los_Angeles;
 
 /// Google's daily URL Inspection allowance, per property.
 pub const DAILY_INSPECTIONS: usize = 2000;
@@ -376,8 +377,21 @@ pub struct HourView {
     pub latest_complete: Option<DateTime<Utc>>,
     pub now: Totals,
     /// The same hours seven days earlier, or `None` when the lookback
-    /// does not reach back that far for every one of them.
+    /// does not reach back that far for every one of them, or a clock
+    /// change leaves some hour without exactly one counterpart.
     pub week_ago: Option<Totals>,
+    /// Why `week_ago` is `None` when that is a Pacific clock change rather
+    /// than the lookback.
+    pub clock_change: bool,
+}
+
+/// The start of the same Pacific wall-clock hour seven calendar days
+/// before `at`, as Unix seconds, or `None` when that hour did not exist
+/// (the spring-forward gap). Of a repeated hour (fall-back) the first is
+/// taken.
+pub fn week_earlier(at: DateTime<Utc>) -> Option<i64> {
+    let local = at.with_timezone(&Los_Angeles).naive_local() - Duration::days(7);
+    Los_Angeles.from_local_datetime(&local).earliest().map(|t| t.timestamp())
 }
 
 /// Build the strip from an `hour` + `hourly_all` answer.
@@ -425,13 +439,24 @@ pub fn hour_view(a: &Analytics, now: DateTime<Utc>) -> HourView {
     let mut totals = Totals::default();
     let mut prior = Totals::default();
     let mut reaches = true;
+    let mut paired: HashSet<i64> = HashSet::new();
+    let mut clock_change = false;
     for h in hours.iter().filter(|h| h.state == HourState::Complete) {
         add(&mut totals, h.m.as_ref());
-        let then = h.start.timestamp() - 7 * 86400;
-        if earliest_row.is_none_or(|first| then < first) {
-            reaches = false;
+        // The same Pacific wall-clock hour a calendar week earlier, which
+        // is what Google's hourly keys are in. Across a clock change that
+        // is not exactly 7 * 86400 seconds back; an hour with no single
+        // counterpart, or two hours landing on one, leave nothing like for
+        // like to compare, so the week is not compared at all.
+        match week_earlier(h.start) {
+            Some(then) if paired.insert(then) => {
+                if earliest_row.is_none_or(|first| then < first) {
+                    reaches = false;
+                }
+                add(&mut prior, by_hour.get(&then));
+            }
+            _ => clock_change = true,
         }
-        add(&mut prior, by_hour.get(&then));
     }
     let latest_complete = hours
         .iter()
@@ -451,7 +476,8 @@ pub fn hour_view(a: &Analytics, now: DateTime<Utc>) -> HourView {
             _ => None,
         },
         latest_complete,
-        week_ago: (totals.hours > 0 && reaches).then_some(prior),
+        week_ago: (totals.hours > 0 && reaches && !clock_change).then_some(prior),
+        clock_change,
         now: totals,
         hours,
     }
@@ -462,14 +488,17 @@ pub fn hour_view(a: &Analytics, now: DateTime<Utc>) -> HourView {
 /// The last day each data state covers, read from a `date` grouping asked
 /// with `dataState: all`.
 ///
-/// Final ends the day before `first_incomplete_date`; with no marker every
-/// day returned is final. Fresh ends at the last day with any data. `None`
+/// Final ends the day before `first_incomplete_date` - that day itself,
+/// not the last row before the marker, since a final day with no traffic
+/// has no row; with no marker every day returned is final. Fresh ends at the last day with any data. `None`
 /// means there is no such day: a brand-new property with nothing final yet.
 pub fn last_days(a: &Analytics) -> (Option<NaiveDate>, Option<NaiveDate>) {
     let days: Vec<NaiveDate> = a.rows.iter().filter_map(|r| r.keys.first().and_then(|k| parse_date(k))).collect();
     let fresh = days.iter().max().copied();
     let final_end = match a.first_incomplete_date.as_deref().and_then(parse_date) {
-        Some(first) => days.iter().filter(|d| **d < first).max().copied(),
+        // Some row before the marker says the property had final days at
+        // all; a brand-new one has none, whatever the marker says.
+        Some(first) => days.iter().any(|d| *d < first).then(|| first - Duration::days(1)),
         None => fresh,
     };
     (final_end, fresh)
@@ -550,16 +579,21 @@ pub struct Mover {
     pub key: String,
     pub cur: Option<Metrics>,
     pub prior: Option<Metrics>,
+    /// The missing side is absent only from an answer Google's row limit
+    /// cut, so it is not known to be zero: the row may sit just below the
+    /// top `MOVER_ROWS` of that window. Such a row is neither new nor gone.
+    pub unknown: bool,
 }
 
 impl Mover {
-    /// In the current window and not the prior one.
+    /// In the current window and known to be absent from the prior one.
     pub fn is_new(&self) -> bool {
-        self.cur.is_some() && self.prior.is_none()
+        self.cur.is_some() && self.prior.is_none() && !self.unknown
     }
-    /// In the prior window and not the current one: it dropped to zero.
+    /// In the prior window and known to be absent from the current one:
+    /// it dropped to zero.
     pub fn is_gone(&self) -> bool {
-        self.cur.is_none() && self.prior.is_some()
+        self.cur.is_none() && self.prior.is_some() && !self.unknown
     }
 
     /// How far it moved on `metric`, with improvement positive.
@@ -573,27 +607,36 @@ impl Mover {
             (Some(c), Some(p), Metric::Position) => Some(p.position - c.position),
             (Some(c), Some(p), _) => Some(metric.of(&c) - metric.of(&p)),
             (_, _, Metric::Ctr | Metric::Position) => None,
+            // A side cut by the row limit is unknown, not zero.
+            _ if self.unknown => None,
             (c, p, _) => Some(c.map(|m| metric.of(&m)).unwrap_or(0.0) - p.map(|m| metric.of(&m)).unwrap_or(0.0)),
         }
     }
 }
 
 /// Join a current and a prior answer by their first key.
+///
+/// An answer that came back with `MOVER_ROWS` rows was cut by Google's row
+/// limit, so a key missing from it is marked unknown rather than zero.
 pub fn join_movers(cur: &[Row], prior: &[Row]) -> Vec<Mover> {
+    let (cur_cut, prior_cut) = (cur.len() >= MOVER_ROWS, prior.len() >= MOVER_ROWS);
     let mut out: Vec<Mover> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for r in cur {
         let key = r.keys.first().cloned().unwrap_or_default();
         at.insert(key.clone(), out.len());
-        out.push(Mover { key, cur: Some(r.m), prior: None });
+        out.push(Mover { key, cur: Some(r.m), prior: None, unknown: prior_cut });
     }
     for r in prior {
         let key = r.keys.first().cloned().unwrap_or_default();
         match at.get(&key) {
-            Some(&i) => out[i].prior = Some(r.m),
+            Some(&i) => {
+                out[i].prior = Some(r.m);
+                out[i].unknown = false;
+            }
             None => {
                 at.insert(key.clone(), out.len());
-                out.push(Mover { key, cur: None, prior: Some(r.m) });
+                out.push(Mover { key, cur: None, prior: Some(r.m), unknown: cur_cut });
             }
         }
     }
@@ -1080,6 +1123,46 @@ mod tests {
         let (fin, fresh) = last_days(&a);
         assert_eq!(fin, parse_date("2026-10-18"));
         assert_eq!(fresh, parse_date("2026-10-20"));
+    }
+
+    #[test]
+    fn a_final_day_with_no_traffic_still_ends_the_final_window() {
+        // The 18th was final and had nothing, so Google sent no row for it.
+        let a = dates(&["2026-10-16", "2026-10-17", "2026-10-20"], Some("2026-10-19"));
+        assert_eq!(last_days(&a).0, parse_date("2026-10-18"));
+    }
+
+    #[test]
+    fn a_week_back_is_the_same_pacific_hour_across_a_clock_change() {
+        // 2026-11-01 is the fall-back Sunday in the US. Noon Pacific on the
+        // 3rd (PST, 20:00 UTC) pairs with noon Pacific on Oct 27 (PDT,
+        // 19:00 UTC): 169 hours back, not 168.
+        let noon = Utc.with_ymd_and_hms(2026, 11, 3, 20, 0, 0).unwrap();
+        assert_eq!(week_earlier(noon), Some(Utc.with_ymd_and_hms(2026, 10, 27, 19, 0, 0).unwrap().timestamp()));
+        // An ordinary week is exactly 168 hours.
+        let plain = Utc.with_ymd_and_hms(2026, 10, 21, 16, 0, 0).unwrap();
+        assert_eq!(week_earlier(plain), Some(plain.timestamp() - 7 * 86400));
+        // 02:00 on 2026-03-15 Pacific: a week earlier, 2026-03-08, skipped it.
+        let gap = Utc.with_ymd_and_hms(2026, 3, 15, 9, 0, 0).unwrap();
+        assert_eq!(week_earlier(gap), None);
+    }
+
+    #[test]
+    fn a_window_cut_by_the_row_limit_calls_nothing_new_or_gone() {
+        let full: Vec<Row> = (0..MOVER_ROWS).map(|i| row(&format!("/p{i}"), 1.0, 10.0, 5.0)).collect();
+        let prior = vec![row("/p0", 1.0, 10.0, 5.0), row("/slipped", 2.0, 20.0, 5.0)];
+        let m = join_movers(&full, &prior);
+        let slipped = m.iter().find(|m| m.key == "/slipped").unwrap();
+        assert!(!slipped.is_gone(), "absent from a cut answer is not zero");
+        assert_eq!(slipped.change(Metric::Impressions), None);
+        // The whole prior answer was not cut, so a page missing there is new.
+        assert!(m.iter().find(|m| m.key == "/p1").unwrap().is_new());
+        assert!(inspection_set(&m, 5).0.iter().all(|u| u != "/slipped"));
+        // And the other way round.
+        let m = join_movers(&prior, &full);
+        let slipped = m.iter().find(|m| m.key == "/slipped").unwrap();
+        assert!(!slipped.is_new());
+        assert!(!m.iter().find(|m| m.key == "/p0").unwrap().unknown);
     }
 
     #[test]
