@@ -1672,6 +1672,7 @@ fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("netwatch");
     if !tc::dependencies_available(
         "netwatch",
         include_str!("dependencies.json"),
@@ -1964,6 +1965,10 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "1" => sort_live = false,
@@ -2360,7 +2365,10 @@ fn main() {
         // when even a two-row plot would leave the list fewer than five
         // rows the chart stands down — this screen does not scroll, so a
         // chart that overruns its budget pushes the list off the pane.
-        let spare = h.saturating_sub(out.len() + 4);
+        // The notices banner sits above the footer and is part of it, so
+        // the chart and the table are sized with it already taken.
+        let banner = tc::notices::banner_rows(w);
+        let spare = h.saturating_sub(out.len() + 4 + banner.len());
         let series: Vec<(f64, f64)> = guard
             .series
             .iter()
@@ -2403,7 +2411,7 @@ fn main() {
             out.push(String::new());
         }
 
-        let room = h.saturating_sub(out.len() + 3).max(1);
+        let room = h.saturating_sub(out.len() + 3 + banner.len()).max(1);
         let show = if limit > 0 { limit.min(room) } else { room };
         // The window follows the cursor, as it does in the detail screen and
         // in github's account list. It did not before: the table always drew
@@ -2464,7 +2472,7 @@ fn main() {
             out.extend(table(&rows, w, first, show, selected, &p));
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
@@ -2483,12 +2491,19 @@ fn main() {
                 format!("[o]{} others", if mine { "show" } else { "hide" }),
             )],
             vec![(p.dim.as_str(), "[r]ezero".into())],
+        ];
+        hints.extend(tc::notices::hint(w - 2));
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         drop(guard);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let foot: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         // Nothing is pinned on this screen - the whole frame is built to
         // the pane and the table windows itself - so the head is zero and
         // a frame row is a body row.
@@ -2499,9 +2514,9 @@ fn main() {
         // Each screen registers its own as it draws, and the last draw
         // wins - which is what a click arriving next has to be measured
         // against.
-        let foot_top = out.len();
+        let foot_top = out.len() + banner.len();
         out.extend(foot);
-        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1 + banner.len()))).collect();
         tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
     }
