@@ -23,11 +23,9 @@
 #![allow(dead_code)]
 
 use opscope_core as tc;
-use opscope_core::google::{parse_refusal, Credential, Refusal};
+use opscope_core::google::{parse_refusal, Credential, Refusal, SCOPE_ANALYTICS_READONLY};
 use serde_json::{json, Value};
 
-/// Read-only Analytics: the Data API and the Admin API's reads.
-pub const SCOPE: &str = "https://www.googleapis.com/auth/analytics.readonly";
 const DATA: &str = "https://analyticsdata.googleapis.com/v1beta";
 const ADMIN: &str = "https://analyticsadmin.googleapis.com/v1beta";
 
@@ -55,7 +53,7 @@ pub fn grant(email: Option<&str>) -> String {
 }
 
 fn bearer(cred: &Credential) -> Result<String, Fail> {
-    cred.bearer(&[SCOPE]).map(|t| t.value).map_err(Fail::plain)
+    cred.bearer(&[SCOPE_ANALYTICS_READONLY]).map(|t| t.value).map_err(Fail::plain)
 }
 
 /// A refusal in the shared wording, with the pasted-token reminder on a
