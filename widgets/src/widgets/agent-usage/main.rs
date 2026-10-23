@@ -427,7 +427,6 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "grok" => (120, 196, 250),
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
-        "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
         // Perplexity's dark teal, its brand #20808D lifted only as far as
         // reading needs: the brand measures 2.59 on the selected-row tint,
@@ -473,8 +472,8 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
-    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
-    "perplexity", "devin", "droid",
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "notion", "perplexity",
+    "devin", "droid",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -983,7 +982,6 @@ fn run_hint(name: &str) -> &'static str {
         "cursor" => "cursor-agent",
         "grok" => "grok",
         "copilot" => "copilot",
-        "coderabbit" => "coderabbit auth login",
         _ => "",
     }
 }
@@ -1886,9 +1884,6 @@ struct Config {
     /// one down. Turn it off and the quota lasts an hour past the last time
     /// Antigravity ran, which is the token's life.
     antigravity_start: bool,
-    /// The directory `coderabbit usage` runs in. Empty is this widget's
-    /// own; CodeRabbit reports included reviews only inside a repository.
-    coderabbit_repo: String,
     /// Days a week that count towards a window's pace, from Monday: 5 is
     /// Monday to Friday. Seven, the default, is the wall clock. Clamped to
     /// 1..=7, because no week has more and a pace over no days is nothing.
@@ -2008,7 +2003,6 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .get("antigravity_start")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        coderabbit_repo: tc::cfg_str(&raw, "coderabbit_repo", ""),
         work_days_per_week: tc::cfg_f64(&raw, "work_days_per_week", 7.0).round().clamp(1.0, 7.0) as u8,
         legacy_section,
         // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
@@ -2098,7 +2092,6 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec!["antigravity"],
             vec![under_home(".gemini/antigravity-cli")],
         ),
-        "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
@@ -2820,7 +2813,6 @@ mod parse;
 mod shared;
 mod antigravity;
 mod claude;
-mod coderabbit;
 mod notion;
 mod perplexity;
 mod devin;

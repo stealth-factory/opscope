@@ -35,7 +35,6 @@ pub struct State {
     pub grok: crate::grok::Data,
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
-    pub coderabbit: crate::coderabbit::Data,
     pub notion: crate::notion::Data,
     pub perplexity: crate::perplexity::Data,
     pub devin: crate::devin::Data,
@@ -43,15 +42,6 @@ pub struct State {
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
-}
-
-/// Whether `coderabbit usage` may run. Only CodeRabbit is gated on being
-/// chosen: it is the one reader that starts a program spending a request on
-/// the reader's login. It is read before the fallback, because when nothing
-/// chosen is left `visible_agents` brings back every tab, and a tab that
-/// fallback adds was never picked.
-fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
-    chosen_agents(installed, cfg).iter().any(|t| t == "coderabbit")
 }
 
 /// Whether Notion may be asked, on the same terms: it sends the reader's
@@ -87,7 +77,6 @@ pub fn read_all(
     // The poller already checked presence for this pass. Checking again
     // would repeat the binary, file, and credential lookups, and a second
     // answer could disagree with the map the tabs were drawn from.
-    let coderabbit_shown = coderabbit_asked(&installed, cfg);
     let notion_shown = notion_asked(&installed, cfg);
     let perplexity_shown = perplexity_asked(&installed, cfg);
     let devin_shown = devin_asked(&installed, cfg);
@@ -99,7 +88,6 @@ pub fn read_all(
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
-        coderabbit: crate::coderabbit::read(caches, coderabbit_shown, &cfg.coderabbit_repo),
         notion: crate::notion::read(caches, cfg, notion_shown),
         perplexity: crate::perplexity::read(caches, cfg, perplexity_shown),
         devin: crate::devin::read(caches, cfg, devin_shown),
@@ -338,7 +326,6 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "grok" => crate::grok::lanes(&s.grok),
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
-        "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
         "notion" => crate::notion::lanes(&s.notion),
         "perplexity" => crate::perplexity::lanes(&s.perplexity),
         "devin" => crate::devin::lanes(&s.devin),
@@ -406,7 +393,6 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "grok" => crate::grok::why_no_lane(&s.grok),
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
-        "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
         "notion" => crate::notion::why_no_lane(&s.notion),
         "perplexity" => crate::perplexity::why_no_lane(&s.perplexity),
         "devin" => crate::devin::why_no_lane(&s.devin),
@@ -947,7 +933,6 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
         "grok" => crate::grok::tab_with_plots(&s.grok, w, h, cfg, p, plots),
         "copilot" => crate::copilot::tab_with_plots(&s.copilot, w, h, cfg, p, plots),
         "antigravity" => crate::antigravity::tab_with_plots(&s.antigravity, w, h, cfg, p, plots),
-        "coderabbit" => crate::coderabbit::tab_with_plots(&s.coderabbit, w, h, cfg, p, plots),
         "notion" => crate::notion::tab_with_plots(&s.notion, w, h, cfg, p, plots),
         "perplexity" => crate::perplexity::tab_with_plots(&s.perplexity, w, h, cfg, p, plots),
         "devin" => crate::devin::tab_with_plots(&s.devin, w, h, cfg, p, plots),
@@ -1027,35 +1012,19 @@ mod tests {
     }
 
     #[test]
-    fn an_excluded_coderabbit_is_never_asked_even_when_every_agent_is_excluded() {
-        // Excluding every chosen agent falls back to showing all tabs; the
-        // exclusion still keeps CodeRabbit's CLI from running.
+    fn an_agent_this_build_no_longer_knows_is_ignored() {
+        // A config from before CodeRabbit was dropped still names it; it is
+        // an unknown agent now, like `foo`, so no tab and no panic - in
+        // either list.
         let cfg = Config {
-            agents: vec!["coderabbit".into()],
+            agents: vec!["coderabbit".into(), "claude".into()],
             exclude_agents: vec!["coderabbit".into()],
             auto_detect_agent: Some(false),
             ..Config::default()
         };
-        let installed = HashMap::new();
-        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
-        assert!(!coderabbit_asked(&installed, &cfg));
-        let named = Config { exclude_agents: Vec::new(), ..cfg };
-        assert!(coderabbit_asked(&installed, &named));
-    }
-
-    #[test]
-    fn a_coderabbit_the_fallback_brings_back_is_never_asked() {
-        // A fixed list without CodeRabbit whose only agent is excluded: the
-        // fallback draws every tab, CodeRabbit's among them, unchosen.
-        let cfg = Config {
-            agents: vec!["codex".into()],
-            exclude_agents: vec!["codex".into()],
-            auto_detect_agent: Some(false),
-            ..Config::default()
-        };
-        let installed = HashMap::new();
-        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
-        assert!(!coderabbit_asked(&installed, &cfg));
+        let visible = visible_agents(&HashMap::new(), &cfg);
+        assert!(visible.iter().any(|t| t == "claude"), "{visible:?}");
+        assert!(!visible.iter().any(|t| t == "coderabbit"), "{visible:?}");
     }
 
     /// The summary follows the tabs. With only `[+]` up — discovery has
@@ -1277,45 +1246,6 @@ mod tests {
         rank_by_worst_lane(&mut groups);
         let order: Vec<&str> = groups.iter().map(|(n, _)| *n).collect();
         assert_eq!(order, vec!["codex", "grok", "claude"]);
-    }
-
-    #[test]
-    fn coderabbit_summary_is_compact_and_its_tab_keeps_the_explanation() {
-        let p = palette();
-        let at = now();
-        let day = 86400.0;
-        for samples in [
-            vec![(at - 8.0 * day, 40), (at, 95)],
-            vec![(at - 2.0 * day, 83), (at, 95)],
-            vec![(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)],
-        ] {
-            let s = State {
-                coderabbit: crate::coderabbit::Data::with_readings(samples, "Team"),
-                ..State::default()
-            };
-            for w in 12..=100 {
-                let rows = plain(&summary_for(&s, w, &p, &["coderabbit"]));
-                for r in &rows {
-                    assert!(tc::display_width(r) < w, "{w}: {r:?}");
-                }
-                let joined = rows.join("\n");
-                assert!(!joined.contains("more reviews") && !joined.contains("an hour"), "{joined}");
-                assert!(!joined.contains("no quota"), "{joined}");
-                // The group is just its heading and lane, even at narrow widths.
-                let heading = rows.iter().position(|r| r.starts_with("  CODER")).unwrap();
-                assert_eq!(rows[heading..].iter().filter(|r| !r.is_empty()).count(), 2, "{joined}");
-                if w >= 40 {
-                    assert!(joined.contains("~fair use"), "{joined}");
-                }
-                // Exercise the actual tab dispatch, and verify wrapped text survives.
-                let detail = plain(&tab_body("coderabbit", &s, w, 40, &Config::default(), &p, &[]));
-                let words: String = detail.concat().split_whitespace().collect();
-                for said in ["more reviews before", "an hour now on Team", "Only pull request reviews count toward fair use"] {
-                    let said: String = said.split_whitespace().collect();
-                    assert!(words.contains(&said), "{w}: {said} missing from {words}");
-                }
-            }
-        }
     }
 
     #[test]
