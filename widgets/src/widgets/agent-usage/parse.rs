@@ -587,6 +587,28 @@ pub fn coderabbit_signed_out(text: &str) -> bool {
     .any(|s| lower.contains(s))
 }
 
+/// What a failed `coderabbit usage` said for itself: the `message` of an
+/// `--agent` error line when there is one, else the first line of plain
+/// output that says anything. None when it printed nothing.
+pub fn parse_coderabbit_fault(text: &str) -> Option<String> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| strip_controls(l).trim().to_string())
+        .collect();
+    for line in &lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let error = v["type"].as_str().is_none_or(|t| t == "error");
+        if error {
+            if let Some(m) = v["message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+                return Some(m.to_string());
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .find(|l| l.chars().any(|c| !c.is_whitespace() && !"─━═╌|┃-".contains(c)))
+}
+
 /// One Notion AI allowance window, from `getCreditRateLimitStatus`.
 ///
 /// Both numbers come from Notion; neither is assumed. `limit` has been 100
@@ -2260,6 +2282,32 @@ Period resets : 2026-10-06
         assert!(!coderabbit_signed_out("Your reviews : 3"));
         // A count that is not a number does not make a report on its own.
         assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
+    }
+
+    #[test]
+    fn coderabbit_fault_is_what_the_cli_said() {
+        const WHY: &str = "Your role can't read this organization's billing summary on \
+                           this server version. Ask an org admin, or upgrade the server \
+                           to one with per-user usage support.";
+        // Plain mode: the sentence itself.
+        assert_eq!(parse_coderabbit_fault(WHY).as_deref(), Some(WHY));
+        // --agent mode: the error line's message.
+        let agent = format!(
+            "{{\"type\":\"error\",\"phase\":\"usage\",\"status\":\"forbidden\",\"message\":\"{WHY}\"}}"
+        );
+        assert_eq!(parse_coderabbit_fault(&agent).as_deref(), Some(WHY));
+        // Still the message under a blank line and a rule line.
+        let dressed = format!("\n────────\n{agent}");
+        assert_eq!(parse_coderabbit_fault(&dressed).as_deref(), Some(WHY));
+        // A signed-out line is a fault too; which to say first is ask()'s.
+        let out = "Not authenticated. Please run 'coderabbit auth login'.";
+        assert_eq!(parse_coderabbit_fault(out).as_deref(), Some(out));
+        // Nothing printed, nothing said.
+        assert_eq!(parse_coderabbit_fault(""), None);
+        assert_eq!(parse_coderabbit_fault("  \n \n"), None);
+        // Colour sequences are not part of what it said.
+        let coloured = format!("\u{1b}[31m{WHY}\u{1b}[0m");
+        assert_eq!(parse_coderabbit_fault(&coloured).as_deref(), Some(WHY));
     }
 
     const PERPLEXITY: &str = r#"{

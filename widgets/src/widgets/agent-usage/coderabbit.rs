@@ -39,7 +39,7 @@ use opscope_core as tc;
 
 use crate::parse::{
     coderabbit_fair_use, coderabbit_fair_use_tiers, coderabbit_quota_field, coderabbit_signed_out,
-    parse_coderabbit_plan, parse_coderabbit_usage, CodeRabbitUsage,
+    parse_coderabbit_fault, parse_coderabbit_plan, parse_coderabbit_usage, CodeRabbitUsage,
 };
 use crate::shared::*;
 use crate::*;
@@ -120,10 +120,19 @@ fn ask(repo: &str) -> Result<serde_json::Value, String> {
     Err(if coderabbit_signed_out(&text) {
         "not signed in · run coderabbit auth login".to_string()
     } else if !out.status.success() {
-        format!("coderabbit usage exited {}", out.status)
+        match parse_coderabbit_fault(&text) {
+            Some(said) => format!("CodeRabbit refused the usage report: {said}"),
+            None => format!("coderabbit usage exited {}", exit_code(&out.status)),
+        }
     } else {
         "coderabbit usage printed no report this widget can read".to_string()
     })
+}
+
+/// `1`, or what ended it when there is no code, as `ExitStatus` already
+/// says "exit status" and the row says "exited".
+fn exit_code(status: &std::process::ExitStatus) -> String {
+    status.code().map_or_else(|| "on a signal".to_string(), |c| c.to_string())
 }
 
 /// The plan from `coderabbit auth status`, or None when it names none. A
@@ -1018,10 +1027,19 @@ mod tests {
     fn only_a_sign_in_failure_offers_the_login_command() {
         let strip = |rows: Vec<String>| rows.join("\n");
         let signed_out = Data { why: "not signed in · run coderabbit auth login".into(), ..Data::default() };
-        let other = Data { why: "coderabbit usage exited 2".into(), ..Data::default() };
+        let other = Data {
+            why: "CodeRabbit refused the usage report: Your role can't read this \
+                  organization's billing summary on this server version."
+                .into(),
+            ..Data::default()
+        };
         let cfg = Config::default();
         assert_eq!(strip(tab(&signed_out, 80, 20, &cfg, &palette())).matches("auth login").count(), 2);
-        assert!(!strip(tab(&other, 80, 20, &cfg, &palette())).contains("auth login"));
+        let other_rows = strip(tab(&other, 80, 20, &cfg, &palette()));
+        assert!(!other_rows.contains("auth login"));
+        // The CLI's own sentence reaches the tab and the [+] summary.
+        assert!(other_rows.contains("billing summary"), "{other_rows}");
+        assert!(why_no_lane(&other).starts_with("no quota · CodeRabbit refused"), "{}", why_no_lane(&other));
     }
 
     #[test]
