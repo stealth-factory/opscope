@@ -261,16 +261,61 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
-`Plot::under_text()` is only for line charts. In a Kitty graphics session the
+Inside tmux (`$TMUX` set and non-empty), core does not send XTVERSION.
+tmux already asked, and a second answer through the passthrough is delivered
+to whichever pane is focused, as keystrokes. Detection reads
+`tmux display -p '#{client_termtype}'`, tmux's stored copy of the outer
+terminal's XTVERSION. Placeholders are used when that string names Kitty
+0.28.0 or newer, Ghostty, or another name on the allowlist, and
+`allow-passthrough` is `on` or `all`. If either command fails, the name is
+unknown, or passthrough is `off` or unreadable, charts stay on Braille. A
+command that has not answered after 250 ms is killed and counts as
+unreadable. Both reads run once, at startup. A later reattach from a
+different outer terminal, or `allow-passthrough` changing after that, is
+not noticed until the widget is started again. With several
+clients attached, tmux picks one `client_termtype`. A graphics OK does not decide
+this. `a=q` is try-to-load, and `U` has no meaning on that command, so an
+old Kitty, WezTerm or Konsole can answer OK and then draw the placeholder
+character as tofu. A cursor placement does not survive the multiplexer
+either. Herdr (`HERDR_ENV=1`) is not wrapped. Nothing in Herdr's own
+behaviour shows that it forwards a tmux DCS passthrough, so Herdr stays on
+the direct path.
+
+The upload uses `q=2,U=1`, the quiet mode Kitty specifies for placeholders,
+and is written before the placeholder cells. There is no APC reply to read.
+Each cell is U+10EEEE with the row and column diacritics and the image id in
+the foreground colour. A non-zero high byte of the id, which these ids have,
+is a third diacritic. Inside tmux there is no heal and no `a=p`
+query. Stock tmux does not forward an APC reply, and its key parser would
+type a `q=1` error into the focused pane. The periodic whole frame, every
+5 seconds, sends the same `q=2,U=1` upload again. A static chart whose image was dropped
+stays blank until that upload fires. A frame that is not a whole frame
+leaves an unchanged chart alone. tmux has to allow the passthrough:
+
+```
+set -g allow-passthrough on
+```
+
+Use `all` instead of `on` for a pane that is not visible. Outside tmux, or
+when `client_termtype` does not name a terminal with placeholders, behaviour
+stays as it is today.
+The cells are ordinary text, so a scroll or a pane move is expected to keep
+the image. That was not checked by eye.
+
+`Plot::under_text()` is only for line charts. On a direct Kitty session the
 image is placed at `z=-1`: under the glyphs, and above cells that have a
 background colour. A lower z, below `-1073741824`, would also sit under that
 background, so an opaque selected-row tint would cover the stroke. The widget
 draws labels and the current value in the chart cells. The row a label shares
 with the stroke is `line_row`: the pixel y the chart rounds against, then the
 cell that pixel falls in. Rounding against the cell count instead lands the
-label on a different row. Pixel mode leaves the labels there. Braille and text
-mode still replace those cells with the chart, so the
-fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
+label on a different row. Pixel mode leaves the labels there. Inside tmux
+those labels stay too. A placeholder cell cannot also hold a glyph, so the
+blank cells of the rectangle become the placeholders and the reading is left
+where the widget drew it. An uncoloured glyph after a placeholder is reset,
+because the placeholder's foreground is the image id. There is still no
+`a=p` inside tmux. Braille and text mode still replace those cells with the
+chart, so the fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
 meters or stacked bars: text over a solid fill does not stay readable, and it
 would fail the contrast rule.
 
@@ -492,11 +537,21 @@ bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-This implementation requires replies through the actual pane and does not force
-passthrough wrappers. A multiplexer that drops queries uses the text path. A
-positive reply still needs real visual checks for placement and pane clipping.
-Direct Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
-check; the managed test workspace has no attached graphical terminal.
+Inside tmux, detection reads `client_termtype` once at startup rather than
+sending XTVERSION. A later reattach or a later change to `allow-passthrough`
+is not noticed until the widget starts again. A hung read is abandoned after
+250 ms. Placeholders are used when that string names Kitty 0.28.0 or newer,
+Ghostty, or another allowlisted name, and `allow-passthrough` is `on` or
+`all`. If either command fails, the name is unknown, or passthrough is `off`
+or unreadable, charts stay on Braille. With several clients attached, tmux picks one. Herdr
+is not wrapped. tmux needs `allow-passthrough on`, or `all` for a pane that
+is not visible. Outside tmux the graphics query is not wrapped. A positive
+reply still needs real visual checks for placement and pane clipping. Direct
+Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
+check; the managed test workspace has no attached graphical terminal. A
+scroll or a pane move is expected to keep a placeholder image, and that was
+not checked by eye. A static chart whose image was dropped stays blank until
+the whole-frame upload fires, every 5 seconds. That upload is not a heal.
 
 ## Keyboard protocol
 

@@ -25,6 +25,7 @@ mod settings;
 mod terminal;
 mod graphics;
 mod shm;
+mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
 pub use graphics::{braille, line_col, line_row, LineChart, Plot, Trace};
@@ -255,10 +256,12 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 
 /// The terminal columns occupied by printable text.
 ///
-/// Colour and other escapes are not text. An OSC 66 sized block occupies
-/// `scale` times the width of its payload.
+/// A Kitty unicode placeholder is one column: U+10EEEE, the row and column
+/// diacritics, and the image id carried in the foreground colour. Colour and
+/// other escapes are not text. An OSC 66 sized block occupies `scale` times
+/// the width of its payload.
 pub fn display_width(s: &str) -> usize {
-    if !s.contains('\u{1b}') {
+    if !s.contains('\u{1b}') && !s.contains(placeholder::PLACEHOLDER) {
         return s.width();
     }
     let chars: Vec<char> = s.chars().collect();
@@ -275,6 +278,17 @@ pub fn display_width(s: &str) -> usize {
                 continue;
             }
             i = skip_escape(&chars, i);
+            continue;
+        }
+        if chars[i] == placeholder::PLACEHOLDER {
+            // One cell: the placeholder and the row/column diacritics after it.
+            columns += visible.width();
+            visible.clear();
+            i += 1;
+            while i < chars.len() && placeholder::is_placeholder_diacritic(chars[i]) {
+                i += 1;
+            }
+            columns += 1;
             continue;
         }
         visible.push(chars[i]);
@@ -949,16 +963,29 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
     let lost = signalled | whole;
-    // Images are sent again only when the screen may really have lost them.
-    // The periodic whole frame just re-places them: resending every chart
-    // every few seconds is most of a dashboard's bandwidth over SSH.
+    // Direct images are sent again only when the screen may really have
+    // lost them. The periodic whole frame just re-places those: resending
+    // every chart every few seconds is most of a dashboard's bandwidth
+    // over SSH. A placeholder upload is quiet, so that same whole frame
+    // sends the image again. Until it does, a static chart whose image
+    // was dropped stays blank. The resend is an upload, not a heal.
     let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
     // Expire the probe and retired objects before images are published.
     terminal::on_frame();
-    let (rows, before, after) =
-        graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
+    let (rows, before, after) = graphics::compose(
+        rows,
+        plots,
+        w,
+        h,
+        caps.kitty_graphics,
+        caps.kitty_placeholders,
+        reset,
+        whole && !reset,
+    );
     let bytes = paint(&mut shown, &rows, w, h, lost);
+    // Placeholder uploads are in `before`, so the virtual placement exists
+    // before the cells that name it. Direct placements stay in `after`.
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
     // The resize handler only sets a flag. The query goes out here, before
