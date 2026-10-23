@@ -2365,7 +2365,7 @@ fn main() {
         // and ended: a run is one row, or two when its jobs are drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
-            if rows.len() >= h.saturating_sub(footer.len()) {
+            if !row_fits_above_footer(rows.len(), h, footer.len()) {
                 break;
             }
             let from = rows.len();
@@ -2458,7 +2458,7 @@ fn main() {
             }
             let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
-            if !cols.single && rows.len() < h.saturating_sub(1) {
+            if !cols.single && row_fits_above_footer(rows.len(), h, footer.len()) {
                 // The workflow joins the subject here rather than fighting
                 // the repo for room on the row above. Both are as long as
                 // whoever named them made them, and this line carries only
@@ -2525,9 +2525,34 @@ fn main() {
 }
 
 
+/// Whether another run row still fits above a footer of `footer` rows.
+///
+/// Both lines of a run use this. The second used to stop at `h - 1`, which
+/// is the footer only when the footer is one row. A taller one — the
+/// banner — let the second line land on the row `truncate` then cut, and
+/// the placement survived, so a click on the banner selected that run.
+fn row_fits_above_footer(rows: usize, h: usize, footer: usize) -> bool {
+    rows < h.saturating_sub(footer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runs_second_line_stops_where_the_first_does() {
+        // A one-row footer: the old `h - 1` bound and this one agree.
+        assert!(row_fits_above_footer(10, 12, 1));
+        assert!(!row_fits_above_footer(11, 12, 1));
+        // A banner makes the footer taller than one row. Index `h - footer`
+        // is the first footer row. The old bound still called that a fit.
+        let h = 20;
+        let footer = 4;
+        let first_footer_row = h - footer;
+        assert!(row_fits_above_footer(first_footer_row - 1, h, footer));
+        assert!(!row_fits_above_footer(first_footer_row, h, footer));
+        assert!(first_footer_row < h - 1);
+    }
 
     #[test]
     fn the_filters_are_named_and_neither_all_nor_the_window_is_one() {

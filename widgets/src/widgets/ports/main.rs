@@ -3001,9 +3001,33 @@ fn main() {
         ));
 
         // The notices banner sits above the footer and is part of it, so
-        // the list is sized with it already taken.
+        // the list is sized with it already taken. The hints are packed
+        // first too: a fixed three was the height before the notice
+        // counter wrapped another row and pushed the last hint off the pane.
+        let mut hints: Vec<Vec<(String, String)>> = vec![
+            vec![
+                (ok.accent.clone(), "↑↓".into()),
+                (ok.dim.clone(), " select".into()),
+            ],
+            vec![
+                (ok.accent.clone(), "→/↵".into()),
+                (ok.dim.clone(), " details".into()),
+            ],
+            vec![(ok.dim.clone(), "[k]ill".into())],
+            vec![(
+                ok.dim.clone(),
+                format!("[o]{} system", if hide_system { "show" } else { "hide" }),
+            )],
+            vec![(ok.dim.clone(), "[r]efresh".into())],
+        ];
+        hints.extend(counter_hint(w));
+        hints.extend([
+            vec![(ok.dim.clone(), "[,] settings".into())],
+            vec![(ok.dim.clone(), "[q]uit".into())],
+        ]);
         let banner = tc::notices::banner_rows(w, h);
-        let visible = std::cmp::max(1, h.saturating_sub(rows.len() + 3 + banner.len()));
+        let hint_rows = footer(&confirm, &watch, &working, &notice, w, &hints, &ok);
+        let visible = list_rows(h, rows.len(), hint_rows.len(), banner.len());
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -3186,29 +3210,8 @@ fn main() {
             rows.push(tc::seg(&line, w - 1));
         }
 
-        let mut hints: Vec<Vec<(String, String)>> = vec![
-            vec![
-                (ok.accent.clone(), "↑↓".into()),
-                (ok.dim.clone(), " select".into()),
-            ],
-            vec![
-                (ok.accent.clone(), "→/↵".into()),
-                (ok.dim.clone(), " details".into()),
-            ],
-            vec![(ok.dim.clone(), "[k]ill".into())],
-            vec![(
-                ok.dim.clone(),
-                format!("[o]{} system", if hide_system { "show" } else { "hide" }),
-            )],
-            vec![(ok.dim.clone(), "[r]efresh".into())],
-        ];
-        hints.extend(counter_hint(w));
-        hints.extend([
-            vec![(ok.dim.clone(), "[,] settings".into())],
-            vec![(ok.dim.clone(), "[q]uit".into())],
-        ]);
         let mut foot = banner;
-        foot.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
+        foot.extend(hint_rows);
         while rows.len() < h.saturating_sub(foot.len() + 1) {
             rows.push(String::new());
         }
@@ -3267,9 +3270,32 @@ fn bind_note(row: &Row, p: &Palette) -> (String, String) {
     }
 }
 
+/// Listening-port rows that fit under `drawn` rows once `footer` hint rows
+/// and `banner` notice rows are reserved. At least one, so a short pane
+/// still shows the port the cursor is on.
+fn list_rows(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
+    h.saturating_sub(drawn + footer + banner).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_reserves_the_packed_footer_not_a_fixed_three() {
+        let h = 30;
+        let drawn = 8;
+        let banner = 0;
+        // Two hint rows plus the notice counter wraps a fourth on a narrow
+        // pane. Reserving three then makes the frame one row too tall.
+        let footer = 4;
+        let visible = list_rows(h, drawn, footer, banner);
+        assert_eq!(drawn + visible + footer + banner, h);
+        let old = std::cmp::max(1, h.saturating_sub(drawn + 3 + banner));
+        assert_eq!(drawn + old + footer + banner, h + 1);
+        // The height the fixed three already described does not move.
+        assert_eq!(list_rows(h, drawn, 3, 2), h - drawn - 5);
+    }
 
     fn wait_for_snapshot<T: Send + 'static>(snapshot: &mut AsyncSnapshot<T>) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

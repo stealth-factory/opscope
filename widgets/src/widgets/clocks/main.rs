@@ -1436,7 +1436,10 @@ fn main() {
         // The footer as packed, not a guess at it: it wraps to more lines
         // as the pane narrows, and every one it gains comes out of this.
         let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
-        if free.saturating_sub(banner.len()) < 2 && !ordered.is_empty() {
+        // Two rows is a world-clock heading and one city. With no cities
+        // the banner still has to fit: this screen does not scroll, and a
+        // banner past the pane takes `[!]`, `[,]` and `[q]` with it.
+        if banner_stands_down(free, banner.len(), !ordered.is_empty()) {
             banner.clear();
         }
         let room = free.saturating_sub(banner.len());
@@ -1690,10 +1693,42 @@ fn palette() -> Palette {
     }
 }
 
+/// The banner stands down when keeping it would hide the footer, or would
+/// leave a configured world clock with fewer than two rows.
+///
+/// `free` is the rows left under the clock body once the packed hints and
+/// one separator are reserved. A banner of `free + 1` fills the pane
+/// exactly. One more pushes `[!]`, `[,]` and `[q]` off the bottom, and
+/// this screen does not scroll them back. An empty city list is not a
+/// reason to keep a banner that does not fit.
+fn banner_stands_down(free: usize, banner_rows: usize, has_cities: bool) -> bool {
+    let fits = banner_rows <= free.saturating_add(1);
+    if !fits {
+        return true;
+    }
+    has_cities && free.saturating_sub(banner_rows) < 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn the_banner_stands_down_when_it_does_not_fit() {
+        // Cities present and two rows left after the banner: it stays.
+        assert!(!banner_stands_down(5, 3, true));
+        // Cities present but the banner would leave them one row: it goes,
+        // and the counter still says the notices are there.
+        assert!(banner_stands_down(5, 4, true));
+        // No cities, and the banner fills the pane exactly: the footer stays.
+        assert!(!banner_stands_down(5, 6, false));
+        // No cities, and the banner is one past the pane. The old gate only
+        // cleared when there were cities, so this case kept the banner and
+        // pushed the footer off the bottom.
+        assert!(banner_stands_down(5, 7, false));
+        assert!(banner_stands_down(1, 6, false));
+    }
 
     /// One lock for every test that touches the state file.
     ///
