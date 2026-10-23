@@ -480,32 +480,47 @@ fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, Str
     Some(vec![(worst.colour(), text)])
 }
 
-/// The banner: 0 to 2 notices, newest first, wrapped to `w` by
-/// [`crate::error_rows`] and never clipped.
+/// The banner: 0 to 2 notices, newest first, each its title alone wrapped
+/// to `w` by [`crate::error_rows`] and never clipped.
 ///
 /// Draw these directly above the footer, and count them in the rows the
 /// footer takes, so a body that scrolls does not scroll under them. Not
 /// injected by `draw()`: that would move the footer out from under the
 /// placements `footer_at` registered.
-pub fn banner_rows(w: usize) -> Vec<String> {
+///
+/// `h` is the pane's height. The banner takes at most a quarter of it,
+/// because it is pinned: only the body scrolls, so a banner as tall as the
+/// pane pushes the footer - the `[!]` counter and `[q]uit` with it - below
+/// the bottom edge for the minute it shows, and nothing the reader can do
+/// brings it back. So the title only, never the detail, which waits on the
+/// `!` screen; and a notice whose title does not fit whole in what is left
+/// is not shown rather than cut. The counter still counts it, so leaving
+/// it out hides nothing.
+pub fn banner_rows(w: usize, h: usize) -> Vec<String> {
     let now = crate::now();
     recheck_config_permissions(now);
-    with(|r| banner_of(r, now, w))
+    with(|r| banner_of(r, now, w, h))
 }
 
-fn banner_text(notice: &Notice) -> String {
-    if notice.detail.is_empty() {
-        notice.title.clone()
-    } else {
-        format!("{} — {}", notice.title, notice.detail)
+/// The most rows the banner may take on a pane `h` tall.
+fn banner_budget(h: usize) -> usize {
+    h / 4
+}
+
+fn banner_of(r: &Registry, now: f64, w: usize, h: usize) -> Vec<String> {
+    let budget = banner_budget(h);
+    let mut rows = Vec::new();
+    // Newest first, and whole notices only: once the newest that is left
+    // does not fit, an older one is not shown in its place, so what the
+    // banner shows is always the latest news.
+    for live in r.banner(now) {
+        let wrapped = crate::error_rows(live.notice.level.colour(), &live.notice.title, w);
+        if rows.len() + wrapped.len() > budget {
+            break;
+        }
+        rows.extend(wrapped);
     }
-}
-
-fn banner_of(r: &Registry, now: f64, w: usize) -> Vec<String> {
-    r.banner(now)
-        .into_iter()
-        .flat_map(|l| crate::error_rows(l.notice.level.colour(), &banner_text(&l.notice), w))
-        .collect()
+    rows
 }
 
 /// Which list the screen is showing.
@@ -1080,10 +1095,10 @@ mod tests {
     fn clear_removes_the_banner_and_the_hint() {
         let mut r = reg();
         r.raise(Notice::error("a", "broken"), 0.0);
-        assert!(!banner_of(&r, 1.0, 80).is_empty());
+        assert!(!banner_of(&r, 1.0, 80, 40).is_empty());
         assert!(hint_of(&r, 1.0, 80).is_some());
         r.clear((Scope::Widget, "a"));
-        assert!(banner_of(&r, 1.0, 80).is_empty());
+        assert!(banner_of(&r, 1.0, 80, 40).is_empty());
         assert!(hint_of(&r, 1.0, 80).is_none());
     }
 
@@ -1123,13 +1138,89 @@ mod tests {
                 .detail("and a detail that says what to do"),
             0.0,
         );
-        let rows = banner_of(&r, 1.0, 24);
+        let rows = banner_of(&r, 1.0, 24, 40);
         assert!(rows.len() > 2);
         for row in &rows {
             assert!(crate::display_width(row) <= 23, "{row:?}");
         }
         let text = plain(&rows).split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(text.contains("what to do"), "nothing is clipped: {text}");
+        assert!(text.contains("at this width"), "nothing is clipped: {text}");
+        assert!(!text.contains("what to do"), "the detail waits on the ! screen: {text}");
+    }
+
+    /// The Core config notice as `check_config_permissions` raises it.
+    fn config_notice() -> Notice {
+        Notice::warn(
+            "config-world-readable",
+            "config.json is readable by others; chmod 600 it",
+        )
+        .detail(
+            "Tokens and cookies set in it are a sign-in for whoever can read \
+             the file. `chmod 600` on the config file makes it yours alone.",
+        )
+        .source("config")
+        .core()
+    }
+
+    #[test]
+    fn the_config_notice_at_24_wide_stays_within_its_budget() {
+        let mut r = reg();
+        r.raise(config_notice(), 0.0);
+        for h in 0..=40 {
+            let rows = banner_of(&r, 1.0, 24, h);
+            assert!(rows.len() <= banner_budget(h), "{h}: {} rows", rows.len());
+            for row in &rows {
+                assert!(crate::display_width(row) <= 23, "{h}: {row:?}");
+            }
+            let text = plain(&rows).split_whitespace().collect::<Vec<_>>().join(" ");
+            // Whole or not at all: never a title cut part way.
+            assert!(
+                rows.is_empty() || text.contains("chmod 600 it"),
+                "{h}: {text}"
+            );
+            assert!(!text.contains("Tokens"), "{h}: the detail is not bannered");
+        }
+        // And at an ordinary height it does show.
+        assert!(!banner_of(&r, 1.0, 24, 24).is_empty());
+    }
+
+    #[test]
+    fn a_short_pane_keeps_its_footer_hints_on_screen() {
+        // Built the way the widgets build a frame: the title pinned, a body
+        // window of at least one row, the banner, then the packed footer.
+        // The banner must never be what pushes the footer off the bottom.
+        let mut r = reg();
+        r.raise(config_notice(), 0.0);
+        r.raise(
+            Notice::error("fetch", "the last fetch failed and the figures are stale"),
+            0.5,
+        );
+        for w in [20usize, 24, 30, 60, 120] {
+            for h in 6..=30 {
+                let mut hints = vec![
+                    vec![(DIM, "[r]efresh".to_string())],
+                ];
+                hints.extend(hint_of(&r, 1.0, w - 2));
+                hints.push(vec![(DIM, "[,] settings".to_string())]);
+                hints.push(vec![(DIM, "[q]uit".to_string())]);
+                let packed = crate::pack_hints_placed(&hints, w - 2, "  ");
+                let footer = packed.lines.len();
+                // Only panes the footer fits at all, with no banner.
+                if 2 + footer > h {
+                    continue;
+                }
+                let banner = banner_of(&r, 1.0, w, h);
+                let body = h.saturating_sub(1 + banner.len() + footer).max(1);
+                assert!(
+                    1 + body + banner.len() + footer <= h,
+                    "{w}x{h}: banner {} + footer {footer} pushed the hints off",
+                    banner.len()
+                );
+                for row in banner.iter().chain(packed.lines.iter()) {
+                    assert!(crate::display_width(row) <= w, "{w}x{h}: {row:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1228,7 +1319,7 @@ mod tests {
                         let id = IDS[(t + i) % IDS.len()];
                         raise(Notice::info(id, format!("pass {}", i % 3)));
                         let _ = hint(40);
-                        let _ = banner_rows(40);
+                        let _ = banner_rows(40, 24);
                         if i % 7 == 0 {
                             clear(id);
                         }

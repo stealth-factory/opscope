@@ -1192,7 +1192,7 @@ fn copy_overlay(
     ]);
     let packed = tc::pack_hints_placed(&hints, w - 2, " · ");
     // The notices banner, then the hints, as one block the padding reserves.
-    let banner = tc::notices::banner_rows(w);
+    let banner = tc::notices::banner_rows(w, h);
     let foot: Vec<String> = banner
         .iter()
         .cloned()
@@ -1708,7 +1708,7 @@ fn main() {
                 ]);
                 // The notices banner sits above the hints and is counted
                 // in the footer, so the detail never scrolls under it.
-                let banner = tc::notices::banner_rows(w);
+                let banner = tc::notices::banner_rows(w, h);
                 let base_foot = tc::pack_hints(&hints, w - 2, " · ");
                 if body.len() > h.saturating_sub(base_foot.len() + banner.len() + 1) {
                     let rest_len = body.len().saturating_sub(1);
@@ -2074,7 +2074,7 @@ fn main() {
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The notices banner, then the hints: one block, so `room` below
         // reserves both and the body never scrolls under the banner.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let footer: Vec<String> = banner
             .iter()
             .cloned()

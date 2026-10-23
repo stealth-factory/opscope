@@ -2135,7 +2135,7 @@ fn main() {
             hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             // Above the footer and counted in it, as on the list.
-            let banner = tc::notices::banner_rows(w);
+            let banner = tc::notices::banner_rows(w, h);
             let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let mut foot: Vec<String> =
                 packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -2376,7 +2376,7 @@ fn main() {
         // chart that overruns its budget pushes the list off the pane.
         // The notices banner sits above the footer and is part of it, so
         // the chart and the table are sized with it already taken.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let spare = h.saturating_sub(out.len() + 4 + banner.len());
         let series: Vec<(f64, f64)> = guard
             .series

@@ -2332,7 +2332,7 @@ fn main() {
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-            let banner = tc::notices::banner_rows(w);
+            let banner = tc::notices::banner_rows(w, h);
             let foot: Vec<String> = banner
                 .iter()
                 .cloned()
@@ -3161,7 +3161,7 @@ fn main() {
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-                let banner = tc::notices::banner_rows(w);
+                let banner = tc::notices::banner_rows(w, h);
                 let foot: Vec<String> = banner
                     .iter()
                     .cloned()
@@ -3251,7 +3251,7 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let footer: Vec<String> = banner
             .iter()
             .cloned()

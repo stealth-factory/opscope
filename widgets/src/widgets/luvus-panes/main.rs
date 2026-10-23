@@ -1619,7 +1619,7 @@ fn main() {
         // The notices banner sits directly above the hints and counts as
         // footer, so every budget below that reads `footer.len()` keeps
         // room for it.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let footer: Vec<String> = banner
             .iter()
             .cloned()

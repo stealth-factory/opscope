@@ -474,7 +474,7 @@ fn band_scale(months: &[Month], width: usize, height: usize) -> u8 {
 /// to fit in; the terminal's full height counts rows the footer already owns.
 fn pane_room(w: usize, neighbours: bool, p: &Palette) -> usize {
     let (_, h) = tc::size();
-    let foot = footer(w, neighbours, p).0.lines.len() + tc::notices::banner_rows(w).len();
+    let foot = footer(w, neighbours, p).0.lines.len() + tc::notices::banner_rows(w, h).len();
     h.saturating_sub(foot).saturating_sub(1).max(1)
 }
 
@@ -950,7 +950,7 @@ fn main() {
         let (packed, indent) = footer(w, neighbours, &p);
         // The notices banner sits directly above the hints and counts as
         // footer: the body window shrinks for it rather than running under.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: on a wall of panes it is the only row saying which

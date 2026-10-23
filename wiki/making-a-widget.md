@@ -422,7 +422,7 @@ counts as footer rows, so a scrolling body never runs under it, and
 
 ```rust
 hints.extend(tc::notices::hint(w - 2));                     // before [,] settings
-let banner = tc::notices::banner_rows(w);
+let banner = tc::notices::banner_rows(w, h);                // h: the pane's height
 let foot: Vec<String> = banner.iter().cloned()
     .chain(packed.lines.iter().map(|l| format!(" {l}"))).collect();
 // ... pad to h - foot.len(), then:

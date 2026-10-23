@@ -2501,7 +2501,7 @@ fn main() {
             hints
         };
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let footer: Vec<String> = banner
             .iter()
             .cloned()

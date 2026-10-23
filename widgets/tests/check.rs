@@ -989,7 +989,7 @@ fn a_widget_that_raises_a_notice_shows_it() {
          \n    tc::notices::start(\"name\");                 // in main\n\
          \u{20}   \"!\" => tc::notices::run(&mut keyboard),     // beside \",\"\n\
          \u{20}   hints.extend(tc::notices::hint(w - 2));     // beside [,] settings\n\
-         \u{20}   let banner = tc::notices::banner_rows(w);   // above the footer\n",
+         \u{20}   let banner = tc::notices::banner_rows(w, h); // above the footer\n",
         missing.join("\n  ")
     );
 }

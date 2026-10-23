@@ -731,7 +731,7 @@ fn main() {
                 hints
             };
             // Above the footer and counted in it, as on the list.
-            let banner = tc::notices::banner_rows(w);
+            let banner = tc::notices::banner_rows(w, h);
             // Returns the placement alongside the lines, because the footer
             // is packed twice here: once to measure how many rows it will
             // take, and again with the real scroll label once that is
@@ -916,7 +916,7 @@ fn main() {
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The notices banner sits directly above the hints and counts as
         // footer, so the body never scrolls under it.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner
             .iter()
             .cloned()

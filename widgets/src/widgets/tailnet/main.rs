@@ -1030,7 +1030,7 @@ fn main() {
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let (packed, indent) = pack_footer(&hints, w);
             // The notices banner sits above the hints and counts as footer.
-            let banner = tc::notices::banner_rows(w);
+            let banner = tc::notices::banner_rows(w, h);
             let foot: Vec<String> =
                 banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
             while rows.len() < h.saturating_sub(foot.len()) {
@@ -1330,7 +1330,7 @@ fn main() {
         let (packed, indent) = pack_footer(&hints, w);
         // The notices banner sits above the hints and counts as footer, so
         // the body budget below leaves room for it.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> =
             banner.iter().cloned().chain(packed.lines.iter().cloned()).collect();
         // The emptied-filter line is part of the body budget, not a row
@@ -1526,7 +1526,7 @@ fn framed(
     scroll: usize,
     foot: Vec<String>,
 ) -> (Vec<String>, usize, usize) {
-    let mut foot: Vec<String> = tc::notices::banner_rows(w).into_iter().chain(foot).collect();
+    let mut foot: Vec<String> = tc::notices::banner_rows(w, h).into_iter().chain(foot).collect();
     if let Some(hint) = tc::notices::hint(w.saturating_sub(2).max(1)) {
         let hint: Vec<(&str, String)> = hint.into_iter().map(|(c, t)| (c, format!(" {t}"))).collect();
         foot.push(tc::seg(&hint, w - 1));

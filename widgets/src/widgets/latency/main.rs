@@ -1389,7 +1389,7 @@ fn main() {
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The notices banner sits directly above the hints and counts as
         // footer, so the body never scrolls under it.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner
             .iter()
             .cloned()

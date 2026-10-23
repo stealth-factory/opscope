@@ -2730,7 +2730,7 @@ fn main() {
         let reserved = tc::pack_hints(&hints, w - 2, "  ").len();
         // The notices banner sits directly above the hints and is reserved
         // with them, so the tab never scrolls under it.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let avail = h.saturating_sub(rows.len() + reserved + banner.len()).max(1);
         let top = body.len().saturating_sub(avail);
         let mut off = if name == shown { carried.min(top) } else { 0 };

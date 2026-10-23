@@ -82,9 +82,13 @@ The widget draws two things and answers one key. `hint(room)` is the footer
 hint, `[!] 1 error, 2 warnings`, worst level first and coloured by it, or
 `None` when nothing is outstanding; it shortens to `[!] 3 notices` rather
 than overflowing a narrow footer, and `hint_key` reads its `[!]`, so it is
-clickable through `footer_at` with nothing more done. `banner_rows(w)` is up
-to two notices, newest first, for sixty seconds each, wrapped by
-`error_rows()` — drawn above the footer and counted in it, not injected by
+clickable through `footer_at` with nothing more done. `banner_rows(w, h)` is
+up to two notices, newest first, for sixty seconds each - each one's title
+alone, wrapped by `error_rows()`, the detail left to the `!` screen. It takes
+at most a quarter of the pane's height `h`, since only the body scrolls and a
+taller banner would push the footer's hints below the bottom edge; a title
+that does not fit whole in what is left is not shown rather than cut, and
+the `[!]` counter still counts it. It is drawn above the footer and counted in it, not injected by
 `draw()`, which would move the footer out from under the placements
 `footer_at` registered. `run(keyboard)` is the screen, on `!`.
 

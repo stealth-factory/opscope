@@ -2732,7 +2732,7 @@ fn main() {
                 ];
                 hints.extend(counter_hint(w));
                 hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
-                rows.extend(tc::notices::banner_rows(w));
+                rows.extend(tc::notices::banner_rows(w, h));
                 rows.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
                 tc::draw(&rows, w, h);
                 keyboard.wait(Duration::from_millis(100));
@@ -2797,7 +2797,7 @@ fn main() {
             hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
             // The banner sits above the footer on this screen as on the
             // list, and counts in the rows the footer takes.
-            let mut foot = tc::notices::banner_rows(w);
+            let mut foot = tc::notices::banner_rows(w, h);
             foot.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
             let room = h.saturating_sub(foot.len() + 1);
             // A window onto the body rather than a cut of it. The title is
@@ -3002,7 +3002,7 @@ fn main() {
 
         // The notices banner sits above the footer and is part of it, so
         // the list is sized with it already taken.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let visible = std::cmp::max(1, h.saturating_sub(rows.len() + 3 + banner.len()));
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves

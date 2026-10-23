@@ -1368,7 +1368,7 @@ fn main() {
         let ordered = cities_west_to_east(&cities, &now);
         // The notices banner sits above the footer and is never clipped, so
         // the world clock gives up its rows rather than the banner.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let room = h.saturating_sub(rows.len() + 3 + banner.len());
         if room >= 2 && !ordered.is_empty() {
             let shown = room.saturating_sub(1).min(ordered.len());

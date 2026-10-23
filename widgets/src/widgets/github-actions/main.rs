@@ -2047,7 +2047,7 @@ fn main() {
             // The banner sits above this screen's one-line footer, counted
             // in what the footer takes so the run's text never scrolls
             // under it.
-            let banner = tc::notices::banner_rows(w);
+            let banner = tc::notices::banner_rows(w, h);
             // And the [!] counter on a line of its own under the prose
             // footer, so a notice that outlives its banner is still counted
             // while a run is open.
@@ -2329,7 +2329,7 @@ fn main() {
         // list so the list is sized with it already taken. Sized after,
         // a banner arriving cut the last run off the bottom while `scroll`
         // had no range left to bring it back.
-        let banner = tc::notices::banner_rows(w);
+        let banner = tc::notices::banner_rows(w, h);
         let footer: Vec<String> = banner
             .iter()
             .cloned()
