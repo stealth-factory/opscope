@@ -3025,8 +3025,15 @@ fn main() {
             vec![(ok.dim.clone(), "[,] settings".into())],
             vec![(ok.dim.clone(), "[q]uit".into())],
         ]);
-        let banner = tc::notices::banner_rows(w, h);
+        let mut banner = tc::notices::banner_rows(w, h);
         let hint_rows = footer(&confirm, &watch, &working, &notice, w, &hints, &ok);
+        // One port row and the packed hints have to stay. The banner is
+        // pinned and this list does not scroll, so a banner that leaves
+        // no room for both takes the footer off the pane. The [!] counter
+        // still counts the notices.
+        if banner_kept(h, rows.len(), hint_rows.len(), banner.len()) == 0 {
+            banner.clear();
+        }
         let visible = list_rows(h, rows.len(), hint_rows.len(), banner.len());
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
@@ -3271,10 +3278,20 @@ fn bind_note(row: &Row, p: &Palette) -> (String, String) {
 }
 
 /// Listening-port rows that fit under `drawn` rows once `footer` hint rows
-/// and `banner` notice rows are reserved. At least one, so a short pane
-/// still shows the port the cursor is on.
+/// and `banner` notice rows are reserved. Zero when the heading and the
+/// footer already fill the pane, so the footer stays on screen.
 fn list_rows(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
-    h.saturating_sub(drawn + footer + banner).max(1)
+    h.saturating_sub(drawn + footer + banner)
+}
+
+/// Banner rows to keep. Zero when keeping them would leave no room for one
+/// port row and the packed hints.
+fn banner_kept(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
+    if drawn.saturating_add(footer).saturating_add(banner).saturating_add(1) > h {
+        0
+    } else {
+        banner
+    }
 }
 
 #[cfg(test)]
@@ -3295,6 +3312,24 @@ mod tests {
         assert_eq!(drawn + old + footer + banner, h + 1);
         // The height the fixed three already described does not move.
         assert_eq!(list_rows(h, drawn, 3, 2), h - drawn - 5);
+    }
+
+    #[test]
+    fn the_banner_stands_down_before_it_hides_the_footer() {
+        // 4 rows of body, 3 of hints, a 2-row banner, on a 9-row pane.
+        // Forcing one port row on top of the banner made 10 rows, and the
+        // last footer row was not drawn.
+        let h = 9;
+        let drawn = 4;
+        let footer = 3;
+        let banner = 2;
+        let kept = banner_kept(h, drawn, footer, banner);
+        assert_eq!(kept, 0);
+        let visible = list_rows(h, drawn, footer, kept);
+        assert!(visible >= 1);
+        assert!(drawn + visible + footer + kept <= h);
+        // The banner stays when one port row still fits beside it.
+        assert_eq!(banner_kept(30, 8, 3, 2), 2);
     }
 
     fn wait_for_snapshot<T: Send + 'static>(snapshot: &mut AsyncSnapshot<T>) {
