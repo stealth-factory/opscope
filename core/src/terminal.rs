@@ -321,14 +321,31 @@ pub(crate) fn tmux_passthrough(sequence: &str) -> String {
     out
 }
 
+/// The renderer `OPSCOPE_GRAPHICS` asks for, given whether a host relays
+/// this pane's images to a client of its own.
+///
+/// Under such a host `auto` is text. Herdr forwards each image to its client
+/// decoded, so a chart that is 3 KB compressed on the wire costs its client
+/// link the raw 1.5 MB, every frame the chart changes: `latency` alone pushed
+/// a Herdr client over SSH at 4.9 MB/s, and a session spent 3 GB in a couple
+/// of hours (OPS-199). Braille draws the same data for the cost of the text.
+/// `kitty` still asks for pixels, for a Herdr whose client is local.
+fn mode_for(requested: Option<&str>, host_relays_images: bool) -> GraphicsMode {
+    match requested {
+        Some("text") => GraphicsMode::Text,
+        Some("kitty") => GraphicsMode::Kitty,
+        _ if host_relays_images => GraphicsMode::Text,
+        _ => GraphicsMode::Auto,
+    }
+}
+
 /// Query only after cbreak is active, so replies are never echoed as text.
 /// No wait here: the first frames use text while normal input polling negotiates.
 pub(crate) fn start() {
-    let mode = match std::env::var("OPSCOPE_GRAPHICS").as_deref() {
-        Ok("text") => GraphicsMode::Text,
-        Ok("kitty") => GraphicsMode::Kitty,
-        _ => GraphicsMode::Auto,
-    };
+    let mode = mode_for(
+        std::env::var("OPSCOPE_GRAPHICS").ok().as_deref(),
+        super::shm::host_relays_images(|key| std::env::var(key).ok()),
+    );
     // Resume and a fresh start both drop the previous probe. A shared-memory
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();
@@ -1250,6 +1267,17 @@ pub(crate) fn string_len(chars: &[char]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_that_relays_images_gets_text_unless_pixels_are_asked_for() {
+        assert_eq!(mode_for(None, true), GraphicsMode::Text);
+        assert_eq!(mode_for(Some("auto"), true), GraphicsMode::Text);
+        assert_eq!(mode_for(Some("kitty"), true), GraphicsMode::Kitty);
+        assert_eq!(mode_for(Some("text"), true), GraphicsMode::Text);
+        assert_eq!(mode_for(None, false), GraphicsMode::Auto);
+        assert_eq!(mode_for(Some("kitty"), false), GraphicsMode::Kitty);
+        assert_eq!(mode_for(Some("text"), false), GraphicsMode::Text);
+    }
 
     #[test]
     fn capabilities_are_independent_and_late_replies_do_not_enable_them() {
