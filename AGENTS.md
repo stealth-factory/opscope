@@ -366,6 +366,8 @@ that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `filter_row()` and `filtered_to_nothing()` for the one wording every pane
 says its filters in, `config_token_warning()` for widgets holding a secret,
+`google` for Google sign-in, scopes and wording
+([docs/google-widgets.md](docs/google-widgets.md)),
 non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.

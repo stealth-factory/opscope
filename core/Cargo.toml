@@ -23,3 +23,17 @@ unicode-width = "0.2.2"
 # Pure Rust: compressed inline pixels, with no system image library or helper.
 base64 = "0.22"
 miniz_oxide = "0.8"
+# Google's service-account sign-in (src/google.rs): an RS256 JWT signed
+# locally and traded for an hour-long access token. Pure Rust, so nothing
+# here wants a system library at run time - `jsonwebtoken` would bring
+# aws-lc-rs (a C toolchain) and `ring` brings `cc`. RUSTSEC-2023-0071, the
+# Marvin timing side channel in `rsa`, is about an attacker timing many
+# decryptions or signatures; this signs one JWT an hour on the local
+# machine and exposes no timing to anybody.
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
+sha2 = { version = "0.10", features = ["oid"] }
+
+[dev-dependencies]
+# Tests generate a throwaway key at test time, so no key material ever
+# enters the tree. Never reaches a release binary.
+rand = "0.8"
