@@ -2089,6 +2089,15 @@ fn start_work(kind: &str, row: Row) -> Working {
     }
 }
 
+/// The notices counter, in the owned shape this widget's hints take.
+fn counter_hint(w: usize) -> Option<Vec<(String, String)>> {
+    tc::notices::hint(w - 2).map(|hint| {
+        hint.into_iter()
+            .map(|(c, t)| (c.to_string(), t))
+            .collect::<Vec<_>>()
+    })
+}
+
 /// The bottom of either screen.
 ///
 /// One of five things, in the order they matter: a question that must be
@@ -2490,6 +2499,11 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
+                    // The notices are the widget's, not the list's: a
+                    // warning raised while a port is open is read from here.
+                    "!" => {
+                        tc::notices::run(&mut keyboard);
+                    }
                     // The arrows pick an address, which is what the footer
                     // beside them says. The wheel scrolls the screen they
                     // are on - two different things, and conflating them
@@ -2709,22 +2723,17 @@ fn main() {
                         w - 1,
                     ));
                 }
-                rows.extend(footer(
-                    &confirm,
-                    &watch,
-                    &working,
-                    &notice,
-                    w,
-                    &[
-                        vec![(ok.accent.clone(), "[r]".into()), (ok.dim.clone(), "etry".into())],
-                        vec![
-                            (ok.accent.clone(), "←".into()),
-                            (ok.dim.clone(), "/esc back".into()),
-                        ],
-                        vec![(ok.dim.clone(), "[q]uit".into())],
+                let mut hints = vec![
+                    vec![(ok.accent.clone(), "[r]".into()), (ok.dim.clone(), "etry".into())],
+                    vec![
+                        (ok.accent.clone(), "←".into()),
+                        (ok.dim.clone(), "/esc back".into()),
                     ],
-                    &ok,
-                ));
+                ];
+                hints.extend(counter_hint(w));
+                hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
+                rows.extend(tc::notices::banner_rows(w));
+                rows.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
                 tc::draw(&rows, w, h);
                 keyboard.wait(Duration::from_millis(100));
                 continue;
@@ -2770,29 +2779,26 @@ fn main() {
                 &mut plots,
                 activity.tick(tc::animation_tick()),
             );
-            let foot = footer(
-                &confirm,
-                &watch,
-                &working,
-                &notice,
-                w,
-                &[
-                    vec![
-                        (ok.accent.clone(), "↑↓".into()),
-                        (ok.dim.clone(), " address".into()),
-                    ],
-                    vec![(ok.dim.clone(), "[c]opy".into())],
-                    vec![(ok.dim.clone(), "[s]erve".into())],
-                    vec![(ok.dim.clone(), "[t]unnel".into())],
-                    vec![(ok.dim.clone(), "[d] cloudflare".into())],
-                    vec![
-                        (ok.accent.clone(), "←".into()),
-                        (ok.dim.clone(), "/esc back".into()),
-                    ],
-                    vec![(ok.dim.clone(), "[q]uit".into())],
+            let mut hints = vec![
+                vec![
+                    (ok.accent.clone(), "↑↓".into()),
+                    (ok.dim.clone(), " address".into()),
                 ],
-                &ok,
-            );
+                vec![(ok.dim.clone(), "[c]opy".into())],
+                vec![(ok.dim.clone(), "[s]erve".into())],
+                vec![(ok.dim.clone(), "[t]unnel".into())],
+                vec![(ok.dim.clone(), "[d] cloudflare".into())],
+                vec![
+                    (ok.accent.clone(), "←".into()),
+                    (ok.dim.clone(), "/esc back".into()),
+                ],
+            ];
+            hints.extend(counter_hint(w));
+            hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
+            // The banner sits above the footer on this screen as on the
+            // list, and counts in the rows the footer takes.
+            let mut foot = tc::notices::banner_rows(w);
+            foot.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
             let room = h.saturating_sub(foot.len() + 1);
             // A window onto the body rather than a cut of it. The title is
             // pinned above it: on a detail screen it is the only row that
@@ -3196,11 +3202,7 @@ fn main() {
             )],
             vec![(ok.dim.clone(), "[r]efresh".into())],
         ];
-        hints.extend(tc::notices::hint(w - 2).map(|hint| {
-            hint.into_iter()
-                .map(|(c, t)| (c.to_string(), t))
-                .collect::<Vec<_>>()
-        }));
+        hints.extend(counter_hint(w));
         hints.extend([
             vec![(ok.dim.clone(), "[,] settings".into())],
             vec![(ok.dim.clone(), "[q]uit".into())],

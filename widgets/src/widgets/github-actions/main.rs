@@ -2048,7 +2048,15 @@ fn main() {
             // in what the footer takes so the run's text never scrolls
             // under it.
             let banner = tc::notices::banner_rows(w);
-            let foot = 2 + banner.len();
+            // And the [!] counter on a line of its own under the prose
+            // footer, so a notice that outlives its banner is still counted
+            // while a run is open.
+            let counter: Option<String> = tc::notices::hint(w - 2).map(|hint| {
+                let parts: Vec<(&str, String)> =
+                    hint.into_iter().map(|(c, t)| (c, format!(" {t}"))).collect();
+                tc::seg(&parts, w - 1)
+            });
+            let foot = 2 + banner.len() + usize::from(counter.is_some());
             let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
             // saying which run it is describing.
@@ -2079,6 +2087,7 @@ fn main() {
                 )],
                 w - 1,
             ));
+            out.extend(counter);
             // This overlay writes its footer as one line of prose rather
             // than packing hints, so there are no placements to register -
             // and leaving the screen underneath registered would answer a
@@ -2284,9 +2293,52 @@ fn main() {
             w - 1,
         ));
 
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " details".into()),
+            ],
+            // Both name what the next press moves to, not what is in
+            // force: the state filter is on the count line whenever it is
+            // narrowing anything, and the window is in the ACTIVITY
+            // heading and the figures under it.
+            vec![(
+                p.dim.as_str(),
+                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
+            )],
+            vec![(p.dim.as_str(), "[/]filter".into())],
+            vec![(
+                p.dim.as_str(),
+                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
+            )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        if !typing {
+            if let Some(notices) = tc::notices::hint(w - 2) {
+                hints.insert(hints.len() - 1, notices);
+            }
+            hints.insert(hints.len() - 1, vec![(
+                p.dim.as_str(),
+                "[,] settings".into(),
+            )]);
+        }
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        // The notices banner, then the hints: one block, built before the
+        // list so the list is sized with it already taken. Sized after,
+        // a banner arriving cut the last run off the bottom while `scroll`
+        // had no range left to bring it back.
+        let banner = tc::notices::banner_rows(w);
+        let footer: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
+
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
-        visible = (h.saturating_sub(rows.len() + 2) / per_item).max(1);
+        visible = (h.saturating_sub(rows.len() + footer.len() + 1) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
@@ -2313,7 +2365,7 @@ fn main() {
         // and ended: a run is one row, or two when its jobs are drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
-            if rows.len() >= h.saturating_sub(1) {
+            if rows.len() >= h.saturating_sub(footer.len()) {
                 break;
             }
             let from = rows.len();
@@ -2451,47 +2503,7 @@ fn main() {
             }
         }
 
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " details".into()),
-            ],
-            // Both name what the next press moves to, not what is in
-            // force: the state filter is on the count line whenever it is
-            // narrowing anything, and the window is in the ACTIVITY
-            // heading and the figures under it.
-            vec![(
-                p.dim.as_str(),
-                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
-            )],
-            vec![(p.dim.as_str(), "[/]filter".into())],
-            vec![(
-                p.dim.as_str(),
-                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
-            )],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        if !typing {
-            if let Some(notices) = tc::notices::hint(w - 2) {
-                hints.insert(hints.len() - 1, notices);
-            }
-            hints.insert(hints.len() - 1, vec![(
-                p.dim.as_str(),
-                "[,] settings".into(),
-            )]);
-        }
         placed = rows_at;
-        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        // The notices banner, then the hints: one block, so the padding
-        // below reserves both and the body never scrolls under the banner.
-        let banner = tc::notices::banner_rows(w);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
         rows.truncate(h.saturating_sub(footer.len()));
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());

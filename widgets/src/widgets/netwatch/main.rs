@@ -1860,6 +1860,11 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
+                    // The notices are the widget's, not the list's: a
+                    // warning raised while a process is open is read here.
+                    "!" => {
+                        tc::notices::run(&mut keyboard);
+                    }
                     "r" | "R" => {
                         if let Ok(mut guard) = state.lock() {
                             guard.totals.clear();
@@ -2105,7 +2110,7 @@ fn main() {
                 Some(_) => files.get(at[2]).map(|f| f.path.clone()).unwrap_or_default(),
                 None => String::new(),
             };
-            let hints: Vec<Vec<(&str, String)>> = vec![
+            let mut hints: Vec<Vec<(&str, String)>> = vec![
                 vec![
                     (p.accent.as_str(), "↑↓".into()),
                     (
@@ -2126,8 +2131,11 @@ fn main() {
                     (p.accent.as_str(), "←".into()),
                     (p.dim.as_str(), "/esc back".into()),
                 ],
-                vec![(p.dim.as_str(), "[q]uit".into())],
             ];
+            hints.extend(tc::notices::hint(w - 2));
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+            // Above the footer and counted in it, as on the list.
+            let banner = tc::notices::banner_rows(w);
             let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let mut foot: Vec<String> =
                 packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -2139,7 +2147,7 @@ fn main() {
             // else. An empty footer is how a widget takes them back off.
                 packed = tc::Footer::default();
             }
-            let room = h.saturating_sub(foot.len() + 1).max(1);
+            let room = h.saturating_sub(foot.len() + banner.len() + 1).max(1);
             // Built at the height it wants rather than the height it has:
             // the lists are drawn in full and the charts get their rows, and
             // what does not fit is scrolled to rather than dropped.
@@ -2218,10 +2226,11 @@ fn main() {
                     foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
                     packed = tc::Footer::default();
                 }
-                while shown.len() + foot.len() < h {
+                while shown.len() + banner.len() + foot.len() < h {
                     shown.push(String::new());
                 }
             }
+            shown.extend(banner);
             // The detail screen keeps a cursor per section of its own. The
             // list's placements describe a frame that is no longer on
             // screen, so they come off rather than answering for it.

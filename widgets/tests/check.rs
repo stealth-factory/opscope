@@ -215,10 +215,110 @@ fn handed_to_a_tint(src: &str, field: &str) -> bool {
     })
 }
 
-/// A source with its own test module removed. Fixtures are not the screen,
+/// A source with its test-only items removed. Fixtures are not the screen,
 /// and a colour or a key that only appears in one is not shipped.
+///
+/// Each `#[cfg(test)]` drops the one item, statement or block it is on and
+/// nothing after it. Cutting the file at the first one was the earlier
+/// reading, and it dropped every line of production code that follows a
+/// test-only helper - `core/src/lib.rs` and `shm.rs` both have one high up,
+/// so most of core went unread by every check that reads core.
 fn without_tests(src: &str) -> String {
-    src.split("#[cfg(test)]").next().unwrap_or("").to_string()
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = String::new();
+    let mut rest = src;
+    while let Some(at) = rest.find(ATTR) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + ATTR.len()..];
+        rest = &after[test_item_len(after)..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How many bytes of `src` the item an attribute sits on takes: up to the
+/// first `;` at depth zero, or through the `{ }` block that opens first.
+/// Strings, chars and comments are skipped so a brace inside one is not
+/// counted.
+fn test_item_len(src: &str) -> usize {
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            b'r' if matches!(b.get(i + 1), Some(b'"') | Some(b'#'))
+                && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) =>
+            {
+                let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                if b.get(i + 1 + hashes) == Some(&b'"') {
+                    let close = format!("\"{}", "#".repeat(hashes));
+                    let body = i + 2 + hashes;
+                    i = match src[body..].find(&close) {
+                        Some(end) => body + end + close.len(),
+                        None => b.len(),
+                    };
+                    continue;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // A char literal: 'x' or an escape. A lifetime has no closing
+            // quote two or three bytes on, and is left as it is.
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                if let Some(end) = src[i + 2..].find('\'') {
+                    i += 2 + end;
+                }
+            }
+            b'\'' if b.get(i + 2) == Some(&b'\'') => i += 2,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b';' if depth == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+#[test]
+fn without_tests_drops_each_test_item_and_keeps_what_follows() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\nstatic FAIL: u8 = 0;\n\
+               #[cfg(test)]\nfn helper(s: &str) -> char { let _ = \"}\"; '{' }\n\
+               fn shipped() { raise(); }\n\
+               fn body() {\n    #[cfg(test)]\n    if x { return; }\n    kept();\n}\n\
+               #[cfg(test)]\nmod tests {\n    fn t() { r#\"}\"#; }\n}\n\
+               fn last() {}\n";
+    let out = without_tests(src);
+    for kept in ["fn a()", "fn shipped()", "raise()", "kept()", "fn last()"] {
+        assert!(out.contains(kept), "{kept} was dropped:\n{out}");
+    }
+    for gone in ["FAIL", "helper", "return;", "mod tests", "fn t()"] {
+        assert!(!out.contains(gone), "{gone} was kept:\n{out}");
+    }
 }
 
 /// Every widget binary, by stem, with its source.
@@ -807,8 +907,12 @@ fn every_notice_has_a_stable_id() {
         let mut seen = BTreeSet::new();
         for id in notice_ids(src) {
             // Core's one computed id: a match over its own Tool enum that
-            // returns a literal per arm.
-            let core_lookup = *is_core && id.ends_with("recommended_notice_id()");
+            // returns a literal per arm. The reader stops at the first `(`
+            // or `,` it cannot balance, so the call reads as written up to
+            // its open parenthesis; this exemption once asked for `()` and
+            // so never matched, which went unseen while the producer sat
+            // below a `#[cfg(test)]` that cut the rest of lib.rs away.
+            let core_lookup = *is_core && id.ends_with(".recommended_notice_id(");
             if !is_stable_id(&id) && !core_lookup {
                 wrong.push(format!("{name}: notice id {id} is neither a literal nor a const"));
             }

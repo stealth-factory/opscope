@@ -39,6 +39,7 @@
 //! a new `until` on [`Dismissal`] and a file, not a new shape.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -111,6 +112,11 @@ pub enum Scope {
     Widget,
 }
 
+/// What a live notice is found by: its scope and its id, so a widget's
+/// notice and a Core notice that happen to share an id stay two notices,
+/// exactly as their dismissals are already keyed apart.
+type Key = (Scope, &'static str);
+
 /// One thing worth saying that is not about a number on screen.
 ///
 /// `id` is a literal or a const, stable across runs, and unique within the
@@ -174,6 +180,10 @@ impl Notice {
     pub(crate) fn core(mut self) -> Notice {
         self.scope = Scope::Core;
         self
+    }
+
+    fn key(&self) -> Key {
+        (self.scope, self.id)
     }
 
     /// FNV-1a over the title and detail.
@@ -250,7 +260,8 @@ impl Registry {
         let hash = notice.hash();
         self.seq += 1;
         let seq = self.seq;
-        if let Some(live) = self.live.iter_mut().find(|l| l.notice.id == notice.id) {
+        let key = notice.key();
+        if let Some(live) = self.live.iter_mut().find(|l| l.notice.key() == key) {
             if live.hash != hash {
                 live.hash = hash;
                 live.armed = now;
@@ -268,8 +279,8 @@ impl Registry {
         });
     }
 
-    fn clear(&mut self, id: &str) {
-        self.live.retain(|l| l.notice.id != id);
+    fn clear(&mut self, key: Key) {
+        self.live.retain(|l| l.notice.key() != key);
     }
 
     fn is_dismissed(&self, live: &Live, now: f64) -> bool {
@@ -318,8 +329,8 @@ impl Registry {
         list
     }
 
-    fn dismiss(&mut self, id: &str, now: f64) {
-        let Some(live) = self.live.iter().find(|l| l.notice.id == id) else {
+    fn dismiss(&mut self, key: Key, now: f64) {
+        let Some(live) = self.live.iter().find(|l| l.notice.key() == key) else {
             return;
         };
         let key = self.key(&live.notice);
@@ -335,14 +346,14 @@ impl Registry {
     }
 
     fn dismiss_all(&mut self, now: f64) {
-        let ids: Vec<&'static str> = self.outstanding(now).iter().map(|l| l.notice.id).collect();
-        for id in ids {
-            self.dismiss(id, now);
+        let keys: Vec<Key> = self.outstanding(now).iter().map(|l| l.notice.key()).collect();
+        for key in keys {
+            self.dismiss(key, now);
         }
     }
 
-    fn restore(&mut self, id: &str) {
-        let Some(live) = self.live.iter().find(|l| l.notice.id == id) else {
+    fn restore(&mut self, key: Key) {
+        let Some(live) = self.live.iter().find(|l| l.notice.key() == key) else {
             return;
         };
         let key = self.key(&live.notice);
@@ -386,24 +397,29 @@ pub fn raise(notice: Notice) {
 }
 
 /// The condition went away. Clearing an id that is not raised is a no-op.
-pub fn clear(id: &str) {
-    with(|r| r.clear(id));
+///
+/// Clears this widget's notice by that id; a Core notice sharing the id is
+/// a different notice and is left alone.
+pub fn clear(id: &'static str) {
+    with(|r| r.clear((Scope::Widget, id)));
 }
 
 /// Raise when `cond` holds and clear when it does not - the usual shape,
 /// called on every pass of whatever finds out.
 ///
-/// The notice is built only when it is raised, so a closure building a
-/// sentence costs nothing on the passes where all is well.
+/// The notice is built on both branches: on a clear pass it is built only
+/// to learn which id and scope to clear, then dropped. Taking the id
+/// separately would save that sentence, at the price of a second copy of
+/// the id that could drift from the one inside the notice - and a notice
+/// raised under one id and cleared under another never goes away. A pass
+/// runs once per poll, so the sentence is the cheaper of the two.
 pub fn when(cond: bool, notice: impl FnOnce() -> Notice) {
+    let notice = notice();
     if cond {
-        raise(notice());
+        raise(notice);
     } else {
-        // Building the notice to learn its id would cost the sentence this
-        // takes a closure to avoid; but the id is a literal by convention,
-        // so build it once here, where it is about to be thrown away.
-        let id = notice().id;
-        clear(id);
+        let key = notice.key();
+        with(|r| r.clear(key));
     }
 }
 
@@ -437,6 +453,7 @@ const TINT: (u8, u8, u8) = (38, 56, 76);
 /// width it says `[!] 4 notices`, and below that `[!] 4`.
 pub fn hint(room: usize) -> Option<Vec<(&'static str, String)>> {
     let now = crate::now();
+    recheck_config_permissions(now);
     with(|r| hint_of(r, now, room))
 }
 
@@ -472,6 +489,7 @@ fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, Str
 /// placements `footer_at` registered.
 pub fn banner_rows(w: usize) -> Vec<String> {
     let now = crate::now();
+    recheck_config_permissions(now);
     with(|r| banner_of(r, now, w))
 }
 
@@ -500,10 +518,13 @@ enum View {
 /// The screen's own state, apart from the registry it reads every frame.
 struct Screen {
     view: View,
-    /// The notice open in detail, by id.
-    open: Option<&'static str>,
+    /// The notice open in detail, by scope and id.
+    open: Option<Key>,
     selected: usize,
     scroll: usize,
+    /// Where the list was scrolled when a notice was opened, so backing out
+    /// of detail returns to it rather than to the detail's own offset.
+    list_scroll: usize,
     chase: bool,
     /// What the frame on screen offers a click.
     placed: Vec<(usize, usize)>,
@@ -511,8 +532,8 @@ struct Screen {
     shown_scroll: usize,
     /// How many notices the list on screen held, for keys moving the cursor.
     count: usize,
-    /// The ids in the order the frame on screen listed them.
-    ids: Vec<&'static str>,
+    /// The notices in the order the frame on screen listed them.
+    ids: Vec<Key>,
 }
 
 impl Screen {
@@ -522,6 +543,7 @@ impl Screen {
             open: None,
             selected: 0,
             scroll: 0,
+            list_scroll: 0,
             chase: true,
             placed: Vec::new(),
             head: 1,
@@ -540,8 +562,16 @@ impl Screen {
         self.chase = true;
     }
 
-    fn selected_id(&self) -> Option<&'static str> {
+    fn selected_id(&self) -> Option<Key> {
         self.ids.get(self.selected).copied()
+    }
+
+    /// Back from detail to the list where it was, with the selected row
+    /// brought into view if anything moved under it meanwhile.
+    fn close(&mut self) {
+        self.open = None;
+        self.scroll = self.list_scroll;
+        self.chase = true;
     }
 }
 
@@ -590,18 +620,18 @@ pub fn run(keyboard: &mut crate::Keyboard) {
 fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
     if screen.open.is_some() {
         match key {
-            "esc" | "!" | "backspace" => screen.open = None,
+            "esc" | "!" | "backspace" => screen.close(),
             "q" | "Q" => return true,
             "s" | "S" => {
                 if let Some(id) = screen.open {
                     with(|r| r.dismiss(id, now));
-                    screen.open = None;
+                    screen.close();
                 }
             }
             "u" | "U" => {
                 if let Some(id) = screen.open {
                     with(|r| r.restore(id));
-                    screen.open = None;
+                    screen.close();
                 }
             }
             "ctrl-y" | "wheel-up" | "up" | "k" | "K" => {
@@ -634,6 +664,7 @@ fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
         "enter" => {
             if let Some(id) = screen.selected_id() {
                 screen.open = Some(id);
+                screen.list_scroll = screen.scroll;
                 screen.scroll = 0;
             }
         }
@@ -742,11 +773,11 @@ fn frame(
     // closes rather than showing a stale reading.
     let open = screen
         .open
-        .and_then(|id| r.live.iter().find(|l| l.notice.id == id));
+        .and_then(|key| r.live.iter().find(|l| l.notice.key() == key));
     if screen.open.is_some() && open.is_none() {
-        screen.open = None;
+        screen.close();
     }
-    screen.ids = list.iter().map(|l| l.notice.id).collect();
+    screen.ids = list.iter().map(|l| l.notice.key()).collect();
     screen.count = list.len();
     if screen.count > 0 {
         screen.selected = screen.selected.min(screen.count - 1);
@@ -950,9 +981,41 @@ fn frame(
     (out, packed, foot_top)
 }
 
+/// When the config file's permissions were last looked at, as `f64` bits;
+/// zero until `load_config` first runs, so a widget that never loads config
+/// never stats the file.
+static CONFIG_CHECKED: AtomicU64 = AtomicU64::new(0);
+
+/// How often a running widget looks at the config file's permissions again.
+const CONFIG_RECHECK_SECS: f64 = 5.0;
+
 /// Raise the config file's permissions as the one Core notice every pane
-/// shares. Called from `load_config`, so a widget does not have to.
+/// shares. Called from `load_config`, so a widget does not have to, and
+/// again every few seconds from `hint` and `banner_rows`: widgets load
+/// config once at startup, so a check made only there would keep saying
+/// "readable by others" after the `chmod 600` it asks for, and would never
+/// see a file an editor later rewrote with wider permissions.
 pub(crate) fn raise_config_permissions() {
+    CONFIG_CHECKED.store(crate::now().max(f64::MIN_POSITIVE).to_bits(), Ordering::Relaxed);
+    check_config_permissions();
+}
+
+/// Look again if config has been loaded and the last look is stale. Called
+/// outside the registry lock, since raising takes it.
+fn recheck_config_permissions(now: f64) {
+    let last = CONFIG_CHECKED.load(Ordering::Relaxed);
+    if last == 0 || now - f64::from_bits(last) < CONFIG_RECHECK_SECS {
+        return;
+    }
+    if CONFIG_CHECKED
+        .compare_exchange(last, now.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        check_config_permissions();
+    }
+}
+
+fn check_config_permissions() {
     when(crate::config_token_warning().is_some(), || {
         Notice::warn(
             "config-world-readable",
@@ -1005,7 +1068,7 @@ mod tests {
         assert!(r.banner(BANNER_SECS + 1.0).is_empty(), "the banner times out");
         // But the counter is still there: it never vanishes while true.
         assert!(hint_of(&r, BANNER_SECS + 1.0, 80).is_some());
-        r.dismiss("a", 70.0);
+        r.dismiss((Scope::Widget, "a"), 70.0);
         assert!(r.outstanding(71.0).is_empty());
         r.raise(Notice::warn("a", "one").detail("and now this"), 100.0);
         assert_eq!(r.outstanding(101.0).len(), 1, "a changed problem shows again");
@@ -1019,7 +1082,7 @@ mod tests {
         r.raise(Notice::error("a", "broken"), 0.0);
         assert!(!banner_of(&r, 1.0, 80).is_empty());
         assert!(hint_of(&r, 1.0, 80).is_some());
-        r.clear("a");
+        r.clear((Scope::Widget, "a"));
         assert!(banner_of(&r, 1.0, 80).is_empty());
         assert!(hint_of(&r, 1.0, 80).is_none());
     }
@@ -1078,10 +1141,10 @@ mod tests {
         assert!(r.outstanding(2.0).is_empty());
         assert_eq!(r.dismissed_live(2.0).len(), 2, "a dismissed notice is findable");
         assert!(hint_of(&r, 2.0, 80).is_none());
-        r.restore("b");
+        r.restore((Scope::Widget, "b"));
         assert_eq!(r.outstanding(3.0).len(), 1);
         // A dismissal outlives a clear and re-raise of the same content.
-        r.clear("a");
+        r.clear((Scope::Widget, "a"));
         r.raise(Notice::warn("a", "x"), 4.0);
         assert_eq!(r.outstanding(5.0).len(), 1);
     }
@@ -1093,8 +1156,48 @@ mod tests {
         assert_eq!(r.key(&core), "core/x");
         assert_eq!(r.key(&Notice::warn("x", "t")), "test/x");
         r.raise(core, 0.0);
-        r.dismiss("x", 0.0);
+        r.dismiss((Scope::Core, "x"), 0.0);
         assert!(r.dismissed.contains_key("core/x"));
+    }
+
+    #[test]
+    fn a_widget_notice_sharing_a_core_id_is_a_second_notice() {
+        let mut r = reg();
+        r.raise(Notice::warn("x", "core's").core(), 0.0);
+        r.raise(Notice::warn("x", "the widget's"), 0.0);
+        assert_eq!(r.live.len(), 2, "neither overwrites the other");
+        r.clear((Scope::Widget, "x"));
+        assert_eq!(r.live.len(), 1);
+        assert_eq!(r.live[0].notice.scope, Scope::Core, "the Core one survives");
+        assert_eq!(r.live[0].notice.title, "core's");
+    }
+
+    #[test]
+    fn backing_out_of_detail_returns_to_the_list_where_it_was() {
+        let mut r = reg();
+        for (i, id) in ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"]
+            .into_iter()
+            .enumerate()
+        {
+            r.raise(Notice::warn(id, format!("notice number {i}")), i as f64);
+        }
+        let mut screen = Screen::new();
+        let h = 8;
+        frame(&r, &mut screen, 20.0, 60, h);
+        for _ in 0..9 {
+            screen.step(1);
+        }
+        frame(&r, &mut screen, 20.0, 60, h);
+        let list_scroll = screen.scroll;
+        assert!(list_scroll > 0, "the last notice is below the first pane");
+        handle(&mut screen, "enter", 20.0);
+        frame(&r, &mut screen, 20.0, 60, h);
+        handle(&mut screen, "down", 20.0);
+        handle(&mut screen, "esc", 20.0);
+        assert!(screen.open.is_none());
+        let (rows, _, _) = frame(&r, &mut screen, 20.0, 60, h);
+        assert_eq!(screen.scroll, list_scroll);
+        assert!(plain(&rows).contains("notice number 0"), "the selected row is on screen");
     }
 
     #[test]
@@ -1236,7 +1339,7 @@ mod tests {
             assert!(top + packed.lines.len() <= 24);
             assert_eq!(screen.count, 2);
             // Worst first.
-            assert_eq!(screen.ids[0], "e");
+            assert_eq!(screen.ids[0], (Scope::Widget, "e"));
             assert!(handle(&mut screen, "enter", 30.0) == false);
             let (rows, _, _) = frame(&r, &mut screen, 30.0, w, 24);
             let text = plain(&rows);
@@ -1251,13 +1354,13 @@ mod tests {
         let mut screen = Screen::new();
         let now = crate::now();
         with(|r| frame(r, &mut screen, now, 80, 24));
-        let at = screen.ids.iter().position(|id| *id == "screen-test").unwrap();
+        let at = screen.ids.iter().position(|id| *id == (Scope::Widget, "screen-test")).unwrap();
         screen.selected = at;
         handle(&mut screen, "s", now);
         assert!(with(|r| r.dismissed_live(now).iter().any(|l| l.notice.id == "screen-test")));
         handle(&mut screen, "h", now);
         with(|r| frame(r, &mut screen, now, 80, 24));
-        let at = screen.ids.iter().position(|id| *id == "screen-test").unwrap();
+        let at = screen.ids.iter().position(|id| *id == (Scope::Widget, "screen-test")).unwrap();
         screen.selected = at;
         handle(&mut screen, "u", now);
         assert!(with(|r| r.outstanding(now).iter().any(|l| l.notice.id == "screen-test")));

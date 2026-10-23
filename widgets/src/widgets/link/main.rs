@@ -705,8 +705,11 @@ fn main() {
             // `scroll_label` is a fixed width, so the second pass cannot
             // wrap differently from the first and leave the body sized
             // against a footer that is no longer there.
+            // The notices counter is read once per frame, so both packings
+            // below wrap it the same way.
+            let notices_hint = tc::notices::hint(w - 2);
             let detail_hints = |place: String| -> Vec<Vec<(&str, String)>> {
-                vec![
+                let mut hints = vec![
                     vec![
                         (p.accent.as_str(), "←".into()),
                         (p.dim.as_str(), "/[esc] back".into()),
@@ -721,10 +724,14 @@ fn main() {
                         (p.dim.as_str(), format!(" {}", window_label(window))),
                     ],
                     vec![(p.dim.as_str(), "[r]efresh".into())],
-                    vec![(p.dim.as_str(), "[q]uit".into())],
-                    vec![(p.dim.as_str(), place)],
-                ]
+                ];
+                hints.extend(notices_hint.clone());
+                hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+                hints.push(vec![(p.dim.as_str(), place)]);
+                hints
             };
+            // Above the footer and counted in it, as on the list.
+            let banner = tc::notices::banner_rows(w);
             // Returns the placement alongside the lines, because the footer
             // is packed twice here: once to measure how many rows it will
             // take, and again with the real scroll label once that is
@@ -740,7 +747,7 @@ fn main() {
                 packed
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
-            let room = h.saturating_sub(foot.lines.len() + 1).max(1);
+            let room = h.saturating_sub(foot.lines.len() + banner.len() + 1).max(1);
             let body = detail_view(
                 &shown[pick],
                 &guard,
@@ -774,6 +781,7 @@ fn main() {
                 last,
                 rest.len(),
             )));
+            shown_body.extend(banner);
             let foot_top = shown_body.len();
             shown_body.extend(packed.lines.iter().cloned());
             let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();

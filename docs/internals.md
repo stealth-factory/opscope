@@ -73,7 +73,8 @@ that is not about a number goes. `start(widget)` names the widget once in
 `main`; `raise(Notice)`, `clear(id)` and `when(cond, || Notice)` work from
 any thread, against a process-global registry that recovers a poisoned lock
 rather than propagating it, so nothing in the module panics or returns an
-error. A notice is keyed by a stable id: raising the same id again updates
+error. A notice is keyed by its scope and a stable id - a widget notice
+sharing an id with a Core one is a second notice, not an overwrite: raising the same id again updates
 it in place, and a change to its title or detail — hashed with FNV-1a, so the
 number is the same in every build — banners it again and voids a dismissal.
 
@@ -88,7 +89,9 @@ to two notices, newest first, for sixty seconds each, wrapped by
 `footer_at` registered. `run(keyboard)` is the screen, on `!`.
 
 Core raises three of its own: `config-world-readable` (Core scope, from
-`load_config()`), and one Info per recommended tool `dependencies_available()`
+`load_config()`, and looked at again every five seconds from `hint` and
+`banner_rows`, so a `chmod 600` clears it and a file rewritten wider raises
+it without a restart), and one Info per recommended tool `dependencies_available()`
 finds missing. Dismissals are for the session and live in memory, keyed
 `core/<id>` or `<widget>/<id>` with the hash they were taken against, which
 is the shape a persisted dismissal for N days will need.

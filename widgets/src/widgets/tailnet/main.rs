@@ -889,6 +889,9 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
+                    // The footer here carries the [!] counter too, so the
+                    // key it names has to answer here as well.
+                    "!" => tc::notices::run(&mut keyboard),
                     "ctrl-y" | "wheel-up" => dscroll = dscroll.saturating_sub(1),
                     "ctrl-e" | "wheel-down" => dscroll = dscroll.saturating_add(1),
                     "c" | "C" => {
@@ -1512,7 +1515,22 @@ fn main() {
 /// endpoints ran off the bottom of a short pane with nothing saying so.
 /// Hands back where the window actually sat, clamped, so the caller can
 /// keep it for the next frame.
-fn framed(rows: Vec<String>, h: usize, scroll: usize, foot: Vec<String>) -> (Vec<String>, usize) {
+///
+/// The notices banner goes above the footer and the `[!]` counter under it,
+/// as on the list: a warning raised while a machine is open is otherwise
+/// unseen until the reader backs out.
+fn framed(
+    rows: Vec<String>,
+    w: usize,
+    h: usize,
+    scroll: usize,
+    foot: Vec<String>,
+) -> (Vec<String>, usize, usize) {
+    let mut foot: Vec<String> = tc::notices::banner_rows(w).into_iter().chain(foot).collect();
+    if let Some(hint) = tc::notices::hint(w.saturating_sub(2).max(1)) {
+        let hint: Vec<(&str, String)> = hint.into_iter().map(|(c, t)| (c, format!(" {t}"))).collect();
+        foot.push(tc::seg(&hint, w - 1));
+    }
     let room = h.saturating_sub(foot.len());
     let (head, rest) = rows.split_at(1.min(rows.len()));
     let room_below = room.saturating_sub(head.len()).max(1);
@@ -1523,7 +1541,7 @@ fn framed(rows: Vec<String>, h: usize, scroll: usize, foot: Vec<String>) -> (Vec
         out.push(String::new());
     }
     out.extend(foot);
-    (out, at)
+    (out, at, room_below)
 }
 
 fn info_overlay_with_plots(
@@ -1896,8 +1914,9 @@ fn info_overlay_with_plots(
         ));
     }
 
-    let (rows, at) = framed(
+    let (rows, at, room_below) = framed(
         rows,
+        w,
         h,
         scroll,
         vec![tc::seg(
@@ -1905,7 +1924,9 @@ fn info_overlay_with_plots(
             w - 1,
         )],
     );
-    *plots = plots.drain(..).filter_map(|p| p.in_viewport(at, 1, h.saturating_sub(2).max(1))).collect();
+    // The footer's height moves with the notices banner, so the charts are
+    // cropped to the window `framed` actually left them.
+    *plots = plots.drain(..).filter_map(|p| p.in_viewport(at, 1, room_below)).collect();
     (rows, at)
 }
 
@@ -1948,8 +1969,9 @@ fn copy_overlay(
             w - 1,
         ));
     }
-    framed(
+    let (rows, at, _) = framed(
         rows,
+        w,
         h,
         scroll,
         vec![
@@ -1969,7 +1991,8 @@ fn copy_overlay(
                 tc::seg(&[(p.online.as_str(), format!(" {}", note))], w - 1)
             },
         ],
-    )
+    );
+    (rows, at)
 }
 
 #[cfg(test)]

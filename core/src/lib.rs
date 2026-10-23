@@ -2643,20 +2643,16 @@ fn cannot_start_inner(
 /// Any widget that takes a token writes it into this file, so the check
 /// belongs beside the loader rather than in whichever widget happened to
 /// need it first.
+///
+/// The file checked is the one `load_config` reads - the first that exists
+/// *and parses* - not merely the first that exists: a malformed earlier
+/// candidate is skipped by the loader, so it must be skipped here too, or
+/// the file actually holding the tokens goes unchecked.
 pub fn config_token_warning() -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
-    for path in config_paths() {
-        if !path.exists() {
-            continue;
-        }
-        let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
-        return if mode != 0 {
-            Some("config.json is readable by others; chmod 600 it".into())
-        } else {
-            None
-        };
-    }
-    None
+    let path = resolved_config_path()?;
+    let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
+    (mode != 0).then(|| "config.json is readable by others; chmod 600 it".into())
 }
 
 /// One HTTPS GET, returning the body.
