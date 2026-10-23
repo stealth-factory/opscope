@@ -986,10 +986,17 @@ fn frame(
     let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
+    // Only rows in the window are clickable: a record scrolled out of view
+    // would otherwise answer a click on the footer that now covers it.
+    let window = screen.scroll..screen.scroll + room;
     screen.placed = if screen.open.is_some() {
         Vec::new()
     } else {
-        placed.into_iter().map(|(row, i)| (row + 1, i)).collect()
+        placed
+            .into_iter()
+            .filter(|(row, _)| window.contains(row))
+            .map(|(row, i)| (row + 1, i))
+            .collect()
     };
     screen.head = 1;
     screen.shown_scroll = screen.scroll;
@@ -1289,6 +1296,32 @@ mod tests {
         let (rows, _, _) = frame(&r, &mut screen, 20.0, 60, h);
         assert_eq!(screen.scroll, list_scroll);
         assert!(plain(&rows).contains("notice number 0"), "the selected row is on screen");
+    }
+
+    #[test]
+    fn a_click_on_the_footer_does_not_select_a_hidden_notice() {
+        let mut r = reg();
+        for i in 0..8 {
+            let id: &'static str = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"][i];
+            r.raise(Notice::warn(id, format!("notice number {i}")), i as f64);
+        }
+        let mut screen = Screen::new();
+        let (h, w) = (8, 60);
+        let (rows, _, foot_top) = frame(&r, &mut screen, 20.0, w, h);
+        assert!(screen.placed.len() < 8, "some notices are below the window");
+        for y in 0..rows.len() {
+            let at = crate::item_at(y, screen.head, screen.shown_scroll, &screen.placed);
+            if y >= foot_top {
+                assert_eq!(at, None, "footer row {y} selects notice {at:?}");
+            } else if let Some(i) = at {
+                let id = screen.ids[i].1;
+                let n = &id[1..];
+                assert!(
+                    plain(&rows[y..=y]).contains(&format!("notice number {n}")),
+                    "row {y} does not show the notice a click on it selects"
+                );
+            }
+        }
     }
 
     #[test]
