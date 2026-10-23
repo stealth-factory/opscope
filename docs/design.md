@@ -97,6 +97,19 @@ wrong first.
   folder, plus a settings declaration when the widget is configurable.
   Configurable widgets all open the shared settings screen with `,`; the
   `opscope` launcher is not counted as a widget.
+- **A warning that explains a missing or partial number stays in the body;
+  everything else is a notice.** A scope a token lacks, a page of jobs that
+  was not read, a poller that stopped: those sit beside the number they
+  explain. A config file others can read, an old section name still doing
+  the work, a recommended tool that is not installed are not about any
+  number, and they go through `tc::notices` rather than being glued onto a
+  fetch error with `·` — which made a working pane read as a failing one —
+  or dropped. A new notice banners above the footer for sixty seconds, then
+  collapses into a `[!] 1 error, 2 warnings` hint coloured by the worst
+  level for as long as it is true. `!` opens the core-drawn screen in every
+  widget, as `,` opens settings, to read each one whole and dismiss it for
+  the session; a dismissed notice is listed there and can be restored, so
+  it is never lost.
 
 ## Where these are enforced
 
@@ -106,8 +119,11 @@ sources and fails on a footer hint naming a key nothing answers, a hint
 missing from the widget's README, a config key read but never declared,
 an incomplete widget folder, a colour drawing text on the selected-row tint
 below WCAG AA, a widget that does not answer the wheel, a parser or a test
-gated by `cfg(target_os)`, and a widget that opens `/proc` with no macOS
-path. See [internals](internals.md#the-checks).
+gated by `cfg(target_os)`, a widget that opens `/proc` with no macOS
+path, a notice whose id is built at run time or a Core-scope notice raised
+by a widget, a widget that can hold a notice and never shows it, and a
+widget that grows a notices screen of its own. See
+[internals](internals.md#the-checks).
 
 The wheel rule is enforced the way it is because the obvious marker does not
 work. A check that only looked at widgets calling `follow()` would have

@@ -416,6 +416,7 @@ fn store_poll(state: &mut State, reading: Result<Reading, String>, history_len: 
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("link");
     if !tc::dependencies_available("link", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -563,6 +564,10 @@ fn main() {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
+                    continue;
+                }
                 // Up and down mean "move through what is in front of you"
                 // in both views: in the list that is the selection, on the
                 // detail screen it is the screen itself.
@@ -700,8 +705,11 @@ fn main() {
             // `scroll_label` is a fixed width, so the second pass cannot
             // wrap differently from the first and leave the body sized
             // against a footer that is no longer there.
+            // The notices counter is read once per frame, so both packings
+            // below wrap it the same way.
+            let notices_hint = tc::notices::hint(w - 2);
             let detail_hints = |place: String| -> Vec<Vec<(&str, String)>> {
-                vec![
+                let mut hints = vec![
                     vec![
                         (p.accent.as_str(), "←".into()),
                         (p.dim.as_str(), "/[esc] back".into()),
@@ -716,10 +724,14 @@ fn main() {
                         (p.dim.as_str(), format!(" {}", window_label(window))),
                     ],
                     vec![(p.dim.as_str(), "[r]efresh".into())],
-                    vec![(p.dim.as_str(), "[q]uit".into())],
-                    vec![(p.dim.as_str(), place)],
-                ]
+                ];
+                hints.extend(notices_hint.clone());
+                hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+                hints.push(vec![(p.dim.as_str(), place)]);
+                hints
             };
+            // Above the footer and counted in it, as on the list.
+            let banner = tc::notices::banner_rows(w, h);
             // Returns the placement alongside the lines, because the footer
             // is packed twice here: once to measure how many rows it will
             // take, and again with the real scroll label once that is
@@ -735,7 +747,7 @@ fn main() {
                 packed
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
-            let room = h.saturating_sub(foot.lines.len() + 1).max(1);
+            let room = h.saturating_sub(foot.lines.len() + banner.len() + 1).max(1);
             let body = detail_view(
                 &shown[pick],
                 &guard,
@@ -769,6 +781,7 @@ fn main() {
                 last,
                 rest.len(),
             )));
+            shown_body.extend(banner);
             let foot_top = shown_body.len();
             shown_body.extend(packed.lines.iter().cloned());
             let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
@@ -875,7 +888,7 @@ fn main() {
             ));
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
@@ -893,12 +906,22 @@ fn main() {
                 format!("[o]{} idle", if hide_idle { "show" } else { "hide" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend(tc::notices::hint(w - 2));
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         drop(guard);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // The notices banner sits directly above the hints and counts as
+        // footer, so the body never scrolls under it.
+        let banner = tc::notices::banner_rows(w, h);
+        let foot: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         // A window onto the body rather than a cut of it, and the title
         // stays put above it: on a pane too short for every session the
         // table and the chart under it used to run off the bottom with
@@ -924,7 +947,7 @@ fn main() {
         // Each screen registers its own footer as it draws, and the last
         // draw wins - which is right, because the last draw is what is on
         // screen when the next click arrives.
-        let foot_top = frame.len();
+        let foot_top = frame.len() + banner.len();
         frame.extend(foot);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(lscroll, 1, room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);

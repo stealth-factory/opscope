@@ -139,6 +139,7 @@ support OSC 8. `c` remains the keyboard route for opening the copy sheet.
 | `r` | refresh now, and in the detail view fetch it again |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings (while entering a text filter, types a comma) |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session (while entering a text filter, types a !) |
 | `q` | quit, from either screen |
 | `f` `p` | the state filter and the project cycle — **`deployments` only**; the Rust build has `s` and `/` instead |
 

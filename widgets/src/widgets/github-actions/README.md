@@ -158,6 +158,7 @@ support OSC 8. `c` remains the keyboard route for copying the URL.
 | `r` | refresh now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings, from either screen |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit, from either screen |
 
 `j` and `k` move the selection the same way `↓` and `↑` do, as they do on

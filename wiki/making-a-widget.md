@@ -402,6 +402,39 @@ is absent, and `tc::cannot_start_because()` with `tc::unsupported()` when the
 kernel has no truthful source. Do not copy a one-off failure screen or turn a
 failed command into an empty result.
 
+**A warning that explains a missing or partial number stays in the body**,
+beside the number. Anything else - an old section name still being read, a
+fallback the reader would not guess - is a notice, not a row and not a
+clause glued onto the fetch error. Raise it by a stable id, from whichever
+thread finds out, and answer `!` beside `,`:
+
+```rust
+tc::notices::start("example-widget");                       // once, in main
+tc::notices::when(on_legacy_section(), || {                 // any thread, every pass
+    tc::notices::Notice::info("legacy-config-section", "config: reading the old section")
+});
+"!" => { tc::notices::run(&mut keyboard); continue; }       // beside ","
+```
+
+Then put the counter in the footer and the banner above it - the banner
+counts as footer rows, so a scrolling body never runs under it, and
+`footer_at` is handed the row the hints start on, below the banner:
+
+```rust
+hints.extend(tc::notices::hint(w - 2));                     // before [,] settings
+let banner = tc::notices::banner_rows(w, h);                // h: the pane's height
+let foot: Vec<String> = banner.iter().cloned()
+    .chain(packed.lines.iter().map(|l| format!(" {l}"))).collect();
+// ... pad to h - foot.len(), then:
+let foot_top = rows.len() + banner.len();
+```
+
+Core raises two kinds for you: `config.json` readable by others, from
+`load_config()`, and each missing *recommended* tool, from
+`dependencies_available()`. So nearly every widget can hold a notice and
+has to show it; `a_widget_that_raises_a_notice_shows_it` says which call
+is missing.
+
 ### 7. Generate configuration and run the gates
 
 If settings changed, regenerate the checked-in example with the focused test:
@@ -469,6 +502,9 @@ and npm publication path is separate from PR merge; it is documented in
 | answering the wheel | `every_widget_answers_the_wheel` |
 | registering the footer, so its hints are clickable | `every_widget_registers_its_footer` |
 | answering a click on a row | `every_widget_with_a_cursor_answers_a_click` |
+| a notice id that is a literal or a const, and no Core notice from a widget | `every_notice_has_a_stable_id` |
+| starting the notices channel, its banner, its `[!]` hint and the `!` arm | `a_widget_that_raises_a_notice_shows_it`, then the README and key checks for `!` |
+| no notices screen of a widget's own | `only_core_draws_the_notices_screen` |
 
 `every_widget_is_on_the_launcher_menu` is the repository check: it fails
 if a widget folder is missing from the launcher registry.
@@ -488,7 +524,9 @@ Anything slow goes on a thread. **A background thread that dies is invisible**
 — the pane shows no data and no error, indistinguishable from a source that
 genuinely has none. `vercel-deployments` sat like that for a day.
 
-Every poller records *why* it stopped, and that reason has to reach a row.
+Every poller records *why* it stopped, and that reason has to reach a row -
+a row, not a notice. A dead poller is the missing number, so the reason sits
+where the number would have been; it raises nothing on the `!` channel.
 `a_poller_that_dies_records_why` flags a caught panic ending in
 `unwrap_or_default()` on its own line, because that shape hands the pane an
 empty list and draws a source with nothing in it.
@@ -560,6 +598,10 @@ Three rules the tests measure:
   while the issue sat open. That is what prose costs.
 
 ## Keys, scroll and the mouse
+
+`!` joins `,` as a key every widget answers: `,` opens the shared settings
+screen and `!` the shared notices screen, both drawn by core and both
+borrowing the widget's `Keyboard`. Do not bind `!` to anything else.
 
 ### Refresh activity in the title
 

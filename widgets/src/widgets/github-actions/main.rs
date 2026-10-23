@@ -1141,10 +1141,20 @@ fn on_legacy_section() -> bool {
 
 /// And said out loud, because a silent fallback is how a rename becomes
 /// permanent: nothing ever tells anyone the old name is still doing the
-/// work.
-fn legacy_section_note() -> Option<String> {
-    on_legacy_section()
-        .then(|| "config: reading the old `gha` section — rename it to `github_actions`".into())
+/// work. A notice rather than a clause on the fetch error, which made a
+/// working board read as a failing one.
+fn raise_legacy_section_notice() {
+    tc::notices::when(on_legacy_section(), || {
+        tc::notices::Notice::info(
+            "legacy-config-section",
+            "config: reading the old `gha` section — rename it to `github_actions`",
+        )
+        .detail(
+            "github-actions reads the old name until the section is renamed; \
+             saving from the settings screen (,) or editing config.json renames it.",
+        )
+        .source("config")
+    });
 }
 
 /// Report a step to the pane, if the lock is free.
@@ -1161,7 +1171,6 @@ fn note(live: &Arc<Mutex<State>>, f: impl FnOnce(&mut tc::Progress)) {
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
-    source: &str,
     accounts: &[String],
     explicit: &[String],
     pushed_days: i64,
@@ -1169,18 +1178,7 @@ fn one_pass(
     hours: i64,
     live: &Arc<Mutex<State>>,
 ) -> Result<State, String> {
-    let mut err = if source == "config" {
-        tc::config_token_warning().unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if let Some(said) = legacy_section_note() {
-        err = if err.is_empty() {
-            said
-        } else {
-            format!("{} · {}", err, said)
-        };
-    }
+    let mut err = String::new();
     let mut rate = None;
     let empty_stats = PickStats::default();
     note(live, |p| {
@@ -1622,6 +1620,7 @@ fn info_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("github-actions");
     if !tc::dependencies_available(
         "github-actions",
         include_str!("dependencies.json"),
@@ -1629,6 +1628,7 @@ fn main() {
     ) {
         return;
     }
+    raise_legacy_section_notice();
     let cfg = if on_legacy_section() {
         tc::load_config("gha")
     } else {
@@ -1664,7 +1664,7 @@ fn main() {
     });
 
     let p = palette();
-    let (tok, source) = token(&cfg);
+    let (tok, _) = token(&cfg);
     // The variable this widget would read, for the message that names it
     // when there is no token. Its own, like everything else here.
     let env_name = {
@@ -1699,7 +1699,6 @@ fn main() {
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 one_pass(
                     &poll_tok,
-                    source,
                     &poll_accounts,
                     &poll_explicit,
                     pushed_days,
@@ -1800,6 +1799,10 @@ fn main() {
             }
             if key == "," {
                 tc::run_settings(&mut keyboard, SETTINGS);
+                continue;
+            }
+            if key == "!" {
+                tc::notices::run(&mut keyboard);
                 continue;
             }
             if overlay {
@@ -2041,7 +2044,19 @@ fn main() {
                 refresh_activity.tick(tick),
                 &p,
             );
-            let foot = 2;
+            // The banner sits above this screen's one-line footer, counted
+            // in what the footer takes so the run's text never scrolls
+            // under it.
+            let banner = tc::notices::banner_rows(w, h);
+            // And the [!] counter on a line of its own under the prose
+            // footer, so a notice that outlives its banner is still counted
+            // while a run is open.
+            let counter: Option<String> = tc::notices::hint(w - 2).map(|hint| {
+                let parts: Vec<(&str, String)> =
+                    hint.into_iter().map(|(c, t)| (c, format!(" {t}"))).collect();
+                tc::seg(&parts, w - 1)
+            });
+            let foot = 2 + banner.len() + usize::from(counter.is_some());
             let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
             // saying which run it is describing.
@@ -2055,6 +2070,7 @@ fn main() {
             while out.len() < room {
                 out.push(String::new());
             }
+            out.extend(banner);
             out.push(tc::seg(
                 &[(
                     p.hint.as_str(),
@@ -2071,6 +2087,7 @@ fn main() {
                 )],
                 w - 1,
             ));
+            out.extend(counter);
             // This overlay writes its footer as one line of prose rather
             // than packing hints, so there are no placements to register -
             // and leaving the screen underneath registered would answer a
@@ -2276,9 +2293,52 @@ fn main() {
             w - 1,
         ));
 
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " details".into()),
+            ],
+            // Both name what the next press moves to, not what is in
+            // force: the state filter is on the count line whenever it is
+            // narrowing anything, and the window is in the ACTIVITY
+            // heading and the figures under it.
+            vec![(
+                p.dim.as_str(),
+                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
+            )],
+            vec![(p.dim.as_str(), "[/]filter".into())],
+            vec![(
+                p.dim.as_str(),
+                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
+            )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        if !typing {
+            if let Some(notices) = tc::notices::hint(w - 2) {
+                hints.insert(hints.len() - 1, notices);
+            }
+            hints.insert(hints.len() - 1, vec![(
+                p.dim.as_str(),
+                "[,] settings".into(),
+            )]);
+        }
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        // The notices banner, then the hints: one block, built before the
+        // list so the list is sized with it already taken. Sized after,
+        // a banner arriving cut the last run off the bottom while `scroll`
+        // had no range left to bring it back.
+        let banner = tc::notices::banner_rows(w, h);
+        let footer: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
+
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
-        visible = (h.saturating_sub(rows.len() + 2) / per_item).max(1);
+        visible = (h.saturating_sub(rows.len() + footer.len() + 1) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
@@ -2305,7 +2365,7 @@ fn main() {
         // and ended: a run is one row, or two when its jobs are drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
-            if rows.len() >= h.saturating_sub(1) {
+            if !row_fits_above_footer(rows.len(), h, footer.len()) {
                 break;
             }
             let from = rows.len();
@@ -2398,7 +2458,7 @@ fn main() {
             }
             let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
-            if !cols.single && rows.len() < h.saturating_sub(1) {
+            if !cols.single && row_fits_above_footer(rows.len(), h, footer.len()) {
                 // The workflow joins the subject here rather than fighting
                 // the repo for room on the row above. Both are as long as
                 // whoever named them made them, and this line carries only
@@ -2443,38 +2503,7 @@ fn main() {
             }
         }
 
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " details".into()),
-            ],
-            // Both name what the next press moves to, not what is in
-            // force: the state filter is on the count line whenever it is
-            // narrowing anything, and the window is in the ACTIVITY
-            // heading and the figures under it.
-            vec![(
-                p.dim.as_str(),
-                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
-            )],
-            vec![(p.dim.as_str(), "[/]filter".into())],
-            vec![(
-                p.dim.as_str(),
-                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
-            )],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        if !typing {
-            hints.insert(hints.len() - 1, vec![(
-                p.dim.as_str(),
-                "[,] settings".into(),
-            )]);
-        }
         placed = rows_at;
-        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         rows.truncate(h.saturating_sub(footer.len()));
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
@@ -2485,9 +2514,10 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len();
+        let foot_top = rows.len() + banner.len();
+        let body_end = rows.len();
         rows.extend(footer);
-        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1))).collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
@@ -2495,9 +2525,34 @@ fn main() {
 }
 
 
+/// Whether another run row still fits above a footer of `footer` rows.
+///
+/// Both lines of a run use this. The second used to stop at `h - 1`, which
+/// is the footer only when the footer is one row. A taller one — the
+/// banner — let the second line land on the row `truncate` then cut, and
+/// the placement survived, so a click on the banner selected that run.
+fn row_fits_above_footer(rows: usize, h: usize, footer: usize) -> bool {
+    rows < h.saturating_sub(footer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runs_second_line_stops_where_the_first_does() {
+        // A one-row footer: the old `h - 1` bound and this one agree.
+        assert!(row_fits_above_footer(10, 12, 1));
+        assert!(!row_fits_above_footer(11, 12, 1));
+        // A banner makes the footer taller than one row. Index `h - footer`
+        // is the first footer row. The old bound still called that a fit.
+        let h = 20;
+        let footer = 4;
+        let first_footer_row = h - footer;
+        assert!(row_fits_above_footer(first_footer_row - 1, h, footer));
+        assert!(!row_fits_above_footer(first_footer_row, h, footer));
+        assert!(first_footer_row < h - 1);
+    }
 
     #[test]
     fn the_filters_are_named_and_neither_all_nor_the_window_is_one() {

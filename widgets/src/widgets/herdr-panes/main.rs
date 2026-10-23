@@ -876,6 +876,7 @@ fn homely(path: &str) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("herdr-panes");
     if !tc::dependencies_available(
         "herdr-panes",
         include_str!("dependencies.json"),
@@ -992,6 +993,10 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1234,7 +1239,7 @@ fn main() {
         // it takes depends on the width, and the body cannot know its own
         // budget until that is settled. Each section budgeting for itself is
         // what drifted before, and left the footer written past the bottom.
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![(
                 p.dim.as_str(),
                 format!(
@@ -1271,11 +1276,20 @@ fn main() {
                 format!("[l]abels {}", if show_labels { "hide" } else { "show" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
         ];
+        hints.extend(tc::notices::hint(w - 2));
+        hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // The notices banner sits directly above the hints and counts as
+        // footer, so every budget below that reads `footer.len()` keeps
+        // room for it.
+        let banner = tc::notices::banner_rows(w, h);
+        let footer: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
 
         // One window over the three lists read as one, which is the order
         // `rows_now` is in and the order the keys walk. The cursor used to
@@ -1759,9 +1773,10 @@ fn main() {
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
         placed = rows_at;
-        let foot_top = rows.len();
+        let body_end = rows.len();
+        let foot_top = body_end + banner.len();
         rows.extend(footer);
-        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(2))).collect();
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(2))).collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));

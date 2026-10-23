@@ -2459,6 +2459,7 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("agent-usage");
     if !tc::dependencies_available(
         "agent-usage",
         include_str!("dependencies.json"),
@@ -2589,6 +2590,10 @@ fn main() {
                 tc::run_settings(&mut keyboard, SETTINGS);
                 continue;
             }
+            if key == "!" {
+                tc::notices::run(&mut keyboard);
+                continue;
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -2714,13 +2719,19 @@ fn main() {
             vec![(p.accent.as_str(), "←→".into()), (p.dim.as_str(), " agent".into())],
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend(tc::notices::hint(w - 2));
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         // The footer is packed once, with the scroll hint always counted, so
         // the body's height does not change when scrolling becomes possible.
         let reserved = tc::pack_hints(&hints, w - 2, "  ").len();
-        let avail = h.saturating_sub(rows.len() + reserved).max(1);
+        // The notices banner sits directly above the hints and is reserved
+        // with them, so the tab never scrolls under it.
+        let banner = tc::notices::banner_rows(w, h);
+        let avail = h.saturating_sub(rows.len() + reserved + banner.len()).max(1);
         let top = body.len().saturating_sub(avail);
         let mut off = if name == shown { carried.min(top) } else { 0 };
         if to_top {
@@ -2789,6 +2800,10 @@ fn main() {
             footer.insert(0, String::new());
             blanks += 1;
         }
+        let banner_rows = banner.len();
+        for (i, line) in banner.into_iter().enumerate() {
+            footer.insert(blanks + i, line);
+        }
         let top = rows.len();
         let plots: Vec<_> = plots.into_iter().filter_map(|mut plot| {
             plot.y += top;
@@ -2802,7 +2817,7 @@ fn main() {
         // many rows further down than where the footer starts. Counting them
         // rather than measuring the footer is the difference between
         // registering the hints and registering the padding.
-        let foot_top = rows.len() + blanks;
+        let foot_top = rows.len() + blanks + banner_rows;
         rows.extend(footer);
         rows.truncate(h);
         tc::draw_plots(&rows, w, h, &plots);

@@ -40,3 +40,9 @@ so does Home. q quits.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the mouse
 wheel does the same.
+
+Press ! to read this widget's notices - warnings that are not about a number
+on screen, such as a config file others can read or a recommended tool that
+is missing - and dismiss them for this session. A new notice shows above the
+footer for a minute, then as a [!] count in the footer for as long as it is
+still true.
