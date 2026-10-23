@@ -394,7 +394,9 @@ that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it
 says its filters in, `config_token_warning()` for widgets holding a secret
 (raised for them as the Core notice `config-world-readable` by
 `load_config()`), `notices` (`tc::notices`) for warnings not tied to a row -
-the 60 s banner, the `[!]` footer counter and the `!` screen - non-blocking
+the 60 s banner, the `[!]` footer counter and the `!` screen - `google` for
+Google sign-in, scopes and wording
+([docs/google-widgets.md](docs/google-widgets.md)), non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only

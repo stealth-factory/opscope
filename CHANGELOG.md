@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [1.11.0] - 2026-10-23
+
+### Features
+
+- **agent-usage**: One set of steps for the Perplexity token, and an overview hint for pasted-token agents (OPS-183) (#439)
+- **core**: Anchor tmux pixel charts with Unicode placeholders (OPS-157) (#366)
+
+### Miscellaneous
+
+- Add mattpocock/skills and cursor pstack skills (#457)
+
 ## [1.10.0] - 2026-10-22
 
 ### Bug Fixes

@@ -1,4 +1,6 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
+use std::io::Read;
+use std::process::Child;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -11,6 +13,13 @@ pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
 const GRAPHICS_QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+const GRAPHICS_REPLY: &str = "\x1b_Gi=2147483646;";
+/// Kitty added Unicode placeholders in 0.28.0.
+const KITTY_PLACEHOLDERS: [u32; 3] = [0, 28, 0];
+/// Names whose XTVERSION means placeholders, with no version floor. Kitty is
+/// not in this list: a build older than 0.28 answers XTVERSION and then
+/// draws the placeholder character as tofu.
+const PLACEHOLDER_ALLOWLIST: &[&str] = &["ghostty"];
 /// Sync, then the keyboard query, then device attributes. The keyboard
 /// query goes out before device attributes.
 const QUERY_TAIL: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
@@ -32,6 +41,9 @@ const NOTIFY_QUERY: &str = "\x1b]99;i=opscope:p=?;\x1b\\";
 /// positions means the terminal ignored it.
 const SIZE_PROBE: &str = "\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n";
 const TIMEOUT: Duration = Duration::from_millis(800);
+/// A tmux client blocked on a socket that accepts and never answers must not
+/// hold the first frame. Both startup reads use this, then stay on Braille.
+const TMUX_READ_TIMEOUT: Duration = Duration::from_millis(250);
 /// A lost `CSI 16 t` reply never decrements the in-flight count, so every
 /// later reply is rejected. Drop the count after this long with no send
 /// and no reply. A cell report normally comes back in a round trip.
@@ -99,6 +111,8 @@ static CELL: AtomicU32 = AtomicU32::new(((FALLBACK_CELL_H as u32) << 16) | FALLB
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     pub kitty_graphics: bool,
+    /// Unicode placeholders, only after XTVERSION names a terminal that has them.
+    pub kitty_placeholders: bool,
     pub synchronized_updates: bool,
     /// Kitty `Smulx`: curly and dashed underlines.
     pub styled_underlines: bool,
@@ -142,6 +156,8 @@ struct Session {
     probe_settled: bool,
     /// Later images go out as `t=s`. A failure clears this and stays on `t=d`.
     use_shm: bool,
+    /// Inside tmux. Placeholders follow `client_termtype`, not a reply.
+    passthrough: bool,
     /// Columns from the three sizing-probe reports, in the order they arrive.
     size_columns: [Option<usize>; 3],
     size_reports: u8,
@@ -150,6 +166,7 @@ struct Session {
 static SESSION: Mutex<Session> = Mutex::new(Session {
     capabilities: Capabilities {
         kitty_graphics: false,
+        kitty_placeholders: false,
         synchronized_updates: false,
         styled_underlines: false,
         underline_colour: false,
@@ -167,9 +184,142 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     keyboard_disambiguate: false,
     probe_settled: true,
     use_shm: false,
+    passthrough: false,
     size_columns: [None, None, None],
     size_reports: 0,
 });
+
+/// A non-empty `TMUX` is a session. Herdr is not one: nothing in its own
+/// behaviour shows that it forwards a tmux DCS passthrough, so it stays on
+/// the direct path.
+pub(crate) fn tmux_session(tmux: Option<&str>) -> bool {
+    tmux.is_some_and(|value| !value.is_empty())
+}
+
+fn in_tmux() -> bool {
+    tmux_session(std::env::var("TMUX").ok().as_deref())
+}
+
+/// tmux's stored copy of the outer terminal's XTVERSION.
+///
+/// Sending `CSI > q` through the passthrough is not safe: tmux keeps the
+/// first answer, which is its own query, and delivers a later one to the
+/// focused pane as keystrokes. `#{client_termtype}` is that stored text.
+/// With several clients attached, tmux picks one. Read once, at startup.
+fn client_termtype() -> Option<String> {
+    tmux_text(&["display".into(), "-p".into(), "#{client_termtype}".into()])
+}
+
+/// `show-options` arguments for this pane's `allow-passthrough`.
+///
+/// `-p` is the pane option. A window-only query misses a pane override.
+/// `-A` still includes an inherited window or global value. `-t` is
+/// `TMUX_PANE` when that variable is set, so another pane's option is not
+/// the one read.
+fn passthrough_args(pane: Option<&str>) -> Vec<String> {
+    let mut args = vec!["show-options".to_string(), "-Apv".to_string()];
+    if let Some(pane) = pane.map(str::trim).filter(|pane| !pane.is_empty()) {
+        args.push("-t".to_string());
+        args.push(pane.to_string());
+    }
+    args.push("allow-passthrough".to_string());
+    args
+}
+
+/// Effective `allow-passthrough` for this pane. `None` means unreadable,
+/// including a read that did not finish. Read once, at startup.
+fn allow_passthrough() -> Option<String> {
+    let pane = std::env::var("TMUX_PANE").ok();
+    tmux_text(&passthrough_args(pane.as_deref()))
+}
+
+/// Run `tmux` and return trimmed stdout. A non-zero exit, empty output, or
+/// a read still running after `TMUX_READ_TIMEOUT` is `None` (Braille).
+fn tmux_text(args: &[String]) -> Option<String> {
+    let child = std::process::Command::new("tmux")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    bounded_output(child, TMUX_READ_TIMEOUT)
+}
+
+/// Wait up to `timeout`, then kill the child. The fast path returns as soon
+/// as the process exits. A kill is reaped so a hung client is not left behind.
+fn bounded_output(mut child: Child, timeout: Duration) -> Option<String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = child.stdout.take()?;
+                let mut text = String::new();
+                stdout.read_to_string(&mut text).ok()?;
+                let text = text.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                return Some(text.to_string());
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// tmux forwards a DCS passthrough only for `on` and `all`. `off`, an empty
+/// answer, and a failed read all stay on Braille.
+fn passthrough_enabled_by(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("on") | Some("all"))
+}
+
+/// `termtype` is `client_termtype`. `allowed` is `allow-passthrough`.
+/// Either missing, or passthrough not `on`/`all`, stays on Braille.
+/// A direct session does not use this: its graphics query is unchanged.
+fn decide_placeholders(session: &mut Session, termtype: Option<&str>, allowed: Option<&str>) {
+    if !session.passthrough {
+        return;
+    }
+    if !passthrough_enabled_by(allowed) {
+        session.graphics_answered = true;
+        return;
+    }
+    match termtype {
+        Some(payload) => session.accept_version(payload),
+        None => session.graphics_answered = true,
+    }
+}
+
+/// Wrap an escape sequence so tmux forwards it. Every ESC inside is doubled.
+///
+/// The documented form is `ESC P tmux ;` and then the payload. A payload
+/// that starts with ESC therefore has two ESC bytes before its command,
+/// which is the example in tmux's FAQ (`ESC P tmux ; ESC ESC ] …`).
+pub(crate) fn tmux_passthrough(sequence: &str) -> String {
+    let mut out = String::with_capacity(sequence.len() + 16);
+    out.push_str("\x1bPtmux;");
+    for c in sequence.chars() {
+        if c == '\x1b' {
+            out.push('\x1b');
+        }
+        out.push(c);
+    }
+    out.push_str("\x1b\\");
+    out
+}
 
 /// Query only after cbreak is active, so replies are never echoed as text.
 /// No wait here: the first frames use text while normal input polling negotiates.
@@ -182,10 +332,19 @@ pub(crate) fn start() {
     // Resume and a fresh start both drop the previous probe. A shared-memory
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();
+    let passthrough = mode != GraphicsMode::Text && in_tmux();
+    // Read before taking the session lock. A failed or timed-out command is
+    // Braille, the same as an unknown name. Not read again after startup.
+    let (termtype, allowed) = if passthrough {
+        (client_termtype(), allow_passthrough())
+    } else {
+        (None, None)
+    };
     let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *session = Session {
         mode,
         probe_settled: true,
+        passthrough,
         ..Session::default()
     };
     SYNC_SUPPORTED.store(false, Ordering::Release);
@@ -194,7 +353,8 @@ pub(crate) fn start() {
         return;
     }
     session.deadline = Some(Instant::now() + TIMEOUT);
-    let probe = if mode == GraphicsMode::Text
+    // Shared memory stays off for tmux and Herdr image relays.
+    let probe = if mode == GraphicsMode::Text || passthrough
         || super::shm::host_relays_images(|key| std::env::var(key).ok())
     {
         None
@@ -203,6 +363,10 @@ pub(crate) fn start() {
     };
     if probe.is_some() {
         session.probe_settled = false;
+    }
+    if passthrough {
+        decide_placeholders(&mut session, termtype.as_deref(), allowed.as_deref());
+        super::graphics::set_passthrough(session.capabilities.kitty_placeholders);
     }
     drop(session);
     // A resumed or reclaimed session asks again. Pop first so a second push
@@ -214,7 +378,7 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    let query_cells = mode != GraphicsMode::Text;
+    let query_cells = mode != GraphicsMode::Text && !passthrough;
     QUERY_CELLS.store(query_cells, Ordering::Release);
     // Resume can leave an unread reply in the tty. Keep that query counted,
     // so its buffered report cannot answer the new negotiation.
@@ -228,14 +392,19 @@ pub(crate) fn start() {
     }
     // Probe frames before the query tail; keep keyboard/DA adjacent and the
     // cell-size request after DA, as required by current negotiation.
-    let mut query = if mode == GraphicsMode::Text {
-        format!("{NOTIFY_QUERY}{SIZE_PROBE}{QUERY_TAIL}{UNDERLINE_QUERY}")
+    // Inside tmux the terminal's name comes from `client_termtype`, and no
+    // graphics query or animation probe is sent: a passthrough reply would be
+    // typed into the focused pane. Herdr is not wrapped. The notification,
+    // size, keyboard, underline and shared-memory probes stay unwrapped.
+    let leading = if mode == GraphicsMode::Text || passthrough {
+        String::new()
     } else {
-        format!(
-            "{GRAPHICS_QUERY}{}{NOTIFY_QUERY}{SIZE_PROBE}{QUERY_TAIL}\x1b[16t{UNDERLINE_QUERY}",
-            super::graphics::animation_probe()
-        )
+        format!("{GRAPHICS_QUERY}{}", super::graphics::animation_probe())
     };
+    let cell_query = if query_cells { "\x1b[16t" } else { "" };
+    let mut query = format!(
+        "{leading}{NOTIFY_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}"
+    );
     if let Some(probe) = probe {
         query.push_str(&probe);
     }
@@ -363,6 +532,7 @@ impl Session {
                         return false;
                     }
                     self.capabilities.kitty_graphics = false;
+                    self.capabilities.kitty_placeholders = false;
                     self.image_rejected = true;
                     self.graphics_answered = true;
                     return false;
@@ -372,14 +542,15 @@ impl Session {
         if !self.deadline.is_some_and(|deadline| now <= deadline) {
             return false;
         }
-        if let Some(response) = sequence.strip_prefix("\x1b_Gi=2147483646;") {
-            if !self.graphics_answered {
-                self.capabilities.kitty_graphics =
-                    response == "OK\x1b\\" && self.mode != GraphicsMode::Text;
-                self.graphics_answered = true;
+        // Inside tmux a graphics OK is not placeholder support, and a
+        // passthrough XTVERSION reply is not read: tmux delivers it to
+        // the focused pane as keys. The name was taken from client_termtype.
+        if !self.passthrough {
+            if let Some(response) = sequence.strip_prefix(GRAPHICS_REPLY) {
+                self.accept_graphics(response, false);
             }
-            false
-        } else if sequence == "\x1b[?2026;1$y" || sequence == "\x1b[?2026;2$y" {
+        }
+        if sequence == "\x1b[?2026;1$y" || sequence == "\x1b[?2026;2$y" {
             self.capabilities.synchronized_updates = true;
             false
         } else if let Some(body) = sequence
@@ -418,7 +589,11 @@ impl Session {
             // It does not answer the keyboard query. Terminals send these
             // two replies in either order, and a flags reply still inside
             // the window is support.
-            self.graphics_answered = true;
+            // tmux answers DA itself. That must not override client_termtype
+            // or close the 800 ms wait on the direct path's behalf.
+            if !self.passthrough {
+                self.graphics_answered = true;
+            }
             false
         } else if let Some(column) = cursor_column(sequence) {
             if self.size_reports < 3 {
@@ -439,6 +614,65 @@ impl Session {
             false
         }
     }
+
+    fn accept_graphics(&mut self, response: &str, placeholders: bool) {
+        if self.graphics_answered {
+            return;
+        }
+        let ok = response == "OK\x1b\\" && self.mode != GraphicsMode::Text;
+        self.capabilities.kitty_graphics = ok;
+        self.capabilities.kitty_placeholders = ok && placeholders;
+        self.graphics_answered = true;
+    }
+
+    fn accept_version(&mut self, payload: &str) {
+        if self.graphics_answered || self.mode == GraphicsMode::Text {
+            return;
+        }
+        let ok = supports_unicode_placeholders(payload);
+        self.capabilities.kitty_graphics = ok;
+        self.capabilities.kitty_placeholders = ok;
+        self.graphics_answered = true;
+    }
+}
+
+/// `client_termtype` is the XTVERSION payload tmux stored: `kitty(0.40.0)`
+/// or `ghostty 1.1.0`, without the DCS wrapper.
+fn supports_unicode_placeholders(payload: &str) -> bool {
+    let (name, version) = split_xtversion(payload.trim());
+    if PLACEHOLDER_ALLOWLIST
+        .iter()
+        .any(|allowed| name.eq_ignore_ascii_case(allowed))
+    {
+        return true;
+    }
+    name.eq_ignore_ascii_case("kitty")
+        && version.is_some_and(|version| version_at_least(version, KITTY_PLACEHOLDERS))
+}
+
+fn split_xtversion(payload: &str) -> (&str, Option<&str>) {
+    if let Some(name) = payload.strip_suffix(')') {
+        if let Some((name, version)) = name.split_once('(') {
+            return (name.trim(), Some(version.trim()));
+        }
+    }
+    if let Some((name, version)) = payload.split_once([' ', '\t']) {
+        return (name.trim(), Some(version.trim()));
+    }
+    (payload, None)
+}
+
+fn version_at_least(version: &str, want: [u32; 3]) -> bool {
+    let mut got = [0u32; 3];
+    for (i, part) in version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .take(3)
+        .enumerate()
+    {
+        got[i] = part.parse().unwrap_or(0);
+    }
+    got >= want
 }
 
 /// `CSI row ; column R` from the sizing probe. The row is not needed:
@@ -555,6 +789,9 @@ pub(crate) fn reply(sequence: &str) {
     let push = {
         let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
         let push = session.reply(sequence, Instant::now());
+        if session.capabilities.kitty_placeholders {
+            super::graphics::set_passthrough(true);
+        }
         SYNC_SUPPORTED.store(session.capabilities.synchronized_updates, Ordering::Release);
         push
     };
@@ -1589,6 +1826,65 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_query_targets_this_pane() {
+        assert_eq!(
+            passthrough_args(Some("%7")),
+            ["show-options", "-Apv", "-t", "%7", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("  %12 ")),
+            ["show-options", "-Apv", "-t", "%12", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(None),
+            ["show-options", "-Apv", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("")),
+            ["show-options", "-Apv", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("   ")),
+            ["show-options", "-Apv", "allow-passthrough"]
+        );
+    }
+
+    fn spawn_quiet(program: &str, args: &[&str]) -> std::process::Child {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|err| panic!("{program}: {err}"))
+    }
+
+    #[test]
+    fn a_hung_tmux_read_is_killed_and_unreadable() {
+        let millis = TMUX_READ_TIMEOUT.as_millis();
+        assert!((200..=300).contains(&millis), "{millis}");
+
+        assert_eq!(
+            bounded_output(spawn_quiet("/bin/echo", &["on"]), TMUX_READ_TIMEOUT).as_deref(),
+            Some("on")
+        );
+        assert!(bounded_output(spawn_quiet("/bin/echo", &[]), TMUX_READ_TIMEOUT).is_none());
+        assert!(
+            bounded_output(spawn_quiet("/bin/sh", &["-c", "exit 1"]), TMUX_READ_TIMEOUT).is_none()
+        );
+
+        let child = spawn_quiet("/bin/sleep", &["30"]);
+        let pid = child.id();
+        let started = Instant::now();
+        assert!(bounded_output(child, TMUX_READ_TIMEOUT).is_none());
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(800), "{elapsed:?}");
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        assert!(!alive, "hung client {pid} was not reaped");
+    }
+
+    #[test]
     fn queued_shared_memory_errors_keep_graphics_until_a_direct_send() {
         let _guard = crate::shm::guard();
         let now = Instant::now();
@@ -1694,6 +1990,127 @@ mod tests {
         };
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!s.use_shm && s.probe_settled);
+    }
+
+    #[test]
+    fn passthrough_wraps_by_doubling_escapes() {
+        let wrapped = tmux_passthrough(GRAPHICS_QUERY);
+        assert_eq!(
+            wrapped,
+            "\x1bPtmux;\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
+        );
+        assert!(!wrapped.contains("\x1bPtmux;\x1b\x1b\x1b"));
+        // 2147483645 is the shared-memory probe id on another branch.
+        assert!(!wrapped.contains("2147483645"));
+        assert!(tmux_session(Some("/tmp/tmux-0,1,0")));
+        assert!(!tmux_session(Some("")));
+        assert!(!tmux_session(None));
+    }
+
+    #[test]
+    fn placeholders_follow_the_client_termtype_string() {
+        let now = Instant::now();
+        let mut direct = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        // A direct session ignores an XTVERSION reply and a termtype string.
+        direct.reply("\x1bP>|kitty(0.40.0)\x1b\\", now);
+        assert!(!direct.graphics_answered);
+        assert!(!direct.capabilities.kitty_graphics);
+        decide_placeholders(&mut direct, Some("kitty(0.40.0)"), Some("on"));
+        assert!(!direct.capabilities.kitty_graphics);
+        direct.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        assert!(direct.capabilities.kitty_graphics);
+        assert!(!direct.capabilities.kitty_placeholders);
+
+        let mut waiting = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        // tmux answers DA itself. A passthrough XTVERSION reply is not the
+        // gate: that reply is typed into the focused pane.
+        waiting.reply("\x1b[?62;c", now);
+        assert!(!waiting.graphics_answered);
+        waiting.reply("\x1bP>|kitty(0.40.0)\x1b\\", now);
+        assert!(!waiting.graphics_answered);
+        assert!(!waiting.capabilities.kitty_placeholders);
+        waiting.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        assert!(!waiting.capabilities.kitty_placeholders);
+        waiting.reply("\x1b[?2026;2$y", now);
+        assert!(waiting.capabilities.synchronized_updates);
+        // A late reply after the 800 ms deadline still does not enable it.
+        waiting.reply("\x1bP>|kitty(0.40.0)\x1b\\", now + TIMEOUT + TIMEOUT);
+        assert!(!waiting.capabilities.kitty_placeholders);
+
+        for (termtype, on) in [
+            ("kitty(0.40.0)", true),
+            ("kitty(0.28.0)", true),
+            ("ghostty 1.1.0", true),
+            ("Ghostty 1.2", true),
+            ("kitty(0.27.1)", false),
+            ("WezTerm 20240203-110809-5046fc22", false),
+            ("XTerm(388)", false),
+            ("Konsole 24.08.0", false),
+            ("xterm-256color", false),
+        ] {
+            let mut session = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            decide_placeholders(&mut session, Some(termtype), Some("on"));
+            assert_eq!(session.graphics_answered, true, "{termtype}");
+            assert_eq!(session.capabilities.kitty_graphics, on, "{termtype}");
+            assert_eq!(session.capabilities.kitty_placeholders, on, "{termtype}");
+            assert_eq!(supports_unicode_placeholders(termtype), on, "{termtype}");
+        }
+
+        let mut failed = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        decide_placeholders(&mut failed, None, Some("on"));
+        assert!(failed.graphics_answered);
+        assert!(!failed.capabilities.kitty_graphics);
+        assert!(!failed.capabilities.kitty_placeholders);
+
+        // allow-passthrough must be on or all. off and an unreadable
+        // option stay on Braille even when the terminal name would qualify.
+        for allowed in [Some("on"), Some("all"), Some("  on"), Some("all\n")] {
+            let mut session = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            decide_placeholders(&mut session, Some("kitty(0.40.0)"), allowed);
+            assert!(
+                session.capabilities.kitty_placeholders,
+                "{allowed:?}"
+            );
+            assert!(passthrough_enabled_by(allowed), "{allowed:?}");
+        }
+        for allowed in [Some("off"), Some(""), Some("ON"), None] {
+            let mut session = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            decide_placeholders(&mut session, Some("kitty(0.40.0)"), allowed);
+            assert!(session.graphics_answered, "{allowed:?}");
+            assert!(!session.capabilities.kitty_graphics, "{allowed:?}");
+            assert!(!session.capabilities.kitty_placeholders, "{allowed:?}");
+            assert!(!passthrough_enabled_by(allowed), "{allowed:?}");
+        }
+        let mut old = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        decide_placeholders(&mut old, Some("kitty(0.27.1)"), Some("all"));
+        assert!(!old.capabilities.kitty_placeholders);
     }
 
 }
