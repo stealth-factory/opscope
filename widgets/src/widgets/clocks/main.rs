@@ -1361,69 +1361,6 @@ fn main() {
         }
         rows.push(String::new());
 
-        // The world clock takes whatever is left, and says which slice of
-        // the list it is showing rather than silently truncating. Order is
-        // west to east by this frame's offsets, not the order at load:
-        // a pane left up across DST has to keep being a map.
-        let ordered = cities_west_to_east(&cities, &now);
-        // The notices banner sits above the footer and is never clipped, so
-        // the world clock gives up its rows rather than the banner.
-        let banner = tc::notices::banner_rows(w, h);
-        let room = h.saturating_sub(rows.len() + 3 + banner.len());
-        if room >= 2 && !ordered.is_empty() {
-            let shown = room.saturating_sub(1).min(ordered.len());
-            if scroll + shown > ordered.len() {
-                scroll = ordered.len().saturating_sub(shown);
-            }
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
-                    ),
-                ],
-                w - 1,
-            ));
-            // The name grows with the pane rather than being cut at 16. The
-            // glyph, the time, the day with a UTC+5:30 offset and a day shift
-            // are the fixed cells, and one more keeps a full-length name off
-            // the time.
-            let longest = ordered
-                .iter()
-                .map(|c| tc::display_width(&c.name) + 1)
-                .max()
-                .unwrap_or(0);
-            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
-            for city in ordered.iter().skip(scroll).take(shown) {
-                let there = now.with_timezone(&city.zone);
-                // Sun or moon by the local hour, which is the fastest way
-                // to read "is it a reasonable time to message them".
-                let (ink, glyph) = phase_of(&there, &p);
-                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
-                rows.push(tc::seg(
-                    &[
-                        (ink.as_str(), format!(" {} ", glyph)),
-                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
-                        (p.txt.as_str(), there.format("%H:%M").to_string()),
-                        (
-                            p.dim.as_str(),
-                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
-                        ),
-                        (
-                            p.dim.as_str(),
-                            match day_shift {
-                                0 => String::new(),
-                                d if d > 0 => format!("    +{}d", d),
-                                d => format!("    {}d", d),
-                            },
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-        }
-
         // Navigation first, as every other widget in the collection has it,
         // then the pomodoro's own controls, then the panel keys. Only the
         // pomodoro controls hide behind ?: hiding the way back would leave
@@ -1485,6 +1422,78 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+
+        // The world clock takes whatever is left, and says which slice of
+        // the list it is showing rather than silently truncating. Order is
+        // west to east by this frame's offsets, not the order at load:
+        // a pane left up across DST has to keep being a map.
+        let ordered = cities_west_to_east(&cities, &now);
+        // The notices banner sits above the footer and is never clipped, so
+        // when both will not fit the banner is the one that stands down: the
+        // footer's [!] counter still says the notices are there, where a
+        // world clock dropped for its rows would say nothing at all.
+        let mut banner = tc::notices::banner_rows(w, h);
+        // The footer as packed, not a guess at it: it wraps to more lines
+        // as the pane narrows, and every one it gains comes out of this.
+        let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
+        if free.saturating_sub(banner.len()) < 2 && !ordered.is_empty() {
+            banner.clear();
+        }
+        let room = free.saturating_sub(banner.len());
+        if room >= 2 && !ordered.is_empty() {
+            let shown = room.saturating_sub(1).min(ordered.len());
+            if scroll + shown > ordered.len() {
+                scroll = ordered.len().saturating_sub(shown);
+            }
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
+                    (
+                        p.dim.as_str(),
+                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
+                    ),
+                ],
+                w - 1,
+            ));
+            // The name grows with the pane rather than being cut at 16. The
+            // glyph, the time, the day with a UTC+5:30 offset and a day shift
+            // are the fixed cells, and one more keeps a full-length name off
+            // the time.
+            let longest = ordered
+                .iter()
+                .map(|c| tc::display_width(&c.name) + 1)
+                .max()
+                .unwrap_or(0);
+            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
+            for city in ordered.iter().skip(scroll).take(shown) {
+                let there = now.with_timezone(&city.zone);
+                // Sun or moon by the local hour, which is the fastest way
+                // to read "is it a reasonable time to message them".
+                let (ink, glyph) = phase_of(&there, &p);
+                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
+                rows.push(tc::seg(
+                    &[
+                        (ink.as_str(), format!(" {} ", glyph)),
+                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
+                        (p.txt.as_str(), there.format("%H:%M").to_string()),
+                        (
+                            p.dim.as_str(),
+                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
+                        ),
+                        (
+                            p.dim.as_str(),
+                            match day_shift {
+                                0 => String::new(),
+                                d if d > 0 => format!("    +{}d", d),
+                                d => format!("    {}d", d),
+                            },
+                        ),
+                    ],
+                    w - 1,
+                ));
+            }
+        }
+
         let foot: Vec<String> = banner
             .iter()
             .cloned()
