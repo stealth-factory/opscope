@@ -1350,6 +1350,15 @@ A reading is held for a couple of minutes, because these windows move over
 hours and the pane redraws every thirty seconds. A failure is held too, so
 something that is down is retried occasionally rather than on every frame.
 
+Cursor, Copilot, Devin, Droid, Notion and Perplexity have no fallback of their
+own, so a failure in transit - a timeout, a host that could not be reached, a
+rate limit, a server error - keeps their **last good reading** on screen for
+up to six hours rather than blanking it. The heading's `live` becomes
+`kept 12m`, the row under it says `Not current` with the reading's own time
+and this pass's reason, and the summary marks those lanes as cached. A refused
+or missing token, or a different account, never brings an old reading back:
+any failure that is not in transit drops what was kept.
+
 ### Claude's fallback is our own snapshot, not Claude Code's
 
 Claude Code keeps a usage cache of its own, and this widget used to read it
@@ -1885,14 +1894,39 @@ gigabytes, and none of it is ever held whole: what stays in memory is the
 records each file yielded, a byte offset, and its first kilobyte. A file that
 shrinks or is replaced is read again from the start, and one that is deleted
 takes its records with it, so memory follows what is on disk rather than how
-long the pane has been open. A live quota
+long the pane has been open.
+
+The logs are also read less often than the quotas are asked. Every pass
+looks only at the logs' metadata - a directory walk, no contents - and reads
+them only when one has changed, at most every five minutes unless `r` asks;
+the tab says how old its local figures are (`Local rollouts as of 3m ago`).
+Claude's transcripts are only read if they were written within the METERED
+window, `30 days` and a day's margin, since nothing older can reach those
+rows; Codex and Grok show totals and a calendar over their whole history, so
+every one of their logs is still read. A pass reads at most 64 MiB or 200 ms
+of logs across every agent; a first read bigger than that carries on two
+seconds later from the byte it stopped at, with the log it stopped in sent to
+the back of the queue, and until it is done the figures say `so far` and how
+many logs are left rather than calling themselves totals.
+
+How far each log was read is written to
+`$XDG_STATE_HOME/opscope/agent-usage-logs.jsonl` (or `~/.local/state/...`)
+every five minutes while the logs change, and when a first read finishes, so
+a restart reads only what was appended since rather than every log again. It
+holds counters only - each file's identity, size and offset, a hash of its
+first kilobyte, and the day, model and token counts its lines added up to,
+keyed by the ids that stop a replayed turn counting twice - never a line of
+any transcript. A log replaced while the widget was not running fails the
+same identity check a running widget makes and is read again from the start;
+a file of another format version is ignored. Deleting it costs one slow
+start. A live quota
 is held for a couple of minutes and a plan for an hour, so what a pane left
 open all day asks of each agent is the same whichever tab is on screen.
 
-The first paint is the slow one: a freshly started widget takes **roughly
-fifteen seconds** to put anything on any tab, because Claude's transcripts and
-Cursor's spend history are both read through before there is anything to draw.
-Neither is paid again.
+The first paint is the slow one, because Cursor's spend history is paged
+through before there is anything to draw. The local logs no longer hold it
+up: the first pass reads its budgeted slice of them, and the rest fill in over
+the passes that follow, labelled as partial until they are done.
 
 ## More than one Claude Max
 

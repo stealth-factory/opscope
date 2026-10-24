@@ -73,6 +73,8 @@ pub struct Data {
     live: Option<serde_json::Value>,
     /// Why it did not, when it did not.
     live_why: String,
+    /// Set when `live` is a reading kept from an earlier pass.
+    live_kept: Option<Kept>,
     sessions: i64,
     events: i64,
     /// None until an event has been read - a locked store and an empty one
@@ -155,14 +157,16 @@ fn token_in(raw: &str) -> Option<String> {
 /// store records what was spent per turn and is empty on plenty of
 /// machines; this is the account's standing, and it answers the only
 /// question a limit pane is really asked.
-fn copilot_live() -> Option<serde_json::Value> {
-    let Some(tok) = copilot_token() else {
+fn copilot_live(tok: Option<&str>) -> Option<serde_json::Value> {
+    let Some(tok) = tok else {
         return Some(serde_json::json!({"why": "no token in ~/.copilot/config.json"}));
     };
     // Which of the two went wrong matters: blaming the config file for a
     // dropped connection sends the reader to edit a file that is fine.
+    // Said in `refusal`'s words, so a timeout or a server error reads as
+    // one and `kept` can tell a failure in transit from the token refused.
     let failed = |e: String| {
-        let short: String = e.chars().take(40).collect();
+        let short: String = refusal(&e).chars().take(40).collect();
         Some(serde_json::json!({"why": format!("quota request failed: {}", short)}))
     };
     let auth = format!("token {}", tok);
@@ -183,13 +187,34 @@ fn copilot_live() -> Option<serde_json::Value> {
     }
 }
 
+/// The slot a reading is held under, one per token: a reading taken for
+/// one account must not be kept on screen for the next one.
+fn cache_key(tok: Option<&str>) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tok.hash(&mut hasher);
+    format!("copilot:{:016x}", hasher.finish())
+}
+
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
-    if let Some(got) = cached(caches, "copilot", LIVE_TTL, copilot_live) {
+    let tok = copilot_token();
+    let key = cache_key(tok.as_deref());
+    if let Some(got) = cached(caches, &key, LIVE_TTL, || copilot_live(tok.as_deref())) {
         if got["data"].is_object() {
             d.live = Some(got["data"].clone());
         }
         d.live_why = text(&got, "why");
+    }
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    if d.live.is_none() {
+        if let Some((value, k)) = kept(caches, &key, &d.live_why) {
+            if value["data"].is_object() {
+                d.live = Some(value["data"].clone());
+                d.live_kept = Some(k);
+            }
+        }
     }
     read_store_at(&copilot_db(), &mut d);
     d
@@ -367,7 +392,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             pct: 100.0 - num(snap, "percent_remaining"),
             window_secs: span,
             reset: stamp,
-            stale: false,
+            stale: d.live_kept.is_some(),
             projected: false,
                     apart: false,
         });
@@ -428,7 +453,7 @@ pub fn copilot_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Str
     metered_rows(
         &[
             ("today".to_string(), claude::window_models(&d.daily, 1)),
-            ("30 days".to_string(), claude::window_models(&d.daily, 30)),
+            (crate::metered_label(), claude::window_models(&d.daily, crate::METERED_DAYS)),
         ],
         w,
         "",
@@ -483,14 +508,16 @@ fn copilot_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::P
                 "resetting".into()
             };
         }
+        let (ink, badge) = crate::live_badge(d.live_kept.as_ref(), p);
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── QUOTA ── ".into()),
-                (p.ok.as_str(), "live".into()),
+                (ink.as_str(), badge),
                 (p.dim.as_str(), " · account-wide".into()),
             ],
             w - 1,
         ));
+        rows.extend(crate::kept_rows(d.live_kept.as_ref(), w, p));
         // The reset sits with the window rather than on the header: they
         // are two halves of the same cycle, and the header had no room for
         // it. The window is claimed only when quota_window could derive it.

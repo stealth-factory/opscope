@@ -55,6 +55,8 @@ pub struct Data {
     /// `config`, `env`, `file`, or empty when no key was set.
     source: &'static str,
     why: String,
+    /// Set when the quota is a reading kept from an earlier pass.
+    kept: Option<Kept>,
 }
 
 /// The API key, and where it came from. The setting wins, then the named
@@ -254,6 +256,18 @@ fn read_with_home(caches: &mut Caches, cfg: &Config, shown: bool, home_dir: &str
         caches.live.remove(&slot);
     }
     remember_refusal(caches, &slot, &refused);
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    let failed = if refused.is_empty() {
+        got.as_ref().map(|g| text(g, "why")).unwrap_or_default()
+    } else {
+        refused.clone()
+    };
+    if let Some((value, k)) = kept(caches, &slot, &failed) {
+        got = Some(value);
+        data.kept = Some(k);
+        refused.clear();
+    }
     if !refused.is_empty() {
         data.why = refused;
         return data;
@@ -295,6 +309,17 @@ fn reset_passed(got: &serde_json::Value) -> bool {
 /// states. Weekly, monthly, and the legacy pools have a reset and no pace.
 /// Core lanes sit apart from the standard group.
 pub fn lanes(data: &Data) -> Vec<Lane> {
+    let mut out = fresh_lanes(data);
+    // A kept reading is a cached one, and the summary says so.
+    if data.kept.is_some() {
+        for lane in &mut out {
+            lane.stale = true;
+        }
+    }
+    out
+}
+
+fn fresh_lanes(data: &Data) -> Vec<Lane> {
     if let Some(billing) = data.billing.as_ref() {
         let mut out = pool_lanes(&billing.standard, "", false, data.read_at);
         if let Some(core) = &billing.core {
@@ -424,14 +449,16 @@ pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palet
 }
 
 fn rate_rows_with_plots(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let (ink, badge) = crate::live_badge(data.kept.as_ref(), p);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), " · token rate limits · account-wide".into()),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(data.kept.as_ref(), w, p));
     let hue = agent_hue("droid");
     let all = lanes(data);
     let standard: Vec<&Lane> = all
@@ -466,10 +493,11 @@ fn rate_rows_with_plots(data: &Data, billing: &FactoryBilling, w: usize, p: &Pal
 }
 
 fn legacy_rows_with_plots(data: &Data, usage: &FactoryUsage, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let (ink, badge) = crate::live_badge(data.kept.as_ref(), p);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (
                 p.dim.as_str(),
                 " · standard and premium tokens · account-wide".into(),
@@ -477,6 +505,7 @@ fn legacy_rows_with_plots(data: &Data, usage: &FactoryUsage, w: usize, p: &Palet
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(data.kept.as_ref(), w, p));
     let hue = agent_hue("droid");
     tc::append_plot_rows(&mut rows, plots, |plots| draw_lanes_with_plots(
         &lanes(data).iter().collect::<Vec<_>>(),

@@ -53,6 +53,8 @@ pub struct Data {
     /// `config`, `env`, `cli`, or empty when no token was set.
     source: &'static str,
     why: String,
+    /// Set when the quota is a reading kept from an earlier pass.
+    kept: Option<Kept>,
 }
 
 /// The bearer token, and where it came from. The setting wins, then the
@@ -298,6 +300,18 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         caches.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    let failed = if refused.is_empty() {
+        got.as_ref().map(|g| text(g, "why")).unwrap_or_default()
+    } else {
+        refused.clone()
+    };
+    if let Some((value, k)) = kept(caches, &key, &failed) {
+        got = Some(value);
+        data.kept = Some(k);
+        refused.clear();
+    }
     if !refused.is_empty() {
         data.why = refused;
         return data;
@@ -345,21 +359,21 @@ pub fn lanes(data: &Data) -> Vec<Lane> {
     };
     let mut out = Vec::new();
     if let Some(window) = &quota.daily {
-        out.push(lane("daily", window, DAY));
+        out.push(lane("daily", window, DAY, data.kept.is_some()));
     }
     if let Some(window) = &quota.weekly {
-        out.push(lane("weekly", window, WEEK));
+        out.push(lane("weekly", window, WEEK, data.kept.is_some()));
     }
     out
 }
 
-fn lane(label: &str, window: &DevinWindow, window_secs: f64) -> Lane {
+fn lane(label: &str, window: &DevinWindow, window_secs: f64, kept: bool) -> Lane {
     Lane {
         label: label.into(),
         pct: window.pct,
         window_secs: Some(window_secs),
         reset: window.reset,
-        stale: window.reset.is_some_and(|reset| reset <= now()),
+        stale: window.reset.is_some_and(|reset| reset <= now()) || kept,
         projected: false,
         apart: false,
     }
@@ -382,14 +396,16 @@ pub fn why_no_lane(data: &Data) -> String {
 }
 
 fn quota_rows_with_plots(data: &Data, quota: &DevinQuota, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let (ink, badge) = crate::live_badge(data.kept.as_ref(), p);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), " · account-wide".into()),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(data.kept.as_ref(), w, p));
     let hue = agent_hue("devin");
     let drawn = lanes(data);
     let label_w = drawn
@@ -627,6 +643,23 @@ mod tests {
         assert!(!rows.contains('+'), "{rows}");
         assert!(rows.contains("pro_plus"), "{rows}");
         assert!(rows.contains("Daily quota is hidden"), "{rows}");
+    }
+
+    #[test]
+    fn a_kept_reading_says_how_old_it_is_and_why_on_the_tab_and_the_summary() {
+        let mut data = reading(r#"{"daily_percentage":40,"weekly_percentage":10,"weekly_reset_at":4102444800}"#);
+        let fresh = plain(&tab(&data, 100, 30, &Config::default(), &palette()));
+        assert!(fresh.contains("live") && !fresh.contains("kept"), "{fresh}");
+        assert!(lanes(&data).iter().all(|lane| !lane.stale));
+        data.kept = Some(Kept { at: now() - 720.0, why: "quota the request timed out".into() });
+        for w in [24usize, 60, 100] {
+            let rows = plain(&tab(&data, w, 30, &Config::default(), &palette()));
+            let said = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(said.contains("kept 12m"), "width {w}: {said}");
+            assert!(said.contains("Not current") && said.contains("timed out"), "width {w}: {said}");
+            assert!(said.contains("10%"), "the kept bars are still drawn: {said}");
+        }
+        assert!(lanes(&data).iter().all(|lane| lane.stale), "the summary marks it cached");
     }
 
     #[test]
