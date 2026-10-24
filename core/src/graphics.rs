@@ -599,8 +599,9 @@ fn stacked_cells(
             continue;
         }
         // Three or more categories in one cell: one partial block can only
-        // show two, so the largest overlap takes the whole cell.
-        if last > first + 1 {
+        // show two, so the largest overlap takes the whole cell. A zero
+        // share between two others occupies nothing and does not count.
+        if (first + 1..last).any(|part| edges[part] > edges[part - 1]) {
             let overlap = |part: usize| {
                 let start = if part == 0 { 0 } else { edges[part - 1] };
                 edges[part].min(cell * 8 + 8).saturating_sub(start.max(cell * 8))
@@ -2552,8 +2553,12 @@ mod tests {
         // Three categories in one cell: the middle, largest one takes it,
         // rather than the outer two splitting it between them.
         let c = super::super::rgb(90, 120, 250);
-        let plot = Plot::stacked_bar(0, 1, 1, &[(0.125, a.clone()), (0.75, b.clone()), (0.125, c)]);
+        let plot = Plot::stacked_bar(0, 1, 1, &[(0.125, a.clone()), (0.75, b.clone()), (0.125, c.clone())]);
         assert_eq!(plot.text_row(0)[0], (b.clone(), "█".to_string()));
+        // An empty category between two others is not a third share: the
+        // cell is still three eighths of a on c.
+        let plot = Plot::stacked_bar(0, 1, 1, &[(0.375, a.clone()), (0.0, b.clone()), (0.625, c)]);
+        assert_eq!(plot.text_row(0)[0], (format!("{a}{}", super::super::bg(90, 120, 250)), "▍".to_string()));
     }
 
     #[test]
