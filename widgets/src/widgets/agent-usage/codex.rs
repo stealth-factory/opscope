@@ -91,6 +91,8 @@ pub struct Data {
     rates: Vec<f64>,
     /// day -> model -> tokens by priced kind, plus reasoning.
     daily: HashMap<String, HashMap<String, Tokens>>,
+    /// How current the rollouts behind the totals are.
+    pub history: History,
 }
 
 impl Data {
@@ -389,25 +391,26 @@ fn billed_model(model: &str, tier: &str) -> String {
     }
 }
 
-/// Bring one rollout's records up to date, reading only what was appended.
-///
-/// A finished rollout never changes and is read once. A live one grows for
-/// as long as the session runs - past four gigabytes here - so it is read
-/// once and then only from where the last pass stopped. False when the
-/// file cannot be read, which counts as a rollout with nothing in it.
-fn scan_rollout(caches: &mut Caches, path: &str) -> bool {
-    // The basename only stands in until session_meta names the session. Two
-    // rollouts in different directories can share one, so it is a last resort
-    // rather than an identifier.
-    let base = path.rsplit('/').next().unwrap_or(path);
-    follow(&mut caches.rollouts, path, || RolloutLines::new(base))
+/// The rollout reader for one path. The basename only stands in until
+/// session_meta names the session. Two rollouts in different directories
+/// can share one, so it is a last resort rather than an identifier.
+fn rollout_reader(path: &str) -> RolloutLines {
+    RolloutLines::new(path.rsplit('/').next().unwrap_or(path))
 }
 
-/// Every rollout on this machine, newest first.
-fn rollout_files() -> Vec<String> {
-    let mut files = Vec::new();
-    walk(&under_home(".codex/sessions"), ".jsonl", &mut files);
-    newest_first(files)
+/// Bring one rollout's records up to date, reading only what was appended.
+#[cfg(test)]
+fn scan_rollout(caches: &mut Caches, path: &str) -> bool {
+    follow(&mut caches.rollouts.tails, path, || rollout_reader(path))
+}
+
+/// What the rollouts add up to, kept for the passes that read nothing new.
+#[derive(Clone, Default)]
+pub struct Built {
+    daily: HashMap<String, HashMap<String, Tokens>>,
+    sessions: usize,
+    total: Totals,
+    rates: Vec<f64>,
 }
 
 /// Per-day, per-model tokens, and how many distinct sessions they came from.
@@ -587,39 +590,60 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         bank,
         ..Data::default()
     };
-    let files = rollout_files();
-    // Every rollout comes from the one sessions directory, so anything held
-    // for a path not found there this pass is a file that has gone - and
-    // when none are left, nothing is.
-    let present: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
-    prune(&mut caches.rollouts, |_| true, &present);
+    // Every rollout, not a window of them: the tab's TOTALS and its
+    // calendar are the whole history on this disk, so every log can still
+    // change what is drawn. Metadata only; the contents are read below,
+    // and only what changed.
+    let at = now();
+    let (listed, complete) = list_logs(&under_home(".codex/sessions"), ".jsonl", None, at);
+    let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     let Some(newest) = files.first().cloned() else {
+        caches.rollouts = Logs::default();
+        caches.codex_built = None;
         return codex;
     };
-    use std::os::unix::fs::MetadataExt;
     codex.ok = true;
     codex.files = files.len();
-    codex.last = std::fs::metadata(&newest)
-        .map(|m| m.mtime() as f64)
-        .unwrap_or(0.0);
+    codex.last = listed[0].mtime as f64;
+    // The quota fallback reads the newest rollout's tail on every pass:
+    // it stands in for a live call that failed this pass, not for history.
     codex.limits = newest_limits(&files);
-    // Brought up to date first and borrowed after, so the records stay in
-    // the cache rather than being copied out of it on every pass. Later
-    // files win a shared key, as `extend` did.
-    let readable: Vec<&String> = files.iter().filter(|path| scan_rollout(caches, path)).collect();
+    let asked = caches.asked_at > 0.0;
+    let pass = caches
+        .rollouts
+        .pass((listed, complete), asked, at, &mut caches.budget, rollout_reader);
+    codex.history = caches.rollouts.history.clone();
+    if pass == Pass::Held {
+        if let Some(built) = &caches.codex_built {
+            codex.daily = built.daily.clone();
+            codex.sessions = built.sessions;
+            codex.total = built.total.clone();
+            codex.rates = built.rates.clone();
+            return codex;
+        }
+    }
+    // Borrowed rather than copied out of the cache. Oldest first, so the
+    // newest file wins a key two of them share.
     let mut seen: HashMap<&str, &Record> = HashMap::new();
-    for path in readable {
-        if let Some(t) = caches.rollouts.get(path.as_str()) {
+    for path in files.iter().rev() {
+        if let Some(t) = caches.rollouts.tails.get(path.as_str()) {
             for (key, record) in &t.parser.records {
                 seen.insert(key, record);
             }
         }
     }
     let (daily, sessions) = merge_days(seen);
-    codex.total = codex_totals(&daily);
-    codex.daily = daily;
-    codex.sessions = sessions;
-    codex.rates = codex_rates(&newest);
+    let built = Built {
+        total: codex_totals(&daily),
+        daily,
+        sessions,
+        rates: codex_rates(&newest),
+    };
+    codex.daily = built.daily.clone();
+    codex.sessions = built.sessions;
+    codex.total = built.total.clone();
+    codex.rates = built.rates.clone();
+    caches.codex_built = Some(built);
     codex
 }
 
@@ -816,7 +840,10 @@ fn codex_totals_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let t = &d.total;
     let mut rows = vec![tc::seg(
         &[
-            (p.lbl.as_str(), " ── TOTALS ── ".into()),
+            (
+                p.lbl.as_str(),
+                if d.history.partial() { " ── SO FAR ── " } else { " ── TOTALS ── " }.into(),
+            ),
             (
                 p.dim.as_str(),
                 format!("{} sessions · newest {} ago", d.sessions, ago(d.last)),
@@ -988,6 +1015,17 @@ fn codex_calendar_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc
 }
 
 fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    let mut rows = codex_metered_windows(d, w, cfg, p);
+    // The age is said once, over TOTALS; a partial read is said here too,
+    // beside the windows it makes partial.
+    if d.history.partial() {
+        let at = 1.min(rows.len());
+        rows.splice(at..at, crate::history_rows(&d.history, "rollouts", w, p));
+    }
+    rows
+}
+
+fn codex_metered_windows(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     metered_rows(
         &[
             (
@@ -995,8 +1033,8 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
                 crate::claude::window_models(&d.daily, 1),
             ),
             (
-                "30 days".to_string(),
-                crate::claude::window_models(&d.daily, 30),
+                crate::metered_label(),
+                crate::claude::window_models(&d.daily, crate::METERED_DAYS),
             ),
         ],
         w,
@@ -1401,6 +1439,7 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
         ));
         return add_section(rows, codex_plan_rows(d, w, p));
     }
+    rows.extend(crate::history_rows(&d.history, "rollouts", w, p));
     rows.extend(codex_totals_rows(d, w, p));
     rows = add_section(rows, codex_rate_rows(d, w, p));
     let mut calendar_plots = Vec::new();
@@ -1737,7 +1776,7 @@ mod tests {
             }
             let mut seen: HashMap<&str, &Record> = HashMap::new();
             for path in [&first, &replay] {
-                for (key, record) in &caches.rollouts[path.as_str()].parser.records {
+                for (key, record) in &caches.rollouts.tails[path.as_str()].parser.records {
                     seen.insert(key, record);
                 }
             }
@@ -1998,6 +2037,26 @@ mod tests {
             daily,
             ..Data::default()
         };
+        // While the rollouts are still being read, nothing is called a
+        // total: the heading says so far, and a row says how much is left.
+        let mut reading = d.clone();
+        reading.history = History { as_of: 0.0, behind: 3, of: 9, listed_all: true };
+        for w in [20usize, 40, 80, 200] {
+            let plain: String = tab(&reading, w, 40, &cfg, &p).join("\n");
+            assert!(plain.contains("SO FAR") && !plain.contains("TOTALS"), "width {w}: {plain}");
+            // Read as words, since a narrow pane wraps the sentence.
+            let (mut bare, mut in_escape) = (String::new(), false);
+            for c in plain.chars() {
+                match (in_escape, c) {
+                    (false, '\x1b') => in_escape = true,
+                    (true, 'm') => in_escape = false,
+                    (true, _) => {}
+                    (false, c) => bare.push(c),
+                }
+            }
+            let said = bare.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(said.contains("not totals."), "width {w}: {said}");
+        }
         for w in [20usize, 40, 80, 200] {
             let rows = tab(&d, w, 40, &cfg, &p);
             let plain = rows.join("\n");

@@ -29,14 +29,21 @@ use crate::*;
 /// and a quota endpoint is not asked six times a minute.
 #[derive(Default)]
 pub struct Caches {
-    /// Claude transcripts: path -> what has been read of it so far.
-    pub transcripts: HashMap<String, Tail<crate::claude::TranscriptLines>>,
+    /// Claude transcripts, one set per projects directory.
+    pub transcripts: HashMap<String, Logs<crate::claude::TranscriptLines>>,
+    /// What was last built from each set, kept for the passes that read
+    /// nothing new.
+    pub claude_built: HashMap<String, crate::claude::Built>,
     /// Codex rollouts, the same way.
-    pub rollouts: HashMap<String, Tail<crate::codex::RolloutLines>>,
+    pub rollouts: Logs<crate::codex::RolloutLines>,
+    pub codex_built: Option<crate::codex::Built>,
     /// Antigravity's prompt history, counted a line at a time.
-    pub history: HashMap<String, Tail<Counted>>,
+    pub history: Logs<Counted>,
     /// Grok's session logs, summed as they grow.
-    pub grok: HashMap<String, Tail<crate::grok::SessionLines>>,
+    pub grok: Logs<crate::grok::SessionLines>,
+    pub grok_built: Option<crate::grok::Built>,
+    /// What is left of this pass's reading budget, shared by every agent.
+    pub budget: Budget,
     /// key -> (when, value, ttl)
     pub live: HashMap<String, (f64, Option<serde_json::Value>, f64)>,
     /// key -> refusals in a row, which is what the backoff doubles on.
@@ -88,8 +95,11 @@ pub struct Tail<P> {
     file: (u64, u64),
     /// Bytes consumed, always at a line boundary.
     offset: u64,
-    /// The first bytes of the file, up to `HEAD`.
-    head: Vec<u8>,
+    /// How many of the file's first bytes are remembered, up to `HEAD`,
+    /// and a hash of them. A hash rather than the bytes: they are the start
+    /// of somebody's transcript, and this state is written to disk.
+    head_len: usize,
+    head_hash: u64,
     /// Bytes taken off the disk for this log, all passes together. A torn
     /// last line is read again on the pass that finishes it, so this is
     /// the file's size plus those re-reads and nothing more.
@@ -103,6 +113,62 @@ pub struct Tail<P> {
 /// How much of a log's start is kept to recognise it by.
 const HEAD: usize = 1024;
 
+/// FNV-1a, 64 bits. Fixed by definition, unlike the standard library's
+/// hasher, so a hash written by one build still means the same to the next.
+fn fnv(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// How much one pass may read of the logs, across every agent.
+///
+/// A first read of a machine's history can be gigabytes, and reading it in
+/// one pass is what pinned a core for the length of it. With a budget, a
+/// pass reads its share and stops at a line boundary; the next pass carries
+/// on from the same byte. See `PASS_BYTES` for the numbers.
+pub struct Budget {
+    pub bytes: u64,
+    pub until: std::time::Instant,
+}
+
+impl Default for Budget {
+    /// Unlimited: a reader called on its own reads its logs through. The
+    /// poller sets a real budget at the start of every pass.
+    fn default() -> Budget {
+        Budget::unlimited()
+    }
+}
+
+impl Budget {
+    pub fn new(bytes: u64, time: std::time::Duration) -> Budget {
+        Budget { bytes, until: std::time::Instant::now() + time }
+    }
+
+    /// No limit, for a caller that wants a log read through.
+    pub fn unlimited() -> Budget {
+        Budget::new(u64::MAX, std::time::Duration::from_secs(86_400 * 365))
+    }
+
+    pub fn spent(&self) -> bool {
+        self.bytes == 0 || std::time::Instant::now() >= self.until
+    }
+}
+
+/// What one `follow_within` call left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Followed {
+    /// Everything the file held when it was looked at has been read.
+    Current,
+    /// The budget ran out first; the next pass resumes from the offset.
+    Behind,
+    /// The file could not be opened or is gone.
+    Unreadable,
+}
+
 /// Bring one log's reader up to date, reading only what was appended.
 ///
 /// False when the file cannot be read at all, which is what callers treat
@@ -112,28 +178,45 @@ pub fn follow<P: Lines>(
     path: &str,
     fresh: impl FnOnce() -> P,
 ) -> bool {
+    follow_within(tails, path, fresh, &mut Budget::unlimited()) != Followed::Unreadable
+}
+
+/// `follow`, reading no more than `budget` allows.
+///
+/// A log the budget runs out in keeps its place at the last whole line and
+/// is not marked as read, so the next pass picks it up again rather than
+/// taking the unread end for a file that has not changed.
+pub fn follow_within<P: Lines>(
+    tails: &mut HashMap<String, Tail<P>>,
+    path: &str,
+    fresh: impl FnOnce() -> P,
+    budget: &mut Budget,
+) -> Followed {
     use std::os::unix::fs::{FileExt, MetadataExt};
     let Ok(meta) = std::fs::metadata(path) else {
         // Gone: nothing held for it is true any more.
         tails.remove(path);
-        return false;
+        return Followed::Unreadable;
     };
     let stamp = (meta.mtime(), meta.size());
     let file = (meta.dev(), meta.ino());
     if let Some(t) = tails.get(path) {
         if t.stamp == stamp && t.file == file {
-            return true;
+            return Followed::Current;
         }
     }
+    if budget.spent() {
+        return Followed::Behind;
+    }
     let Ok(f) = std::fs::File::open(path) else {
-        return false;
+        return Followed::Unreadable;
     };
-    let same = |head: &[u8]| {
-        let mut now = vec![0u8; head.len()];
-        f.read_exact_at(&mut now, 0).is_ok() && now == head
+    let same = |len: usize, hash: u64| {
+        let mut now = vec![0u8; len];
+        f.read_exact_at(&mut now, 0).is_ok() && fnv(&now) == hash
     };
     let keep = match tails.get(path) {
-        Some(t) => t.file == file && stamp.1 >= t.offset && same(&t.head),
+        Some(t) => t.file == file && stamp.1 >= t.offset && same(t.head_len, t.head_hash),
         None => false,
     };
     if !keep {
@@ -143,7 +226,8 @@ pub fn follow<P: Lines>(
                 stamp: (0, 0),
                 file,
                 offset: 0,
-                head: Vec::new(),
+                head_len: 0,
+                head_hash: fnv(&[]),
                 read: 0,
                 widest: 0,
                 parser: fresh(),
@@ -151,21 +235,25 @@ pub fn follow<P: Lines>(
         );
     }
     let Some(t) = tails.get_mut(path) else {
-        return false;
+        return Followed::Unreadable;
     };
     let size = stamp.1;
-    if t.head.len() < HEAD && (t.head.len() as u64) < size {
+    if t.head_len < HEAD && (t.head_len as u64) < size {
         let mut head = vec![0u8; HEAD.min(size as usize)];
         if f.read_exact_at(&mut head, 0).is_ok() {
-            t.head = head;
+            t.head_len = head.len();
+            t.head_hash = fnv(&head);
         }
     }
-    let (used, read, widest) = feed(&f, t.offset, size, &mut t.parser);
+    let (used, read, widest, finished) = feed(&f, t.offset, size, &mut t.parser, budget);
     t.offset += used;
     t.read += read;
     t.widest = t.widest.max(widest);
+    if !finished {
+        return Followed::Behind;
+    }
     t.stamp = stamp;
-    true
+    Followed::Current
 }
 
 /// Drop what is held for logs that are no longer on disk.
@@ -189,25 +277,40 @@ pub fn prune<P>(
 /// line rather than the file. `to` is the size the file had when it was
 /// looked at, so a line being written while this reads is left for the
 /// next pass rather than read half-finished.
-fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> (u64, u64, usize) {
+fn feed<P: Lines>(
+    f: &std::fs::File,
+    from: u64,
+    to: u64,
+    parser: &mut P,
+    budget: &mut Budget,
+) -> (u64, u64, usize, bool) {
     use std::io::{BufRead, Read, Seek, SeekFrom};
     if to <= from {
-        return (0, 0, 0);
+        return (0, 0, 0, true);
     }
     let mut f = f;
     if f.seek(SeekFrom::Start(from)).is_err() {
-        return (0, 0, 0);
+        return (0, 0, 0, true);
     }
     let mut reader = std::io::BufReader::with_capacity(256 * 1024, f.take(to - from));
     let (mut used, mut read, mut widest) = (0u64, 0u64, 0usize);
     let mut buf: Vec<u8> = Vec::new();
+    let mut lines = 0u32;
     loop {
+        // The clock is read every few hundred lines rather than every one:
+        // a line can be a few bytes, and a clock read per line would be a
+        // measurable share of the pass it is meant to bound.
+        lines = lines.wrapping_add(1);
+        if budget.bytes == 0 || (lines % 256 == 0 && std::time::Instant::now() >= budget.until) {
+            return (used, read, widest, false);
+        }
         buf.clear();
         let n = match reader.read_until(b'\n', &mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
         read += n as u64;
+        budget.bytes = budget.bytes.saturating_sub(n as u64);
         widest = widest.max(n);
         if buf.last() != Some(&b'\n')
             && serde_json::from_slice::<serde_json::Value>(&buf).is_err()
@@ -224,7 +327,236 @@ fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> (u64
         }
         parser.line(&String::from_utf8_lossy(line));
     }
-    (used, read, widest)
+    (used, read, widest, true)
+}
+
+/// How much a pass may read of the logs, across every agent: 64 MiB or
+/// 200 ms, whichever comes first.
+///
+/// Measured here, the readers get through Codex rollouts at roughly
+/// 300-400 MB/s, so the two limits meet at about the same place and either
+/// one is the real bound depending on the disk and the lines. 200 ms is
+/// short enough that a pass never holds a core for longer than a blink; at
+/// the catch-up cadence below it is about a tenth of one core while a first
+/// read is under way, and nothing at all once it is done.
+pub const PASS_BYTES: u64 = 64 * 1024 * 1024;
+pub const PASS_TIME: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How soon the next pass runs while a first read is still catching up.
+/// Thirty seconds between 64 MiB slices would take an hour over a few
+/// gigabytes of history; two seconds takes a few minutes and still leaves
+/// the core idle nine tenths of the time.
+pub const CATCH_UP_EVERY: f64 = 2.0;
+
+/// How often the token history is brought up to date when the logs have
+/// changed: five minutes.
+///
+/// The history is tokens per day - today, thirty days, the calendar, the
+/// totals. A live session moves today's figure continuously, but five
+/// minutes is invisible at a resolution of a day, and the screen says how
+/// old the figure is. Live quotas keep their own, faster refresh: those are
+/// the numbers that move minute to minute. CodexBar waits fifteen; reading
+/// only what was appended makes a refresh cheap enough not to wait that long.
+pub const HISTORY_EVERY: f64 = 300.0;
+
+/// The most log entries a metadata check will look at, and for how long.
+/// A directory that has grown past either is listed as far as it got and
+/// said to be incomplete, rather than stat'ed for as long as it takes.
+pub const LIST_MAX: usize = 20_000;
+pub const LIST_TIME: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Where one reader's logs stand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct History {
+    /// When what is held last matched what is on disk. Zero before the
+    /// first read has finished.
+    pub as_of: f64,
+    /// Logs whose contents are not all read yet, of how many there are.
+    pub behind: usize,
+    pub of: usize,
+    /// False when the listing stopped at `LIST_MAX` or `LIST_TIME`.
+    pub listed_all: bool,
+}
+
+impl Default for History {
+    /// Nothing read and nothing owed: no logs, so nothing partial.
+    fn default() -> History {
+        History { as_of: 0.0, behind: 0, of: 0, listed_all: true }
+    }
+}
+
+impl History {
+    /// True while a figure built from these logs is not yet a total.
+    pub fn partial(&self) -> bool {
+        self.behind > 0 || !self.listed_all
+    }
+}
+
+/// One log on disk, as a metadata check sees it: no contents read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub path: String,
+    /// Modification time, never later than now: a clock that ran ahead
+    /// would otherwise make a log look newer than everything for as long
+    /// as the skew lasts, and hold a window open that should have closed.
+    pub mtime: i64,
+    pub size: u64,
+}
+
+/// Every log under `dir` ending in `suffix`, newest first, from metadata
+/// alone, and whether the listing is complete.
+///
+/// `window` drops any log not written to within that many seconds: such a
+/// log cannot hold a record the screen still shows.
+pub fn list_logs(dir: &str, suffix: &str, window: Option<f64>, at: f64) -> (Vec<Listed>, bool) {
+    list_logs_within(dir, suffix, window, at, LIST_MAX, LIST_TIME)
+}
+
+fn list_logs_within(
+    dir: &str,
+    suffix: &str,
+    window: Option<f64>,
+    at: f64,
+    most: usize,
+    time: std::time::Duration,
+) -> (Vec<Listed>, bool) {
+    use std::os::unix::fs::MetadataExt;
+    let until = std::time::Instant::now() + time;
+    let mut found = Vec::new();
+    let mut complete = true;
+    let mut dirs = vec![dir.to_string()];
+    'walk: while let Some(d) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if found.len() >= most || std::time::Instant::now() >= until {
+                complete = false;
+                break 'walk;
+            }
+            let path = entry.path();
+            let name = path.to_string_lossy().to_string();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(name),
+                Ok(t) if t.is_file() && name.ends_with(suffix) => {
+                    let Ok(meta) = entry.metadata() else {
+                        continue;
+                    };
+                    let mtime = meta.mtime().min(at as i64);
+                    if window.is_some_and(|w| (mtime as f64) < at - w) {
+                        continue;
+                    }
+                    found.push(Listed { path: name, mtime, size: meta.size() });
+                }
+                _ => {}
+            }
+        }
+    }
+    found.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+    (found, complete)
+}
+
+/// One reader's logs, kept up to date a pass at a time.
+///
+/// Every pass looks at the logs' metadata, which costs a directory walk and
+/// no reads. The contents are read only when that listing has changed and
+/// `HISTORY_EVERY` has passed since the last read, when `r` asks, or while
+/// a first read is still catching up - and then within the pass's budget,
+/// newest first, with a log the budget ran out in sent to the back of the
+/// queue so a single huge one cannot keep the rest waiting.
+pub struct Logs<P> {
+    pub tails: HashMap<String, Tail<P>>,
+    listed: Vec<Listed>,
+    /// Logs a budget left unfinished, in the order they will be resumed.
+    queue: Vec<String>,
+    read_at: f64,
+    pub history: History,
+}
+
+impl<P> Default for Logs<P> {
+    fn default() -> Self {
+        Logs {
+            tails: HashMap::new(),
+            listed: Vec::new(),
+            queue: Vec::new(),
+            read_at: 0.0,
+            history: History::default(),
+        }
+    }
+}
+
+/// Whether a pass read anything, so a caller knows to rebuild what it
+/// derives from the records or to keep what it built last time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    Read,
+    Held,
+}
+
+impl<P: Lines> Logs<P> {
+    /// Bring these logs up to date as far as `budget` allows.
+    pub fn pass(
+        &mut self,
+        listing: (Vec<Listed>, bool),
+        asked: bool,
+        at: f64,
+        budget: &mut Budget,
+        fresh: impl Fn(&str) -> P,
+    ) -> Pass {
+        let (listed, complete) = listing;
+        let changed = listed != self.listed || complete != self.history.listed_all;
+        let catching_up = !self.queue.is_empty() || self.read_at == 0.0;
+        let due = asked || catching_up || (changed && at - self.read_at >= HISTORY_EVERY);
+        // Gone from disk, or out of the window: nothing held for it can
+        // reach the screen any more.
+        let present: std::collections::HashSet<&str> = listed.iter().map(|l| l.path.as_str()).collect();
+        self.tails.retain(|path, _| present.contains(path.as_str()));
+        self.queue.retain(|path| present.contains(path.as_str()));
+        self.history.of = listed.len();
+        self.history.listed_all = complete;
+        if !due {
+            // The listing seen last is kept until the change is read, or
+            // the next check would compare against it, find nothing new and
+            // call the history current when it is not.
+            if !changed {
+                self.history.as_of = at;
+            }
+            return Pass::Held;
+        }
+        // Newest first, then whatever a budget left unfinished last time.
+        let mut order: Vec<String> = listed
+            .iter()
+            .map(|l| l.path.clone())
+            .filter(|p| !self.queue.contains(p))
+            .collect();
+        order.append(&mut self.queue);
+        let mut unfinished = Vec::new();
+        let mut cut_short = None;
+        for path in order {
+            let had_budget = !budget.spent();
+            match follow_within(&mut self.tails, &path, || fresh(&path), budget) {
+                Followed::Current | Followed::Unreadable => {}
+                // The one the budget ran out in goes to the very back,
+                // behind the logs it never reached.
+                Followed::Behind if had_budget => cut_short = Some(path),
+                Followed::Behind => unfinished.push(path),
+            }
+        }
+        unfinished.extend(cut_short);
+        self.queue = unfinished;
+        self.read_at = at;
+        self.history.behind = self.queue.len();
+        if self.queue.is_empty() && complete {
+            self.history.as_of = at;
+        }
+        self.listed = listed;
+        Pass::Read
+    }
+
+    /// Paths in the order the last listing gave them, newest first.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.listed.iter().map(|l| l.path.as_str())
+    }
 }
 
 /// Lines that are not blank, counted as they are appended.
@@ -236,6 +568,17 @@ impl Lines for Counted {
         if !line.trim().is_empty() {
             self.0 += 1;
         }
+    }
+}
+
+impl Caches {
+    /// True while any agent's logs still have a first read under way, so
+    /// the poller comes back for the next slice sooner than its refresh.
+    pub fn catching_up(&self) -> bool {
+        self.transcripts.values().any(|l| l.history.behind > 0)
+            || self.rollouts.history.behind > 0
+            || self.history.history.behind > 0
+            || self.grok.history.behind > 0
     }
 }
 
@@ -818,7 +1161,7 @@ mod tests {
         assert!(written > 20 * 1024 * 1024, "the log is meant to dwarf its lines");
         assert_eq!(t.read, written + torn, "each byte read once, torn halves twice");
         assert_eq!(t.widest, line.len(), "never more than one line at a time");
-        assert!(t.head.len() <= HEAD);
+        assert!(t.head_len <= HEAD);
     }
 
     #[test]
@@ -834,7 +1177,7 @@ mod tests {
         }
         tails.insert(
             other.clone(),
-            Tail { stamp: (0, 0), file: (0, 0), offset: 0, head: Vec::new(), read: 0, widest: 0, parser: Counted(9) },
+            Tail { stamp: (0, 0), file: (0, 0), offset: 0, head_len: 0, head_hash: 0, read: 0, widest: 0, parser: Counted(9) },
         );
         let gone = b.path.clone();
         drop(b);
@@ -850,6 +1193,148 @@ mod tests {
         assert!(tails.contains_key(&a.path));
         assert!(!tails.contains_key(&gone), "a deleted log's records are dropped");
         assert!(tails.contains_key(&other), "another reader's entries are not this prune's");
+    }
+
+    /// Counts every line it is handed, so a test can see what was read.
+    #[derive(Default)]
+    struct Seen(usize);
+    impl Lines for Seen {
+        fn line(&mut self, _: &str) {
+            self.0 += 1;
+        }
+    }
+
+    fn listing(dir: &std::path::Path, at: f64) -> (Vec<Listed>, bool) {
+        list_logs(&dir.to_string_lossy(), ".jsonl", None, at)
+    }
+
+    fn lines_in(logs: &Logs<Seen>) -> usize {
+        logs.tails.values().map(|t| t.parser.0).sum()
+    }
+
+    #[test]
+    fn a_changed_log_waits_for_the_history_cadence_and_an_unchanged_one_is_never_read() {
+        let log = growing::Log::new("cadence");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n{}\n");
+        let mut logs: Logs<Seen> = Logs::default();
+        let t0 = now();
+        let mut budget = Budget::unlimited();
+        assert_eq!(logs.pass(listing(&dir, t0), false, t0, &mut budget, |_| Seen(0)), Pass::Read);
+        assert_eq!(lines_in(&logs), 2);
+        assert_eq!(logs.history.as_of, t0);
+        // Changed within the cadence of the last read: held, and no longer
+        // claimed current.
+        log.append("{}\n");
+        let soon = t0 + 1.0;
+        assert_eq!(logs.pass(listing(&dir, soon), false, soon, &mut budget, |_| Seen(0)), Pass::Held);
+        assert_eq!(lines_in(&logs), 2);
+        // Still changed on the next check too: the change is not forgotten
+        // because it was looked at once.
+        let soon2 = soon + 30.0;
+        assert_eq!(logs.pass(listing(&dir, soon2), false, soon2, &mut budget, |_| Seen(0)), Pass::Held);
+        assert_eq!(logs.history.as_of, t0, "a change not yet read is not current");
+        // Asked for, it is read at once.
+        assert_eq!(logs.pass(listing(&dir, soon2), true, soon2, &mut budget, |_| Seen(0)), Pass::Read);
+        assert_eq!(lines_in(&logs), 3);
+        // And without asking, once the cadence has passed.
+        log.append("{}\n");
+        let early = soon2 + HISTORY_EVERY - 1.0;
+        assert_eq!(logs.pass(listing(&dir, early), false, early, &mut budget, |_| Seen(0)), Pass::Held);
+        let due = soon2 + HISTORY_EVERY;
+        assert_eq!(logs.pass(listing(&dir, due), false, due, &mut budget, |_| Seen(0)), Pass::Read);
+        assert_eq!(lines_in(&logs), 4);
+        // Nothing changed since: no read at all, however long it has been,
+        // and the history is current as of each check.
+        let later = due + 10.0 * HISTORY_EVERY;
+        assert_eq!(logs.pass(listing(&dir, later), false, later, &mut budget, |_| Seen(0)), Pass::Held);
+        assert_eq!(logs.history.as_of, later);
+        assert_eq!(lines_in(&logs), 4);
+    }
+
+    #[test]
+    fn a_budget_stops_at_a_line_and_the_next_pass_resumes_with_the_big_log_last() {
+        let big = growing::Log::new("budget-big");
+        let dir = std::path::Path::new(&big.path).parent().unwrap().to_path_buf();
+        let line = format!("{{\"pad\":\"{}\"}}\n", "x".repeat(1000));
+        big.append(&line.repeat(300));
+        // Two small logs beside it, older, so newest-first reaches the big
+        // one first and the budget runs out inside it.
+        for name in ["a.jsonl", "b.jsonl"] {
+            let path = dir.join(name);
+            std::fs::write(&path, line.repeat(3)).unwrap();
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        }
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        let slice = 50 * line.len() as u64;
+        let mut budget = Budget::new(slice, std::time::Duration::from_secs(60));
+        logs.pass(listing(&dir, at), false, at, &mut budget, |_| Seen(0));
+        assert_eq!(lines_in(&logs), 50, "stopped at a line boundary inside the big log");
+        assert_eq!(logs.history.behind, 3, "nothing is current yet");
+        assert!(logs.history.partial());
+        assert_eq!(logs.history.as_of, 0.0, "a partial read is never as-of anything");
+        let note = crate::history_rows(&logs.history, "rollouts", 60, &crate::palette());
+        let said = note.join(" ");
+        assert!(said.contains("3 of 3 left") && said.contains("not totals"), "{said}");
+        // Next pass: the small logs the budget never reached go first, the
+        // one it ran out in goes last, so it cannot starve them.
+        let mut budget = Budget::new(slice, std::time::Duration::from_secs(60));
+        logs.pass(listing(&dir, at + 2.0), false, at + 2.0, &mut budget, |_| Seen(0));
+        let small: usize = ["a.jsonl", "b.jsonl"]
+            .iter()
+            .map(|n| logs.tails[&dir.join(n).to_string_lossy().to_string()].parser.0)
+            .sum();
+        assert_eq!(small, 6, "both small logs read in full");
+        assert_eq!(logs.history.behind, 1);
+        // Carried on to the end, every line is read exactly once.
+        for i in 0..10 {
+            let mut budget = Budget::new(slice, std::time::Duration::from_secs(60));
+            let t = at + 4.0 + i as f64;
+            logs.pass(listing(&dir, t), false, t, &mut budget, |_| Seen(0));
+        }
+        assert_eq!(lines_in(&logs), 306);
+        assert_eq!(logs.history.behind, 0);
+        assert!(!logs.history.partial());
+        assert!(logs.history.as_of > 0.0);
+    }
+
+    #[test]
+    fn a_time_budget_also_stops_a_pass() {
+        let log = growing::Log::new("budget-time");
+        log.append(&"{}\n".repeat(10_000));
+        let mut tails: HashMap<String, Tail<Seen>> = HashMap::new();
+        let mut spent = Budget::new(u64::MAX, std::time::Duration::ZERO);
+        assert_eq!(follow_within(&mut tails, &log.path, Seen::default, &mut spent), Followed::Behind);
+        assert!(tails.get(&log.path).map_or(0, |t| t.parser.0) < 10_000);
+        assert_eq!(follow_within(&mut tails, &log.path, Seen::default, &mut Budget::unlimited()), Followed::Current);
+        assert_eq!(tails[&log.path].parser.0, 10_000);
+    }
+
+    #[test]
+    fn a_listing_is_metadata_only_bounded_and_never_dated_in_the_future() {
+        let log = growing::Log::new("listing");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n");
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(86_400);
+        std::fs::File::options().write(true).open(&log.path).unwrap().set_modified(ahead).unwrap();
+        let old = dir.join("old.jsonl");
+        std::fs::write(&old, "{}\n").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(long_ago).unwrap();
+        let at = now();
+        let (all, complete) = listing(&dir, at);
+        assert!(complete);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].mtime, at as i64, "a future mtime is clamped to now");
+        // A window drops what was not written within it.
+        let (recent, _) = list_logs(&dir.to_string_lossy(), ".jsonl", Some(31.0 * 86_400.0), at);
+        assert_eq!(recent.len(), 1);
+        // Past the entry bound, the listing says it is not the whole.
+        let (cut, complete) =
+            list_logs_within(&dir.to_string_lossy(), ".jsonl", None, at, 1, std::time::Duration::from_secs(5));
+        assert_eq!((cut.len(), complete), (1, false));
     }
 
     #[test]

@@ -80,6 +80,8 @@ pub struct Data {
     sampled: usize,
     /// day -> model -> tokens by priced kind.
     daily: HashMap<String, HashMap<String, Tokens>>,
+    /// How current the transcripts behind `daily` and `rates` are.
+    pub history: History,
 }
 
 impl Data {
@@ -816,30 +818,58 @@ pub fn transcript_records(body: &str) -> Records {
 /// day - and input, output and the two cache kinds differ in price by up to
 /// fifty times, so a total cannot be costed. The transcripts carry the
 /// split, which is why the money comes from here and not from the cache.
+#[cfg(test)]
 fn claude_daily_at(
     caches: &mut Caches,
     projects: &str,
 ) -> HashMap<String, HashMap<String, Tokens>> {
-    let mut files = Vec::new();
+    claude_history_at(caches, projects).daily
+}
+
+/// What one projects directory's transcripts add up to, and how current
+/// that is.
+#[derive(Clone, Default)]
+pub struct Built {
+    pub daily: HashMap<String, HashMap<String, Tokens>>,
+    pub rates: Vec<f64>,
+    pub sampled: usize,
+    pub history: History,
+}
+
+/// Bring one projects directory's transcripts up to date, within this
+/// pass's budget, and build what the tab shows from them.
+///
+/// Only transcripts written within the METERED window are read: the
+/// totals from them are drawn as today and the last `METERED_DAYS`, and
+/// nothing older can reach either row. The rate is the exception, and is
+/// taken from the newest transcripts whatever their age, as it always was.
+///
+/// A pass that read nothing new hands back what the last one built.
+fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
+    let at = now();
+    let asked = caches.asked_at > 0.0;
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
-    walk(projects, ".jsonl", &mut files);
-    // Brought up to date first and borrowed after, so the records stay
-    // where they are rather than being copied out of the cache every pass.
-    let readable: Vec<&String> = files
-        .iter()
-        .filter(|path| follow(&mut caches.transcripts, path, TranscriptLines::default))
-        .collect();
-    // A transcript deleted from under this directory takes its records
-    // with it, so what is held follows the disk and not the uptime. Other
-    // configured directories share the map and are left to their own pass.
-    let under = format!("{}/", projects.trim_end_matches('/'));
-    let present: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
-    prune(&mut caches.transcripts, |path| path.starts_with(&under), &present);
-    // Later files win a shared uuid, as `extend` did.
+    let (all, complete) = list_logs(projects, ".jsonl", None, at);
+    let since = at - crate::metered_window();
+    let windowed: Vec<Listed> = all.iter().filter(|l| l.mtime as f64 >= since).cloned().collect();
+    let logs = caches.transcripts.entry(projects.to_string()).or_default();
+    let pass = logs.pass((windowed, complete), asked, at, &mut caches.budget, |_| {
+        TranscriptLines::default()
+    });
+    let history = logs.history.clone();
+    if pass == Pass::Held {
+        if let Some(built) = caches.claude_built.get_mut(projects) {
+            built.history = history;
+            return built.clone();
+        }
+    }
+    // Borrowed rather than copied out of the cache. Oldest first, so the
+    // newest file wins a uuid two of them share.
+    let paths: Vec<&str> = logs.paths().collect();
     let mut seen: HashMap<&str, &Record> = HashMap::new();
-    for path in readable {
-        if let Some(t) = caches.transcripts.get(path.as_str()) {
+    for path in paths.iter().rev() {
+        if let Some(t) = logs.tails.get(*path) {
             for (uid, record) in &t.parser.records {
                 seen.insert(uid, record);
             }
@@ -856,7 +886,11 @@ fn claude_daily_at(
             *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
         }
     }
-    merged
+    let newest: Vec<&str> = all.iter().map(|l| l.path.as_str()).collect();
+    let (rates, sampled) = claude_rates_in(&newest);
+    let built = Built { daily: merged, rates, sampled, history };
+    caches.claude_built.insert(projects.to_string(), built.clone());
+    built
 }
 
 /// Per-model token totals over the last N days (1 = today only).
@@ -894,21 +928,10 @@ pub fn window_models(
 /// The median is what gets shown: it barely moves whichever way the outliers
 /// are trimmed, which is the reason to trust it, while the maximum moves by
 /// a factor of twenty on the same data, which is the reason not to show one.
-fn claude_rates_at(projects: &str) -> (Vec<f64>, usize) {
-    let mut files = Vec::new();
-    walk(projects, ".jsonl", &mut files);
-    let mut with_time: Vec<(u64, String)> = files
-        .into_iter()
-        .filter_map(|path| {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&path).ok()?;
-            Some((meta.mtime() as u64, path))
-        })
-        .collect();
-    with_time.sort_by(|a, b| b.0.cmp(&a.0));
+fn claude_rates_in(newest_first: &[&str]) -> (Vec<f64>, usize) {
     let mut out: Vec<f64> = Vec::new();
     let mut sampled = 0usize;
-    for (_, path) in with_time.iter().take(RATE_FILES) {
+    for path in newest_first.iter().take(RATE_FILES) {
         sampled += 1;
         let (mut prev, mut prev_type): (Option<f64>, String) = (None, String::new());
         for line in tail_lines(path, 4 * 1024 * 1024) {
@@ -1035,10 +1058,11 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // Transcripts are written as Claude runs; the optional stats cache is
     // rebuilt separately. A missing cache must not hide recorded usage.
     let projects = projects_path(&dir.path);
-    let (rates, sampled) = claude_rates_at(&projects);
-    claude.rates = rates;
-    claude.sampled = sampled;
-    claude.daily = claude_daily_at(caches, &projects);
+    let built = claude_history_at(caches, &projects);
+    claude.rates = built.rates;
+    claude.sampled = built.sampled;
+    claude.daily = built.daily;
+    claude.history = built.history;
     claude
 }
 
@@ -1759,10 +1783,19 @@ pub fn claude_plan_rows(prof: &serde_json::Value, w: usize, p: &Palette) -> Vec<
 }
 
 pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    let mut rows = claude_metered_windows(c, w, cfg, p);
+    // Under the heading: what the windows below were read from, and when.
+    let at = 1.min(rows.len());
+    let note = crate::history_rows(&c.history, "transcripts", w, p);
+    rows.splice(at..at, note);
+    rows
+}
+
+fn claude_metered_windows(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     metered_rows(
         &[
             ("today".to_string(), window_models(&c.daily, 1)),
-            ("30 days".to_string(), window_models(&c.daily, 30)),
+            (metered_label(), window_models(&c.daily, METERED_DAYS)),
         ],
         w,
         "",
@@ -3935,10 +3968,40 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         std::io::Write::write_all(&mut f, b.as_bytes()).unwrap();
         drop(f);
+        // Asked, as `r` would: within five minutes of the last read a grown
+        // log otherwise waits for the history cadence.
+        grown.asked_at = now();
         let incremental = claude_daily_at(&mut grown, &projects);
         let whole = claude_daily_at(&mut Caches::default(), &projects);
         assert!(!whole.is_empty());
         assert_eq!(incremental, whole);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_transcript_older_than_the_metered_window_is_not_read() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-208-window-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let projects = root.join("projects").to_string_lossy().to_string();
+        std::fs::write(project.join("recent.jsonl"), synthetic_transcript(4)).unwrap();
+        let old = project.join("old.jsonl");
+        std::fs::write(&old, synthetic_transcript(6).replace("\"a-", "\"z-")).unwrap();
+        // Last written a day past the window, which is METERED_DAYS and a
+        // day's margin: nothing in it can be in either METERED row.
+        let age = crate::metered_window() + 86_400.0;
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs_f64(age);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(then).unwrap();
+        let mut caches = Caches::default();
+        let built = claude_history_at(&mut caches, &projects);
+        let held: Vec<&String> = caches.transcripts[&projects].tails.keys().collect();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert!(held[0].ends_with("recent.jsonl"));
+        // Exactly what the recent transcript alone adds up to.
+        std::fs::remove_file(&old).unwrap();
+        assert_eq!(built.daily, claude_history_at(&mut Caches::default(), &projects).daily);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3955,16 +4018,21 @@ mod tests {
         std::fs::write(&gone, synthetic_transcript(9).replace("\"a-", "\"b-")).unwrap();
         let mut caches = Caches::default();
         // Another configured directory's entry must survive this one's prune.
-        std::fs::create_dir_all(root.join("projects2")).unwrap();
-        let elsewhere = format!("{}2/other.jsonl", projects);
-        std::fs::write(&elsewhere, synthetic_transcript(2)).unwrap();
-        assert!(follow(&mut caches.transcripts, &elsewhere, TranscriptLines::default));
+        let other = root.join("projects2/example");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("other.jsonl"), synthetic_transcript(2)).unwrap();
+        let elsewhere = root.join("projects2").to_string_lossy().to_string();
+        claude_daily_at(&mut caches, &elsewhere);
         claude_daily_at(&mut caches, &projects);
-        assert_eq!(caches.transcripts.len(), 3);
+        assert_eq!(caches.transcripts[&projects].tails.len(), 2);
         std::fs::remove_file(&gone).unwrap();
+        // Dropped on the next pass whether or not it is due to read: what
+        // is held follows the disk.
+        claude_daily_at(&mut caches, &projects);
+        assert_eq!(caches.transcripts[&projects].tails.len(), 1);
+        assert_eq!(caches.transcripts[&elsewhere].tails.len(), 1);
+        caches.asked_at = now();
         let after = claude_daily_at(&mut caches, &projects);
-        assert_eq!(caches.transcripts.len(), 2, "{:?}", caches.transcripts.keys());
-        assert!(caches.transcripts.contains_key(&elsewhere));
         assert_eq!(after, claude_daily_at(&mut Caches::default(), &projects));
         let _ = std::fs::remove_dir_all(&root);
     }

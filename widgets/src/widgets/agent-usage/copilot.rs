@@ -428,7 +428,7 @@ pub fn copilot_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Str
     metered_rows(
         &[
             ("today".to_string(), claude::window_models(&d.daily, 1)),
-            ("30 days".to_string(), claude::window_models(&d.daily, 30)),
+            (crate::metered_label(), claude::window_models(&d.daily, crate::METERED_DAYS)),
         ],
         w,
         "",

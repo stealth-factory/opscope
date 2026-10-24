@@ -1885,14 +1885,27 @@ gigabytes, and none of it is ever held whole: what stays in memory is the
 records each file yielded, a byte offset, and its first kilobyte. A file that
 shrinks or is replaced is read again from the start, and one that is deleted
 takes its records with it, so memory follows what is on disk rather than how
-long the pane has been open. A live quota
+long the pane has been open.
+
+The logs are also read less often than the quotas are asked. Every pass
+looks only at the logs' metadata - a directory walk, no contents - and reads
+them only when one has changed, at most every five minutes unless `r` asks;
+the tab says how old its local figures are (`Local rollouts as of 3m ago`).
+Claude's transcripts are only read if they were written within the METERED
+window, `30 days` and a day's margin, since nothing older can reach those
+rows; Codex and Grok show totals and a calendar over their whole history, so
+every one of their logs is still read. A pass reads at most 64 MiB or 200 ms
+of logs across every agent; a first read bigger than that carries on two
+seconds later from the byte it stopped at, with the log it stopped in sent to
+the back of the queue, and until it is done the figures say `so far` and how
+many logs are left rather than calling themselves totals. A live quota
 is held for a couple of minutes and a plan for an hour, so what a pane left
 open all day asks of each agent is the same whichever tab is on screen.
 
-The first paint is the slow one: a freshly started widget takes **roughly
-fifteen seconds** to put anything on any tab, because Claude's transcripts and
-Cursor's spend history are both read through before there is anything to draw.
-Neither is paid again.
+The first paint is the slow one, because Cursor's spend history is paged
+through before there is anything to draw. The local logs no longer hold it
+up: the first pass reads its budgeted slice of them, and the rest fill in over
+the passes that follow, labelled as partial until they are done.
 
 ## More than one Claude Max
 

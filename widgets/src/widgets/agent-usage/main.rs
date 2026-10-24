@@ -1005,6 +1005,47 @@ fn no_local(what: &str, run: &str, w: usize, p: &Palette) -> Vec<String> {
     rows
 }
 
+/// How current the figures read from local logs are, said where they are
+/// drawn.
+///
+/// Two states and only two. While a first read is still catching up the
+/// figures are what has been read so far, and they say so in the warning
+/// colour with how many logs are left - a partial count presented as a
+/// total is exactly what this repo will not draw. Otherwise they are as of
+/// the last time the logs were checked against the disk, which a slower
+/// history cadence makes worth stating. Nothing at all before the first
+/// pass, when the loading rows are on screen instead.
+fn history_rows(h: &shared::History, what: &str, w: usize, p: &Palette) -> Vec<String> {
+    // Wrapped to the pane, never clipped by it: a sentence that says the
+    // figures are partial is no use with its end cut off.
+    let width = w.saturating_sub(4).max(8);
+    let (colour, text) = if h.behind > 0 {
+        (
+            p.warn.as_str(),
+            format!(
+                "Still reading local {what}: {} of {} left. The figures from them below are so far, not totals.",
+                h.behind, h.of
+            ),
+        )
+    } else if !h.listed_all {
+        (
+            p.warn.as_str(),
+            format!(
+                "Only the first {} local {what} were listed; the figures from them below are not totals.",
+                h.of
+            ),
+        )
+    } else if h.as_of > 0.0 {
+        (p.dim.as_str(), format!("Local {what} as of {} ago.", ago(h.as_of)))
+    } else {
+        return Vec::new();
+    };
+    wrap_text(&text, width)
+        .into_iter()
+        .map(|line| tc::seg(&[(colour, format!("  {}", line))], w - 1))
+        .collect()
+}
+
 /// A rate card: US$ per million tokens, by priced kind.
 type Rate = HashMap<String, f64>;
 
@@ -1204,6 +1245,23 @@ fn session_rate(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate
 
 /// Token counts by priced kind.
 type Tokens = HashMap<String, f64>;
+
+/// The longest window of token history any tab shows: the METERED rows'
+/// `30 days`. Logs not written to within it (and a day's margin, for the
+/// local midnight it is counted from and a clock that is slightly off) can
+/// hold nothing those rows show, so the readers that feed only those rows
+/// skip them. Change the window here and the label and the skip follow.
+pub const METERED_DAYS: i64 = 30;
+
+/// `METERED_DAYS` as the age, in seconds, past which a log is not read.
+pub fn metered_window() -> f64 {
+    (METERED_DAYS + 1) as f64 * 86_400.0
+}
+
+/// The label for the METERED window, from the same number.
+pub fn metered_label() -> String {
+    format!("{METERED_DAYS} days")
+}
 
 fn cost_of(tokens: &Tokens, rate: &Rate) -> f64 {
     RATE_KINDS
@@ -1564,7 +1622,7 @@ fn metered_rows(
     // A month's list cost against what the month actually cost you. Shown
     // only when the plan price is configured, because it is the one figure
     // in this section that no machine here knows.
-    let month = built.iter().find(|x| x.0 == "30 days");
+    let month = built.iter().find(|x| x.0 == metered_label());
     // What the plan saves is the month's cost minus the plan price, so
     // where that cost is a floor this is one too: fixing the window row and
     // leaving the arithmetic under it unmarked would be half a fix.
@@ -2440,9 +2498,9 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
         String::new(),
     ];
     for part in wrap_text(
-        "The first pass is the slow one: Claude's transcripts run to hundreds \
-         of megabytes and Cursor's usage events are paged a thousand at a \
-         time. Both are cached afterwards.",
+        "The first pass is the slow one: Cursor's usage events are paged a \
+         thousand at a time, and local logs are read in slices after it. \
+         Both are cached afterwards.",
         w.saturating_sub(4).max(20),
     ) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", part))], w - 1));
@@ -2484,6 +2542,9 @@ fn main() {
             if asked {
                 caches.asked_at = now();
             }
+            // One budget for the whole pass, every agent's logs drawing on
+            // it, so a pass is bounded however much history is on disk.
+            caches.budget = shared::Budget::new(shared::PASS_BYTES, shared::PASS_TIME);
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
             //
@@ -2532,8 +2593,15 @@ fn main() {
                 Ok(g) => g,
                 Err(_) => return,
             };
+            // A first read still catching up comes back for its next slice
+            // in a couple of seconds rather than a whole refresh later.
+            let wait = if caches.catching_up() {
+                refresh.min(shared::CATCH_UP_EVERY)
+            } else {
+                refresh
+            };
             if !*pressed {
-                pressed = match cond.wait_timeout(pressed, Duration::from_secs_f64(refresh)) {
+                pressed = match cond.wait_timeout(pressed, Duration::from_secs_f64(wait)) {
                     Ok((g, _)) => g,
                     Err(_) => return,
                 };
