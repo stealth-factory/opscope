@@ -296,8 +296,8 @@ def supported(t):
     assert b"\x1b[?2026h" in t.output
     assert b"now" in t.output, "line-chart label was blanked"
     assert any(
-        keys.get(b"a") == b"p" and keys.get(b"z") == b"-1" for keys, _ in t.commands()
-    ), "line chart was not placed under the text"
+        keys.get(b"a") == b"T" and keys.get(b"z") == b"-1" for keys, _ in t.commands()
+    ), "line chart was not uploaded under the text"
     count = len(t.images())
     t.read(0.2)
     assert len(t.images()) == count, "unchanged chart retransmitted"
@@ -331,10 +331,10 @@ def supported(t):
 
 
 def placed_under_text(commands):
-    # image() still transmits at the default z. compose() then re-places
-    # that same id under the text, so the last command is the placement.
-    assert commands[-2][0].get(b"a") == b"T", "chart was not transmitted"
-    assert commands[-1][0].get(b"a") == b"p" and commands[-1][0].get(b"z") == b"-1"
+    # The upload carries z=-1 itself (OPS-205), so no second placement follows.
+    last = max(i for i, (k, _) in enumerate(commands) if k.get(b"a") == b"T")
+    assert commands[last][0].get(b"z") == b"-1", "chart was not uploaded under the text"
+    assert not any(k.get(b"a") == b"p" for k, _ in commands[last:]), "a second placement followed the upload"
 
 
 def fallback(t):
@@ -890,18 +890,23 @@ def frame_tick(t):
     assert b"c" in actions and b"f" in actions, actions
     assert b"T" not in actions, actions
     assert len(t.images()) == images
-    # A changed sample in the middle is a new scale, not a slide.
+    # A changed sample in the middle is not a slide. It is an edit of the
+    # rectangle it changed or, when that is most of the chart, the whole
+    # image, which waits out the two-second cap on full uploads (OPS-205).
     mark = len(t.commands())
     t.send(b"s")
-    t.read(0.3)
+    t.read(2.4)
     fresh = t.commands()[mark:]
-    assert any(keys.get(b"a") == b"T" for keys, _payload in fresh)
+    actions = [keys.get(b"a") for keys, _payload in fresh]
+    assert b"c" not in actions, actions
+    assert b"T" in actions or b"f" in actions, actions
 
 
 def frames_refused(t):
     mark = len(t.images())
     t.send(b"t")
-    t.read(0.3)
+    # The whole image goes again once the two-second cap allows (OPS-205).
+    t.read(2.4)
     assert len(t.images()) > mark, "a refused frame probe still has to upload the tick"
     assert t.probe_id(), "animation probe was not sent"
 
