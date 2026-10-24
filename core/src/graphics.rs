@@ -95,6 +95,10 @@ struct Fill {
     // Rectangle index and its bright end. Ordinary fills remain solid;
     // gradient fills interpolate at pixel resolution inside that rectangle.
     gradients: Vec<(usize, [u8; 3])>,
+    /// Drawn as eighth-cell text in every mode, never as an image. A
+    /// one-row bar gains nothing visible from pixels, and meters are the
+    /// plots that change most often: a pace marker follows the clock.
+    always_text: bool,
 }
 
 impl Fill {
@@ -222,6 +226,7 @@ impl Plot {
             rects: Vec::new(),
             text: Vec::new(),
             gradients: Vec::new(),
+            always_text: false,
         };
         for (r, row) in cells.iter().enumerate() {
             let mut line = Vec::new();
@@ -273,15 +278,11 @@ impl Plot {
             }
             left = right;
         }
-        let text = super::stacked_bar(parts, width)
-            .into_iter()
-            .flat_map(|(colour, text)| {
-                text.chars()
-                    .map(move |ch| (colour.clone(), ch.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        Self::filled(x, y, width, 1, rects, vec![text])
+        let colours: Vec<_> = parts.iter().map(|(_, colour)| colour.clone()).collect();
+        let text = stacked_cells(parts, width, |part, _, _| colours[part].clone());
+        let mut plot = Self::filled(x, y, width, 1, rects, vec![text]);
+        plot.fill.as_mut().unwrap().always_text = true;
+        plot
     }
 
     /// `meter`, with a colour per filled cell: `cells[i]` paints cell `i`
@@ -355,7 +356,9 @@ impl Plot {
                 colour: foreground.into(),
             });
         }
-        let filled = (fraction * width as f64).round() as usize;
+        // Whole cells, then one partial cell to the nearest eighth.
+        let eighths = (fraction * width as f64 * 8.0).round() as usize;
+        let (whole, part) = (eighths / 8, eighths % 8);
         let at = marker.map(|v| ((v * width as f64).round() as usize).min(width.saturating_sub(1)));
         let text = (0..width)
             .map(|i| {
@@ -364,19 +367,24 @@ impl Plot {
                 } else {
                     ""
                 };
+                let filled = |glyph: char| match cell(i) {
+                    Some(colour) => (format!("{reset}{colour}"), glyph.to_string()),
+                    None => (format!("{reset}{track}"), "░".into()),
+                };
                 if Some(i) == at {
                     (mark.into(), "┃".into())
-                } else if i < filled {
-                    (
-                        format!("{reset}{}", cell(i).cloned().unwrap_or_else(|| track.into())),
-                        "█".into(),
-                    )
+                } else if i < whole {
+                    filled('█')
+                } else if i == whole && part > 0 {
+                    filled(LEFT_EIGHTHS[part])
                 } else {
                     (format!("{reset}{track}"), "░".into())
                 }
             })
             .collect();
-        Self::filled(x, y, width, 1, rects, vec![text])
+        let mut plot = Self::filled(x, y, width, 1, rects, vec![text]);
+        plot.fill.as_mut().unwrap().always_text = true;
+        plot
     }
 
     /// A measured fraction plus an optional reference position (e.g. elapsed
@@ -440,8 +448,9 @@ impl Plot {
     ) -> Self {
         let fraction = finite_fraction(fraction);
         let (start, end) = (readable_on_tint(start, 0.0), readable_on_tint(end, 0.0));
-        let filled = (fraction * width as f64).round() as usize;
-        let cells: Vec<_> = (0..filled.max(usize::from(fraction > 0.0)).min(width))
+        // Every cell the fill touches, the partial one included.
+        let filled = ((fraction * width as f64 * 8.0).round() as usize).div_ceil(8).max(usize::from(fraction > 0.0)).min(width);
+        let cells: Vec<_> = (0..filled)
             .map(|i| colour_at(start, end, i as f64 / filled.saturating_sub(1).max(1) as f64))
             .collect();
         let mut plot = Self::ramped_meter(x, y, width, fraction, marker, &cells, track, mark);
@@ -479,14 +488,14 @@ impl Plot {
             rect.colour = colour_at(start, end, 0.0);
             fill.gradients.push((i, end));
         }
-        fill.text[0] = super::stacked_bar(parts, width).into_iter().flat_map(|(colour, text)| {
-            let (start, end) = gradient_stops(rgb(&colour).unwrap_or([180, 200, 220]));
-            let count = text.chars().count();
-            (0..count).map(move |i| (
-                colour_at(start, end, i as f64 / count.saturating_sub(1).max(1) as f64),
-                "█".into(),
-            ))
-        }).collect();
+        let stops: Vec<_> = parts
+            .iter()
+            .map(|(_, colour)| gradient_stops(rgb(colour).unwrap_or([180, 200, 220])))
+            .collect();
+        fill.text[0] = stacked_cells(parts, width, |part, i, count| {
+            let (start, end) = stops[part];
+            colour_at(start, end, i as f64 / count.saturating_sub(1).max(1) as f64)
+        });
         plot
     }
 
@@ -517,7 +526,7 @@ impl Plot {
                 focus: None,
             },
         );
-        plot.fill = Some(Fill { rects, text, gradients: Vec::new() });
+        plot.fill = Some(Fill { rects, text, gradients: Vec::new(), always_text: false });
         plot
     }
 
@@ -535,6 +544,73 @@ impl Plot {
         self.y = top + first - start;
         Some(self)
     }
+}
+
+/// Left-aligned partial blocks, in eighths of a cell: index 8 is a full cell.
+const LEFT_EIGHTHS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+/// The text cells of a stacked bar, to the nearest eighth of a cell.
+///
+/// Each category's edge is rounded to an eighth. A cell two categories
+/// share is the left one's partial block on the right one's colour as a
+/// background, so the cell stays solid and the boundary lands where the
+/// share puts it; the next cell clears that background. A category smaller
+/// than a cell can lose its sliver to its neighbours, as in whole cells.
+/// `colour(part, i, count)` is category `part`'s colour for its `i`th of
+/// `count` cells, so a gradient can restart inside each category.
+fn stacked_cells(
+    parts: &[(f64, String)],
+    width: usize,
+    colour: impl Fn(usize, usize, usize) -> String,
+) -> Vec<(String, String)> {
+    let total = width * 8;
+    let mut edges = Vec::with_capacity(parts.len());
+    let mut left = 0.0;
+    for (i, (fraction, _)) in parts.iter().enumerate() {
+        let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+        left = if i + 1 == parts.len() { 1.0 } else { (left + fraction).min(1.0) };
+        edges.push(((left * total as f64).round() as usize).min(total));
+    }
+    // The category covering eighth `e`.
+    let at = |e: usize| edges.iter().position(|edge| e < *edge);
+    // Cells a category touches, for its gradient.
+    let span = |part: usize| {
+        let start = if part == 0 { 0 } else { edges[part - 1] };
+        let end = edges[part];
+        if end <= start { (0, 0) } else { (start / 8, (end - 1) / 8 + 1) }
+    };
+    let mut out = Vec::with_capacity(width + 1);
+    let mut background = false;
+    for cell in 0..width {
+        let reset = if background { super::NOBG } else { "" };
+        background = false;
+        let (Some(first), Some(last)) = (at(cell * 8), at(cell * 8 + 7)) else {
+            out.push((reset.to_string(), " ".to_string()));
+            continue;
+        };
+        let ink = |part: usize| {
+            let (start, end) = span(part);
+            colour(part, cell.saturating_sub(start), end - start)
+        };
+        if first == last {
+            out.push((format!("{reset}{}", ink(first)), "█".into()));
+            continue;
+        }
+        let share = edges[first] - cell * 8;
+        let (fg, bg) = (ink(first), ink(last));
+        match rgb(&bg) {
+            Some([r, g, b]) => {
+                background = true;
+                out.push((format!("{reset}{fg}\x1b[48;2;{r};{g};{b}m"), LEFT_EIGHTHS[share].to_string()));
+            }
+            // No truecolour to paint behind it: the larger share takes the cell.
+            None => out.push((format!("{reset}{}", if share >= 4 { fg } else { bg }), "█".into())),
+        }
+    }
+    if background {
+        out.push((super::NOBG.into(), String::new()));
+    }
+    out
 }
 
 /// Shared Braille rasterizer, also useful to widgets drawing small sparklines.
@@ -962,6 +1038,7 @@ pub(crate) fn compose(
         let fits_placeholder = !placeholders || (cols <= super::placeholder::LIMIT
             && plot.visible_rows <= super::placeholder::LIMIT);
         let use_pixels = kitty
+            && plot.fill.as_ref().is_none_or(|f| !f.always_text)
             && fits_placeholder
             && images.len() < MAX_PLOTS
             && plot.width.saturating_mul(plot.height) <= super::terminal::max_plot_cells()
@@ -2291,8 +2368,12 @@ mod tests {
                 let plot = Plot::gradient_meter(0, 1, width, fraction, None, &hue, &track, &mark);
                 let text = plot.text_row(0);
                 assert_eq!(text.iter().map(|(_, t)| t.chars().count()).sum::<usize>(), width);
-                assert_eq!(text.iter().filter(|(_, t)| t == "█").count(),
-                    (finite_fraction(fraction) * width as f64).round() as usize);
+                let eighths = (finite_fraction(fraction) * width as f64 * 8.0).round() as usize;
+                assert_eq!(text.iter().filter(|(_, t)| t == "█").count(), eighths / 8);
+                assert_eq!(
+                    text.iter().filter(|(_, t)| LEFT_EIGHTHS[1..8].iter().any(|g| t == &g.to_string())).count(),
+                    usize::from(eighths % 8 > 0),
+                );
                 let bytes = pixels(&plot);
                 assert_eq!(bytes.len(), width * CELL_W * CELL_H * 4);
                 if width > 0 && fraction == 0.01 {
@@ -2396,21 +2477,84 @@ mod tests {
     }
 
     #[test]
+    fn meters_and_stacked_bars_are_text_in_kitty_mode() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let hue = super::super::rgb(120, 196, 250);
+        let other = super::super::rgb(250, 180, 90);
+        let track = super::super::rgb(60, 70, 80);
+        let mark = format!("{}{}", super::super::bg(10, 12, 18), super::super::rgb(238, 244, 252));
+        let parts = [(0.3, hue.clone()), (0.7, other.clone())];
+        let plots = [
+            Plot::meter(1, 1, 20, 0.43, Some(0.6), &hue, &track, &mark),
+            Plot::ramped_meter(1, 2, 20, 0.43, Some(0.6), &[hue.clone(), other.clone()], &track, &mark),
+            Plot::gradient_meter(1, 3, 20, 0.43, Some(0.6), &hue, &track, &mark),
+            Plot::gradient_meter_between(1, 4, 20, 0.43, None, [40, 90, 200], [120, 200, 255], &track, &mark),
+            Plot::stacked_bar(1, 5, 20, &parts),
+            Plot::gradient_stacked_bar(1, 6, 20, &parts),
+        ];
+        let rows = vec![String::new(); 8];
+        for plot in &plots {
+            for (lost, heal) in [(true, false), (false, false), (false, true)] {
+                let (text, before, after) =
+                    compose(&rows, std::slice::from_ref(plot), 30, 8, true, false, lost, heal);
+                assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"), "{plot:?}");
+                let (plain, _, _) = compose(&rows, std::slice::from_ref(plot), 30, 8, false, false, false, false);
+                assert_eq!(text, plain, "Kitty and text mode draw the same cells");
+            }
+            // Inside tmux too: no placeholder cells for a bar.
+            let (text, before, after) =
+                compose(&rows, std::slice::from_ref(plot), 30, 8, true, true, true, true);
+            assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"));
+            assert!(!text.concat().contains('\u{10EEEE}'));
+        }
+        // 43% of twenty cells is 8.6: eight whole cells and five eighths.
+        let row: String = plots[0].text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(row, "████████▋░░░┃░░░░░░░");
+        // 30% of twenty is six cells exactly; the boundary is one colour each.
+        let row: String = plots[4].text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(row, "█".repeat(20));
+        assert_eq!(plots[4].text_row(0)[5].0, hue);
+        assert_eq!(plots[4].text_row(0)[6].0, other);
+    }
+
+    #[test]
+    fn a_stacked_boundary_inside_a_cell_is_the_left_share_on_the_right_colour() {
+        let a = super::super::rgb(120, 196, 250);
+        let b = super::super::rgb(250, 180, 90);
+        // 0.33 of ten cells is 3.3: three cells, then two eighths of a.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.33, a.clone()), (0.67, b.clone())]);
+        let cells = plot.text_row(0);
+        let glyphs: String = cells.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(glyphs, "███▎██████");
+        assert_eq!(cells[3].0, format!("{a}{}", super::super::bg(250, 180, 90)));
+        assert!(cells[4].0.starts_with(super::super::NOBG), "the next cell clears the background");
+        assert_eq!(plot.fill.as_ref().unwrap().row(0, 10).matches(super::super::NOBG).count(), 1);
+        // A boundary in the last cell still ends its background before any label.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.95, a.clone()), (0.05, b)]);
+        assert!(plot.fill.as_ref().unwrap().row(0, 10).ends_with(super::super::NOBG));
+        // Colours that are not truecolour cannot be painted behind: the larger share wins.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.33, "\x1b[31m".into()), (0.67, "\x1b[32m".into())]);
+        assert_eq!(plot.text_row(0)[3], ("\x1b[32m".to_string(), "█".to_string()));
+    }
+
+    #[test]
     fn a_sub_cell_fill_needs_a_colour_or_the_pixel_bar_stays_empty() {
         let fill = super::super::rgb(10, 20, 30);
         let track = super::super::rgb(80, 100, 120);
         let mark = super::super::rgb(240, 245, 250);
-        // 1% of eight cells is under half a glyph, so both text fallbacks
-        // round to an empty track. The pixel path still paints the sliver
-        // when it has a colour, and paints nothing when the ramp is empty.
+        // 1% of eight cells is about two thirds of an eighth, so the text
+        // bar paints one eighth when it has a colour and stays an empty
+        // track when the ramp is empty.
         let sliver = Plot::ramped_meter(0, 0, 8, 0.01, None, &[fill], &track, &mark);
         let blank = Plot::ramped_meter(0, 0, 8, 0.01, None, &[], &track, &mark);
         assert_ne!(pixels(&sliver), pixels(&blank));
-        for plot in [&sliver, &blank] {
-            let row = plot.fill.as_ref().unwrap().row(0, 8);
-            assert!(!row.contains('█'), "{row:?}");
-            assert_eq!(row.matches('░').count(), 8, "{row:?}");
-        }
+        let row = sliver.fill.as_ref().unwrap().row(0, 8);
+        assert!(!row.contains('█') && row.contains('▏'), "{row:?}");
+        assert_eq!(row.matches('░').count(), 7, "{row:?}");
+        let row = blank.fill.as_ref().unwrap().row(0, 8);
+        assert!(!row.contains('█') && !row.contains('▏'), "{row:?}");
+        assert_eq!(row.matches('░').count(), 8, "{row:?}");
     }
 
     #[test]
@@ -2529,14 +2673,9 @@ mod tests {
     #[test]
     fn image_cache_ignores_subpixel_changes_but_updates_visible_changes() {
         let _transport = super::super::shm::guard();
-        let colour = super::super::rgb(80, 210, 160);
-        let track = super::super::rgb(70, 80, 90);
-        let mark = super::super::rgb(240, 240, 240);
         let rows = vec!["title".into()];
         for width in [57, 120] {
-            let meter = |marker| Plot::gradient_meter(
-                3, 2, width - 6, 0.4, Some(marker), &colour, &track, &mark,
-            );
+            let meter = |level| Plot::new(3, 2, width - 6, 3, chart(vec![Some(0.4), Some(level)]));
             let first = meter(0.501);
             let next = meter(0.501 + 1e-12);
             assert_ne!(first, next);
@@ -2670,8 +2809,8 @@ mod tests {
         // A quota overview can have more than sixteen visible bars. Keep
         // every one in Kitty and clean up the highest slot as well.
         let colour = super::super::rgb(120, 196, 250);
-        let plots: Vec<_> = (0..32).map(|i| Plot::gradient_meter(
-            2, i + 1, 4, 0.5, None, &colour, &colour, &colour,
+        let plots: Vec<_> = (0..32).map(|i| Plot::heatmap_levels(
+            2, i + 1, &[vec![Some((colour.clone(), 4)); 4]], &colour,
         )).collect();
         let rows = vec!["          ".into(); 34];
         let (text, _, after) = compose(&rows, &plots, 10, 34, true, false, true, false);
