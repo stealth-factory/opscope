@@ -622,6 +622,13 @@ impl<P: Lines> Logs<P> {
         }
     }
 
+    /// True while a budget has left logs part-read. A log that could not be
+    /// opened is not one: it is retried on the history cadence, and a
+    /// faster poll would only fail to open it more often.
+    pub fn owes_slices(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     /// Paths in the order the last listing gave them, newest first.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.listed.iter().map(|l| l.path.as_str())
@@ -725,10 +732,10 @@ impl Caches {
     /// True while any agent's logs still have a first read under way, so
     /// the poller comes back for the next slice sooner than its refresh.
     pub fn catching_up(&self) -> bool {
-        self.transcripts.values().any(|l| l.history.behind > 0)
-            || self.rollouts.history.behind > 0
-            || self.history.history.behind > 0
-            || self.grok.history.behind > 0
+        self.transcripts.values().any(|l| l.owes_slices())
+            || self.rollouts.owes_slices()
+            || self.history.owes_slices()
+            || self.grok.owes_slices()
     }
 }
 
@@ -1570,6 +1577,7 @@ mod tests {
         logs.pass(seen, false, at, &mut Budget::unlimited(), |_| Seen(0));
         assert_eq!(lines_in(&logs), 0);
         assert!(logs.history.partial(), "a log not read is not part of a total");
+        assert!(!logs.owes_slices(), "and no reason to poll faster for it");
         assert_eq!(logs.history.as_of, 0.0);
         // Back, the same file: the next read on the cadence picks it up.
         std::fs::rename(&aside, &log.path).unwrap();
