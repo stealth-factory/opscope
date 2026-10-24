@@ -1013,18 +1013,18 @@ mod tests {
 
     #[test]
     fn an_agent_this_build_no_longer_knows_is_ignored() {
-        // A config from before CodeRabbit was dropped still names it; it is
-        // an unknown agent now, like `foo`, so no tab and no panic - in
-        // either list.
+        // A config written by an older build can name an agent this one
+        // does not know; it is unknown now, like `foo`, so no tab and no
+        // panic - in either list.
         let cfg = Config {
-            agents: vec!["coderabbit".into(), "claude".into()],
-            exclude_agents: vec!["coderabbit".into()],
+            agents: vec!["foo".into(), "claude".into()],
+            exclude_agents: vec!["foo".into()],
             auto_detect_agent: Some(false),
             ..Config::default()
         };
         let visible = visible_agents(&HashMap::new(), &cfg);
         assert!(visible.iter().any(|t| t == "claude"), "{visible:?}");
-        assert!(!visible.iter().any(|t| t == "coderabbit"), "{visible:?}");
+        assert!(!visible.iter().any(|t| t == "foo"), "{visible:?}");
     }
 
     /// The summary follows the tabs. With only `[+]` up — discovery has
