@@ -21,7 +21,7 @@
 //! per-day figures - the running total alone would credit an entire session
 //! to whichever day it happened to be read on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use opscope_core as tc;
@@ -618,7 +618,8 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     }
     // A session that is gone keeps nothing here, or every deleted log
     // would stay in memory for as long as the pane runs.
-    caches.grok.retain(|path, _| files.contains(path));
+    let live: HashSet<&str> = files.iter().map(String::as_str).collect();
+    caches.grok.retain(|path, _| live.contains(path.as_str()));
     // A session that has just ended is the moment the numbers have changed
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean

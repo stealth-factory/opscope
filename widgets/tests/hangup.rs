@@ -103,5 +103,12 @@ fn a_widget_exits_within_a_second_of_its_terminal_closing() {
     }
     let _ = std::fs::remove_dir_all(&home);
     assert!(exited.is_some(), "matrix was still running 3s after its terminal closed");
+    // 129 is what the hang-up path exits with. Any other code means it
+    // left some other way, which would otherwise pass here.
+    assert_eq!(
+        exited.unwrap().code(),
+        Some(128 + libc::SIGHUP),
+        "matrix did not exit through the hang-up path"
+    );
     assert!(took < Duration::from_secs(1), "matrix took {took:?} to notice its terminal closed");
 }
