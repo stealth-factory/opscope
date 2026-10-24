@@ -230,7 +230,9 @@ def artifact(name, data):
         (Path(directory) / name).write_bytes(data)
 
 
-def moving_meter_keeps_unchanged_pixels():
+def moving_meter_is_text_and_quiet():
+    # A meter is text in every mode (OPS-203). A marker that moves by less
+    # than a cell changes nothing on screen, so nothing is written for it.
     for width in (57, 120):
         for shared in (False, True):
             t = Terminal()
@@ -240,15 +242,15 @@ def moving_meter_keeps_unchanged_pixels():
                 fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, width, 0, 0))
                 os.kill(t.proc.pid, signal.SIGWINCH)
                 t.read(0.2)
+                before = len(t.images())
                 t.send(b"m")
                 t.read(0.3)
-                assert t.images()[-1][0][b"r"] == b"1"
-                assert t.images()[-1][0][b"t"] == (b"s" if shared else b"d")
-                count = len(t.images())
+                assert len(t.images()) == before, "a meter was sent as an image"
+                assert "┃".encode() in t.output and "█".encode() in t.output
                 start = len(t.commands())
                 t.read(1.0)
-                assert len(t.images()) == count, "subpixel marker changes triggered an upload/reply loop"
-                assert not any(k.get(b"a") == b"d" for k, _ in t.commands()[start:]), "unchanged pixels were deleted"
+                assert not any(k.get(b"a") in (b"T", b"t", b"f") for k, _ in t.commands()[start:]), \
+                    "subpixel marker changes triggered an upload"
                 t.quit()
                 print(f"PASS moving-meter/{width}/{'shared' if shared else 'direct'}")
             finally:
@@ -373,7 +375,8 @@ def filled_graphics(t):
     t.send(b"g")
     t.read()
     added = t.images()[count:]
-    assert len(added) == 6, "bars, calendar, meter, state distribution and solid tile did not reach the compositor"
+    # The meter and the state distribution are text in every mode (OPS-203).
+    assert len(added) == 4, "bars, calendar and solid tile did not reach the compositor"
     formats = []
     for n, (keys, payload) in enumerate(added):
         assert keys[b"m"] == b"0", "small gallery fixture unexpectedly chunked"
@@ -389,17 +392,6 @@ def filled_graphics(t):
             assert any(decoded), "empty graphic"
         assert b"z" not in keys, "a solid fill must not sit under text"
         formats.append(keys[b"f"])
-        if n == 3:
-            # Pace mark at 65% of the meter: two dark pixels, the mark, two
-            # dark pixels. The buffer is the visible crop, so the row is the
-            # middle of what was sent and the stride is that crop's width.
-            y = height // 2
-            row = decoded[y * width * bpp:(y + 1) * width * bpp]
-            dark = bytes([10, 12, 18, 255][:bpp])
-            light = bytes([238, 244, 252, 255][:bpp])
-            assert row[102 * bpp:104 * bpp] == dark * 2
-            assert row[104 * bpp:106 * bpp] == light * 2
-            assert row[106 * bpp:108 * bpp] == dark * 2
         # Keep the transmitted bytes. RGB is not padded out to RGBA; the
         # name and the size line say which layout a viewer should use.
         ext = "rgb" if bpp == 3 else "rgba"
@@ -408,8 +400,12 @@ def filled_graphics(t):
             f"opscope-gallery-{n}.size",
             f"{width} {height} {ext}".encode(),
         )
-    assert formats[:4] == [b"32", b"32", b"32", b"32"], "gaps, partial bars and the meter inset keep alpha"
-    assert formats[-2:] == [b"24", b"24"], "the stacked bar and fully opaque tile are sent as RGB"
+    assert formats[:3] == [b"32", b"32", b"32"], "gaps and partial bars keep alpha"
+    assert formats[-1:] == [b"24"], "the fully opaque tile is sent as RGB"
+    text = t.output.decode(errors="replace")
+    # 37.5% of twenty cells is seven and a half: the half is one partial block.
+    assert "▌" in text, "the meter lost its partial cell"
+    assert "\x1b[48;2;10;12;18m\x1b[38;2;238;244;252m┃\x1b[49m" in text, "the pace mark lost its surround"
     count = len(t.images())
     t.read()
     assert len(t.images()) == count, "unchanged figures retransmitted"
@@ -511,7 +507,7 @@ def hidpi_shared_rgb_gallery(t):
             assert int(keys[b"v"]) == int(keys[b"r"]) * 40
             assert len(data) == int(keys[b"s"]) * int(keys[b"v"]) * 3
             rgb.append(keys)
-    assert len(rgb) == 2, "HiDPI opaque stacked bar/tile did not use RGB shared uploads"
+    assert len(rgb) == 1, "HiDPI opaque tile did not use an RGB shared upload"
 
 
 def cell_raster_follows_report(t):
@@ -1063,7 +1059,8 @@ def run_tmux(reply, check, termtype, passthrough="on", pane="%1"):
 def herdr_pane_sends_images_inline():
     # Herdr's server answers the shared-memory probe OK and then draws
     # nothing sent through t=s, so a Herdr pane never sends the probe.
-    t = Terminal(extra_env={"HERDR_ENV": "1"})
+    # Under Herdr `auto` is text (OPS-199); pixels are asked for here.
+    t = Terminal(extra_env={"HERDR_ENV": "1", "OPSCOPE_GRAPHICS": "kitty"})
     try:
         t.read(0.4)
         probes = [c for c in t.commands() if c[0].get(b"a") == b"q" and c[0].get(b"t") == b"s"]
@@ -1077,7 +1074,7 @@ def herdr_pane_sends_images_inline():
 
 if __name__ == "__main__":
     scroll_clears_previous_image_region()
-    moving_meter_keeps_unchanged_pixels()
+    moving_meter_is_text_and_quiet()
     successful_upload_before_shared_failure()
     print("PASS shared-memory/success-before-failure")
     missing_and_late_replies_keep_their_upload_keys()
@@ -1121,7 +1118,7 @@ if __name__ == "__main__":
     print("PASS placeholder passthrough off stays text")
     run_tmux("basic", tmux_basic_is_braille, "kitty(0.27.1)")
     print("PASS placeholder old kitty stays text")
-    run("auto", "kitty", herdr_direct, {"HERDR_ENV": "1"})
+    run("kitty", "kitty", herdr_direct, {"HERDR_ENV": "1"})  # auto is text under Herdr (OPS-199)
     print("PASS herdr direct")
     run_tmux("silent", tmux_text, None)
     print("PASS placeholder termtype failed")
