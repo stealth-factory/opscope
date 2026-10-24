@@ -3,6 +3,7 @@
 use base64::Engine;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trace {
@@ -58,6 +59,39 @@ impl LineChart {
             }
         }
         cells
+    }
+}
+
+/// A value axis that holds still between samples.
+///
+/// A chart scaled to exactly what it shows rescales whenever its highest or
+/// lowest sample changes, which on a live chart is most samples. Every
+/// rescale moves every pixel, so Kitty mode sent the whole image again each
+/// time, and the axis labels flickered. `hold` keeps the last range while
+/// the data still fits inside it and it is not more than twice as wide as a
+/// fresh fit would be, so a spike that has scrolled away lets the axis
+/// tighten again. Units are whatever the widget plots in: latency and link
+/// pass log₁₀ milliseconds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StickyRange {
+    held: Option<(f64, f64)>,
+}
+
+impl StickyRange {
+    /// `data` is the lowest and highest value that must be on the axis;
+    /// `fresh` is the range the widget would choose for it from nothing,
+    /// headroom included. Returns the range to draw.
+    pub fn hold(&mut self, data: (f64, f64), fresh: (f64, f64)) -> (f64, f64) {
+        let usable = |(lo, hi): (f64, f64)| lo.is_finite() && hi.is_finite() && hi > lo;
+        if let Some(held) = self.held.filter(|held| usable(*held) && usable(fresh)) {
+            let inside = held.0 <= data.0 && data.1 <= held.1;
+            let tight = held.1 - held.0 <= 2.0 * (fresh.1 - fresh.0);
+            if inside && tight {
+                return held;
+            }
+        }
+        self.held = usable(fresh).then_some(fresh);
+        fresh
     }
 }
 
@@ -797,7 +831,46 @@ struct CachedPlot {
     cols: usize,
     cell_size: (usize, usize),
     rgba: Option<Vec<u8>>,
+    /// When this slot last sent its whole image or a large edit. Another
+    /// large change waits until `FULL_UPLOAD_GAP` has passed.
+    uploaded: Instant,
 }
+
+/// The least time between two whole-image uploads of one slot whose size
+/// did not change. A chart that rescales or slides on every sample sent its
+/// whole raster on every frame; a relay that forwards images decoded paid
+/// that raw size each time. Changes in between are held, not dropped: the
+/// first frame after the gap sends the chart as it is then.
+const FULL_UPLOAD_GAP: Duration = Duration::from_secs(2);
+
+#[cfg(not(test))]
+fn full_upload_gap() -> Duration {
+    FULL_UPLOAD_GAP
+}
+
+// Tests of the upload paths other than the cap send one change after
+// another; the cap's own test turns it on.
+#[cfg(test)]
+thread_local! {
+    static GAP: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+#[cfg(test)]
+fn full_upload_gap() -> Duration {
+    GAP.with(|gap| gap.get())
+}
+
+/// A changed rectangle is sent as a frame edit only while it is at most this
+/// share of the image. Past that the whole image costs about the same and
+/// replaces every pixel the terminal holds.
+const EDIT_SHARE: f64 = 0.5;
+
+/// An edit up to this share of the image is small and always goes: a sample
+/// that moved at the end of a line. A larger one, such as a line chart sliding
+/// by a slot whose pitch is not a whole number of pixels, counts against the
+/// same gap as a whole image, or the strips sent every sample add up to more
+/// than the capped whole images would have.
+const SMALL_SHARE: f64 = 0.125;
 
 impl CachedPlot {
     fn same_region(&self, plot: &Plot, cols: usize, cell_size: (usize, usize)) -> bool {
@@ -809,13 +882,103 @@ impl CachedPlot {
             && self.plot.visible_rows == plot.visible_rows
     }
 
+    #[cfg(test)]
     fn same_pixels(&self, plot: &Plot, cols: usize, cell_size: (usize, usize), rgba: &[u8]) -> bool {
-        self.same_region(plot, cols, cell_size)
-            && match &self.rgba {
-                Some(previous) => previous == rgba,
-                None => raster_pixels(&self.plot, self.cols, cell_size.0, cell_size.1) == rgba,
-            }
+        self.same_region(plot, cols, cell_size) && *self.held_pixels() == *rgba
     }
+
+    /// The pixels the terminal holds for this slot: the retained buffer,
+    /// or the cached plot rasterised again when it was too large to keep.
+    fn held_pixels(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.rgba {
+            Some(previous) => std::borrow::Cow::Borrowed(previous),
+            None => std::borrow::Cow::Owned(raster_pixels(&self.plot, self.cols, self.cell_size.0, self.cell_size.1)),
+        }
+    }
+}
+
+/// Whether a host between this process and the terminal relays images to a
+/// client of its own (Herdr). It forwards each placement and upload decoded,
+/// so a re-place that a terminal does for free costs that client the image.
+#[cfg(not(test))]
+fn host_relays_images() -> bool {
+    static RELAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RELAYS.get_or_init(|| super::shm::host_relays_images(|key| std::env::var(key).ok()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn host_relays_images() -> bool {
+    RELAYS.with(|cell| cell.get())
+}
+
+/// Unchanged rows between two changed bands that still join them into one
+/// rectangle. Each rectangle is its own command, so a sliver of rows is not
+/// worth a second header and a second deflate stream.
+const BAND_GAP: usize = 8;
+
+/// The rectangles holding every pixel that differs, as `(x, y, w, h)` in the
+/// image: one per band of changed rows, each as wide as its own changes.
+/// Line charts change along their strokes, so a chart whose traces sit in a
+/// few bands of its height changes in a few rectangles rather than one that
+/// spans them all. Empty when the two are identical or not the same size.
+fn changed_rects(old: &[u8], new: &[u8], img_w: usize) -> Vec<(usize, usize, usize, usize)> {
+    if old.len() != new.len() || img_w == 0 || new.len() % (img_w * 4) != 0 {
+        return Vec::new();
+    }
+    let img_h = new.len() / (img_w * 4);
+    let mut rects: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // The band being grown: first row, last row, leftmost and rightmost pixel.
+    let mut band: Option<(usize, usize, usize, usize)> = None;
+    for y in 0..img_h {
+        let row = y * img_w * 4..(y + 1) * img_w * 4;
+        let (a, b) = (&old[row.clone()], &new[row]);
+        if a == b {
+            continue;
+        }
+        let differs = |(p, q): (&[u8], &[u8])| p != q;
+        let first = a.chunks_exact(4).zip(b.chunks_exact(4)).position(differs).unwrap_or(0);
+        let last = img_w - 1 - a.chunks_exact(4).rev().zip(b.chunks_exact(4).rev()).position(differs).unwrap_or(0);
+        band = Some(match band {
+            Some((top, bottom, left, right)) if y - bottom <= BAND_GAP => (top, y, left.min(first), right.max(last)),
+            Some((top, bottom, left, right)) => {
+                rects.push((left, top, right + 1 - left, bottom + 1 - top));
+                (y, y, first, last)
+            }
+            None => (y, y, first, last),
+        });
+    }
+    if let Some((top, bottom, left, right)) = band {
+        rects.push((left, top, right + 1 - left, bottom + 1 - top));
+    }
+    rects
+}
+
+/// The changed rectangles of a held image as edits of its root frame, when
+/// together they are a small enough part of the image to be worth it.
+/// Also returns the share of the image the edit covers.
+fn rect_edit(old: &[u8], new: &[u8], img_w: usize, slot: usize) -> Option<(String, f64)> {
+    let rects = changed_rects(old, new, img_w);
+    let img_h = new.len() / (img_w * 4).max(1);
+    let area: usize = rects.iter().map(|(_, _, w, h)| w * h).sum();
+    let share = area as f64 / (img_w * img_h).max(1) as f64;
+    if rects.is_empty() || share > EDIT_SHARE {
+        return None;
+    }
+    let mut out = String::new();
+    for (x, y, w, h) in rects {
+        let mut raw = Vec::with_capacity(w * h * 4);
+        for row in y..y + h {
+            let start = (row * img_w + x) * 4;
+            raw.extend_from_slice(&new[start..start + w * 4]);
+        }
+        out.push_str(&frame_payload(image_id(slot), x, y, w, h, &raw));
+    }
+    Some((out, share))
 }
 
 fn with_cache<R>(f: impl FnOnce(&mut Vec<CachedPlot>) -> R) -> R {
@@ -922,12 +1085,17 @@ pub(crate) fn testing_mark_frame(slot: usize) {
 
 /// One-pixel image, a second frame copied from it, then a compose of that
 /// frame onto the root. Terminals without animation answer ENOENT or EINVAL.
+///
+/// The frame and the compose ask for a reply (`q=0`). They used to carry
+/// `q=1`, which suppresses `OK`, so a terminal that supports frames never
+/// said so and every change stayed a whole upload. An `OK` turns edits on;
+/// an error from either, arriving after it, turns them off again.
 pub(crate) fn animation_probe() -> String {
     let id = probe_id();
     format!(
         "\x1b_Ga=t,f=24,t=d,s=1,v=1,i={id},q=1;AAAA\x1b\\\
-         \x1b_Ga=f,f=24,t=d,s=1,v=1,i={id},c=1,X=1,z=-1,q=1;AAAA\x1b\\\
-         \x1b_Ga=c,i={id},r=2,c=1,w=1,h=1,C=1\x1b\\"
+         \x1b_Ga=f,f=24,t=d,s=1,v=1,i={id},c=1,X=1,z=-1,q=0;AAAA\x1b\\\
+         \x1b_Ga=c,i={id},r=2,c=1,w=1,h=1,C=1,q=0\x1b\\"
     )
 }
 
@@ -1113,6 +1281,11 @@ pub(crate) fn compose(
     }
     let (before, after) = with_cache(|cache| {
     let wrap = placeholders || passthrough_enabled();
+    // A host that relays images forwards a re-place as the image again, so
+    // the periodic whole frame does not re-place there. A dropped image is
+    // put back by `lost`, which resends it.
+    let replace_on_heal = heal && !host_relays_images();
+    let now = Instant::now();
     let mut before = String::new();
     let mut after = String::new();
     // One read for the frame: cache comparison, rasterization and upload
@@ -1131,51 +1304,91 @@ pub(crate) fn compose(
                     if placeholders {
                         let rgba = raster_pixels(plot, cols, cell_w, cell_h);
                         before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, &rgba), wrap));
-                    } else {
+                    } else if replace_on_heal {
                         after.push_str(&place(plot, slot, w));
                     }
             }
             continue;
         }
         let rgba = plot.map(|p| raster_pixels(p, cols, cell_w, cell_h));
-        if !lost {
-            if let (Some(cached), Some(plot), Some(rgba)) =
-                (cache.get_mut(slot), plot, rgba.as_deref())
-            {
-                // Time-dependent values can change without changing a pixel.
-                // Upload acknowledgements must not start a redraw/upload loop.
-                if cached.same_pixels(plot, cols, (cell_w, cell_h), rgba) {
-                    // Pixels do not record z. Turning under_text on or off
-                    // has to re-place this id, or the stroke stays over the
-                    // label until the next heal.
-                    let z_changed = cached.plot.under_text != plot.under_text;
-                    cached.plot = plot.clone();
-                    if placeholders && heal {
-                        before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, rgba), wrap));
-                    } else if !placeholders && (heal || z_changed) {
-                        after.push_str(&place(plot, slot, w));
-                    }
-                    continue;
+        // What the terminal holds for this slot, when it is the same region:
+        // every edit below is measured against it.
+        let held = match (lost, cache.get(slot), plot) {
+            (false, Some(cached), Some(next)) if cached.same_region(next, cols, (cell_w, cell_h)) =>
+                Some(cached.held_pixels().into_owned()),
+            _ => None,
+        };
+        if let (Some(cached), Some(plot), Some(rgba), Some(held)) =
+            (cache.get_mut(slot), plot, rgba.as_deref(), held.as_deref())
+        {
+            // Time-dependent values can change without changing a pixel.
+            // Upload acknowledgements must not start a redraw/upload loop.
+            if held == rgba {
+                // Pixels do not record z. Turning under_text on or off
+                // has to re-place this id, or the stroke stays over the
+                // label until the next heal.
+                let z_changed = cached.plot.under_text != plot.under_text;
+                cached.plot = plot.clone();
+                if placeholders && heal {
+                    before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, rgba), wrap));
+                } else if !placeholders && (replace_on_heal || z_changed) {
+                    after.push_str(&place(plot, slot, w));
                 }
+                continue;
             }
         }
         // A one-sample slide edits the held image. Identical pixels already
-        // returned above, so this only runs when the raster changed.
+        // returned above, so this only runs when the raster changed. Failing
+        // that, the rectangle that changed is written over the held root
+        // frame, when it is a small part of the image and the z is the same.
+        // Whether this slot sent a large change less than a gap ago. Only
+        // a change in the same region can be held: the terminal must still
+        // be showing the image the cache names.
+        let recent = held.is_some()
+            && cache.get(slot).is_some_and(|c| now.duration_since(c.uploaded) < full_upload_gap());
         let edit = if !lost && frames_ready() {
             match (cache.get(slot), plot, rgba.as_deref()) {
                 (Some(cached), Some(next), Some(bytes))
                     if cached.same_region(next, cols, (cell_w, cell_h)) =>
-                    frame_edit(&cached.plot, next, slot, w, (cell_w, cell_h), bytes),
+                    match frame_edit(&cached.plot, next, slot, w, (cell_w, cell_h), bytes) {
+                        // A slide sends its new columns, never the image.
+                        Some(slide) => Some((slide, false)),
+                        None => {
+                            let img_w = crop_px(next, cols, cell_w, cell_h).2;
+                            // An opaque fill went up as RGB; a frame edit is
+                            // RGBA, and that pairing was not seen to work, so
+                            // it is uploaded whole instead.
+                            let opaque = |p: &Plot, px: &[u8]| p.fill.is_some()
+                                && !px.is_empty()
+                                && px.chunks_exact(4).all(|px| px[3] == 255);
+                            held.as_deref()
+                                .filter(|old| !placeholders
+                                    && cached.plot.under_text == next.under_text
+                                    && !opaque(&cached.plot, old))
+                                .and_then(|old| rect_edit(old, bytes, img_w, slot))
+                                .map(|(edit, share)| (edit, share > SMALL_SHARE))
+                        }
+                    },
                 _ => None,
             }
         } else {
             None
         };
-        if let Some(edit) = edit {
+        // A large change, edit or whole image, goes at most once per gap per
+        // slot; until then the terminal keeps showing the image it holds, and
+        // the cache still names that one, so the next frame compares against
+        // what is really on screen. A small edit always goes.
+        if recent && edit.as_ref().is_none_or(|(_, large)| *large) {
+            if let Some(plot) = plot.filter(|_| replace_on_heal && !placeholders) {
+                after.push_str(&place(plot, slot, w));
+            }
+            continue;
+        }
+        if let Some((edit, large)) = edit {
             note_frame(slot);
             after.push_str(&edit);
             if let Some(next) = plot {
-                if heal {
+                if replace_on_heal {
                     after.push_str(&place(next, slot, w));
                 }
                 if let Some(previous) = cache.get_mut(slot) {
@@ -1184,6 +1397,9 @@ pub(crate) fn compose(
                     previous.cell_size = (cell_w, cell_h);
                     if let Some(bytes) = rgba {
                         previous.rgba = (bytes.len() <= MAX_CACHED_RGBA).then_some(bytes);
+                    }
+                    if large {
+                        previous.uploaded = now;
                     }
                 }
             }
@@ -1209,13 +1425,9 @@ pub(crate) fn compose(
             if placeholders {
                 before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, &rgba), wrap));
             } else {
+                // An under-text chart carries z=-1 on its own upload, so it
+                // never sits over its labels and needs no second placement.
                 after.push_str(&emit_graphics(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba), wrap));
-            }
-            // image_rgba() places at the default z, above the text. The same
-            // placement id is put back underneath, in this write, so a
-            // frame never shows the chart covering its labels.
-            if plot.under_text && !placeholders {
-                after.push_str(&place(plot, slot, w));
             }
             if let Some(old) = replaced {
                 after.push_str(&delete_placement(slot, old));
@@ -1225,6 +1437,7 @@ pub(crate) fn compose(
                 cols,
                 cell_size: (cell_w, cell_h),
                 rgba: (rgba.len() <= MAX_CACHED_RGBA).then_some(rgba),
+                uploaded: now,
             };
             if let Some(previous) = cache.get_mut(slot) {
                 *previous = cached;
@@ -1716,8 +1929,8 @@ fn frame_edit(
     out.push_str(&format!(
         "\x1b_Ga=c,i={id},r=2,c=1,X={dx},Y=0,x=0,y=0,w={copied},h={img_h},C=1,q=1\x1b\\"
     ));
-    out.push_str(&frame_payload(id, 0, 1, img_h, &edge));
-    out.push_str(&frame_payload(id, col_x, col_w, img_h, &column));
+    out.push_str(&frame_payload(id, 0, 0, 1, img_h, &edge));
+    out.push_str(&frame_payload(id, col_x, 0, col_w, img_h, &column));
     Some(out)
 }
 
@@ -1930,7 +2143,7 @@ fn column_rgba(rgba: &[u8], img_w: usize, col_x: usize, col_w: usize) -> Vec<u8>
     out
 }
 
-fn frame_payload(id: u32, x: usize, w: usize, h: usize, raw: &[u8]) -> String {
+fn frame_payload(id: u32, x: usize, y: usize, w: usize, h: usize, raw: &[u8]) -> String {
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(raw, ZLIB_LEVEL);
     let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
     let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
@@ -1939,7 +2152,7 @@ fn frame_payload(id: u32, x: usize, w: usize, h: usize, raw: &[u8]) -> String {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=f,f=32,t=d,o=z,s={w},v={h},x={x},y=0,i={id},r=1,X=1,q=1,m={more};"
+                "\x1b_Ga=f,f=32,t=d,o=z,s={w},v={h},x={x},y={y},i={id},r=1,X=1,q=1,m={more};"
             ));
         } else {
             // Later chunks of a frame still name the action.
@@ -1985,8 +2198,12 @@ fn image_rgba(
     };
     PLACEMENTS[slot].store(placement, Ordering::Release);
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
+    // z=-1 is under the glyphs and above cells that have a background, the
+    // same z `place` gives an under-text chart. On the upload itself, so the
+    // chart never shows over its labels and needs no second placement.
+    let z = if plot.under_text { ",z=-1" } else { "" };
     let keys = format!(
-        "s={w},v={h},i={id},p={placement},c={cols},r={rows},C=1,q=0"
+        "s={w},v={h},i={id},p={placement},c={cols},r={rows},C=1,q=0{z}"
     );
     out.push_str(&transmit_pixels(
         raw.as_deref().unwrap_or(rgba),
@@ -2537,6 +2754,23 @@ mod tests {
     }
 
     #[test]
+    fn a_sticky_range_holds_until_the_data_leaves_it_or_it_is_twice_too_wide() {
+        let mut range = StickyRange::default();
+        assert_eq!(range.hold((1.0, 2.0), (0.9, 2.1)), (0.9, 2.1));
+        // Jitter inside the held range keeps it, though a fresh fit moved.
+        assert_eq!(range.hold((1.05, 1.95), (0.95, 2.05)), (0.9, 2.1));
+        assert_eq!(range.hold((0.9, 2.1), (0.8, 2.2)), (0.9, 2.1));
+        // A sample past the edge takes the fresh range.
+        assert_eq!(range.hold((0.9, 2.3), (0.8, 2.4)), (0.8, 2.4));
+        // A spike that left the window lets the axis tighten once the held
+        // range is more than twice the fresh one.
+        assert_eq!(range.hold((1.0, 1.5), (0.95, 1.55)), (0.95, 1.55));
+        // Nonsense never sticks.
+        assert_eq!(range.hold((1.0, 1.0), (f64::NAN, 1.0)).0.is_nan(), true);
+        assert_eq!(range.hold((1.0, 1.2), (0.9, 1.3)), (0.9, 1.3));
+    }
+
+    #[test]
     fn a_dancing_placeholder_is_text_in_kitty_mode() {
         let _transport = super::super::shm::guard();
         let _cache = compose_lock();
@@ -2812,7 +3046,7 @@ mod tests {
         let next_rgba = raster_pixels(&next, 12, CELL_W, CELL_H);
         assert_ne!(p, next);
         for buffer in [Some(rgba), None] {
-            let cached = CachedPlot { plot: p.clone(), cols: 12, cell_size: (CELL_W, CELL_H), rgba: buffer };
+            let cached = CachedPlot { plot: p.clone(), cols: 12, cell_size: (CELL_W, CELL_H), rgba: buffer, uploaded: Instant::now() };
             assert!(cached.same_pixels(&next, 12, (CELL_W, CELL_H), &next_rgba));
             assert!(!cached.same_pixels(&next, 11, (CELL_W, CELL_H), &next_rgba));
             assert!(!cached.same_pixels(&next, 12, (20, 40), &next_rgba));
@@ -3554,8 +3788,18 @@ mod tests {
         assert_eq!(frame_column(&after, 0), column_rgba(&rgba, 64, 0, 1));
         assert_eq!(frame_column(&after, 54), column_rgba(&rgba, 64, 54, 10));
 
-        let mut scaled = new.clone();
-        scaled.chart.traces[0].values[3] = Some(0.05);
+        // One sample that changed in place is a small rectangle of the root.
+        let mut nudged = new.clone();
+        nudged.chart.traces[0].values[7] = Some(0.05);
+        let (_, before, after) = compose(&rows, std::slice::from_ref(&nudged), 40, 8, true, false, false, false);
+        assert!(
+            before.is_empty() && after.contains("a=f") && !after.contains("a=c") && !after.contains("a=T"),
+            "a changed sample edits its rectangle: {after:?}"
+        );
+        let mut scaled = nudged.clone();
+        for value in scaled.chart.traces[0].values.iter_mut() {
+            *value = value.map(|v| v * 0.5);
+        }
         let (_, before, after) = compose(&rows, &[scaled], 40, 8, true, false, false, false);
         // A replacement upload does not delete the image first. That gap is
         // what an acknowledgement would paint over while the new pixels arrive.
@@ -3578,6 +3822,228 @@ mod tests {
         let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, true, false);
         assert!(before.contains("a=d") && after.contains("a=T") && !after.contains("a=c"));
         compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    /// Apply every root-frame edit (`a=f,r=1`, any x/y) in `bytes` to a held
+    /// RGBA image. Returns how many rectangles there were.
+    fn apply_rect(held: &mut [u8], img_w: usize, bytes: &str) -> usize {
+        let mut edits: Vec<(String, String)> = Vec::new();
+        for chunk in bytes.split("\x1b_G").skip(1) {
+            let chunk = chunk.trim_end_matches("\x1b\\");
+            let (keys, data) = chunk.split_once(';').unwrap_or((chunk, ""));
+            if keys.contains("a=f") && keys.contains("r=1") {
+                edits.push((keys.to_string(), data.to_string()));
+            } else if keys.starts_with("a=f,m=") {
+                edits.last_mut().unwrap().1.push_str(data);
+            }
+        }
+        for (keys, data) in &edits {
+            let key = |k: &str| keys.split(',').find_map(|kv| kv.strip_prefix(k)).unwrap().parse::<usize>().unwrap();
+            let (x, y, w, h) = (key("x="), key("y="), key("s="), key("v="));
+            let encoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+            let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap();
+            assert_eq!(raw.len(), w * h * 4);
+            for row in 0..h {
+                let at = ((y + row) * img_w + x) * 4;
+                held[at..at + w * 4].copy_from_slice(&raw[row * w * 4..(row + 1) * w * 4]);
+            }
+        }
+        edits.len()
+    }
+
+    #[test]
+    fn a_changed_rectangle_edits_the_root_frame_and_matches_a_full_raster() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["title".into(); 10];
+        // A line chart whose newest sample moves, and a calendar where one
+        // day lands: both change a corner of the image, not all of it.
+        let values: Vec<_> = (0..24).map(|i| Some(0.2 + 0.02 * i as f64)).collect();
+        let line = Plot::new(2, 1, 12, 4, chart(values.clone()));
+        let mut moved = values;
+        *moved.last_mut().unwrap() = Some(0.9);
+        let line_next = Plot::new(2, 1, 12, 4, chart(moved));
+        let green = super::super::rgb(80, 215, 130);
+        let mut days = vec![vec![Some((green.clone(), 2)); 10]; 3];
+        days[2][9] = None; // a missing day keeps alpha, so the image is RGBA
+        let calendar = Plot::heatmap_levels(2, 6, &days, &green);
+        days[1][4] = Some((super::super::rgb(60, 130, 95), 1));
+        let calendar_next = Plot::heatmap_levels(2, 6, &days, &green);
+        for (old, new) in [(line, line_next), (calendar, calendar_next)] {
+            compose(&rows, std::slice::from_ref(&old), 40, 10, true, false, true, false);
+            let (_, before, after) = compose(&rows, std::slice::from_ref(&new), 40, 10, true, false, false, false);
+            assert!(before.is_empty(), "{before:?}");
+            assert!(after.contains("a=f") && after.contains("r=1"), "{after:?}");
+            assert!(!after.contains("a=T") && !after.contains("a=d") && !after.contains("a=c"));
+            let img_w = new.width * CELL_W;
+            let mut held = pixels(&old);
+            apply_rect(&mut held, img_w, &after);
+            assert_eq!(held, pixels(&new), "the edit leaves exactly the new raster");
+            let rects = changed_rects(&pixels(&old), &pixels(&new), img_w);
+            let area: usize = rects.iter().map(|(_, _, w, h)| w * h).sum();
+            assert!(area * 4 < img_w * new.height * CELL_H, "only the changed part: {rects:?}");
+            compose(&rows, &[], 40, 10, true, false, false, false);
+        }
+        // An opaque calendar went up as RGB and is not edited in RGBA.
+        let solid = Plot::heatmap_levels(2, 6, &vec![vec![Some((green.clone(), 2)); 10]; 3], &green);
+        let mut cells = vec![vec![Some((green.clone(), 2)); 10]; 3];
+        cells[0][0] = Some((super::super::rgb(60, 130, 95), 1));
+        let solid_next = Plot::heatmap_levels(2, 6, &cells, &green);
+        compose(&rows, &[solid], 40, 10, true, false, true, false);
+        let (_, _, after) = compose(&rows, &[solid_next], 40, 10, true, false, false, false);
+        assert!(after.contains("a=T") && !after.contains("a=f"));
+        compose(&rows, &[], 40, 10, true, false, false, false);
+    }
+
+    #[test]
+    fn changes_in_separate_bands_are_separate_rectangles() {
+        let img_w = 20;
+        let old = vec![0u8; img_w * 40 * 4];
+        let mut new = old.clone();
+        let mut ink = |x: usize, y: usize| new[(y * img_w + x) * 4 + 3] = 255;
+        // Two strokes far apart, and two rows close enough to share a band.
+        ink(3, 2);
+        ink(5, 4);
+        ink(15, 30);
+        ink(12, 30 + BAND_GAP);
+        assert_eq!(
+            changed_rects(&old, &new, img_w),
+            vec![(3, 2, 3, 3), (12, 30, 4, BAND_GAP + 1)],
+        );
+        assert!(changed_rects(&old, &old, img_w).is_empty());
+        assert!(changed_rects(&old, &new[4..], img_w).is_empty(), "a size change is no edit");
+        // Spread across the image, the bands add up past the share: no edit.
+        let mut busy = old.clone();
+        for y in (0..40).step_by(2) {
+            for x in 0..img_w {
+                busy[(y * img_w + x) * 4 + 3] = 255;
+            }
+        }
+        assert!(rect_edit(&old, &busy, img_w, 0).is_none());
+        let mut held = old.clone();
+        let (edit, share) = rect_edit(&old, &new, img_w, 0).unwrap();
+        assert_eq!(share, (9 + 4 * (BAND_GAP + 1)) as f64 / (img_w * 40) as f64);
+        assert_eq!(apply_rect(&mut held, img_w, &edit), 2);
+        assert_eq!(held, new);
+    }
+
+    #[test]
+    fn a_slot_sends_its_whole_image_at_most_once_per_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 8];
+        let at = |level: f64| Plot::new(2, 1, 12, 4, chart(vec![Some(level), Some(1.0 - level)]));
+        let (_, _, after) = compose(&rows, &[at(0.2)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // A rescale moments later is held: nothing is sent and the terminal
+        // keeps the image it has.
+        let (_, before, after) = compose(&rows, &[at(0.4)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        let (_, before, after) = compose(&rows, &[at(0.5)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty());
+        // The cache still names what is on screen, so a return to it is a no-op.
+        with_cache(|cache| assert_eq!(cache[0].plot, at(0.2)));
+        // Once the gap has passed, the next frame sends the chart as it is then.
+        with_cache(|cache| cache[0].uploaded -= FULL_UPLOAD_GAP);
+        let (_, _, after) = compose(&rows, &[at(0.5)], 40, 8, true, false, false, false);
+        assert!(after.contains("a=T"));
+        assert_eq!(uploaded_pixels(&after), pixels(&at(0.5)));
+        // A size change or a lost screen is never held.
+        let mut wider = at(0.6);
+        wider.width += 2;
+        let (_, before, after) = compose(&rows, &[wider], 40, 8, true, false, false, false);
+        assert!(before.contains("a=d") && after.contains("a=T"));
+        let (_, _, after) = compose(&rows, &[at(0.7)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn a_small_edit_always_goes_and_a_large_one_waits_for_the_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 10];
+        let line = |values: Vec<Option<f64>>| Plot::new(2, 1, 24, 6, chart(values));
+        let mut values: Vec<_> = (0..48).map(|i| Some(0.5 + 0.004 * i as f64)).collect();
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // The newest sample moves: a strip at the right edge, sent at once.
+        *values.last_mut().unwrap() = Some(0.9);
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(after.contains("a=f") && !after.contains("a=T"), "{after:?}");
+        // Half the chart moves: more than a small edit, so it waits.
+        for v in values.iter_mut().skip(24) {
+            *v = v.map(|v| v - 0.3);
+        }
+        let (_, before, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        with_cache(|cache| cache[0].uploaded -= FULL_UPLOAD_GAP);
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(after.contains("a=f") || after.contains("a=T"), "{after:?}");
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 10, true, false, false, false);
+    }
+
+    /// The pixels of the first `a=T` in `bytes`, continuation chunks included.
+    fn uploaded_pixels(bytes: &str) -> Vec<u8> {
+        let start = bytes.find("\x1b_Ga=T").unwrap();
+        let mut command = String::new();
+        for chunk in bytes[start..].split_inclusive("\x1b\\") {
+            command.push_str(chunk);
+            if chunk.contains("m=0;") {
+                break;
+            }
+        }
+        decode_image(&command).1
+    }
+
+    #[test]
+    fn an_under_text_chart_carries_its_z_on_the_upload() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let rows = vec!["title".into(), "label".into()];
+        let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)])).under_text();
+        let (_, _, after) = compose(&rows, &[plot], 40, 8, true, false, true, false);
+        let upload = graphics_keys(&after).into_iter().find(|keys| keys.contains("a=T")).unwrap();
+        assert!(upload.split(',').any(|key| key == "z=-1"), "{upload}");
+        assert!(!after.contains("a=p"), "no second placement: {after:?}");
+        let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        let (_, _, after) = compose(&rows, &[plain], 40, 8, true, false, true, false);
+        assert!(!after.contains("z=-1"));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn the_periodic_whole_frame_does_not_re_place_under_a_relaying_host() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let rows = vec!["title".into(), "axis".into()];
+        let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, true, false);
+        let (_, _, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, false, true);
+        assert!(after.contains("a=p"), "a terminal gets the re-place");
+        RELAYS.with(|relays| relays.set(true));
+        let (_, before, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, false, true);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        // A lost screen still sends the image again.
+        let (_, _, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        RELAYS.with(|relays| relays.set(false));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn the_animation_probe_asks_for_the_ok_it_waits_for() {
+        let probe = animation_probe();
+        for action in ["a=f", "a=c"] {
+            let keys = graphics_keys(&probe).into_iter().find(|keys| keys.contains(action)).unwrap();
+            assert!(keys.split(',').any(|key| key.trim_end_matches("\x1b\\") == "q=0"), "{keys}");
+        }
     }
 
     #[test]
