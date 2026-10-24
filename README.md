@@ -459,6 +459,9 @@ render progress/quota meters. Other sessions use Braille and text graphics with
 the same data and controls. Use `OPSCOPE_GRAPHICS=text` to keep text charts, or
 `OPSCOPE_GRAPHICS=kitty` to request pixels with an on-screen fallback explanation.
 The default is `auto`. No Kitty helper or image library needs installing.
+Inside Herdr, `auto` draws text charts: Herdr relays every image to its client
+uncompressed, which over SSH costs megabytes a second. Set
+`OPSCOPE_GRAPHICS=kitty` for pixels when the Herdr client is local.
 
 To force text charts even in Kitty, run `OPSCOPE_GRAPHICS=text opscope latency`
 for one widget or `OPSCOPE_GRAPHICS=text opscope` for the launcher and its widgets.

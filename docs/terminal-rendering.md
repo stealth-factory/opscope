@@ -54,7 +54,13 @@ OPSCOPE_GRAPHICS=kitty opscope latency  # negotiate; explain an unavailable Kitt
 ```
 
 The variable is inherited by widgets opened through the launcher. `kitty` does
-not bypass detection. Unsupported explicit requests show a notice in the title
+not bypass detection.
+
+Under Herdr (`HERDR_ENV=1`), `auto` means text. Herdr relays each image to its
+own client decoded, so a chart that is a few KB compressed costs the client's
+link its raw size, every frame the chart changes. Over SSH that measured 4.9
+MB/s for `latency` alone (OPS-199). Set `OPSCOPE_GRAPHICS=kitty` to have pixels
+anyway, for a Herdr whose client runs on the same machine. Unsupported explicit requests show a notice in the title
 row and use text. An image transmission error also disables pixels for the
 session and shows why; re-entering the terminal session renegotiates support.
 
