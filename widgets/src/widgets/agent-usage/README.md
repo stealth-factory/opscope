@@ -1350,6 +1350,15 @@ A reading is held for a couple of minutes, because these windows move over
 hours and the pane redraws every thirty seconds. A failure is held too, so
 something that is down is retried occasionally rather than on every frame.
 
+Cursor, Copilot, Devin, Droid, Notion and Perplexity have no fallback of their
+own, so a failure in transit - a timeout, a host that could not be reached, a
+rate limit, a server error - keeps their **last good reading** on screen for
+up to six hours rather than blanking it. The heading's `live` becomes
+`kept 12m`, the row under it says `Not current` with the reading's own time
+and this pass's reason, and the summary marks those lanes as cached. A refused
+or missing token, or a different account, never brings an old reading back:
+any failure that is not in transit drops what was kept.
+
 ### Claude's fallback is our own snapshot, not Claude Code's
 
 Claude Code keeps a usage cache of its own, and this widget used to read it

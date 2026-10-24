@@ -44,6 +44,8 @@ pub struct Caches {
     pub grok_built: Option<crate::grok::Built>,
     /// What is left of this pass's reading budget, shared by every agent.
     pub budget: Budget,
+    /// key -> (when, value) of the last good reading, for `kept`.
+    pub good: HashMap<String, (f64, serde_json::Value)>,
     /// key -> (when, value, ttl)
     pub live: HashMap<String, (f64, Option<serde_json::Value>, f64)>,
     /// key -> refusals in a row, which is what the backoff doubles on.
@@ -681,8 +683,67 @@ where
         // thirty minutes is fine, but it must not exceed the hour.
         backoff(*n).min(ttl.max(BACKOFF_FROM))
     };
+    match &value {
+        Some(v) if v.get("why").is_none() && v.get("opscope_refusal").is_none() => {
+            caches.good.insert(key.to_string(), (at, v.clone()));
+        }
+        _ => {}
+    }
     caches.live.insert(key.to_string(), (at, value.clone(), held));
     value
+}
+
+/// How long a good reading is kept on screen through failures in transit.
+///
+/// Long enough to ride out an outage, a laptop off the network, or a run of
+/// rate limits - and short of the point where the 5-hour windows most of
+/// these quotas have would have rolled over twice. Past it the tab says the
+/// reading is missing and why, as it would have before this kept anything.
+pub const KEEP_FOR: f64 = 6.0 * 3600.0;
+
+/// Whether a refusal is the network or the server having a moment, rather
+/// than the account saying no.
+///
+/// Only these are: a timeout, a host that could not be reached, an endpoint
+/// that did not answer, a rate limit, and a server error. A refused token,
+/// a missing one, a gone endpoint or an answer that did not parse are not,
+/// and must not be papered over with a reading from before: those are the
+/// account changing under the widget, and the last reading may not be its.
+/// The phrases are the ones `refusal` and the readers write.
+pub fn transient(why: &str) -> bool {
+    let w = why.to_ascii_lowercase();
+    ["timed out", "could not reach", "did not answer", "too many requests", "the server answered 5"]
+        .iter()
+        .any(|m| w.contains(m))
+}
+
+/// A quota reading kept from an earlier pass, and why it is not fresh.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kept {
+    /// When the kept reading was taken - its own time, not this pass's.
+    pub at: f64,
+    /// Why this pass could not take a new one.
+    pub why: String,
+}
+
+/// The last good reading under `key`, when this pass's failure to get one
+/// was in transit and that reading is not older than `KEEP_FOR`.
+///
+/// Any other failure drops what was kept, so a token that was refused or an
+/// account that changed can never bring an old reading back later.
+pub fn kept(caches: &mut Caches, key: &str, why: &str) -> Option<(serde_json::Value, Kept)> {
+    if why.is_empty() {
+        return None;
+    }
+    if !transient(why) {
+        caches.good.remove(key);
+        return None;
+    }
+    let (at, value) = caches.good.get(key)?;
+    if now() - at > KEEP_FOR {
+        return None;
+    }
+    Some((value.clone(), Kept { at: *at, why: why.to_string() }))
 }
 
 /// Put a refusal's reason in the slot `cached` just stored as `None`.
@@ -1335,6 +1396,56 @@ mod tests {
         let (cut, complete) =
             list_logs_within(&dir.to_string_lossy(), ".jsonl", None, at, 1, std::time::Duration::from_secs(5));
         assert_eq!((cut.len(), complete), (1, false));
+    }
+
+    #[test]
+    fn only_a_failure_in_transit_is_transient() {
+        for why in [
+            "the request timed out",
+            "quota could not reach it",
+            "Cursor's usage endpoint did not answer",
+            "too many requests - something else is polling the same token",
+            "the server answered 503",
+        ] {
+            assert!(transient(why), "{why}");
+        }
+        for why in [
+            "the token was refused - the agent may need signing in again",
+            "token rejected · copy a fresh bearer token",
+            "no token - Codex has not signed in here",
+            "the endpoint is gone",
+            "the server answered 400",
+            "",
+        ] {
+            assert!(!transient(why), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_good_reading_is_kept_through_a_failure_in_transit_and_dropped_on_a_refusal() {
+        let mut caches = Caches::default();
+        let good = serde_json::json!({"u": {"pct": 40}});
+        assert!(cached(&mut caches, "probe", 120.0, || Some(good.clone())).is_some());
+        let taken = caches.good["probe"].0;
+        // Past its hold, the endpoint does not answer.
+        caches.live.get_mut("probe").unwrap().0 -= 500.0;
+        caches.good.get_mut("probe").unwrap().0 -= 500.0;
+        assert!(cached(&mut caches, "probe", 120.0, || None).is_none());
+        let (value, k) = kept(&mut caches, "probe", "the request timed out").expect("kept");
+        assert_eq!(value, good);
+        assert_eq!(k.at, taken - 500.0, "the reading's own time, not this pass's");
+        assert_eq!(k.why, "the request timed out");
+        // Too old to keep is not kept, and says nothing it cannot back.
+        caches.good.get_mut("probe").unwrap().0 = now() - KEEP_FOR - 1.0;
+        assert!(kept(&mut caches, "probe", "the request timed out").is_none());
+        caches.good.get_mut("probe").unwrap().0 = now() - 60.0;
+        // The token refused: the old reading is dropped for good, so a later
+        // timeout cannot bring it back under an account that said no.
+        assert!(kept(&mut caches, "probe", "the token was refused").is_none());
+        assert!(kept(&mut caches, "probe", "the request timed out").is_none());
+        // A local fact riding in the value is not a reading either.
+        assert!(cached(&mut caches, "fact", 120.0, || Some(serde_json::json!({"why": "no token"}))).is_some());
+        assert!(!caches.good.contains_key("fact"));
     }
 
     #[test]
