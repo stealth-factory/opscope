@@ -1,0 +1,38 @@
+Google Analytics 4: is traffic normal right now, and did the last change hurt key events?
+
+GA's own screens say how many people are on the site, not whether that is
+normal for this minute of a Tuesday, or whether key events fell after this
+morning's deploy. Each section here answers one question you would act on:
+live users against a baseline this widget records itself, today against the
+same weekday, key events to the same hour, the pages Google Search sends
+visitors to, and the pages and channels that moved.
+
+    google-analytics
+
+Signs in with a Google service-account key (credentials_file), which mints
+its own hour-long token indefinitely, or with a pasted token for an hour of
+testing (token, or $GOOGLE_OAUTH_ACCESS_TOKEN), which the screen says will
+expire. Setup on Google's side - one Cloud project, three APIs, the service
+account as Viewer on each property - is docs/google-setup.md.
+
+Realtime is read every 15 s by default, backing off to 60 s after five
+minutes with nobody on the site and slowing to 120 s when under a tenth of
+the property's quota is left; the header says which. Processed reports come
+every 5 minutes and run 2-6 hours behind, so an hour GA has not processed is
+drawn hatched, never as zero. Every request reads GA's property quota back.
+
+The baseline is the median of active users at this minute of the week over
+the last 4 weeks, from samples this widget wrote to
+$XDG_STATE_HOME/opscope/google-analytics/. It uses only weeks the widget was
+running at that minute and says how many that was; with none it says so
+rather than showing a figure.
+
+Keys: up/down move between rows, tab jumps to the next section, left/right
+change property, Enter opens a page, key event or property in detail and esc
+closes it, m cycles the metric, w cycles the window, s cycles the sort, /
+filters by text, l cycles the realtime interval, c copies the property's GA
+URL, r refreshes now, comma opens settings, q quits.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.
