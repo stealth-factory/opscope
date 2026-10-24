@@ -485,6 +485,11 @@ pub struct Logs<P> {
     listed: Vec<Listed>,
     /// Logs a budget left unfinished, in the order they will be resumed.
     queue: Vec<String>,
+    /// Listed logs the last read could not open. Retried on the history
+    /// cadence until one succeeds or a complete listing no longer has it,
+    /// and counted as not read meanwhile, so what was built without them is
+    /// never called a total.
+    unread: Vec<String>,
     read_at: f64,
     pub history: History,
     /// Read something since the store last saved it.
@@ -497,6 +502,7 @@ impl<P> Default for Logs<P> {
             tails: HashMap::new(),
             listed: Vec::new(),
             queue: Vec::new(),
+            unread: Vec::new(),
             read_at: 0.0,
             history: History::default(),
             dirty: false,
@@ -523,7 +529,7 @@ impl<P: Lines> Logs<P> {
         fresh: impl Fn(&str) -> P,
     ) -> Pass {
         let (listed, complete) = listing;
-        let changed = listed != self.listed || complete != self.history.listed_all;
+        let changed = listed != self.listed || complete != self.history.listed_all || !self.unread.is_empty();
         let catching_up = !self.queue.is_empty() || self.read_at == 0.0;
         let due = asked || catching_up || (changed && at - self.read_at >= HISTORY_EVERY);
         // Gone from disk, or out of the window: nothing held for it can
@@ -534,7 +540,9 @@ impl<P: Lines> Logs<P> {
             let present: std::collections::HashSet<&str> = listed.iter().map(|l| l.path.as_str()).collect();
             self.tails.retain(|path, _| present.contains(path.as_str()));
             self.queue.retain(|path| present.contains(path.as_str()));
+            self.unread.retain(|path| present.contains(path.as_str()));
         }
+        self.history.behind = self.queue.len() + self.unread.len();
         self.history.of = listed.len();
         self.history.listed_all = complete;
         if !due {
@@ -555,10 +563,12 @@ impl<P: Lines> Logs<P> {
         order.append(&mut self.queue);
         let mut unfinished = Vec::new();
         let mut cut_short = None;
+        let mut unread = Vec::new();
         for path in order {
             let had_budget = !budget.spent();
             match follow_within(&mut self.tails, &path, || fresh(&path), budget) {
-                Followed::Current | Followed::Unreadable => {}
+                Followed::Current => {}
+                Followed::Unreadable => unread.push(path),
                 // The one the budget ran out in goes to the very back,
                 // behind the logs it never reached.
                 Followed::Behind if had_budget => cut_short = Some(path),
@@ -567,9 +577,10 @@ impl<P: Lines> Logs<P> {
         }
         unfinished.extend(cut_short);
         self.queue = unfinished;
+        self.unread = unread;
         self.read_at = at;
-        self.history.behind = self.queue.len();
-        if self.queue.is_empty() && complete {
+        self.history.behind = self.queue.len() + self.unread.len();
+        if self.history.behind == 0 && complete {
             self.history.as_of = at;
         }
         self.listed = listed;
@@ -1509,6 +1520,33 @@ mod tests {
         assert_eq!(logs.tails[&log.path].parser.0, 2, "read again from the start, not added to");
         use std::os::unix::fs::MetadataExt;
         assert_eq!(logs.tails[&log.path].file.1, std::fs::metadata(&log.path).unwrap().ino());
+    }
+
+    #[test]
+    fn a_log_that_could_not_be_read_is_retried_and_never_called_read() {
+        let log = growing::Log::new("unreadable");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n{}\n");
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        // Listed, then moved aside before it could be read.
+        let seen = listing(&dir, at);
+        let aside = dir.join("aside");
+        std::fs::rename(&log.path, &aside).unwrap();
+        logs.pass(seen, false, at, &mut Budget::unlimited(), |_| Seen(0));
+        assert_eq!(lines_in(&logs), 0);
+        assert!(logs.history.partial(), "a log not read is not part of a total");
+        assert_eq!(logs.history.as_of, 0.0);
+        // Back, the same file: the next read on the cadence picks it up.
+        std::fs::rename(&aside, &log.path).unwrap();
+        let soon = at + 1.0;
+        assert_eq!(logs.pass(listing(&dir, soon), false, soon, &mut Budget::unlimited(), |_| Seen(0)), Pass::Held);
+        assert_eq!(logs.history.as_of, 0.0, "still not current while it is owed");
+        let due = at + HISTORY_EVERY;
+        assert_eq!(logs.pass(listing(&dir, due), false, due, &mut Budget::unlimited(), |_| Seen(0)), Pass::Read);
+        assert_eq!(lines_in(&logs), 2);
+        assert!(!logs.history.partial());
+        assert_eq!(logs.history.as_of, due);
     }
 
     #[test]

@@ -261,9 +261,15 @@ fn cursor_token() -> Option<String> {
 /// curl on its standard input, never in an argument - /proc/<pid>/cmdline
 /// is world-readable.
 fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
-    let tok = cursor_token()?;
+    cursor_rpc_said(method, body).ok()
+}
+
+/// `cursor_rpc`, keeping why it failed in `refusal`'s words, so `kept` can
+/// tell a request lost in transit from a token the server refused.
+fn cursor_rpc_said(method: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let tok = cursor_token().ok_or_else(|| "no token - Cursor has not signed in here".to_string())?;
     let bearer = format!("Bearer {}", tok);
-    post_json(
+    post_json_said(
         &format!("{}{}", CURSOR_RPC, method),
         &[
             ("Authorization", bearer.as_str()),
@@ -279,15 +285,15 @@ fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Valu
 /// Plan usage, from the endpoint cursor-agent's own Usage view calls.
 ///
 /// A missing token is a local fact and rides in the cached value, so the
-/// summary can name it for as long as the absence lasts. A silent endpoint
-/// is a refusal: it stays `None` so `cached` backs off rather than treating
-/// the diagnostic as a successful reading.
-fn cursor_live() -> Option<serde_json::Value> {
+/// summary can name it for as long as the absence lasts. A failed request
+/// is a refusal, returned as its reason so the caller can keep it out of
+/// the cache, and `cached` backs off rather than treating the diagnostic as
+/// a successful reading.
+fn cursor_live() -> Result<serde_json::Value, String> {
     if cursor_token().is_none() {
-        return Some(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
+        return Ok(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
     }
-    cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({}))
-        .map(|u| serde_json::json!({"u": u}))
+    cursor_rpc_said("GetCurrentPeriodUsage", &serde_json::json!({})).map(|u| serde_json::json!({"u": u}))
 }
 
 /// Which Cursor plan the percentages are percentages of.
@@ -1783,12 +1789,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let me = account_key();
     let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
+    // Said as the request failed, not as "did not answer" whatever the
+    // cause: a refused token must not read as a failure in transit and
+    // bring back a reading `kept` holds for one.
     d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live() {
-        None => {
-            refuse = "Cursor's usage endpoint did not answer".into();
+        Err(why) => {
+            let short: String = why.chars().take(40).collect();
+            refuse = format!("Cursor's usage request failed: {short}");
             None
         }
-        other => other,
+        Ok(got) => Some(got),
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             d.live_why = text(&got, "why");
