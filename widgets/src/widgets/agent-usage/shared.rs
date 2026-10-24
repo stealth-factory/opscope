@@ -90,6 +90,13 @@ pub struct Tail<P> {
     offset: u64,
     /// The first bytes of the file, up to `HEAD`.
     head: Vec<u8>,
+    /// Bytes taken off the disk for this log, all passes together. A torn
+    /// last line is read again on the pass that finishes it, so this is
+    /// the file's size plus those re-reads and nothing more.
+    pub read: u64,
+    /// The longest single line held while reading - the most of this log
+    /// that was ever in memory at once, past the reader's fixed buffer.
+    pub widest: usize,
     pub parser: P,
 }
 
@@ -107,6 +114,8 @@ pub fn follow<P: Lines>(
 ) -> bool {
     use std::os::unix::fs::{FileExt, MetadataExt};
     let Ok(meta) = std::fs::metadata(path) else {
+        // Gone: nothing held for it is true any more.
+        tails.remove(path);
         return false;
     };
     let stamp = (meta.mtime(), meta.size());
@@ -135,6 +144,8 @@ pub fn follow<P: Lines>(
                 file,
                 offset: 0,
                 head: Vec::new(),
+                read: 0,
+                widest: 0,
                 parser: fresh(),
             },
         );
@@ -149,29 +160,46 @@ pub fn follow<P: Lines>(
             t.head = head;
         }
     }
-    t.offset += feed(&f, t.offset, size, &mut t.parser);
+    let (used, read, widest) = feed(&f, t.offset, size, &mut t.parser);
+    t.offset += used;
+    t.read += read;
+    t.widest = t.widest.max(widest);
     t.stamp = stamp;
     true
 }
 
+/// Drop what is held for logs that are no longer on disk.
+///
+/// The state follows the files rather than the uptime: a transcript that
+/// was deleted, or a rollout an agent cleaned up, takes its records with
+/// it. `owns` says which paths this caller is responsible for, so one
+/// reader's prune cannot empty another's entries in a shared map.
+pub fn prune<P>(
+    tails: &mut HashMap<String, Tail<P>>,
+    owns: impl Fn(&str) -> bool,
+    present: &std::collections::HashSet<&str>,
+) {
+    tails.retain(|path, _| !owns(path) || present.contains(path.as_str()));
+}
+
 /// Hand the parser every whole line between `from` and `to`, and say how
-/// many bytes that consumed.
+/// many bytes that consumed, how many were read, and the longest line.
 ///
 /// Read through a buffer, a line at a time, so memory follows the longest
 /// line rather than the file. `to` is the size the file had when it was
 /// looked at, so a line being written while this reads is left for the
 /// next pass rather than read half-finished.
-fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> u64 {
+fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> (u64, u64, usize) {
     use std::io::{BufRead, Read, Seek, SeekFrom};
     if to <= from {
-        return 0;
+        return (0, 0, 0);
     }
     let mut f = f;
     if f.seek(SeekFrom::Start(from)).is_err() {
-        return 0;
+        return (0, 0, 0);
     }
     let mut reader = std::io::BufReader::with_capacity(256 * 1024, f.take(to - from));
-    let mut used = 0u64;
+    let (mut used, mut read, mut widest) = (0u64, 0u64, 0usize);
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
@@ -179,6 +207,8 @@ fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> u64 
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        read += n as u64;
+        widest = widest.max(n);
         if buf.last() != Some(&b'\n')
             && serde_json::from_slice::<serde_json::Value>(&buf).is_err()
         {
@@ -194,7 +224,7 @@ fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> u64 
         }
         parser.line(&String::from_utf8_lossy(line));
     }
-    used
+    (used, read, widest)
 }
 
 /// Lines that are not blank, counted as they are appended.
@@ -744,6 +774,82 @@ mod tests {
         log.append("\n{\"a\":3}\n");
         follow(&mut tails, &log.path, Counted::default);
         assert_eq!(tails[&log.path].parser.0, 3, "the newline that closed it is not a second line");
+    }
+
+    #[test]
+    fn a_log_far_bigger_than_its_lines_is_never_held_whole() {
+        // Grown to 24 MB in 3,000 appends, some of them tearing a line in
+        // half. Whatever the size, what is held is one line at a time and
+        // the first kilobyte, and every byte comes off the disk once -
+        // apart from the torn halves, read again on the pass that ends them.
+        let log = growing::Log::new("bounded");
+        let mut tails: HashMap<String, Tail<Counted>> = HashMap::new();
+        let line = format!("{{\"pad\":\"{}\"}}\n", "x".repeat(8 * 1024 - 12));
+        let (mut written, mut lines, mut torn) = (0u64, 0usize, 0u64);
+        let mut half = String::new();
+        for i in 0..3000 {
+            let mut piece = std::mem::take(&mut half);
+            piece.push_str(&line);
+            if i % 7 == 3 {
+                // Leave the next line half written until the next append.
+                let cut = line.len() / 2;
+                piece.push_str(&line[..cut]);
+                half = line[cut..].to_string();
+                torn += cut as u64;
+            }
+            log.append(&piece);
+            written += piece.len() as u64;
+            lines += piece.matches('\n').count();
+            let before = tails.get(&log.path).map_or(0, |t| t.read);
+            assert!(follow(&mut tails, &log.path, Counted::default));
+            let t = &tails[&log.path];
+            assert_eq!(t.parser.0, lines, "append {i}");
+            // Only what was appended, plus a half line left from before.
+            assert!(t.read - before <= piece.len() as u64 + line.len() as u64, "append {i}");
+        }
+        if !half.is_empty() {
+            log.append(&half);
+            written += half.len() as u64;
+            lines += 1;
+            follow(&mut tails, &log.path, Counted::default);
+        }
+        let t = &tails[&log.path];
+        assert_eq!(t.parser.0, lines);
+        assert!(written > 20 * 1024 * 1024, "the log is meant to dwarf its lines");
+        assert_eq!(t.read, written + torn, "each byte read once, torn halves twice");
+        assert_eq!(t.widest, line.len(), "never more than one line at a time");
+        assert!(t.head.len() <= HEAD);
+    }
+
+    #[test]
+    fn a_deleted_log_takes_its_state_with_it() {
+        let a = growing::Log::new("kept");
+        let b = growing::Log::new("deleted");
+        a.append("{}\n");
+        b.append("{}\n{}\n");
+        let mut tails: HashMap<String, Tail<Counted>> = HashMap::new();
+        let other = "/somewhere/else/log.jsonl".to_string();
+        for path in [&a.path, &b.path] {
+            assert!(follow(&mut tails, path, Counted::default));
+        }
+        tails.insert(
+            other.clone(),
+            Tail { stamp: (0, 0), file: (0, 0), offset: 0, head: Vec::new(), read: 0, widest: 0, parser: Counted(9) },
+        );
+        let gone = b.path.clone();
+        drop(b);
+        // Asked for by name after it went, it is dropped on the spot.
+        let mut asked = HashMap::new();
+        assert!(follow(&mut asked, &a.path, Counted::default));
+        std::fs::remove_file(&a.path).unwrap();
+        assert!(!follow(&mut asked, &a.path, Counted::default));
+        assert!(asked.is_empty(), "a log asked for after it went is forgotten");
+        std::fs::write(&a.path, "{}\n").unwrap();
+        let present: std::collections::HashSet<&str> = [a.path.as_str()].into_iter().collect();
+        prune(&mut tails, |path| !path.starts_with("/somewhere/"), &present);
+        assert!(tails.contains_key(&a.path));
+        assert!(!tails.contains_key(&gone), "a deleted log's records are dropped");
+        assert!(tails.contains_key(&other), "another reader's entries are not this prune's");
     }
 
     #[test]

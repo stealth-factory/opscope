@@ -830,6 +830,12 @@ fn claude_daily_at(
         .iter()
         .filter(|path| follow(&mut caches.transcripts, path, TranscriptLines::default))
         .collect();
+    // A transcript deleted from under this directory takes its records
+    // with it, so what is held follows the disk and not the uptime. Other
+    // configured directories share the map and are left to their own pass.
+    let under = format!("{}/", projects.trim_end_matches('/'));
+    let present: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    prune(&mut caches.transcripts, |path| path.starts_with(&under), &present);
     // Later files win a shared uuid, as `extend` did.
     let mut seen: HashMap<&str, &Record> = HashMap::new();
     for path in readable {
@@ -3933,6 +3939,33 @@ mod tests {
         let whole = claude_daily_at(&mut Caches::default(), &projects);
         assert!(!whole.is_empty());
         assert_eq!(incremental, whole);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_transcript_leaves_nothing_behind() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-207-gone-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let projects = root.join("projects").to_string_lossy().to_string();
+        std::fs::write(project.join("kept.jsonl"), synthetic_transcript(5)).unwrap();
+        let gone = project.join("gone.jsonl");
+        std::fs::write(&gone, synthetic_transcript(9).replace("\"a-", "\"b-")).unwrap();
+        let mut caches = Caches::default();
+        // Another configured directory's entry must survive this one's prune.
+        std::fs::create_dir_all(root.join("projects2")).unwrap();
+        let elsewhere = format!("{}2/other.jsonl", projects);
+        std::fs::write(&elsewhere, synthetic_transcript(2)).unwrap();
+        assert!(follow(&mut caches.transcripts, &elsewhere, TranscriptLines::default));
+        claude_daily_at(&mut caches, &projects);
+        assert_eq!(caches.transcripts.len(), 3);
+        std::fs::remove_file(&gone).unwrap();
+        let after = claude_daily_at(&mut caches, &projects);
+        assert_eq!(caches.transcripts.len(), 2, "{:?}", caches.transcripts.keys());
+        assert!(caches.transcripts.contains_key(&elsewhere));
+        assert_eq!(after, claude_daily_at(&mut Caches::default(), &projects));
         let _ = std::fs::remove_dir_all(&root);
     }
 

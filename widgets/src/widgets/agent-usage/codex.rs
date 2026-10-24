@@ -588,6 +588,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         ..Data::default()
     };
     let files = rollout_files();
+    // Every rollout comes from the one sessions directory, so anything held
+    // for a path not found there this pass is a file that has gone - and
+    // when none are left, nothing is.
+    let present: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    prune(&mut caches.rollouts, |_| true, &present);
     let Some(newest) = files.first().cloned() else {
         return codex;
     };

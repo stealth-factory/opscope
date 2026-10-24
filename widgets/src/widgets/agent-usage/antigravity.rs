@@ -811,6 +811,8 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let history = format!("{}/history.jsonl", antigravity_dir());
     // Counted as it grows rather than read whole on every pass: the history
     // is appended to for as long as Antigravity is used.
+    let present: std::collections::HashSet<&str> = [history.as_str()].into_iter().collect();
+    prune(&mut caches.history, |_| true, &present);
     if follow(&mut caches.history, &history, Counted::default) {
         d.prompts = caches.history.get(&history).map_or(0, |t| t.parser.0);
         if let Ok(meta) = std::fs::metadata(&history) {
