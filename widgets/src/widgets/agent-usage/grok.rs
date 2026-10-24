@@ -593,7 +593,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // Every session, not a window: the tab's token figure is the whole
     // history on this disk. Metadata only; contents are read below.
     let at = now();
-    let (listed, complete) = list_logs(&under_home(SESSIONS), "updates.jsonl", None, at);
+    let (listed, complete) = caches.grok.or_last(list_logs(&under_home(SESSIONS), "updates.jsonl", None, at));
     let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     if files.is_empty() {
         // Every session log is gone, so what was held for them goes too -
@@ -619,6 +619,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             quota_at,
             quota_why,
             quota_every: quota_every_secs(cfg),
+            history: History { listed_all: complete, ..History::default() },
             ..Data::default()
         };
     }
@@ -1632,8 +1633,14 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
     // when there is nothing recorded - but the quota above has already been
     // drawn, because it is a fact about the account rather than the disk.
     if !d.ok {
+        // Only a complete listing shows there are none.
+        let none = if d.history.listed_all {
+            "No Grok sessions on this machine."
+        } else {
+            "Grok sessions not listed yet: the directory walk ran out of time."
+        };
         rows.extend(no_local(
-            "No Grok sessions on this machine.",
+            none,
             run_hint("grok"),
             w,
             p,

@@ -609,6 +609,19 @@ impl<P: Lines> Logs<P> {
         Pass::Read
     }
 
+    /// `listing`, or the last one read when this one was cut short before
+    /// it found anything. A walk that ran out of time at the first entry
+    /// has not shown the logs are gone, and taken at its word it would
+    /// draw the figures built from them as nothing at all; the last
+    /// listing, still marked incomplete, keeps them on screen as not totals.
+    pub fn or_last(&self, listing: (Vec<Listed>, bool)) -> (Vec<Listed>, bool) {
+        if listing.0.is_empty() && !listing.1 {
+            (self.listed.clone(), false)
+        } else {
+            listing
+        }
+    }
+
     /// Paths in the order the last listing gave them, newest first.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.listed.iter().map(|l| l.path.as_str())
@@ -1587,6 +1600,20 @@ mod tests {
         assert_eq!(logs.pass(listing(&dir, soon), false, soon, &mut Budget::unlimited(), |_| Seen(0)), Pass::Read);
         assert_eq!(lines_in(&logs), 3);
         assert!(!logs.history.partial());
+    }
+
+    #[test]
+    fn a_listing_cut_short_before_it_found_anything_keeps_the_last_one() {
+        let log = growing::Log::new("or-last");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n");
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        logs.pass(listing(&dir, at), false, at, &mut Budget::unlimited(), |_| Seen(0));
+        let (kept, complete) = logs.or_last((Vec::new(), false));
+        assert_eq!((kept.len(), complete), (1, false), "still incomplete, so never a total");
+        // A complete empty listing is believed: the logs are gone.
+        assert!(logs.or_last((Vec::new(), true)).0.is_empty());
     }
 
     #[test]

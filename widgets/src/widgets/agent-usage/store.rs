@@ -194,18 +194,26 @@ pub fn save(caches: &Caches, path: &str) -> std::io::Result<()> {
     if let Some(dir) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let next = format!("{path}.next");
+    // A staging file of this save's own, made new rather than truncated:
+    // two widgets saving at once must never write into one file, or into
+    // the one the other has just moved into place.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let next = format!("{path}.{}.{stamp}.next", std::process::id());
     let file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&next)?;
     let mut out = std::io::BufWriter::new(file);
-    write_all(caches, &mut out)?;
-    out.flush()?;
+    let written = write_all(caches, &mut out).and_then(|_| out.flush());
     drop(out);
-    std::fs::rename(&next, path)
+    if let Err(e) = written.and_then(|_| std::fs::rename(&next, path)) {
+        let _ = std::fs::remove_file(&next);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Whether anything was read since the last save, clearing the marks.
@@ -278,6 +286,9 @@ mod tests {
         logs.pass((listed, all), false, at, &mut Budget::unlimited(), |_| crate::claude::TranscriptLines::default());
         let saved = dir.clone() + "/store.json";
         save(&first, &saved).unwrap();
+        save(&first, &saved).unwrap();
+        let staged = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".next")).count();
+        assert_eq!(staged, 0, "each save's staging file is moved into place");
         // Counters only: not a word of what was said, nor the start of the
         // file it was said in.
         let body = std::fs::read(&saved).unwrap();

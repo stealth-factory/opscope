@@ -614,7 +614,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // change what is drawn. Metadata only; the contents are read below,
     // and only what changed.
     let at = now();
-    let (listed, complete) = list_logs(&under_home(".codex/sessions"), ".jsonl", None, at);
+    let (listed, complete) = caches.rollouts.or_last(list_logs(&under_home(".codex/sessions"), ".jsonl", None, at));
     let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     let Some(newest) = files.first().cloned() else {
         // Only a complete listing proves the rollouts are gone: one cut
@@ -623,6 +623,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             caches.rollouts = Logs::default();
             caches.codex_built = None;
         }
+        codex.history.listed_all = complete;
         return codex;
     };
     codex.ok = true;
@@ -1454,8 +1455,15 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
     if !d.ok {
         // The quota above is the account's and is true whatever this machine
         // has on disk, so it stays; only the local half is missing.
+        // Only a complete listing shows there are none; one cut short has
+        // just not found any yet.
+        let none = if d.history.listed_all {
+            "No session rollouts on this machine."
+        } else {
+            "Session rollouts not listed yet: the directory walk ran out of time."
+        };
         rows.extend(no_local(
-            "No session rollouts on this machine.",
+            none,
             run_hint("codex"),
             w,
             p,

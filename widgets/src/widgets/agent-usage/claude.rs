@@ -865,8 +865,8 @@ fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
     //
     // Windowed while listing, not after, so transcripts too old to show
     // never count towards the listing's entry bound.
-    let (windowed, complete) = list_logs(projects, ".jsonl", Some(crate::metered_window()), at);
     let logs = caches.transcripts.entry(projects.to_string()).or_default();
+    let (windowed, complete) = logs.or_last(list_logs(projects, ".jsonl", Some(crate::metered_window()), at));
     let pass = logs.pass((windowed, complete), asked, at, &mut caches.budget, |_| {
         TranscriptLines::default()
     });
