@@ -105,6 +105,10 @@ pub struct Data {
     /// The variable read, when `source` is `env`.
     env_name: String,
     why: String,
+    /// Set when the credits, or the weekly limit, are a reading kept from
+    /// an earlier pass.
+    kept: Option<Kept>,
+    quota_kept: Option<Kept>,
 }
 
 /// The cookie, and where it came from. `config` wins over the environment.
@@ -233,6 +237,18 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         caches.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    let failed = if refused.is_empty() {
+        got.as_ref().map(|g| text(g, "why")).unwrap_or_default()
+    } else {
+        refused.clone()
+    };
+    if let Some((value, k)) = kept(caches, &key, &failed) {
+        got = Some(value);
+        d.kept = Some(k);
+        refused.clear();
+    }
     d.why = refused;
     if let Some(got) = got.as_ref().filter(|_| d.why.is_empty()) {
         d.why = text(got, "why");
@@ -266,6 +282,18 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         caches.live.remove(&qkey);
     }
     remember_refusal(caches, &qkey, &refused);
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    let failed = if refused.is_empty() {
+        got.as_ref().map(|g| text(g, "why")).unwrap_or_default()
+    } else {
+        refused.clone()
+    };
+    if let Some((value, k)) = kept(caches, &qkey, &failed) {
+        got = Some(value);
+        d.quota_kept = Some(k);
+        refused.clear();
+    }
     d.quota_why = refused;
     // The plan is only a label in the heading, but a session that failed
     // is said, so it is not taken for one that names no plan.
@@ -394,7 +422,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             pct: q.pct,
             window_secs: q.resets.map(|_| WEEK),
             reset: q.resets,
-            stale: q.resets.is_some_and(|r| r <= now()),
+            stale: q.resets.is_some_and(|r| r <= now()) || d.quota_kept.is_some(),
             projected: false,
             apart: false,
         });
@@ -409,7 +437,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             pct: c.recurring.pct(),
             window_secs: length,
             reset: length.and(c.renews),
-            stale: length.and(c.renews).is_some_and(|r| r <= now()),
+            stale: length.and(c.renews).is_some_and(|r| r <= now()) || d.kept.is_some(),
             projected: false,
             apart: false,
         });
@@ -421,7 +449,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 pct: pool.pct(),
                 window_secs: None,
                 reset: None,
-                stale: false,
+                stale: d.kept.is_some(),
                 projected: false,
                 apart: false,
             });
@@ -594,16 +622,27 @@ fn credit_rows_with_plots(
         (false, true) => "credits",
         (false, false) => "billing",
     };
+    // The older of the two kept readings names the badge: the heading
+    // says how old the oldest thing under it is.
+    let oldest = match (d.kept.as_ref(), d.quota_kept.as_ref()) {
+        (Some(a), Some(b)) => Some(if a.at <= b.at { a } else { b }),
+        (a, b) => a.or(b),
+    };
+    let (ink, badge) = crate::live_badge(oldest, p);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── PERPLEXITY ".into()),
             (p.txt.as_str(), d.plan.as_ref().map(|plan| format!("{plan} ")).unwrap_or_default()),
             (p.lbl.as_str(), "── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), format!(" · {read} · read {} ago", ago(d.read_at))),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.kept.as_ref(), w, p));
+    if d.quota_kept != d.kept {
+        rows.extend(crate::kept_rows(d.quota_kept.as_ref(), w, p));
+    }
     let hue = agent_hue("perplexity");
     let label_w = 7;
     // Which token was sent: config wins over the variable, so a stale one

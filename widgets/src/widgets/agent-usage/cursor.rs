@@ -119,6 +119,8 @@ pub struct Data {
     /// Why there is no live reading, when there is none. Empty while the
     /// endpoint is answering, or when nothing has been asked yet.
     live_why: String,
+    /// Set when `live` is a reading kept from an earlier pass.
+    live_kept: Option<Kept>,
     /// GetPlanInfo: the plan the percentages are percentages of.
     plan: Option<serde_json::Value>,
     /// GetHardLimit: the extra-usage cap in dollars, and - on the
@@ -259,9 +261,15 @@ fn cursor_token() -> Option<String> {
 /// curl on its standard input, never in an argument - /proc/<pid>/cmdline
 /// is world-readable.
 fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
-    let tok = cursor_token()?;
+    cursor_rpc_said(method, body).ok()
+}
+
+/// `cursor_rpc`, keeping why it failed in `refusal`'s words, so `kept` can
+/// tell a request lost in transit from a token the server refused.
+fn cursor_rpc_said(method: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let tok = cursor_token().ok_or_else(|| "no token - Cursor has not signed in here".to_string())?;
     let bearer = format!("Bearer {}", tok);
-    post_json(
+    post_json_said(
         &format!("{}{}", CURSOR_RPC, method),
         &[
             ("Authorization", bearer.as_str()),
@@ -277,15 +285,15 @@ fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Valu
 /// Plan usage, from the endpoint cursor-agent's own Usage view calls.
 ///
 /// A missing token is a local fact and rides in the cached value, so the
-/// summary can name it for as long as the absence lasts. A silent endpoint
-/// is a refusal: it stays `None` so `cached` backs off rather than treating
-/// the diagnostic as a successful reading.
-fn cursor_live() -> Option<serde_json::Value> {
+/// summary can name it for as long as the absence lasts. A failed request
+/// is a refusal, returned as its reason so the caller can keep it out of
+/// the cache, and `cached` backs off rather than treating the diagnostic as
+/// a successful reading.
+fn cursor_live() -> Result<serde_json::Value, String> {
     if cursor_token().is_none() {
-        return Some(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
+        return Ok(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
     }
-    cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({}))
-        .map(|u| serde_json::json!({"u": u}))
+    cursor_rpc_said("GetCurrentPeriodUsage", &serde_json::json!({})).map(|u| serde_json::json!({"u": u}))
 }
 
 /// Which Cursor plan the percentages are percentages of.
@@ -799,17 +807,19 @@ fn spacexsi_quota_with_plots(
     // The countdown stands down whole when it does not fit: "resets " with
     // nothing after it is a sentence that stops.
     let head = format!(" ── {} ── ", SPACEXSI);
-    let fixed = head.chars().count() + via.chars().count() + "live · weekly".chars().count();
+    let (ink, badge) = crate::live_badge(d.live_kept.as_ref(), p);
+    let fixed = head.chars().count() + via.chars().count() + badge.chars().count() + " · weekly".chars().count();
     let when = if fixed + when.chars().count() <= w.saturating_sub(1) { when } else { String::new() };
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), head),
             (p.dim.as_str(), via.into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), format!(" · weekly{}", when)),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.live_kept.as_ref(), w, p));
     // Calendar time, as the QUOTA section's "of the cycle gone" is; the
     // pace cell beside the bar is the one that counts only work days.
     if let (Some(s), Some(e)) = (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
@@ -1779,12 +1789,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let me = account_key();
     let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
+    // Said as the request failed, not as "did not answer" whatever the
+    // cause: a refused token must not read as a failure in transit and
+    // bring back a reading `kept` holds for one.
     d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live() {
-        None => {
-            refuse = "Cursor's usage endpoint did not answer".into();
+        Err(why) => {
+            let short: String = why.chars().take(40).collect();
+            refuse = format!("Cursor's usage request failed: {short}");
             None
         }
-        other => other,
+        Ok(got) => Some(got),
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             d.live_why = text(&got, "why");
@@ -1796,6 +1810,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     if !refuse.is_empty() {
         d.live_why = refuse.clone();
         remember_refusal(caches, &live_key, &refuse);
+    }
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    // The key is the account's, so another account's reading never comes
+    // back here.
+    if d.live.is_none() {
+        if let Some((value, k)) = kept(caches, &live_key, &d.live_why) {
+            d.live = Some(if value.get("u").is_some() { value["u"].clone() } else { value });
+            d.live_kept = Some(k);
+        }
     }
     // A plan cached for one account must never classify another.
     d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
@@ -1924,9 +1948,22 @@ pub fn why_no_lane(d: &Data) -> String {
 /// Every quota this agent publishes, for the summary screen.
 ///
 /// The same three percentages the tab draws, against the same billing
-/// cycle. Never marked stale: the CLI keeps no quota cache on disk to fall
-/// back to, so a reading is either recent or absent.
+/// cycle. Marked stale only when the reading is one kept through a failure
+/// in transit: the CLI keeps no quota cache on disk to fall back to.
 pub fn lanes(d: &Data) -> Vec<Lane> {
+    let mut out = fresh_lanes(d);
+    if d.live_kept.is_some() {
+        // Only the lanes the kept usage reading drew: the prepaid balance
+        // and Grok Bot come from requests of their own that may have
+        // answered this pass.
+        for lane in &mut out {
+            lane.stale = lane.label != PREPAID_LABEL && lane.label != "grok bot";
+        }
+    }
+    out
+}
+
+fn fresh_lanes(d: &Data) -> Vec<Lane> {
     let Some(live) = d.live.as_ref() else {
         return Vec::new();
     };
@@ -2068,18 +2105,21 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
         }
         _ => None,
     };
+    let (ink, badge) = crate::live_badge(d.live_kept.as_ref(), p);
+    let used = 13 + badge.chars().count() + when.chars().count();
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (
                 p.dim.as_str(),
-                crate::claude::scope_phrase(w, 17 + when.chars().count()).into(),
+                crate::claude::scope_phrase(w, used).into(),
             ),
             (p.dim.as_str(), when.clone()),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.live_kept.as_ref(), w, p));
     if let Some(elapsed) = elapsed {
         // Just the fact; the +/- column it explains is on every tab now, so
         // a per-tab legend was both redundant and the thing that clipped.
@@ -4224,6 +4264,18 @@ mod tests {
         // And the summary lane is on the same monthly clock.
         let extra = lanes(&d).into_iter().find(|l| l.label == "usage limit").expect("a usage limit lane");
         assert_eq!(extra.reset, Some(month_end / 1000.0));
+    }
+
+    #[test]
+    fn a_kept_usage_reading_marks_only_its_own_lanes_stale() {
+        let mut d = unified_data(true);
+        d.live_kept = Some(crate::shared::Kept { at: now() - 600.0, why: "the request timed out".into() });
+        let stale: Vec<(String, bool)> = lanes(&d).into_iter().map(|l| (l.label, l.stale)).collect();
+        assert_eq!(
+            stale,
+            [("weekly pool".into(), true), ("usage limit".into(), true), ("prepaid credits".into(), false)],
+            "the prepaid balance answered this pass"
+        );
     }
 
     #[test]
