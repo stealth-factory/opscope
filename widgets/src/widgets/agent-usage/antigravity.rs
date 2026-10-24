@@ -809,8 +809,10 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         }
     }
     let history = format!("{}/history.jsonl", antigravity_dir());
-    if let Ok(body) = std::fs::read_to_string(&history) {
-        d.prompts = body.lines().filter(|line| !line.trim().is_empty()).count();
+    // Counted as it grows rather than read whole on every pass: the history
+    // is appended to for as long as Antigravity is used.
+    if follow(&mut caches.history, &history, Counted::default) {
+        d.prompts = caches.history.get(&history).map_or(0, |t| t.parser.0);
         if let Ok(meta) = std::fs::metadata(&history) {
             d.last = d.last.max(meta.mtime() as f64);
         }

@@ -4087,9 +4087,14 @@ impl Keyboard {
     }
 
     /// Every key waiting, decoded. Empty when nothing has been pressed.
+    ///
+    /// Never returns once the terminal has gone away: see `leave_after_hangup`.
     pub fn poll(&mut self) -> Vec<String> {
         if self.saved.is_none() {
             return Vec::new();
+        }
+        if hung_up(self.fd) {
+            self.leave_after_hangup();
         }
         if SESSION_CHANGED.swap(false, Ordering::AcqRel) {
             graphics::cleanup();
@@ -4118,6 +4123,45 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+impl Keyboard {
+    /// Exit, because the terminal this widget was drawing on is gone.
+    ///
+    /// When a pane's terminal closes - the tmux server killed, the window
+    /// shut - SIGHUP goes to the terminal's session, and a widget that is
+    /// not in that session, or that inherited SIGHUP ignored, never hears
+    /// it. Nothing else stops it: every read is an empty one, every write
+    /// fails silently, and the pollers carry on polling. One copy of
+    /// agent-usage ran like that for six hours at 95% CPU with nobody able
+    /// to see it. So `poll`, which every widget calls every frame, looks
+    /// for the hang-up itself and leaves.
+    ///
+    /// The terminal is not restored: there is nothing left to restore it
+    /// for, and draining output to a terminal nobody reads is a way to
+    /// block forever. What outlives the process - shared-memory images -
+    /// is still released. `_exit` rather than `exit`, so no flush of
+    /// buffered output can wait on the dead terminal either.
+    fn leave_after_hangup(&mut self) -> ! {
+        self.saved = None;
+        forget_termios();
+        graphics::cleanup();
+        unsafe { libc::_exit(128 + libc::SIGHUP) }
+    }
+}
+
+/// Whether the terminal on `fd` has hung up.
+///
+/// A terminal whose other end has closed is always readable and every read
+/// of it returns nothing, which with `VMIN` at zero is exactly what a live
+/// terminal with no key pressed returns - so a read cannot tell the two
+/// apart and `poll` has to. Only `POLLHUP` counts: `POLLNVAL` is a
+/// descriptor that is not open, which is not this, and some platforms
+/// report it for terminals that are perfectly alive.
+fn hung_up(fd: i32) -> bool {
+    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let ready = unsafe { libc::poll(&mut p, 1, 0) };
+    ready > 0 && p.revents & libc::POLLHUP != 0
 }
 
 impl Drop for Keyboard {
@@ -5148,6 +5192,34 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::hung_up;
+
+    /// A pseudo-terminal pair: the master, and the slave's descriptor.
+    fn pty() -> (i32, i32) {
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0, "no pty");
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let name = libc::ptsname(master);
+            assert!(!name.is_null());
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "could not open the slave");
+            (master, slave)
+        }
+    }
+
+    #[test]
+    fn a_terminal_is_hung_up_only_once_its_other_end_closes() {
+        let (master, slave) = pty();
+        assert!(!hung_up(slave), "a live terminal with nothing typed is not a hang-up");
+        unsafe { libc::write(master, b"x".as_ptr().cast(), 1) };
+        assert!(!hung_up(slave), "nor is one with a key waiting");
+        unsafe { libc::close(master) };
+        assert!(hung_up(slave), "the other end closed");
+        unsafe { libc::close(slave) };
+    }
+
     #[test]
     fn nested_plot_sections_follow_their_text_offsets() {
         let mut rows = vec!["title".into(), "heading".into()];

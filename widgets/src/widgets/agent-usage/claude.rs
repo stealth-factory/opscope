@@ -759,57 +759,55 @@ pub fn usage_kinds(u: &serde_json::Value) -> Tokens {
 /// transcript, and subagent turns are written twice over. Left raw that
 /// inflated one model by 29% against Claude Code's own totals.
 ///
-/// Cached on (mtime, size): a finished transcript never changes, so each is
-/// parsed once.
-pub fn scan_transcript(
-    caches: &mut Caches,
-    path: &str,
-) -> HashMap<String, (String, String, Tokens)> {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return HashMap::new();
-    };
-    use std::os::unix::fs::MetadataExt;
-    let key = (meta.mtime() as u64, meta.size());
-    if let Some((had, records)) = caches.transcripts.get(path) {
-        if *had == key {
-            return records.clone();
+/// Fed a line at a time by `follow`, which reads a transcript once and
+/// after that only what was appended to it.
+#[derive(Default)]
+pub struct TranscriptLines {
+    pub records: Records,
+}
+
+impl Lines for TranscriptLines {
+    fn line(&mut self, line: &str) {
+        if let Some((uid, record)) = transcript_record(line) {
+            self.records.insert(uid, record);
         }
     }
-    let mut records = HashMap::new();
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return records;
-    };
+}
+
+/// The record one transcript line contributes, keyed by its uuid.
+fn transcript_record(line: &str) -> Option<(String, Record)> {
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let r = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let msg = &r["message"];
+    let u = &msg["usage"];
+    let (model, uid, stamp) = (text(msg, "model"), text(&r, "uuid"), text(&r, "timestamp"));
+    if u.is_null() || model.is_empty() || uid.is_empty() || stamp.is_empty() {
+        return None;
+    }
+    let when = iso_epoch(&stamp)?;
+    let got = usage_kinds(u);
+    if total_tokens(&got) <= 0.0 {
+        return None;
+    }
+    let day = Local
+        .timestamp_opt(when as i64, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    Some((uid, (day, model, got)))
+}
+
+/// Every record in a whole transcript's text, the way `follow` builds it
+/// up a piece at a time. What the incremental reads are measured against.
+#[cfg(test)]
+pub fn transcript_records(body: &str) -> Records {
+    let mut lines = TranscriptLines::default();
     for line in body.lines() {
-        if !line.contains("\"usage\"") {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let msg = &r["message"];
-        let u = &msg["usage"];
-        let (model, uid, stamp) = (text(msg, "model"), text(&r, "uuid"), text(&r, "timestamp"));
-        if u.is_null() || model.is_empty() || uid.is_empty() || stamp.is_empty() {
-            continue;
-        }
-        let Some(when) = iso_epoch(&stamp) else {
-            continue;
-        };
-        let got = usage_kinds(u);
-        if total_tokens(&got) <= 0.0 {
-            continue;
-        }
-        let day = Local
-            .timestamp_opt(when as i64, 0)
-            .single()
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        records.insert(uid, (day, model, got));
+        lines.line(line);
     }
-    caches
-        .transcripts
-        .insert(path.to_string(), (key, records.clone()));
-    records
+    lines.records
 }
 
 /// Every transcript's per-day, per-model tokens, de-duplicated.
@@ -826,16 +824,27 @@ fn claude_daily_at(
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
     walk(projects, ".jsonl", &mut files);
-    let mut seen: HashMap<String, (String, String, Tokens)> = HashMap::new();
-    for path in &files {
-        seen.extend(scan_transcript(caches, path));
+    // Brought up to date first and borrowed after, so the records stay
+    // where they are rather than being copied out of the cache every pass.
+    let readable: Vec<&String> = files
+        .iter()
+        .filter(|path| follow(&mut caches.transcripts, path, TranscriptLines::default))
+        .collect();
+    // Later files win a shared uuid, as `extend` did.
+    let mut seen: HashMap<&str, &Record> = HashMap::new();
+    for path in readable {
+        if let Some(t) = caches.transcripts.get(path.as_str()) {
+            for (uid, record) in &t.parser.records {
+                seen.insert(uid, record);
+            }
+        }
     }
     let mut merged: HashMap<String, HashMap<String, Tokens>> = HashMap::new();
     for (day, model, tokens) in seen.into_values() {
         let bucket = merged
-            .entry(day)
+            .entry(day.clone())
             .or_default()
-            .entry(model)
+            .entry(model.clone())
             .or_insert_with(empty_tokens);
         for kind in RATE_KINDS {
             *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
@@ -3858,6 +3867,72 @@ mod tests {
         let sibling = root.join("profile.json");
         std::fs::write(&sibling, "{}").unwrap();
         assert_eq!(claude_json_for(&dir_s), sibling.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A synthetic transcript: usage records, a replayed uuid, lines with
+    /// no usage, and text that is not ASCII so byte cuts land mid-character.
+    fn synthetic_transcript(turns: usize) -> String {
+        let mut lines = vec![r#"{"type":"summary","summary":"naïve ✓ — synthetic"}"#.to_string()];
+        for i in 0..turns {
+            lines.push(
+                serde_json::json!({"type": "user", "uuid": format!("u-{i}"),
+                    "timestamp": format!("2026-09-0{}T10:{:02}:00Z", 1 + i % 3, i % 60),
+                    "message": {"content": "ünïcödé ⚙ prompt"}})
+                .to_string(),
+            );
+            lines.push(
+                serde_json::json!({"type": "assistant", "uuid": format!("a-{}", i % 7),
+                    "timestamp": format!("2026-09-0{}T10:{:02}:30Z", 1 + i % 3, i % 60),
+                    "message": {"model": if i % 2 == 0 { "claude-a" } else { "claude-b" },
+                        "usage": {"input_tokens": 10 + i, "output_tokens": 3 * i + 1,
+                            "cache_read_input_tokens": i,
+                            "cache_creation": {"ephemeral_5m_input_tokens": 2,
+                                "ephemeral_1h_input_tokens": i % 4}}}})
+                .to_string(),
+            );
+        }
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn a_transcript_read_as_it_grows_matches_one_read_whole() {
+        let body = synthetic_transcript(40);
+        let replacement = synthetic_transcript(3).replace("synthetic", "replaced!");
+        for step in [1, 29, 211, 4096] {
+            growing::check(
+                "claude",
+                &body,
+                step,
+                &replacement,
+                TranscriptLines::default,
+                transcript_records,
+                |p: &TranscriptLines| p.records.clone(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_growing_transcript_meters_the_same_totals_as_a_whole_one() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-207-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let body = synthetic_transcript(25);
+        let path = project.join("session.jsonl");
+        let projects = root.join("projects").to_string_lossy().to_string();
+        let mut grown = Caches::default();
+        let (a, b) = body.split_at(body.len() / 2 + 3);
+        std::fs::write(&path, a).unwrap();
+        claude_daily_at(&mut grown, &projects);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut f, b.as_bytes()).unwrap();
+        drop(f);
+        let incremental = claude_daily_at(&mut grown, &projects);
+        let whole = claude_daily_at(&mut Caches::default(), &projects);
+        assert!(!whole.is_empty());
+        assert_eq!(incremental, whole);
         let _ = std::fs::remove_dir_all(&root);
     }
 

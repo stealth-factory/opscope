@@ -29,8 +29,14 @@ use crate::*;
 /// and a quota endpoint is not asked six times a minute.
 #[derive(Default)]
 pub struct Caches {
-    /// path -> ((mtime, size), records keyed by uuid)
-    pub transcripts: HashMap<String, ((u64, u64), HashMap<String, (String, String, Tokens)>)>,
+    /// Claude transcripts: path -> what has been read of it so far.
+    pub transcripts: HashMap<String, Tail<crate::claude::TranscriptLines>>,
+    /// Codex rollouts, the same way.
+    pub rollouts: HashMap<String, Tail<crate::codex::RolloutLines>>,
+    /// Antigravity's prompt history, counted a line at a time.
+    pub history: HashMap<String, Tail<Counted>>,
+    /// Grok's session logs, summed as they grow.
+    pub grok: HashMap<String, Tail<crate::grok::SessionLines>>,
     /// key -> (when, value, ttl)
     pub live: HashMap<String, (f64, Option<serde_json::Value>, f64)>,
     /// key -> refusals in a row, which is what the backoff doubles on.
@@ -40,6 +46,167 @@ pub struct Caches {
     /// A good reading taken before this is asked again rather than served
     /// out of its hold; see `cached`. Zero on every other pass.
     pub asked_at: f64,
+}
+
+/// One record a transcript reader keeps: day, billed model, tokens.
+pub type Record = (String, String, Tokens);
+/// A transcript's records, keyed on whatever makes a turn the same turn
+/// when it is written into a second file.
+pub type Records = HashMap<String, Record>;
+
+/// A reader of one append-only log, fed a line at a time in file order.
+///
+/// It holds whatever it carries between lines - the model a turn was
+/// taken on, the session a rollout belongs to - as well as what it has
+/// found, so that feeding it the rest of a file later lands exactly where
+/// feeding it the whole file at once would have.
+pub trait Lines {
+    fn line(&mut self, line: &str);
+}
+
+/// How much of an append-only log has been read, and what reading it found.
+///
+/// Agents append to their transcripts for as long as a session runs, and a
+/// live Codex rollout passes four gigabytes. Reading the whole file again
+/// because it grew - as this did, on every refresh - put that whole file
+/// in memory every ninety seconds. So a log is read once, a line at a
+/// time, and after that only what was added is read: from `offset`, which
+/// is always the end of the last line handed to the parser.
+///
+/// An unterminated last line is left where it is - the agent is still
+/// writing it - unless it already parses as JSON, which is what a
+/// whole-file read would have counted. The next pass starts from the same
+/// byte, so a line torn across two appends reaches the parser once, whole.
+///
+/// The file is read from the start again when it is no longer the file
+/// that was read: a different inode, a size below what was read, or a
+/// first kilobyte that has changed under the same inode.
+pub struct Tail<P> {
+    /// (mtime, size) when it was last read. Unchanged means nothing to read.
+    stamp: (i64, u64),
+    /// (device, inode), so a log replaced under the same name is noticed.
+    file: (u64, u64),
+    /// Bytes consumed, always at a line boundary.
+    offset: u64,
+    /// The first bytes of the file, up to `HEAD`.
+    head: Vec<u8>,
+    pub parser: P,
+}
+
+/// How much of a log's start is kept to recognise it by.
+const HEAD: usize = 1024;
+
+/// Bring one log's reader up to date, reading only what was appended.
+///
+/// False when the file cannot be read at all, which is what callers treat
+/// as a log with nothing in it - the same as before this kept state.
+pub fn follow<P: Lines>(
+    tails: &mut HashMap<String, Tail<P>>,
+    path: &str,
+    fresh: impl FnOnce() -> P,
+) -> bool {
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let stamp = (meta.mtime(), meta.size());
+    let file = (meta.dev(), meta.ino());
+    if let Some(t) = tails.get(path) {
+        if t.stamp == stamp && t.file == file {
+            return true;
+        }
+    }
+    let Ok(f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let same = |head: &[u8]| {
+        let mut now = vec![0u8; head.len()];
+        f.read_exact_at(&mut now, 0).is_ok() && now == head
+    };
+    let keep = match tails.get(path) {
+        Some(t) => t.file == file && stamp.1 >= t.offset && same(&t.head),
+        None => false,
+    };
+    if !keep {
+        tails.insert(
+            path.to_string(),
+            Tail {
+                stamp: (0, 0),
+                file,
+                offset: 0,
+                head: Vec::new(),
+                parser: fresh(),
+            },
+        );
+    }
+    let Some(t) = tails.get_mut(path) else {
+        return false;
+    };
+    let size = stamp.1;
+    if t.head.len() < HEAD && (t.head.len() as u64) < size {
+        let mut head = vec![0u8; HEAD.min(size as usize)];
+        if f.read_exact_at(&mut head, 0).is_ok() {
+            t.head = head;
+        }
+    }
+    t.offset += feed(&f, t.offset, size, &mut t.parser);
+    t.stamp = stamp;
+    true
+}
+
+/// Hand the parser every whole line between `from` and `to`, and say how
+/// many bytes that consumed.
+///
+/// Read through a buffer, a line at a time, so memory follows the longest
+/// line rather than the file. `to` is the size the file had when it was
+/// looked at, so a line being written while this reads is left for the
+/// next pass rather than read half-finished.
+fn feed<P: Lines>(f: &std::fs::File, from: u64, to: u64, parser: &mut P) -> u64 {
+    use std::io::{BufRead, Read, Seek, SeekFrom};
+    if to <= from {
+        return 0;
+    }
+    let mut f = f;
+    if f.seek(SeekFrom::Start(from)).is_err() {
+        return 0;
+    }
+    let mut reader = std::io::BufReader::with_capacity(256 * 1024, f.take(to - from));
+    let mut used = 0u64;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let n = match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if buf.last() != Some(&b'\n')
+            && serde_json::from_slice::<serde_json::Value>(&buf).is_err()
+        {
+            break;
+        }
+        used += n as u64;
+        let mut line: &[u8] = &buf;
+        if let Some(rest) = line.strip_suffix(b"\n") {
+            line = rest;
+        }
+        if let Some(rest) = line.strip_suffix(b"\r") {
+            line = rest;
+        }
+        parser.line(&String::from_utf8_lossy(line));
+    }
+    used
+}
+
+/// Lines that are not blank, counted as they are appended.
+#[derive(Default)]
+pub struct Counted(pub usize);
+
+impl Lines for Counted {
+    fn line(&mut self, line: &str) {
+        if !line.trim().is_empty() {
+            self.0 += 1;
+        }
+    }
 }
 
 pub const LIVE_TTL: f64 = 120.0;
@@ -439,9 +606,165 @@ pub fn post_json_said(
     serde_json::from_str(&text).map_err(|e| format!("unreadable answer: {}", e))
 }
 
+/// A log that grows, is torn mid-line, and is replaced, for checking that
+/// a reader fed by `follow` always lands where a whole-file read would.
+#[cfg(test)]
+pub mod growing {
+    use super::*;
+    use std::io::Write;
+
+    pub struct Log {
+        dir: std::path::PathBuf,
+        pub path: String,
+    }
+
+    impl Log {
+        pub fn new(tag: &str) -> Log {
+            let dir = std::env::temp_dir().join(format!(
+                "opscope-follow-{tag}-{}-{}",
+                std::process::id(),
+                now().to_bits()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("log.jsonl").to_string_lossy().to_string();
+            std::fs::write(&path, "").unwrap();
+            Log { dir, path }
+        }
+
+        pub fn append(&self, bytes: &str) {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&self.path).unwrap();
+            f.write_all(bytes.as_bytes()).unwrap();
+        }
+
+        /// A new file put in place by rename: a different inode, the way
+        /// an agent rotating its log or an editor saving it would.
+        pub fn replace(&self, bytes: &str) {
+            let next = self.dir.join("next.jsonl");
+            std::fs::write(&next, bytes).unwrap();
+            std::fs::rename(&next, &self.path).unwrap();
+        }
+
+        /// The same inode, truncated and written again.
+        pub fn rewrite(&self, bytes: &str) {
+            std::fs::write(&self.path, bytes).unwrap();
+        }
+    }
+
+    impl Drop for Log {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The lines a writer has finished: up to the last newline, plus a last
+    /// line only if it is already a whole JSON value. A line still being
+    /// written is not a line yet, and a reader that counted `{"n":10` as
+    /// ten would be wrong by the time it read `{"n":1000}`.
+    fn finished(text: &str) -> &str {
+        let cut = text.rfind('\n').map_or(0, |at| at + 1);
+        match serde_json::from_str::<serde_json::Value>(&text[cut..]) {
+            Ok(_) => text,
+            Err(_) => &text[..cut],
+        }
+    }
+
+    /// Append `body` a piece of `step` bytes at a time, then replace and
+    /// rewrite the file, and after every change compare what the followed
+    /// reader holds against `whole` run over the file as it now stands.
+    ///
+    /// Odd steps put cuts in the middle of lines, and of the characters
+    /// inside them when the body is not all ASCII, which is the case a
+    /// reader keeping its place has to get right.
+    pub fn check<P: Lines, T: PartialEq + std::fmt::Debug>(
+        tag: &str,
+        body: &str,
+        step: usize,
+        replacement: &str,
+        fresh: impl Fn() -> P,
+        whole: impl Fn(&str) -> T,
+        of: impl Fn(&P) -> T,
+    ) {
+        let log = Log::new(tag);
+        let mut tails: HashMap<String, Tail<P>> = HashMap::new();
+        let bytes = body.as_bytes();
+        let mut written = 0;
+        let compare = |tails: &mut HashMap<String, Tail<P>>, what: &str| {
+            assert!(follow(tails, &log.path, &fresh), "{what}: unreadable");
+            let on_disk = String::from_utf8_lossy(&std::fs::read(&log.path).unwrap()).to_string();
+            assert_eq!(of(&tails[&log.path].parser), whole(finished(&on_disk)), "{what}");
+        };
+        while written < bytes.len() {
+            let end = (written + step).min(bytes.len());
+            let mut f = std::fs::OpenOptions::new().append(true).open(&log.path).unwrap();
+            f.write_all(&bytes[written..end]).unwrap();
+            drop(f);
+            written = end;
+            compare(&mut tails, &format!("after {written} of {} bytes", bytes.len()));
+        }
+        assert_eq!(of(&tails[&log.path].parser), whole(body), "the whole file");
+        // Replaced by a shorter, different log: started again, not added to.
+        log.replace(replacement);
+        compare(&mut tails, "replaced");
+        // Back to the long one under the same inode: bigger than what was
+        // read, so only the changed first bytes say it is not the same log.
+        log.rewrite(body);
+        compare(&mut tails, "rewritten in place");
+        // Cut short in place.
+        log.rewrite(replacement);
+        compare(&mut tails, "truncated");
+        log.append(body);
+        compare(&mut tails, "grown again");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_counted_log_counts_what_a_whole_read_does() {
+        let body = "{\"a\":1}\n\n{\"a\":2}\n  \n{\"a\":3}\n";
+        let count = |text: &str| text.lines().filter(|l| !l.trim().is_empty()).count();
+        for step in [1, 3, 7, 64] {
+            growing::check("counted", body, step, "{\"b\":1}\n", Counted::default, count, |c: &Counted| c.0);
+        }
+    }
+
+    #[test]
+    fn an_unterminated_last_line_waits_unless_it_is_already_whole() {
+        let log = growing::Log::new("partial");
+        let mut tails: HashMap<String, Tail<Counted>> = HashMap::new();
+        log.append("{\"a\":1}\n{\"a\":");
+        assert!(follow(&mut tails, &log.path, Counted::default));
+        assert_eq!(tails[&log.path].parser.0, 1, "half a line is not a line yet");
+        assert_eq!(tails[&log.path].offset, 8, "and the place is kept before it");
+        log.append("2}");
+        follow(&mut tails, &log.path, Counted::default);
+        assert_eq!(tails[&log.path].parser.0, 2, "a whole object is counted, as a whole read would");
+        log.append("\n{\"a\":3}\n");
+        follow(&mut tails, &log.path, Counted::default);
+        assert_eq!(tails[&log.path].parser.0, 3, "the newline that closed it is not a second line");
+    }
+
+    #[test]
+    fn an_unchanged_log_is_not_read_again() {
+        struct Loud(usize);
+        impl Lines for Loud {
+            fn line(&mut self, _: &str) {
+                self.0 += 1;
+            }
+        }
+        let log = growing::Log::new("unchanged");
+        log.append("{}\n{}\n");
+        let mut tails: HashMap<String, Tail<Loud>> = HashMap::new();
+        for _ in 0..3 {
+            assert!(follow(&mut tails, &log.path, || Loud(0)));
+        }
+        assert_eq!(tails[&log.path].parser.0, 2);
+        log.append("{}\n");
+        follow(&mut tails, &log.path, || Loud(0));
+        assert_eq!(tails[&log.path].parser.0, 3, "only the appended line was read");
+    }
 
     #[test]
     fn a_cap_on_a_label_fits_the_column_it_was_given() {
