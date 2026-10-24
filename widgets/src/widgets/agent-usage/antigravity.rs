@@ -832,20 +832,30 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // Gemini quota there is. Asked on the same terms as the summary: never
     // when asking Google is off, never with a lapsed token.
     //
-    // The refusal is cached with the failure, as the tier's is, so the
-    // reason lasts as long as the failure rather than one frame.
+    // A failure goes back to the cache as a failure, so it keeps the short
+    // backoff rather than being held for the hour a reading is; its reason
+    // is written into the slot afterwards so it lasts as long as the failure.
     if !d.quota.is_empty() && !has_gemini_group(&d.quota) {
         match remote_token(cfg.antigravity_remote) {
             Err(said) => d.gemini_why = said,
             Ok(access) => {
-                let got = cached(caches, "antigravity-models", PLAN_TTL, || {
-                    Some(match post_body(REMOTE_MODEL_QUOTA_API, &access, "{}") {
-                        Ok(v) => v,
-                        Err(said) => serde_json::json!({ "opscope_refusal": said }),
-                    })
-                })
-                .unwrap_or_default();
-                let refused = text(&got, "opscope_refusal");
+                const KEY: &str = "antigravity-models";
+                let mut asked = String::new();
+                let got = cached(caches, KEY, PLAN_TTL, || {
+                    match post_body(REMOTE_MODEL_QUOTA_API, &access, "{}") {
+                        Ok(v) => Some(v),
+                        Err(said) => {
+                            asked = said;
+                            None
+                        }
+                    }
+                });
+                remember_refusal(caches, KEY, &asked);
+                let got = got.unwrap_or_default();
+                let refused = match text(&got, "why") {
+                    held if held.is_empty() => asked,
+                    held => held,
+                };
                 match crate::parse::parse_antigravity_model_quota(&got.to_string()) {
                     _ if !refused.is_empty() => {
                         d.gemini_why = format!("Google refused the per-model quota: {}", refused)
@@ -1026,7 +1036,7 @@ fn antigravity_quota_rows_with_plots(
             why.push_str(" Google publishes no grouped Gemini limit.");
         }
         rows.extend(
-            wrap_text(&why, w.saturating_sub(4).max(20))
+            wrap_text(&why, w.saturating_sub(4).max(1))
                 .into_iter()
                 .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
         );
@@ -1046,7 +1056,7 @@ fn antigravity_quota_rows_with_plots(
         let covers = crate::parse::strip_controls(&text(group, "description"));
         if !covers.is_empty() {
             rows.extend(
-                wrap_text(&covers, w.saturating_sub(6).max(20))
+                wrap_text(&covers, w.saturating_sub(6).max(1))
                     .into_iter()
                     .map(|line| tc::seg(&[(p.dim.as_str(), format!("    {}", line))], w - 1)),
             );
@@ -1069,6 +1079,35 @@ fn antigravity_quota_rows_with_plots(
     rows.push(String::new());
     rows
 }
+
+/// A model id cut into lines of at most `budget` characters, after its
+/// hyphens where it can be and mid-word only where a piece is longer than
+/// the line. `gemini-3.5-flash-extra-low` does not fit a 20-column pane even
+/// on a row of its own, and a clipped id names a model that does not exist.
+fn break_model_id(id: &str, budget: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for piece in id.split_inclusive('-') {
+        if !line.is_empty() && line.chars().count() + piece.chars().count() > budget {
+            lines.push(std::mem::take(&mut line));
+        }
+        line.push_str(piece);
+        while line.chars().count() > budget {
+            let head: String = line.chars().take(budget).collect();
+            line = line.chars().skip(budget).collect();
+            lines.push(head);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// What a pace-less bar row needs besides its label: three cells of indent,
+/// a space, the bar's eight-cell floor, the six-cell percentage, two cells
+/// before the reset, and the column the frame keeps free.
+const QUOTA_ROW_FIXED: usize = 21;
 
 /// One limit as a bar: its label, the bar, % spent, pace, and the reset.
 #[allow(clippy::too_many_arguments)]
@@ -1141,14 +1180,28 @@ fn gemini_model_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>,
         )
     };
     rows.extend(
-        wrap_text(&note, w.saturating_sub(6).max(20))
+        wrap_text(&note, w.saturating_sub(6).max(1))
             .into_iter()
             .map(|line| tc::seg(&[(colour, format!("    {}", line))], w - 1)),
     );
+    // Model ids run to 26 characters, and a label that wide in a narrow pane
+    // pushes the bar and the percentage past the edge, where `seg` clips
+    // them - the row fits and the reading is gone. So below the width a bar
+    // needs beside its label, each name takes a row of its own and the bar
+    // goes underneath it.
     let label_w = d.gemini.iter().map(|m| m.model.chars().count()).max().unwrap_or(1);
+    let stacked = label_w + QUOTA_ROW_FIXED > w;
     for m in &d.gemini {
-        let row = quota_bar_row(rows.len(), &m.model, label_w, m.left, None, m.reset, w, p, plots);
-        rows.push(row);
+        if stacked {
+            for piece in break_model_id(&m.model, w.saturating_sub(4).max(1)) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", piece))], w - 1));
+            }
+            let row = quota_bar_row(rows.len(), "", 0, m.left, None, m.reset, w, p, plots);
+            rows.push(row);
+        } else {
+            let row = quota_bar_row(rows.len(), &m.model, label_w, m.left, None, m.reset, w, p, plots);
+            rows.push(row);
+        }
     }
     rows.push(String::new());
 }
@@ -1752,6 +1805,17 @@ mod tests {
     }
 
     #[test]
+    fn a_model_id_breaks_after_its_hyphens_and_loses_nothing() {
+        let id = "gemini-3.5-flash-extra-low";
+        assert_eq!(break_model_id(id, 40), [id]);
+        assert_eq!(break_model_id(id, 16), ["gemini-3.5-", "flash-extra-low"]);
+        // A piece longer than the line is cut mid-word, not dropped.
+        let tight = break_model_id(id, 5);
+        assert!(tight.iter().all(|l| l.chars().count() <= 5), "{:?}", tight);
+        assert_eq!(tight.concat(), id);
+    }
+
+    #[test]
     fn only_a_summary_without_gemini_asks_for_the_per_model_readings() {
         assert!(!has_gemini_group(&google_summary()));
         assert!(has_gemini_group(&groups(&[("Gemini Models", "5h", 1.0)])));
@@ -1993,9 +2057,42 @@ mod tests {
         for w in [20usize, 26, 40, 80, 200] {
             let rows = tab(&google, w, 40, &cfg, &p);
             let plain = rows.join("\n");
-            for want in ["QUOTA", "Gemini, per model", "ACTIVITY"] {
+            // Fitting is not enough: a row can fit by having its reading
+            // clipped off the end. Every model's name and its percentage
+            // must survive at every width.
+            for want in ["QUOTA", "Gemini, per model", "ACTIVITY", "50%"] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
             }
+            // A name may be broken across rows below its width, but every
+            // character of it must be on screen.
+            let visible = |s: &str| {
+                let mut out = String::new();
+                let mut rest = s.chars();
+                while let Some(c) = rest.next() {
+                    if c == '\u{1b}' {
+                        for c in rest.by_ref() {
+                            if c == 'm' {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+            let joined: String = rows.iter().map(|r| visible(r).trim().to_string()).collect();
+            for name in ["gemini-3.5-flash-extra-low", "gemini-3-flash"] {
+                assert!(joined.contains(name), "{} cut at width {}: {}", name, w, plain);
+            }
+            let section: Vec<&String> = rows
+                .iter()
+                .skip_while(|r| !r.contains("Gemini, per model"))
+                .take_while(|r| !r.is_empty())
+                .collect();
+            let readings = section.iter().filter(|r| r.contains('%')).count();
+            assert_eq!(readings, 2, "a Gemini reading was clipped at width {}: {}", w, plain);
+            assert!(section.iter().any(|r| r.contains("50%")), "width {}: {}", w, plain);
             for row in &rows {
                 assert!(
                     tc::display_width(row) < w,
