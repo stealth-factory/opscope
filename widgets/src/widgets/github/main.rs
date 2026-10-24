@@ -590,6 +590,44 @@ enum FlowHead {
     Counting { want: i64 },
 }
 
+/// Whether the PR-flow chart is still waiting for day counts, and the
+/// accounts it has given up on for this window with the reason.
+///
+/// An account whose day counts failed for `want` no longer holds the chart
+/// back. Before, any failed chunk left it counting - dancing - until a
+/// later pass happened to succeed, and nothing on screen said why.
+fn flow_progress(stats: &[Account], want: i64) -> (bool, Vec<(String, String)>) {
+    fn failed(a: &Account, want: i64) -> Option<&(i64, String)> {
+        a.hist_failed.as_ref().filter(|(w, _)| *w == want)
+    }
+    let waiting = stats.is_empty()
+        || stats.iter().any(|a| a.hist_window != Some(want) && failed(a, want).is_none());
+    let missing = stats
+        .iter()
+        .filter(|a| a.hist_window != Some(want))
+        .filter_map(|a| failed(a, want).map(|(_, why)| (a.account.clone(), why.clone())))
+        .collect();
+    (waiting, missing)
+}
+
+/// The rows saying which accounts the PR-flow chart leaves out, wrapped to
+/// the pane rather than cut.
+fn flow_missing(missing: &[(String, String)], w: usize) -> Vec<String> {
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let who: Vec<_> = missing.iter().map(|(a, why)| format!("{a} ({why})")).collect();
+    let text = format!(
+        "PR flow leaves out {}: day counts failed, retried next poll",
+        who.join(", ")
+    );
+    // One cell of margin, as the chart's own rows have.
+    tc::wrap_words(&text, w.saturating_sub(1).max(1))
+        .into_iter()
+        .map(|line| format!(" {line}"))
+        .collect()
+}
+
 /// One whole PR FLOW - heading, the rows its totals and figures fall back
 /// to, and the chart - for the board and for an account's own screen alike.
 ///
@@ -2212,6 +2250,11 @@ struct Account {
     hist: HashMap<String, i64>,
     opened_hist: HashMap<String, i64>,
     hist_window: Option<i64>,
+    /// The window a day-count pass gave up on, and why. Set when a chunk
+    /// of day counts failed, so the PR-flow chart stops waiting for this
+    /// account and says what is missing rather than dancing until the
+    /// next good poll.
+    hist_failed: Option<(i64, String)>,
     /// The rolling twenty-four hours, `None` until the alias that carries
     /// it has arrived. Not an `i64` defaulting to zero: nothing opened in
     /// a day is a real reading, and a pane still counting has to look
@@ -2628,6 +2671,7 @@ fn one_pass(
                 hist: prev.hist,
                 opened_hist: prev.opened_hist,
                 hist_window: prev.hist_window,
+                hist_failed: prev.hist_failed,
                 // Read straight off the payload rather than through
                 // `count_at`, which lands a missing alias on zero - and a
                 // zero here is a claim the skeleton exists to avoid
@@ -2664,10 +2708,14 @@ fn one_pass(
             .filter(|x| !cache.contains_key(*x) || fresh.contains(x))
             .cloned()
             .collect();
+        let mut chunk_err = None;
         for chunk in want.chunks(DAY_CHUNK) {
             let dd = match graphql(&build_day_query(&scope_of(acc, viewer), chunk), tok, scopes) {
                 Ok(d) => d["data"].clone(),
-                Err(_) => continue,
+                Err(e) => {
+                    chunk_err.get_or_insert(e);
+                    continue;
+                }
             };
             for (n, day) in chunk.iter().enumerate() {
                 cache.insert(
@@ -2681,12 +2729,23 @@ fn one_pass(
         }
         cache.retain(|day, _| *day >= keep_from); // older than any window
         if !dates.iter().all(|x| cache.contains_key(x)) {
-            continue; // a chunk failed; leave it
+            // A chunk failed. The days it did read stay cached for the next
+            // pass, but this window's chart cannot count this account, and
+            // it says so instead of waiting for a pass that may never come.
+            let why = chunk_err.unwrap_or_else(|| "a day was not answered".into());
+            let why: String = why.chars().take(50).collect();
+            failed.push(format!("{} day counts ({})", acc, why));
+            if let Some(row) = by_acc.get_mut(acc) {
+                row.hist_failed = Some((days_now, why));
+            }
+            publish(state, &accounts, &by_acc, rate);
+            continue;
         }
         if let Some(row) = by_acc.get_mut(acc) {
             row.hist = dates.iter().map(|x| (x.clone(), cache[x].0)).collect();
             row.opened_hist = dates.iter().map(|x| (x.clone(), cache[x].1)).collect();
             row.hist_window = Some(days_now);
+            row.hist_failed = None;
         }
         publish(state, &accounts, &by_acc, rate);
     }
@@ -3101,7 +3160,7 @@ fn main() {
         // window now selected. The charts are tracked apart from the headline
         // because their data costs far more requests and lands well after it.
         let stale = stats.is_empty() || stats.iter().any(|x| x.window != want);
-        let chart_stale = stats.is_empty() || stats.iter().any(|x| x.hist_window != Some(want));
+        let (chart_stale, chart_missing) = flow_progress(&stats, want);
         if !stats.is_empty() && selected >= stats.len() {
             selected = stats.len() - 1;
         }
@@ -3322,6 +3381,9 @@ fn main() {
         // always - trimming the unused half would make the chart change
         // height at the end of the animation, which is exactly when it
         // should be still.
+        // Bars that move every frame are text in every mode: an image of
+        // them would be re-sent whole on each frame they move.
+        let mut moving = chart_stale;
         let (hu, hd, cu, cd) = if chart_stale {
             // Dance per day, then widen: bouncing each column on its own
             // would show a twelve-column day as twelve separate thin bars.
@@ -3341,6 +3403,7 @@ fn main() {
             match &settle_from {
                 Some((fu, fd)) if settle_t < SETTLE_FRAMES && fu.len() == chart_cols => {
                     settle_t += 1;
+                    moving = true;
                     let q = settle_t as f64 / SETTLE_FRAMES as f64;
                     let q = q * q * (3.0 - 2.0 * q); // ease in and out
                     (
@@ -3386,6 +3449,14 @@ fn main() {
             &mut plots,
             rows.len(),
         ));
+        if moving {
+            plots = plots.into_iter().map(tc::Plot::as_text).collect();
+        }
+        // A chart that stopped waiting for an account says which, and why,
+        // so its totals are not read as everyone's.
+        for line in flow_missing(&chart_missing, w - 1) {
+            rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
+        }
         rows.push(String::new());
 
         // Drawn whatever the pane is. It used to stand down below 39 rows so
@@ -4126,6 +4197,45 @@ mod tests {
         assert_eq!(board_24h(&holed, 3, |s| s.opened_24h), None);
         // And no accounts at all sums to nothing, not to zero.
         assert_eq!(board_24h(&[], 0, |s| s.opened_24h), None);
+    }
+
+    #[test]
+    fn a_failed_day_chunk_ends_the_dance_and_names_the_account() {
+        let want = 14;
+        let done = Account {
+            account: "acme".into(),
+            hist_window: Some(want),
+            ..Default::default()
+        };
+        let waiting = Account { account: "slow".into(), ..Default::default() };
+        // Still counting: one account has neither answered nor failed.
+        let (stale, missing) = flow_progress(&[done.clone(), waiting.clone()], want);
+        assert!(stale && missing.is_empty());
+        // Its day counts failed for this window: the chart stops waiting
+        // and says which account it leaves out and why.
+        let failed = Account {
+            hist_failed: Some((want, "HTTP 502".into())),
+            ..waiting.clone()
+        };
+        let (stale, missing) = flow_progress(&[done.clone(), failed.clone()], want);
+        assert!(!stale);
+        assert_eq!(missing, vec![("slow".to_string(), "HTTP 502".to_string())]);
+        // A failure for another window does not count for this one.
+        let (stale, _) = flow_progress(&[done.clone(), failed.clone()], want + 7);
+        assert!(stale);
+        // Nothing is left out once the account has this window's counts.
+        let recovered = Account { hist_window: Some(want), ..failed };
+        assert_eq!(flow_progress(&[done, recovered], want), (false, Vec::new()));
+        assert!(flow_progress(&[], want).0, "no accounts yet is still counting");
+        // The reason reaches a row, wrapped to the pane rather than cut.
+        for w in [20, 30, 57, 120] {
+            let rows = flow_missing(&missing, w);
+            assert!(!rows.is_empty());
+            assert!(rows.iter().all(|r| tc::display_width(r) <= w), "{rows:?}");
+            let joined = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(joined.contains("slow") && joined.contains("HTTP 502"), "{joined}");
+        }
+        assert!(flow_missing(&[], 57).is_empty());
     }
 
     #[test]
