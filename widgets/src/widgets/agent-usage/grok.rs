@@ -181,6 +181,22 @@ pub struct SessionLines {
     days: HashMap<String, f64>,
 }
 
+impl Persist for SessionLines {
+    fn meta(&self) -> serde_json::Value {
+        serde_json::json!({"prev": self.prev, "total": self.total, "days": self.days})
+    }
+    fn records(&self) -> Option<&Records> {
+        None
+    }
+    fn load(v: &serde_json::Value, _: Records) -> Option<SessionLines> {
+        let mut days = HashMap::new();
+        for (day, n) in v["days"].as_object()? {
+            days.insert(day.clone(), n.as_f64()?);
+        }
+        Some(SessionLines { prev: v["prev"].as_f64()?, total: v["total"].as_f64()?, days })
+    }
+}
+
 impl Lines for SessionLines {
     fn line(&mut self, line: &str) {
         let Some(value) = int_after(line, "\"totalTokens\":") else {

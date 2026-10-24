@@ -284,6 +284,25 @@ impl RolloutLines {
     }
 }
 
+impl Persist for RolloutLines {
+    /// The session id, model and tier it carries, and the records keyed by
+    /// session and timestamp: identifiers and counts, nothing that was said.
+    fn meta(&self) -> serde_json::Value {
+        serde_json::json!({"session": self.session, "model": self.model, "tier": self.tier})
+    }
+    fn records(&self) -> Option<&Records> {
+        Some(&self.records)
+    }
+    fn load(v: &serde_json::Value, records: Records) -> Option<RolloutLines> {
+        Some(RolloutLines {
+            session: v["session"].as_str()?.to_string(),
+            model: v["model"].as_str()?.to_string(),
+            tier: v["tier"].as_str()?.to_string(),
+            records,
+        })
+    }
+}
+
 impl Lines for RolloutLines {
     fn line(&mut self, line: &str) {
         if !line.contains("\"model\"")

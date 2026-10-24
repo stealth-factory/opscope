@@ -768,6 +768,18 @@ pub struct TranscriptLines {
     pub records: Records,
 }
 
+impl Persist for TranscriptLines {
+    fn meta(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn records(&self) -> Option<&Records> {
+        Some(&self.records)
+    }
+    fn load(_: &serde_json::Value, records: Records) -> Option<TranscriptLines> {
+        Some(TranscriptLines { records })
+    }
+}
+
 impl Lines for TranscriptLines {
     fn line(&mut self, line: &str) {
         if let Some((uid, record)) = transcript_record(line) {

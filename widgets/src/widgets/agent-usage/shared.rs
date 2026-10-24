@@ -92,16 +92,16 @@ pub trait Lines {
 /// first kilobyte that has changed under the same inode.
 pub struct Tail<P> {
     /// (mtime, size) when it was last read. Unchanged means nothing to read.
-    stamp: (i64, u64),
+    pub(crate) stamp: (i64, u64),
     /// (device, inode), so a log replaced under the same name is noticed.
-    file: (u64, u64),
+    pub(crate) file: (u64, u64),
     /// Bytes consumed, always at a line boundary.
-    offset: u64,
+    pub(crate) offset: u64,
     /// How many of the file's first bytes are remembered, up to `HEAD`,
     /// and a hash of them. A hash rather than the bytes: they are the start
     /// of somebody's transcript, and this state is written to disk.
-    head_len: usize,
-    head_hash: u64,
+    pub(crate) head_len: usize,
+    pub(crate) head_hash: u64,
     /// Bytes taken off the disk for this log, all passes together. A torn
     /// last line is read again on the pass that finishes it, so this is
     /// the file's size plus those re-reads and nothing more.
@@ -335,12 +335,13 @@ fn feed<P: Lines>(
 /// How much a pass may read of the logs, across every agent: 64 MiB or
 /// 200 ms, whichever comes first.
 ///
-/// Measured here, the readers get through Codex rollouts at roughly
-/// 300-400 MB/s, so the two limits meet at about the same place and either
-/// one is the real bound depending on the disk and the lines. 200 ms is
-/// short enough that a pass never holds a core for longer than a blink; at
-/// the catch-up cadence below it is about a tenth of one core while a first
-/// read is under way, and nothing at all once it is done.
+/// Measured here on a release build, an unbudgeted first read of 5.8 GB
+/// of Codex rollouts took about eleven seconds - roughly 500 MB/s - so on a
+/// warm disk 64 MiB is the bound and takes about 130 ms, and the 200 ms is
+/// there for a cold disk or a slow machine. Either way a pass never holds a
+/// core for longer than a blink; at the catch-up cadence below a first read
+/// costs about a tenth of one core for the few minutes it takes, and
+/// nothing at all once it is done.
 pub const PASS_BYTES: u64 = 64 * 1024 * 1024;
 pub const PASS_TIME: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -473,6 +474,8 @@ pub struct Logs<P> {
     queue: Vec<String>,
     read_at: f64,
     pub history: History,
+    /// Read something since the store last saved it.
+    pub dirty: bool,
 }
 
 impl<P> Default for Logs<P> {
@@ -483,6 +486,7 @@ impl<P> Default for Logs<P> {
             queue: Vec::new(),
             read_at: 0.0,
             history: History::default(),
+            dirty: false,
         }
     }
 }
@@ -552,12 +556,94 @@ impl<P: Lines> Logs<P> {
             self.history.as_of = at;
         }
         self.listed = listed;
+        self.dirty = true;
         Pass::Read
     }
 
     /// Paths in the order the last listing gave them, newest first.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.listed.iter().map(|l| l.path.as_str())
+    }
+}
+
+/// A reader's state as counters, for `store`: what it found and what it
+/// carries between lines, never a line it was handed.
+///
+/// In two parts, so the store can write the records one line each rather
+/// than building them all into one document in memory: `meta` is the small
+/// state a reader carries, `records` the per-turn counts if it keeps any.
+pub trait Persist: Sized {
+    fn meta(&self) -> serde_json::Value;
+    fn records(&self) -> Option<&Records>;
+    fn load(meta: &serde_json::Value, records: Records) -> Option<Self>;
+}
+
+/// One record as `[key, day, model, {kind: count}]`, zero counts left out.
+pub fn record_line(key: &str, record: &Record) -> serde_json::Value {
+    let (day, model, tokens) = record;
+    let counts: serde_json::Map<String, serde_json::Value> = tokens
+        .iter()
+        .filter(|(_, n)| **n != 0.0)
+        .map(|(k, n)| (k.clone(), serde_json::json!(n)))
+        .collect();
+    serde_json::json!([key, day, model, counts])
+}
+
+pub fn record_from(v: &serde_json::Value) -> Option<(String, Record)> {
+    let rec = v.as_array()?;
+    let mut tokens = empty_tokens();
+    for (k, n) in rec.get(3)?.as_object()? {
+        tokens.insert(k.clone(), n.as_f64()?);
+    }
+    Some((
+        rec.first()?.as_str()?.to_string(),
+        (rec.get(1)?.as_str()?.to_string(), rec.get(2)?.as_str()?.to_string(), tokens),
+    ))
+}
+
+impl<P: Persist> Tail<P> {
+    /// Everything about a tail but its records, which follow it a line each.
+    pub(crate) fn meta(&self, path: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": path,
+            "mtime": self.stamp.0,
+            "size": self.stamp.1,
+            "dev": self.file.0,
+            "ino": self.file.1,
+            "offset": self.offset,
+            "head_len": self.head_len,
+            "head_hash": self.head_hash,
+            "state": self.parser.meta(),
+        })
+    }
+
+    pub(crate) fn load(v: &serde_json::Value, records: Records) -> Option<(String, Tail<P>)> {
+        let n = |k: &str| v[k].as_u64();
+        Some((
+            v["path"].as_str()?.to_string(),
+            Tail {
+                stamp: (v["mtime"].as_i64()?, n("size")?),
+                file: (n("dev")?, n("ino")?),
+                offset: n("offset")?,
+                head_len: n("head_len")? as usize,
+                head_hash: n("head_hash")?,
+                read: 0,
+                widest: 0,
+                parser: P::load(&v["state"], records)?,
+            },
+        ))
+    }
+}
+
+impl Persist for Counted {
+    fn meta(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
+    }
+    fn records(&self) -> Option<&Records> {
+        None
+    }
+    fn load(meta: &serde_json::Value, _: Records) -> Option<Counted> {
+        Some(Counted(meta.as_u64()? as usize))
     }
 }
 
