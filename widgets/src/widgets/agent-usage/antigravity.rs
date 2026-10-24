@@ -240,16 +240,6 @@ fn agy_wait(pid: i32, master: libc::c_int) -> Result<Vec<serde_json::Value>, Str
 const REMOTE_QUOTA_API: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 
-/// Each model's own allowance, on the same host and the same credential.
-///
-/// Asked only when the summary carries no Gemini group - which is every
-/// time Google's summary is the one read, since Google's has only ever held
-/// the Claude and GPT-OSS group. The grouped Gemini limit came from the
-/// local language server alone, and `agy` stopped serving that to outside
-/// callers. This is the Gemini quota Google still publishes, per model.
-const REMOTE_MODEL_QUOTA_API: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
-
 /// The Connect method the language server answers the quota on.
 const ANTIGRAVITY_RPC: &str =
     "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
@@ -303,16 +293,6 @@ pub struct Data {
     /// value, so nothing else can tell them apart - and a reader wondering
     /// why there are numbers with the app shut deserves the answer.
     quota_from: From,
-    /// True when a language server was running and refused for want of its
-    /// CSRF token. The app is open, so "the app is not running" would be a
-    /// false reason for reading Google's summary instead.
-    local_refused: bool,
-    /// Each Gemini model's own allowance, read only when the summary has no
-    /// Gemini group. Per model, never a group limit.
-    gemini: Vec<crate::parse::ModelQuota>,
-    /// Why there are no Gemini readings when the summary needed them.
-    /// Empty when there are, or when the summary had its own Gemini group.
-    gemini_why: String,
     /// How the CLI authenticated. Read once here rather than per frame:
     /// the tab is redrawn on every keypress and this is a file on disk.
     auth: String,
@@ -437,26 +417,10 @@ fn antigravity_ports() -> Vec<u16> {
 /// Found by reading how CodexBar does it (github.com/steipete/CodexBar),
 /// after chasing the Google endpoint in the binary to a 404: the quota was
 /// never a remote call to make, it was a local one.
-///
-/// A server that refuses for want of its CSRF token is recorded rather than
-/// skipped, as `{"opscope_refusal": "csrf"}`: `agy` builds from October
-/// 2026 refuse every outside caller that way, and passing over it silently
-/// left the Google summary on screen with nothing to say why the app's own
-/// Gemini group had gone. A real answer on another port still wins.
 fn antigravity_quota() -> Option<serde_json::Value> {
-    let mut refused = false;
     for port in antigravity_ports() {
         let url = format!("http://127.0.0.1:{}{}", port, ANTIGRAVITY_RPC);
-        let Ok((status, text, _)) =
-            tc::post_answer(&url, &[("Content-Type", "application/json")], "{}", 5)
-        else {
-            continue;
-        };
-        if !(200..300).contains(&status) {
-            refused |= crate::parse::parse_antigravity_csrf_refusal(&text);
-            continue;
-        }
-        let Ok(got) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Some(got) = post_json(&url, &[("Content-Type", "application/json")], "{}", 5) else {
             continue;
         };
         // Some builds wrap the payload and some do not, so an envelope is
@@ -474,7 +438,7 @@ fn antigravity_quota() -> Option<serde_json::Value> {
             }
         }
     }
-    refused.then(|| serde_json::json!({ "opscope_refusal": "csrf" }))
+    None
 }
 
 /// Which Code Assist tier the account is on.
@@ -736,15 +700,11 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         .map(|v| text(v, "opscope_refusal"))
         .unwrap_or_default();
     let live = if said.is_empty() { live } else { None };
-    let local = cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota);
     let mut d = Data {
         tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier() },
         tier_said: said,
         live,
-        local_refused: local
-            .as_ref()
-            .is_some_and(|v| text(v, "opscope_refusal") == "csrf"),
-        quota: local
+        quota: cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota)
             .and_then(|got| got.as_array().cloned())
             .unwrap_or_default(),
         auth: read_json(&token_path())
@@ -827,36 +787,6 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             d.quota_why = why;
         }
     }
-    // A summary with no Gemini group is Google's - the local server is the
-    // only source that ever carried one - so the per-model readings are the
-    // Gemini quota there is. Asked on the same terms as the summary: never
-    // when asking Google is off, never with a lapsed token.
-    //
-    // The refusal is cached with the failure, as the tier's is, so the
-    // reason lasts as long as the failure rather than one frame.
-    if !d.quota.is_empty() && !has_gemini_group(&d.quota) {
-        match remote_token(cfg.antigravity_remote) {
-            Err(said) => d.gemini_why = said,
-            Ok(access) => {
-                let got = cached(caches, "antigravity-models", PLAN_TTL, || {
-                    Some(match post_body(REMOTE_MODEL_QUOTA_API, &access, "{}") {
-                        Ok(v) => v,
-                        Err(said) => serde_json::json!({ "opscope_refusal": said }),
-                    })
-                })
-                .unwrap_or_default();
-                let refused = text(&got, "opscope_refusal");
-                match crate::parse::parse_antigravity_model_quota(&got.to_string()) {
-                    _ if !refused.is_empty() => {
-                        d.gemini_why = format!("Google refused the per-model quota: {}", refused)
-                    }
-                    Some(models) if !models.is_empty() => d.gemini = models,
-                    Some(_) => d.gemini_why = "Google lists no Gemini models for this account".into(),
-                    None => d.gemini_why = "Google's per-model quota came back unreadable".into(),
-                }
-            }
-        }
-    }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
         .into_iter()
         .flatten()
@@ -926,49 +856,18 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             });
         }
     }
-    // Per-model Gemini readings stand in for a Gemini group only when there
-    // is none, and the summary gets one lane of them: the busiest model,
-    // named as that. Every model would be a dozen lanes on a screen meant
-    // for comparing agents, and an average would be a number Google never
-    // published.
-    if let Some(top) = d
-        .gemini
-        .iter()
-        .min_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal))
-    {
-        out.push(Lane {
-            label: "gemini busiest".into(),
-            pct: 100.0 * (1.0 - top.left),
-            window_secs: None,
-            reset: top.reset,
-            stale: false,
-            projected: false,
-            apart: !out.is_empty(),
-        });
-    }
     out
-}
-
-/// Whether the summary carries a Gemini group of its own. The local server's
-/// does; Google's never has.
-fn has_gemini_group(groups: &[serde_json::Value]) -> bool {
-    groups
-        .iter()
-        .any(|g| text(g, "displayName").to_lowercase().starts_with("gemini"))
 }
 
 /// One bar per limit, grouped by the model family it covers.
 ///
 /// Shown as spent rather than the remaining fraction the RPC returns, so
-/// red means the same here as on every other tab. Which groups there are is
-/// whatever the source sends - the local server has sent Gemini beside
-/// Claude and GPT-OSS, Google sends only the latter - and each is named
-/// with the models Google says it covers, since a heading like "Claude and
-/// GPT models" reads wrongly to anyone who does not know the GPT is GPT-OSS.
+/// red means the same here as on every other tab. Every plan reports every
+/// family it covers, so a Gemini-only account still gets a Claude/GPT pair
+/// sitting at 0% - they are real limits, not padding, and are left in.
 fn antigravity_quota_rows_with_plots(
     groups: &[serde_json::Value],
     from: From,
-    local_refused: bool,
     w: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
@@ -980,13 +879,6 @@ fn antigravity_quota_rows_with_plots(
     // more than elsewhere; the short one still says it is not this machine's
     // own tally. Shortened before it can clip, as the other headers are.
     let (mut note, short, tiny) = match from {
-        // Running and refusing is not the same as shut, and saying the app
-        // is not running while it is open beside the pane is a false reason.
-        From::Google if local_refused => (
-            " · account-wide, from Google - the app's server refused",
-            " · from Google",
-            " · remote",
-        ),
         From::Google => (
             " · account-wide, from Google - the app is not running",
             " · from Google",
@@ -1009,6 +901,7 @@ fn antigravity_quota_rows_with_plots(
         }
         note = shorter;
     }
+    let hue = agent_hue("antigravity");
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
@@ -1017,20 +910,6 @@ fn antigravity_quota_rows_with_plots(
         ],
         w - 1,
     )];
-    if local_refused {
-        let mut why = "Antigravity's language server now refuses outside readers: it \
-                       wants a CSRF token it gives only to processes it starts itself. \
-                       This is Google's summary instead."
-            .to_string();
-        if !has_gemini_group(groups) {
-            why.push_str(" Google publishes no grouped Gemini limit.");
-        }
-        rows.extend(
-            wrap_text(&why, w.saturating_sub(4).max(20))
-                .into_iter()
-                .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
-        );
-    }
     for group in groups {
         let buckets = ordered_buckets(group);
         if buckets.is_empty() {
@@ -1041,16 +920,6 @@ fn antigravity_quota_rows_with_plots(
             s => s,
         };
         rows.push(tc::seg(&[(p.txt.as_str(), format!("  {}", name))], w - 1));
-        // Google's own list of what the group covers - "Claude Opus, Claude
-        // Sonnet, GPT-OSS" - which is what settles the heading.
-        let covers = crate::parse::strip_controls(&text(group, "description"));
-        if !covers.is_empty() {
-            rows.extend(
-                wrap_text(&covers, w.saturating_sub(6).max(20))
-                    .into_iter()
-                    .map(|line| tc::seg(&[(p.dim.as_str(), format!("    {}", line))], w - 1)),
-            );
-        }
         let windows: Vec<String> = buckets
             .iter()
             .map(|b| match text(b, "window") {
@@ -1060,97 +929,45 @@ fn antigravity_quota_rows_with_plots(
             .collect();
         let label_w = windows.iter().map(|s| s.chars().count()).max().unwrap_or(1);
         for (bucket, window) in buckets.iter().zip(&windows) {
-            let left = bucket["remainingFraction"].as_f64().unwrap_or(0.0);
+            let pct = 100.0 * (1.0 - bucket["remainingFraction"].as_f64().unwrap_or(0.0));
+            let used = (pct / 100.0).clamp(0.0, 1.0);
+            let secs = window_secs(window);
             let reset = iso_epoch(&text(bucket, "resetTime"));
-            let row = quota_bar_row(rows.len(), window, label_w, left, window_secs(window), reset, w, p, plots);
-            rows.push(row);
+            let mut when = match reset {
+                None => String::new(),
+                Some(at) if at - now() > 0.0 => format!("resets in {}", left_span(at - now())),
+                Some(_) => "resetting".to_string(),
+            };
+            let mut room = w as i64 - 36 - label_w as i64;
+            if room < 8 {
+                // Below the bar's floor the row cannot shrink further, so the
+                // reset stands down rather than being cut in half.
+                when = String::new();
+                room = w as i64 - 20 - label_w as i64;
+            }
+            let mut line: Vec<(String, String)> = vec![(
+                p.dim.clone(),
+                format!("   {} ", tc::pad(window, label_w)),
+            )];
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line,
+                used,
+                elapsed_of(secs, reset),
+                room.max(8) as usize,
+                hue,
+                p,
+            ));
+            line.push((pct_colour(pct, hue, p), pct_text(pct)));
+            let (pace_colour, pace_txt) =
+                pace_cell(lead(pct, secs, reset), pace_guessed(false, false, reset), p);
+            line.push((pace_colour, pace_txt));
+            line.push((p.dim.clone(), format!("  {}", when)));
+            let refs: Vec<(&str, String)> =
+                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            rows.push(tc::seg(&refs, w - 1));
         }
     }
     rows.push(String::new());
     rows
-}
-
-/// One limit as a bar: its label, the bar, % spent, pace, and the reset.
-#[allow(clippy::too_many_arguments)]
-fn quota_bar_row(
-    at: usize,
-    label: &str,
-    label_w: usize,
-    left: f64,
-    secs: Option<f64>,
-    reset: Option<f64>,
-    w: usize,
-    p: &Palette,
-    plots: &mut Vec<tc::Plot>,
-) -> String {
-    let pct = 100.0 * (1.0 - left);
-    let used = (pct / 100.0).clamp(0.0, 1.0);
-    let mut when = match reset {
-        None => String::new(),
-        Some(at) if at - now() > 0.0 => format!("resets in {}", left_span(at - now())),
-        Some(_) => "resetting".to_string(),
-    };
-    let mut room = w as i64 - 36 - label_w as i64;
-    if room < 8 {
-        // Below the bar's floor the row cannot shrink further, so the
-        // reset stands down rather than being cut in half.
-        when = String::new();
-        room = w as i64 - 20 - label_w as i64;
-    }
-    let hue = agent_hue("antigravity");
-    let mut line: Vec<(String, String)> = vec![(
-        p.dim.clone(),
-        format!("   {} ", tc::pad(label, label_w)),
-    )];
-    line.extend(paced_bar_with_plot(plots, at, &line,
-        used,
-        elapsed_of(secs, reset),
-        room.max(8) as usize,
-        hue,
-        p,
-    ));
-    line.push((pct_colour(pct, hue, p), pct_text(pct)));
-    let (pace_colour, pace_txt) =
-        pace_cell(lead(pct, secs, reset), pace_guessed(false, false, reset), p);
-    line.push((pace_colour, pace_txt));
-    line.push((p.dim.clone(), format!("  {}", when)));
-    let refs: Vec<(&str, String)> =
-        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-    tc::seg(&refs, w - 1)
-}
-
-/// Gemini's quota as Google publishes it when there is no Gemini group:
-/// one bar per model, each that model's own allowance.
-///
-/// Headed so it cannot be read as a shared limit, because it is not one -
-/// Google states no window for these, so they carry no pace either. When
-/// the readings are missing the reason is drawn where they would be, since
-/// a summary with no Gemini in it looks like an account that has none.
-fn gemini_model_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, rows: &mut Vec<String>) {
-    if d.gemini.is_empty() && d.gemini_why.is_empty() {
-        return;
-    }
-    rows.push(tc::seg(&[(p.txt.as_str(), "  Gemini, per model".to_string())], w - 1));
-    let (note, colour) = if d.gemini.is_empty() {
-        (format!("No Gemini readings: {}.", d.gemini_why), p.warn.as_str())
-    } else {
-        (
-            "Each model's own allowance, from Google - not slices of one shared limit."
-                .to_string(),
-            p.dim.as_str(),
-        )
-    };
-    rows.extend(
-        wrap_text(&note, w.saturating_sub(6).max(20))
-            .into_iter()
-            .map(|line| tc::seg(&[(colour, format!("    {}", line))], w - 1)),
-    );
-    let label_w = d.gemini.iter().map(|m| m.model.chars().count()).max().unwrap_or(1);
-    for m in &d.gemini {
-        let row = quota_bar_row(rows.len(), &m.model, label_w, m.left, None, m.reset, w, p, plots);
-        rows.push(row);
-    }
-    rows.push(String::new());
 }
 
 fn antigravity_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
@@ -1271,9 +1088,7 @@ fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 }
 
 fn antigravity_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    let mut rows =
-        antigravity_quota_rows_with_plots(&d.quota, d.quota_from, d.local_refused, w, p, plots);
-    gemini_model_rows(d, w, p, plots, &mut rows);
+    let mut rows = antigravity_quota_rows_with_plots(&d.quota, d.quota_from, w, p, plots);
     if d.live.is_none() {
         rows.extend(
             wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
@@ -1639,124 +1454,6 @@ mod tests {
         );
     }
 
-    /// Google's summary as it actually arrives: the one group, with the
-    /// models it covers.
-    fn google_summary() -> Vec<serde_json::Value> {
-        vec![serde_json::json!({
-            "displayName": "Claude and GPT models",
-            "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
-            "buckets": [
-                {"bucketId": "3p-weekly", "window": "weekly",
-                 "resetTime": "2099-01-01T00:00:00Z", "remainingFraction": 1},
-                {"bucketId": "3p-5h", "window": "5h",
-                 "resetTime": "2099-01-01T00:00:00Z", "remainingFraction": 1}
-            ]
-        })]
-    }
-
-    fn model(name: &str, left: f64) -> crate::parse::ModelQuota {
-        crate::parse::ModelQuota { model: name.into(), left, reset: iso_epoch("2099-01-01T00:00:00Z") }
-    }
-
-    #[test]
-    fn a_refusing_local_server_is_not_reported_as_an_app_that_is_shut() {
-        let p = palette();
-        let shown = antigravity_quota_rows_with_plots(
-            &google_summary(), From::Google, true, 120, &p, &mut Vec::new(),
-        )
-        .join("\n");
-        assert!(!shown.contains("not running"), "the app is open: {}", shown);
-        assert!(shown.contains("refused"), "{}", shown);
-        assert!(shown.contains("CSRF token"), "{}", shown);
-        assert!(shown.contains("no grouped Gemini limit"), "{}", shown);
-        // Without a refusal, the old reason stands.
-        let shut = antigravity_quota_rows_with_plots(
-            &google_summary(), From::Google, false, 120, &p, &mut Vec::new(),
-        )
-        .join("\n");
-        assert!(shut.contains("not running"), "{}", shut);
-        assert!(!shut.contains("CSRF"), "{}", shut);
-    }
-
-    #[test]
-    fn a_group_says_which_models_it_covers() {
-        // "Claude and GPT models" reads as a mistake until it says the GPT
-        // is GPT-OSS - and Google says so, in the group's description.
-        let shown = antigravity_quota_rows(&google_summary(), From::Google, 120, &palette()).join("\n");
-        assert!(shown.contains("Claude and GPT models"));
-        assert!(shown.contains("Claude Opus, Claude Sonnet, GPT-OSS"), "{}", shown);
-    }
-
-    #[test]
-    fn gemini_per_model_readings_are_drawn_and_headed_as_per_model() {
-        let d = Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
-            quota: google_summary(),
-            quota_from: From::Google,
-            local_refused: true,
-            gemini: vec![model("gemini-3-flash", 0.75), model("gemini-2.5-pro", 1.0)],
-            ..Data::default()
-        };
-        let mut plots = Vec::new();
-        let rows = antigravity_body_with_plots(&d, 120, &palette(), &mut plots);
-        let shown = rows.join("\n");
-        assert!(shown.contains("Gemini, per model"), "{}", shown);
-        assert!(shown.contains("not slices of one shared limit"), "{}", shown);
-        let flash = rows.iter().position(|r| r.contains("gemini-3-flash")).unwrap();
-        assert!(rows[flash].contains("25%"), "spent, not left: {}", rows[flash]);
-        assert!(rows.iter().any(|r| r.contains("gemini-2.5-pro")));
-        // Two windows of the group and two models, each with its bar on its
-        // own row.
-        assert_eq!(plots.len(), 4);
-        assert!(plots.iter().any(|plot| plot.y == flash));
-    }
-
-    #[test]
-    fn missing_gemini_readings_say_why_where_they_would_be() {
-        let d = Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
-            quota: google_summary(),
-            quota_from: From::Google,
-            gemini_why: "Google refused the per-model quota: the server answered 500".into(),
-            ..Data::default()
-        };
-        let shown = antigravity_body(&d, 120, &palette()).join("\n");
-        assert!(shown.contains("Gemini, per model"), "{}", shown);
-        assert!(shown.contains("No Gemini readings: Google refused"), "{}", shown);
-        // Nothing to say when the summary carried its own Gemini group.
-        let grouped = Data { quota: groups(&[("Gemini", "5h", 0.5)]), ..Data::default() };
-        assert!(!antigravity_body(&grouped, 120, &palette()).join("\n").contains("per model"));
-    }
-
-    #[test]
-    fn the_summary_gets_one_gemini_lane_for_the_busiest_model() {
-        let d = Data {
-            quota: google_summary(),
-            gemini: vec![
-                model("gemini-2.5-pro", 1.0),
-                model("gemini-3-flash", 0.4),
-                model("gemini-3.5-flash-low", 0.9),
-            ],
-            ..Data::default()
-        };
-        let found = lanes(&d);
-        let gemini: Vec<_> = found.iter().filter(|l| l.label.starts_with("gemini")).collect();
-        assert_eq!(gemini.len(), 1, "one lane, not one per model");
-        assert_eq!(gemini[0].label, "gemini busiest");
-        assert!((gemini[0].pct - 60.0).abs() < 1e-9);
-        assert!(gemini[0].apart, "not a third window of the Claude group");
-        assert!(gemini[0].label.chars().count() <= 16, "the summary's label column");
-        // No readings, no lane - never a 0% standing in for a missing one.
-        let none = Data { quota: google_summary(), ..Data::default() };
-        assert!(lanes(&none).iter().all(|l| !l.label.starts_with("gemini")));
-    }
-
-    #[test]
-    fn only_a_summary_without_gemini_asks_for_the_per_model_readings() {
-        assert!(!has_gemini_group(&google_summary()));
-        assert!(has_gemini_group(&groups(&[("Gemini Models", "5h", 1.0)])));
-    }
-
     #[test]
     fn quota_charts_put_five_hours_above_weekly_for_every_model() {
         let quota = groups(&[
@@ -1769,7 +1466,7 @@ mod tests {
         ]);
         let mut plots = Vec::new();
         let rows =
-            antigravity_quota_rows_with_plots(&quota, From::Local, false, 96, &palette(), &mut plots);
+            antigravity_quota_rows_with_plots(&quota, From::Local, 96, &palette(), &mut plots);
         assert_eq!(plots.len(), 6);
         for pair in plots.chunks_exact(2) {
             assert!(rows[pair[0].y].contains("5h"));
@@ -1969,40 +1666,11 @@ mod tests {
             last: now() - 3600.0,
             tier_why: Missing::Nothing,
             tier_said: String::new(),
-            local_refused: false,
-            gemini: Vec::new(),
-            gemini_why: String::new(),
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");
             for want in ["QUOTA", "ACTIVITY", "SUBSCRIPTION"] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
-            }
-        }
-        // Google's summary behind a refusing server, with the per-model
-        // Gemini rows: the longest model id is wider than a narrow pane's
-        // whole bar, and the two notes are prose. No row may outgrow the
-        // pane, or the terminal wraps it and scrolls the title away.
-        let google = Data {
-            quota: google_summary(),
-            quota_from: From::Google,
-            local_refused: true,
-            gemini: vec![model("gemini-3.5-flash-extra-low", 0.5), model("gemini-3-flash", 1.0)],
-            ..d.clone()
-        };
-        for w in [20usize, 26, 40, 80, 200] {
-            let rows = tab(&google, w, 40, &cfg, &p);
-            let plain = rows.join("\n");
-            for want in ["QUOTA", "Gemini, per model", "ACTIVITY"] {
-                assert!(plain.contains(want), "{} missing at width {}", want, w);
-            }
-            for row in &rows {
-                assert!(
-                    tc::display_width(row) < w,
-                    "a row outgrew the {}-column pane: {:?}",
-                    w,
-                    row
-                );
             }
         }
     }
@@ -2023,7 +1691,7 @@ fn antigravity_quota_rows(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    antigravity_quota_rows_with_plots(groups, from, false, w, p, &mut Vec::new())
+    antigravity_quota_rows_with_plots(groups, from, w, p, &mut Vec::new())
 }
 
 #[cfg(test)]

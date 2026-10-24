@@ -1419,68 +1419,6 @@ pub fn parse_factory_dotenv(text: &str) -> Option<String> {
     None
 }
 
-/// Whether a body is Antigravity's language server refusing a caller for
-/// want of its CSRF token.
-///
-/// `agy` builds from October 2026 on answer every outside request with
-/// `{"code":"unauthenticated","message":"unauthenticated: missing CSRF
-/// token"}`, and hand the token only to processes they start themselves.
-/// Told apart from any other refusal because it is the one that explains a
-/// running app with no local quota - without it the probe reads exactly
-/// like an app that is shut.
-pub fn parse_antigravity_csrf_refusal(text: &str) -> bool {
-    let Ok(body) = serde_json::from_str::<serde_json::Value>(text) else {
-        return false;
-    };
-    body["code"].as_str() == Some("unauthenticated")
-        && body["message"]
-            .as_str()
-            .is_some_and(|m| m.to_ascii_lowercase().contains("csrf"))
-}
-
-/// One model's own allowance, from Antigravity's per-model quota.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ModelQuota {
-    pub model: String,
-    /// The fraction left, as Google sends it: 1.0 is untouched.
-    pub left: f64,
-    pub reset: Option<f64>,
-}
-
-/// The Gemini models in a `retrieveUserQuota` answer, one entry per model.
-///
-/// That endpoint lists every model the account can call, each with its own
-/// `remainingFraction` - not the grouped weekly and five-hour pair the
-/// summary carries, so nothing here is a group limit and callers must not
-/// draw it as one. Only `gemini-` models are kept: the Claude and GPT-OSS
-/// ones are already covered by the summary's own group, and the `chat_` and
-/// `tab_` entries are internal ids with no reset and no name a reader would
-/// recognise. A model listed twice keeps its first bucket. `None` when the
-/// body is not that shape at all, so an unreadable answer is not mistaken
-/// for an account with no Gemini models.
-pub fn parse_antigravity_model_quota(text: &str) -> Option<Vec<ModelQuota>> {
-    let body: serde_json::Value = serde_json::from_str(text).ok()?;
-    let buckets = body["buckets"].as_array()?;
-    let mut out: Vec<ModelQuota> = Vec::new();
-    for bucket in buckets {
-        let Some(model) = non_empty(&bucket["modelId"]) else {
-            continue;
-        };
-        let Some(left) = bucket["remainingFraction"].as_f64() else {
-            continue;
-        };
-        if !model.starts_with("gemini-") || out.iter().any(|m| m.model == model) {
-            continue;
-        }
-        out.push(ModelQuota {
-            model,
-            left: left.clamp(0.0, 1.0),
-            reset: epoch_from(&bucket["resetTime"], 1e11),
-        });
-    }
-    Some(out)
-}
-
 fn quoted(value: &str) -> Option<&str> {
     let bytes = value.as_bytes();
     if bytes.len() >= 2
@@ -1541,48 +1479,6 @@ pub fn format_balance(n: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn antigravity_csrf_refusal_is_told_apart_from_other_answers() {
-        // The body the October 2026 `agy` sends to an outside caller.
-        assert!(super::parse_antigravity_csrf_refusal(
-            r#"{"code":"unauthenticated","message":"unauthenticated: missing CSRF token"}"#
-        ));
-        // Unauthenticated for some other reason is not this one.
-        assert!(!super::parse_antigravity_csrf_refusal(
-            r#"{"code":"unauthenticated","message":"token expired"}"#
-        ));
-        // Nor is a real answer, or something that is not JSON at all.
-        assert!(!super::parse_antigravity_csrf_refusal(r#"{"groups":[]}"#));
-        assert!(!super::parse_antigravity_csrf_refusal("Client sent an HTTP request to an HTTPS server."));
-    }
-
-    #[test]
-    fn antigravity_model_quota_keeps_gemini_models_once_each() {
-        // Shaped like a real `retrieveUserQuota` answer: internal ids with
-        // no reset, Claude and GPT-OSS models, and the Gemini ones.
-        let body = r#"{"buckets":[
-            {"tokenType":"WTUS","modelId":"chat_20706","remainingFraction":1},
-            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"claude-sonnet-5-5-high","remainingFraction":1},
-            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"gemini-3-flash","remainingFraction":0.75},
-            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"OTHER","modelId":"gemini-3-flash","remainingFraction":0.1},
-            {"tokenType":"WTUS","modelId":"gemini-2.5-pro","remainingFraction":1},
-            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"gpt-oss-120b-medium","remainingFraction":1},
-            {"tokenType":"WTUS","modelId":"gemini-no-fraction"},
-            {"tokenType":"WTUS","modelId":"tab_flash_lite_preview","remainingFraction":1}
-        ]}"#;
-        let got = super::parse_antigravity_model_quota(body).unwrap();
-        let names: Vec<_> = got.iter().map(|m| m.model.as_str()).collect();
-        assert_eq!(names, ["gemini-3-flash", "gemini-2.5-pro"]);
-        assert_eq!(got[0].left, 0.75, "the first bucket for a model wins");
-        assert_eq!(got[0].reset, crate::iso_epoch("2026-10-24T08:53:27Z"));
-        assert_eq!(got[1].reset, None, "no reset is unknown, not now");
-        // An answer with no Gemini models is an empty list, and an answer
-        // that is not this shape is no answer.
-        assert_eq!(super::parse_antigravity_model_quota(r#"{"buckets":[]}"#), Some(Vec::new()));
-        assert_eq!(super::parse_antigravity_model_quota(r#"{"groups":[]}"#), None);
-        assert_eq!(super::parse_antigravity_model_quota("not json"), None);
-    }
-
     #[test]
     fn cursor_cookie_reuses_the_token_subject_without_exposing_another_session() {
         use base64::Engine;
