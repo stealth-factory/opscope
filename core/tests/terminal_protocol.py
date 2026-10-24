@@ -248,9 +248,16 @@ def moving_meter_is_text_and_quiet():
                 assert len(t.images()) == before, "a meter was sent as an image"
                 assert "┃".encode() in t.output and "█".encode() in t.output
                 start = len(t.commands())
+                mark = len(t.output)
                 t.read(1.0)
                 assert not any(k.get(b"a") in (b"T", b"t", b"f") for k, _ in t.commands()[start:]), \
                     "subpixel marker changes triggered an upload"
+                # Nor is its text rewritten, unless a whole-screen refresh
+                # (which repaints the title too) happened in the window.
+                later = t.output[mark:]
+                if "protocol fixture".encode() not in later:
+                    assert "┃".encode() not in later and "░".encode() not in later, \
+                        "subpixel marker changes redrew the meter text"
                 t.quit()
                 print(f"PASS moving-meter/{width}/{'shared' if shared else 'direct'}")
             finally:

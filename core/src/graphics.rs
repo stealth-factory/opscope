@@ -554,8 +554,10 @@ const LEFT_EIGHTHS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', 
 /// Each category's edge is rounded to an eighth. A cell two categories
 /// share is the left one's partial block on the right one's colour as a
 /// background, so the cell stays solid and the boundary lands where the
-/// share puts it; the next cell clears that background. A category smaller
-/// than a cell can lose its sliver to its neighbours, as in whole cells.
+/// share puts it; the next cell clears that background. A cell three or
+/// more categories share goes whole to the largest of them. A category
+/// smaller than a cell can lose its sliver to its neighbours, as in whole
+/// cells.
 /// `colour(part, i, count)` is category `part`'s colour for its `i`th of
 /// `count` cells, so a gradient can restart inside each category.
 fn stacked_cells(
@@ -594,6 +596,17 @@ fn stacked_cells(
         };
         if first == last {
             out.push((format!("{reset}{}", ink(first)), "█".into()));
+            continue;
+        }
+        // Three or more categories in one cell: one partial block can only
+        // show two, so the largest overlap takes the whole cell.
+        if last > first + 1 {
+            let overlap = |part: usize| {
+                let start = if part == 0 { 0 } else { edges[part - 1] };
+                edges[part].min(cell * 8 + 8).saturating_sub(start.max(cell * 8))
+            };
+            let widest = (first..=last).rev().max_by_key(|&part| overlap(part)).unwrap_or(first);
+            out.push((format!("{reset}{}", ink(widest)), "█".into()));
             continue;
         }
         let share = edges[first] - cell * 8;
@@ -2531,11 +2544,16 @@ mod tests {
         assert!(cells[4].0.starts_with(super::super::NOBG), "the next cell clears the background");
         assert_eq!(plot.fill.as_ref().unwrap().row(0, 10).matches(super::super::NOBG).count(), 1);
         // A boundary in the last cell still ends its background before any label.
-        let plot = Plot::stacked_bar(0, 1, 10, &[(0.95, a.clone()), (0.05, b)]);
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.95, a.clone()), (0.05, b.clone())]);
         assert!(plot.fill.as_ref().unwrap().row(0, 10).ends_with(super::super::NOBG));
         // Colours that are not truecolour cannot be painted behind: the larger share wins.
         let plot = Plot::stacked_bar(0, 1, 10, &[(0.33, "\x1b[31m".into()), (0.67, "\x1b[32m".into())]);
         assert_eq!(plot.text_row(0)[3], ("\x1b[32m".to_string(), "█".to_string()));
+        // Three categories in one cell: the middle, largest one takes it,
+        // rather than the outer two splitting it between them.
+        let c = super::super::rgb(90, 120, 250);
+        let plot = Plot::stacked_bar(0, 1, 1, &[(0.125, a.clone()), (0.75, b.clone()), (0.125, c)]);
+        assert_eq!(plot.text_row(0)[0], (b.clone(), "█".to_string()));
     }
 
     #[test]
