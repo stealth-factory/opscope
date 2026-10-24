@@ -2566,6 +2566,11 @@ fn main() {
         // log on disk again from its first byte.
         let saved_at = store::path();
         store::restore(&mut caches, &saved_at);
+        // A directory dropped from the config is never read again, so
+        // nothing would ever prune what was saved for it.
+        let wanted: std::collections::HashSet<String> =
+            claude::dirs_of(&poller_cfg).iter().map(|d| claude::projects_path(&d.path)).collect();
+        caches.transcripts.retain(|dir, _| wanted.contains(dir));
         let mut saver = store::Saver::new(now());
         let mut asked = false;
         loop {

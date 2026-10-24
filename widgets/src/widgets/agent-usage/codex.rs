@@ -617,8 +617,12 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let (listed, complete) = list_logs(&under_home(".codex/sessions"), ".jsonl", None, at);
     let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     let Some(newest) = files.first().cloned() else {
-        caches.rollouts = Logs::default();
-        caches.codex_built = None;
+        // Only a complete listing proves the rollouts are gone: one cut
+        // short before it found any has not looked yet.
+        if complete {
+            caches.rollouts = Logs::default();
+            caches.codex_built = None;
+        }
         return codex;
     };
     codex.ok = true;

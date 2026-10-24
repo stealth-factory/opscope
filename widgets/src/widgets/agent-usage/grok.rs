@@ -596,9 +596,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let (listed, complete) = list_logs(&under_home(SESSIONS), "updates.jsonl", None, at);
     let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     if files.is_empty() {
-        // Every session log is gone, so what was held for them goes too.
-        caches.grok = Logs::default();
-        caches.grok_built = None;
+        // Every session log is gone, so what was held for them goes too -
+        // when the listing is complete. One cut short has not looked yet.
+        if complete {
+            caches.grok = Logs::default();
+            caches.grok_built = None;
+        }
         // The log is still read. The credit window is account-wide and true
         // whatever this disk holds, and hiding it because the local half is
         // missing is the failure this repo keeps paying for. ok stays false,

@@ -442,10 +442,22 @@ fn list_logs_within(
     let mut complete = true;
     let mut dirs = vec![dir.to_string()];
     'walk: while let Some(d) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
+        // A missing root is no logs at all. Anything else that cannot be
+        // read is a part not looked at, and a listing missing it must not
+        // be taken as proof that what was under it has gone.
+        let entries = match std::fs::read_dir(&d) {
+            Ok(entries) => entries,
+            Err(e) if d == dir && e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
             if found.len() >= most || std::time::Instant::now() >= until {
                 complete = false;
                 break 'walk;
@@ -456,6 +468,7 @@ fn list_logs_within(
                 Ok(t) if t.is_dir() => dirs.push(name),
                 Ok(t) if t.is_file() && name.ends_with(suffix) => {
                     let Ok(meta) = entry.metadata() else {
+                        complete = false;
                         continue;
                     };
                     let mtime = meta.mtime().min(at as i64);
@@ -464,7 +477,8 @@ fn list_logs_within(
                     }
                     found.push(Listed { path: name, mtime, size: meta.size(), file: (meta.dev(), meta.ino()) });
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(_) => complete = false,
             }
         }
     }
@@ -1589,6 +1603,9 @@ mod tests {
         // A window drops what was not written within it.
         let (recent, _) = list_logs(&dir.to_string_lossy(), ".jsonl", Some(31.0 * 86_400.0), at);
         assert_eq!(recent.len(), 1);
+        // A root that is not there is no logs, and that is the whole of it.
+        let (none, complete) = listing(&dir.join("absent"), at);
+        assert!(none.is_empty() && complete);
         // Past the entry bound, the listing says it is not the whole.
         let (cut, complete) =
             list_logs_within(&dir.to_string_lossy(), ".jsonl", None, at, 1, std::time::Duration::from_secs(5));

@@ -1953,8 +1953,11 @@ pub fn why_no_lane(d: &Data) -> String {
 pub fn lanes(d: &Data) -> Vec<Lane> {
     let mut out = fresh_lanes(d);
     if d.live_kept.is_some() {
+        // Only the lanes the kept usage reading drew: the prepaid balance
+        // and Grok Bot come from requests of their own that may have
+        // answered this pass.
         for lane in &mut out {
-            lane.stale = true;
+            lane.stale = lane.label != PREPAID_LABEL && lane.label != "grok bot";
         }
     }
     out
@@ -4261,6 +4264,18 @@ mod tests {
         // And the summary lane is on the same monthly clock.
         let extra = lanes(&d).into_iter().find(|l| l.label == "usage limit").expect("a usage limit lane");
         assert_eq!(extra.reset, Some(month_end / 1000.0));
+    }
+
+    #[test]
+    fn a_kept_usage_reading_marks_only_its_own_lanes_stale() {
+        let mut d = unified_data(true);
+        d.live_kept = Some(crate::shared::Kept { at: now() - 600.0, why: "the request timed out".into() });
+        let stale: Vec<(String, bool)> = lanes(&d).into_iter().map(|l| (l.label, l.stale)).collect();
+        assert_eq!(
+            stale,
+            [("weekly pool".into(), true), ("usage limit".into(), true), ("prepaid credits".into(), false)],
+            "the prepaid balance answered this pass"
+        );
     }
 
     #[test]

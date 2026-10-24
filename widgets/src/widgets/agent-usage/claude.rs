@@ -433,7 +433,7 @@ fn stats_path(dir: &str) -> String {
     format!("{dir}/stats-cache.json")
 }
 
-fn projects_path(dir: &str) -> String {
+pub(crate) fn projects_path(dir: &str) -> String {
     format!("{dir}/projects")
 }
 
@@ -862,9 +862,10 @@ fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
     let asked = caches.asked_at > 0.0;
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
-    let (all, complete) = list_logs(projects, ".jsonl", None, at);
-    let since = at - crate::metered_window();
-    let windowed: Vec<Listed> = all.iter().filter(|l| l.mtime as f64 >= since).cloned().collect();
+    //
+    // Windowed while listing, not after, so transcripts too old to show
+    // never count towards the listing's entry bound.
+    let (windowed, complete) = list_logs(projects, ".jsonl", Some(crate::metered_window()), at);
     let logs = caches.transcripts.entry(projects.to_string()).or_default();
     let pass = logs.pass((windowed, complete), asked, at, &mut caches.budget, |_| {
         TranscriptLines::default()
@@ -898,7 +899,15 @@ fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
             *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
         }
     }
-    let newest: Vec<&str> = all.iter().map(|l| l.path.as_str()).collect();
+    // The newest few in the window are the newest few on disk. Only when
+    // the window holds fewer than the sample is the whole listing walked,
+    // so an idle month still has a rate.
+    let all: Vec<String> = if paths.len() >= RATE_FILES {
+        paths.iter().map(|p| p.to_string()).collect()
+    } else {
+        list_logs(projects, ".jsonl", None, at).0.into_iter().map(|l| l.path).collect()
+    };
+    let newest: Vec<&str> = all.iter().map(String::as_str).collect();
     let (rates, sampled) = claude_rates_in(&newest);
     let built = Built { daily: merged, rates, sampled, history };
     caches.claude_built.insert(projects.to_string(), built.clone());
