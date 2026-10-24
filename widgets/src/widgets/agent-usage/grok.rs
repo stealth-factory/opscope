@@ -567,6 +567,9 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let mut files = Vec::new();
     walk(&under_home(SESSIONS), "updates.jsonl", &mut files);
     if files.is_empty() {
+        // Every session log is gone, so the tails of the ones that were
+        // here go too; the prune after the loop below is never reached.
+        caches.grok.clear();
         // The log is still read. The credit window is account-wide and true
         // whatever this disk holds, and hiding it because the local half is
         // missing is the failure this repo keeps paying for. ok stays false,
