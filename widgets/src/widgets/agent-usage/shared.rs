@@ -505,6 +505,10 @@ pub struct Logs<P> {
     /// never called a total.
     unread: Vec<String>,
     read_at: f64,
+    /// Whether the listing the last read worked from was complete. A
+    /// listing that becomes complete is read at once, not on the cadence:
+    /// until then what is held was built from part of the logs.
+    read_whole: bool,
     pub history: History,
     /// Read something since the store last saved it.
     pub dirty: bool,
@@ -518,6 +522,7 @@ impl<P> Default for Logs<P> {
             queue: Vec::new(),
             unread: Vec::new(),
             read_at: 0.0,
+            read_whole: true,
             history: History::default(),
             dirty: false,
         }
@@ -545,7 +550,8 @@ impl<P: Lines> Logs<P> {
         let (listed, complete) = listing;
         let changed = listed != self.listed || complete != self.history.listed_all || !self.unread.is_empty();
         let catching_up = !self.queue.is_empty() || self.read_at == 0.0;
-        let due = asked || catching_up || (changed && at - self.read_at >= HISTORY_EVERY);
+        let completed = complete && !self.read_whole;
+        let due = asked || catching_up || completed || (changed && at - self.read_at >= HISTORY_EVERY);
         // Gone from disk, or out of the window: nothing held for it can
         // reach the screen any more. Only a complete listing says so: one
         // cut short has simply not reached the rest, and dropping them would
@@ -593,6 +599,7 @@ impl<P: Lines> Logs<P> {
         self.queue = unfinished;
         self.unread = unread;
         self.read_at = at;
+        self.read_whole = complete;
         self.history.behind = self.queue.len() + self.unread.len();
         if self.history.behind == 0 && complete {
             self.history.as_of = at;
@@ -1561,6 +1568,25 @@ mod tests {
         assert_eq!(lines_in(&logs), 2);
         assert!(!logs.history.partial());
         assert_eq!(logs.history.as_of, due);
+    }
+
+    #[test]
+    fn a_listing_that_becomes_complete_is_read_at_once() {
+        let log = growing::Log::new("becomes-complete");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n");
+        std::fs::write(dir.join("other.jsonl"), "{}\n{}\n").unwrap();
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        let (all, _) = listing(&dir, at);
+        logs.pass((all[..1].to_vec(), false), false, at, &mut Budget::unlimited(), |_| Seen(0));
+        assert!(logs.history.partial());
+        // Well inside the cadence, the whole listing arrives: read now, not
+        // held as a total built from half of it.
+        let soon = at + 1.0;
+        assert_eq!(logs.pass(listing(&dir, soon), false, soon, &mut Budget::unlimited(), |_| Seen(0)), Pass::Read);
+        assert_eq!(lines_in(&logs), 3);
+        assert!(!logs.history.partial());
     }
 
     #[test]
