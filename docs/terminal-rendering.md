@@ -390,7 +390,8 @@ cleared on the next cell. A stacked bar rounds each category's edge to an
 eighth; a cell two categories share is the left one's partial block on the
 right one's colour as a background, so the cell stays solid, and the next cell
 clears that background (`CSI 49 m`). Without a truecolour pair the larger
-share takes the whole cell. A category smaller than a cell can still lose its
+share takes the whole cell, and a cell three or more categories share goes
+whole to the largest of them. A category smaller than a cell can still lose its
 sliver to its neighbours, as it did in whole cells. Fill colours are the same
 ones the widget passed, so the contrast rule on the selected-row tint is
 unchanged.
@@ -406,7 +407,8 @@ For nested sections, `append_plot_rows(&mut rows, &mut plots, |local_plots| ...)
 appends returned text and offsets section-local plots by the existing row count.
 It publishes neither if the section panics. Apply the viewport transform once,
 after all sections are assembled. Stacked bars take normalized fractions that
-sum to one; pixel edges preserve subcell shares and text uses whole-cell shares.
+sum to one; they are always text, with each category's edge rounded to an
+eighth of a cell (see "Always text" above).
 
 The widget owns its axis transform, sample aggregation, labels and colors.
 For timed traces, set `Trace::positions` to horizontal fractions in `0..=1`,

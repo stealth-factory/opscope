@@ -256,8 +256,8 @@ def moving_meter_is_text_and_quiet():
                 # (which repaints the title too) happened in the window.
                 later = t.output[mark:]
                 if "protocol fixture".encode() not in later:
-                    assert "┃".encode() not in later and "░".encode() not in later, \
-                        "subpixel marker changes redrew the meter text"
+                    assert "┃".encode() not in later, "subpixel marker changes redrew the meter text"
+                    assert "░".encode() not in later, "subpixel marker changes redrew the meter text"
                 t.quit()
                 print(f"PASS moving-meter/{width}/{'shared' if shared else 'direct'}")
             finally:
