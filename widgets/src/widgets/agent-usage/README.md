@@ -1878,8 +1878,14 @@ refresh makes a tab a row longer.
 
 ## Cost
 
-Small. Local files are read every 30 seconds, and a transcript is read once
-and then left alone, because a finished transcript never changes. A live quota
+Small. Local files are looked at every 30 seconds. Each transcript, rollout,
+session log and prompt history is read once, a line at a time, and after that
+only what the agent has appended since. A live session's log can pass four
+gigabytes, and none of it is ever held whole: what stays in memory is the
+records each file yielded, a byte offset, and its first kilobyte. A file that
+shrinks or is replaced is read again from the start, and one that is deleted
+takes its records with it, so memory follows what is on disk rather than how
+long the pane has been open. A live quota
 is held for a couple of minutes and a plan for an hour, so what a pane left
 open all day asks of each agent is the same whichever tab is on screen.
 

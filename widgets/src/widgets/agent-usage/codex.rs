@@ -251,53 +251,80 @@ fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank>
 /// the same turn is written twice with the same stamp. Sequence numbers
 /// restart per file and would pair unrelated events, and `ordinal` is absent
 /// from older rollouts.
-fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, String, Tokens)> {
-    let mut records: HashMap<String, (String, String, Tokens)> = HashMap::new();
-    let mut session = fallback.to_string();
-    let mut model = String::new();
-    let mut tier = String::new();
+#[cfg(test)]
+fn rollout_records(body: &str, fallback: &str) -> Records {
+    let mut lines = RolloutLines::new(fallback);
     for line in body.lines() {
+        lines.line(line);
+    }
+    lines.records
+}
+
+/// `rollout_records` a line at a time, carrying the session, model and
+/// tier from one line to the next - which is what lets `follow` hand it
+/// only the lines appended since the last pass and still land where a
+/// whole-file read would.
+pub struct RolloutLines {
+    session: String,
+    model: String,
+    tier: String,
+    pub records: Records,
+}
+
+impl RolloutLines {
+    fn new(fallback: &str) -> RolloutLines {
+        RolloutLines {
+            session: fallback.to_string(),
+            model: String::new(),
+            tier: String::new(),
+            records: HashMap::new(),
+        }
+    }
+}
+
+impl Lines for RolloutLines {
+    fn line(&mut self, line: &str) {
         if !line.contains("\"model\"")
             && !line.contains("\"token_count\"")
             && !line.contains("\"session_meta\"")
             && !line.contains("\"service_tier\"")
         {
-            continue;
+            return;
         }
         let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+            return;
         };
         let payload = &r["payload"];
         match text(&r, "type").as_str() {
             "session_meta" => {
                 let id = text(payload, "session_id");
                 if !id.is_empty() {
-                    session = id;
+                    self.session = id;
                 }
-                continue;
+                return;
             }
             "turn_context" => {
                 let named = text(payload, "model");
                 if !named.is_empty() {
-                    model = named;
+                    self.model = named;
                 }
-                continue;
+                return;
             }
             "event_msg" => {
                 if let Some(next) = tier_from_event(payload) {
-                    tier = next;
-                    continue;
+                    self.tier = next;
+                    return;
                 }
             }
             _ => {}
         }
-        if text(payload, "type") != "token_count" || model.is_empty() {
-            continue;
+        if text(payload, "type") != "token_count" || self.model.is_empty() {
+            return;
         }
         let used = &payload["info"]["last_token_usage"];
         let stamp = text(&r, "timestamp");
         let Some(when) = iso_epoch(&stamp) else {
-            continue;
+            return;
         };
         let cached = num(used, "cached_input_tokens");
         let mut got = empty_tokens();
@@ -307,19 +334,18 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
         *got.get_mut("cache_write").unwrap() = num(used, "cache_write_input_tokens");
         *got.get_mut("output").unwrap() = num(used, "output_tokens");
         if got.values().all(|n| *n == 0.0) {
-            continue;
+            return;
         }
         let day = Local
             .timestamp_opt(when as i64, 0)
             .single()
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        records.insert(
-            format!("{}\u{0}{}", session, stamp),
-            (day, billed_model(&model, &tier), got),
+        self.records.insert(
+            format!("{}\u{0}{}", self.session, stamp),
+            (day, billed_model(&self.model, &self.tier), got),
         );
     }
-    records
 }
 
 /// The tier a thread-settings snapshot carries forward.
@@ -363,34 +389,18 @@ fn billed_model(model: &str, tier: &str) -> String {
     }
 }
 
-/// One rollout's records, parsed once.
+/// Bring one rollout's records up to date, reading only what was appended.
 ///
-/// Cached on (mtime, size): a finished rollout never changes, and some run to
-/// thirty megabytes, so the full parse happens once per file rather than on
-/// every refresh.
-fn scan_rollout(caches: &mut Caches, path: &str) -> HashMap<String, (String, String, Tokens)> {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return HashMap::new();
-    };
-    let key = (meta.mtime() as u64, meta.size());
-    if let Some((had, records)) = caches.transcripts.get(path) {
-        if *had == key {
-            return records.clone();
-        }
-    }
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
+/// A finished rollout never changes and is read once. A live one grows for
+/// as long as the session runs - past four gigabytes here - so it is read
+/// once and then only from where the last pass stopped. False when the
+/// file cannot be read, which counts as a rollout with nothing in it.
+fn scan_rollout(caches: &mut Caches, path: &str) -> bool {
     // The basename only stands in until session_meta names the session. Two
     // rollouts in different directories can share one, so it is a last resort
     // rather than an identifier.
     let base = path.rsplit('/').next().unwrap_or(path);
-    let records = rollout_records(&body, base);
-    caches
-        .transcripts
-        .insert(path.to_string(), (key, records.clone()));
-    records
+    follow(&mut caches.rollouts, path, || RolloutLines::new(base))
 }
 
 /// Every rollout on this machine, newest first.
@@ -406,23 +416,24 @@ fn rollout_files() -> Vec<String> {
 /// sessions, because resuming writes a new file for a session that already
 /// existed. Counting files and calling them sessions was the same mistake
 /// that made the totals wrong, in the label.
-fn merge_days(
-    seen: HashMap<String, (String, String, Tokens)>,
+fn merge_days<K: AsRef<str>, V: std::borrow::Borrow<Record>>(
+    seen: impl IntoIterator<Item = (K, V)>,
 ) -> (HashMap<String, HashMap<String, Tokens>>, usize) {
     let mut sessions: HashSet<String> = HashSet::new();
     let mut merged: HashMap<String, HashMap<String, Tokens>> = HashMap::new();
-    for (key, (day, model, tokens)) in seen {
-        if let Some(id) = key.split('\u{0}').next() {
+    for (key, record) in seen {
+        let (day, model, tokens) = record.borrow();
+        if let Some(id) = key.as_ref().split('\u{0}').next() {
             sessions.insert(id.to_string());
         }
         let bucket = merged
-            .entry(day)
+            .entry(day.clone())
             .or_default()
-            .entry(model)
+            .entry(model.clone())
             .or_insert_with(empty_tokens);
         // Every kind, not just the priced ones: reasoning is carried
         // alongside them and iterating the rate card would drop it.
-        for (kind, n) in &tokens {
+        for (kind, n) in tokens {
             *bucket.entry(kind.clone()).or_insert(0.0) += n;
         }
     }
@@ -577,6 +588,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         ..Data::default()
     };
     let files = rollout_files();
+    // Every rollout comes from the one sessions directory, so anything held
+    // for a path not found there this pass is a file that has gone - and
+    // when none are left, nothing is.
+    let present: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    prune(&mut caches.rollouts, |_| true, &present);
     let Some(newest) = files.first().cloned() else {
         return codex;
     };
@@ -587,9 +603,17 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         .map(|m| m.mtime() as f64)
         .unwrap_or(0.0);
     codex.limits = newest_limits(&files);
-    let mut seen: HashMap<String, (String, String, Tokens)> = HashMap::new();
-    for path in &files {
-        seen.extend(scan_rollout(caches, path));
+    // Brought up to date first and borrowed after, so the records stay in
+    // the cache rather than being copied out of it on every pass. Later
+    // files win a shared key, as `extend` did.
+    let readable: Vec<&String> = files.iter().filter(|path| scan_rollout(caches, path)).collect();
+    let mut seen: HashMap<&str, &Record> = HashMap::new();
+    for path in readable {
+        if let Some(t) = caches.rollouts.get(path.as_str()) {
+            for (key, record) in &t.parser.records {
+                seen.insert(key, record);
+            }
+        }
     }
     let (daily, sessions) = merge_days(seen);
     codex.total = codex_totals(&daily);
@@ -1645,6 +1669,95 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(only_model(&plain), "gpt-6.1-sol");
+    }
+
+    /// A synthetic rollout that leans on state carried between lines: the
+    /// session named first, the model and tier changing part way, a token
+    /// count before any model, and text that is not ASCII.
+    fn synthetic_rollout(id: &str, turns: usize) -> String {
+        let mut lines = vec![
+            r#"{"type":"event_msg","timestamp":"2026-09-01T08:59:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":5}}}}"#.to_string(),
+            format!(r#"{{"type":"session_meta","payload":{{"session_id":"{id}","note":"naïve ✓"}}}}"#),
+        ];
+        for i in 0..turns {
+            if i % 5 == 0 {
+                let model = if i % 10 == 0 { "gpt-6-astra" } else { "gpt-5.3-codex" };
+                lines.push(format!(r#"{{"type":"turn_context","payload":{{"model":"{model}"}}}}"#));
+            }
+            if i % 8 == 3 {
+                let tier = if i % 16 == 3 { "fast" } else { "" };
+                lines.push(format!(
+                    r#"{{"type":"event_msg","timestamp":"2026-09-01T09:00:00Z","payload":{{"type":"thread_settings_applied","thread_settings":{{"service_tier":"{tier}"}}}}}}"#
+                ));
+            }
+            lines.push(format!(
+                r#"{{"type":"response_item","payload":{{"text":"ünïcödé ⚙ {i}"}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"type":"event_msg","timestamp":"2026-09-0{}T10:{:02}:{:02}Z","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{},"cached_input_tokens":{},"output_tokens":{},"reasoning_output_tokens":{}}}}}}}}}"#,
+                1 + i % 2, i / 60, i % 60, 100 + i, i, 10 + i, i / 2
+            ));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn a_rollout_read_as_it_grows_matches_one_read_whole() {
+        let body = synthetic_rollout("s-grow", 60);
+        let replacement = synthetic_rollout("s-new", 4).replacen("08:59", "07:59", 1);
+        for step in [1, 53, 997, 1 << 16] {
+            growing::check(
+                "codex",
+                &body,
+                step,
+                &replacement,
+                || RolloutLines::new("log.jsonl"),
+                |text| rollout_records(text, "log.jsonl"),
+                |p: &RolloutLines| p.records.clone(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_growing_rollout_totals_the_same_as_a_whole_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "ops-207-codex-{}-{}", std::process::id(), now().to_bits()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.jsonl").to_string_lossy().to_string();
+        let replay = dir.join("replay.jsonl").to_string_lossy().to_string();
+        let body = synthetic_rollout("s-1", 30);
+        let mut caches = Caches::default();
+        let (a, b) = body.split_at(body.len() / 3 + 1);
+        std::fs::write(&first, a).unwrap();
+        std::fs::write(&replay, &body).unwrap();
+        let total = |caches: &mut Caches| {
+            for path in [&first, &replay] {
+                assert!(scan_rollout(caches, path));
+            }
+            let mut seen: HashMap<&str, &Record> = HashMap::new();
+            for path in [&first, &replay] {
+                for (key, record) in &caches.rollouts[path.as_str()].parser.records {
+                    seen.insert(key, record);
+                }
+            }
+            let (daily, sessions) = merge_days(seen);
+            (codex_totals(&daily).all, sessions)
+        };
+        total(&mut caches);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&first).unwrap();
+        std::io::Write::write_all(&mut f, b.as_bytes()).unwrap();
+        drop(f);
+        let grown = total(&mut caches);
+        let whole = total(&mut Caches::default());
+        assert_eq!(grown, whole);
+        // The replay is the same session, counted once.
+        assert_eq!(grown.1, 1);
+        let mut by_hand: HashMap<String, Record> = HashMap::new();
+        by_hand.extend(rollout_records(&body, "first.jsonl"));
+        by_hand.extend(rollout_records(&body, "replay.jsonl"));
+        assert_eq!(codex_totals(&merge_days(by_hand).0).all, grown.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

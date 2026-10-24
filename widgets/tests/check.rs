@@ -4716,3 +4716,195 @@ fn a_unicode_character_literal_keeps_its_closing_quote_out_of_code() {
     assert_eq!(skip_tick("'x'}", 0), 3);
     assert_eq!(skip_tick("'\\n'}", 0), 4);
 }
+
+/// Code and string literals, without comments - so a log's path, which
+/// is a string, is seen, and a comment that merely mentions a session is
+/// not.
+fn without_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            let comment = b[i] == b'/' && i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*');
+            if !comment {
+                out.push_str(&src[i..j]);
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        let c = src[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// A source with every `#[cfg(test)]` item cut out, wherever it sits.
+///
+/// `without_tests` stops at the first one, which is right for a file that
+/// ends in its test module and wrong for one with a test-only helper half
+/// way down: codex.rs has one above `scan_rollout`, and the first version
+/// of the log check below read nothing past it and passed the very read it
+/// was written to catch.
+fn without_test_items_text(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(j) = skip_non_code(src, i) {
+            out.push_str(&src[i..j]);
+            i = j.max(i + 1);
+            continue;
+        }
+        if b[i..].starts_with(b"#[cfg(test)]") {
+            // Skip to the end of the item: a `;` before any brace, or the
+            // brace that closes the first one opened.
+            let mut j = i + "#[cfg(test)]".len();
+            let mut depth = 0i32;
+            while j < b.len() {
+                if let Some(k) = skip_non_code(src, j) {
+                    j = k.max(j + 1);
+                    continue;
+                }
+                match b[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    b';' if depth == 0 => {
+                        j += 1;
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        let c = src[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// What makes a function a reader of an agent's append-only log: its name
+/// or its code names one. Transcripts, rollouts, session logs and prompt
+/// history are the files an agent keeps appending to for as long as it
+/// runs; credentials, configs and SQLite stores are not, and are fine to
+/// read whole.
+const LOG_MARKERS: &[&str] = &[".jsonl", "transcript", "rollout", "history", "session"];
+
+/// Reads that take a whole file into memory at once.
+const WHOLE_READS: &[&str] = &["read_to_string(", "fs::read(", "read_to_end(", "read_to_string ("];
+
+/// Functions allowed a whole read of a log, each with why it is bounded.
+const BOUNDED_LOG_READS: &[(&str, &str)] = &[
+    // Seeks to `size` bytes from the end first, so it never holds more
+    // than that however long the log grows.
+    ("tail_lines", "reads only the last `size` bytes"),
+];
+
+/// `name: call` for every agent-usage function that reads a log whole.
+fn whole_log_reads(src: &str) -> Vec<String> {
+    let src = without_comments(src);
+    let mut found = Vec::new();
+    for (name, body) in function_bodies(&src) {
+        if BOUNDED_LOG_READS.iter().any(|(allowed, _)| *allowed == name) {
+            continue;
+        }
+        let lower = format!("{name} {}", body.to_ascii_lowercase());
+        if !LOG_MARKERS.iter().any(|m| lower.contains(m)) {
+            continue;
+        }
+        // An outer function that only contains a nested one is reported
+        // under the nested name, not twice.
+        let nested: Vec<String> = function_bodies(&body[1..])
+            .into_iter()
+            .map(|(_, inner)| inner)
+            .collect();
+        let mut own = body.clone();
+        for inner in &nested {
+            own = own.replace(inner.as_str(), "");
+        }
+        for call in WHOLE_READS {
+            if code_contains(&own, call) {
+                found.push(format!("{name}: {}", call.trim_end_matches('(')));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn the_log_reader_check_sees_a_whole_read_and_leaves_a_credential_alone() {
+    // The shape OPS-207 removed: a rollout read whole because it grew.
+    let old = r#"
+fn scan_rollout(caches: &mut Caches, path: &str) -> Records {
+    let Ok(body) = std::fs::read_to_string(path) else { return HashMap::new(); };
+    rollout_records(&body, path)
+}
+fn read(caches: &mut Caches) {
+    let history = format!("{}/history.jsonl", dir());
+    if let Ok(body) = std::fs::read_to_string(&history) { count(&body); }
+}
+fn sessions(path: &str) -> Vec<u8> { std::fs::read(path).unwrap_or_default() }
+"#;
+    assert_eq!(
+        whole_log_reads(old),
+        vec!["read: read_to_string", "scan_rollout: read_to_string", "sessions: fs::read"]
+    );
+    // A token file, a config and a bounded tail are not logs being slurped,
+    // and a comment that mentions a session does not make one.
+    let fine = r#"
+fn cli_token(paths: &[PathBuf]) -> Option<String> {
+    // the token the session uses
+    paths.iter().find_map(|p| std::fs::read_to_string(p).ok())
+}
+fn tail_lines(path: &str, size: u64) -> Vec<String> {
+    let mut buf = Vec::new(); f.read_to_end(&mut buf); lines(".jsonl")
+}
+fn scan_transcript(caches: &mut Caches, path: &str) -> bool {
+    follow(&mut caches.transcripts, path, TranscriptLines::default)
+}
+"#;
+    assert!(whole_log_reads(fine).is_empty(), "{:?}", whole_log_reads(fine));
+    // A test-only helper part way down a file must not hide what follows.
+    let split = format!(
+        "#[cfg(test)]\nfn fixture() -> &'static str {{ \"{{\" }}\n{old}\n#[cfg(test)]\nmod tests {{ fn t() {{ std::fs::read_to_string(\"x.jsonl\"); }} }}\n"
+    );
+    assert_eq!(whole_log_reads(&without_test_items_text(&split)).len(), 3);
+}
+
+#[test]
+fn agent_logs_are_followed_not_read_whole() {
+    // A live Codex rollout passes four gigabytes. Reading one whole because
+    // it grew put that much in memory on every refresh (OPS-207); the logs
+    // go through `shared::follow`, which reads only what was appended.
+    let dir = root().join("widgets/src/widgets/agent-usage");
+    let mut wrong = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("agent-usage").flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = without_test_items_text(&std::fs::read_to_string(&path).unwrap_or_default());
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        for item in whole_log_reads(&src) {
+            wrong.push(format!("{file}: {item}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "an agent log read whole instead of through shared::follow:\n  {}",
+        wrong.join("\n  ")
+    );
+}
