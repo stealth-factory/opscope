@@ -119,6 +119,8 @@ pub struct Data {
     /// Why there is no live reading, when there is none. Empty while the
     /// endpoint is answering, or when nothing has been asked yet.
     live_why: String,
+    /// Set when `live` is a reading kept from an earlier pass.
+    live_kept: Option<Kept>,
     /// GetPlanInfo: the plan the percentages are percentages of.
     plan: Option<serde_json::Value>,
     /// GetHardLimit: the extra-usage cap in dollars, and - on the
@@ -799,17 +801,19 @@ fn spacexsi_quota_with_plots(
     // The countdown stands down whole when it does not fit: "resets " with
     // nothing after it is a sentence that stops.
     let head = format!(" ── {} ── ", SPACEXSI);
-    let fixed = head.chars().count() + via.chars().count() + "live · weekly".chars().count();
+    let (ink, badge) = crate::live_badge(d.live_kept.as_ref(), p);
+    let fixed = head.chars().count() + via.chars().count() + badge.chars().count() + " · weekly".chars().count();
     let when = if fixed + when.chars().count() <= w.saturating_sub(1) { when } else { String::new() };
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), head),
             (p.dim.as_str(), via.into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), format!(" · weekly{}", when)),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.live_kept.as_ref(), w, p));
     // Calendar time, as the QUOTA section's "of the cycle gone" is; the
     // pace cell beside the bar is the one that counts only work days.
     if let (Some(s), Some(e)) = (loose(&live["billingCycleStart"]), loose(&live["billingCycleEnd"])) {
@@ -1797,6 +1801,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         d.live_why = refuse.clone();
         remember_refusal(caches, &live_key, &refuse);
     }
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    // The key is the account's, so another account's reading never comes
+    // back here.
+    if d.live.is_none() {
+        if let Some((value, k)) = kept(caches, &live_key, &d.live_why) {
+            d.live = Some(if value.get("u").is_some() { value["u"].clone() } else { value });
+            d.live_kept = Some(k);
+        }
+    }
     // A plan cached for one account must never classify another.
     d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
     // The plan decides which drawing the live figures get, so a failed
@@ -1924,9 +1938,19 @@ pub fn why_no_lane(d: &Data) -> String {
 /// Every quota this agent publishes, for the summary screen.
 ///
 /// The same three percentages the tab draws, against the same billing
-/// cycle. Never marked stale: the CLI keeps no quota cache on disk to fall
-/// back to, so a reading is either recent or absent.
+/// cycle. Marked stale only when the reading is one kept through a failure
+/// in transit: the CLI keeps no quota cache on disk to fall back to.
 pub fn lanes(d: &Data) -> Vec<Lane> {
+    let mut out = fresh_lanes(d);
+    if d.live_kept.is_some() {
+        for lane in &mut out {
+            lane.stale = true;
+        }
+    }
+    out
+}
+
+fn fresh_lanes(d: &Data) -> Vec<Lane> {
     let Some(live) = d.live.as_ref() else {
         return Vec::new();
     };
@@ -2068,18 +2092,21 @@ fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::
         }
         _ => None,
     };
+    let (ink, badge) = crate::live_badge(d.live_kept.as_ref(), p);
+    let used = 13 + badge.chars().count() + when.chars().count();
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (
                 p.dim.as_str(),
-                crate::claude::scope_phrase(w, 17 + when.chars().count()).into(),
+                crate::claude::scope_phrase(w, used).into(),
             ),
             (p.dim.as_str(), when.clone()),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.live_kept.as_ref(), w, p));
     if let Some(elapsed) = elapsed {
         // Just the fact; the +/- column it explains is on every tab now, so
         // a per-tab legend was both redundant and the thing that clipped.

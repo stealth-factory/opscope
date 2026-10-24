@@ -1046,6 +1046,32 @@ fn history_rows(h: &shared::History, what: &str, w: usize, p: &Palette) -> Vec<S
         .collect()
 }
 
+/// The badge a QUOTA heading carries: `live`, or how old a kept reading is.
+fn live_badge(kept: Option<&shared::Kept>, p: &Palette) -> (String, String) {
+    match kept {
+        None => (p.ok.clone(), "live".into()),
+        Some(k) => (p.warn.clone(), format!("kept {}", ago(k.at))),
+    }
+}
+
+/// The row under a QUOTA heading that says why the bars below are a kept
+/// reading and not a new one. The reason has to reach a row: a bar that is
+/// simply older than it looks is the failure this repo keeps paying for.
+fn kept_rows(kept: Option<&shared::Kept>, w: usize, p: &Palette) -> Vec<String> {
+    let Some(k) = kept else {
+        return Vec::new();
+    };
+    let text = format!(
+        "Not current: the last good reading, taken {} ago. This pass: {}.",
+        ago(k.at),
+        k.why.trim_end_matches('.')
+    );
+    wrap_text(&text, w.saturating_sub(4).max(8))
+        .into_iter()
+        .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1))
+        .collect()
+}
+
 /// A rate card: US$ per million tokens, by priced kind.
 type Rate = HashMap<String, f64>;
 
