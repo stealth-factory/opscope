@@ -2562,6 +2562,11 @@ fn main() {
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
+        // Resume where the last run left off, rather than reading every
+        // log on disk again from its first byte.
+        let saved_at = store::path();
+        store::restore(&mut caches, &saved_at);
+        let mut saver = store::Saver::new(now());
         let mut asked = false;
         loop {
             let work = poller_activity.start();
@@ -2600,6 +2605,12 @@ fn main() {
                     if let Ok(mut g) = poller.lock() {
                         *g = found;
                         g.fetched = now();
+                    }
+                    // A save that fails costs the next start a slower first
+                    // read and nothing else; there is nothing on screen it
+                    // could make wrong, so it is not a reason to stop.
+                    if saver.due(&mut caches, now()) {
+                        let _ = store::save(&caches, &saved_at);
                     }
                 }
                 Err(_) => {
@@ -2905,6 +2916,7 @@ fn main() {
 // not be five edits to the same file.
 mod parse;
 mod shared;
+mod store;
 mod antigravity;
 mod claude;
 mod notion;

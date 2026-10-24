@@ -1907,7 +1907,19 @@ every one of their logs is still read. A pass reads at most 64 MiB or 200 ms
 of logs across every agent; a first read bigger than that carries on two
 seconds later from the byte it stopped at, with the log it stopped in sent to
 the back of the queue, and until it is done the figures say `so far` and how
-many logs are left rather than calling themselves totals. A live quota
+many logs are left rather than calling themselves totals.
+
+How far each log was read is written to
+`$XDG_STATE_HOME/opscope/agent-usage-logs.jsonl` (or `~/.local/state/...`)
+every five minutes while the logs change, and when a first read finishes, so
+a restart reads only what was appended since rather than every log again. It
+holds counters only - each file's identity, size and offset, a hash of its
+first kilobyte, and the day, model and token counts its lines added up to,
+keyed by the ids that stop a replayed turn counting twice - never a line of
+any transcript. A log replaced while the widget was not running fails the
+same identity check a running widget makes and is read again from the start;
+a file of another format version is ignored. Deleting it costs one slow
+start. A live quota
 is held for a couple of minutes and a plan for an hour, so what a pane left
 open all day asks of each agent is the same whichever tab is on screen.
 
