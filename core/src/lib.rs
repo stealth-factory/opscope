@@ -29,7 +29,7 @@ mod shm;
 mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
-pub use graphics::{braille, line_col, line_row, LineChart, Plot, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, StickyRange, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,

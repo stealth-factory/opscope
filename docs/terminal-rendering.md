@@ -63,9 +63,36 @@ Under Herdr (`HERDR_ENV=1`), `auto` means text. Herdr relays each image to its
 own client decoded, so a chart that is a few KB compressed costs the client's
 link its raw size, every frame the chart changes. Over SSH that measured 4.9
 MB/s for `latency` alone (OPS-199). Set `OPSCOPE_GRAPHICS=kitty` to have pixels
-anyway, for a Herdr whose client runs on the same machine. Unsupported explicit requests show a notice in the title
+anyway. Since OPS-202 meters, bars and loading placeholders are text in every
+mode, a changed chart sends only its changed rectangles, a whole image goes at
+most once every two seconds per chart, and the periodic whole frame does not
+re-place images under Herdr. See [Pixels under Herdr](#pixels-under-herdr) for
+what that measures. Unsupported explicit requests show a notice in the title
 row and use text. An image transmission error also disables pixels for the
 session and shows why; re-entering the terminal session renegotiates support.
+
+### Pixels under Herdr
+
+`OPSCOPE_GRAPHICS=kitty` under Herdr is an option, not the default. Measured
+with a local fake-terminal harness at 57×48 cells (10×20 px), after each
+chart had filled its window. "Raw" is the decoded size of what was uploaded
+or edited, which is what a relaying host forwards. The harness answers the
+frame probe `OK`, as Kitty does; nothing here was watched in a real Herdr.
+
+| widget | before (v2.0.0), raw | after OPS-202, raw | after, written |
+| --- | --- | --- | --- |
+| `latency` | 2275 KB/s | 138 KB/s | 6.2 KB/s |
+| `link` | 632 KB/s | 545 KB/s | 6.4 KB/s |
+| `clocks`, `agent-usage` | 115 KB/s, 42 KB/s (Kitty, no Herdr) | 0 | their text-mode rate |
+
+`latency` keeps its axis and its newest bucket moves in small strips; once a
+second its time grid steps one slot, which is not a whole number of pixels,
+so that step is a large edit capped at one every two seconds. `link` is
+barely better: it condenses its history to the chart's width, so every new
+sample resamples every point and the whole chart changes each poll. That is
+already one change every two seconds, which is what the cap allows. Over SSH,
+`latency` alone is still about a megabit a second of relayed image, so text
+stays the default under Herdr.
 
 ### Force text rendering on Kitty-capable terminals
 
@@ -166,7 +193,10 @@ column is uploaded the same way. The segment that just left the chart can
 still cover it, and a pure shift would leave that tail behind.
 
 Startup sends a 1×1 probe and a frame compose on it, ahead of the capability
-tail. `OK` enables the path. `ENOENT` or `EINVAL`, or no answer, leaves it
+tail. The frame and the compose ask for a reply (`q=0`). They used to carry
+`q=1`, which suppresses `OK`, so a terminal that supports frames never said so
+and every change stayed a full upload (OPS-205). `OK` enables the path, and an
+error from the compose arriving after it turns it off again. `ENOENT` or `EINVAL`, or no answer, leaves it
 off, and every tick stays a full `a=T` upload. A later frame error,
 including `ENOSPC` when animation storage is exhausted, does the same and
 asks the next frame to send the image again. Graphics stay on. An
@@ -174,10 +204,39 @@ asks the next frame to send the image again. Graphics stay on. An
 image missing or moving, not a frame error, so animation stays on. A
 successful placement acknowledgement carries `p=` too, and is not an error.
 
-A rescale, a cell-size change, a move to another cell,
+A cell-size change, a move to another cell,
 a slot-count change, a resize, a scroll that changes the crop, or a screen
 loss is a full upload too. Changing only whether the image sits under the
 text re-places it, and the pixels stay. Text and Braille are unchanged.
+
+### Changed rectangles
+
+Any other change to a line chart or a heatmap that keeps its cell and its
+size is compared with the pixels the terminal holds (the cached raster, or
+the cached plot rasterised again when it was too large to keep). The rows
+that differ are grouped into bands, joined across gaps of up to eight
+unchanged rows, and each band is written over the root frame as its own
+`a=f,r=1` edit at its `x`, `y`, width and height (`X=1`, no blending). Line
+charts change along their strokes, so a chart whose traces sit in a few bands
+of its height sends a few strips rather than the whole image. When the bands
+add up to more than half the image, it is sent whole instead. An image that
+went up as opaque RGB (`f=24`) is not edited in RGBA; it is sent whole. Edits
+need the frame probe's `OK` and are not used inside tmux. A refused edit
+turns them off and sends the image again, the same as a refused slide.
+
+A whole image for a slot whose size did not change goes at most once every two
+seconds. A change that would need another one sooner is held: nothing is
+sent, the terminal keeps showing the image it has, and the cache still names
+that image, so the first frame after the gap sends the chart as it is then. A
+size change, a move, a scroll that changes the crop and a screen loss are
+never held. A held chart is at most two seconds behind its numbers, which
+stay in text.
+
+`latency` and `link` keep their value axis sticky (`tc::StickyRange`): the
+range holds while every sample fits inside it and it is not more than twice
+as wide as a fresh fit. Before, the axis followed the lowest and highest
+sample, so most samples rescaled the chart and moved every pixel. The axis
+labels move only when the range does.
 
 The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
 pixels only for some shapes. A netwatch trace on an 80-column pane is 64
@@ -190,7 +249,8 @@ pixels. A full tick also deletes the previous image first; the frame edit
 does not.
 
 It is still not a general animation player. Nothing is drawn that the full
-raster would not have drawn.
+raster would not have drawn: after a slide or a rectangle edit the terminal
+holds exactly the raster a full upload would have sent.
 
 Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
 on synthetic frames at the sizes the widgets use:
@@ -244,7 +304,8 @@ and the byte product is the same. Thirty-two plots at that cap (327,680,000 raw 
 ceiling, unchanged from the fixed raster. Bigger or extra plots stay text.
 Cell layout is unchanged. It is a raster chart renderer, not a general
 replacement for terminal text or native scaled fonts. Frame edits apply only
-to the sample slides described above, using the current reported cell size.
+to the sample slides and changed rectangles described above, using the
+current reported cell size.
 
 ## Widget API
 
@@ -328,12 +389,13 @@ chart, so the fallback layout does not move. `under_text()` does nothing for bar
 meters or stacked bars: text over a solid fill does not stay readable, and it
 would fail the contrast rule.
 
-The placement is a second graphics command (`a=p` with the same placement id)
-after `image()` transmits the pixels at the default z. `image()` is unchanged.
-Terminals without Kitty graphics never see the command, and the cells are
-drawn as Braille exactly as before.
+The upload itself carries `z=-1` (OPS-205), so the chart is never shown over
+its labels and no second placement follows it. It used to be uploaded at the
+default z and then placed again with `a=p`, which a relaying host forwarded as
+the image a second time. Terminals without Kitty graphics never see the
+command, and the cells are drawn as Braille exactly as before.
 
-This was checked by the PTY fixture, which asserts the `z=-1` placement and
+This was checked by the PTY fixture, which asserts `z=-1` on the upload and
 that the label cell is not blanked. Kitty, Ghostty and WezTerm were not
 available in the build environment, so the z-index under a tinted cell was
 not watched on a real terminal.
