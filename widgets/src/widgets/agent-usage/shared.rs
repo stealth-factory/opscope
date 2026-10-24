@@ -132,9 +132,14 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// one pass is what pinned a core for the length of it. With a budget, a
 /// pass reads its share and stops at a line boundary; the next pass carries
 /// on from the same byte. See `PASS_BYTES` for the numbers.
+///
+/// The time is charged only while logs are being read. A pass also detects
+/// agents, asks for quotas and lists directories; were those on the same
+/// clock, a slow listing could spend it every pass and leave a first read
+/// that never moves.
 pub struct Budget {
     pub bytes: u64,
-    pub until: std::time::Instant,
+    pub time: std::time::Duration,
 }
 
 impl Default for Budget {
@@ -147,7 +152,7 @@ impl Default for Budget {
 
 impl Budget {
     pub fn new(bytes: u64, time: std::time::Duration) -> Budget {
-        Budget { bytes, until: std::time::Instant::now() + time }
+        Budget { bytes, time }
     }
 
     /// No limit, for a caller that wants a log read through.
@@ -156,7 +161,7 @@ impl Budget {
     }
 
     pub fn spent(&self) -> bool {
-        self.bytes == 0 || std::time::Instant::now() >= self.until
+        self.bytes == 0 || self.time.is_zero()
     }
 }
 
@@ -294,17 +299,21 @@ fn feed<P: Lines>(
     if f.seek(SeekFrom::Start(from)).is_err() {
         return (0, 0, 0, true);
     }
+    let started = std::time::Instant::now();
+    let until = started + budget.time;
     let mut reader = std::io::BufReader::with_capacity(256 * 1024, f.take(to - from));
     let (mut used, mut read, mut widest) = (0u64, 0u64, 0usize);
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = 0u32;
+    let mut finished = true;
     loop {
         // The clock is read every few hundred lines rather than every one:
         // a line can be a few bytes, and a clock read per line would be a
         // measurable share of the pass it is meant to bound.
         lines = lines.wrapping_add(1);
-        if budget.bytes == 0 || (lines % 256 == 0 && std::time::Instant::now() >= budget.until) {
-            return (used, read, widest, false);
+        if budget.bytes == 0 || (lines % 256 == 0 && std::time::Instant::now() >= until) {
+            finished = false;
+            break;
         }
         buf.clear();
         let n = match reader.read_until(b'\n', &mut buf) {
@@ -329,11 +338,12 @@ fn feed<P: Lines>(
         }
         parser.line(&String::from_utf8_lossy(line));
     }
-    (used, read, widest, true)
+    budget.time = budget.time.saturating_sub(started.elapsed());
+    (used, read, widest, finished)
 }
 
 /// How much a pass may read of the logs, across every agent: 64 MiB or
-/// 200 ms, whichever comes first.
+/// 200 ms spent reading, whichever comes first.
 ///
 /// Measured here on a release build, an unbudgeted first read of 5.8 GB
 /// of Codex rollouts took about eleven seconds - roughly 500 MB/s - so on a
@@ -404,6 +414,9 @@ pub struct Listed {
     /// as the skew lasts, and hold a window open that should have closed.
     pub mtime: i64,
     pub size: u64,
+    /// Device and inode. A log replaced by another of the same size and
+    /// mtime is still a change, and must be read rather than held.
+    pub file: (u64, u64),
 }
 
 /// Every log under `dir` ending in `suffix`, newest first, from metadata
@@ -449,7 +462,7 @@ fn list_logs_within(
                     if window.is_some_and(|w| (mtime as f64) < at - w) {
                         continue;
                     }
-                    found.push(Listed { path: name, mtime, size: meta.size() });
+                    found.push(Listed { path: name, mtime, size: meta.size(), file: (meta.dev(), meta.ino()) });
                 }
                 _ => {}
             }
@@ -514,10 +527,14 @@ impl<P: Lines> Logs<P> {
         let catching_up = !self.queue.is_empty() || self.read_at == 0.0;
         let due = asked || catching_up || (changed && at - self.read_at >= HISTORY_EVERY);
         // Gone from disk, or out of the window: nothing held for it can
-        // reach the screen any more.
-        let present: std::collections::HashSet<&str> = listed.iter().map(|l| l.path.as_str()).collect();
-        self.tails.retain(|path, _| present.contains(path.as_str()));
-        self.queue.retain(|path| present.contains(path.as_str()));
+        // reach the screen any more. Only a complete listing says so: one
+        // cut short has simply not reached the rest, and dropping them would
+        // read them again from the first byte once it does.
+        if complete {
+            let present: std::collections::HashSet<&str> = listed.iter().map(|l| l.path.as_str()).collect();
+            self.tails.retain(|path, _| present.contains(path.as_str()));
+            self.queue.retain(|path| present.contains(path.as_str()));
+        }
         self.history.of = listed.len();
         self.history.listed_all = complete;
         if !due {
@@ -1457,6 +1474,62 @@ mod tests {
         assert!(tails.get(&log.path).map_or(0, |t| t.parser.0) < 10_000);
         assert_eq!(follow_within(&mut tails, &log.path, Seen::default, &mut Budget::unlimited()), Followed::Current);
         assert_eq!(tails[&log.path].parser.0, 10_000);
+    }
+
+    #[test]
+    fn the_time_budget_runs_only_while_logs_are_read() {
+        let log = growing::Log::new("budget-clock");
+        log.append(&"{}\n".repeat(1000));
+        let mut tails: HashMap<String, Tail<Seen>> = HashMap::new();
+        // Other work in the pass takes longer than the whole allowance;
+        // none of it is charged, so the read still happens.
+        let mut budget = Budget::new(u64::MAX, std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(follow_within(&mut tails, &log.path, Seen::default, &mut budget), Followed::Current);
+        assert_eq!(tails[&log.path].parser.0, 1000);
+        assert!(budget.time < std::time::Duration::from_millis(100), "the read itself is charged");
+    }
+
+    #[test]
+    fn a_log_replaced_by_one_of_the_same_size_and_mtime_is_read_again() {
+        let log = growing::Log::new("same-stamp");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n{}\n");
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        logs.pass(listing(&dir, at), false, at, &mut Budget::unlimited(), |_| Seen(0));
+        let was = std::fs::metadata(&log.path).unwrap().modified().unwrap();
+        // Another file, same bytes count and mtime, moved into its place.
+        let next = dir.join("next.tmp");
+        std::fs::write(&next, "[]\n[]\n").unwrap();
+        std::fs::File::options().write(true).open(&next).unwrap().set_modified(was).unwrap();
+        std::fs::rename(&next, &log.path).unwrap();
+        let due = at + HISTORY_EVERY;
+        assert_eq!(logs.pass(listing(&dir, due), false, due, &mut Budget::unlimited(), |_| Seen(0)), Pass::Read);
+        assert_eq!(logs.tails[&log.path].parser.0, 2, "read again from the start, not added to");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(logs.tails[&log.path].file.1, std::fs::metadata(&log.path).unwrap().ino());
+    }
+
+    #[test]
+    fn a_listing_cut_short_keeps_what_was_read_of_the_logs_it_did_not_reach() {
+        let log = growing::Log::new("cut-listing");
+        let dir = std::path::Path::new(&log.path).parent().unwrap().to_path_buf();
+        log.append("{}\n");
+        std::fs::write(dir.join("other.jsonl"), "{}\n{}\n").unwrap();
+        let mut logs: Logs<Seen> = Logs::default();
+        let at = now();
+        logs.pass(listing(&dir, at), false, at, &mut Budget::unlimited(), |_| Seen(0));
+        assert_eq!(lines_in(&logs), 3);
+        let (all, _) = listing(&dir, at);
+        let cut = (all[..1].to_vec(), false);
+        logs.pass(cut, true, at + 1.0, &mut Budget::unlimited(), |_| Seen(0));
+        assert_eq!(logs.tails.len(), 2, "an incomplete listing is not proof the rest are gone");
+        assert!(logs.history.partial());
+        // A complete listing that no longer has it does drop it.
+        std::fs::remove_file(dir.join("other.jsonl")).unwrap();
+        logs.pass(listing(&dir, at + 2.0), true, at + 2.0, &mut Budget::unlimited(), |_| Seen(0));
+        assert_eq!(logs.tails.len(), 1);
     }
 
     #[test]

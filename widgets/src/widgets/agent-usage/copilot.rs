@@ -157,8 +157,8 @@ fn token_in(raw: &str) -> Option<String> {
 /// store records what was spent per turn and is empty on plenty of
 /// machines; this is the account's standing, and it answers the only
 /// question a limit pane is really asked.
-fn copilot_live() -> Option<serde_json::Value> {
-    let Some(tok) = copilot_token() else {
+fn copilot_live(tok: Option<&str>) -> Option<serde_json::Value> {
+    let Some(tok) = tok else {
         return Some(serde_json::json!({"why": "no token in ~/.copilot/config.json"}));
     };
     // Which of the two went wrong matters: blaming the config file for a
@@ -187,9 +187,20 @@ fn copilot_live() -> Option<serde_json::Value> {
     }
 }
 
+/// The slot a reading is held under, one per token: a reading taken for
+/// one account must not be kept on screen for the next one.
+fn cache_key(tok: Option<&str>) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tok.hash(&mut hasher);
+    format!("copilot:{:016x}", hasher.finish())
+}
+
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
-    if let Some(got) = cached(caches, "copilot", LIVE_TTL, copilot_live) {
+    let tok = copilot_token();
+    let key = cache_key(tok.as_deref());
+    if let Some(got) = cached(caches, &key, LIVE_TTL, || copilot_live(tok.as_deref())) {
         if got["data"].is_object() {
             d.live = Some(got["data"].clone());
         }
@@ -198,7 +209,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // A failure in transit keeps the last good reading on screen, labelled
     // with its own time and this pass's reason; any other failure does not.
     if d.live.is_none() {
-        if let Some((value, k)) = kept(caches, "copilot", &d.live_why) {
+        if let Some((value, k)) = kept(caches, &key, &d.live_why) {
             if value["data"].is_object() {
                 d.live = Some(value["data"].clone());
                 d.live_kept = Some(k);

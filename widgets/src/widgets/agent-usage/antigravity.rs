@@ -818,7 +818,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let listed: Vec<Listed> = std::fs::metadata(&history)
         .ok()
         .filter(|m| m.is_file())
-        .map(|m| Listed { path: history.clone(), mtime: m.mtime().min(at as i64), size: m.size() })
+        .map(|m| Listed {
+            path: history.clone(),
+            mtime: m.mtime().min(at as i64),
+            size: m.size(),
+            file: (m.dev(), m.ino()),
+        })
         .into_iter()
         .collect();
     if let Some(l) = listed.first() {

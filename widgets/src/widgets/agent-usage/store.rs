@@ -67,7 +67,10 @@ fn write_set<P: Persist>(
 ) -> std::io::Result<()> {
     writeln!(out, "{}", serde_json::json!({ "set": name }))?;
     for (path, tail) in &logs.tails {
-        writeln!(out, "{}", serde_json::json!({ "tail": tail.meta(path) }))?;
+        // How many records follow, so a file cut off between two of them
+        // is not taken for a tail that had only those.
+        let count = tail.parser.records().map_or(0, |r| r.len());
+        writeln!(out, "{}", serde_json::json!({ "tail": tail.meta(path), "records": count }))?;
         for (key, record) in tail.parser.records().into_iter().flatten() {
             writeln!(out, "{}", record_line(key, record))?;
         }
@@ -127,7 +130,10 @@ fn place(caches: &mut Caches, set: &Set, meta: &serde_json::Value, records: Reco
 /// Put back what `write_all` wrote. A file of another version, or one
 /// whose first line is not a version, leaves the caches as they were; a
 /// line that does not parse ends the restore at the last whole tail, and
-/// whatever is missing is read from the logs again.
+/// whatever is missing is read from the logs again. A tail is whole only
+/// when every record its line counted arrived: a file cut off between two
+/// lines parses cleanly, and would otherwise restore a tail missing some of
+/// its records at the full offset, so they would never be read again.
 fn read_all(caches: &mut Caches, input: impl std::io::BufRead) -> bool {
     let mut lines = input.lines();
     let first = lines.next().and_then(|l| l.ok());
@@ -138,10 +144,12 @@ fn read_all(caches: &mut Caches, input: impl std::io::BufRead) -> bool {
         return false;
     }
     let mut set: Option<Set> = None;
-    let mut pending: Option<(serde_json::Value, Records)> = None;
-    let flush = |caches: &mut Caches, set: &Option<Set>, pending: &mut Option<(serde_json::Value, Records)>| {
-        if let (Some(set), Some((meta, records))) = (set, pending.take()) {
-            place(caches, set, &meta, records);
+    let mut pending: Option<(serde_json::Value, u64, Records)> = None;
+    let flush = |caches: &mut Caches, set: &Option<Set>, pending: &mut Option<(serde_json::Value, u64, Records)>| {
+        if let (Some(set), Some((meta, count, records))) = (set, pending.take()) {
+            if records.len() as u64 == count {
+                place(caches, set, &meta, records);
+            }
         }
     };
     for line in lines {
@@ -157,8 +165,12 @@ fn read_all(caches: &mut Caches, input: impl std::io::BufRead) -> bool {
             set = set_of(name);
         } else if let Some(meta) = v.get("tail") {
             flush(caches, &set, &mut pending);
-            pending = Some((meta.clone(), Records::new()));
-        } else if let (Some((_, records)), Some((key, record))) = (pending.as_mut(), record_from(&v)) {
+            let Some(count) = v["records"].as_u64() else {
+                pending = None;
+                break;
+            };
+            pending = Some((meta.clone(), count, Records::new()));
+        } else if let (Some((_, _, records)), Some((key, record))) = (pending.as_mut(), record_from(&v)) {
             records.insert(key, record);
         }
     }
@@ -354,6 +366,15 @@ mod tests {
         assert!(read_all(&mut back, cut.as_bytes()));
         let held = &back.transcripts["/x"].tails;
         assert_eq!(held.len(), 1, "the torn tail is dropped, to be read again");
+        assert_eq!(held.values().next().unwrap().parser.records.len(), 3);
+        // Cut between two whole record lines: every line parses, but the
+        // tail is still missing a record, so it is dropped too.
+        let last = text[..text.find("{\"set\":[\"codex\"]}").unwrap()].trim_end_matches('\n');
+        let between = &last[..=last.rfind('\n').unwrap()];
+        let mut back = Caches::default();
+        assert!(read_all(&mut back, between.as_bytes()));
+        let held = &back.transcripts["/x"].tails;
+        assert_eq!(held.len(), 1, "a tail short of a record is read again");
         assert_eq!(held.values().next().unwrap().parser.records.len(), 3);
         // Whole, everything comes back.
         let mut whole = Caches::default();
