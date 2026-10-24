@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.0.0] - 2026-10-24
+
+### Bug Fixes
+
+- **core**: Draw text charts under herdr unless pixels are asked for (OPS-199) (#469)
+
+### Features
+
+- **core**: Add a Google service-account auth helper (OPS-185) (#446)
+- **agent-usage**: Retire the CodeRabbit tab (OPS-200) (#468) — **breaking**
+
 ## [1.11.0] - 2026-10-23
 
 ### Features
