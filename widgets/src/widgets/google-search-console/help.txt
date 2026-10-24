@@ -1,0 +1,40 @@
+Google Search Console: what moved in Google Search, and what is broken in the index.
+
+Shows the last 24 hours of search clicks by the hour, the pages and queries
+that moved against the previous window, the search terms that bring the
+most clicks and the page each lands on, URL Inspection of the pages that
+earn the traffic, and whether the sitemaps are still being read.
+
+    google-search-console
+
+Every figure is Google's and says how far behind Google keeps it: hourly
+data is a few hours behind and the latest hours are still being collected
+(drawn hatched, never as a drop); final data is two or three days behind.
+Hours come from Google in Pacific time and are drawn in local time.
+
+Keys: up/down select a row, tab moves to the next section, left/right
+switch property when there is more than one, and Enter opens the selected
+row - 28 days of a page or query with its top queries or pages, the full
+inspection of a page, the pages a search term lands on, a sitemap's
+contents, or a property's permission and budget. m cycles the movers
+metric (impressions, clicks, CTR, position). w toggles the window between
+7 and 28 days. d toggles final and fresh data. t cycles the search type
+(web, image, video, news, discover). press i to inspect the selected page
+now, which spends one of the property's 2,000 daily inspections; Enter
+never does. / filters by text and esc clears it, c copies the selected row,
+r refreshes, comma opens settings, q quits. In a detail view, l copies the
+page's Search Console link, and esc or left closes it.
+
+Inspection is bounded: the top inspect_top pages by impressions (25 by
+default) and as many that dropped to zero, each once a day, cached for 14
+days under $XDG_STATE_HOME/opscope/google-search-console/. The Page
+Indexing report has no API, so the INDEX HEALTH section is that sample and
+says so.
+
+Sign-in: a service-account key file in google_search_console.credentials_file,
+shared with google-analytics, or a pasted token in $GOOGLE_OAUTH_ACCESS_TOKEN
+for an hour of testing. docs/google-setup.md walks through the Google side.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.
