@@ -499,6 +499,24 @@ impl Plot {
         plot
     }
 
+    /// Draw this filled plot as text in every mode, never as an image.
+    ///
+    /// For values that move every frame, such as a `dance` placeholder or
+    /// bars easing onto their real values: an image would be re-sent whole
+    /// on each of those frames. Meters and stacked bars are always text
+    /// already. A line chart ignores it.
+    pub fn as_text(mut self) -> Self {
+        if let Some(fill) = self.fill.as_mut() {
+            fill.always_text = true;
+        }
+        self
+    }
+
+    /// Whether this plot is drawn as text in every mode.
+    pub fn is_text(&self) -> bool {
+        self.fill.as_ref().is_some_and(|fill| fill.always_text)
+    }
+
     /// The same fallback cells `draw_plots` uses. A widget can compose
     /// labels or an alert frame without reimplementing the bar's colours,
     /// marker or background resets. Line charts have no stored text row.
@@ -2516,6 +2534,33 @@ mod tests {
         assert_eq!(row, "█".repeat(20));
         assert_eq!(plots[4].text_row(0)[5].0, hue);
         assert_eq!(plots[4].text_row(0)[6].0, other);
+    }
+
+    #[test]
+    fn a_dancing_placeholder_is_text_in_kitty_mode() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let colour = super::super::rgb(120, 196, 250);
+        let rows = vec![String::new(); 10];
+        for tick in 0..4 {
+            let columns: Vec<_> = super::super::dance(12, tick, 0.0)
+                .into_iter().map(|v| (v, colour.clone())).collect();
+            let plots = [
+                Plot::bars(1, 1, &columns, 3, 1.0, false).as_text(),
+                Plot::bars(1, 5, &columns, 3, 1.0, true).as_text(),
+            ];
+            assert!(plots.iter().all(Plot::is_text));
+            let (text, before, after) = compose(&rows, &plots, 20, 10, true, false, tick == 0, false);
+            assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"), "tick {tick}");
+            let (plain, _, _) = compose(&rows, &plots, 20, 10, false, false, false, false);
+            assert_eq!(text, plain);
+        }
+        // The same bars without it are still pixels.
+        let columns = vec![(0.5, colour.clone()); 12];
+        let plot = Plot::bars(1, 1, &columns, 3, 1.0, false);
+        assert!(!plot.is_text());
+        let (_, _, after) = compose(&rows, &[plot], 20, 10, true, false, true, false);
+        assert!(after.contains("a=T"));
     }
 
     #[test]

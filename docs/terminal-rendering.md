@@ -394,6 +394,13 @@ share takes the whole cell. A category smaller than a cell can still lose its
 sliver to its neighbours, as it did in whole cells. Fill colours are the same
 ones the widget passed, so the contrast rule on the selected-row tint is
 unchanged.
+
+No image is animated either (OPS-204). `Plot::as_text()` makes any filled plot
+text in every mode, and `is_text()` reports it. `github` and `linear` use it
+for their flow charts while the bars dance on a `dance` placeholder and while
+they settle onto the real values. An image of those bars was two uploads a
+frame for as long as the figures were loading. Once the chart is still it is
+pixels again.
 `Plot::text_row(0)` exposes the exact fallback cells for composing labels or
 alert frames without duplicating gradient or marker logic. No primitive
 animates a value between API polls.
@@ -457,7 +464,7 @@ and intentional text presentation, not unimplemented widget migrations.
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
-| `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
+| `github` | Pixel PR-flow bars on board and account details once still; text while they dance or settle; contribution heatmap | Keep discrete day buckets and side-by-side figures; validate dense account boards |
 | `linear` | Pixel created/completed bars and cycle burnup; board/detail progress and milestone meters and state distributions in eighth-cell text | Preserve exact scope/percentage labels; validate dense project details |
 | `github-prs` | Pixel opened/merged daily charts and PR-state distribution; elapsed-time loading indicators | Keep review text, counts and tables selectable; unavailable series remain placeholders |
 | `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
