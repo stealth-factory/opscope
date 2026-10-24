@@ -74,6 +74,13 @@ title = "github-prs"
 placement = "split"
 command = ["./luvus/bin/opscope", "github-prs"]
 
+# What a region is searching for right now, from Google's own Trending Now feed.
+[[panes]]
+id = "google-trends"
+title = "google-trends"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-trends"]
+
 # Everything running in Herdr, across every workspace.
 [[panes]]
 id = "herdr-panes"
