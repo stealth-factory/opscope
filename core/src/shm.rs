@@ -1064,8 +1064,10 @@ mod tests {
         };
         apply_accepted();
         let colour = super::super::rgb(120, 196, 250);
-        let plot =
-            super::super::Plot::gradient_meter(2, 1, 40, 0.5, None, &colour, &colour, &colour);
+        // Two rows of forty solid cells: RGB, over the shared-memory floor.
+        let plot = super::super::Plot::heatmap_levels(
+            2, 1, &vec![vec![Some((colour.clone(), 4)); 40]; 2], &colour,
+        );
         let rows = vec!["title".into(); 4];
         let (_, _, first) =
             super::super::graphics::compose(&rows, &[plot.clone()], 44, 4, true, false, true, false);
