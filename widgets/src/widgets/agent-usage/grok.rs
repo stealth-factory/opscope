@@ -21,7 +21,7 @@
 //! per-day figures - the running total alone would credit an entire session
 //! to whichever day it happened to be read on.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use opscope_core as tc;
@@ -118,6 +118,8 @@ pub struct Data {
     files: usize,
     total: f64,
     daily: HashMap<NaiveDate, f64>,
+    /// How current the session logs behind `total` and `daily` are.
+    pub history: History,
     /// Newest transcript mtime, as epoch seconds.
     last: f64,
     quota: Option<Quota>,
@@ -562,14 +564,25 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
     caches.live.remove(&ping_key(token_account().as_deref()));
 }
 
+/// What the session logs add up to, kept for the passes that read
+/// nothing new.
+#[derive(Clone, Default)]
+pub struct Built {
+    sessions: usize,
+    total: f64,
+    daily: HashMap<NaiveDate, f64>,
+}
+
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
-    use std::os::unix::fs::MetadataExt;
-    let mut files = Vec::new();
-    walk(&under_home(SESSIONS), "updates.jsonl", &mut files);
+    // Every session, not a window: the tab's token figure is the whole
+    // history on this disk. Metadata only; contents are read below.
+    let at = now();
+    let (listed, complete) = list_logs(&under_home(SESSIONS), "updates.jsonl", None, at);
+    let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     if files.is_empty() {
-        // Every session log is gone, so the tails of the ones that were
-        // here go too; the prune after the loop below is never reached.
-        caches.grok.clear();
+        // Every session log is gone, so what was held for them goes too.
+        caches.grok = Logs::default();
+        caches.grok_built = None;
         // The log is still read. The credit window is account-wide and true
         // whatever this disk holds, and hiding it because the local half is
         // missing is the failure this repo keeps paying for. ok stays false,
@@ -590,39 +603,40 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             ..Data::default()
         };
     }
-    let (mut total, mut sessions, mut newest) = (0.0f64, 0usize, 0.0f64);
-    let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
-    for path in &files {
-        let Ok(meta) = std::fs::metadata(path) else {
-            continue;
-        };
-        newest = newest.max(meta.mtime() as f64);
-        // Read once and then only as it grows: a transcript that has not
-        // been appended to cannot have different deltas, and re-reading
-        // every session on every refresh to learn that is the whole cost
-        // of this tab.
-        if !follow(&mut caches.grok, path, SessionLines::default) {
-            continue;
+    let newest = listed.first().map_or(0.0, |l| l.mtime as f64);
+    let asked = caches.asked_at > 0.0;
+    // Read once and then only as it grows: a transcript that has not been
+    // appended to cannot have different deltas, and re-reading every
+    // session on every refresh to learn that is the whole cost of this tab.
+    let pass = caches
+        .grok
+        .pass((listed, complete), asked, at, &mut caches.budget, |_| SessionLines::default());
+    let history = caches.grok.history.clone();
+    let built = match (&caches.grok_built, pass) {
+        (Some(built), Pass::Held) => built.clone(),
+        _ => {
+            let mut built = Built::default();
+            for path in &files {
+                let Some(got) = caches.grok.tails.get(path.as_str()).map(|t| &t.parser) else {
+                    continue;
+                };
+                if got.total <= 0.0 {
+                    continue;
+                }
+                built.sessions += 1;
+                built.total += got.total;
+                for (day, n) in &got.days {
+                    let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+                        continue;
+                    };
+                    *built.daily.entry(at).or_insert(0.0) += n;
+                }
+            }
+            caches.grok_built = Some(built.clone());
+            built
         }
-        let Some(got) = caches.grok.get(path.as_str()).map(|t| &t.parser) else {
-            continue;
-        };
-        if got.total <= 0.0 {
-            continue;
-        }
-        sessions += 1;
-        total += got.total;
-        for (day, n) in &got.days {
-            let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
-                continue;
-            };
-            *daily.entry(at).or_insert(0.0) += n;
-        }
-    }
-    // A session that is gone keeps nothing here, or every deleted log
-    // would stay in memory for as long as the pane runs.
-    let live: HashSet<&str> = files.iter().map(String::as_str).collect();
-    caches.grok.retain(|path, _| live.contains(path.as_str()));
+    };
+    let Built { sessions, total, daily } = built;
     // A session that has just ended is the moment the numbers have changed
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean
@@ -659,6 +673,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
+        history,
         sessions,
         files: files.len(),
         total,
@@ -1607,9 +1622,13 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         return rows;
     }
 
+    rows.extend(crate::history_rows(&d.history, "session logs", w, p));
     rows.push(tc::seg(
         &[
-            (p.lbl.as_str(), " ── TOTALS ── ".into()),
+            (
+                p.lbl.as_str(),
+                if d.history.partial() { " ── SO FAR ── " } else { " ── TOTALS ── " }.into(),
+            ),
             (
                 p.dim.as_str(),
                 format!("{} sessions · newest {} ago", d.sessions, ago(d.last)),
@@ -2542,6 +2561,7 @@ mod tests {
         let p = palette();
         let d = Data {
             ok: true,
+            history: Default::default(),
             sessions: 2,
             files: 3,
             total: 12_345.0,

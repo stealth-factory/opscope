@@ -303,6 +303,8 @@ pub struct Data {
     counted: usize,
     steps: f64,
     prompts: usize,
+    /// How current the prompt count is.
+    pub prompts_history: History,
     last: f64,
 }
 
@@ -810,15 +812,22 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     }
     let history = format!("{}/history.jsonl", antigravity_dir());
     // Counted as it grows rather than read whole on every pass: the history
-    // is appended to for as long as Antigravity is used.
-    let present: std::collections::HashSet<&str> = [history.as_str()].into_iter().collect();
-    prune(&mut caches.history, |_| true, &present);
-    if follow(&mut caches.history, &history, Counted::default) {
-        d.prompts = caches.history.get(&history).map_or(0, |t| t.parser.0);
-        if let Ok(meta) = std::fs::metadata(&history) {
-            d.last = d.last.max(meta.mtime() as f64);
-        }
+    // is appended to for as long as Antigravity is used. One file, so its
+    // listing is the file's own metadata.
+    let at = now();
+    let listed: Vec<Listed> = std::fs::metadata(&history)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| Listed { path: history.clone(), mtime: m.mtime().min(at as i64), size: m.size() })
+        .into_iter()
+        .collect();
+    if let Some(l) = listed.first() {
+        d.last = d.last.max(l.mtime as f64);
     }
+    let asked = caches.asked_at > 0.0;
+    caches.history.pass((listed, true), asked, at, &mut caches.budget, |_| Counted::default());
+    d.prompts = caches.history.tails.get(&history).map_or(0, |t| t.parser.0);
+    d.prompts_history = caches.history.history.clone();
     d
 }
 
@@ -1042,6 +1051,17 @@ fn steps_note(d: &Data, room: i64) -> String {
 /// sum says how partial it is and a sum of nothing says nothing - a zero
 /// would read as an idle agent, which is the opposite of the truth.
 fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    let mut rows = antigravity_activity_rows(d, w, p);
+    // The prompt count is read from the local history, which can still be
+    // catching up; anything else here is counted fresh every pass.
+    if d.prompts_history.partial() {
+        let at = 1.min(rows.len());
+        rows.splice(at..at, crate::history_rows(&d.prompts_history, "prompt history", w, p));
+    }
+    rows
+}
+
+fn antigravity_activity_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── ACTIVITY ── ".into()),
@@ -1667,6 +1687,7 @@ mod tests {
             counted: 7,
             steps: 1234.0,
             prompts: 42,
+            prompts_history: Default::default(),
             last: now() - 3600.0,
             tier_why: Missing::Nothing,
             tier_said: String::new(),
