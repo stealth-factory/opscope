@@ -3,6 +3,21 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.0.1] - 2026-10-24
+
+### Bug Fixes
+
+- **agent-usage**: Show Antigravity's Gemini quota after agy locked its local server (OPS-198)
+- **agent-usage**: Read transcripts incrementally instead of whole on every refresh (OPS-207) (#482)
+
+### Documentation
+
+- **agents**: Never push to main; every change goes through a PR
+
+### Reverted
+
+- Undo the OPS-198 commit pushed straight to main (#478)
+
 ## [2.0.0] - 2026-10-24
 
 ### Bug Fixes
