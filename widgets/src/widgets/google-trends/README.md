@@ -7,7 +7,7 @@ shown as Google states it, with what changed since the last look.
 
 ```text
 ╺━ TRENDS US ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v1.9.0
- [US]·1  GB·
+ [US]·1  GB ·
  fetched 2m ago · Google's Trending Now feed, every 5 min
 
  TRENDING NOW
@@ -28,11 +28,13 @@ shown as Google states it, with what changed since the last look.
 Every trend, bucket and story above is made up; the layout is the widget's.
 
 The strip under the title is the regions: the open one is in brackets and
-tinted, and `←`/`→` or a click on a tab switches to it. The cell after each
-name says how the last fetch went — `·` it succeeded, `!` it failed or would
-not parse (the rows shown for that region are from the fetch before), `×`
-Google rejected the region code outright (HTTP 400) — and is blank until the
-first fetch lands. A number after the marker is how many trends are new
+tinted, and `←`/`→` or a click on a tab switches to it. When the regions wrap
+past the pane, the strip keeps the open tab on screen and leaves the feed a
+row; the arrows still reach every region. The cell after each name says how
+the last fetch went — `·` it succeeded, `!` it failed or would not parse (the
+rows shown for that region are from the fetch before), `×` Google rejected
+the region code outright (HTTP 400) — and is blank until the first fetch
+lands. A number after the marker is how many trends are new
 since the fetch before: the widget's own observation, the same count as
 `N new since HH:MM` in the open region's header, absent when zero or on a
 first check.

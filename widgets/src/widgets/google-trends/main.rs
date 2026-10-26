@@ -209,7 +209,11 @@ fn save_memory(geo: &str, memory: &Memory) -> Result<(), String> {
 
 /// The memory note after a save: a failure replaces it, a success ends a
 /// failure, and the started-fresh notice goes once there is a fetch to compare with.
-fn note_after_save(note: Option<String>, saved: Result<(), String>, compared: bool) -> Option<String> {
+fn note_after_save(
+    note: Option<String>,
+    saved: Result<(), String>,
+    compared: bool,
+) -> Option<String> {
     match saved {
         Err(why) => Some(format!("could not save what was seen ({why})")),
         Ok(()) => match note {
@@ -468,7 +472,11 @@ fn columns(
             + if with_started { started + gap } else { 0 }
             + if with_seen { seen + gap } else { 0 };
         // The last table needs only SEARCH's heading, since its terms wrap.
-        let least = if with_started { search_min } else { "SEARCH".len() };
+        let least = if with_started {
+            search_min
+        } else {
+            "SEARCH".len()
+        };
         if room >= fixed + least {
             return Columns {
                 search: room - fixed,
@@ -505,8 +513,7 @@ fn region_tabs(shared: &Shared, p: &Palette) -> Vec<tc::Tab> {
                 None if r.fetched > 0.0 => Some((p.ok.clone(), "·")),
                 None => None,
             },
-            badge: (r.since.is_some() && r.new_count > 0)
-                .then(|| r.new_count.to_string()),
+            badge: (r.since.is_some() && r.new_count > 0).then(|| r.new_count.to_string()),
         })
         .collect()
 }
@@ -529,6 +536,72 @@ fn tab_clicked(
         .map(|&(_, _, i)| i)
 }
 
+/// Rows the pinned strip may take.
+///
+/// The title, one row of the feed, the notices banner and the footer are
+/// reserved first. A strip that wrapped without a limit filled a short pane
+/// on its own, and the feed sat below the screen where the wheel cannot
+/// reach it: scrolling moves the body, and the strip is not part of the body.
+fn strip_rows(h: usize, foot: usize, banner: usize) -> usize {
+    h.saturating_sub(2 + foot + banner)
+}
+
+/// The strip lines that fit in `rows`, with the active tab's line kept.
+///
+/// Placements come back in that window's coordinates, so a click still
+/// matches the row on screen. No rows draws nothing: the arrows still
+/// change region, and the feed keeps the pane.
+fn window_strip(
+    lines: Vec<String>,
+    placed: Vec<(usize, usize, usize)>,
+    active: usize,
+    rows: usize,
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    if rows == 0 || lines.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if lines.len() <= rows {
+        return (lines, placed);
+    }
+    let active_row = placed
+        .iter()
+        .find(|&&(_, _, i)| i == active)
+        .map(|&(row, _, _)| row)
+        .unwrap_or(0)
+        .min(lines.len() - 1);
+    let start = active_row.saturating_sub(rows / 2).min(lines.len() - rows);
+    let shown = lines.into_iter().skip(start).take(rows).collect();
+    let placed = placed
+        .into_iter()
+        .filter(|&(row, _, _)| (start..start + rows).contains(&row))
+        .map(|(row, col, i)| (row - start, col, i))
+        .collect();
+    (shown, placed)
+}
+
+/// The list the keys after a region change read.
+///
+/// `drawn` belongs to the region that was on screen. A click or an arrow
+/// in this poll can open another region before `enter`, and `enter` indexes
+/// that body's `visible` into the region now showing. The old `visible` is
+/// the previous region's filtered positions, so it opens a different trend.
+fn body_for_keys(
+    shared: &Shared,
+    view: &View,
+    refresh: f64,
+    cw: usize,
+    now: f64,
+    p: &Palette,
+    drawn: Body,
+    region_drawn: usize,
+) -> Body {
+    if view.region == region_drawn {
+        drawn
+    } else {
+        list_body(shared, view, refresh, cw, now, p)
+    }
+}
+
 /// The list screen's body, below the pinned title.
 fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p: &Palette) -> Body {
     let mut b = Body::default();
@@ -541,7 +614,7 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
     };
     let first_check = region.since.is_none();
 
-    // Status: when, where from, and which region of how many.
+    // Status: when this region was fetched, and where the feed comes from.
     let mut status = vec![if region.fetched > 0.0 {
         format!("fetched {} ago", tc::age(now - region.fetched))
     } else if region.failure.is_some() {
@@ -582,19 +655,18 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         .filter(|&i| now - region.left[i].left_at <= state::LEFT_KEPT)
         .filter(|&i| {
             let l = &region.left[i];
-            matches(&view.needle, &l.title, l.news.as_deref().unwrap_or_default())
+            matches(
+                &view.needle,
+                &l.title,
+                l.news.as_deref().unwrap_or_default(),
+            )
         })
         .collect();
     for s in 0..2 {
         b.lens[s] = b.visible[s].len();
     }
 
-    b.rows.extend(line(
-        &p.head,
-        1,
-        "TRENDING NOW",
-        cw,
-    ));
+    b.rows.extend(line(&p.head, 1, "TRENDING NOW", cw));
     let mut about = vec!["Google's \"approx traffic\" is a bucket, not a count".to_string()];
     match tc::filter_row(b.lens[TRENDING], region.items.len(), &filters) {
         Some(f) => about.push(f),
@@ -1053,7 +1125,8 @@ fn detail_body(d: &Detail, cw: usize, now: f64, p: &Palette) -> Body {
     }
     b.rows.push(String::new());
     if !d.news_kept {
-        b.rows.extend(line(&p.head, 1, &format!("NEWS{SEP}not kept"), cw));
+        b.rows
+            .extend(line(&p.head, 1, &format!("NEWS{SEP}not kept"), cw));
         let why = "stories are kept only while the widget runs, and it has \
                    restarted since this trend left";
         for l in tc::wrap_words(why, room) {
@@ -1194,6 +1267,28 @@ fn detail_hints() -> Vec<Vec<(&'static str, String)>> {
         vec![("", "esc back".to_string())],
         vec![("", "[q]uit".to_string())],
     ]
+}
+
+/// Which screen answers a key. Notices are the widget's, so `!` is taken
+/// before the news view or a filter can swallow it: both of those screens
+/// show the hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Scroll,
+    Notices,
+    Detail,
+    Typing,
+    List,
+}
+
+fn route_key(key: &str, in_detail: bool, typing: bool) -> Route {
+    match key {
+        "ctrl-y" | "wheel-up" | "ctrl-e" | "wheel-down" | "pgup" | "pgdn" => Route::Scroll,
+        "!" => Route::Notices,
+        _ if in_detail => Route::Detail,
+        _ if typing => Route::Typing,
+        _ => Route::List,
+    }
 }
 
 /// Footer lines, coloured, and the placements for clicks.
@@ -1389,7 +1484,7 @@ fn main() {
         let several = snapshot.regions.len() > 1;
         // The body as it stands before this frame's keys, for resolving
         // what a key or click refers to.
-        let before = list_body(&snapshot, &view, refresh, cw, now, &p);
+        let mut before = list_body(&snapshot, &view, refresh, cw, now, &p);
         follow_titles(&mut view, &snapshot, &before, &was);
 
         let mut keys = keyboard.poll();
@@ -1399,6 +1494,8 @@ fn main() {
                 .iter()
                 .position(|&s| s == (view.focus, view.at[view.focus])),
         };
+        let region_drawn = view.region;
+        let mut switched = false;
         if detail.is_none() {
             // A click on a tab opens it, which is what stepping to it
             // with the arrows does - the same rule as everywhere else,
@@ -1407,6 +1504,7 @@ fn main() {
             for key in keys.iter_mut() {
                 if let Some((x, y)) = tc::click_at(key) {
                     if let Some(i) = tab_clicked(&tabs_at, x, y, head) {
+                        switched |= i != view.region;
                         view.region = i;
                         view.at = [0; 2];
                         scroll = 0;
@@ -1415,7 +1513,16 @@ fn main() {
                 }
             }
         }
-        if let Some(at) = tc::rows_clicked(&mut keys, current, head, scroll, &placed, None) {
+        // A row click in this poll landed on the region that was drawn.
+        // Applying it after the tab click would index that row into the
+        // region just opened.
+        if switched {
+            for key in keys.iter_mut() {
+                if tc::click_at(key).is_some() {
+                    key.clear();
+                }
+            }
+        } else if let Some(at) = tc::rows_clicked(&mut keys, current, head, scroll, &placed, None) {
             match &mut detail {
                 Some(d) => d.at = at,
                 None => {
@@ -1428,30 +1535,31 @@ fn main() {
             }
             moved = true;
         }
+        before = body_for_keys(&snapshot, &view, refresh, cw, now, &p, before, region_drawn);
         let mut quit = false;
         for key in keys {
             if key.is_empty() {
                 continue;
             }
-            // The view keys answer the same on every screen.
-            match key.as_str() {
-                "ctrl-y" | "wheel-up" => {
-                    scroll = scroll.saturating_sub(1);
+            // Scroll and notices answer on every screen. `!` in particular
+            // is taken before the news view and the filter, which both show
+            // its hint; the filter would otherwise type the character.
+            match route_key(&key, detail.is_some(), view.typing) {
+                Route::Scroll => {
+                    match key.as_str() {
+                        "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                        "ctrl-e" | "wheel-down" => scroll += 1,
+                        "pgup" => scroll = scroll.saturating_sub(room.max(1)),
+                        "pgdn" => scroll += room.max(1),
+                        _ => {}
+                    }
                     continue;
                 }
-                "ctrl-e" | "wheel-down" => {
-                    scroll += 1;
+                Route::Notices => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
-                "pgup" => {
-                    scroll = scroll.saturating_sub(room.max(1));
-                    continue;
-                }
-                "pgdn" => {
-                    scroll += room.max(1);
-                    continue;
-                }
-                _ => {}
+                Route::Detail | Route::Typing | Route::List => {}
             }
             if let Some(d) = &mut detail {
                 match key.as_str() {
@@ -1519,10 +1627,6 @@ fn main() {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
-                    continue;
-                }
                 "/" => {
                     view.typing = true;
                 }
@@ -1544,10 +1648,12 @@ fn main() {
                     }
                 }
                 "left" | "right" if several => {
+                    let was = view.region;
                     let by = if key == "left" { -1 } else { 1 };
                     view.region = tc::step_tab(view.region as i64, by, snapshot.regions.len());
                     view.at = [0; 2];
                     scroll = 0;
+                    before = body_for_keys(&snapshot, &view, refresh, cw, now, &p, before, was);
                 }
                 "up" | "k" | "down" | "j" => {
                     let down = key == "down" || key == "j";
@@ -1673,24 +1779,38 @@ fn main() {
             }
             body.cursor = body.cursor.map(|c| c + n);
         }
-        // The strip is pinned under the title, not part of the scrolling
-        // body; the detail screen has none. Its placements are kept for
-        // the frame a click is answered against.
-        let strip = if detail.is_some() {
-            Vec::new()
-        } else {
-            let open = format!("{}{}", p.tint, p.accent);
-            let (strip, at) =
-                tc::tab_strip(view.region, &region_tabs(&snapshot, &p), w, &open, &p.dim, &p.dim);
-            tabs_at = at;
-            strip
-        };
-        head = 1 + strip.len();
         // The notices counter rides the footer; the banner sits above it
         // and counts as footer, so the body never scrolls under it.
         hints.extend(tc::notices::hint(w - 2));
         let banner = tc::notices::banner_rows(w, h);
         let (packed, foot) = footer(&hints, cw, &p);
+        // The strip is pinned under the title, not part of the scrolling
+        // body; the detail screen has none. Its placements are kept for
+        // the frame a click is answered against. Lines that do not fit are
+        // windowed around the open tab, after a row is reserved for the feed.
+        let strip = if detail.is_some() {
+            tabs_at.clear();
+            Vec::new()
+        } else {
+            let open = format!("{}{}", p.tint, p.accent);
+            let (lines, at) = tc::tab_strip(
+                view.region,
+                &region_tabs(&snapshot, &p),
+                w,
+                &open,
+                &p.dim,
+                &p.dim,
+            );
+            let (lines, at) = window_strip(
+                lines,
+                at,
+                view.region,
+                strip_rows(h, foot.len(), banner.len()),
+            );
+            tabs_at = at;
+            lines
+        };
+        head = 1 + strip.len();
         room = h.saturating_sub(head + foot.len() + banner.len()).max(1);
         if moved {
             if let Some(c) = body.cursor {
@@ -1961,7 +2081,11 @@ mod tests {
     fn a_stale_previous_fetch_says_why_nothing_is_compared() {
         let p = palette();
         let mut memory = Memory::default();
-        memory.observe(&[trend("alpha", "200+", None, &[])], NOW - 86_400.0, f64::INFINITY);
+        memory.observe(
+            &[trend("alpha", "200+", None, &[])],
+            NOW - 86_400.0,
+            f64::INFINITY,
+        );
         let mut us = Region {
             geo: "US".into(),
             ..Region::default()
@@ -2015,9 +2139,15 @@ mod tests {
         };
         let restarted = text_of(gone(None));
         assert!(restarted.contains("not kept"), "{restarted}");
-        assert!(!restarted.contains("Google lists no stories"), "{restarted}");
+        assert!(
+            !restarted.contains("Google lists no stories"),
+            "{restarted}"
+        );
         assert!(restarted.contains("start time not kept"), "{restarted}");
-        assert!(!restarted.contains("no start time in the feed"), "{restarted}");
+        assert!(
+            !restarted.contains("no start time in the feed"),
+            "{restarted}"
+        );
         let empty = text_of(gone(Some(Vec::new())));
         assert!(empty.contains("Google lists no stories"), "{empty}");
     }
@@ -2221,8 +2351,10 @@ mod tests {
         let p = palette();
         let shared = sample();
         let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 80, "", "", "");
-        let text = tc::source_text(&lines.join("
-"));
+        let text = tc::source_text(&lines.join(
+            "
+",
+        ));
         assert!(text.contains("[US]"), "{text}");
         assert!(text.contains(" ZZ "), "{text}");
         assert!(text.contains(" GB "), "{text}");
@@ -2232,8 +2364,11 @@ mod tests {
             err: String::new(),
         };
         let (lines, _) = tc::tab_strip(0, &region_tabs(&one, &p), 80, "", "", "");
-        assert!(tc::source_text(&lines.join("
-")).contains("[US]"));
+        assert!(tc::source_text(&lines.join(
+            "
+"
+        ))
+        .contains("[US]"));
     }
 
     #[test]
@@ -2251,7 +2386,10 @@ mod tests {
     #[test]
     fn markers_and_badges_follow_the_region_state() {
         let p = palette();
-        let mut ok_new = Region { geo: "US".into(), ..Region::default() };
+        let mut ok_new = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
         let mut mem = Memory::default();
         apply(
             &mut ok_new,
@@ -2271,15 +2409,41 @@ mod tests {
             NOW + 300.0,
             300.0,
         );
-        let mut failed = Region { geo: "GB".into(), ..Region::default() };
-        apply(&mut failed, Answer::Failed("HTTP 429".into()), &mut Memory::default(), NOW, 300.0);
-        let mut rejected = Region { geo: "ZZ".into(), ..Region::default() };
-        apply(&mut rejected, Answer::Rejected("nope".into()), &mut Memory::default(), NOW, 300.0);
-        let unfetched = Region { geo: "FR".into(), ..Region::default() };
-        let shared = Shared { regions: vec![ok_new, failed, rejected, unfetched], err: String::new() };
+        let mut failed = Region {
+            geo: "GB".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut failed,
+            Answer::Failed("HTTP 429".into()),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let mut rejected = Region {
+            geo: "ZZ".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut rejected,
+            Answer::Rejected("nope".into()),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let unfetched = Region {
+            geo: "FR".into(),
+            ..Region::default()
+        };
+        let shared = Shared {
+            regions: vec![ok_new, failed, rejected, unfetched],
+            err: String::new(),
+        };
         let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 120, "", "", "");
-        let text = tc::source_text(&lines.join("
-"));
+        let text = tc::source_text(&lines.join(
+            "
+",
+        ));
         assert!(text.contains("·2"), "{text}");
         assert!(text.contains(" GB !"), "{text}");
         assert!(text.contains("×"), "{text}");
@@ -2289,7 +2453,10 @@ mod tests {
 
     #[test]
     fn left_from_the_first_tab_lands_on_the_last() {
-        assert_eq!(tc::step_tab(0, -1, sample().regions.len()), sample().regions.len() - 1);
+        assert_eq!(
+            tc::step_tab(0, -1, sample().regions.len()),
+            sample().regions.len() - 1
+        );
     }
 
     #[test]
@@ -2301,6 +2468,110 @@ mod tests {
         assert_eq!(tab_clicked(&placed, col, row + 1, 2), Some(2));
         // Below the strip is the body; nothing answers there.
         assert_eq!(tab_clicked(&placed, col, 4, 2), None);
+    }
+
+    #[test]
+    fn a_tall_strip_keeps_the_open_tab_and_leaves_the_feed_a_row() {
+        let p = palette();
+        // Forty two-letter regions at width 30 wrap to more rows than a
+        // short pane has. The reviewers' case: a 30×10 pane, footer of 2.
+        let shared = Shared {
+            regions: (0..40)
+                .map(|i| Region {
+                    geo: format!("{i:02}"),
+                    ..Region::default()
+                })
+                .collect(),
+            err: String::new(),
+        };
+        let h = 10;
+        let foot = 2;
+        let banner = 0;
+        let budget = strip_rows(h, foot, banner);
+        assert_eq!(budget, 6);
+        let tabs = region_tabs(&shared, &p);
+        for active in [0usize, 39] {
+            let (lines, placed) = tc::tab_strip(active, &tabs, 30, "", "", "");
+            assert!(lines.len() > budget, "{} lines", lines.len());
+            let (shown, vis) = window_strip(lines, placed, active, budget);
+            assert!(shown.len() <= budget);
+            let text = tc::source_text(&shown.concat());
+            let name = format!("{active:02}");
+            assert!(text.contains(&format!("[{name}]")), "{text}");
+            let head = 1 + shown.len();
+            let room = h - head - foot - banner;
+            assert!(room >= 1, "feed row gone at active {active}");
+            assert!(head + room + foot + banner <= h);
+            let (row, col, _) = vis.iter().copied().find(|&(_, _, i)| i == active).unwrap();
+            assert_eq!(tab_clicked(&vis, col, row + 1, head), Some(active));
+        }
+    }
+
+    #[test]
+    fn a_strip_steps_aside_when_the_pane_cannot_hold_one() {
+        assert_eq!(strip_rows(3, 2, 0), 0);
+        let (shown, vis) = window_strip(vec![" [US]".into()], vec![(0, 1, 0)], 0, 0);
+        assert!(shown.is_empty());
+        assert!(vis.is_empty());
+        assert_eq!(tab_clicked(&vis, 1, 1, 1), None);
+    }
+
+    #[test]
+    fn enter_after_a_region_change_opens_the_new_regions_trend() {
+        let p = palette();
+        let item = |title: &str| trend(title, "200+", None, &[]);
+        let mut us = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut us,
+            Answer::Items(vec![item("zorblax"), item("other")]),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let mut gb = Region {
+            geo: "GB".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut gb,
+            Answer::Items(vec![item("other"), item("zorblax")]),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let shared = Shared {
+            regions: vec![us, gb],
+            err: String::new(),
+        };
+        let drawn_view = View {
+            needle: "zor".into(),
+            ..View::default()
+        };
+        let drawn = list_body(&shared, &drawn_view, 300.0, 80, NOW, &p);
+        let mut view = drawn_view;
+        view.region = 1;
+        view.at = [0; 2];
+        // The body from before the switch still points at US's first hit,
+        // which is a different row in GB.
+        let stale = detail_for(&shared, &view, &drawn, NOW).unwrap();
+        assert_eq!(stale.title, "other");
+        let fresh = body_for_keys(&shared, &view, 300.0, 80, NOW, &p, drawn, 0);
+        let opened = detail_for(&shared, &view, &fresh, NOW).unwrap();
+        assert_eq!(opened.geo, "GB");
+        assert_eq!(opened.title, "zorblax");
+    }
+
+    #[test]
+    fn notices_are_answered_before_the_news_view_and_the_filter() {
+        assert_eq!(route_key("!", true, false), Route::Notices);
+        assert_eq!(route_key("!", false, true), Route::Notices);
+        assert_eq!(route_key("!", false, false), Route::Notices);
+        assert_eq!(route_key("left", true, false), Route::Detail);
+        assert_eq!(route_key("x", false, true), Route::Typing);
+        assert_eq!(route_key("left", false, false), Route::List);
     }
 
     #[test]

@@ -21,7 +21,9 @@ comma opens settings, q quits.
 
 On the region tabs, the marker · says the last fetch succeeded, ! that it
 failed or would not parse, and × that Google rejected the region code; a
-number after it counts the trends new since the fetch before.
+number after it counts the trends new since the fetch before. When the tabs
+wrap past the pane, the strip keeps the open region on screen and the feed
+keeps a row.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read or a recommended tool that is
