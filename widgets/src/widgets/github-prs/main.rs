@@ -164,6 +164,17 @@ fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
     )
 }
 
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rate {
     /// Remaining and the ceiling it is measured against. A bare remaining
@@ -236,12 +247,7 @@ fn graphql(
     tok: &str,
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let cfg = if on_legacy_section() {
-        tc::load_config("pr")
-    } else {
-        tc::load_config("github_prs")
-    };
-    let gql_url = tc::github_graphql_url(enterprise_host(&cfg).as_deref());
+    let gql_url = tc::github_graphql_url(api_host());
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
     let (out, _headers) = tc::post_json(
         &gql_url,
@@ -1877,6 +1883,7 @@ fn main() {
     let limit = tc::cfg_usize(&cfg, "limit", 25);
     let sources = sources_from(&cfg);
     let _ = SOURCES_REFILLED.set(sources_were_emptied(&cfg));
+    let _ = API_HOST.set(enterprise_host(&cfg));
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut extra: Vec<String> = Vec::new();

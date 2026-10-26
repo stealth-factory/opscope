@@ -111,6 +111,17 @@ fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
     )
 }
 
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
 fn graphql(
     query: &str,
     tok: &str,
@@ -1379,12 +1390,7 @@ fn one_pass(
 }
 
 fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
-    let cfg = if on_legacy_section() {
-        tc::load_config("gha")
-    } else {
-        tc::load_config("github_actions")
-    };
-    let rest_base = tc::github_rest_base_url(enterprise_host(&cfg).as_deref());
+    let rest_base = tc::github_rest_base_url(api_host());
     let repo = text(run, "repo");
     let id = run["id"].as_i64().unwrap_or(0);
     let Some((owner, name)) = split_repo(&repo) else {
@@ -1716,7 +1722,7 @@ fn main() {
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
     let poll_env = env_name.clone();
-    let poll_host = enterprise_host(&cfg);
+    let _ = API_HOST.set(enterprise_host(&cfg));
     std::thread::spawn(move || loop {
         let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
         if poll_tok.is_empty() {
@@ -1737,7 +1743,7 @@ fn main() {
                     max_repos,
                     hours,
                     &poller,
-                    poll_host.as_deref(),
+                    api_host(),
                 )
             }));
             // However the pass ended - answer, error or panic - it is no

@@ -1600,6 +1600,17 @@ fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
     )
 }
 
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
 /// The open PRs that have been open longest, for one account.
 ///
 /// The board and the row are built entirely from `issueCount` aggregates,
@@ -1617,8 +1628,7 @@ fn pr_url(node: &serde_json::Value) -> String {
 }
 
 fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
-    let cfg = tc::load_config("github");
-    let gql_url = tc::github_graphql_url(enterprise_host(&cfg).as_deref());
+    let gql_url = tc::github_graphql_url(api_host());
     let q = scope_of(acc, viewer);
     let query = format!(
         r#"{{
@@ -2944,7 +2954,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_scopes = Arc::clone(&scopes);
     let poller_activity = activity.clone();
-    let poll_host = enterprise_host(&cfg);
+    let _ = API_HOST.set(enterprise_host(&cfg));
     std::thread::spawn(move || {
         let mut viewer = String::new();
         let mut day_cache: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
@@ -2964,7 +2974,7 @@ fn main() {
                     &mut day_cache,
                     &poller,
                     &poller_scopes,
-                    poll_host.as_deref(),
+                    api_host(),
                 ) {
                     if let Ok(mut g) = poller.lock() {
                         g.err = said;
@@ -3766,9 +3776,7 @@ fn main() {
                         let asking = Arc::clone(&timing_asking);
                         let backoff = Arc::clone(&timing_backoff);
                         let timing_activity = activity.clone();
-                        let timing_cfg = tc::load_config("github");
-                        let timing_gql =
-                            tc::github_graphql_url(enterprise_host(&timing_cfg).as_deref());
+                        let timing_gql = tc::github_graphql_url(api_host());
                         std::thread::spawn(move || {
                             let _work = timing_activity.start();
                             match fetch_land_timing(
