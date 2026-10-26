@@ -257,6 +257,36 @@ fn forget_24h(row: &mut Account) {
     row.merged_24h = None;
 }
 
+/// Lands one account's day counts for a `days`-day window on its row, or
+/// marks the window failed and returns why.
+///
+/// Any failed chunk fails the window, even when the cache still holds every
+/// day: the trailing days are asked again on every pass, so a full cache
+/// after a failure is yesterday's count wearing today's label. A failed
+/// window also gives up the one the row last counted, so the chart leaves
+/// the account out and names it rather than drawing the counts it kept.
+/// The days that were read stay cached for the next pass either way.
+fn settle_day_counts(
+    row: &mut Account,
+    days: i64,
+    dates: &[String],
+    cache: &HashMap<String, (i64, i64)>,
+    chunk_err: Option<String>,
+) -> Option<String> {
+    let whole = dates.iter().all(|x| cache.contains_key(x));
+    if chunk_err.is_some() || !whole {
+        let why = chunk_err.unwrap_or_else(|| "a day was not answered".into());
+        row.hist_failed = Some((days, why.clone()));
+        row.hist_window = None;
+        return Some(why);
+    }
+    row.hist = dates.iter().map(|x| (x.clone(), cache[x].0)).collect();
+    row.opened_hist = dates.iter().map(|x| (x.clone(), cache[x].1)).collect();
+    row.hist_window = Some(days);
+    row.hist_failed = None;
+    None
+}
+
 /// An opened and merged rolling-day pair, either of which may not have
 /// arrived.
 type Pair24h = (Option<i64>, Option<i64>);
@@ -2728,24 +2758,11 @@ fn one_pass(
             }
         }
         cache.retain(|day, _| *day >= keep_from); // older than any window
-        if !dates.iter().all(|x| cache.contains_key(x)) {
-            // A chunk failed. The days it did read stay cached for the next
-            // pass, but this window's chart cannot count this account, and
-            // it says so instead of waiting for a pass that may never come.
-            let why = chunk_err.unwrap_or_else(|| "a day was not answered".into());
-            let why: String = why.chars().take(50).collect();
-            failed.push(format!("{} day counts ({})", acc, why));
-            if let Some(row) = by_acc.get_mut(acc) {
-                row.hist_failed = Some((days_now, why));
-            }
-            publish(state, &accounts, &by_acc, rate);
-            continue;
-        }
         if let Some(row) = by_acc.get_mut(acc) {
-            row.hist = dates.iter().map(|x| (x.clone(), cache[x].0)).collect();
-            row.opened_hist = dates.iter().map(|x| (x.clone(), cache[x].1)).collect();
-            row.hist_window = Some(days_now);
-            row.hist_failed = None;
+            if let Some(why) = settle_day_counts(row, days_now, &dates, cache, chunk_err) {
+                let why: String = why.chars().take(50).collect();
+                failed.push(format!("{} day counts ({})", acc, why));
+            }
         }
         publish(state, &accounts, &by_acc, rate);
     }
@@ -4236,6 +4253,39 @@ mod tests {
             assert!(joined.contains("slow") && joined.contains("HTTP 502"), "{joined}");
         }
         assert!(flow_missing(&[], 57).is_empty());
+    }
+
+    #[test]
+    fn a_failed_fresh_day_fails_the_window_even_with_a_full_cache() {
+        // The trailing days are asked again every pass, so the cache can
+        // still hold every day after a request failed. That used to pass as
+        // a complete count: the chart drew last pass's numbers as current
+        // and no error said the refresh failed.
+        let want = 3;
+        let dates: Vec<String> = ["d1", "d2", "d3"].map(String::from).to_vec();
+        let cache: HashMap<String, (i64, i64)> =
+            dates.iter().map(|d| (d.clone(), (1, 2))).collect();
+        let mut row = Account::default();
+        assert_eq!(settle_day_counts(&mut row, want, &dates, &cache, None), None);
+        assert_eq!(row.hist_window, Some(want));
+        assert_eq!(row.hist.len(), 3);
+        let long = format!("HTTP 502 {}", "x".repeat(80));
+        let why = settle_day_counts(&mut row, want, &dates, &cache, Some(long.clone()));
+        assert_eq!(why.as_deref(), Some(long.as_str()));
+        // The window it last counted is given up, so the chart leaves the
+        // account out and names it, with the whole reason for the row.
+        assert_eq!(row.hist_window, None);
+        assert_eq!(row.hist_failed, Some((want, long.clone())));
+        assert_eq!(flow_progress(&[row.clone()], want), (false, vec![(String::new(), long)]));
+        // A hole in the cache with no error still fails the window.
+        let mut short = cache.clone();
+        short.remove("d2");
+        let mut row = Account::default();
+        assert!(settle_day_counts(&mut row, want, &dates, &short, None).is_some());
+        assert_eq!(row.hist_window, None);
+        // And a clean pass clears the failure.
+        assert_eq!(settle_day_counts(&mut row, want, &dates, &cache, None), None);
+        assert_eq!((row.hist_window, row.hist_failed), (Some(want), None));
     }
 
     #[test]
