@@ -745,12 +745,12 @@ group's limit:
 ```
 
 They are not added up or averaged into a group figure, because Google states
-none. `[+]` gets one lane from them, `gemini busiest` — the model with the
-least left — after the four group lanes rather than a dozen. With no Gemini
-group on screen they are the Gemini quota there is, and if the per-model call
-fails the reason is drawn where the rows would be; with a group, a failure is
-left unsaid, since a warning under four good bars reads as though the bars
-were wrong.
+none. They stay on the tab: `[+]` shows the four group lanes `agy` itself
+draws. Only when no Gemini group came back does `[+]` take one lane from them,
+`gemini busiest` — the model with the least left — since they are then the
+Gemini quota there is. In that case, if the per-model call fails the reason
+is drawn where the rows would be; with a group, a failure is left unsaid,
+since a warning under four good bars reads as though the bars were wrong.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the

@@ -1106,16 +1106,17 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             });
         }
     }
-    // Per-model Gemini readings get one lane, after the groups: the busiest
-    // model, named as that. With no Gemini group it stands in for one; with
-    // a group it says how close the hungriest model is to its own cap. Every model would be a dozen lanes on a screen meant
-    // for comparing agents, and an average would be a number Google never
-    // published.
-    if let Some(top) = d
+    // Per-model Gemini readings get one lane, the busiest model named as
+    // that, and only when no Gemini group came back: then it is the only
+    // Gemini figure there is. Beside a group it is a fifth bar `agy` itself
+    // never draws, so the per-model rows stay on the tab. Every model would
+    // be a dozen lanes on a screen meant for comparing agents, and an
+    // average would be a number Google never published.
+    let top = d
         .gemini
         .iter()
-        .min_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal))
-    {
+        .min_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some(top) = top.filter(|_| !has_gemini_group(&d.quota)) {
         out.push(Lane {
             label: "gemini busiest".into(),
             pct: 100.0 * (1.0 - top.left),
@@ -1925,12 +1926,13 @@ mod tests {
         let labels: Vec<_> = found.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["gemini 5h", "gemini weekly", "claude 5h", "claude weekly", "gemini busiest"]
+            ["gemini 5h", "gemini weekly", "claude 5h", "claude weekly"],
+            "the four bars agy draws, no per-model lane beside its own Gemini group"
         );
         assert!((found[0].pct - 70.0).abs() < 1e-9, "spent, not left");
         assert!((found[1].pct - 20.0).abs() < 1e-9);
         assert_eq!(found[0].window_secs, Some(5.0 * 3600.0));
-        assert!(found[2].apart && found[4].apart && !found[1].apart);
+        assert!(found[2].apart && !found[1].apart);
     }
 
     #[test]
