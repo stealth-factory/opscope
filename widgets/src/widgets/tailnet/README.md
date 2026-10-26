@@ -107,6 +107,7 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | `r` | refresh now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit |
 
 ## Throughput graphs

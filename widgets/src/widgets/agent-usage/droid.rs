@@ -418,16 +418,14 @@ fn no_token_percent(usage: &FactoryUsage) -> bool {
 
 pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     if let Some(billing) = data.billing.as_ref() {
-        let mut rows = rate_rows_with_plots(data, billing, w, p, plots);
-        rows.extend(token_warning(data, w, p));
+        let rows = rate_rows_with_plots(data, billing, w, p, plots);
         return add_section(
             rows,
             account_rows(data, billing.overage_preference.as_deref(), w, p),
         );
     }
     if let Some(usage) = data.usage.as_ref() {
-        let mut rows = legacy_rows_with_plots(data, usage, w, p, plots);
-        rows.extend(token_warning(data, w, p));
+        let rows = legacy_rows_with_plots(data, usage, w, p, plots);
         return add_section(rows, account_rows(data, None, w, p));
     }
     let what = if data.source.is_empty() && data.why.is_empty() {
@@ -443,8 +441,7 @@ pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palet
             .trim_start_matches("no quota · ")
             .to_string()
     };
-    let mut rows = no_local(&what, "", w, p);
-    rows.extend(token_warning(data, w, p));
+    let rows = no_local(&what, "", w, p);
     rows
 }
 
@@ -647,13 +644,6 @@ fn preference_only(preference: Option<&str>, w: usize, p: &Palette) -> Vec<Strin
         "",
         p,
     )
-}
-
-fn token_warning(data: &Data, w: usize, p: &Palette) -> Vec<String> {
-    tc::config_token_warning()
-        .filter(|_| data.source == "config")
-        .map(|warn| note(&warn, &p.warn, w))
-        .unwrap_or_default()
 }
 
 fn note(text: &str, colour: &str, w: usize) -> Vec<String> {

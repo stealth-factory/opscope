@@ -1007,15 +1007,6 @@ fn billing_rows(
     rows
 }
 
-// The cookie is a full sign-in, so a config.json others can read is worth
-// saying on every reading, not only on the ones that failed.
-fn token_warning(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    tc::config_token_warning()
-        .filter(|_| d.source == "config")
-        .map(|warn| note(&warn, &p.warn, w))
-        .unwrap_or_default()
-}
-
 /// A sentence under the bars, wrapped to the pane rather than cut by it.
 /// A word longer than the room - the cookie's name is 32 characters - is
 /// broken by hand, since wrapping alone would leave it to be cut.
@@ -1063,7 +1054,6 @@ pub fn tab_with_plots(
         ));
         rows.push(String::new());
         rows.extend(step_rows(d, w, p));
-        rows.extend(token_warning(d, w, p));
         return rows;
     }
     // An answer with no credit pools still has a balance and billing to
@@ -1071,8 +1061,7 @@ pub fn tab_with_plots(
     let credits = d.credits.as_ref();
     match credits {
         _ if credits.is_some() || d.quota.is_some() || d.subscription.is_some() => {
-            let mut rows = credit_rows_with_plots(d, credits, w, p, plots);
-            rows.extend(token_warning(d, w, p));
+            let rows = credit_rows_with_plots(d, credits, w, p, plots);
             rows
         }
         _ => {
@@ -1090,8 +1079,7 @@ pub fn tab_with_plots(
                 return rows;
             }
             let what = why_no_lane(d).trim_start_matches("no quota · ").to_string();
-            let mut rows = no_local(&what, "", w, p);
-            rows.extend(token_warning(d, w, p));
+            let rows = no_local(&what, "", w, p);
             rows
         }
     }

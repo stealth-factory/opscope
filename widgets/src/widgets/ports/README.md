@@ -407,6 +407,7 @@ are on this screen rather than an IP.
 | `r` | rescan now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit |
 
 ## Cost

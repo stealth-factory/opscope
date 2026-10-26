@@ -22,6 +22,7 @@
 
 mod dependencies;
 pub mod google;
+pub mod notices;
 mod settings;
 mod terminal;
 mod graphics;
@@ -34,7 +35,8 @@ pub use graphics::{braille, line_col, line_row, LineChart, Plot, StickyRange, Tr
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
     dependency_install_hint, dependency_status, doctor_report, install_command,
-    parse_dependencies, parse_os_release, tool_available, unsatisfied_required,
+    parse_dependencies, parse_os_release, tool_available, unsatisfied_recommended,
+    unsatisfied_required,
 };
 pub use settings::{run_settings, Catalogue, SettingsSpec};
 
@@ -2108,6 +2110,10 @@ pub fn config_paths() -> Vec<std::path::PathBuf> {
 /// defaults rather than stopping a running panel - a widget on a wall
 /// should not vanish because a comma went missing in a file it shares.
 pub fn load_config(section: &str) -> serde_json::Value {
+    // The file's permissions are the same fact in every pane, so it is
+    // raised here, once, as a Core notice - not glued onto a widget's fetch
+    // error, where it made a working pane read as a failing one.
+    notices::raise_config_permissions();
     for path in config_paths() {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -2456,9 +2462,10 @@ pub fn cannot_start_because(name: &str, reason: &str, why: &[&str], install: &st
 /// Check the calling widget's owned dependency declaration before it starts.
 ///
 /// Required tools block on the same persistent screen as every other startup
-/// failure. Recommended tools are deliberately absent here: they belong in
-/// `opscope doctor`, because losing an enhancement must not make a useful
-/// widget unavailable.
+/// failure. A missing recommended tool never blocks - losing an enhancement
+/// must not make a useful widget unavailable - but it is not dropped either:
+/// each one is raised as an Info notice, so the pane says what it is doing
+/// without and `opscope doctor` is one key away from being mentioned.
 pub fn dependencies_available(
     name: &str,
     source: &str,
@@ -2479,6 +2486,7 @@ pub fn dependencies_available(
         }
     };
     let host = Host::detect();
+    raise_missing_recommended(&dependencies, &host);
     let missing = unsatisfied_required(&dependencies, host.platform);
     if missing.is_empty() {
         return true;
@@ -2526,6 +2534,40 @@ pub fn dependencies_available(
     let install = dependency_install_hint(&host, &needed);
     cannot_start_inner(name, &reason, &refs, &install, settings);
     false
+}
+
+/// One Info notice per recommended tool this host lacks.
+fn raise_missing_recommended(dependencies: &Dependencies, host: &Host) {
+    for (dependency, status) in unsatisfied_recommended(dependencies, host.platform) {
+        let command = dependency.tool.command();
+        let what = match status {
+            DependencyStatus::TooOld(version) => format!(
+                "{command} is {version}; {} is recommended",
+                dependency.version_text
+            ),
+            DependencyStatus::VersionUnknown => format!(
+                "{command}'s version could not be checked (recommended {})",
+                dependency.version_text
+            ),
+            _ => format!("{command} is not installed (recommended)"),
+        };
+        let install = dependency_install_hint(host, std::slice::from_ref(&dependency));
+        let mut detail = dependency.why.clone().unwrap_or_default();
+        if !detail.is_empty() && !detail.ends_with('.') {
+            detail.push('.');
+        }
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+        detail.push_str(&format!(
+            "The widget runs without it. To add it: {install}. `opscope doctor` lists every tool."
+        ));
+        notices::raise(
+            notices::Notice::info(dependency.tool.recommended_notice_id(), what)
+                .detail(detail)
+                .source("tools"),
+        );
+    }
 }
 
 fn cannot_start_inner(
@@ -2601,20 +2643,16 @@ fn cannot_start_inner(
 /// Any widget that takes a token writes it into this file, so the check
 /// belongs beside the loader rather than in whichever widget happened to
 /// need it first.
+///
+/// The file checked is the one `load_config` reads - the first that exists
+/// *and parses* - not merely the first that exists: a malformed earlier
+/// candidate is skipped by the loader, so it must be skipped here too, or
+/// the file actually holding the tokens goes unchecked.
 pub fn config_token_warning() -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
-    for path in config_paths() {
-        if !path.exists() {
-            continue;
-        }
-        let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
-        return if mode != 0 {
-            Some("config.json is readable by others; chmod 600 it".into())
-        } else {
-            None
-        };
-    }
-    None
+    let path = resolved_config_path()?;
+    let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
+    (mode != 0).then(|| "config.json is readable by others; chmod 600 it".into())
 }
 
 /// One HTTPS GET, returning the body.

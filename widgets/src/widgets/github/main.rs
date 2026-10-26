@@ -1148,7 +1148,17 @@ fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
 /// One function rather than the condition written out at each call, since
 /// what is at stake is a footer offering a key that draws nothing.
 fn board_foot(p: &Palette, notes: bool, w: usize) -> Vec<Vec<(&str, String)>> {
-    board_hints(p, by_account_held(w).then(|| info_hint(notes, p, w)))
+    let mut hints = board_hints(p, by_account_held(w).then(|| info_hint(notes, p, w)));
+    // The notices counter sits just before `[,] settings`, as it does in
+    // every widget, and only while something is outstanding.
+    if let Some(notice) = tc::notices::hint(w - 2) {
+        let at = hints
+            .iter()
+            .position(|h| h.iter().any(|(_, t)| t == "[,] settings"))
+            .unwrap_or(hints.len());
+        hints.insert(at, notice);
+    }
+    hints
 }
 
 /// What `[i]` does next, which is not what it did last.
@@ -2543,7 +2553,6 @@ fn orgs_query(after: Option<&str>) -> String {
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
-    source: &str,
     viewer: &mut String,
     day_cache: &mut HashMap<String, HashMap<String, (i64, i64)>>,
     state: &Arc<Mutex<State>>,
@@ -2813,19 +2822,13 @@ fn one_pass(
     }
 
     if let Ok(mut g) = state.lock() {
-        // With nothing else to report, surface a token sitting in a file
-        // other users on the box can read.
+        // A config file others can read is no longer said here: core raises
+        // it as a notice from load_config, so it is not glued onto a fetch
+        // that worked.
         g.err = if !failed.is_empty() {
             format!("could not read: {}", failed.join(", "))
         } else {
-            let warn = scopes.lock().map(|s| scope_warning(&s)).unwrap_or_default();
-            if !warn.is_empty() {
-                warn
-            } else if source == "config" {
-                tc::config_token_warning().unwrap_or_default()
-            } else {
-                String::new()
-            }
+            scopes.lock().map(|s| scope_warning(&s)).unwrap_or_default()
         };
     }
     Ok(())
@@ -2869,6 +2872,7 @@ fn publish(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("github");
     if !tc::dependencies_available("github", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -2904,7 +2908,7 @@ fn main() {
     let activity = tc::Refresh::default();
     let scopes = Arc::new(Mutex::new(Scopes::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
-    let (tok, source) = token(&cfg);
+    let (tok, _source) = token(&cfg);
     // The poller thread takes ownership of it; the render loop needs it too,
     // for the one on-demand request an account's own screen makes.
     let ui_tok = tok.clone();
@@ -2933,7 +2937,6 @@ fn main() {
                 let work = poller_activity.start();
                 if let Err(said) = one_pass(
                     &tok,
-                    source,
                     &mut viewer,
                     &mut day_cache,
                     &poller,
@@ -3021,6 +3024,10 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -3216,18 +3223,24 @@ fn main() {
         }
         if stats.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
-            let hints = vec![vec![(p.dim.as_str(), "[,] settings".into())], vec![(
-                p.dim.as_str(),
-                "[q]uit".into(),
-            )]];
+            let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
+            hints.extend(tc::notices::hint(w - 2));
+            hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-            let foot: Vec<String> =
-                packed.lines.iter().map(|line| format!(" {}", line)).collect();
+            let banner = tc::notices::banner_rows(w, h);
+            let foot: Vec<String> = banner
+                .iter()
+                .cloned()
+                .chain(packed.lines.iter().map(|line| format!(" {}", line)))
+                .collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
-            let foot_top = rows.len();
+            // The hints start under the banner, and that is where a click
+            // on one lands.
+            let foot_top = rows.len() + banner.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
@@ -3779,12 +3792,18 @@ fn main() {
                         (p.accent.as_str(), "←".into()),
                         (p.dim.as_str(), "/esc back".into()),
                     ],
-                    vec![(p.dim.as_str(), "[,] settings".into())],
-                    vec![(p.dim.as_str(), "[q]uit".into())],
                 ];
+                let mut hints = hints;
+                hints.extend(tc::notices::hint(w - 2));
+                hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+                hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-                let foot: Vec<String> =
-                    packed.lines.iter().map(|l| format!(" {}", l)).collect();
+                let banner = tc::notices::banner_rows(w, h);
+                let foot: Vec<String> = banner
+                    .iter()
+                    .cloned()
+                    .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+                    .collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 // The page follows the cursor into the oldest list, the way
                 // netwatch's detail follows one into a section. Without it
@@ -3824,7 +3843,7 @@ fn main() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
                 }
-                let foot_top = out.len();
+                let foot_top = out.len() + banner.len();
                 out.extend(foot);
                 let plots: Vec<_> = detail_plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room_below)).collect();
                 tc::draw_plots(&out, w, h, &plots);
@@ -3837,8 +3856,12 @@ fn main() {
 
         let hints = board_foot(&p, notes, w);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let banner = tc::notices::banner_rows(w, h);
+        let footer: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         // A window onto the frame, title pinned, rather than a cut of it.
         // Truncating dropped every account past the fold with nothing
         // saying so.
@@ -3859,7 +3882,7 @@ fn main() {
         while rows.len() < room {
             rows.push(String::new());
         }
-        let foot_top = rows.len();
+        let foot_top = rows.len() + banner.len();
         rows.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
         tc::draw_plots(&rows, w, h, &plots);

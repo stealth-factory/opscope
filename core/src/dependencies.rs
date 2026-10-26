@@ -102,6 +102,30 @@ impl Tool {
         }
     }
 
+    /// The id of the notice raised when this tool is recommended and
+    /// missing. A literal per tool, because a notice id is stable and
+    /// `check.rs` holds every id to being a literal or a const.
+    pub const fn recommended_notice_id(self) -> &'static str {
+        match self {
+            Self::Cloudflared => "recommended-cloudflared",
+            Self::Curl => "recommended-curl",
+            Self::Getent => "recommended-getent",
+            Self::Herdr => "recommended-herdr",
+            Self::Ifconfig => "recommended-ifconfig",
+            Self::Ip => "recommended-ip",
+            Self::Lsof => "recommended-lsof",
+            Self::Luvus => "recommended-luvus",
+            Self::Netstat => "recommended-netstat",
+            Self::Nettop => "recommended-nettop",
+            Self::Ping => "recommended-ping",
+            Self::Ps => "recommended-ps",
+            Self::Script => "recommended-script",
+            Self::Ss => "recommended-ss",
+            Self::Tailscale => "recommended-tailscale",
+            Self::Who => "recommended-who",
+        }
+    }
+
     fn separate_install(self) -> Option<&'static str> {
         match self {
             Self::Tailscale => Some("https://tailscale.com/download"),
@@ -453,6 +477,22 @@ fn parse_yyyymmdd(digits: &str) -> Option<Version> {
         return None;
     }
     Some(Version::new(year, month, day))
+}
+
+/// The recommended tools this host is missing, with why each was wanted.
+pub fn unsatisfied_recommended(
+    dependencies: &Dependencies,
+    platform: Platform,
+) -> Vec<(Dependency, DependencyStatus)> {
+    dependencies
+        .recommended
+        .iter()
+        .filter(|dependency| dependency.applies_to(platform))
+        .filter_map(|dependency| {
+            let status = dependency_status(dependency);
+            (!status.satisfies()).then(|| (dependency.clone(), status))
+        })
+        .collect()
 }
 
 pub fn unsatisfied_required(

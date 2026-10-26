@@ -922,6 +922,7 @@ fn host_column_width(longest: usize, w: usize, show_med: bool) -> usize {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("latency");
     if !tc::dependencies_available("latency", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -1054,6 +1055,10 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -1386,12 +1391,21 @@ fn main() {
         hints.extend([
             vec![(p.dim.as_str(), "[g]roup".into())],
             vec![(p.dim.as_str(), "[c]olumns".into())],
+        ]);
+        hints.extend(tc::notices::hint(w - 2));
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // The notices banner sits directly above the hints and counts as
+        // footer, so the body never scrolls under it.
+        let banner = tc::notices::banner_rows(w, h);
+        let foot: Vec<String> = banner
+            .iter()
+            .cloned()
+            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
+            .collect();
         let body_h = h.saturating_sub(foot.len());
 
         // The log is always drawn and the chart takes what is left, down to
@@ -1500,7 +1514,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len();
+        let foot_top = rows.len() + banner.len();
         rows.extend(foot);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
         tc::draw_plots(&rows, w, h, &plots);

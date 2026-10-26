@@ -37,6 +37,12 @@ numbered keys copy one. r refreshes now, o shows or hides
 offline peers, comma opens settings, q quits. Copying uses OSC 52, so it
 reaches the clipboard of the machine you are typing at even over SSH.
 
+Press ! to read this widget's notices - warnings that are not about a number
+on screen, such as a config file others can read or a recommended tool that
+is missing - and dismiss them for this session. A new notice shows above the
+footer for a minute, then as a [!] count in the footer for as long as it is
+still true.
+
 Needs the `tailscale` CLI. Peer LAN addresses come from `tailscale debug
 netmap`, which needs root; it is attempted with `sudo -n` and simply omitted
 when that would prompt, so nothing here requires privilege.
