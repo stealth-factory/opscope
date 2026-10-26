@@ -837,7 +837,7 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text().on_axis(llo, lhi));
     // The number is the bucket the stroke ends on, in that bucket's column.
     // A later loss-only bucket is a gap, so the line stops short of the
     // right edge and the label has to stop with it. A raw reply inside the

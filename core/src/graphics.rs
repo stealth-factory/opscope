@@ -110,6 +110,8 @@ pub struct Plot {
     /// Place the image under terminal text. Line charts only: a solid fill
     /// would hide the glyphs and fail the contrast rule.
     under_text: bool,
+    /// The value range the widget's axis labels name, when it set one.
+    axis: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +166,7 @@ impl Plot {
             first_row: 0,
             visible_rows: height,
             under_text: false,
+            axis: None,
         }
     }
 
@@ -178,6 +181,14 @@ impl Plot {
         if self.fill.is_none() {
             self.under_text = true;
         }
+        self
+    }
+
+    /// The value range this chart is scaled to, which the widget's axis
+    /// labels name. A change of range is never held by the upload cap: the
+    /// labels are text and change at once, so the strokes go with them.
+    pub fn on_axis(mut self, lo: f64, hi: f64) -> Self {
+        self.axis = Some((lo, hi));
         self
     }
 
@@ -972,19 +983,28 @@ fn changed_rects(old: &[u8], new: &[u8], img_w: usize) -> Vec<(usize, usize, usi
     rects
 }
 
-/// The changed rectangles of a held image as edits of its root frame, when
-/// together they are a small enough part of the image to be worth it.
-/// Also returns the share of the image the edit covers.
-fn rect_edit(old: &[u8], new: &[u8], img_w: usize, slot: usize) -> Option<(String, f64)> {
+/// The changed rectangles of a held image and the share of it they cover,
+/// when together they are a small enough part of the image to edit.
+fn edit_rects(old: &[u8], new: &[u8], img_w: usize) -> Option<(Vec<(usize, usize, usize, usize)>, f64)> {
     let rects = changed_rects(old, new, img_w);
     let img_h = new.len() / (img_w * 4).max(1);
     let area: usize = rects.iter().map(|(_, _, w, h)| w * h).sum();
     let share = area as f64 / (img_w * img_h).max(1) as f64;
-    if rects.is_empty() || share > EDIT_SHARE {
-        return None;
-    }
+    (!rects.is_empty() && share <= EDIT_SHARE).then_some((rects, share))
+}
+
+/// The changed rectangles of a held image as edits of its root frame, when
+/// together they are a small enough part of the image to be worth it.
+/// Also returns the share of the image the edit covers.
+#[cfg(test)]
+fn rect_edit(old: &[u8], new: &[u8], img_w: usize, slot: usize) -> Option<(String, f64)> {
+    edit_rects(old, new, img_w).map(|(rects, share)| (rect_payload(&rects, new, img_w, slot), share))
+}
+
+/// Frame edits writing `rects` of `new` over the held root frame.
+fn rect_payload(rects: &[(usize, usize, usize, usize)], new: &[u8], img_w: usize, slot: usize) -> String {
     let mut out = String::new();
-    for (x, y, w, h) in rects {
+    for &(x, y, w, h) in rects {
         let mut raw = Vec::with_capacity(w * h * 4);
         for row in y..y + h {
             let start = (row * img_w + x) * 4;
@@ -992,7 +1012,7 @@ fn rect_edit(old: &[u8], new: &[u8], img_w: usize, slot: usize) -> Option<(Strin
         }
         out.push_str(&frame_payload(image_id(slot), x, y, w, h, &raw));
     }
-    Some((out, share))
+    out
 }
 
 fn with_cache<R>(f: impl FnOnce(&mut Vec<CachedPlot>) -> R) -> R {
@@ -1357,9 +1377,13 @@ pub(crate) fn compose(
         // frame, when it is a small part of the image and the z is the same.
         // Whether this slot sent a large change less than a gap ago. Only
         // a change in the same region can be held: the terminal must still
-        // be showing the image the cache names.
+        // be showing the image the cache names. A new axis range is not
+        // held either, or the old strokes sit under the new labels.
         let recent = held.is_some()
-            && cache.get(slot).is_some_and(|c| now.duration_since(c.uploaded) < full_upload_gap());
+            && cache.get(slot).is_some_and(|c| {
+                plot.is_some_and(|p| p.axis == c.plot.axis)
+                    && now.duration_since(c.uploaded) < full_upload_gap()
+            });
         let edit = if !lost && frames_ready() {
             match (cache.get(slot), plot, rgba.as_deref()) {
                 (Some(cached), Some(next), Some(bytes))
@@ -1379,8 +1403,18 @@ pub(crate) fn compose(
                                 .filter(|old| !placeholders
                                     && cached.plot.under_text == next.under_text
                                     && !opaque(&cached.plot, old))
-                                .and_then(|old| rect_edit(old, bytes, img_w, slot))
-                                .map(|(edit, share)| (edit, share > SMALL_SHARE))
+                                .and_then(|old| edit_rects(old, bytes, img_w))
+                                .map(|(rects, share)| {
+                                    let large = share > SMALL_SHARE;
+                                    // A large edit the cap holds is never
+                                    // sent, so it is not compressed either.
+                                    let edit = if recent && large {
+                                        String::new()
+                                    } else {
+                                        rect_payload(&rects, bytes, img_w, slot)
+                                    };
+                                    (edit, large)
+                                })
                         }
                     },
                 _ => None,
@@ -3981,6 +4015,29 @@ mod tests {
         assert!(before.contains("a=d") && after.contains("a=T"));
         let (_, _, after) = compose(&rows, &[at(0.7)], 40, 8, true, false, true, false);
         assert!(after.contains("a=T"));
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn a_new_axis_range_is_never_held_by_the_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 8];
+        let at = |level: f64, hi: f64| {
+            Plot::new(2, 1, 12, 4, chart(vec![Some(level), Some(1.0 - level)])).on_axis(0.0, hi)
+        };
+        let (_, _, after) = compose(&rows, &[at(0.2, 1.0)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // Same axis: the change waits, as any large change does.
+        let (_, before, after) = compose(&rows, &[at(0.4, 1.0)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        // The axis moved, so its labels already name the new range: the
+        // strokes go now rather than sit under the wrong scale.
+        let (_, _, after) = compose(&rows, &[at(0.4, 2.0)], 40, 8, true, false, false, false);
+        assert!(after.contains("a=T"), "{after:?}");
+        assert_eq!(uploaded_pixels(&after), pixels(&at(0.4, 2.0)));
         GAP.with(|gap| gap.set(Duration::ZERO));
         compose(&rows, &[], 40, 8, true, false, false, false);
     }

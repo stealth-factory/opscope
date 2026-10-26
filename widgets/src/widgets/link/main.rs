@@ -1505,7 +1505,7 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart));
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).on_axis(llo, lhi));
     let mut out = Vec::new();
     for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));

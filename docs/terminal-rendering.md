@@ -236,7 +236,10 @@ stay in text.
 range holds while every sample fits inside it and it is not more than twice
 as wide as a fresh fit. Before, the axis followed the lowest and highest
 sample, so most samples rescaled the chart and moved every pixel. The axis
-labels move only when the range does.
+labels move only when the range does. Both pass that range with `Plot::on_axis`,
+and a change of range is never held by the two-second cap: the labels are
+text and move at once, so the strokes go with them rather than sit under the
+wrong scale.
 
 The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
 pixels only for some shapes. A netwatch trace on an 80-column pane is 64
