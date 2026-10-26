@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.2.0] - 2026-10-26
+
+### Features
+
+- **github**: Route github, github-actions, and github-prs to an Enterprise Cloud host (#521)
+
 ## [2.1.0] - 2026-10-26
 
 ### Bug Fixes
