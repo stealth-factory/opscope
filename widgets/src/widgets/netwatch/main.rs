@@ -2708,7 +2708,7 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
             traces: vec![tc::Trace { positions: None, values, colour: colour.clone(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
             slots,
             focus: None,
-        }).under_text());
+        }).under_text().on_axis(0.0, peak));
     }
     for _ in 0..up_h {
         let mut line = vec![
