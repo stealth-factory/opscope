@@ -69,6 +69,12 @@ fn droid_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
     chosen_agents(installed, cfg).iter().any(|t| t == "droid")
 }
 
+/// Whether Antigravity may start `agy`. The `/usage` report boots a
+/// language server, so a tab the reader did not choose does not count.
+fn antigravity_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "antigravity")
+}
+
 pub fn read_all(
     caches: &mut Caches,
     cfg: &Config,
@@ -81,13 +87,14 @@ pub fn read_all(
     let perplexity_shown = perplexity_asked(&installed, cfg);
     let devin_shown = devin_asked(&installed, cfg);
     let droid_shown = droid_asked(&installed, cfg);
+    let antigravity_shown = antigravity_asked(&installed, cfg);
     let mut state = State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
         cursor: crate::cursor::read(caches, cfg),
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
-        antigravity: crate::antigravity::read(caches, cfg),
+        antigravity: crate::antigravity::read(caches, cfg, antigravity_shown),
         notion: crate::notion::read(caches, cfg, notion_shown),
         perplexity: crate::perplexity::read(caches, cfg, perplexity_shown),
         devin: crate::devin::read(caches, cfg, devin_shown),

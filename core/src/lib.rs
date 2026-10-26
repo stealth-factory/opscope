@@ -2801,6 +2801,145 @@ pub fn get_answer(
     Ok((status, body, found))
 }
 
+/// Strip a URL down to a hostname, keeping a numeric port.
+pub fn normalize_github_hostname(raw: &str) -> String {
+    let raw = raw.trim();
+    // A scheme is case-insensitive, so `HTTPS://` is stripped like `https://`.
+    let lower = raw.to_ascii_lowercase();
+    let rest = if lower.starts_with("https://") {
+        &raw[8..]
+    } else if lower.starts_with("http://") {
+        &raw[7..]
+    } else {
+        raw
+    };
+    let host = rest
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(raw);
+    host.to_string()
+}
+
+/// Hostname from the widget's `enterprise_hostname`, then from the named env var.
+///
+/// Widgets read both keys with `cfg_str` and pass them here. An empty hostname
+/// reads `env_name`, and only when one is named: a variable read by default
+/// would move every GitHub widget, and the github.com token it holds, onto
+/// whatever host some other tool put there. Empty after that means the
+/// public github.com API (`api.github.com`).
+pub fn github_enterprise_hostname(hostname: &str, env_name: &str) -> Option<String> {
+    if !hostname.trim().is_empty() {
+        let host = normalize_github_hostname(hostname);
+        if !host.is_empty() {
+            return Some(host);
+        }
+    }
+    let env_name = env_name.trim();
+    if env_name.is_empty() {
+        return None;
+    }
+    match std::env::var(env_name) {
+        Ok(value) if !value.trim().is_empty() => {
+            let host = normalize_github_hostname(&value);
+            if host.is_empty() { None } else { Some(host) }
+        }
+        _ => None,
+    }
+}
+
+/// Where a configured GitHub host is actually called.
+enum GithubHostKind {
+    /// `api.github.com`, including a hostname of `github.com` or `api.github.com`.
+    Public,
+    /// Enterprise Cloud with data residency. `host` is `api.<tenant>.ghe.com`.
+    Cloud(String),
+    /// Any other host, called the way GitHub Enterprise Server is.
+    Server(String),
+}
+
+fn classify_github_host(hostname: Option<&str>) -> GithubHostKind {
+    let Some(raw) = hostname.filter(|h| !h.trim().is_empty()) else {
+        return GithubHostKind::Public;
+    };
+    let normalized = normalize_github_hostname(raw);
+    if normalized.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let (name, port) = split_github_host_port(&normalized);
+    if name.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "github.com" || lower == "api.github.com" {
+        return GithubHostKind::Public;
+    }
+    let with_port = |api_name: &str| match port {
+        Some(p) => format!("{api_name}:{p}"),
+        None => api_name.to_string(),
+    };
+    // Data residency tenants are `*.ghe.com` on the web and `api.*.ghe.com` on the API.
+    // A host that already starts with `api.` is the API host; do not prefix it again.
+    if lower.ends_with(".ghe.com") {
+        if lower.starts_with("api.") {
+            GithubHostKind::Cloud(with_port(name))
+        } else {
+            GithubHostKind::Cloud(with_port(&format!("api.{name}")))
+        }
+    } else {
+        GithubHostKind::Server(with_port(name))
+    }
+}
+
+/// Split `host` or `host:port`. A colon inside the name is left alone.
+fn split_github_host_port(host: &str) -> (&str, Option<&str>) {
+    match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.is_empty()
+                && !name.contains(':')
+                && !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    }
+}
+
+/// Whether `hostname` is called the way GitHub Enterprise Server is.
+///
+/// Server ships its own schema releases, so a field github.com and
+/// `*.ghe.com` both have can be missing there. A widget that asks for one
+/// checks this first and leaves it out.
+pub fn github_host_is_server(hostname: Option<&str>) -> bool {
+    matches!(classify_github_host(hostname), GithubHostKind::Server(_))
+}
+
+/// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
+///
+/// A `*.ghe.com` tenant is called at `https://api.<host>/graphql`. Any other
+/// enterprise host is called at `https://<host>/api/graphql`.
+pub fn github_graphql_url(hostname: Option<&str>) -> String {
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com/graphql".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}/graphql"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/graphql"),
+    }
+}
+
+/// REST API base for `hostname`, or github.com when `hostname` is absent.
+///
+/// A `*.ghe.com` tenant is called at `https://api.<host>`. Any other
+/// enterprise host is called at `https://<host>/api/v3`. Paths start with
+/// `/repos/...` either way.
+pub fn github_rest_base_url(hostname: Option<&str>) -> String {
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/v3"),
+    }
+}
+
 /// One HTTPS POST of a JSON body, returning the body and its headers.
 ///
 /// The headers come back because a rate limit is only knowable from them,
@@ -3777,6 +3916,115 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         out.push(line);
     }
     out
+}
+
+#[cfg(test)]
+mod github_api_tests {
+    use super::*;
+
+    #[test]
+    fn enterprise_cloud_urls_use_the_api_subdomain() {
+        assert_eq!(
+            github_graphql_url(Some("acme.ghe.com")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("acme.ghe.com")),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("https://acme.ghe.com/api/v3")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("api.acme.ghe.com")),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("API.Acme.ghe.com")),
+            "https://API.Acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_graphql_url(Some("Acme.GHE.com:8443")),
+            "https://api.Acme.GHE.com:8443/graphql"
+        );
+        assert_eq!(github_graphql_url(None), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(None), "https://api.github.com");
+        assert_eq!(github_graphql_url(Some("")), "https://api.github.com/graphql");
+        assert_eq!(github_graphql_url(Some("github.com")), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(Some("api.github.com")), "https://api.github.com");
+    }
+
+    #[test]
+    fn other_enterprise_hosts_use_the_server_paths() {
+        assert_eq!(
+            github_graphql_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/v3"
+        );
+        assert_eq!(
+            normalize_github_hostname("https://acme.ghe.com/api/v3/"),
+            "acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("HTTPS://acme.ghe.com")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(normalize_github_hostname("Http://ghe.example.com/"), "ghe.example.com");
+        assert!(github_host_is_server(Some("ghe.example.com")));
+        assert!(!github_host_is_server(Some("acme.ghe.com")));
+        assert!(!github_host_is_server(Some("github.com")));
+        assert!(!github_host_is_server(None));
+    }
+
+    struct RestoreEnv {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl RestoreEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn enterprise_hostname_prefers_config_then_env() {
+        let _held = RestoreEnv::set("OPSCOPE_TEST_GHE_HOST", "https://from-env.ghe.com/api");
+        assert_eq!(
+            github_enterprise_hostname(" https://from-config.ghe.com/ ", "OPSCOPE_TEST_GHE_HOST")
+                .as_deref(),
+            Some("from-config.ghe.com")
+        );
+        assert_eq!(
+            github_enterprise_hostname("  ", "OPSCOPE_TEST_GHE_HOST").as_deref(),
+            Some("from-env.ghe.com")
+        );
+        assert_eq!(github_enterprise_hostname("", "OPSCOPE_TEST_GHE_HOST_UNSET"), None);
+    }
+
+    #[test]
+    fn an_unnamed_env_var_is_never_read() {
+        // Opt-in: with no variable named, a value some other tool exported
+        // must not move the widget off github.com.
+        let _held = RestoreEnv::set("GITHUB_ENTERPRISE_HOSTNAME", "ambient.ghe.com");
+        assert_eq!(github_enterprise_hostname("", ""), None);
+        assert_eq!(github_enterprise_hostname("", "   "), None);
+    }
 }
 
 #[cfg(test)]
@@ -5157,8 +5405,8 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: seventeen binaries that disagree about how to say their own version
-    // are seventeen answers to one question. netwatch used to answer this
+    // is: eighteen binaries that disagree about how to say their own version
+    // are eighteen answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {

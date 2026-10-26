@@ -43,7 +43,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-const API: &str = "https://api.github.com/graphql";
 const SORTS: &[&str] = &["updated", "created"];
 /// Width of the per-day charts, in days.
 const OPENED_DAYS: i64 = 30;
@@ -154,6 +153,42 @@ fn token(pr_cfg: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", ""),
+    )
+}
+
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
+/// `query` with `field` taken out when this run talks to Enterprise Server.
+///
+/// Native stacks are a github.com feature, and a Server schema without
+/// `stack` refuses the whole query, which would leave the detail screen
+/// unable to open at all. Without the field the stack is inferred from
+/// branches, as it already is for a stack not made with `gh stack`.
+fn for_this_host(query: &str, field: &str) -> String {
+    if tc::github_host_is_server(api_host()) {
+        query.replacen(field, "", 1)
+    } else {
+        query.to_string()
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rate {
     /// Remaining and the ceiling it is measured against. A bare remaining
@@ -226,9 +261,10 @@ fn graphql(
     tok: &str,
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let gql_url = tc::github_graphql_url(api_host());
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
     let (out, _headers) = tc::post_json(
-        API,
+        &gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),
@@ -307,7 +343,7 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
     for chunk in ids.chunks(50) {
         let query = format!(
             "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
-            PR_HEAVY_FIELDS
+            for_this_host(PR_HEAVY_FIELDS, STACK_ENTRY_FIELD)
         );
         let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
             // A failed chunk must not look like "no CI". ready_to_merge
@@ -396,6 +432,15 @@ fn list_query(queries: &[String], limit: usize, cursors: &[Option<String>]) -> S
     }
     format!("{{ {} }}", parts.join(" "))
 }
+
+/// The part of [`PR_HEAVY_FIELDS`] an Enterprise Server may not have.
+const STACK_ENTRY_FIELD: &str = "stackEntry { position stack { number size } }";
+
+/// The part of [`DETAIL_QUERY`] an Enterprise Server may not have.
+const DETAIL_STACK_FIELD: &str = "stack { number size baseRefName
+        entries(first: 40) { nodes { position pullRequest {
+          number title isDraft reviewDecision mergeable
+          additions deletions author { login } headRefName } } } }";
 
 const DETAIL_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!) {
@@ -1090,7 +1135,7 @@ fn fetch_detail(
         g.stage("pull request, checks, reviews", false);
     }
     let d = graphql(
-        DETAIL_QUERY,
+        &for_this_host(DETAIL_QUERY, DETAIL_STACK_FIELD),
         tok,
         serde_json::json!({ "owner": owner, "name": name, "number": num }),
     )?;
@@ -1171,7 +1216,14 @@ fn fetch_detail(
                 // others branched off it - so the connectors are drawn
                 // properly rather than indenting by depth alone.
                 let mut stack = vec![(root, String::new(), true)];
+                // Two PRs whose head and base branches point at each other
+                // leave a cycle in `kids`; without this the walk pushes the
+                // pair forever and the rows grow until memory runs out.
+                let mut seen: HashSet<i64> = HashSet::new();
                 while let Some((num_at, prefix, last)) = stack.pop() {
+                    if !seen.insert(num_at) {
+                        continue;
+                    }
                     if let Some(node) = by_num.get(&num_at) {
                         rows.push((
                             format!("{}{}", prefix, if last { "└─ " } else { "├─ " }),
@@ -1861,6 +1913,7 @@ fn main() {
     let limit = tc::cfg_usize(&cfg, "limit", 25);
     let sources = sources_from(&cfg);
     let _ = SOURCES_REFILLED.set(sources_were_emptied(&cfg));
+    let _ = API_HOST.set(enterprise_host(&cfg));
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut extra: Vec<String> = Vec::new();
@@ -4108,6 +4161,20 @@ mod tests {
         assert!(!worth_retrying(
             "Field 'stackEntry' doesn't exist on type 'PullRequest'"
         ));
+    }
+
+    #[test]
+    fn the_stack_fields_left_out_on_enterprise_server_are_in_the_queries() {
+        // Taking a field out is a text replacement, so a query edited
+        // without its constant would quietly keep asking a Server schema
+        // for `stack` and fail there again.
+        assert_eq!(PR_HEAVY_FIELDS.matches(STACK_ENTRY_FIELD).count(), 1);
+        assert_eq!(DETAIL_QUERY.matches(DETAIL_STACK_FIELD).count(), 1);
+        let without = DETAIL_QUERY.replacen(DETAIL_STACK_FIELD, "", 1);
+        assert!(!without.contains("stack"));
+        assert_eq!(without.matches('{').count(), without.matches('}').count());
+        let heavy = PR_HEAVY_FIELDS.replacen(STACK_ENTRY_FIELD, "", 1);
+        assert!(!heavy.contains("stack"));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 id = "opscope.widgets"
 name = "opscope"
 description = "Terminal widgets that look like sci-fi movie panels and show only real data."
-version = "2.0.1"
+version = "2.2.0"
 min_luvus_version = "0.8.3"
 platforms = ["macos", "linux"]
 
@@ -73,6 +73,13 @@ id = "github-prs"
 title = "github-prs"
 placement = "split"
 command = ["./luvus/bin/opscope", "github-prs"]
+
+# What a region is searching for right now, from Google's own Trending Now feed.
+[[panes]]
+id = "google-trends"
+title = "google-trends"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-trends"]
 
 # Everything running in Herdr, across every workspace.
 [[panes]]

@@ -1481,6 +1481,67 @@ pub fn parse_antigravity_model_quota(text: &str) -> Option<Vec<ModelQuota>> {
     Some(out)
 }
 
+/// The quota groups in `agy -p /usage --output-format json`, in the shape the
+/// language server and Google's summary use.
+///
+/// This is `agy`'s own `/usage` command, run in print mode: it answers from
+/// the CLI's authenticated session without starting a turn - zero tokens,
+/// `num_turns` 0 - and it is the one place left that still publishes the
+/// grouped Gemini limit, since the local server wants a CSRF token and
+/// Google's summary has only ever held the Claude and GPT-OSS group. The
+/// report names its fields in snake_case; they are renamed to the camelCase
+/// the rest of the tab reads, so every source draws through one path.
+///
+/// `None` for anything that is not a successful `usage` report with at
+/// least one group, so a failed print is never mistaken for an account with
+/// no limits.
+pub fn parse_antigravity_usage_report(text: &str) -> Option<Vec<serde_json::Value>> {
+    let body: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    if body["status"].as_str() != Some("SUCCESS") || body["command"]["name"].as_str() != Some("usage") {
+        return None;
+    }
+    let mut out = Vec::new();
+    for group in body["command"]["data"]["groups"].as_array()? {
+        let Some(name) = non_empty(&group["name"]) else {
+            continue;
+        };
+        let buckets: Vec<serde_json::Value> = group["buckets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| {
+                let left = b["remaining_fraction"].as_f64()?;
+                Some(serde_json::json!({
+                    "bucketId": non_empty(&b["id"]).unwrap_or_default(),
+                    "displayName": non_empty(&b["name"]).unwrap_or_default(),
+                    "window": non_empty(&b["window"]).unwrap_or_default(),
+                    "remainingFraction": left.clamp(0.0, 1.0),
+                    "resetTime": non_empty(&b["reset_time"]).unwrap_or_default(),
+                }))
+            })
+            .collect();
+        if buckets.is_empty() {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "displayName": name,
+            "description": non_empty(&group["description"]).unwrap_or_default(),
+            "buckets": buckets,
+        }));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// `agy --version` as (major, minor, patch). Anything but a bare
+/// `major.minor.patch` is unknown.
+pub fn parse_agy_version(text: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = text.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((major, minor, patch))
+}
+
 fn quoted(value: &str) -> Option<&str> {
     let bytes = value.as_bytes();
     if bytes.len() >= 2
@@ -1581,6 +1642,54 @@ mod tests {
         assert_eq!(super::parse_antigravity_model_quota(r#"{"buckets":[]}"#), Some(Vec::new()));
         assert_eq!(super::parse_antigravity_model_quota(r#"{"groups":[]}"#), None);
         assert_eq!(super::parse_antigravity_model_quota("not json"), None);
+    }
+
+    #[test]
+    fn antigravity_usage_report_becomes_the_summary_shape() {
+        // Shaped like a real `agy -p /usage --output-format json` answer.
+        let body = r#"{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly",
+            "num_turns":0,"usage":{"total_tokens":0},
+            "command":{"name":"usage","data":{"description":"Within each group...","groups":[
+              {"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro",
+               "buckets":[
+                {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.4,"reset_time":"2026-11-02T03:35:07Z"},
+                {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"2026-10-26T08:35:07Z"}]},
+              {"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+               "buckets":[
+                {"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1.2,"reset_time":"2026-11-02T03:35:07Z"},
+                {"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h"}]},
+              {"name":"Empty","buckets":[]}]}}}"#;
+        let got = super::parse_antigravity_usage_report(body).unwrap();
+        assert_eq!(got.len(), 2, "a group with no readable bucket is dropped");
+        assert_eq!(got[0]["displayName"], "Gemini Models");
+        assert_eq!(got[0]["description"], "Models within this group: Gemini Flash, Gemini Pro");
+        assert_eq!(got[0]["buckets"][0]["window"], "weekly");
+        assert_eq!(got[0]["buckets"][0]["remainingFraction"], 0.4);
+        assert_eq!(got[0]["buckets"][0]["resetTime"], "2026-11-02T03:35:07Z");
+        assert_eq!(got[0]["buckets"][1]["window"], "5h");
+        // Clamped, and a bucket with no fraction is not a reading.
+        assert_eq!(got[1]["buckets"][0]["remainingFraction"], 1.0);
+        assert_eq!(got[1]["buckets"].as_array().unwrap().len(), 1);
+        // A failed print, another command, or no groups is no answer.
+        assert_eq!(super::parse_antigravity_usage_report(&body.replace("SUCCESS", "ERROR")), None);
+        assert_eq!(super::parse_antigravity_usage_report(&body.replace(r#""name":"usage""#, r#""name":"credits""#)), None);
+        assert_eq!(
+            super::parse_antigravity_usage_report(
+                r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[]}}}"#
+            ),
+            None
+        );
+        assert_eq!(super::parse_antigravity_usage_report("Error: not signed in"), None);
+    }
+
+    #[test]
+    fn agy_version_is_three_numbers_or_nothing() {
+        assert_eq!(super::parse_agy_version("1.4.7\n"), Some((1, 4, 7)));
+        assert_eq!(super::parse_agy_version("1.1.11"), Some((1, 1, 11)));
+        assert_eq!(super::parse_agy_version("1.4"), None);
+        assert_eq!(super::parse_agy_version("1.4.7-beta"), None);
+        assert_eq!(super::parse_agy_version("agy 1.4.7"), None);
+        assert_eq!(super::parse_agy_version(""), None);
     }
 
     #[test]
