@@ -21,12 +21,15 @@ same. Higher resolution does not imply more samples or faster polling.
 
 `ports` adds pixel traffic bars; `github`, `github-actions`,
 `vercel-deployments`, and `linear` add discrete pixel bar charts.
-`github` and `agent-usage` use gapless calendar tiles, and `linear` and
-all `agent-usage` vendor quota views use fractional progress/quota meters.
+`github` and `agent-usage` use gapless calendar tiles.
 `github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
-`herdr-panes` and `luvus-panes` show measured agent-state distributions,
-and `clocks` adds countdown and pomodoro meters. These use shared text fallbacks:
-block bars, Braille traces and reference marks.
+These use shared text fallbacks: block bars, Braille traces and reference marks.
+
+Meters and stacked bars are text in every mode, Kitty included (OPS-203):
+`linear`'s progress and milestone meters and state distributions, every
+`agent-usage` quota meter, `herdr-panes` and `luvus-panes` agent-state
+distributions, and `clocks`' countdown and pomodoro bars. See
+[Always text](#always-text-meters-and-stacked-bars).
 
 Notifications and text sizing are negotiated in the same window, separately
 from graphics. A terminal advertising OSC 99 title and body support gets one
@@ -361,17 +364,37 @@ Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
-Kitty meters fill seven eighths of the cell height (14 of 16 pixels at the
-fallback size), with a gap above and below, so quota bars remain readable
-alongside text. Meters clamp the drawn fill to 0–100%, while
+Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. `Plot::ramped_meter` takes a colour per filled
-cell, so a ramp the text bar draws is painted in pixels too rather than
-flattened to one fill. `gradient_meter` and `gradient_stacked_bar` instead
-let core own a smooth ramp: one colour per text cell, continuous interpolation
-per Kitty pixel, with the same readable colour stops. Stacked gradients restart
-inside each category and retain the measured boundaries. The original `meter`
-and `stacked_bar` remain solid for widgets that need that treatment.
+cell. `gradient_meter` and `gradient_stacked_bar` instead
+let core own the ramp: one colour per text cell, with readable colour stops.
+Stacked gradients restart inside each category and retain the measured
+boundaries. The original `meter` and `stacked_bar` remain solid for widgets
+that need that treatment.
+
+### Always text: meters and stacked bars
+
+`Plot::meter`, `ramped_meter`, `gradient_meter`, `gradient_meter_between`,
+`stacked_bar` and `gradient_stacked_bar` never become Kitty images. They are
+drawn with eighth-cell block characters (`▏▎▍▌▋▊▉█`) and their colours in
+every mode, and inside tmux they are not placeholders either. A one-row bar
+gains nothing visible from pixels, and these are the plots that change most:
+`agent-usage`'s pace marker follows the clock, so its quota meters re-uploaded
+an image every frame, and `clocks`' countdown meters moved every second. That
+was about 37 KB/s and 115 KB/s of raw image for a relay to forward.
+
+A meter is whole cells, then one partial cell rounded to the nearest eighth,
+then the track. The marker is one `┃` cell, with its background surround
+cleared on the next cell. A stacked bar rounds each category's edge to an
+eighth; a cell two categories share is the left one's partial block on the
+right one's colour as a background, so the cell stays solid, and the next cell
+clears that background (`CSI 49 m`). Without a truecolour pair the larger
+share takes the whole cell, and a cell three or more categories share goes
+whole to the largest of them. A category smaller than a cell can still lose its
+sliver to its neighbours, as it did in whole cells. Fill colours are the same
+ones the widget passed, so the contrast rule on the selected-row tint is
+unchanged.
 `Plot::text_row(0)` exposes the exact fallback cells for composing labels or
 alert frames without duplicating gradient or marker logic. No primitive
 animates a value between API polls.
@@ -384,7 +407,8 @@ For nested sections, `append_plot_rows(&mut rows, &mut plots, |local_plots| ...)
 appends returned text and offsets section-local plots by the existing row count.
 It publishes neither if the section panics. Apply the viewport transform once,
 after all sections are assembled. Stacked bars take normalized fractions that
-sum to one; pixel edges preserve subcell shares and text uses whole-cell shares.
+sum to one; they are always text, with each category's edge rounded to an
+eighth of a cell (see "Always text" above).
 
 The widget owns its axis transform, sample aggregation, labels and colors.
 For timed traces, set `Trace::positions` to horizontal fractions in `0..=1`,
@@ -436,14 +460,14 @@ and intentional text presentation, not unimplemented widget migrations.
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
 | `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
-| `linear` | Pixel created/completed bars, cycle burnup, board/detail progress and milestone meters, and state distributions | Preserve exact scope/percentage labels; validate dense project details |
+| `linear` | Pixel created/completed bars and cycle burnup; board/detail progress and milestone meters and state distributions in eighth-cell text | Preserve exact scope/percentage labels; validate dense project details |
 | `github-prs` | Pixel opened/merged daily charts and PR-state distribution; elapsed-time loading indicators | Keep review text, counts and tables selectable; unavailable series remain placeholders |
 | `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
 | `vercel-deployments` | Pixel deployment activity and recent-build-duration bars; elapsed-time build indicators | Preserve scrolling and text logs; a spinner does not imply measured build progress |
-| `agent-usage` | Pixel quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
+| `agent-usage` | Eighth-cell text quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
 | `herdr-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Keep status, selection and navigation as text; no invented progress |
 | `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
-| `clocks` | Pixel countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
+| `clocks` | Eighth-cell text countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
 | `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
@@ -538,7 +562,8 @@ cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation,
 plus the cell-size parser and the byte cap.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
-PTY checks exercise both its pixel and text paths. These tests verify emitted
+PTY checks exercise both its pixel and text paths, and that the meter and the distribution stay text
+in both. These tests verify emitted
 bytes and state, not a terminal
 emulator's implementation of them.
 

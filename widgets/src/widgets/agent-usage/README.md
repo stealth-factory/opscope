@@ -1810,8 +1810,10 @@ never did.
 
 All horizontal data bars use opscope-core's smooth gradient: quota lanes in
 the overview and provider tabs, model/token/spend bars, and each category of
-the human/AI split. The same colour stops brighten across text cells and
-Kitty pixels. Core lifts darker hues to keep every filled colour above AA
+the human/AI split. The colour stops brighten across text cells, and the
+fill ends to the nearest eighth of a cell. These bars are text in Kitty too:
+the pace mark follows the clock, and a one-row image re-sent every frame
+bought nothing visible. Core lifts darker hues to keep every filled colour above AA
 4.5 against the dark terminal background and selected-row tint. Empty tracks
 remain separate from the fill; the pace mark keeps its dark surround.
 

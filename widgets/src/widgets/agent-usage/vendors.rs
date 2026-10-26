@@ -1344,7 +1344,7 @@ mod tests {
                 assert_eq!(plot.height, 1);
                 assert!(plot.x > 0);
                 for glyph in rows[plot.y].chars().skip(plot.x).take(plot.width) {
-                    assert!(['█', '░', '┃'].contains(&glyph), "covered label: {glyph}");
+                    assert!("█░┃▏▎▍▌▋▊▉".contains(glyph), "covered label: {glyph}");
                 }
             }
         }
@@ -1366,7 +1366,7 @@ mod tests {
             assert_eq!(plot.height, 1);
             let glyphs: Vec<_> = rows[plot.y].chars().collect();
             for glyph in glyphs.iter().skip(plot.x).take(plot.width) {
-                assert!(['█', '░', '┃'].contains(glyph), "plot would cover a label: {glyph}");
+                assert!("█░┃▏▎▍▌▋▊▉".contains(*glyph), "plot would cover a label: {glyph}");
             }
             assert!(rows[plot.y].contains("18%"));
         }

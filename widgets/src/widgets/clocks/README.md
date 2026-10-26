@@ -50,7 +50,8 @@ offset instead of following the system.
 
 The filled portion brightens from left to right in each countdown's own
 colour: cyan for the hour, amber for office hours, purple for the day.
-Kitty pixel bars and the text fallback use the same gradient. The length
+The bars are eighth-cell text in every terminal, Kitty included, so a bar
+that moves every second sends a few bytes rather than an image. The length
 shows elapsed time; the digits show time remaining.
 
 **Pomodoro** — see below. Off until you press `p`.

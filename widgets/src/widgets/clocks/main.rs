@@ -2263,14 +2263,18 @@ mod tests {
             for frac in [0.0, 0.01, 0.25, 0.5, 1.0, 1.5, -0.2, f64::NAN] {
                 let mut plots = Vec::new();
                 let text = bar(&mut plots, 7, frac, width, FOCUS_HUE, &p);
-                let cells = text.chars().filter(|c| matches!(c, ' ' | '█' | '░')).count();
+                let partial = |c: char| ('▉'..='▏').contains(&c);
+                let cells = text.chars().filter(|c| matches!(c, ' ' | '█' | '░') || partial(*c)).count();
                 assert_eq!(cells, width + 1, "frac {frac}, width {width}");
                 assert_eq!((plots[0].x, plots[0].y, plots[0].width), (1, 7, width));
-                let filled = text.chars().filter(|c| *c == '█').count();
-                let expected = if frac.is_finite() {
-                    (frac.clamp(0.0, 1.0) * width as f64).round() as usize
+                // Whole cells, then one partial cell to the nearest eighth.
+                let eighths = if frac.is_finite() {
+                    (frac.clamp(0.0, 1.0) * width as f64 * 8.0).round() as usize
                 } else { 0 };
-                assert_eq!(filled, expected, "frac {frac}, width {width}");
+                let filled = text.chars().filter(|c| *c == '█').count();
+                assert_eq!(filled, eighths / 8, "frac {frac}, width {width}");
+                let partials = text.chars().filter(|c| partial(*c)).count();
+                assert_eq!(partials, usize::from(eighths % 8 > 0), "frac {frac}, width {width}");
             }
         }
     }
