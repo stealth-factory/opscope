@@ -74,6 +74,13 @@ title = "github-prs"
 placement = "split"
 command = ["./luvus/bin/opscope", "github-prs"]
 
+# Google Search Console: what moved in Google Search, and what is broken in the index.
+[[panes]]
+id = "google-search-console"
+title = "google-search-console"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-search-console"]
+
 # Everything running in Herdr, across every workspace.
 [[panes]]
 id = "herdr-panes"
