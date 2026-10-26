@@ -160,7 +160,7 @@ fn token(pr_cfg: &serde_json::Value) -> (String, &'static str) {
 fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
     tc::github_enterprise_hostname(
         &tc::cfg_str(cfg, "enterprise_hostname", ""),
-        &tc::cfg_str(cfg, "enterprise_hostname_env", "GITHUB_ENTERPRISE_HOSTNAME"),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", ""),
     )
 }
 

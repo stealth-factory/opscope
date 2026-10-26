@@ -2799,9 +2799,6 @@ pub fn get_answer(
     Ok((status, body, found))
 }
 
-/// Default env var for [`github_enterprise_hostname`] when `enterprise_hostname` is empty.
-pub const GITHUB_ENTERPRISE_HOST_ENV: &str = "GITHUB_ENTERPRISE_HOSTNAME";
-
 /// Strip a URL down to a hostname, keeping a numeric port.
 pub fn normalize_github_hostname(raw: &str) -> String {
     let raw = raw.trim();
@@ -2825,8 +2822,10 @@ pub fn normalize_github_hostname(raw: &str) -> String {
 /// Hostname from the widget's `enterprise_hostname`, then from the named env var.
 ///
 /// Widgets read both keys with `cfg_str` and pass them here. An empty hostname
-/// reads `env_name`, and an empty name reads [`GITHUB_ENTERPRISE_HOST_ENV`].
-/// Empty after that means the public github.com API (`api.github.com`).
+/// reads `env_name`, and only when one is named: a variable read by default
+/// would move every GitHub widget, and the github.com token it holds, onto
+/// whatever host some other tool put there. Empty after that means the
+/// public github.com API (`api.github.com`).
 pub fn github_enterprise_hostname(hostname: &str, env_name: &str) -> Option<String> {
     if !hostname.trim().is_empty() {
         let host = normalize_github_hostname(hostname);
@@ -2834,11 +2833,10 @@ pub fn github_enterprise_hostname(hostname: &str, env_name: &str) -> Option<Stri
             return Some(host);
         }
     }
-    let env_name = if env_name.trim().is_empty() {
-        GITHUB_ENTERPRISE_HOST_ENV
-    } else {
-        env_name.trim()
-    };
+    let env_name = env_name.trim();
+    if env_name.is_empty() {
+        return None;
+    }
     match std::env::var(env_name) {
         Ok(value) if !value.trim().is_empty() => {
             let host = normalize_github_hostname(&value);
@@ -4018,16 +4016,12 @@ mod github_api_tests {
     }
 
     #[test]
-    fn empty_hostname_env_name_reads_the_default_variable() {
-        let _held = RestoreEnv::set(GITHUB_ENTERPRISE_HOST_ENV, "default-var.ghe.com");
-        assert_eq!(
-            github_enterprise_hostname("", "").as_deref(),
-            Some("default-var.ghe.com")
-        );
-        assert_eq!(
-            github_enterprise_hostname("", "   ").as_deref(),
-            Some("default-var.ghe.com")
-        );
+    fn an_unnamed_env_var_is_never_read() {
+        // Opt-in: with no variable named, a value some other tool exported
+        // must not move the widget off github.com.
+        let _held = RestoreEnv::set("GITHUB_ENTERPRISE_HOSTNAME", "ambient.ghe.com");
+        assert_eq!(github_enterprise_hostname("", ""), None);
+        assert_eq!(github_enterprise_hostname("", "   "), None);
     }
 }
 
