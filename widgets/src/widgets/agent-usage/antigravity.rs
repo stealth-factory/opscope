@@ -70,6 +70,44 @@ fn agy_path() -> Option<String> {
     seen.into_iter().find(|p| std::path::Path::new(p).exists())
 }
 
+/// The CLI path, made absolute in this process's own directory.
+///
+/// The `/usage` report runs with its working directory set to an empty
+/// temporary one. A relative path - `ANTIGRAVITY_CLI_PATH=./bin/agy`, or
+/// `agy` found through a relative `PATH` entry - would then be looked up
+/// in that empty directory, and the spawn would fail with the CLI
+/// installed and signed in.
+fn absolute_cli(path: &str) -> Result<String, String> {
+    match std::path::absolute(path) {
+        Ok(found) => Ok(found.to_string_lossy().into_owned()),
+        Err(e) => Err(format!("could not resolve `agy` at `{}`: {}", path, e)),
+    }
+}
+
+/// `open` and `xdg-open` that fail, so a background poll cannot pop a
+/// sign-in page. Any step that does not land is an error: a stub that was
+/// not written leaves the real opener later on `PATH`.
+fn install_browser_stubs(dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("could not lock down the directory for `agy`: {}", e))?;
+    for stub in ["open", "xdg-open"] {
+        let at = dir.join(stub);
+        std::fs::write(&at, "#!/bin/sh\nexit 1\n").map_err(|e| {
+            format!("could not write the `{}` stub that blocks a sign-in page: {}", stub, e)
+        })?;
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("could not make the `{}` stub executable: {}", stub, e))?;
+    }
+    Ok(())
+}
+
+/// Drop a half-made directory and return the reason it was abandoned.
+fn abandon_agy_dir(dir: &std::path::Path, why: String) -> Result<Vec<serde_json::Value>, String> {
+    let _ = std::fs::remove_dir_all(dir);
+    Err(why)
+}
+
 /// Every listening TCP port belonging to `pid` or anything it started.
 ///
 /// Descendants matter: the port that answers is not always the process that
@@ -257,7 +295,6 @@ const AGY_USAGE_TTL: f64 = 300.0;
 /// the reading. Auto-update is off for the run - a poll is no time for the
 /// CLI to replace itself.
 fn agy_usage(path: &str) -> Result<Vec<serde_json::Value>, String> {
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     let version = tc::run(&[path, "--version"], 10)
         .ok()
@@ -272,24 +309,22 @@ fn agy_usage(path: &str) -> Result<Vec<serde_json::Value>, String> {
         }
         None => return Err("`agy --version` did not answer with a version".into()),
     }
+    let path = absolute_cli(path)?;
     let dir = std::env::temp_dir().join(format!(
         "opscope-agy-usage-{}-{}",
         std::process::id(),
         (now() * 1e6) as u64
     ));
     std::fs::create_dir(&dir).map_err(|e| format!("could not make a directory for `agy`: {}", e))?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    for stub in ["open", "xdg-open"] {
-        let at = dir.join(stub);
-        let _ = std::fs::write(&at, "#!/bin/sh\nexit 1\n");
-        let _ = std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700));
+    if let Err(why) = install_browser_stubs(&dir) {
+        return abandon_agy_dir(&dir, why);
     }
     let shadowed = format!(
         "{}:{}",
         dir.display(),
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
-    let spawned = std::process::Command::new(path)
+    let spawned = std::process::Command::new(&path)
         .args(["-p", "/usage", "--output-format", "json", "--print-timeout", "45s"])
         .current_dir(&dir)
         .env("PATH", shadowed)
@@ -826,12 +861,25 @@ fn conversation_steps(path: &str) -> Option<f64> {
     Some(count as f64)
 }
 
+/// Whether this pass may start `agy`.
+///
+/// It boots a language server, so it waits for three things at once: the
+/// reader chose Antigravity, the reader allowed starting `agy`, and nothing
+/// cheaper has already answered. A hidden agent used to start one anyway,
+/// ahead of Google, and the pass waited on it before any other reading.
+fn may_start_agy(shown: bool, start: bool, have_quota: bool) -> bool {
+    shown && start && !have_quota
+}
+
 /// What the conversation stores record, which is activity and not cost.
 ///
 /// Each conversation is its own SQLite file with a `steps` table - one row
 /// per step the agent took - so the counts are real work done. No table
 /// anywhere carries a token count.
-pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
+///
+/// `shown` is whether Antigravity has a tab the reader chose. Starting
+/// `agy` is skipped when it does not.
+pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     use std::os::unix::fs::MetadataExt;
     // The refusal is cached with the failure, so it is shown for as long as
     // the failure lasts rather than only on the frame the call was made.
@@ -871,7 +919,9 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // left with the Gemini group - Google's summary holds Claude and GPT-OSS
     // alone - and a cheaper answer missing half the limits is not the better
     // one. Behind `antigravity_start`, the setting that already decides
-    // whether this widget may start `agy`.
+    // whether this widget may start `agy`, and only for a tab the reader
+    // chose: the summary draws selected agents, and a poll for another
+    // agent must not boot this language server.
     //
     // A failure goes back to the cache as a failure and its reason is
     // written in afterwards, so it keeps the short backoff and the sentence
@@ -879,7 +929,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let agy = agy_path();
     let mut agy_why = String::new();
     let mut agy_old = false;
-    if d.quota.is_empty() && cfg.antigravity_start {
+    if may_start_agy(shown, cfg.antigravity_start, !d.quota.is_empty()) {
         if let Some(path) = &agy {
             const KEY: &str = "antigravity-agy-usage";
             let mut asked = String::new();
@@ -944,7 +994,9 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         if d.quota.is_empty() && !agy_why.is_empty() {
             why = agy_why.clone();
         }
-        if d.quota.is_empty() && cfg.antigravity_start && (agy_old || agy.is_none()) {
+        if may_start_agy(shown, cfg.antigravity_start, !d.quota.is_empty())
+            && (agy_old || agy.is_none())
+        {
             let mut asked = String::new();
             let got = cached(caches, "antigravity-agy", AGY_TTL, || match agy_quota() {
                 Ok(groups) => Some(serde_json::Value::Array(groups)),
@@ -1561,6 +1613,7 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_note_says_which_step_failed_not_that_something_did() {
@@ -1912,6 +1965,152 @@ mod tests {
             ]}}
         });
         crate::parse::parse_antigravity_usage_report(&body.to_string()).unwrap()
+    }
+
+    #[test]
+    fn agy_starts_only_when_antigravity_was_chosen_and_nothing_has_answered() {
+        assert!(may_start_agy(true, true, false));
+        assert!(!may_start_agy(false, true, false), "a hidden agent still starts");
+        assert!(!may_start_agy(true, false, false), "antigravity_start is off");
+        assert!(!may_start_agy(true, true, true), "a quota already in hand still starts agy");
+    }
+
+    #[test]
+    fn a_failed_agy_directory_is_removed_with_the_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-agy-abandon-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("open"), b"partial").unwrap();
+        let err = abandon_agy_dir(&dir, "could not write the `xdg-open` stub".into()).unwrap_err();
+        assert!(err.contains("`xdg-open` stub"), "{err}");
+        assert!(!dir.exists(), "a failed setup left {}", dir.display());
+    }
+
+    #[test]
+    fn browser_stubs_fail_and_a_stub_that_cannot_be_written_is_an_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-agy-stubs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        install_browser_stubs(&dir).unwrap();
+        for name in ["open", "xdg-open"] {
+            let status = std::process::Command::new(dir.join(name)).status().unwrap();
+            assert_eq!(status.code(), Some(1), "{name} did not fail closed");
+            let mode = std::fs::metadata(dir.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o700, 0o700, "{name} is not executable by its owner");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let file = std::env::temp_dir().join(format!(
+            "opscope-agy-notdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, b"x").unwrap();
+        let err = install_browser_stubs(&file).unwrap_err();
+        assert!(err.contains("`open` stub"), "{err}");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A path relative to this process, the shape `ANTIGRAVITY_CLI_PATH` and
+    /// a relative `PATH` entry both produce. The report then changes
+    /// directory, so the same string has to be absolute before that.
+    #[test]
+    fn a_relative_agy_path_is_resolved_before_its_directory_changes() {
+        let scratch = std::env::temp_dir().join(format!(
+            "opscope-agy-rel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let marker = scratch.join("result");
+        let script = scratch.join("agy");
+        let body = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then\n\
+               printf '%s\\n' '1.1.11'\n\
+               exit 0\n\
+             fi\n\
+             {{\n\
+               printf 'argv0=%s\\n' \"$0\"\n\
+               printf 'open=%s\\n' \"$(command -v open)\"\n\
+               printf 'xdg=%s\\n' \"$(command -v xdg-open)\"\n\
+               open >/dev/null 2>&1\n\
+               printf 'open_status=%s\\n' \"$?\"\n\
+               xdg-open >/dev/null 2>&1\n\
+               printf 'xdg_status=%s\\n' \"$?\"\n\
+             }} > '{marker}'\n\
+             printf '%s\\n' '{json}'\n",
+            marker = marker.display(),
+            json = r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"g","name":"Limit Remaining","window":"weekly","remaining_fraction":0.5,"reset_time":"2099-01-01T00:00:00Z"}]}]}}}"#,
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let rel = relative_to_cwd(&script);
+        assert!(rel.is_relative(), "{}", rel.display());
+        let got = agy_usage(&rel.to_string_lossy());
+        let recorded = std::fs::read_to_string(&marker).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&scratch);
+        let groups = got.unwrap_or_else(|e| panic!("{e}\n{recorded}\nrel={rel}", rel = rel.display()));
+        assert_eq!(groups[0]["displayName"], "Gemini Models");
+        assert!(
+            recorded.lines().any(|line| line.starts_with("argv0=/")),
+            "the child was started on a relative path:\n{recorded}"
+        );
+        assert!(
+            recorded.lines().any(|line| {
+                line.starts_with("open=") && line.contains("opscope-agy-usage")
+            }),
+            "open was not the failing stub:\n{recorded}"
+        );
+        assert!(
+            recorded.lines().any(|line| {
+                line.starts_with("xdg=") && line.contains("opscope-agy-usage")
+            }),
+            "xdg-open was not the failing stub:\n{recorded}"
+        );
+        assert!(recorded.contains("open_status=1\n"), "{recorded}");
+        assert!(recorded.contains("xdg_status=1\n"), "{recorded}");
+    }
+
+    fn relative_to_cwd(path: &std::path::Path) -> std::path::PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let path = std::path::absolute(path).unwrap();
+        let cwd = std::path::absolute(cwd).unwrap();
+        let mut prefix = 0;
+        for (a, b) in cwd.components().zip(path.components()) {
+            if a != b {
+                break;
+            }
+            prefix += 1;
+        }
+        let mut rel = std::path::PathBuf::new();
+        for _ in cwd.components().skip(prefix) {
+            rel.push("..");
+        }
+        for part in path.components().skip(prefix) {
+            rel.push(part);
+        }
+        rel
     }
 
     #[test]
