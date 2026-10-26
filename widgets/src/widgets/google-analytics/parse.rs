@@ -101,15 +101,25 @@ impl Quota {
         self.buckets.iter().find(|(n, _)| n == name).map(|(_, b)| *b)
     }
 
-    /// Token bucket `name` against its documented limit. A balance above
-    /// the standard limit can only be a 360 property, so it is read as
-    /// one even before the Admin API has said so.
-    pub fn level(&self, name: &str, premium: bool) -> Option<Level> {
+    /// Token bucket `name` against its documented limit.
+    ///
+    /// `premium` is `Some(true)` for Analytics 360, `Some(false)` for a
+    /// standard property, and `None` until the service level is known. A
+    /// balance above the standard limit can only be 360, so that bucket
+    /// is read as one even when the tier is still unknown. A balance at
+    /// or under the standard limit, with the tier unknown, is ambiguous:
+    /// 30k left is 75% of a standard hourly bucket and 7.5% of a 360 one.
+    /// The fraction is withheld rather than shown against the wrong size.
+    pub fn level(&self, name: &str, premium: Option<bool>) -> Option<Level> {
         let b = self.get(name)?;
-        let mut limit = documented_limit(name, premium)?;
-        if b.remaining > limit {
-            limit = documented_limit(name, true)?.max(b.remaining);
-        }
+        let standard = documented_limit(name, false)?;
+        let limit = if premium == Some(true) || b.remaining > standard {
+            documented_limit(name, true)?.max(b.remaining)
+        } else if premium == Some(false) {
+            standard
+        } else {
+            return None;
+        };
         Some(Level { limit, left: b.remaining, used: (limit - b.remaining).max(0.0), last: b.consumed })
     }
 
@@ -117,12 +127,19 @@ impl Quota {
     ///
     /// Only token buckets: `concurrentRequests` is empty between requests
     /// and full during one, and slowing down over it would mean slowing
-    /// down for having made a request.
-    pub fn tightest(&self, premium: bool) -> Option<(String, f64)> {
+    /// down for having made a request. `None` when the tier is unknown
+    /// and no balance rises above the standard limit.
+    pub fn tightest(&self, premium: Option<bool>) -> Option<(String, f64)> {
         self.buckets
             .iter()
             .filter_map(|(n, _)| self.level(n, premium).map(|l| (n.clone(), l.fraction_left())))
             .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// True when a token bucket still holds more than a standard property
+    /// is allowed, which only Analytics 360 can.
+    pub fn proves_premium(&self) -> bool {
+        self.buckets.iter().any(|(n, b)| documented_limit(n, false).is_some_and(|lim| b.remaining > lim))
     }
 }
 
@@ -488,8 +505,8 @@ mod tests {
         assert_eq!(q.get("concurrentRequests"), Some(Bucket { consumed: 0.0, remaining: 10.0 }));
         // 13,970 left of the property's hourly 40,000 is the tightest;
         // the same balance is nearly all of the per-project 14,000.
-        assert_eq!(q.tightest(false).map(|t| t.0).as_deref(), Some("tokensPerHour"));
-        let l = q.level("tokensPerProjectPerHour", false).unwrap();
+        assert_eq!(q.tightest(Some(false)).map(|t| t.0).as_deref(), Some("tokensPerHour"));
+        let l = q.level("tokensPerProjectPerHour", Some(false)).unwrap();
         assert_eq!((l.limit, l.left, l.used, l.last), (14_000.0, 13_970.0, 30.0, 30.0));
     }
 
@@ -502,8 +519,8 @@ mod tests {
                 ("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 39_000.0 }),
             ],
         };
-        assert_eq!(q.tightest(false), Some(("tokensPerDay".into(), 0.05)));
-        assert_eq!(Quota::default().tightest(false), None);
+        assert_eq!(q.tightest(Some(false)), Some(("tokensPerDay".into(), 0.05)));
+        assert_eq!(Quota::default().tightest(Some(false)), None);
     }
 
     #[test]
@@ -511,14 +528,32 @@ mod tests {
         // A 10-token request with 100 left is a bucket all but empty, not
         // one that is 91% full.
         let q = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 100.0 })] };
-        let l = q.level("tokensPerHour", false).unwrap();
+        let l = q.level("tokensPerHour", Some(false)).unwrap();
         assert_eq!((l.limit, l.used, l.last), (40_000.0, 39_900.0, 10.0));
-        assert!(q.tightest(false).unwrap().1 < 0.01);
+        assert!(q.tightest(Some(false)).unwrap().1 < 0.01);
         // 360 is ten times the size, said or inferred from the balance.
-        assert_eq!(q.level("tokensPerHour", true).unwrap().limit, 400_000.0);
+        assert_eq!(q.level("tokensPerHour", Some(true)).unwrap().limit, 400_000.0);
         let big = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 390_000.0 })] };
-        assert_eq!(big.level("tokensPerHour", false).unwrap().limit, 400_000.0);
-        assert_eq!(q.level("concurrentRequests", false), None);
+        assert_eq!(big.level("tokensPerHour", Some(false)).unwrap().limit, 400_000.0);
+        assert!(big.proves_premium());
+        assert_eq!(q.level("concurrentRequests", Some(false)), None);
+    }
+
+    #[test]
+    fn an_unknown_tier_withholds_a_balance_under_the_standard_limit() {
+        // 30k left is 75% of the standard hourly 40k and 7.5% of 360's
+        // 400k. Until the service level is known, neither figure is shown.
+        let q = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 30_000.0 })] };
+        assert_eq!(q.level("tokensPerHour", None), None);
+        assert_eq!(q.tightest(None), None);
+        assert!(!q.proves_premium());
+        let known = q.level("tokensPerHour", Some(true)).unwrap();
+        assert_eq!(known.limit, 400_000.0);
+        assert!((known.fraction_left() - 0.075).abs() < 1e-9);
+        assert_eq!(q.level("tokensPerHour", Some(false)).unwrap().limit, 40_000.0);
+        // A balance above the standard limit can only be 360.
+        let big = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 50_000.0 })] };
+        assert_eq!(big.level("tokensPerHour", None).unwrap().limit, 400_000.0);
     }
 
     #[test]

@@ -201,6 +201,13 @@ pub fn same_weekdays() -> Value {
     ])
 }
 
+/// An event-name list that keeps case. GA's `inListFilter` folds case
+/// unless told not to, and `Purchase` and `purchase` are different events.
+fn event_names(values: &[String]) -> Value {
+    json!({ "filter": { "fieldName": "eventName",
+        "inListFilter": { "values": values, "caseSensitive": true } } })
+}
+
 /// The key events asked for: the list named in config by `eventCount`,
 /// or every event GA flags, by `keyEvents`.
 pub fn key_event_filter(names: &[String]) -> (&'static str, Value) {
@@ -211,10 +218,7 @@ pub fn key_event_filter(names: &[String]) -> (&'static str, Value) {
                 "numericFilter": { "operation": "GREATER_THAN", "value": { "int64Value": "0" } } } }),
         )
     } else {
-        (
-            "dimensionFilter",
-            json!({ "filter": { "fieldName": "eventName", "inListFilter": { "values": names } } }),
-        )
+        ("dimensionFilter", event_names(names))
     }
 }
 
@@ -353,7 +357,7 @@ pub fn page_detail_body(path: &str, configured: &[String]) -> Value {
             "metrics": mets(&["eventCount"]),
             "dimensionFilter": { "andGroup": { "expressions": [
                 filter.clone(),
-                { "filter": { "fieldName": "eventName", "inListFilter": { "values": configured } } },
+                event_names(configured),
             ] } },
             "orderBys": [{ "metric": { "metricName": "eventCount" }, "desc": true }],
             "limit": configured.len().max(1),
@@ -475,6 +479,7 @@ mod tests {
         assert!(r[2].get("metricFilter").is_some(), "flagged key events by default");
         let named = processed_body(7, &["purchase".into()]);
         assert_eq!(named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
+        assert_eq!(named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"], true);
         assert!(named["requests"][2].get("metricFilter").is_none());
         let p = page_detail_body("/x", &[]);
         assert_eq!(p["requests"].as_array().unwrap().len(), 5);
@@ -488,6 +493,7 @@ mod tests {
         let both = ev["dimensionFilter"]["andGroup"]["expressions"].as_array().unwrap();
         assert_eq!(both[0]["filter"]["fieldName"], "pagePath");
         assert_eq!(both[1]["filter"]["inListFilter"]["values"][0], "purchase");
+        assert_eq!(both[1]["filter"]["inListFilter"]["caseSensitive"], true);
     }
 
     #[test]
@@ -529,6 +535,7 @@ mod tests {
         assert_eq!(flagged["metricFilter"]["filter"]["fieldName"], "keyEvents");
         let named = realtime_events_body(&["purchase".into()]);
         assert_eq!(named["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
+        assert_eq!(named["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"], true);
         assert!(named.get("metricFilter").is_none());
     }
 

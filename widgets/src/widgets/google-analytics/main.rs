@@ -91,6 +91,21 @@ fn landing_path(landing: &str) -> String {
     landing.split('?').next().unwrap_or(landing).to_string()
 }
 
+/// Configured event names, trimmed, blanks dropped, repeats dropped, in
+/// the order they were written. GA treats `Purchase` and `purchase` as
+/// different events, so the comparison keeps case. A repeated name would
+/// draw twice and be summed twice into one baseline sample.
+fn configured_events(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in names {
+        let name = name.trim().to_string();
+        if !name.is_empty() && !out.iter().any(|e| e == &name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     if !tc::dependencies_available("google-analytics", include_str!("dependencies.json"), Some(SETTINGS)) {
@@ -107,11 +122,7 @@ fn main() {
     let refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 300.0), 300.0).max(60.0);
     let window = tc::cfg_usize(&cfg, "window_days", 7).clamp(1, 90);
     let weeks = tc::cfg_usize(&cfg, "baseline_weeks", 4).clamp(1, 12);
-    let configured: Vec<String> = tc::cfg_strings(&cfg, "key_events", &[])
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let configured = configured_events(tc::cfg_strings(&cfg, "key_events", &[]));
     let poll_cfg = Cfg { refresh, baseline_weeks: weeks, key_events: configured.clone() };
 
     let cred = google::credential(&credentials_file, &token, &token_env);
@@ -460,7 +471,7 @@ fn main() {
             let reports = held.as_ref().map(|d| d.reports.clone());
             // The property's date when the detail was read: what its
             // `today` and `yesterday` meant, for laying out its days.
-            let asked_on = model::local_now(held.as_ref().map_or(view.now, |d| d.at), model::tz_of(&prop.time_zone)).0;
+            let asked_on = model::local_now(held.as_ref().map_or(view.now, |d| d.at), model::tz_of(prop.zone_name())).0;
             let lines = match &open {
                 Item::Property(_) => draw::property_detail(&prop, &view, w),
                 Item::Page(path) => draw::page_detail(path, reports.as_ref(), !configured.is_empty(), asked_on, w),
@@ -583,6 +594,20 @@ mod tests {
         let (ids, bad) = property_ids(&raw);
         assert_eq!(ids, vec!["123", "456", "789"]);
         assert_eq!(bad, vec!["a789p123", ""]);
+    }
+
+    #[test]
+    fn configured_events_drop_blanks_and_repeats_and_keep_case() {
+        let names = configured_events([
+            " purchase ".into(),
+            "purchase".into(),
+            String::new(),
+            "  ".into(),
+            "Purchase".into(),
+            "sign_up".into(),
+            "purchase".into(),
+        ]);
+        assert_eq!(names, vec!["purchase", "Purchase", "sign_up"]);
     }
 
     #[test]

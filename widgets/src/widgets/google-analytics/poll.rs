@@ -92,7 +92,11 @@ pub struct Prop {
     pub time_zone: String,
     pub currency: String,
     /// Analytics 360, whose documented quota is ten times larger.
-    pub premium: bool,
+    /// `None` until the Admin API has said, or a balance above the
+    /// standard limit has shown it can only be 360. A `false` here is a
+    /// standard property, not an unread one: the two calculate differently
+    /// once a bucket falls under the standard limit.
+    pub premium: Option<bool>,
     /// GA's flagged key events, once the Admin API has answered.
     pub key_names: Option<Vec<String>>,
     pub rt: Option<Rt>,
@@ -120,6 +124,38 @@ pub struct Prop {
     pub sample_err: String,
     /// Why the poller stopped, if it has.
     pub died: String,
+}
+
+impl Prop {
+    /// The property's timezone: the Admin API's, or the one the processed
+    /// reports carry when Admin has not answered. Empty only when neither has.
+    pub fn zone_name(&self) -> &str {
+        if !self.time_zone.is_empty() {
+            return &self.time_zone;
+        }
+        self.processed.as_ref().map(|p| p.hourly.meta.time_zone.as_str()).filter(|s| !s.is_empty()).unwrap_or("")
+    }
+
+    /// Keep a timezone a report carried when Admin has not supplied one.
+    /// A later Admin answer replaces it; an empty one does not.
+    pub fn note_zone(&mut self, reported: &str) {
+        if self.time_zone.is_empty() && !reported.is_empty() {
+            self.time_zone = reported.to_string();
+        }
+    }
+
+    /// A balance above the standard limit is Analytics 360. Remember that
+    /// so a later reading under the limit is still measured against the
+    /// 360 size. Admin's answer, once it has arrived, stands.
+    pub fn learn_tier(&mut self) {
+        if self.premium.is_some() {
+            return;
+        }
+        let proved = self.quota_rt.as_ref().is_some_and(Quota::proves_premium) || self.quota_core.as_ref().is_some_and(Quota::proves_premium);
+        if proved {
+            self.premium = Some(true);
+        }
+    }
 }
 
 /// One on-demand detail: the reports it asked for, or why it has none.
@@ -332,9 +368,11 @@ fn run_live(
                     if !info.name.is_empty() {
                         p.name = info.name;
                     }
-                    p.time_zone = info.time_zone;
+                    if !info.time_zone.is_empty() {
+                        p.time_zone = info.time_zone;
+                    }
                     p.currency = info.currency;
-                    p.premium = info.premium;
+                    p.premium = Some(info.premium);
                     p.key_names = Some(names);
                     p.admin_err.clear();
                     next_admin = f64::INFINITY;
@@ -377,6 +415,7 @@ fn run_live(
                     }
                     Err(f) => p.rt_err = f.text,
                 }
+                p.learn_tier();
                 let idle_for = p.idle_since.map_or(0.0, |s| at - s);
                 let left = p.quota_rt.as_ref().and_then(|q| q.tightest(p.premium)).map(|t| t.1);
                 let (secs, why) = model::realtime_interval(chosen, idle_for, left);
@@ -434,6 +473,7 @@ fn run_live(
                     // nothing about whether the breakdowns did.
                     Err(f) => p.bd_err = format!("realtime breakdowns: {}", f.text),
                 }
+                p.learn_tier();
                 p.interval
             })
             .unwrap_or(60);
@@ -487,6 +527,7 @@ fn run_reports(
                         if quota.is_some() {
                             p.quota_core = quota;
                         }
+                        p.note_zone(&proc_.hourly.meta.time_zone);
                         p.processed = Some(proc_);
                         p.core_at = at;
                         p.core_err.clear();
@@ -508,6 +549,7 @@ fn run_reports(
                     }
                     Err(f) => p.core_err = f.text,
                 }
+                p.learn_tier();
                 let low = p
                     .quota_core
                     .as_ref()
@@ -692,4 +734,43 @@ pub fn spawn_detail(
         }
         drop(work);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::Bucket;
+
+    #[test]
+    fn a_report_zone_fills_an_empty_one_and_does_not_replace_admin() {
+        let mut p = Prop::default();
+        let mut hourly = Report::default();
+        hourly.meta.time_zone = "America/New_York".into();
+        p.processed = Some(Processed { hourly, ..Processed::default() });
+        assert_eq!(p.zone_name(), "America/New_York");
+        p.note_zone("America/New_York");
+        p.note_zone("Europe/Berlin");
+        assert_eq!(p.time_zone, "America/New_York");
+        p.time_zone = "Europe/Berlin".into();
+        p.note_zone("America/New_York");
+        assert_eq!(p.zone_name(), "Europe/Berlin");
+    }
+
+    #[test]
+    fn an_inferred_360_tier_sticks_and_admin_is_not_overwritten() {
+        let mut p = Prop::default();
+        p.quota_rt = Some(Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 1.0, remaining: 30_000.0 })] });
+        p.learn_tier();
+        assert_eq!(p.premium, None, "under the standard limit the tier is still unknown");
+        p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 50_000.0;
+        p.learn_tier();
+        assert_eq!(p.premium, Some(true));
+        p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 30_000.0;
+        let level = p.quota_rt.as_ref().unwrap().level("tokensPerHour", p.premium).unwrap();
+        assert_eq!(level.limit, 400_000.0, "a later smaller balance stays on the 360 size");
+        p.premium = Some(false);
+        p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 50_000.0;
+        p.learn_tier();
+        assert_eq!(p.premium, Some(false), "admin's answer stands once it has arrived");
+    }
 }

@@ -282,7 +282,7 @@ fn header(p: &Palette, first: &str, name_w: usize, cells: Vec<String>, budget: u
 /// Quota as the title shows it: the category nearest its limit, by hour
 /// and by day, as used of the documented limit. The hourly figure is the
 /// tighter of the property's and this project's hourly buckets.
-pub fn quota_words(rt: Option<&Quota>, core: Option<&Quota>, premium: bool) -> Option<(String, bool)> {
+pub fn quota_words(rt: Option<&Quota>, core: Option<&Quota>, premium: Option<bool>) -> Option<(String, bool)> {
     let pick = [("realtime", rt), ("core", core)]
         .into_iter()
         .filter_map(|(n, q)| q.and_then(|q| q.tightest(premium).map(|t| (n, q, t.1))))
@@ -371,6 +371,11 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
         chunks.push(live);
         if let Some((q, low)) = quota_words(prop.quota_rt.as_ref(), prop.quota_core.as_ref(), prop.premium) {
             chunks.push(vec![part(if low { &p.warn } else { &p.dim }, q)]);
+        } else if prop.premium.is_none() && (prop.quota_rt.is_some() || prop.quota_core.is_some()) {
+            // A balance under the standard limit is 75% left on a standard
+            // property and 7.5% left on 360. Until the tier is known, the
+            // fraction is withheld rather than drawn against the wrong size.
+            chunks.push(vec![part(&p.dim, "quota: service level not read yet, fraction withheld")]);
         }
     }
     let mut out = flow(chunks, budget, "   ");
@@ -418,7 +423,7 @@ pub fn body(shared: &Shared, v: &View, w: usize) -> Frame {
         }
         return f;
     };
-    let tz = model::tz_of(&prop.time_zone);
+    let tz = model::tz_of(prop.zone_name());
     f.lines.push(Vec::new());
     right_now(&mut f, prop, v, budget, tz, &p);
     f.lines.push(Vec::new());
@@ -1127,7 +1132,7 @@ fn movers(f: &mut Frame, prop: &Prop, v: &View, budget: usize, p: &Palette, coun
 /// One property's row figures: active now, change against baseline,
 /// sessions today against last week, key events against last week.
 fn property_cells(prop: &Prop, v: &View) -> (String, String, String, String, String) {
-    let tz = model::tz_of(&prop.time_zone);
+    let tz = model::tz_of(prop.zone_name());
     let now = prop.rt.as_ref().map(|r| model::thousands(r.active)).unwrap_or_else(|| "–".into());
     let base = match (&prop.rt, model::baseline(&prop.samples, v.now, v.weeks, tz, &|s| s.active)) {
         (Some(r), Baseline::Ready { median, .. }) => model::pct(r.active, median).map(model::pct_label).unwrap_or_else(|| "–".into()),
@@ -1209,7 +1214,8 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     out.extend(prose(&p.txt, &format!("{} (properties/{})", prop.name, prop.id), budget, " "));
     out.push(Vec::new());
-    let tz = if prop.time_zone.is_empty() { "not read yet".to_string() } else { prop.time_zone.clone() };
+    let zone = prop.zone_name();
+    let tz = if zone.is_empty() { "not read yet".to_string() } else { zone.to_string() };
     let cur = if prop.currency.is_empty() { "not read yet".to_string() } else { prop.currency.clone() };
     out.extend(flow(
         vec![vec![part(&p.dim, "timezone "), part(&p.txt, tz)], vec![part(&p.dim, "currency "), part(&p.txt, cur)]],
@@ -1568,6 +1574,7 @@ mod tests {
             name: "Example Site".into(),
             time_zone: "UTC".into(),
             currency: "USD".into(),
+            premium: Some(false),
             key_names: Some(vec!["purchase".into(), "sign_up".into(), "a_key_event_with_an_unusually_long_name_for_testing".into()]),
             rt: Some(Rt { active: 71.0, views: 540.0, key: 3.0, minutes: (0..30).map(|i| (i % 7) as f64).collect(), views_minutes: vec![18.0; 30] }),
             rt_at: NOW - 9.0,
@@ -1714,6 +1721,49 @@ mod tests {
         ] {
             assert!(all.contains(want), "missing {:?} in\n{}", want, all);
         }
+    }
+
+    #[test]
+    fn an_unknown_service_level_does_not_invent_a_quota_fraction() {
+        let mut prop = full_prop();
+        prop.premium = None;
+        let narrow = text(&body(&shared(vec![prop.clone()]), &view(), 30).lines);
+        assert!(narrow.contains("fraction withheld"), "{}", narrow);
+        assert!(!narrow.contains("quota realtime used"), "{}", narrow);
+        for line in body(&shared(vec![prop.clone()]), &view(), 30).lines {
+            assert!(width_of(&line) <= 29, "{:?}", plain(&line));
+        }
+        // 50k left of the hourly bucket is more than a standard property
+        // holds, so the tier is 360 and the fraction uses that size.
+        prop.quota_rt.as_mut().unwrap().buckets[1].1.remaining = 50_000.0;
+        prop.learn_tier();
+        assert_eq!(prop.premium, Some(true));
+        let all = text(&body(&shared(vec![prop]), &view(), 140).lines);
+        assert!(all.contains("quota realtime used 127k/140k h 1.8M/2.0M d"), "{}", all);
+        assert!(!all.contains("1.2k/14k"), "{}", all);
+    }
+
+    #[test]
+    fn a_report_timezone_stands_in_until_admin_answers() {
+        // 2026-10-21 01:20 UTC is still 2026-10-20 in New York. The reports
+        // were asked for on the 20th. Read in the report's timezone they
+        // are still today's; read as UTC they are yesterday's.
+        let mut prop = full_prop();
+        prop.time_zone.clear();
+        prop.processed.as_mut().unwrap().hourly.meta.time_zone = "America/New_York".into();
+        prop.processed.as_mut().unwrap().date = chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let mut v = view();
+        v.now = 1_792_545_600.0;
+        let all = text(&body(&shared(vec![prop.clone()]), &v, 100).lines);
+        assert!(!all.contains("asked for before midnight"), "the report's timezone is still on that date\n{}", all);
+        prop.processed.as_mut().unwrap().hourly.meta.time_zone.clear();
+        let utc = text(&body(&shared(vec![prop]), &v, 100).lines);
+        assert!(utc.contains("asked for before midnight"), "with no timezone the same instant is the next UTC day\n{}", utc);
+        let mut detail_prop = full_prop();
+        detail_prop.time_zone.clear();
+        detail_prop.processed.as_mut().unwrap().hourly.meta.time_zone = "America/New_York".into();
+        let detail = text(&property_detail(&detail_prop, &view(), 80));
+        assert!(detail.contains("America/New_York"), "{}", detail);
     }
 
     #[test]
