@@ -2799,6 +2799,61 @@ pub fn get_answer(
     Ok((status, body, found))
 }
 
+/// Default env var for [`github_enterprise_hostname`] when `enterprise_hostname` is empty.
+pub const GITHUB_ENTERPRISE_HOST_ENV: &str = "GITHUB_ENTERPRISE_HOSTNAME";
+
+/// Strip a URL down to a hostname suitable for GitHub Enterprise Cloud API paths.
+pub fn normalize_github_hostname(raw: &str) -> String {
+    let raw = raw.trim();
+    let host = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw)
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(raw);
+    host.to_string()
+}
+
+/// Enterprise Cloud hostname from config, then from the named environment variable.
+///
+/// Empty means the public github.com API (`api.github.com`).
+pub fn github_enterprise_hostname(cfg: &serde_json::Value) -> Option<String> {
+    let direct = cfg_str(cfg, "enterprise_hostname", "");
+    if !direct.is_empty() {
+        return Some(normalize_github_hostname(&direct));
+    }
+    let env_name = cfg_str(cfg, "enterprise_hostname_env", GITHUB_ENTERPRISE_HOST_ENV);
+    let env_name = if env_name.is_empty() {
+        GITHUB_ENTERPRISE_HOST_ENV
+    } else {
+        env_name.as_str()
+    };
+    match std::env::var(env_name) {
+        Ok(value) if !value.trim().is_empty() => Some(normalize_github_hostname(&value)),
+        _ => None,
+    }
+}
+
+/// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
+pub fn github_graphql_url(hostname: Option<&str>) -> String {
+    match hostname.filter(|h| !h.is_empty()) {
+        Some(h) => format!("https://{}/api/graphql", h),
+        None => "https://api.github.com/graphql".to_string(),
+    }
+}
+
+/// REST API base URL for `hostname`, or github.com when `hostname` is absent.
+///
+/// Enterprise Cloud serves REST under `/api/v3`; github.com uses `api.github.com` without that prefix.
+pub fn github_rest_base_url(hostname: Option<&str>) -> String {
+    match hostname.filter(|h| !h.is_empty()) {
+        Some(h) => format!("https://{}/api/v3", h),
+        None => "https://api.github.com".to_string(),
+    }
+}
+
 /// One HTTPS POST of a JSON body, returning the body and its headers.
 ///
 /// The headers come back because a rate limit is only knowable from them,
@@ -3775,6 +3830,27 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         out.push(line);
     }
     out
+}
+
+#[cfg(test)]
+mod github_api_tests {
+    use super::*;
+
+    #[test]
+    fn enterprise_cloud_urls_use_api_v3_rest() {
+        assert_eq!(
+            github_graphql_url(Some("acme.ghe.com")),
+            "https://acme.ghe.com/api/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("acme.ghe.com")),
+            "https://acme.ghe.com/api/v3"
+        );
+        assert_eq!(
+            github_graphql_url(None),
+            "https://api.github.com/graphql"
+        );
+    }
 }
 
 #[cfg(test)]

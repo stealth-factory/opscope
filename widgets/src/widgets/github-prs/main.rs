@@ -43,7 +43,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-const API: &str = "https://api.github.com/graphql";
 const SORTS: &[&str] = &["updated", "created"];
 /// Width of the per-day charts, in days.
 const OPENED_DAYS: i64 = 30;
@@ -226,9 +225,15 @@ fn graphql(
     tok: &str,
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let cfg = if on_legacy_section() {
+        tc::load_config("pr")
+    } else {
+        tc::load_config("github_prs")
+    };
+    let gql_url = tc::github_graphql_url(tc::github_enterprise_hostname(&cfg).as_deref());
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
     let (out, _headers) = tc::post_json(
-        API,
+        &gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),

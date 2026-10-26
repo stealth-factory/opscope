@@ -46,8 +46,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-const GQL: &str = "https://api.github.com/graphql";
-const REST: &str = "https://api.github.com";
 const WINDOWS: &[i64] = &[12, 24, 48, 168];
 const FILTERS: &[&str] = &["all", "failed", "running"];
 
@@ -106,10 +104,11 @@ fn graphql(
     query: &str,
     tok: &str,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
     let (out, headers) = tc::post_json(
-        GQL,
+        gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),
@@ -157,8 +156,9 @@ fn rest_get(
     path: &str,
     tok: &str,
     rate: &mut Option<(i64, i64)>,
+    rest_base: &str,
 ) -> Result<serde_json::Value, String> {
-    let url = format!("{}{}", REST, path);
+    let url = format!("{}{}", rest_base, path);
     let (body, headers) = tc::get_with_headers(
         &url,
         &[
@@ -918,6 +918,7 @@ fn fetch_runs_for(
     tok: &str,
     hours: i64,
     rate: &mut Option<(i64, i64)>,
+    rest_base: &str,
 ) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
@@ -938,7 +939,7 @@ fn fetch_runs_for(
             page,
             urlencoding_lite(&created)
         );
-        let res = rest_get(&path, tok, rate)?;
+        let res = rest_get(&path, tok, rate, rest_base)?;
         if page == 1 {
             total = res["total_count"].as_i64().unwrap_or(0);
         }
@@ -984,12 +985,16 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-fn discover_accounts(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<(String, Vec<String>), String> {
+fn discover_accounts(
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
+) -> Result<(String, Vec<String>), String> {
     let mut viewer = String::new();
     let mut accounts = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let data = graphql(&orgs_query(cursor.as_deref()), tok, rate)?;
+        let data = graphql(&orgs_query(cursor.as_deref()), tok, rate, gql_url)?;
         if viewer.is_empty() {
             viewer = data["viewer"]["login"].as_str().unwrap_or("").to_string();
             if viewer.is_empty() {
@@ -1031,6 +1036,7 @@ fn discover_account_pages(
     acc: &str,
     since: f64,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<(Vec<FoundRepo>, Option<String>), String> {
     let mut found = Vec::new();
     let mut cursor: Option<String> = None;
@@ -1041,7 +1047,7 @@ fn discover_account_pages(
         } else {
             discover_query(acc, cursor.as_deref())
         };
-        let data = match graphql(&query, tok, rate) {
+        let data = match graphql(&query, tok, rate, gql_url) {
             Ok(d) => d,
             Err(said) => {
                 return Ok((found, Some(format!("{}: {}", acc, said))));
@@ -1086,12 +1092,13 @@ fn discover_repos(
     cap: usize,
     viewer: &str,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<(Vec<String>, PickStats, Option<String>), String> {
     let since = tc::now() - (pushed_days as f64 * 86400.0);
     let mut found: Vec<FoundRepo> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for acc in accounts {
-        match discover_account_pages(tok, acc, since, rate) {
+        match discover_account_pages(tok, acc, since, rate, gql_url) {
             Ok((page, note)) => {
                 found.extend(page);
                 if let Some(said) = note {
@@ -1118,8 +1125,12 @@ fn discover_repos(
     Ok((picked, stats, note))
 }
 
-fn viewer_login(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<String, String> {
-    let data = graphql("{ viewer { login } }", tok, rate)?;
+fn viewer_login(
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
+) -> Result<String, String> {
+    let data = graphql("{ viewer { login } }", tok, rate, gql_url)?;
     let login = data["viewer"]["login"].as_str().unwrap_or("").to_string();
     if login.is_empty() {
         Err("no viewer login in the response".into())
@@ -1177,7 +1188,10 @@ fn one_pass(
     cap: usize,
     hours: i64,
     live: &Arc<Mutex<State>>,
+    host: Option<&str>,
 ) -> Result<State, String> {
+    let gql_url = tc::github_graphql_url(host);
+    let rest_base = tc::github_rest_base_url(host);
     let mut err = String::new();
     let mut rate = None;
     let empty_stats = PickStats::default();
@@ -1186,7 +1200,7 @@ fn one_pass(
         p.begin("accounts");
     });
     let (repos, stats, viewer, orgs, n_accounts, is_explicit) = if !explicit.is_empty() {
-        let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+        let viewer = viewer_login(tok, &mut rate, &gql_url).unwrap_or_default();
         let n = explicit
             .iter()
             .map(|r| repo_owner(r))
@@ -1196,7 +1210,7 @@ fn one_pass(
         (unique_repos(explicit), empty_stats, viewer, 0usize, n, true)
     } else {
         let (viewer, want) = if accounts.is_empty() {
-            match discover_accounts(tok, &mut rate) {
+            match discover_accounts(tok, &mut rate, &gql_url) {
                 Ok(got) => got,
                 Err(said) => {
                     return Ok(State {
@@ -1208,7 +1222,7 @@ fn one_pass(
                 }
             }
         } else {
-            let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+            let viewer = viewer_login(tok, &mut rate, &gql_url).unwrap_or_default();
             (viewer, accounts.to_vec())
         };
         if want.is_empty() {
@@ -1232,7 +1246,7 @@ fn one_pass(
             p.finish("accounts");
             p.begin("repos");
         });
-        match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate) {
+        match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate, &gql_url) {
             Ok((repos, stats, note)) => {
                 if let Some(said) = note {
                     err = if err.is_empty() {
@@ -1293,7 +1307,7 @@ fn one_pass(
         note(live, |p| {
             p.count("runs", done, Some(repos.len()));
         });
-        match fetch_runs_for(repo, tok, hours, &mut rate) {
+        match fetch_runs_for(repo, tok, hours, &mut rate, &rest_base) {
             Ok((got, note)) => {
                 runs.extend(got);
                 if let Some(said) = note {
@@ -1354,6 +1368,12 @@ fn one_pass(
 }
 
 fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
+    let cfg = if on_legacy_section() {
+        tc::load_config("gha")
+    } else {
+        tc::load_config("github_actions")
+    };
+    let rest_base = tc::github_rest_base_url(tc::github_enterprise_hostname(&cfg).as_deref());
     let repo = text(run, "repo");
     let id = run["id"].as_i64().unwrap_or(0);
     let Some((owner, name)) = split_repo(&repo) else {
@@ -1373,7 +1393,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
             "/repos/{}/{}/actions/runs/{}/jobs?per_page=100&page={}",
             owner, name, id, page
         );
-        let res = match rest_get(&path, tok, &mut None) {
+        let res = match rest_get(&path, tok, &mut None, &rest_base) {
             Ok(v) => v,
             // Whatever arrived is real and worth drawing; only a failure on
             // the first page leaves nothing to show.
@@ -1685,6 +1705,7 @@ fn main() {
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
     let poll_env = env_name.clone();
+    let poll_host = tc::github_enterprise_hostname(&cfg);
     std::thread::spawn(move || loop {
         let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
         if poll_tok.is_empty() {
@@ -1705,6 +1726,7 @@ fn main() {
                     max_repos,
                     hours,
                     &poller,
+                    poll_host.as_deref(),
                 )
             }));
             // However the pass ended - answer, error or panic - it is no

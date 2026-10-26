@@ -2,6 +2,8 @@
   "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
   "_schema": {
     "token": { "secret": true },
+    "enterprise_hostname": { "type": "string" },
+    "enterprise_hostname_env": { "type": "string" },
     "accounts": {
       "items": "string"
     },
@@ -16,6 +18,10 @@
   "token": "",
   "_token_env_comment": "Environment variable that holds the GitHub token.",
   "token_env": "GITHUB_TOKEN",
+  "_enterprise_hostname_comment": "GitHub Enterprise Cloud hostname (e.g. acme.ghe.com). Empty uses github.com.",
+  "enterprise_hostname": "",
+  "_enterprise_hostname_env_comment": "Environment variable read when enterprise_hostname is empty.",
+  "enterprise_hostname_env": "GITHUB_ENTERPRISE_HOSTNAME",
   "_accounts_comment": "GitHub users or organizations to include; empty discovers the viewer and their organizations.",
   "accounts": [],
   "_window_days_comment": "Days included in delivery charts and summaries.",

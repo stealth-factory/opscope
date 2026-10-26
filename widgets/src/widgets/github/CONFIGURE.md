@@ -10,7 +10,12 @@ GitHub GraphQL/REST APIs reached with `curl`.
 
 The owned section is `github`.
 
-Declared fields: `token`, `token_env`, `accounts`, `window_days`, `refresh`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `window_days`, `refresh`
+
+For GitHub Enterprise Cloud, set `enterprise_hostname` to your instance host
+(for example `acme.ghe.com`), or set the environment variable named in
+`enterprise_hostname_env` (default `GITHUB_ENTERPRISE_HOSTNAME`). Empty uses
+the public github.com API.
 
 `window_days` is the sample for HELD (closed in the window), R24 and T2D
 (merged in the window). It does not change the 24-hour first-review bar or
