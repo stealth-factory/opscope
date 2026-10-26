@@ -277,6 +277,37 @@ const AGY_USAGE_WAIT: u64 = 60;
 /// pty start's, since it costs no tokens and is over in seconds.
 const AGY_USAGE_TTL: f64 = 300.0;
 
+/// Stdout of one `agy` invocation, with auto-update held off.
+///
+/// `tc::run` cannot set the guard, and a `--version` probe that is allowed
+/// to update the CLI is the command this poll must not run. The value is
+/// `true`, the same one the report sets.
+fn agy_stdout(path: &str, args: &[&str], seconds: u64) -> Result<String, String> {
+    let child = std::process::Command::new(path)
+        .args(args)
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start `agy`: {}", e))?;
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(seconds)) {
+        Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(Ok(out)) => Err(format!("`agy` exited {}", out.status)),
+        Ok(Err(e)) => Err(format!("`agy` failed: {}", e)),
+        Err(_) => {
+            // SAFETY: the pid is the child spawned above.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            Err(format!("`agy` did not answer in {}s", seconds))
+        }
+    }
+}
+
 /// Weekly and five-hour limits for every group, from `agy`'s own `/usage`.
 ///
 /// The one source left that carries the Gemini group. `agy` builds from
@@ -296,7 +327,7 @@ const AGY_USAGE_TTL: f64 = 300.0;
 /// CLI to replace itself.
 fn agy_usage(path: &str) -> Result<Vec<serde_json::Value>, String> {
     use std::os::unix::process::CommandExt;
-    let version = tc::run(&[path, "--version"], 10)
+    let version = agy_stdout(path, &["--version"], 10)
         .ok()
         .and_then(|out| crate::parse::parse_agy_version(&out));
     match version {
@@ -2043,10 +2074,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&scratch).unwrap();
         let marker = scratch.join("result");
+        let version_marker = scratch.join("version");
         let script = scratch.join("agy");
         let body = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then\n\
+               printf '%s\\n' \"$AGY_CLI_DISABLE_AUTO_UPDATE\" > '{version_marker}'\n\
                printf '%s\\n' '1.1.11'\n\
                exit 0\n\
              fi\n\
@@ -2061,6 +2094,7 @@ mod tests {
              }} > '{marker}'\n\
              printf '%s\\n' '{json}'\n",
             marker = marker.display(),
+            version_marker = version_marker.display(),
             json = r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"g","name":"Limit Remaining","window":"weekly","remaining_fraction":0.5,"reset_time":"2099-01-01T00:00:00Z"}]}]}}}"#,
         );
         std::fs::write(&script, body).unwrap();
@@ -2069,8 +2103,10 @@ mod tests {
         assert!(rel.is_relative(), "{}", rel.display());
         let got = agy_usage(&rel.to_string_lossy());
         let recorded = std::fs::read_to_string(&marker).unwrap_or_default();
+        let version_env = std::fs::read_to_string(&version_marker).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&scratch);
         let groups = got.unwrap_or_else(|e| panic!("{e}\n{recorded}\nrel={rel}", rel = rel.display()));
+        assert_eq!(version_env.trim(), "true", "the version probe could still auto-update");
         assert_eq!(groups[0]["displayName"], "Gemini Models");
         assert!(
             recorded.lines().any(|line| line.starts_with("argv0=/")),
