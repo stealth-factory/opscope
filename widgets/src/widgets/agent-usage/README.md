@@ -655,8 +655,9 @@ machine**.
 
 Shown as **spent**, where the source reports what is remaining, so red means
 the same thing here as on every other tab — and with the same pace column.
-Every plan reports every family it covers, so a Gemini-only account still gets
-a Claude/GPT pair at 0%; those are real limits and are left in.
+Which groups appear is whatever the source sends, and each is followed by
+Google's own list of the models it covers — so "Claude and GPT models" says
+underneath it that the GPT is GPT-OSS.
 
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
@@ -688,6 +689,37 @@ only one that always works, and the only one that runs another program.
 Nothing that runs for the widget outlives the fetch, and **an `agy` you started
 yourself is never shut down by this** — it would have answered as source 1
 long before source 3 was reached.
+
+**`agy` builds from October 2026 close sources 1 and 3.** Their language server
+refuses every outside caller with `missing CSRF token`, and hands the token
+only to processes `agy` starts itself — it is in no file, log or environment
+the widget can read. The tab says so rather than reading like an app that is
+shut, and falls back to Google:
+
+```
+ ── QUOTA ── live · account-wide, from Google - the app's server refused
+  Antigravity's language server now refuses outside readers: it wants a
+  CSRF token it gives only to processes it starts itself. This is Google's
+  summary instead. Google publishes no grouped Gemini limit.
+```
+
+Google's summary has only ever carried the Claude and GPT-OSS group; the
+grouped Gemini limit came from the local server alone. What Google does
+publish for Gemini is **each model's own allowance**, so when the summary has
+no Gemini group the tab draws those instead, under a heading that says what
+they are:
+
+```
+  Gemini, per model
+    Each model's own allowance, from Google - not slices of one shared limit.
+   gemini-3-flash        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
+   gemini-2.5-pro        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
+```
+
+They are not added up or averaged into a group figure, because Google states
+none. `[+]` gets one lane from them, `gemini busiest` — the model with the
+least left — rather than a dozen. If the per-model call fails, the reason is
+drawn where the rows would be.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
