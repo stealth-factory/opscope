@@ -71,6 +71,30 @@ fn property_ids(raw: &[serde_json::Value]) -> (Vec<String>, Vec<String>) {
     (ids, bad)
 }
 
+/// What startup does with the property list.
+///
+/// A non-empty `properties` list that contains no numeric id is a config
+/// error. Discovering the account would clear that error and poll every
+/// property the credential can see, which is not the list that was written.
+enum Start {
+    Missing,
+    Configured,
+    Discover,
+    InvalidIds,
+}
+
+fn start_plan(has_credential: bool, valid_ids: usize, configured: usize) -> Start {
+    if !has_credential {
+        Start::Missing
+    } else if valid_ids > 0 {
+        Start::Configured
+    } else if configured == 0 {
+        Start::Discover
+    } else {
+        Start::InvalidIds
+    }
+}
+
 fn new_prop(id: &str, name: &str, interval: u64) -> Prop {
     Prop { id: id.to_string(), name: name.to_string(), interval, ..Prop::default() }
 }
@@ -139,13 +163,16 @@ fn main() {
         }
     }
 
-    match &cred {
-        None => {
+    match (&cred, start_plan(cred.is_some(), ids.len(), raw_properties.len())) {
+        (None, _) => {
             if let Ok(mut g) = shared.lock() {
                 g.discovery_err = google::missing_credential(SETTINGS.section, &token_env);
             }
         }
-        Some(cred) if !ids.is_empty() => {
+        // Every configured entry failed `property_ids`. `discovery_err`
+        // already names them; do not list the account instead.
+        (_, Start::InvalidIds) => {}
+        (Some(cred), Start::Configured) => {
             if let Ok(mut g) = shared.lock() {
                 g.props = ids.iter().map(|id| new_prop(id, "", chosen)).collect();
             }
@@ -160,7 +187,7 @@ fn main() {
                 );
             }
         }
-        Some(cred) => {
+        (Some(cred), Start::Discover) => {
             let (shared, cred, grant, poll_cfg, activity) =
                 (Arc::clone(&shared), cred.clone(), grant.clone(), poll_cfg.clone(), activity.clone());
             let who = email.clone().unwrap_or_else(|| "this token's account".into());
@@ -222,6 +249,7 @@ fn main() {
                 }
             });
         }
+        (Some(_), Start::Missing) => {}
     }
 
     tc::setup();
@@ -411,9 +439,10 @@ fn main() {
                     }
                 }
                 "l" | "L" => {
+                    // `r` is the full refetch. `l` only changes the realtime
+                    // interval; the live poller notices `chosen` on its own.
                     if let Ok(mut g) = shared.lock() {
                         g.chosen = tc::cycle(model::LIVE_CHOICES, g.chosen);
-                        g.force += 1;
                     }
                 }
                 _ => {}
@@ -586,6 +615,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_ids_are_a_config_error_and_an_empty_list_discovers() {
+        assert!(matches!(start_plan(false, 0, 0), Start::Missing));
+        assert!(matches!(start_plan(false, 0, 1), Start::Missing));
+        assert!(matches!(start_plan(true, 2, 3), Start::Configured));
+        assert!(matches!(start_plan(true, 1, 1), Start::Configured));
+        assert!(matches!(start_plan(true, 0, 0), Start::Discover));
+        assert!(matches!(start_plan(true, 0, 1), Start::InvalidIds));
+    }
 
     #[test]
     fn property_ids_take_numbers_and_name_the_rest() {

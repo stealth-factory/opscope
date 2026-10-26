@@ -343,6 +343,10 @@ fn run_live(
     let (mut next_admin, mut next_rt, mut next_bd) = (0.0f64, 0.0f64, 0.0f64);
     let mut rt_paused = 0.0f64;
     let mut seen_force = 0u64;
+    let mut seen_chosen = match shared.lock() {
+        Ok(g) => g.chosen,
+        Err(_) => return,
+    };
     let mut last_prune = tc::now();
     let configured = !cfg.key_events.is_empty();
     loop {
@@ -358,6 +362,13 @@ fn run_live(
                 next_admin = now;
             }
             rt_paused = 0.0;
+        }
+        // `l` changes `chosen` without touching `force`. Take one realtime
+        // reading on the new interval. A 429 pause stays in force, and
+        // breakdowns, admin and the processed reports keep their clocks.
+        if chosen != seen_chosen {
+            seen_chosen = chosen;
+            next_rt = pull_realtime(next_rt, rt_paused, now);
         }
 
         if next_admin <= now {
@@ -485,6 +496,13 @@ fn run_live(
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// The next realtime read after `l`. A pause that has not elapsed is left
+/// alone; otherwise the read is due now, so the interval just chosen is
+/// the one that spaces the reading after it.
+fn pull_realtime(next_rt: f64, paused_until: f64, now: f64) -> f64 {
+    if paused_until <= now { now } else { next_rt }
 }
 
 /// The processed reports, on their own clock.
@@ -740,6 +758,13 @@ pub fn spawn_detail(
 mod tests {
     use super::*;
     use crate::parse::Bucket;
+
+    #[test]
+    fn a_new_realtime_interval_waits_out_a_quota_pause() {
+        assert_eq!(pull_realtime(40.0, 0.0, 10.0), 10.0);
+        assert_eq!(pull_realtime(40.0, 10.0, 10.0), 10.0);
+        assert_eq!(pull_realtime(40.0, 310.0, 10.0), 40.0);
+    }
 
     #[test]
     fn a_report_zone_fills_an_empty_one_and_does_not_replace_admin() {

@@ -340,8 +340,8 @@ Every widget reads optional settings from the first readable of
 the working directory, and `config.json` beside the binary.
 
 **Nothing has to be configured.** Every key is optional, and a key you leave
-out is not a gap — the widget uses the default built into it. Five widgets
-need a token before they can show you something; they are named under
+out is not a gap — the widget uses the default built into it. Six widgets
+need a credential before they can show you something; they are named under
 Credentials below. Every other widget starts on its own defaults.
 
 There are two ways in, and they write the same file.
@@ -423,12 +423,14 @@ own copy key.
 
 ### Credentials
 
-**Five widgets define their own token settings:** `vercel-deployments` wants
+**Six widgets define their own credential settings:** `vercel-deployments` wants
 a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
-`linear` a personal API key from Settings → Security & access, and
+`linear` a personal API key from Settings → Security & access,
 `github-prs` and `github-actions` each hold their own GitHub token rather
-than borrowing one. Every other widget needs no configuration to start.
+than borrowing one, and `google-analytics` a service-account key
+([docs/google-setup.md](docs/google-setup.md)) or a pasted token for an hour
+of testing. Every other widget needs no configuration to start.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
