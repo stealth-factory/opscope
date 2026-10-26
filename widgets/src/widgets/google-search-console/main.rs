@@ -196,8 +196,17 @@ fn plan_sites(
     }
 }
 
+/// A bearer for the next request. Cheap while the token is cached: a round
+/// can start with about five minutes left on it, and the inspections after
+/// the queries can run longer than that. Re-reading mints a new one only
+/// once that window has closed.
+fn refresh_bearer(cred: &google::Credential, client: &mut Client) -> Result<(), String> {
+    client.bearer = cred.bearer(&[google::SCOPE_WEBMASTERS_READONLY])?.value;
+    Ok(())
+}
+
 /// Inspect whatever of the site's set is due, within today's budget.
-fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize) {
+fn inspect_due(cred: &google::Credential, client: &mut Client, data: &mut SiteData, caches: &Caches, top: usize) {
     let Some(movers) = data.pages.value.as_ref() else { return };
     let (set, _, _) = inspection_set(&movers.rows, top);
     let today = google_today().format("%Y-%m-%d").to_string();
@@ -210,6 +219,13 @@ fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize
         Err(_) => return,
     };
     for url in due {
+        // Before the request, not only at the start of the property: one
+        // page can take the whole timeout, and a token that was fresh for
+        // the first page need not still be for the last.
+        if let Err(why) = refresh_bearer(cred, client) {
+            data.inspect_error = Some(format!("inspection stopped for this round: {}", why));
+            break;
+        }
         // Reserved under the lock before every request, not only checked
         // when the list was made: `i` spends from the same budget while
         // this runs, and a page `i` is already asking about is skipped.
@@ -238,24 +254,55 @@ fn inspect_due(client: &Client, data: &mut SiteData, caches: &Caches, top: usize
     }
 }
 
-/// Fold one answer from the poller's inspection round into the cache, and
-/// say why the round has to stop, if it does: a 429, 401 or 403 refuses
-/// every page alike, and Google never reached refuses the rest too.
-fn settle(c: &mut InspectionCache, url: &str, answer: Result<(String, Inspection), Fail>, now: f64) -> Option<String> {
+/// What one inspection answer did to the cache.
+#[derive(Debug, PartialEq)]
+enum InspectionOutcome {
+    /// Google inspected the page. The verdict is the word to show.
+    Inspected(String),
+    /// A refusal about this page. Remembered, and a round continues.
+    Page(String),
+    /// A refusal about the quota or the token, or Google never reached.
+    /// Not remembered as this page's result: it was not about the page,
+    /// and remembering it would hide the page for a day. A round stops.
+    Round(String),
+}
+
+/// Fold one inspection answer into the cache. The poller's round and a
+/// press of `i` both come through here, so a 429 or an expired token is
+/// classified once.
+fn keep_inspection(c: &mut InspectionCache, url: &str, answer: Result<(String, Inspection), Fail>, now: f64) -> InspectionOutcome {
     match answer {
-        Ok((raw, i)) => c.record(url, now, raw, Ok(i)),
-        Err(f) if f.status == 429 || f.status == 401 || f.status == 403 || f.status == 0 => {
-            // Google never reached is a request never counted.
-            if f.status == 0 {
-                c.release(url);
-            } else {
-                c.abandon(url);
-            }
-            return Some(f.said);
+        Ok((raw, i)) => {
+            let verdict = i.verdict.clone();
+            c.record(url, now, raw, Ok(i));
+            InspectionOutcome::Inspected(verdict)
         }
-        Err(f) => c.record(url, now, String::new(), Err(f.said)),
+        // Google never reached is a request never counted.
+        Err(f) if f.status == 0 => {
+            c.release(url);
+            InspectionOutcome::Round(f.said)
+        }
+        // The quota, the token or the permission: every page would be
+        // refused the same way, so this is not the page's result.
+        Err(f) if matches!(f.status, 401 | 403 | 429) => {
+            c.abandon(url);
+            InspectionOutcome::Round(f.said)
+        }
+        Err(f) => {
+            let said = f.said.clone();
+            c.record(url, now, String::new(), Err(f.said));
+            InspectionOutcome::Page(said)
+        }
     }
-    None
+}
+
+/// Fold one answer from the poller's inspection round into the cache, and
+/// say why the round has to stop, if it does.
+fn settle(c: &mut InspectionCache, url: &str, answer: Result<(String, Inspection), Fail>, now: f64) -> Option<String> {
+    match keep_inspection(c, url, answer, now) {
+        InspectionOutcome::Round(why) => Some(why),
+        InspectionOutcome::Inspected(_) | InspectionOutcome::Page(_) => None,
+    }
 }
 
 /// Put one site's reading on screen, folded over what was there.
@@ -270,7 +317,7 @@ fn publish(shared: &Arc<Mutex<Shared>>, params: &Params, data: &SiteData) {
 
 /// One refresh of every property.
 fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches: &Caches) {
-    let (_, client) = match signed_in(cfg) {
+    let (cred, mut client) = match signed_in(cfg) {
         Ok(ok) => ok,
         Err(why) => {
             if let Ok(mut g) = shared.lock() {
@@ -304,6 +351,13 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
         if problem.is_some() {
             continue;
         }
+        // Again before each property, not only at the start of the round.
+        if let Err(why) = refresh_bearer(&cred, &mut client) {
+            if let Ok(mut g) = shared.lock() {
+                g.err = why;
+            }
+            return;
+        }
         let mut data = if permission == "siteUnverifiedUser" {
             let mut d = SiteData::new(&site, params);
             d.problem = Some(format!(
@@ -321,7 +375,7 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
         // every one of them. Then again with what inspecting had to say.
         publish(shared, params, &data);
         if data.problem.is_none() && cfg.inspect_top > 0 {
-            inspect_due(&client, &mut data, caches, cfg.inspect_top);
+            inspect_due(&cred, &mut client, &mut data, caches, cfg.inspect_top);
             publish(shared, params, &data);
         }
     }
@@ -844,20 +898,9 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
                     Err(_) => "! the inspection cache is unavailable".to_string(),
                     Ok(mut g) => {
                         let c = g.entry(site.clone()).or_default();
-                        let said = match answer {
-                            Ok((raw, i)) => {
-                                let verdict = i.verdict.clone();
-                                c.record(&url, tc::now(), raw, Ok(i));
-                                format!("✓ inspected: {}", verdict)
-                            }
-                            Err(f) if f.status == 0 => {
-                                c.release(&url);
-                                format!("! {}", f.said)
-                            }
-                            Err(f) => {
-                                c.record(&url, tc::now(), String::new(), Err(f.said.clone()));
-                                format!("! {}", f.said)
-                            }
+                        let said = match keep_inspection(c, &url, answer, tc::now()) {
+                            InspectionOutcome::Inspected(verdict) => format!("✓ inspected: {}", verdict),
+                            InspectionOutcome::Page(why) | InspectionOutcome::Round(why) => format!("! {}", why),
                         };
                         match save_cache(&site, c) {
                             Ok(()) => said,
@@ -1020,8 +1063,10 @@ mod tests {
         let refused = Err(Fail { status: 429, said: "429 quota".into() });
         assert_eq!(settle(&mut c, "https://example.com/a", refused, 11.0).as_deref(), Some("429 quota"));
         // Counted, and so in what the save that follows writes to disk.
+        // Not stored as the page's result: the quota refused every page.
         assert_eq!(c.used, 1);
         assert!(c.inflight.is_empty());
+        assert!(!c.pages.contains_key("https://example.com/a"));
         assert_eq!(parse_inspection_cache(&c.to_json()).used, 1);
         // Never reached: the slot comes back and the round still stops.
         c.reserve("https://example.com/b").unwrap();
@@ -1034,6 +1079,16 @@ mod tests {
         assert_eq!(settle(&mut c, "https://example.com/c", one, 13.0), None);
         assert_eq!(c.used, 2);
         assert!(c.pages.contains_key("https://example.com/c"));
+        // An expired token on `i` is the same classification: counted,
+        // because Google received it, and not this page's result for a day.
+        c.reserve("https://example.com/d").unwrap();
+        let expired = Err(Fail { status: 401, said: "401 the access token was refused".into() });
+        assert_eq!(
+            keep_inspection(&mut c, "https://example.com/d", expired, 14.0),
+            InspectionOutcome::Round("401 the access token was refused".into())
+        );
+        assert!(!c.pages.contains_key("https://example.com/d"));
+        assert_eq!(c.used, 3);
     }
 
     #[test]

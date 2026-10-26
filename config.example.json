@@ -175,7 +175,7 @@
     "refresh": 600.0,
     "_window_days_comment": "Complete days in each movers window, compared with the equal window before it. w switches between 7 and 28 while running.",
     "window_days": 7,
-    "_inspect_top_comment": "How many top pages by impressions are inspected once a day, plus as many pages that dropped to zero. 0 turns inspection off. Google allows 2,000 inspections a day per property.",
+    "_inspect_top_comment": "How many pages from the movers answer are inspected once a day, the ones with the most impressions, plus as many that dropped to zero. Search Analytics ranks by clicks and stops at 1,000; the INDEX HEALTH header says so when that cut the answer. 0 turns inspection off. Google allows 2,000 inspections a day per property.",
     "inspect_top": 25,
     "_search_type_comment": "Which Google results to read: web, image, video, news or discover. t steps through them while running.",
     "search_type": "web"

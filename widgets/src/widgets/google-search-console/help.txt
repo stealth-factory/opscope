@@ -27,7 +27,9 @@ page's Search Console link, and esc or left closes it.
 
 Inspection is bounded: the top inspect_top pages by impressions (25 by
 default) and as many that dropped to zero, each once a day, cached for 14
-days under $XDG_STATE_HOME/opscope/google-search-console/. The Page
+days under $XDG_STATE_HOME/opscope/google-search-console/. Search Analytics
+ranks pages by clicks and returns at most 1,000; when that cut the answer
+the header says the impressions ranking is among those. The Page
 Indexing report has no API, so the INDEX HEALTH section is that sample and
 says so.
 

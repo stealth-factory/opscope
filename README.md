@@ -340,8 +340,8 @@ Every widget reads optional settings from the first readable of
 the working directory, and `config.json` beside the binary.
 
 **Nothing has to be configured.** Every key is optional, and a key you leave
-out is not a gap — the widget uses the default built into it. Five widgets
-need a token before they can show you something; they are named under
+out is not a gap — the widget uses the default built into it. Six widgets
+need credentials before they can show you something; they are named under
 Credentials below. Every other widget starts on its own defaults.
 
 There are two ways in, and they write the same file.

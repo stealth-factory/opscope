@@ -117,7 +117,10 @@ the collection that shows them.
 **INDEX HEALTH** is built from URL Inspection, because **the API has no
 Page Indexing (Coverage) report**. The header says what was inspected - the
 top `inspect_top` pages by impressions plus as many pages that dropped to
-zero - and how much of the day's budget is spent. Rows that are not `PASS`
+zero - and how much of the day's budget is spent. Search Analytics returns
+pages ordered by clicks and stops at 1,000. When that cut the answer, the
+header says the impressions ranking is among those 1,000, because a page
+with many impressions and few clicks can sit past the cut. Rows that are not `PASS`
 name Google's own values (`coverageState`, `pageFetchState` such as
 `SOFT_404` or `BLOCKED_ROBOTS_TXT`, `indexingState`, a canonical Google chose
 over the page's own) and the crawl age; `PASS` rows collapse to a count. A

@@ -513,6 +513,20 @@ fn header_row(lead: &str, name: &str, cells: &[(&str, usize)], p: &Palette, w: u
 
 // ---------------------------------------------------------------- frame --
 
+/// What INDEX HEALTH says the set is.
+///
+/// An uncut page answer really is the top by impressions. A cut one is
+/// only the click-ranked first `MOVER_ROWS`, and the header says that
+/// rather than calling the slice the property's top pages.
+fn inspection_headline(movers: &[Mover], tops: usize, dropped: usize) -> String {
+    let which = if current_pages_cut(movers) {
+        format!("by impressions among the top {} by clicks", thousands(MOVER_ROWS as f64))
+    } else {
+        "top pages".into()
+    };
+    format!("{tops} {which} + {dropped} dropped, inspected daily")
+}
+
 fn wanted(needle: &str, texts: &[&str]) -> bool {
     needle.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(&needle.to_lowercase()))
 }
@@ -837,7 +851,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     rows.extend(heading(
         "INDEX HEALTH",
         vec![
-            (p.dim.as_str(), format!("{} top pages + {} dropped, inspected daily", tops, dropped)),
+            (p.dim.as_str(), inspection_headline(site.pages.value.as_ref().map(|m| m.rows.as_slice()).unwrap_or(&[]), tops, dropped)),
             (p.dim.as_str(), format!("{}/{} today", thousands(used as f64), thousands(DAILY_INSPECTIONS as f64))),
             (p.dim.as_str(), "not the Page Indexing report (no API)".into()),
             (p.dim.as_str(), showing(from, to, bad.len())),
@@ -1963,6 +1977,7 @@ mod tests {
         let b = list(&screen(&sites, &caches, &p, "", 0), &mut starts, &palette(), 140);
         let text: String = b.rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
         assert!(text.contains("3 top pages + 1 dropped, inspected daily"), "{text}");
+        assert!(!text.contains("among the top"), "three pages are the whole answer");
         assert!(text.contains("3/2,000 today"));
         assert!(text.contains("not the Page Indexing report (no API)"));
         assert!(text.contains("PASS   1 pages"));
@@ -1970,6 +1985,31 @@ mod tests {
         // PASS rows are not items; the FAIL and the refused one are.
         let inspected: Vec<_> = b.items.iter().filter(|(_, s)| *s == Section::Index).collect();
         assert_eq!(inspected.len(), 2);
+    }
+
+    #[test]
+    fn a_cut_page_answer_says_the_impressions_ranking_is_among_clicks() {
+        let mut d = site("sc-domain:example.com");
+        let mut cur: Vec<Row> = (0..MOVER_ROWS)
+            .map(|i| Row { keys: vec![format!("https://example.com/p{i}")], m: metrics(1_000.0 - i as f64, 10.0, 5.0) })
+            .collect();
+        cur[MOVER_ROWS - 1] = Row { keys: vec!["https://example.com/huge".into()], m: metrics(0.1, 1_000_000.0, 5.0) };
+        let rows = join_movers(&cur, &[]);
+        d.pages = Part::ok(Movers { rows, capped: true }, 1.0);
+        let sites = vec![d];
+        let caches = BTreeMap::new();
+        let p = params();
+        for w in WIDTHS {
+            let mut starts = [0; 6];
+            let b = list(&screen(&sites, &caches, &p, "", 0), &mut starts, &palette(), w);
+            assert_fits(&b.rows, w, "cut page answer");
+            let text: String = b.rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+            let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                text.contains("25 by impressions among the top 1,000 by clicks + 0 dropped, inspected daily"),
+                "{w}: {text}"
+            );
+        }
     }
 
     #[test]

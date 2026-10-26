@@ -853,9 +853,21 @@ impl InspectionCache {
     }
 }
 
-/// The pages worth inspecting: the top `top` by impressions in the
-/// current window, then up to `top` that dropped to zero, by what they
+/// Whether the current window's pages are only the click-ranked first
+/// `MOVER_ROWS`. Search Analytics returns rows ordered by clicks and has
+/// no other order, so a page with many impressions and few clicks can sit
+/// past that cut and never enter [`inspection_set`].
+pub fn current_pages_cut(movers: &[Mover]) -> bool {
+    movers.iter().filter(|m| m.cur.is_some()).count() >= MOVER_ROWS
+}
+
+/// The pages worth inspecting: the top `top` by impressions among the
+/// pages in `movers`, then up to `top` that dropped to zero, by what they
 /// had before. Returns the set and how many of each.
+///
+/// `movers` is the page answer already fetched for the movers table.
+/// When [`current_pages_cut`] is true that answer stopped at `MOVER_ROWS`
+/// click-ranked rows, and the impressions ranking is only among those.
 pub fn inspection_set(movers: &[Mover], top: usize) -> (Vec<String>, usize, usize) {
     let mut current: Vec<&Mover> = movers.iter().filter(|m| m.cur.is_some()).collect();
     current.sort_by(|a, b| {
@@ -1342,6 +1354,21 @@ mod tests {
         assert_eq!(set, vec!["/b", "/a", "/y", "/x"]);
         assert_eq!((tops, dropped), (2, 2));
         assert_eq!(inspection_set(&m, 0), (Vec::new(), 0, 0));
+        assert!(!current_pages_cut(&m));
+    }
+
+    #[test]
+    fn a_cut_page_answer_ranks_impressions_only_inside_it() {
+        // Click-ranked, as Google sends them. The last row has the
+        // impressions; a page past the cut is not in the answer at all.
+        let mut cur: Vec<Row> = (0..MOVER_ROWS).map(|i| row(&format!("/p{i}"), 1_000.0 - i as f64, 10.0, 5.0)).collect();
+        cur[MOVER_ROWS - 1] = row("/huge", 0.1, 1_000_000.0, 5.0);
+        let m = join_movers(&cur, &[]);
+        assert!(current_pages_cut(&m));
+        let (set, tops, dropped) = inspection_set(&m, 1);
+        assert_eq!(set, vec!["/huge".to_string()]);
+        assert_eq!((tops, dropped), (1, 0));
+        assert!(set.iter().all(|u| u != "/not-returned"));
     }
 
     #[test]
