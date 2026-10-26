@@ -24,6 +24,7 @@ mod dependencies;
 pub mod google;
 pub mod notices;
 mod settings;
+pub mod statefile;
 mod terminal;
 mod graphics;
 mod shm;
@@ -39,6 +40,7 @@ pub use dependencies::{
     unsatisfied_required,
 };
 pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use statefile::state_dir;
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;

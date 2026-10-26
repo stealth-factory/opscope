@@ -108,8 +108,11 @@ wrong first.
   collapses into a `[!] 1 error, 2 warnings` hint coloured by the worst
   level for as long as it is true. `!` opens the core-drawn screen in every
   widget, as `,` opens settings, to read each one whole and dismiss it for
-  the session; a dismissed notice is listed there and can be restored, so
-  it is never lost.
+  the session, for 7 days or for 30 - an error for the session only, since
+  it is the one level that should not go quiet for a month. A dismissal
+  for days is shared by every widget through one `notices.json`, and any
+  dismissed notice is listed there and can be restored, so it is never
+  lost.
 
 ## Where these are enforced
 

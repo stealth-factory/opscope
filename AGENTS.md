@@ -180,7 +180,11 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   `tc::notices::start()` in `main`, puts `tc::notices::hint()` in its footer
   and `tc::notices::banner_rows()` above it, and answers `!` with
   `tc::notices::run()`, as `,` opens settings. A dead poller keeps its body
-  row and raises no notice.
+  row and raises no notice. On that screen a notice is dismissed for this
+  session, for 7 days or for 30; the two for days go to one `notices.json`
+  under `tc::state_dir()` that every widget reads again each minute, so a
+  Core notice dismissed in one pane goes quiet in all of them. An error is
+  dismissed for the session only.
 - `widgets/src/launcher/` is the source for the public `opscope` command.
   It is the launcher, not a widget, and does not count as one.
 
