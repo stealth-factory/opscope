@@ -105,6 +105,7 @@ Every failure is a named row, never an empty table:
 | `pgup` `pgdn` `home` `end` | scroll a screen, or go to either end |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
 | `q` | quit |
 
 In the news view, `↑` `↓` select a story, `c` copies its URL, and `esc`, `←` or

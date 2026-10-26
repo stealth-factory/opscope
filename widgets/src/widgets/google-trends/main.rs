@@ -1249,7 +1249,11 @@ fn footer(
 ) -> (tc::Footer, Vec<String>) {
     let coloured: Vec<Vec<(&str, String)>> = hints
         .iter()
-        .map(|h| h.iter().map(|(_, t)| (p.dim.as_str(), t.clone())).collect())
+        .map(|h| {
+            h.iter()
+                .map(|(c, t)| (if c.is_empty() { p.dim.as_str() } else { *c }, t.clone()))
+                .collect()
+        })
         .collect();
     let packed = tc::pack_hints_placed(&coloured, cw.saturating_sub(1), "  ");
     let lines = packed
@@ -1279,6 +1283,7 @@ fn main() {
     ) {
         return;
     }
+    tc::notices::start("google-trends");
     let cfg = tc::load_config("google_trends");
     let mut refresh = tc::poll_secs(
         tc::cfg_f64(&cfg, "refresh", DEFAULT_REFRESH),
@@ -1546,6 +1551,10 @@ fn main() {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
+                    continue;
+                }
                 "/" => {
                     view.typing = true;
                 }
@@ -1691,7 +1700,7 @@ fn main() {
             &p.title,
             activity.tick(tc::animation_tick()),
         );
-        let (body, hints) = match &detail {
+        let (body, mut hints) = match &detail {
             Some(d) => (detail_body(d, cw, now, &p), detail_hints()),
             None => (
                 list_body(&snapshot, &view, refresh, cw, now, &p),
@@ -1711,8 +1720,18 @@ fn main() {
             }
             body.cursor = body.cursor.map(|c| c + n);
         }
+        if let Some(counter) = tc::notices::hint(cw.saturating_sub(2)) {
+            let at = hints
+                .iter()
+                .position(|g| g.iter().any(|(_, t)| t == "[,] settings" || t == "[q]uit"))
+                .unwrap_or(hints.len());
+            hints.insert(at, counter);
+        }
         let (packed, foot) = footer(&hints, cw, &p);
-        room = h.saturating_sub(HEAD + foot.len()).max(1);
+        // The notices banner sits directly above the hints and counts as
+        // footer: the body window shrinks for it rather than running under.
+        let banner = tc::notices::banner_rows(cw, h);
+        room = h.saturating_sub(HEAD + banner.len() + foot.len()).max(1);
         if moved {
             if let Some(c) = body.cursor {
                 scroll = tc::follow(scroll, c, room);
@@ -1729,6 +1748,7 @@ fn main() {
         slots = body.slots.clone();
         let mut frame = vec![title];
         frame.extend(shown);
+        frame.extend(banner);
         let foot_top = frame.len();
         frame.extend(foot);
         tc::draw(&frame, w, h);
