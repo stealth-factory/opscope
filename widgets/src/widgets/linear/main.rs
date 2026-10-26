@@ -2641,6 +2641,9 @@ fn main() {
         // While the counters are for a window nobody asked for, the chart
         // dances rather than showing a number that is not the answer; when
         // the real one lands it eases in from where the dance left off.
+        // Bars that move every frame are text in every mode: an image of
+        // them would be re-sent whole on each frame they move.
+        let mut moving = stale;
         let (hu, hd, cu, cd) = if stale {
             let hu = spread(&tc::dance(days_list.len(), tick, 0.0));
             let hd = spread(&tc::dance(days_list.len(), tick, 2.1));
@@ -2658,6 +2661,7 @@ fn main() {
             match &settle_from {
                 Some((fu, fd)) if settle_t < SETTLE_FRAMES && fu.len() == chart_cols => {
                     settle_t += 1;
+                    moving = true;
                     let q = settle_t as f64 / SETTLE_FRAMES as f64;
                     let q = q * q * (3.0 - 2.0 * q);
                     (
@@ -2673,7 +2677,7 @@ fn main() {
         plots.extend([
             tc::Plot::bars(1, rows.len(), &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0, false),
             tc::Plot::bars(1, rows.len() + 4, &hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0, true),
-        ]);
+        ].map(|plot| if moving { plot.as_text() } else { plot }));
         for line in tc::vbars(
             &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(),
             3,
