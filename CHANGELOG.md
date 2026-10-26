@@ -3,6 +3,29 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.0.1] - 2026-10-26
+
+### Bug Fixes
+
+- **agent-usage**: Show Antigravity's Gemini quota after agy locked its local server (OPS-198)
+- **agent-usage**: Read transcripts incrementally instead of whole on every refresh (OPS-207) (#482)
+- **agent-usage**: Show Antigravity's Gemini quota after agy locked its local server (OPS-198) (#479)
+
+### Documentation
+
+- **agents**: Never push to main; every change goes through a PR
+
+### Performance
+
+- **agent-usage**: Read logs less, less often - windowed, gated, budgeted and persisted (OPS-208) (#485)
+- **core**: Draw meters and bars as eighth-cell text (OPS-203) (#477)
+- **core**: Draw loading placeholders as text, never an animated image (OPS-204) (#480)
+- **core**: Upload only the changed part of line charts and heatmaps (OPS-205) (#484)
+
+### Reverted
+
+- Undo the OPS-198 commit pushed straight to main (#478)
+
 ## [2.0.0] - 2026-10-24
 
 ### Bug Fixes
