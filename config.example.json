@@ -163,11 +163,11 @@
   },
   "google_search_console": {
     "_comment": "Google Search Console through a service-account key: hourly search traffic, the pages and queries that moved, the search terms that land on the site, URL Inspection of the pages that matter, and sitemaps. Read-only (webmasters.readonly). docs/google-setup.md is the Google side.",
-    "_credentials_file_comment": "Path to the service-account JSON key, the same file google_analytics uses. Keep it chmod 600 and outside any repository. Wins over token and token_env.",
+    "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), the same file every Google widget uses. Keep it chmod 600 and outside any repository. Wins over token and token_env.",
     "credentials_file": "",
     "_token_comment": "A pre-minted access token, for an hour of testing; Google tokens last one hour and this one is not renewed. Leave empty to read token_env.",
     "token": "",
-    "_token_env_comment": "Environment variable holding a pre-minted access token.",
+    "_token_env_comment": "Environment variable holding a pre-minted access token, read when token is empty.",
     "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN",
     "_sites_comment": "Properties exactly as Search Console names them: sc-domain:example.com for a domain property, or https://example.com/ with its trailing slash for a URL prefix. Empty reads every property the account can see.",
     "sites": [],
