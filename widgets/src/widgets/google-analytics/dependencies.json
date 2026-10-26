@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Every figure comes from Google's Analytics Data and Admin APIs over HTTPS, and the sign-in goes to Google's token endpoint."
+    }
+  },
+  "recommended": {}
+}
