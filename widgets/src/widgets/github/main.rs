@@ -939,6 +939,7 @@ fn fetch_land_timing(
     expected: i64,
     tok: &str,
     scopes: &Arc<Mutex<Scopes>>,
+    gql_url: &str,
 ) -> Result<Timed, String> {
     if expected <= 0 {
         return Ok(Timed {
@@ -958,6 +959,7 @@ fn fetch_land_timing(
             &build_merged_page_query(&q, &since, cursor.as_deref()),
             tok,
             scopes,
+            gql_url,
         )?;
         let page = parse::parse_merged_search_page(&raw.to_string())
             .ok_or_else(|| "unreadable merged page".to_string())?;
@@ -967,7 +969,7 @@ fn fetch_land_timing(
             want = want.max(live);
         }
         for mut pr in page.prs {
-            if !fill_reviews(&mut pr, tok, scopes, &mut budget) {
+            if !fill_reviews(&mut pr, tok, scopes, gql_url, &mut budget) {
                 retry = true;
             }
             prs.push(pr);
@@ -1002,6 +1004,7 @@ fn fill_reviews(
     pr: &mut parse::MergedPr,
     tok: &str,
     scopes: &Arc<Mutex<Scopes>>,
+    gql_url: &str,
     budget: &mut usize,
 ) -> bool {
     if !pr.reviews_incomplete || pr.id.is_empty() {
@@ -1021,8 +1024,12 @@ fn fill_reviews(
             return true;
         }
         *budget -= 1;
-        let Ok(raw) = graphql(&build_reviews_page_query(&pr.id, cursor.as_deref()), tok, scopes)
-        else {
+        let Ok(raw) = graphql(
+            &build_reviews_page_query(&pr.id, cursor.as_deref()),
+            tok,
+            scopes,
+            gql_url,
+        ) else {
             return false;
         };
         let Some((more, has_next, next)) = parse::parse_review_page(&raw.to_string()) else {
@@ -1550,7 +1557,6 @@ fn age_since(iso: &str) -> String {
 
 const OLDEST_WANTED: usize = 10;
 
-const API: &str = "https://api.github.com/graphql";
 const WINDOWS: &[i64] = &[7, 14, 30, 60, 90];
 /// A full year, like the calendar on github.com.
 const CONTRIB_WEEKS: i64 = 52;
@@ -1583,6 +1589,28 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", ""),
+    )
+}
+
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
 /// The open PRs that have been open longest, for one account.
 ///
 /// The board and the row are built entirely from `issueCount` aggregates,
@@ -1600,6 +1628,7 @@ fn pr_url(node: &serde_json::Value) -> String {
 }
 
 fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
+    let gql_url = tc::github_graphql_url(api_host());
     let q = scope_of(acc, viewer);
     let query = format!(
         r#"{{
@@ -1619,7 +1648,7 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
         q = q,
         n = OLDEST_WANTED
     );
-    match graphql(&query, tok, scopes) {
+    match graphql(&query, tok, scopes, &gql_url) {
         Ok(v) => v["data"]["search"]["nodes"].clone(),
         Err(e) => serde_json::json!({ "_error": e }),
     }
@@ -2110,10 +2139,11 @@ fn graphql(
     query: &str,
     tok: &str,
     scopes: &Arc<Mutex<Scopes>>,
+    gql_url: &str,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
     let (text, headers) = tc::post_json(
-        API,
+        gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),
@@ -2557,9 +2587,11 @@ fn one_pass(
     day_cache: &mut HashMap<String, HashMap<String, (i64, i64)>>,
     state: &Arc<Mutex<State>>,
     scopes: &Arc<Mutex<Scopes>>,
+    host: Option<&str>,
 ) -> Result<(), String> {
+    let gql_url = tc::github_graphql_url(host);
     if viewer.is_empty() {
-        let who = graphql("{ viewer { login } }", tok, scopes)?;
+        let who = graphql("{ viewer { login } }", tok, scopes, &gql_url)?;
         // An errors envelope has no data.viewer, and `unwrap_or("")` turned
         // that into an empty login the pass then carried on with - every
         // query after it silently scoped to nobody. Unreadable rendered as
@@ -2592,7 +2624,7 @@ fn one_pass(
         // the cursor is followed to the end.
         let mut cursor: Option<String> = None;
         loop {
-            let d = graphql(&orgs_query(cursor.as_deref()), tok, scopes)?;
+            let d = graphql(&orgs_query(cursor.as_deref()), tok, scopes, &gql_url)?;
             let conn = &d["data"]["viewer"]["organizations"];
             accounts.extend(
                 conn["nodes"]
@@ -2624,7 +2656,7 @@ fn one_pass(
 
     // The calendar is best-effort: it is decoration beside the counts, and a
     // fine-grained token that cannot read it should not blank the board.
-    if let Ok(cal) = graphql(&contribution_query(CONTRIB_WEEKS), tok, scopes) {
+    if let Ok(cal) = graphql(&contribution_query(CONTRIB_WEEKS), tok, scopes, &gql_url) {
         let found = cal["data"]["viewer"]["contributionsCollection"]["contributionCalendar"].clone();
         if !found.is_null() {
             if let Ok(mut g) = state.lock() {
@@ -2677,7 +2709,7 @@ fn one_pass(
     }
     publish(state, &accounts, &by_acc, rate);
     for acc in &accounts {
-        let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes) {
+        let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes, &gql_url) {
             Ok(d) => d,
             Err(e) => {
                 // Fifty characters, which is what the branch below used to
@@ -2759,7 +2791,7 @@ fn one_pass(
             .collect();
         let mut chunk_err = None;
         for chunk in want.chunks(DAY_CHUNK) {
-            let dd = match graphql(&build_day_query(&scope_of(acc, viewer), chunk), tok, scopes) {
+            let dd = match graphql(&build_day_query(&scope_of(acc, viewer), chunk), tok, scopes, &gql_url) {
                 Ok(d) => d["data"].clone(),
                 Err(e) => {
                     chunk_err.get_or_insert(e);
@@ -2804,7 +2836,7 @@ fn one_pass(
             continue;
         }
         let expected = row.merged;
-        match fetch_land_timing(acc, viewer, days_now, expected, tok, scopes) {
+        match fetch_land_timing(acc, viewer, days_now, expected, tok, scopes, &gql_url) {
             Ok(got) => {
                 if let Ok(mut g) = state.lock() {
                     g.timing_overlay
@@ -2922,6 +2954,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_scopes = Arc::clone(&scopes);
     let poller_activity = activity.clone();
+    let _ = API_HOST.set(enterprise_host(&cfg));
     std::thread::spawn(move || {
         let mut viewer = String::new();
         let mut day_cache: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
@@ -2941,6 +2974,7 @@ fn main() {
                     &mut day_cache,
                     &poller,
                     &poller_scopes,
+                    api_host(),
                 ) {
                     if let Ok(mut g) = poller.lock() {
                         g.err = said;
@@ -3742,9 +3776,18 @@ fn main() {
                         let asking = Arc::clone(&timing_asking);
                         let backoff = Arc::clone(&timing_backoff);
                         let timing_activity = activity.clone();
+                        let timing_gql = tc::github_graphql_url(api_host());
                         std::thread::spawn(move || {
                             let _work = timing_activity.start();
-                            match fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes) {
+                            match fetch_land_timing(
+                                &acc,
+                                &viewer,
+                                days,
+                                expected,
+                                &tok,
+                                &scopes,
+                                &timing_gql,
+                            ) {
                                 Ok(got) => {
                                     if let Ok(mut g) = poll.lock() {
                                         g.timing_overlay
