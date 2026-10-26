@@ -535,6 +535,9 @@ fn main() {
     // selection. The wheel writes the window and never the flag, so the
     // list stops chasing the cursor the moment it is turned.
     let (mut lscroll, mut moved) = (0usize, false);
+    // Each screen's chart axis, held between frames so a new sample does not
+    // rescale it. See `tc::StickyRange`.
+    let (mut list_range, mut detail_range) = (tc::StickyRange::default(), tc::StickyRange::default());
 
     loop {
         // Read before the keys rather than after them, so a page key knows
@@ -747,6 +750,7 @@ fn main() {
                 activity.tick(tc::animation_tick()),
                 &p,
                 &mut plots,
+                &mut detail_range,
             );
             drop(guard);
             // The body is as tall as it needs to be and the pane shows a
@@ -846,6 +850,7 @@ fn main() {
                 refresh,
                 &p,
                 &mut plots,
+                &mut list_range,
             ));
             rows.push(tc::seg(
                 &[
@@ -1159,6 +1164,7 @@ fn detail_view(
     busy: Option<usize>,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    range: &mut tc::StickyRange,
 ) -> Vec<String> {
     let empty = Vec::new();
     let users = state.names.get(&row.ip).unwrap_or(&empty);
@@ -1391,6 +1397,7 @@ fn detail_view(
             refresh,
             p,
             plots,
+            range,
         ));
         rows.push(tc::seg(
             &[
@@ -1438,6 +1445,7 @@ fn graph(
     refresh: f64,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
+    range: &mut tc::StickyRange,
 ) -> Vec<String> {
     let gw = w.saturating_sub(9).max(10);
     let gh = h.max(4);
@@ -1461,21 +1469,25 @@ fn graph(
     if series.is_empty() {
         return vec![tc::seg(&[(p.dim.as_str(), "  collecting…".into())], w - 1)];
     }
-    let lo = series
+    let least = series
         .iter()
         .flat_map(|(_, v)| v.iter())
         .cloned()
         .fold(f64::INFINITY, f64::min)
-        .max(0.05)
-        * 0.8;
-    let hi = (series
+        .max(0.05);
+    let most = series
         .iter()
         .flat_map(|(_, v)| v.iter())
         .cloned()
-        .fold(0.0f64, f64::max)
-        * 1.25)
-        .max(lo * 1.6);
-    let (llo, lhi) = (lo.log10(), hi.log10());
+        .fold(0.0f64, f64::max);
+    let lo = least * 0.8;
+    let hi = (most * 1.25).max(lo * 1.6);
+    // The axis holds while the samples fit it, so a new sample moves the
+    // end of the line rather than rescaling the whole chart.
+    let (llo, lhi) = range.hold(
+        (least.log10(), most.max(1e-3).log10()),
+        (lo.log10(), hi.log10()),
+    );
 
     // The axis holds as many samples as the longest session has, which is
     // the same number plotted_span turns into the "N ago" beneath the chart:
@@ -1493,7 +1505,7 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart));
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).on_axis(llo, lhi));
     let mut out = Vec::new();
     for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
@@ -1804,6 +1816,7 @@ mod tests {
             None,
             &palette(),
             &mut Vec::new(),
+            &mut tc::StickyRange::default(),
         )
             .iter()
             .map(|line| plain(line))
@@ -1851,6 +1864,7 @@ mod tests {
             None,
             &palette(),
             &mut Vec::new(),
+            &mut tc::StickyRange::default(),
         )
             .iter()
             .map(|line| plain(line))
