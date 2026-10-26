@@ -2906,6 +2906,15 @@ fn split_github_host_port(host: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Whether `hostname` is called the way GitHub Enterprise Server is.
+///
+/// Server ships its own schema releases, so a field github.com and
+/// `*.ghe.com` both have can be missing there. A widget that asks for one
+/// checks this first and leaves it out.
+pub fn github_host_is_server(hostname: Option<&str>) -> bool {
+    matches!(classify_github_host(hostname), GithubHostKind::Server(_))
+}
+
 /// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
 ///
 /// A `*.ghe.com` tenant is called at `https://api.<host>/graphql`. Any other
@@ -3965,6 +3974,10 @@ mod github_api_tests {
             "https://api.acme.ghe.com/graphql"
         );
         assert_eq!(normalize_github_hostname("Http://ghe.example.com/"), "ghe.example.com");
+        assert!(github_host_is_server(Some("ghe.example.com")));
+        assert!(!github_host_is_server(Some("acme.ghe.com")));
+        assert!(!github_host_is_server(Some("github.com")));
+        assert!(!github_host_is_server(None));
     }
 
     struct RestoreEnv {

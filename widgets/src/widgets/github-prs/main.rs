@@ -175,6 +175,20 @@ fn api_host() -> Option<&'static str> {
     API_HOST.get().and_then(|h| h.as_deref())
 }
 
+/// `query` with `field` taken out when this run talks to Enterprise Server.
+///
+/// Native stacks are a github.com feature, and a Server schema without
+/// `stack` refuses the whole query, which would leave the detail screen
+/// unable to open at all. Without the field the stack is inferred from
+/// branches, as it already is for a stack not made with `gh stack`.
+fn for_this_host(query: &str, field: &str) -> String {
+    if tc::github_host_is_server(api_host()) {
+        query.replacen(field, "", 1)
+    } else {
+        query.to_string()
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rate {
     /// Remaining and the ceiling it is measured against. A bare remaining
@@ -329,7 +343,7 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
     for chunk in ids.chunks(50) {
         let query = format!(
             "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
-            PR_HEAVY_FIELDS
+            for_this_host(PR_HEAVY_FIELDS, STACK_ENTRY_FIELD)
         );
         let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
             // A failed chunk must not look like "no CI". ready_to_merge
@@ -418,6 +432,15 @@ fn list_query(queries: &[String], limit: usize, cursors: &[Option<String>]) -> S
     }
     format!("{{ {} }}", parts.join(" "))
 }
+
+/// The part of [`PR_HEAVY_FIELDS`] an Enterprise Server may not have.
+const STACK_ENTRY_FIELD: &str = "stackEntry { position stack { number size } }";
+
+/// The part of [`DETAIL_QUERY`] an Enterprise Server may not have.
+const DETAIL_STACK_FIELD: &str = "stack { number size baseRefName
+        entries(first: 40) { nodes { position pullRequest {
+          number title isDraft reviewDecision mergeable
+          additions deletions author { login } headRefName } } } }";
 
 const DETAIL_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!) {
@@ -1112,7 +1135,7 @@ fn fetch_detail(
         g.stage("pull request, checks, reviews", false);
     }
     let d = graphql(
-        DETAIL_QUERY,
+        &for_this_host(DETAIL_QUERY, DETAIL_STACK_FIELD),
         tok,
         serde_json::json!({ "owner": owner, "name": name, "number": num }),
     )?;
@@ -4131,6 +4154,20 @@ mod tests {
         assert!(!worth_retrying(
             "Field 'stackEntry' doesn't exist on type 'PullRequest'"
         ));
+    }
+
+    #[test]
+    fn the_stack_fields_left_out_on_enterprise_server_are_in_the_queries() {
+        // Taking a field out is a text replacement, so a query edited
+        // without its constant would quietly keep asking a Server schema
+        // for `stack` and fail there again.
+        assert_eq!(PR_HEAVY_FIELDS.matches(STACK_ENTRY_FIELD).count(), 1);
+        assert_eq!(DETAIL_QUERY.matches(DETAIL_STACK_FIELD).count(), 1);
+        let without = DETAIL_QUERY.replacen(DETAIL_STACK_FIELD, "", 1);
+        assert!(!without.contains("stack"));
+        assert_eq!(without.matches('{').count(), without.matches('}').count());
+        let heavy = PR_HEAVY_FIELDS.replacen(STACK_ENTRY_FIELD, "", 1);
+        assert!(!heavy.contains("stack"));
     }
 
     #[test]
