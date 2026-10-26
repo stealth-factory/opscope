@@ -100,6 +100,17 @@ fn token(gha: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", "GITHUB_ENTERPRISE_HOSTNAME"),
+    )
+}
+
 fn graphql(
     query: &str,
     tok: &str,
@@ -1373,7 +1384,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
     } else {
         tc::load_config("github_actions")
     };
-    let rest_base = tc::github_rest_base_url(tc::github_enterprise_hostname(&cfg).as_deref());
+    let rest_base = tc::github_rest_base_url(enterprise_host(&cfg).as_deref());
     let repo = text(run, "repo");
     let id = run["id"].as_i64().unwrap_or(0);
     let Some((owner, name)) = split_repo(&repo) else {
@@ -1705,7 +1716,7 @@ fn main() {
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
     let poll_env = env_name.clone();
-    let poll_host = tc::github_enterprise_hostname(&cfg);
+    let poll_host = enterprise_host(&cfg);
     std::thread::spawn(move || loop {
         let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
         if poll_tok.is_empty() {

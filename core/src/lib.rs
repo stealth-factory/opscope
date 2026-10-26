@@ -2802,7 +2802,7 @@ pub fn get_answer(
 /// Default env var for [`github_enterprise_hostname`] when `enterprise_hostname` is empty.
 pub const GITHUB_ENTERPRISE_HOST_ENV: &str = "GITHUB_ENTERPRISE_HOSTNAME";
 
-/// Strip a URL down to a hostname suitable for GitHub Enterprise Cloud API paths.
+/// Strip a URL down to a hostname, keeping a numeric port.
 pub fn normalize_github_hostname(raw: &str) -> String {
     let raw = raw.trim();
     let host = raw
@@ -2816,41 +2816,112 @@ pub fn normalize_github_hostname(raw: &str) -> String {
     host.to_string()
 }
 
-/// Enterprise Cloud hostname from config, then from the named environment variable.
+/// Hostname from the widget's `enterprise_hostname`, then from the named env var.
 ///
-/// Empty means the public github.com API (`api.github.com`).
-pub fn github_enterprise_hostname(cfg: &serde_json::Value) -> Option<String> {
-    let direct = cfg_str(cfg, "enterprise_hostname", "");
-    if !direct.is_empty() {
-        return Some(normalize_github_hostname(&direct));
+/// Widgets read both keys with `cfg_str` and pass them here. An empty hostname
+/// reads `env_name`, and an empty name reads [`GITHUB_ENTERPRISE_HOST_ENV`].
+/// Empty after that means the public github.com API (`api.github.com`).
+pub fn github_enterprise_hostname(hostname: &str, env_name: &str) -> Option<String> {
+    if !hostname.trim().is_empty() {
+        let host = normalize_github_hostname(hostname);
+        if !host.is_empty() {
+            return Some(host);
+        }
     }
-    let env_name = cfg_str(cfg, "enterprise_hostname_env", GITHUB_ENTERPRISE_HOST_ENV);
-    let env_name = if env_name.is_empty() {
+    let env_name = if env_name.trim().is_empty() {
         GITHUB_ENTERPRISE_HOST_ENV
     } else {
-        env_name.as_str()
+        env_name.trim()
     };
     match std::env::var(env_name) {
-        Ok(value) if !value.trim().is_empty() => Some(normalize_github_hostname(&value)),
+        Ok(value) if !value.trim().is_empty() => {
+            let host = normalize_github_hostname(&value);
+            if host.is_empty() { None } else { Some(host) }
+        }
         _ => None,
     }
 }
 
-/// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
-pub fn github_graphql_url(hostname: Option<&str>) -> String {
-    match hostname.filter(|h| !h.is_empty()) {
-        Some(h) => format!("https://{}/api/graphql", h),
-        None => "https://api.github.com/graphql".to_string(),
+/// Where a configured GitHub host is actually called.
+enum GithubHostKind {
+    /// `api.github.com`, including a hostname of `github.com` or `api.github.com`.
+    Public,
+    /// Enterprise Cloud with data residency. `host` is `api.<tenant>.ghe.com`.
+    Cloud(String),
+    /// Any other host, called the way GitHub Enterprise Server is.
+    Server(String),
+}
+
+fn classify_github_host(hostname: Option<&str>) -> GithubHostKind {
+    let Some(raw) = hostname.filter(|h| !h.trim().is_empty()) else {
+        return GithubHostKind::Public;
+    };
+    let normalized = normalize_github_hostname(raw);
+    if normalized.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let (name, port) = split_github_host_port(&normalized);
+    if name.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "github.com" || lower == "api.github.com" {
+        return GithubHostKind::Public;
+    }
+    let with_port = |api_name: &str| match port {
+        Some(p) => format!("{api_name}:{p}"),
+        None => api_name.to_string(),
+    };
+    // Data residency tenants are `*.ghe.com` on the web and `api.*.ghe.com` on the API.
+    // A host that already starts with `api.` is the API host; do not prefix it again.
+    if lower.ends_with(".ghe.com") {
+        if lower.starts_with("api.") {
+            GithubHostKind::Cloud(with_port(name))
+        } else {
+            GithubHostKind::Cloud(with_port(&format!("api.{name}")))
+        }
+    } else {
+        GithubHostKind::Server(with_port(name))
     }
 }
 
-/// REST API base URL for `hostname`, or github.com when `hostname` is absent.
+/// Split `host` or `host:port`. A colon inside the name is left alone.
+fn split_github_host_port(host: &str) -> (&str, Option<&str>) {
+    match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.is_empty()
+                && !name.contains(':')
+                && !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    }
+}
+
+/// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
 ///
-/// Enterprise Cloud serves REST under `/api/v3`; github.com uses `api.github.com` without that prefix.
+/// A `*.ghe.com` tenant is called at `https://api.<host>/graphql`. Any other
+/// enterprise host is called at `https://<host>/api/graphql`.
+pub fn github_graphql_url(hostname: Option<&str>) -> String {
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com/graphql".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}/graphql"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/graphql"),
+    }
+}
+
+/// REST API base for `hostname`, or github.com when `hostname` is absent.
+///
+/// A `*.ghe.com` tenant is called at `https://api.<host>`. Any other
+/// enterprise host is called at `https://<host>/api/v3`. Paths start with
+/// `/repos/...` either way.
 pub fn github_rest_base_url(hostname: Option<&str>) -> String {
-    match hostname.filter(|h| !h.is_empty()) {
-        Some(h) => format!("https://{}/api/v3", h),
-        None => "https://api.github.com".to_string(),
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/v3"),
     }
 }
 
@@ -3837,18 +3908,101 @@ mod github_api_tests {
     use super::*;
 
     #[test]
-    fn enterprise_cloud_urls_use_api_v3_rest() {
+    fn enterprise_cloud_urls_use_the_api_subdomain() {
         assert_eq!(
             github_graphql_url(Some("acme.ghe.com")),
-            "https://acme.ghe.com/api/graphql"
+            "https://api.acme.ghe.com/graphql"
         );
         assert_eq!(
             github_rest_base_url(Some("acme.ghe.com")),
-            "https://acme.ghe.com/api/v3"
+            "https://api.acme.ghe.com"
         );
         assert_eq!(
-            github_graphql_url(None),
-            "https://api.github.com/graphql"
+            github_graphql_url(Some("https://acme.ghe.com/api/v3")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("api.acme.ghe.com")),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("API.Acme.ghe.com")),
+            "https://API.Acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_graphql_url(Some("Acme.GHE.com:8443")),
+            "https://api.Acme.GHE.com:8443/graphql"
+        );
+        assert_eq!(github_graphql_url(None), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(None), "https://api.github.com");
+        assert_eq!(github_graphql_url(Some("")), "https://api.github.com/graphql");
+        assert_eq!(github_graphql_url(Some("github.com")), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(Some("api.github.com")), "https://api.github.com");
+    }
+
+    #[test]
+    fn other_enterprise_hosts_use_the_server_paths() {
+        assert_eq!(
+            github_graphql_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/v3"
+        );
+        assert_eq!(
+            normalize_github_hostname("https://acme.ghe.com/api/v3/"),
+            "acme.ghe.com"
+        );
+    }
+
+    struct RestoreEnv {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl RestoreEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn enterprise_hostname_prefers_config_then_env() {
+        let _held = RestoreEnv::set("OPSCOPE_TEST_GHE_HOST", "https://from-env.ghe.com/api");
+        assert_eq!(
+            github_enterprise_hostname(" https://from-config.ghe.com/ ", "OPSCOPE_TEST_GHE_HOST")
+                .as_deref(),
+            Some("from-config.ghe.com")
+        );
+        assert_eq!(
+            github_enterprise_hostname("  ", "OPSCOPE_TEST_GHE_HOST").as_deref(),
+            Some("from-env.ghe.com")
+        );
+        assert_eq!(github_enterprise_hostname("", "OPSCOPE_TEST_GHE_HOST_UNSET"), None);
+    }
+
+    #[test]
+    fn empty_hostname_env_name_reads_the_default_variable() {
+        let _held = RestoreEnv::set(GITHUB_ENTERPRISE_HOST_ENV, "default-var.ghe.com");
+        assert_eq!(
+            github_enterprise_hostname("", "").as_deref(),
+            Some("default-var.ghe.com")
+        );
+        assert_eq!(
+            github_enterprise_hostname("", "   ").as_deref(),
+            Some("default-var.ghe.com")
         );
     }
 }

@@ -12,8 +12,9 @@ The owned section is `github`.
 
 Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `window_days`, `refresh`
 
-For GitHub Enterprise Cloud, set `enterprise_hostname` to your instance host
-(for example `acme.ghe.com`), or set the environment variable named in
+For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
+to the web host (for example `acme.ghe.com`). Requests go to
+`https://api.acme.ghe.com`. Or set the environment variable named in
 `enterprise_hostname_env` (default `GITHUB_ENTERPRISE_HOSTNAME`). Empty uses
 the public github.com API.
 

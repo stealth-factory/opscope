@@ -1589,6 +1589,17 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", "GITHUB_ENTERPRISE_HOSTNAME"),
+    )
+}
+
 /// The open PRs that have been open longest, for one account.
 ///
 /// The board and the row are built entirely from `issueCount` aggregates,
@@ -1607,7 +1618,7 @@ fn pr_url(node: &serde_json::Value) -> String {
 
 fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
     let cfg = tc::load_config("github");
-    let gql_url = tc::github_graphql_url(tc::github_enterprise_hostname(&cfg).as_deref());
+    let gql_url = tc::github_graphql_url(enterprise_host(&cfg).as_deref());
     let q = scope_of(acc, viewer);
     let query = format!(
         r#"{{
@@ -2933,7 +2944,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_scopes = Arc::clone(&scopes);
     let poller_activity = activity.clone();
-    let poll_host = tc::github_enterprise_hostname(&cfg);
+    let poll_host = enterprise_host(&cfg);
     std::thread::spawn(move || {
         let mut viewer = String::new();
         let mut day_cache: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
@@ -3756,9 +3767,8 @@ fn main() {
                         let backoff = Arc::clone(&timing_backoff);
                         let timing_activity = activity.clone();
                         let timing_cfg = tc::load_config("github");
-                        let timing_gql = tc::github_graphql_url(
-                            tc::github_enterprise_hostname(&timing_cfg).as_deref(),
-                        );
+                        let timing_gql =
+                            tc::github_graphql_url(enterprise_host(&timing_cfg).as_deref());
                         std::thread::spawn(move || {
                             let _work = timing_activity.start();
                             match fetch_land_timing(

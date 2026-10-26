@@ -10,7 +10,13 @@ GitHub Actions APIs for the configured/discovered accounts and repositories.
 
 The owned section is `github_actions`. A legacy `gha` section is used only when `github_actions` is absent.
 
-Declared fields: `token`, `token_env`, `accounts`, `repos`, `window_hours`, `refresh`, `max_repos`, `pushed_days`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `repos`, `window_hours`, `refresh`, `max_repos`, `pushed_days`
+
+For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
+to the web host (for example `acme.ghe.com`). Requests go to
+`https://api.acme.ghe.com`. Or set the environment variable named in
+`enterprise_hostname_env` (default `GITHUB_ENTERPRISE_HOSTNAME`). Empty uses
+the public github.com API.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

@@ -153,6 +153,17 @@ fn token(pr_cfg: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", "GITHUB_ENTERPRISE_HOSTNAME"),
+    )
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rate {
     /// Remaining and the ceiling it is measured against. A bare remaining
@@ -230,7 +241,7 @@ fn graphql(
     } else {
         tc::load_config("github_prs")
     };
-    let gql_url = tc::github_graphql_url(tc::github_enterprise_hostname(&cfg).as_deref());
+    let gql_url = tc::github_graphql_url(enterprise_host(&cfg).as_deref());
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
     let (out, _headers) = tc::post_json(
         &gql_url,

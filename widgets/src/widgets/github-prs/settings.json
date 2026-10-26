@@ -16,7 +16,7 @@
   "token": "",
   "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
   "token_env": "GITHUB_TOKEN",
-  "_enterprise_hostname_comment": "GitHub Enterprise Cloud hostname (e.g. acme.ghe.com). Empty uses github.com.",
+  "_enterprise_hostname_comment": "Web hostname of a GitHub Enterprise Cloud tenant (for example acme.ghe.com). A *.ghe.com host is called at api.<host>. Empty uses github.com.",
   "enterprise_hostname": "",
   "_enterprise_hostname_env_comment": "Environment variable read when enterprise_hostname is empty.",
   "enterprise_hostname_env": "GITHUB_ENTERPRISE_HOSTNAME",
