@@ -2575,6 +2575,7 @@ mod tests {
         assert!(!plot.is_text());
         let (_, _, after) = compose(&rows, &[plot], 20, 10, true, false, true, false);
         assert!(after.contains("a=T"));
+        cleanup();
     }
 
     #[test]
