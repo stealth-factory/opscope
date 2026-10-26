@@ -263,9 +263,11 @@ fn forget_24h(row: &mut Account) {
 /// Any failed chunk fails the window, even when the cache still holds every
 /// day: the trailing days are asked again on every pass, so a full cache
 /// after a failure is yesterday's count wearing today's label. A failed
-/// window also gives up the one the row last counted, so the chart leaves
-/// the account out and names it rather than drawing the counts it kept.
-/// The days that were read stay cached for the next pass either way.
+/// window is not counted (see `counted`) even when the row still holds a
+/// count for it, so the chart leaves the account out and names it rather
+/// than drawing the counts it kept. `hist` and `hist_window` stay as they
+/// were, still describing each other, for the account's own screen. The
+/// days that were read stay cached for the next pass either way.
 fn settle_day_counts(
     row: &mut Account,
     days: i64,
@@ -277,7 +279,6 @@ fn settle_day_counts(
     if chunk_err.is_some() || !whole {
         let why = chunk_err.unwrap_or_else(|| "a day was not answered".into());
         row.hist_failed = Some((days, why.clone()));
-        row.hist_window = None;
         return Some(why);
     }
     row.hist = dates.iter().map(|x| (x.clone(), cache[x].0)).collect();
@@ -620,6 +621,18 @@ enum FlowHead {
     Counting { want: i64 },
 }
 
+/// This window's day-count failure for the account, if its last pass had one.
+fn failed(a: &Account, want: i64) -> Option<&(i64, String)> {
+    a.hist_failed.as_ref().filter(|(w, _)| *w == want)
+}
+
+/// Whether the account's day counts are a current count of `want` days. A
+/// row can hold a count for `want` from an earlier pass whose refresh has
+/// since failed; those numbers are not drawn as current.
+fn counted(a: &Account, want: i64) -> bool {
+    a.hist_window == Some(want) && failed(a, want).is_none()
+}
+
 /// Whether the PR-flow chart is still waiting for day counts, and the
 /// accounts it has given up on for this window with the reason.
 ///
@@ -627,14 +640,11 @@ enum FlowHead {
 /// back. Before, any failed chunk left it counting - dancing - until a
 /// later pass happened to succeed, and nothing on screen said why.
 fn flow_progress(stats: &[Account], want: i64) -> (bool, Vec<(String, String)>) {
-    fn failed(a: &Account, want: i64) -> Option<&(i64, String)> {
-        a.hist_failed.as_ref().filter(|(w, _)| *w == want)
-    }
     let waiting = stats.is_empty()
-        || stats.iter().any(|a| a.hist_window != Some(want) && failed(a, want).is_none());
+        || stats.iter().any(|a| !counted(a, want) && failed(a, want).is_none());
     let missing = stats
         .iter()
-        .filter(|a| a.hist_window != Some(want))
+        .filter(|a| !counted(a, want))
         .filter_map(|a| failed(a, want).map(|(_, why)| (a.account.clone(), why.clone())))
         .collect();
     (waiting, missing)
@@ -1450,7 +1460,7 @@ fn by_account_row(
         // Each account's own merged-per-day. The columns carry
         // totals but no shape, and a fortnight of nothing ending in
         // a spike reads very differently from a steady trickle.
-        if s.hist_window != Some(want) {
+        if !counted(s, want) {
             line.push((c(&p.grid), format!("  {}", "·".repeat(spark_days.len()))));
         } else {
             let top = s.hist.values().copied().max().unwrap_or(0);
@@ -3327,8 +3337,8 @@ fn main() {
         let mut merged_all: HashMap<String, i64> = HashMap::new();
         let mut opened_all: HashMap<String, i64> = HashMap::new();
         for st in &stats {
-            if st.hist_window != Some(want) {
-                continue; // covers a different window; adding it lies
+            if !counted(st, want) {
+                continue; // covers a different window, or failed; adding it lies
             }
             for (day, n) in &st.hist {
                 *merged_all.entry(day.clone()).or_insert(0) += n;
@@ -4240,8 +4250,12 @@ mod tests {
         // A failure for another window does not count for this one.
         let (stale, _) = flow_progress(&[done.clone(), failed.clone()], want + 7);
         assert!(stale);
-        // Nothing is left out once the account has this window's counts.
-        let recovered = Account { hist_window: Some(want), ..failed };
+        // A count kept from an earlier pass for this window is not current
+        // once this window's refresh failed: the account is still left out.
+        let kept = Account { hist_window: Some(want), ..failed.clone() };
+        assert_eq!(flow_progress(&[done.clone(), kept], want).1, missing);
+        // Nothing is left out once a pass lands this window's counts.
+        let recovered = Account { hist_window: Some(want), hist_failed: None, ..failed };
         assert_eq!(flow_progress(&[done, recovered], want), (false, Vec::new()));
         assert!(flow_progress(&[], want).0, "no accounts yet is still counting");
         // The reason reaches a row, wrapped to the pane rather than cut.
@@ -4272,9 +4286,9 @@ mod tests {
         let long = format!("HTTP 502 {}", "x".repeat(80));
         let why = settle_day_counts(&mut row, want, &dates, &cache, Some(long.clone()));
         assert_eq!(why.as_deref(), Some(long.as_str()));
-        // The window it last counted is given up, so the chart leaves the
+        // The count it kept is no longer current, so the chart leaves the
         // account out and names it, with the whole reason for the row.
-        assert_eq!(row.hist_window, None);
+        assert!(!counted(&row, want));
         assert_eq!(row.hist_failed, Some((want, long.clone())));
         assert_eq!(flow_progress(&[row.clone()], want), (false, vec![(String::new(), long)]));
         // A hole in the cache with no error still fails the window.
@@ -4282,10 +4296,10 @@ mod tests {
         short.remove("d2");
         let mut row = Account::default();
         assert!(settle_day_counts(&mut row, want, &dates, &short, None).is_some());
-        assert_eq!(row.hist_window, None);
+        assert!(!counted(&row, want));
         // And a clean pass clears the failure.
         assert_eq!(settle_day_counts(&mut row, want, &dates, &cache, None), None);
-        assert_eq!((row.hist_window, row.hist_failed), (Some(want), None));
+        assert!(counted(&row, want));
     }
 
     #[test]
