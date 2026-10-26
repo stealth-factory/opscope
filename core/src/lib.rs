@@ -2805,10 +2805,16 @@ pub const GITHUB_ENTERPRISE_HOST_ENV: &str = "GITHUB_ENTERPRISE_HOSTNAME";
 /// Strip a URL down to a hostname, keeping a numeric port.
 pub fn normalize_github_hostname(raw: &str) -> String {
     let raw = raw.trim();
-    let host = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-        .unwrap_or(raw)
+    // A scheme is case-insensitive, so `HTTPS://` is stripped like `https://`.
+    let lower = raw.to_ascii_lowercase();
+    let rest = if lower.starts_with("https://") {
+        &raw[8..]
+    } else if lower.starts_with("http://") {
+        &raw[7..]
+    } else {
+        raw
+    };
+    let host = rest
         .trim_end_matches('/')
         .split('/')
         .next()
@@ -3954,6 +3960,11 @@ mod github_api_tests {
             normalize_github_hostname("https://acme.ghe.com/api/v3/"),
             "acme.ghe.com"
         );
+        assert_eq!(
+            github_graphql_url(Some("HTTPS://acme.ghe.com")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(normalize_github_hostname("Http://ghe.example.com/"), "ghe.example.com");
     }
 
     struct RestoreEnv {

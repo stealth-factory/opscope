@@ -15,8 +15,8 @@ Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostna
 For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
 to the web host (for example `acme.ghe.com`). Requests go to
 `https://api.acme.ghe.com`. Or set the environment variable named in
-`enterprise_hostname_env` (default `GITHUB_ENTERPRISE_HOSTNAME`). Empty uses
-the public github.com API.
+`enterprise_hostname_env` (default `GITHUB_ENTERPRISE_HOSTNAME`). The public
+github.com API is used only when both are empty.
 
 `window_days` is the sample for HELD (closed in the window), R24 and T2D
 (merged in the window). It does not change the 24-hour first-review bar or
