@@ -432,7 +432,15 @@ impl Registry {
     /// first, since it outlasts one for this session.
     fn dismissal(&self, live: &Live, now: f64) -> Option<&Dismissal> {
         let key = self.key(&live.notice);
-        [self.kept.get(&key), self.dismissed.get(&key)]
+        // An error is dismissed for this session only. The hash covers the
+        // title and detail but not the level, so a warning dismissed for
+        // days would otherwise go on hiding the same notice once it became
+        // an error.
+        let kept = match live.notice.level {
+            Level::Error => None,
+            _ => self.kept.get(&key),
+        };
+        [kept, self.dismissed.get(&key)]
             .into_iter()
             .flatten()
             .find(|d| d.holds(live.hash, now))
@@ -487,7 +495,7 @@ impl Registry {
         self.raise(
             Notice::warn(
                 FILE_UNREADABLE,
-                format!("{} does not parse: {error}", path.display()),
+                format!("{} cannot be read: {error}", path.display()),
             )
             .detail(
                 "Dismissals for 7 or 30 days are read from this file and written \
@@ -580,16 +588,22 @@ impl Registry {
             at: now,
             until: Some(now + days * DAY),
         };
+        // Unsaved, it lasts as long as a session dismissal - until a restart,
+        // not for the days asked for - since that is what the screen says.
+        let session = Dismissal {
+            until: None,
+            ..dismissal.clone()
+        };
         let Some(path) = self.file.clone() else {
-            self.dismissed.insert(name, dismissal);
+            self.dismissed.insert(name, session);
             return Ok(());
         };
-        let entry = (name.clone(), dismissal.clone());
+        let entry = (name.clone(), dismissal);
         let result = self.persist(&path, now, move |kept| {
             kept.insert(entry.0, entry.1);
         });
         if !self.saved(&path, result, now) {
-            self.dismissed.insert(name, dismissal);
+            self.dismissed.insert(name, session);
         }
         Ok(())
     }
@@ -671,11 +685,16 @@ impl Registry {
         // Read first: another pane may have written this key since the
         // last load, and restoring here should take that back too.
         self.load(now);
-        if self.kept.remove(&key).is_some() {
+        if let Some(was) = self.kept.remove(&key) {
             let result = self.persist(&path, now, |kept| {
                 kept.remove(&key);
             });
-            self.saved(&path, result, now);
+            // A restore that could not be written did not happen: the next
+            // reload would hide the notice again. Keep the dismissal, and let
+            // the unwritable notice `saved` raised say why.
+            if !self.saved(&path, result, now) {
+                self.kept.insert(key, was);
+            }
         }
     }
 }
@@ -2088,6 +2107,60 @@ mod tests {
         std::fs::write(&file, "{\"version\":1,\"dismissed\":{}}").unwrap();
         r.reload_if_stale(NOW + 3.0 + RELOAD_SECS);
         assert!(!r.live.iter().any(|l| l.notice.id == FILE_UNREADABLE));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unsaved_dismissal_for_days_lasts_the_session_not_the_days() {
+        let dir = temp_dir("notices-unsaved");
+        let file = dir.join("notices.json");
+        std::fs::write(&file, "{\n").unwrap();
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::warn("a", "x"), NOW);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        // The screen says "this session", so a widget left running past the
+        // seven days must not bring it back.
+        let later = NOW + 8.0 * DAY;
+        assert!(!r.outstanding(later).iter().any(|l| l.notice.id == "a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restore_that_cannot_be_written_does_not_pretend_it_was() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes through the read-only directory below
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("notices-restore-ro");
+        let file = dir.join("notices.json");
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::warn("a", "x"), NOW);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        r.restore((Scope::Widget, "a"), NOW + 1.0);
+        // Right after the failed restore: not shown as restored, since the
+        // next reload would hide it again from the unchanged file.
+        let now: Vec<&str> = r.dismissed_live(NOW + 1.5).iter().map(|l| l.notice.id).collect();
+        r.reload_if_stale(NOW + 2.0 + RELOAD_SECS);
+        let later: Vec<&str> = r.dismissed_live(NOW + 3.0 + RELOAD_SECS).iter().map(|l| l.notice.id).collect();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(now, vec!["a"], "a restore that was not written is not shown as made");
+        assert_eq!(later, vec!["a"], "and the reload agrees");
+        assert!(r.live.iter().any(|l| l.notice.id == FILE_UNWRITABLE), "and the reason is a notice");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dismissal_saved_for_a_warning_does_not_hide_the_same_notice_as_an_error() {
+        let dir = temp_dir("notices-error-level");
+        let file = dir.join("notices.json");
+        let mut first = opened(&file, NOW);
+        first.raise(Notice::warn("a", "disk nearly full").detail("d"), NOW);
+        first.dismiss_for((Scope::Widget, "a"), 30.0, NOW).unwrap();
+        let mut second = opened(&file, NOW + 5.0);
+        second.raise(Notice::error("a", "disk nearly full").detail("d"), NOW + 5.0);
+        let ids: Vec<&str> = second.outstanding(NOW + 6.0).iter().map(|l| l.notice.id).collect();
+        assert_eq!(ids, vec!["a"], "the same title and detail, now an error, shows");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

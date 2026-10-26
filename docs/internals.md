@@ -124,9 +124,12 @@ poller to keep alive. `u` removes the entry from the file as well.
 A file that does not parse, or names a version this build does not know,
 is read as empty and **never overwritten**: a dismissal for days taken
 meanwhile holds for this session only, and the Core Warn
-`notices-file-unreadable` names the path and the error until the file
-parses again. A write that fails for another reason raises
-`notices-file-unwritable` and keeps the dismissal for the session.
+`notices-file-unreadable` says the path cannot be read, with the error, until
+it reads again; the same notice covers a file that cannot be opened at all.
+A write that fails for another reason raises `notices-file-unwritable` and
+keeps the dismissal for the session; a restore that cannot be written is not
+made. Errors ignore dismissals saved in the file, since a notice's hash does
+not include its level.
 
 ### State files
 
