@@ -207,6 +207,19 @@ fn save_memory(geo: &str, memory: &Memory) -> Result<(), String> {
     std::fs::rename(&tmp, dir.join(format!("{stem}.json"))).map_err(|e| e.to_string())
 }
 
+/// The memory note after a save: a failure replaces it, a success ends a
+/// failure, and the started-fresh notice goes once there is a fetch to compare with.
+fn note_after_save(note: Option<String>, saved: Result<(), String>, compared: bool) -> Option<String> {
+    match saved {
+        Err(why) => Some(format!("could not save what was seen ({why})")),
+        Ok(()) => match note {
+            Some(n) if n.starts_with("could not save") => None,
+            Some(n) if n.contains("started fresh") && compared => None,
+            other => other,
+        },
+    }
+}
+
 /// Percent-encode for a query string.
 fn encode(s: &str) -> String {
     let mut out = String::new();
@@ -1344,19 +1357,11 @@ fn main() {
                         };
                         apply(&mut region, answer, memory, now, refresh);
                         if got_items {
-                            match save_memory(geo, memory) {
-                                Ok(()) => {
-                                    // Said once, on the fetch that started fresh.
-                                    if note.as_deref().is_some_and(|n| n.contains("started fresh"))
-                                        && region.since.is_some()
-                                    {
-                                        *note = None;
-                                    }
-                                }
-                                Err(why) => {
-                                    *note = Some(format!("could not save what was seen ({why})"))
-                                }
-                            }
+                            *note = note_after_save(
+                                note.take(),
+                                save_memory(geo, memory),
+                                region.since.is_some(),
+                            );
                         }
                         region.memory_note = note.clone();
                         if let Ok(mut g) = poller.lock() {
@@ -1737,6 +1742,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_that_works_again_ends_the_warning() {
+        assert_eq!(
+            note_after_save(None, Err("disk full".into()), false).as_deref(),
+            Some("could not save what was seen (disk full)")
+        );
+        assert_eq!(
+            note_after_save(
+                Some("could not save what was seen (disk full)".into()),
+                Ok(()),
+                false
+            ),
+            None
+        );
+        // First fetch after starting fresh: nothing compared yet, the
+        // notice stays.
+        let fresh = || Some("saved history would not read (x), started fresh".to_string());
+        assert_eq!(note_after_save(fresh(), Ok(()), false), fresh());
+        assert_eq!(note_after_save(fresh(), Ok(()), true), None);
+        // A failure wins over every note it meets.
+        assert_eq!(
+            note_after_save(fresh(), Err("ro".into()), true).as_deref(),
+            Some("could not save what was seen (ro)")
+        );
+    }
 
     fn trend(title: &str, traffic: &str, started: Option<i64>, sources: &[&str]) -> Trend {
         Trend {
