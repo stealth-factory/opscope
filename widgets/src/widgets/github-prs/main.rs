@@ -1216,7 +1216,14 @@ fn fetch_detail(
                 // others branched off it - so the connectors are drawn
                 // properly rather than indenting by depth alone.
                 let mut stack = vec![(root, String::new(), true)];
+                // Two PRs whose head and base branches point at each other
+                // leave a cycle in `kids`; without this the walk pushes the
+                // pair forever and the rows grow until memory runs out.
+                let mut seen: HashSet<i64> = HashSet::new();
                 while let Some((num_at, prefix, last)) = stack.pop() {
+                    if !seen.insert(num_at) {
+                        continue;
+                    }
                     if let Some(node) = by_num.get(&num_at) {
                         rows.push((
                             format!("{}{}", prefix, if last { "└─ " } else { "├─ " }),
