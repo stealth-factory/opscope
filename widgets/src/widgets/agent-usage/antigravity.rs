@@ -223,6 +223,114 @@ fn agy_wait(pid: i32, master: libc::c_int) -> Result<Vec<serde_json::Value>, Str
     })
 }
 
+/// The first `agy` whose print mode answers `/usage` itself. Before it, a
+/// slash command print mode did not know could be sent on to a model as a
+/// prompt, which would spend the quota this is reading. CodexBar gates on
+/// the same release for the same reason.
+const AGY_USAGE_SINCE: (u32, u32, u32) = (1, 1, 11);
+
+/// How long `agy -p /usage` may take. Measured at about three and a half
+/// seconds here; the CLI's own `--print-timeout` is set below this so it
+/// gives up first and says so.
+const AGY_USAGE_WAIT: u64 = 60;
+
+/// A started `/usage` is a process and a language server booting, so its
+/// answer is held longer than the local probe's - and far shorter than the
+/// pty start's, since it costs no tokens and is over in seconds.
+const AGY_USAGE_TTL: f64 = 300.0;
+
+/// Weekly and five-hour limits for every group, from `agy`'s own `/usage`.
+///
+/// The one source left that carries the Gemini group. `agy` builds from
+/// October 2026 lock the local server behind a CSRF token they hand only to
+/// their own children, and Google's summary has never held that group, so
+/// for a while the tab could show Gemini only per model. The CLI still
+/// prints it: `agy -p /usage --output-format json` is a command, not a
+/// prompt - no turn, no tokens - and returns the same groups and buckets
+/// the server did. Found by reading how CodexBar does it.
+///
+/// Run in a private empty directory with `open` and `xdg-open` shadowed by
+/// stubs that fail, and `BROWSER` pointed at one: the CLI's sign-in path
+/// opens a browser through `PATH` even in print mode, and a widget polling
+/// in the background must never pop a login page. Its own process group,
+/// killed whole at the end, so the language server it boots cannot outlive
+/// the reading. Auto-update is off for the run - a poll is no time for the
+/// CLI to replace itself.
+fn agy_usage(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let version = tc::run(&[path, "--version"], 10)
+        .ok()
+        .and_then(|out| crate::parse::parse_agy_version(&out));
+    match version {
+        Some(v) if v >= AGY_USAGE_SINCE => {}
+        Some((a, b, c)) => {
+            return Err(format!(
+                "`agy` {}.{}.{} predates the `/usage` report - update it with `agy update`",
+                a, b, c
+            ))
+        }
+        None => return Err("`agy --version` did not answer with a version".into()),
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "opscope-agy-usage-{}-{}",
+        std::process::id(),
+        (now() * 1e6) as u64
+    ));
+    std::fs::create_dir(&dir).map_err(|e| format!("could not make a directory for `agy`: {}", e))?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    for stub in ["open", "xdg-open"] {
+        let at = dir.join(stub);
+        let _ = std::fs::write(&at, "#!/bin/sh\nexit 1\n");
+        let _ = std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700));
+    }
+    let shadowed = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+    );
+    let spawned = std::process::Command::new(path)
+        .args(["-p", "/usage", "--output-format", "json", "--print-timeout", "45s"])
+        .current_dir(&dir)
+        .env("PATH", shadowed)
+        .env("BROWSER", dir.join("open"))
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn();
+    let out = match spawned {
+        Err(e) => Err(format!("could not start `agy`: {}", e)),
+        Ok(child) => {
+            let group = child.id() as i32;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            });
+            let got = rx.recv_timeout(Duration::from_secs(AGY_USAGE_WAIT));
+            // SAFETY: the group is the child's own, made by process_group(0)
+            // above, so this reaches what it started and nothing else - a
+            // CLI the reader runs is in a group of its own.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            match got {
+                Ok(Ok(out)) => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+                Ok(Err(e)) => Err(format!("`agy` failed: {}", e)),
+                Err(_) => Err(format!("`agy -p /usage` did not answer in {}s", AGY_USAGE_WAIT)),
+            }
+        }
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out?;
+    crate::parse::parse_antigravity_usage_report(&out).ok_or_else(|| {
+        if out.contains("\"status\"") {
+            "`agy -p /usage` answered without a quota - it may not be signed in".into()
+        } else {
+            "`agy -p /usage` printed no report - it may not be signed in".into()
+        }
+    })
+}
+
 /// The same quota summary the language server answers, from Google.
 ///
 /// This was thought not to exist. The tab said so, and said it in the
@@ -758,13 +866,46 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // Google's is asked only when there is no server to ask, and is held far
     // longer - it is a record rather than a live meter, and unlike the local
     // one it is a request that leaves this machine.
-    // Three sources, cheapest first, and every one of them optional.
+    // Then the CLI's own `/usage`, ahead of Google. It costs a process and a
+    // few seconds where Google costs one request, but it is the only source
+    // left with the Gemini group - Google's summary holds Claude and GPT-OSS
+    // alone - and a cheaper answer missing half the limits is not the better
+    // one. Behind `antigravity_start`, the setting that already decides
+    // whether this widget may start `agy`.
     //
-    // A language server already running costs a socket read, so it is
-    // always tried. Google costs one request and works for as long as the
-    // token lasts. Starting the CLI costs a process and several seconds, so
-    // it is last however preferred it is - being last is not being
-    // disfavoured, it is being expensive.
+    // A failure goes back to the cache as a failure and its reason is
+    // written in afterwards, so it keeps the short backoff and the sentence
+    // lasts as long as the failure does.
+    let agy = agy_path();
+    let mut agy_why = String::new();
+    let mut agy_old = false;
+    if d.quota.is_empty() && cfg.antigravity_start {
+        if let Some(path) = &agy {
+            const KEY: &str = "antigravity-agy-usage";
+            let mut asked = String::new();
+            let got = cached(caches, KEY, AGY_USAGE_TTL, || match agy_usage(path) {
+                Ok(groups) => Some(serde_json::Value::Array(groups)),
+                Err(said) => {
+                    asked = said;
+                    None
+                }
+            });
+            remember_refusal(caches, KEY, &asked);
+            match got {
+                Some(serde_json::Value::Array(groups)) => {
+                    d.quota = groups;
+                    d.quota_from = From::Agy;
+                }
+                held => {
+                    agy_why = held.map(|v| text(&v, "why")).unwrap_or(asked);
+                    agy_old = agy_why.contains("predates");
+                }
+            }
+        }
+    }
+    // Google next: one request, good for as long as the token lasts. Last,
+    // the pty start, which only an `agy` too old for `/usage` still answers
+    // - newer ones lock the server it reads behind the same CSRF token.
     if d.quota.is_empty() {
         let mut why = String::new();
         match remote_token(cfg.antigravity_remote) {
@@ -798,7 +939,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
                 }
             }
         }
-        if d.quota.is_empty() && cfg.antigravity_start {
+        // The CLI's reason outranks Google's for the same reason as below:
+        // it is the more specific one, and it names what to do.
+        if d.quota.is_empty() && !agy_why.is_empty() {
+            why = agy_why.clone();
+        }
+        if d.quota.is_empty() && cfg.antigravity_start && (agy_old || agy.is_none()) {
             let mut asked = String::new();
             let got = cached(caches, "antigravity-agy", AGY_TTL, || match agy_quota() {
                 Ok(groups) => Some(serde_json::Value::Array(groups)),
@@ -829,15 +975,18 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             d.quota_why = why;
         }
     }
-    // A summary with no Gemini group is Google's - the local server is the
-    // only source that ever carried one - so the per-model readings are the
-    // Gemini quota there is. Asked on the same terms as the summary: never
-    // when asking Google is off, never with a lapsed token.
+    // Each Gemini model's own allowance, under the group limits. With no
+    // Gemini group - Google's summary never has one - they are the Gemini
+    // quota there is; with one, they say which model is spending it, which
+    // the group cannot. Asked on the same terms as the summary: never when
+    // asking Google is off, never with a lapsed token. Why they are missing
+    // is said only when there is no group to stand in for them, since a
+    // warning under four good bars reads as though the bars were wrong.
     //
     // A failure goes back to the cache as a failure, so it keeps the short
     // backoff rather than being held for the hour a reading is; its reason
     // is written into the slot afterwards so it lasts as long as the failure.
-    if !d.quota.is_empty() && !has_gemini_group(&d.quota) {
+    if !d.quota.is_empty() {
         match remote_token(cfg.antigravity_remote) {
             Err(said) => d.gemini_why = said,
             Ok(access) => {
@@ -867,6 +1016,9 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
                     None => d.gemini_why = "Google's per-model quota came back unreadable".into(),
                 }
             }
+        }
+        if has_gemini_group(&d.quota) {
+            d.gemini_why.clear();
         }
     }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
@@ -954,9 +1106,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             });
         }
     }
-    // Per-model Gemini readings stand in for a Gemini group only when there
-    // is none, and the summary gets one lane of them: the busiest model,
-    // named as that. Every model would be a dozen lanes on a screen meant
+    // Per-model Gemini readings get one lane, after the groups: the busiest
+    // model, named as that. With no Gemini group it stands in for one; with
+    // a group it says how close the hungriest model is to its own cap. Every model would be a dozen lanes on a screen meant
     // for comparing agents, and an average would be a number Google never
     // published.
     if let Some(top) = d
@@ -1045,7 +1197,7 @@ fn antigravity_quota_rows_with_plots(
         ],
         w - 1,
     )];
-    if local_refused {
+    if local_refused && from == From::Google {
         let mut why = "Antigravity's language server now refuses outside readers: it \
                        wants a CSRF token it gives only to processes it starts itself. \
                        This is Google's summary instead."
@@ -1738,6 +1890,69 @@ mod tests {
 
     fn model(name: &str, left: f64) -> crate::parse::ModelQuota {
         crate::parse::ModelQuota { model: name.into(), left, reset: iso_epoch("2099-01-01T00:00:00Z") }
+    }
+
+    /// `agy -p /usage` as it actually arrives, through the parser that reads
+    /// it: both groups, each with its weekly and five-hour window.
+    fn agy_report() -> Vec<serde_json::Value> {
+        let bucket = |id: &str, window: &str, left: f64| {
+            serde_json::json!({"id": id, "name": "Limit Remaining", "window": window,
+                               "remaining_fraction": left, "reset_time": "2099-01-01T00:00:00Z"})
+        };
+        let body = serde_json::json!({
+            "status": "SUCCESS", "num_turns": 0,
+            "command": {"name": "usage", "data": {"groups": [
+                {"name": "Gemini Models",
+                 "description": "Models within this group: Gemini Flash, Gemini Pro",
+                 "buckets": [bucket("gemini-weekly", "weekly", 0.8), bucket("gemini-5h", "5h", 0.3)]},
+                {"name": "Claude and GPT models",
+                 "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                 "buckets": [bucket("3p-weekly", "weekly", 1.0), bucket("3p-5h", "5h", 0.9)]}
+            ]}}
+        });
+        crate::parse::parse_antigravity_usage_report(&body.to_string()).unwrap()
+    }
+
+    #[test]
+    fn agy_usage_gives_the_summary_all_four_windows() {
+        let d = Data {
+            quota: agy_report(),
+            quota_from: From::Agy,
+            gemini: vec![model("gemini-3-flash", 0.4), model("gemini-2.5-pro", 1.0)],
+            ..Data::default()
+        };
+        let found = lanes(&d);
+        let labels: Vec<_> = found.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["gemini 5h", "gemini weekly", "claude 5h", "claude weekly", "gemini busiest"]
+        );
+        assert!((found[0].pct - 70.0).abs() < 1e-9, "spent, not left");
+        assert!((found[1].pct - 20.0).abs() < 1e-9);
+        assert_eq!(found[0].window_secs, Some(5.0 * 3600.0));
+        assert!(found[2].apart && found[4].apart && !found[1].apart);
+    }
+
+    #[test]
+    fn agy_usage_draws_both_groups_and_keeps_the_per_model_rows() {
+        let d = Data {
+            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
+            quota: agy_report(),
+            quota_from: From::Agy,
+            // The app's server refused too; that is not what is on screen.
+            local_refused: true,
+            gemini: vec![model("gemini-3-flash", 0.75)],
+            ..Data::default()
+        };
+        let mut plots = Vec::new();
+        let shown = antigravity_body_with_plots(&d, 120, &palette(), &mut plots).join("\n");
+        assert!(shown.contains("from `agy`"), "{}", shown);
+        assert!(!shown.contains("Google's summary instead"), "{}", shown);
+        assert!(shown.contains("Gemini Models") && shown.contains("Claude and GPT models"), "{}", shown);
+        assert!(shown.contains("Gemini Flash, Gemini Pro"), "{}", shown);
+        assert!(shown.contains("Gemini, per model") && shown.contains("gemini-3-flash"), "{}", shown);
+        // Four group windows and one model.
+        assert_eq!(plots.len(), 5);
     }
 
     #[test]

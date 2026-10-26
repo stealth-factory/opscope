@@ -675,26 +675,56 @@ So the quota survives the app being closed, for about an hour after it last
 ran — the credential Antigravity leaves behind lasts that long, and this widget
 deliberately does not renew it on Antigravity's behalf.
 
-**Three sources, cheapest first**, each of them optional:
+**Four sources**, each of them optional:
 
 | order | source | works when |
 |---|---|---|
-| 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open |
-| 2 | Google | within an hour of the last run |
-| 3 | `agy`, started by the widget (`antigravity_start`) | whenever the CLI is signed in |
+| 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open and answers outside readers |
+| 2 | `agy -p /usage`, run by the widget (`antigravity_start`) | the CLI is installed, signed in and 1.1.11 or later |
+| 3 | Google | within an hour of the last run |
+| 4 | `agy`, started under a pty by the widget (`antigravity_start`) | only an `agy` older than 1.1.11 |
 
-Being last is not being disfavoured — it is being expensive. The third is the
-only one that always works, and the only one that runs another program.
+The second costs a process and a few seconds where Google costs one request,
+and is asked first anyway: it is the only source left with the **Gemini
+group**. Google's summary has only ever carried the Claude and GPT-OSS group.
 
 Nothing that runs for the widget outlives the fetch, and **an `agy` you started
 yourself is never shut down by this** — it would have answered as source 1
-long before source 3 was reached.
+long before anything was started.
 
-**`agy` builds from October 2026 close sources 1 and 3.** Their language server
+**`agy` builds from October 2026 close source 1.** Their language server
 refuses every outside caller with `missing CSRF token`, and hands the token
 only to processes `agy` starts itself — it is in no file, log or environment
-the widget can read. The tab says so rather than reading like an app that is
-shut, and falls back to Google:
+the widget can read, and the widget does not go looking. The pty start (4)
+reads the same server, so it is closed too, and kept only for older builds.
+
+What still works is `agy`'s own `/usage` command in print mode — the one
+CodexBar reads. It answers from the CLI's session without starting a turn
+(zero tokens) and returns both groups, each with its weekly and five-hour
+window:
+
+```
+ ── QUOTA ── live · account-wide, from `agy`, started for this reading
+  Gemini Models
+    Models within this group: Gemini Flash, Gemini Pro
+   5h     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 4h 59m
+   weekly ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 6d 23h
+  Claude and GPT models
+    Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+   5h     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 4h 59m
+   weekly ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 6d 23h
+```
+
+It runs in a private empty directory with `open` and `xdg-open` shadowed by
+stubs that fail, so a background poll can never pop a sign-in page; in its own
+process group, killed whole afterwards, so the language server it boots goes
+with it; and with auto-update off. Releases before 1.1.11 could send an
+unknown slash command on to a model as a prompt, which would spend the quota
+being read, so those are never asked — the tab says to update instead.
+
+When `/usage` cannot be read and Google's summary is what is on screen, the
+tab says the app's server refused rather than reading like an app that is
+shut:
 
 ```
  ── QUOTA ── live · account-wide, from Google - the app's server refused
@@ -703,11 +733,9 @@ shut, and falls back to Google:
   summary instead. Google publishes no grouped Gemini limit.
 ```
 
-Google's summary has only ever carried the Claude and GPT-OSS group; the
-grouped Gemini limit came from the local server alone. What Google does
-publish for Gemini is **each model's own allowance**, so when the summary has
-no Gemini group the tab draws those instead, under a heading that says what
-they are:
+Under the groups, the tab also draws **each Gemini model's own allowance**,
+which Google publishes per model, so it says which model is spending the
+group's limit:
 
 ```
   Gemini, per model
@@ -718,8 +746,11 @@ they are:
 
 They are not added up or averaged into a group figure, because Google states
 none. `[+]` gets one lane from them, `gemini busiest` — the model with the
-least left — rather than a dozen. If the per-model call fails, the reason is
-drawn where the rows would be.
+least left — after the four group lanes rather than a dozen. With no Gemini
+group on screen they are the Gemini quota there is, and if the per-model call
+fails the reason is drawn where the rows would be; with a group, a failure is
+left unsaid, since a warning under four good bars reads as though the bars
+were wrong.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
@@ -1426,7 +1457,7 @@ Four settings, all on by default except the interval:
 
 | key | default | what it does |
 |---|---|---|
-| `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
+| `antigravity_start` | `true` | may the widget run the `agy` CLI to read the quota, when no running app answers. `agy -p /usage` on 1.1.11 or later - a command, not a prompt, so no tokens - in a private directory, its process group killed when the reading is taken; older builds are started under a pty instead. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
