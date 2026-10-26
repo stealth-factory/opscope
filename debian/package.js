@@ -45,7 +45,7 @@ function stage(version, binaries, destination, repo = path.resolve(__dirname, '.
   }
   walk('usr');
   const size = Math.ceil(files.reduce((n, file) => n + fs.statSync(path.join(destination, file)).size, 0) / 1024);
-  put('DEBIAN/control', `Package: opscope\nVersion: ${version}\nSection: utils\nPriority: optional\nArchitecture: amd64\nMaintainer: William Li <email@wiiiimm.codes>\nDepends: libc6 (>= ${MIN_GLIBC}), libgcc-s1\nInstalled-Size: ${size}\nHomepage: https://github.com/stealth-factory/opscope\nDescription: terminal widgets showing real operational data\n Sixteen widgets and their launcher, with private sibling binaries.\n No Node or Rust runtime is required.\n`);
+  put('DEBIAN/control', `Package: opscope\nVersion: ${version}\nSection: utils\nPriority: optional\nArchitecture: amd64\nMaintainer: William Li <email@wiiiimm.codes>\nDepends: libc6 (>= ${MIN_GLIBC}), libgcc-s1\nInstalled-Size: ${size}\nHomepage: https://github.com/stealth-factory/opscope\nDescription: terminal widgets showing real operational data\n Seventeen widgets and their launcher, with private sibling binaries.\n No Node or Rust runtime is required.\n`);
   put('DEBIAN/md5sums', files.sort().map(file =>
     `${crypto.createHash('md5').update(fs.readFileSync(path.join(destination, file))).digest('hex')}  ${file}\n`).join(''));
   return bins;

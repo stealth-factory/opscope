@@ -1,0 +1,27 @@
+What a region is searching for right now, from Google's own Trending Now feed.
+
+Reads Google's public Trending Now RSS feed for each configured region - no
+account, no key - and shows every trend in Google's order with its traffic
+bucket exactly as Google writes it, when it started, and the news Google
+attaches. What changed between fetches - new trends, and the ones that left
+the feed - is this widget's own observation, and is labelled that way.
+
+    google-trends [-n SECONDS] [GEO ...]
+
+Polls every 300s by default (-n changes it, minimum 60s). Region codes on the
+command line replace google_trends.geos for that run.
+
+Keys while running: up/down select a row, tab moves between TRENDING NOW,
+LEFT THE FEED and REGIONS, left/right step between regions, Enter opens the
+news for the selected trend (or switches to the selected region), / filters
+by term, story headline or news source, esc clears the filter. In the list c
+copies the trend's Google Trends Explore link; in the news view c copies the
+selected story's URL, and esc, left or backspace go back. r refreshes now,
+comma opens settings, q quits.
+
+Copying uses OSC 52, so the terminal you are sitting at performs it. If your
+terminal blocks OSC 52, the link is shown on screen instead.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.
