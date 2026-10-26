@@ -1,10 +1,9 @@
 //! Shared chart geometry and optional inline Kitty images. Widgets never emit
 //! protocol bytes and the same normalized measurements drive both backends.
 use base64::Engine;
-use std::sync::{
-    atomic::{AtomicU32, AtomicU8, Ordering},
-    Mutex,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trace {
@@ -63,6 +62,39 @@ impl LineChart {
     }
 }
 
+/// A value axis that holds still between samples.
+///
+/// A chart scaled to exactly what it shows rescales whenever its highest or
+/// lowest sample changes, which on a live chart is most samples. Every
+/// rescale moves every pixel, so Kitty mode sent the whole image again each
+/// time, and the axis labels flickered. `hold` keeps the last range while
+/// the data still fits inside it and it is not more than twice as wide as a
+/// fresh fit would be, so a spike that has scrolled away lets the axis
+/// tighten again. Units are whatever the widget plots in: latency and link
+/// pass log₁₀ milliseconds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StickyRange {
+    held: Option<(f64, f64)>,
+}
+
+impl StickyRange {
+    /// `data` is the lowest and highest value that must be on the axis;
+    /// `fresh` is the range the widget would choose for it from nothing,
+    /// headroom included. Returns the range to draw.
+    pub fn hold(&mut self, data: (f64, f64), fresh: (f64, f64)) -> (f64, f64) {
+        let usable = |(lo, hi): (f64, f64)| lo.is_finite() && hi.is_finite() && hi > lo;
+        if let Some(held) = self.held.filter(|held| usable(*held) && usable(fresh)) {
+            let inside = held.0 <= data.0 && data.1 <= held.1;
+            let tight = held.1 - held.0 <= 2.0 * (fresh.1 - fresh.0);
+            if inside && tight {
+                return held;
+            }
+        }
+        self.held = usable(fresh).then_some(fresh);
+        fresh
+    }
+}
+
 /// A chart region in body coordinates. Use `in_viewport` after scrolling the
 /// text body; it crops graphics without changing the plotted time/value range.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +110,8 @@ pub struct Plot {
     /// Place the image under terminal text. Line charts only: a solid fill
     /// would hide the glyphs and fail the contrast rule.
     under_text: bool,
+    /// The value range the widget's axis labels name, when it set one.
+    axis: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +131,10 @@ struct Fill {
     // Rectangle index and its bright end. Ordinary fills remain solid;
     // gradient fills interpolate at pixel resolution inside that rectangle.
     gradients: Vec<(usize, [u8; 3])>,
+    /// Drawn as eighth-cell text in every mode, never as an image. A
+    /// one-row bar gains nothing visible from pixels, and meters are the
+    /// plots that change most often: a pace marker follows the clock.
+    always_text: bool,
 }
 
 impl Fill {
@@ -128,18 +166,29 @@ impl Plot {
             first_row: 0,
             visible_rows: height,
             under_text: false,
+            axis: None,
         }
     }
 
     /// Draw this line chart under the cell text instead of blanking it.
     ///
-    /// Pixel mode keeps the glyphs and the selected-row tint; Braille and
-    /// text mode still paint the chart the way they do today. Solid fills
+    /// Pixel mode keeps the glyphs and the selected-row tint. Inside tmux
+    /// the blank cells of that rectangle are Unicode placeholders, so the
+    /// image stays anchored to the text and the reading stays put. Braille
+    /// and text mode still paint the chart the way they do today. Solid fills
     /// ignore it: text over a heatmap or a meter does not stay readable.
     pub fn under_text(mut self) -> Self {
         if self.fill.is_none() {
             self.under_text = true;
         }
+        self
+    }
+
+    /// The value range this chart is scaled to, which the widget's axis
+    /// labels name. A change of range is never held by the upload cap: the
+    /// labels are text and change at once, so the strokes go with them.
+    pub fn on_axis(mut self, lo: f64, hi: f64) -> Self {
+        self.axis = Some((lo, hi));
         self
     }
 
@@ -222,6 +271,7 @@ impl Plot {
             rects: Vec::new(),
             text: Vec::new(),
             gradients: Vec::new(),
+            always_text: false,
         };
         for (r, row) in cells.iter().enumerate() {
             let mut line = Vec::new();
@@ -273,15 +323,11 @@ impl Plot {
             }
             left = right;
         }
-        let text = super::stacked_bar(parts, width)
-            .into_iter()
-            .flat_map(|(colour, text)| {
-                text.chars()
-                    .map(move |ch| (colour.clone(), ch.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        Self::filled(x, y, width, 1, rects, vec![text])
+        let colours: Vec<_> = parts.iter().map(|(_, colour)| colour.clone()).collect();
+        let text = stacked_cells(parts, width, |part, _, _| colours[part].clone());
+        let mut plot = Self::filled(x, y, width, 1, rects, vec![text]);
+        plot.fill.as_mut().unwrap().always_text = true;
+        plot
     }
 
     /// `meter`, with a colour per filled cell: `cells[i]` paints cell `i`
@@ -355,7 +401,9 @@ impl Plot {
                 colour: foreground.into(),
             });
         }
-        let filled = (fraction * width as f64).round() as usize;
+        // Whole cells, then one partial cell to the nearest eighth.
+        let eighths = (fraction * width as f64 * 8.0).round() as usize;
+        let (whole, part) = (eighths / 8, eighths % 8);
         let at = marker.map(|v| ((v * width as f64).round() as usize).min(width.saturating_sub(1)));
         let text = (0..width)
             .map(|i| {
@@ -364,19 +412,24 @@ impl Plot {
                 } else {
                     ""
                 };
+                let filled = |glyph: char| match cell(i) {
+                    Some(colour) => (format!("{reset}{colour}"), glyph.to_string()),
+                    None => (format!("{reset}{track}"), "░".into()),
+                };
                 if Some(i) == at {
                     (mark.into(), "┃".into())
-                } else if i < filled {
-                    (
-                        format!("{reset}{}", cell(i).cloned().unwrap_or_else(|| track.into())),
-                        "█".into(),
-                    )
+                } else if i < whole {
+                    filled('█')
+                } else if i == whole && part > 0 {
+                    filled(LEFT_EIGHTHS[part])
                 } else {
                     (format!("{reset}{track}"), "░".into())
                 }
             })
             .collect();
-        Self::filled(x, y, width, 1, rects, vec![text])
+        let mut plot = Self::filled(x, y, width, 1, rects, vec![text]);
+        plot.fill.as_mut().unwrap().always_text = true;
+        plot
     }
 
     /// A measured fraction plus an optional reference position (e.g. elapsed
@@ -440,8 +493,9 @@ impl Plot {
     ) -> Self {
         let fraction = finite_fraction(fraction);
         let (start, end) = (readable_on_tint(start, 0.0), readable_on_tint(end, 0.0));
-        let filled = (fraction * width as f64).round() as usize;
-        let cells: Vec<_> = (0..filled.max(usize::from(fraction > 0.0)).min(width))
+        // Every cell the fill touches, the partial one included.
+        let filled = ((fraction * width as f64 * 8.0).round() as usize).div_ceil(8).max(usize::from(fraction > 0.0)).min(width);
+        let cells: Vec<_> = (0..filled)
             .map(|i| colour_at(start, end, i as f64 / filled.saturating_sub(1).max(1) as f64))
             .collect();
         let mut plot = Self::ramped_meter(x, y, width, fraction, marker, &cells, track, mark);
@@ -479,15 +533,33 @@ impl Plot {
             rect.colour = colour_at(start, end, 0.0);
             fill.gradients.push((i, end));
         }
-        fill.text[0] = super::stacked_bar(parts, width).into_iter().flat_map(|(colour, text)| {
-            let (start, end) = gradient_stops(rgb(&colour).unwrap_or([180, 200, 220]));
-            let count = text.chars().count();
-            (0..count).map(move |i| (
-                colour_at(start, end, i as f64 / count.saturating_sub(1).max(1) as f64),
-                "█".into(),
-            ))
-        }).collect();
+        let stops: Vec<_> = parts
+            .iter()
+            .map(|(_, colour)| gradient_stops(rgb(colour).unwrap_or([180, 200, 220])))
+            .collect();
+        fill.text[0] = stacked_cells(parts, width, |part, i, count| {
+            let (start, end) = stops[part];
+            colour_at(start, end, i as f64 / count.saturating_sub(1).max(1) as f64)
+        });
         plot
+    }
+
+    /// Draw this filled plot as text in every mode, never as an image.
+    ///
+    /// For values that move every frame, such as a `dance` placeholder or
+    /// bars easing onto their real values: an image would be re-sent whole
+    /// on each of those frames. Meters and stacked bars are always text
+    /// already. A line chart ignores it.
+    pub fn as_text(mut self) -> Self {
+        if let Some(fill) = self.fill.as_mut() {
+            fill.always_text = true;
+        }
+        self
+    }
+
+    /// Whether this plot is drawn as text in every mode.
+    pub fn is_text(&self) -> bool {
+        self.fill.as_ref().is_some_and(|fill| fill.always_text)
     }
 
     /// The same fallback cells `draw_plots` uses. A widget can compose
@@ -517,7 +589,7 @@ impl Plot {
                 focus: None,
             },
         );
-        plot.fill = Some(Fill { rects, text, gradients: Vec::new() });
+        plot.fill = Some(Fill { rects, text, gradients: Vec::new(), always_text: false });
         plot
     }
 
@@ -535,6 +607,87 @@ impl Plot {
         self.y = top + first - start;
         Some(self)
     }
+}
+
+/// Left-aligned partial blocks, in eighths of a cell: index 8 is a full cell.
+const LEFT_EIGHTHS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+/// The text cells of a stacked bar, to the nearest eighth of a cell.
+///
+/// Each category's edge is rounded to an eighth. A cell two categories
+/// share is the left one's partial block on the right one's colour as a
+/// background, so the cell stays solid and the boundary lands where the
+/// share puts it; the next cell clears that background. A cell three or
+/// more categories share goes whole to the largest of them. A category
+/// smaller than a cell can lose its sliver to its neighbours, as in whole
+/// cells.
+/// `colour(part, i, count)` is category `part`'s colour for its `i`th of
+/// `count` cells, so a gradient can restart inside each category.
+fn stacked_cells(
+    parts: &[(f64, String)],
+    width: usize,
+    colour: impl Fn(usize, usize, usize) -> String,
+) -> Vec<(String, String)> {
+    let total = width * 8;
+    let mut edges = Vec::with_capacity(parts.len());
+    let mut left = 0.0;
+    for (i, (fraction, _)) in parts.iter().enumerate() {
+        let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+        left = if i + 1 == parts.len() { 1.0 } else { (left + fraction).min(1.0) };
+        edges.push(((left * total as f64).round() as usize).min(total));
+    }
+    // The category covering eighth `e`.
+    let at = |e: usize| edges.iter().position(|edge| e < *edge);
+    // Cells a category touches, for its gradient.
+    let span = |part: usize| {
+        let start = if part == 0 { 0 } else { edges[part - 1] };
+        let end = edges[part];
+        if end <= start { (0, 0) } else { (start / 8, (end - 1) / 8 + 1) }
+    };
+    let mut out = Vec::with_capacity(width + 1);
+    let mut background = false;
+    for cell in 0..width {
+        let reset = if background { super::NOBG } else { "" };
+        background = false;
+        let (Some(first), Some(last)) = (at(cell * 8), at(cell * 8 + 7)) else {
+            out.push((reset.to_string(), " ".to_string()));
+            continue;
+        };
+        let ink = |part: usize| {
+            let (start, end) = span(part);
+            colour(part, cell.saturating_sub(start), end - start)
+        };
+        if first == last {
+            out.push((format!("{reset}{}", ink(first)), "█".into()));
+            continue;
+        }
+        // Three or more categories in one cell: one partial block can only
+        // show two, so the largest overlap takes the whole cell. A zero
+        // share between two others occupies nothing and does not count.
+        if (first + 1..last).any(|part| edges[part] > edges[part - 1]) {
+            let overlap = |part: usize| {
+                let start = if part == 0 { 0 } else { edges[part - 1] };
+                edges[part].min(cell * 8 + 8).saturating_sub(start.max(cell * 8))
+            };
+            let widest = (first..=last).rev().max_by_key(|&part| overlap(part)).unwrap_or(first);
+            out.push((format!("{reset}{}", ink(widest)), "█".into()));
+            continue;
+        }
+        let share = edges[first] - cell * 8;
+        let (fg, bg) = (ink(first), ink(last));
+        match rgb(&bg) {
+            Some([r, g, b]) => {
+                background = true;
+                out.push((format!("{reset}{fg}\x1b[48;2;{r};{g};{b}m"), LEFT_EIGHTHS[share].to_string()));
+            }
+            // No truecolour to paint behind it: the larger share takes the cell.
+            None => out.push((format!("{reset}{}", if share >= 4 { fg } else { bg }), "█".into())),
+        }
+    }
+    if background {
+        out.push((super::NOBG.into(), String::new()));
+    }
+    out
 }
 
 /// Shared Braille rasterizer, also useful to widgets drawing small sparklines.
@@ -686,7 +839,14 @@ const CELL_W: usize = super::terminal::FALLBACK_CELL_W;
 #[cfg(test)]
 const CELL_H: usize = super::terminal::FALLBACK_CELL_H;
 static LIVE: AtomicU32 = AtomicU32::new(0);
+// Tests run in parallel in one process. A process-wide cache makes an
+// unchanged chart look new because another test cleared it.
+#[cfg(not(test))]
 static CACHE: Mutex<Vec<CachedPlot>> = Mutex::new(Vec::new());
+#[cfg(test)]
+std::thread_local! {
+    static CACHE: std::cell::RefCell<Vec<CachedPlot>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 // At most 8 MiB across all slots. Larger crops compare by re-rasterizing
 // the old plot rather than retaining another large pixel buffer.
 const MAX_CACHED_RGBA: usize = 256 * 1024;
@@ -696,7 +856,46 @@ struct CachedPlot {
     cols: usize,
     cell_size: (usize, usize),
     rgba: Option<Vec<u8>>,
+    /// When this slot last sent its whole image or a large edit. Another
+    /// large change waits until `FULL_UPLOAD_GAP` has passed.
+    uploaded: Instant,
 }
+
+/// The least time between two whole-image uploads of one slot whose size
+/// did not change. A chart that rescales or slides on every sample sent its
+/// whole raster on every frame; a relay that forwards images decoded paid
+/// that raw size each time. Changes in between are held, not dropped: the
+/// first frame after the gap sends the chart as it is then.
+const FULL_UPLOAD_GAP: Duration = Duration::from_secs(2);
+
+#[cfg(not(test))]
+fn full_upload_gap() -> Duration {
+    FULL_UPLOAD_GAP
+}
+
+// Tests of the upload paths other than the cap send one change after
+// another; the cap's own test turns it on.
+#[cfg(test)]
+thread_local! {
+    static GAP: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+#[cfg(test)]
+fn full_upload_gap() -> Duration {
+    GAP.with(|gap| gap.get())
+}
+
+/// A changed rectangle is sent as a frame edit only while it is at most this
+/// share of the image. Past that the whole image costs about the same and
+/// replaces every pixel the terminal holds.
+const EDIT_SHARE: f64 = 0.5;
+
+/// An edit up to this share of the image is small and always goes: a sample
+/// that moved at the end of a line. A larger one, such as a line chart sliding
+/// by a slot whose pitch is not a whole number of pixels, counts against the
+/// same gap as a whole image, or the strips sent every sample add up to more
+/// than the capped whole images would have.
+const SMALL_SHARE: f64 = 0.125;
 
 impl CachedPlot {
     fn same_region(&self, plot: &Plot, cols: usize, cell_size: (usize, usize)) -> bool {
@@ -708,16 +907,140 @@ impl CachedPlot {
             && self.plot.visible_rows == plot.visible_rows
     }
 
+    #[cfg(test)]
     fn same_pixels(&self, plot: &Plot, cols: usize, cell_size: (usize, usize), rgba: &[u8]) -> bool {
-        self.same_region(plot, cols, cell_size)
-            && match &self.rgba {
-                Some(previous) => previous == rgba,
-                None => raster_pixels(&self.plot, self.cols, cell_size.0, cell_size.1) == rgba,
-            }
+        self.same_region(plot, cols, cell_size) && *self.held_pixels() == *rgba
+    }
+
+    /// The pixels the terminal holds for this slot: the retained buffer,
+    /// or the cached plot rasterised again when it was too large to keep.
+    fn held_pixels(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.rgba {
+            Some(previous) => std::borrow::Cow::Borrowed(previous),
+            None => std::borrow::Cow::Owned(raster_pixels(&self.plot, self.cols, self.cell_size.0, self.cell_size.1)),
+        }
     }
 }
+
+/// Whether a host between this process and the terminal relays images to a
+/// client of its own (Herdr). It forwards each placement and upload decoded,
+/// so a re-place that a terminal does for free costs that client the image.
+#[cfg(not(test))]
+fn host_relays_images() -> bool {
+    static RELAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RELAYS.get_or_init(|| super::shm::host_relays_images(|key| std::env::var(key).ok()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn host_relays_images() -> bool {
+    RELAYS.with(|cell| cell.get())
+}
+
+/// Unchanged rows between two changed bands that still join them into one
+/// rectangle. Each rectangle is its own command, so a sliver of rows is not
+/// worth a second header and a second deflate stream.
+const BAND_GAP: usize = 8;
+
+/// The rectangles holding every pixel that differs, as `(x, y, w, h)` in the
+/// image: one per band of changed rows, each as wide as its own changes.
+/// Line charts change along their strokes, so a chart whose traces sit in a
+/// few bands of its height changes in a few rectangles rather than one that
+/// spans them all. Empty when the two are identical or not the same size.
+fn changed_rects(old: &[u8], new: &[u8], img_w: usize) -> Vec<(usize, usize, usize, usize)> {
+    if old.len() != new.len() || img_w == 0 || new.len() % (img_w * 4) != 0 {
+        return Vec::new();
+    }
+    let img_h = new.len() / (img_w * 4);
+    let mut rects: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // The band being grown: first row, last row, leftmost and rightmost pixel.
+    let mut band: Option<(usize, usize, usize, usize)> = None;
+    for y in 0..img_h {
+        let row = y * img_w * 4..(y + 1) * img_w * 4;
+        let (a, b) = (&old[row.clone()], &new[row]);
+        if a == b {
+            continue;
+        }
+        let differs = |(p, q): (&[u8], &[u8])| p != q;
+        let first = a.chunks_exact(4).zip(b.chunks_exact(4)).position(differs).unwrap_or(0);
+        let last = img_w - 1 - a.chunks_exact(4).rev().zip(b.chunks_exact(4).rev()).position(differs).unwrap_or(0);
+        band = Some(match band {
+            Some((top, bottom, left, right)) if y - bottom <= BAND_GAP => (top, y, left.min(first), right.max(last)),
+            Some((top, bottom, left, right)) => {
+                rects.push((left, top, right + 1 - left, bottom + 1 - top));
+                (y, y, first, last)
+            }
+            None => (y, y, first, last),
+        });
+    }
+    if let Some((top, bottom, left, right)) = band {
+        rects.push((left, top, right + 1 - left, bottom + 1 - top));
+    }
+    rects
+}
+
+/// The changed rectangles of a held image and the share of it they cover,
+/// when together they are a small enough part of the image to edit.
+fn edit_rects(old: &[u8], new: &[u8], img_w: usize) -> Option<(Vec<(usize, usize, usize, usize)>, f64)> {
+    let rects = changed_rects(old, new, img_w);
+    let img_h = new.len() / (img_w * 4).max(1);
+    let area: usize = rects.iter().map(|(_, _, w, h)| w * h).sum();
+    let share = area as f64 / (img_w * img_h).max(1) as f64;
+    (!rects.is_empty() && share <= EDIT_SHARE).then_some((rects, share))
+}
+
+/// The changed rectangles of a held image as edits of its root frame, when
+/// together they are a small enough part of the image to be worth it.
+/// Also returns the share of the image the edit covers.
+#[cfg(test)]
+fn rect_edit(old: &[u8], new: &[u8], img_w: usize, slot: usize) -> Option<(String, f64)> {
+    edit_rects(old, new, img_w).map(|(rects, share)| (rect_payload(&rects, new, img_w, slot), share))
+}
+
+/// Frame edits writing `rects` of `new` over the held root frame.
+fn rect_payload(rects: &[(usize, usize, usize, usize)], new: &[u8], img_w: usize, slot: usize) -> String {
+    let mut out = String::new();
+    for &(x, y, w, h) in rects {
+        let mut raw = Vec::with_capacity(w * h * 4);
+        for row in y..y + h {
+            let start = (row * img_w + x) * 4;
+            raw.extend_from_slice(&new[start..start + w * 4]);
+        }
+        out.push_str(&frame_payload(image_id(slot), x, y, w, h, &raw));
+    }
+    out
+}
+
+fn with_cache<R>(f: impl FnOnce(&mut Vec<CachedPlot>) -> R) -> R {
+    #[cfg(test)]
+    {
+        CACHE.with(|cache| f(&mut cache.borrow_mut()))
+    }
+    #[cfg(not(test))]
+    {
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut cache)
+    }
+}
+
 static PLACEMENT_SEQ: AtomicU32 = AtomicU32::new(1);
 static PLACEMENTS: [AtomicU32; MAX_PLOTS] = [const { AtomicU32::new(1) }; MAX_PLOTS];
+/// Set once a passthrough query is answered. Signal cleanup has to wrap
+/// deletes the same way, and it cannot take a lock to find that out.
+static PASSTHROUGH: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_passthrough(on: bool) {
+    PASSTHROUGH.store(on, Ordering::Release);
+}
+
+fn passthrough_enabled() -> bool {
+    PASSTHROUGH.load(Ordering::Acquire)
+}
+
 /// 0 unknown, 1 the terminal accepted a frame compose, 2 it refused.
 static ANIMATION: AtomicU8 = AtomicU8::new(0);
 /// Slots whose latest transmission was a frame edit. An error for one of
@@ -796,12 +1119,17 @@ pub(crate) fn testing_mark_frame(slot: usize) {
 
 /// One-pixel image, a second frame copied from it, then a compose of that
 /// frame onto the root. Terminals without animation answer ENOENT or EINVAL.
+///
+/// The frame and the compose ask for a reply (`q=0`). They used to carry
+/// `q=1`, which suppresses `OK`, so a terminal that supports frames never
+/// said so and every change stayed a whole upload. An `OK` turns edits on;
+/// an error from either, arriving after it, turns them off again.
 pub(crate) fn animation_probe() -> String {
     let id = probe_id();
     format!(
         "\x1b_Ga=t,f=24,t=d,s=1,v=1,i={id},q=1;AAAA\x1b\\\
-         \x1b_Ga=f,f=24,t=d,s=1,v=1,i={id},c=1,X=1,z=-1,q=1;AAAA\x1b\\\
-         \x1b_Ga=c,i={id},r=2,c=1,w=1,h=1,C=1\x1b\\"
+         \x1b_Ga=f,f=24,t=d,s=1,v=1,i={id},c=1,X=1,z=-1,q=0;AAAA\x1b\\\
+         \x1b_Ga=c,i={id},r=2,c=1,w=1,h=1,C=1,q=0\x1b\\"
     )
 }
 
@@ -830,13 +1158,14 @@ fn delete_placement(slot: usize, placement: u32) -> String {
 /// `cleanup` collects those objects on the ordinary path.
 pub(crate) fn cleanup_signal() {
     let live = LIVE.swap(0, Ordering::AcqRel);
+    let wrap = PASSTHROUGH.load(Ordering::Acquire);
     for slot in 0..MAX_PLOTS {
         if live & (1 << slot) == 0 {
             continue;
         }
-        let mut buf = [0u8; 64];
+        let mut raw = [0u8; 40];
         let prefix = b"\x1b_Ga=d,d=I,i=";
-        buf[..prefix.len()].copy_from_slice(prefix);
+        raw[..prefix.len()].copy_from_slice(prefix);
         let mut pos = prefix.len();
         let id = image_id(slot);
         let mut divisor = 1_000_000_000;
@@ -844,7 +1173,7 @@ pub(crate) fn cleanup_signal() {
             divisor /= 10;
         }
         loop {
-            buf[pos] = b'0' + ((id / divisor) % 10) as u8;
+            raw[pos] = b'0' + ((id / divisor) % 10) as u8;
             pos += 1;
             if divisor == 1 {
                 break;
@@ -852,17 +1181,44 @@ pub(crate) fn cleanup_signal() {
             divisor /= 10;
         }
         let suffix = b",q=2\x1b\\";
-        buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+        raw[pos..pos + suffix.len()].copy_from_slice(suffix);
+        pos += suffix.len();
+        let mut out = [0u8; 80];
+        let n = if wrap {
+            wrap_graphics(&raw[..pos], &mut out)
+        } else {
+            out[..pos].copy_from_slice(&raw[..pos]);
+            pos
+        };
         unsafe {
-            libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), pos + suffix.len());
+            libc::write(libc::STDOUT_FILENO, out.as_ptr().cast(), n);
         }
     }
+}
+
+/// Double every ESC and surround the sequence with tmux's DCS passthrough.
+/// The header ends at `tmux;`. Stack only: this runs from the signal handler.
+fn wrap_graphics(raw: &[u8], out: &mut [u8]) -> usize {
+    let header = b"\x1bPtmux;";
+    out[..header.len()].copy_from_slice(header);
+    let mut pos = header.len();
+    for &byte in raw {
+        if byte == 0x1b {
+            out[pos] = 0x1b;
+            pos += 1;
+        }
+        out[pos] = byte;
+        pos += 1;
+    }
+    out[pos] = 0x1b;
+    out[pos + 1] = b'\\';
+    pos + 2
 }
 
 pub(crate) fn cleanup() {
     super::shm::release();
     cleanup_signal();
-    CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    with_cache(|cache| cache.clear());
 }
 
 /// Compose chart regions through core, preserving the sanitizer and header.
@@ -873,6 +1229,7 @@ pub(crate) fn compose(
     w: usize,
     h: usize,
     kitty: bool,
+    placeholders: bool,
     lost: bool,
     heal: bool,
 ) -> (Vec<String>, String, String) {
@@ -898,7 +1255,11 @@ pub(crate) fn compose(
             continue;
         }
         let cols = plot.width.min(w - plot.x);
+        let fits_placeholder = !placeholders || (cols <= super::placeholder::LIMIT
+            && plot.visible_rows <= super::placeholder::LIMIT);
         let use_pixels = kitty
+            && plot.fill.as_ref().is_none_or(|f| !f.always_text)
+            && fits_placeholder
             && images.len() < MAX_PLOTS
             && plot.width.saturating_mul(plot.height) <= super::terminal::max_plot_cells()
             && plot
@@ -913,14 +1274,22 @@ pub(crate) fn compose(
         };
         // A line chart under the text keeps whatever the widget drew there:
         // an axis value, a rate, the tint. Blanking those cells is what
-        // puts the image in a hole beside the label. Braille and solid
-        // fills still replace the cells, so text mode does not move.
-        let keep_text = use_pixels && plot.under_text;
+        // puts the image in a hole beside the label. Direct Kitty leaves
+        // the cells alone and places the image at z=-1. A placeholder cell
+        // cannot also hold a glyph, so the blanks become placeholders and
+        // the glyphs stay. Braille and solid fills still replace the cells.
+        let slot = images.len();
+        let keep_text = use_pixels && plot.under_text && !placeholders;
+        let overlay = use_pixels && plot.under_text && placeholders;
         for row in 0..plot.visible_rows {
             if keep_text {
                 continue;
             }
-            let content = if use_pixels {
+            let content = if overlay {
+                placeholders_keeping_text(&text[plot.y + row], plot.x, cols, image_id(slot), row)
+            } else if use_pixels && placeholders {
+                super::placeholder::placeholder_run(image_id(slot), row, cols)
+            } else if use_pixels {
                 " ".repeat(cols)
             } else if let Some(fill) = &plot.fill {
                 fill.row(row + plot.first_row, cols)
@@ -944,7 +1313,13 @@ pub(crate) fn compose(
             images.push(plot);
         }
     }
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let (before, after) = with_cache(|cache| {
+    let wrap = placeholders || passthrough_enabled();
+    // A host that relays images forwards a re-place as the image again, so
+    // the periodic whole frame does not re-place there. A dropped image is
+    // put back by `lost`, which resends it.
+    let replace_on_heal = heal && !host_relays_images();
+    let now = Instant::now();
     let mut before = String::new();
     let mut after = String::new();
     // One read for the frame: cache comparison, rasterization and upload
@@ -960,47 +1335,108 @@ pub(crate) fn compose(
             // have scrolled or covered. The terminal still holds the image,
             // so only its placement is put back, not the pixels.
             if let Some(plot) = images.get(slot).filter(|_| heal) {
-                after.push_str(&place(plot, slot, w));
+                    if placeholders {
+                        let rgba = raster_pixels(plot, cols, cell_w, cell_h);
+                        before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, &rgba), wrap));
+                    } else if replace_on_heal {
+                        after.push_str(&place(plot, slot, w));
+                    }
             }
             continue;
         }
         let rgba = plot.map(|p| raster_pixels(p, cols, cell_w, cell_h));
-        if !lost {
-            if let (Some(cached), Some(plot), Some(rgba)) =
-                (cache.get_mut(slot), plot, rgba.as_deref())
-            {
-                // Time-dependent values can change without changing a pixel.
-                // Upload acknowledgements must not start a redraw/upload loop.
-                if cached.same_pixels(plot, cols, (cell_w, cell_h), rgba) {
-                    // Pixels do not record z. Turning under_text on or off
-                    // has to re-place this id, or the stroke stays over the
-                    // label until the next heal.
-                    let z_changed = cached.plot.under_text != plot.under_text;
-                    cached.plot = plot.clone();
-                    if heal || z_changed {
-                        after.push_str(&place(plot, slot, w));
-                    }
-                    continue;
+        // What the terminal holds for this slot, when it is the same region:
+        // every edit below is measured against it.
+        let held = match (lost, cache.get(slot), plot) {
+            (false, Some(cached), Some(next)) if cached.same_region(next, cols, (cell_w, cell_h)) =>
+                Some(cached.held_pixels().into_owned()),
+            _ => None,
+        };
+        if let (Some(cached), Some(plot), Some(rgba), Some(held)) =
+            (cache.get_mut(slot), plot, rgba.as_deref(), held.as_deref())
+        {
+            // Time-dependent values can change without changing a pixel.
+            // Upload acknowledgements must not start a redraw/upload loop.
+            if held == rgba {
+                // Pixels do not record z. Turning under_text on or off
+                // has to re-place this id, or the stroke stays over the
+                // label until the next heal.
+                let z_changed = cached.plot.under_text != plot.under_text;
+                cached.plot = plot.clone();
+                if placeholders && heal {
+                    before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, rgba), wrap));
+                } else if !placeholders && (replace_on_heal || z_changed) {
+                    after.push_str(&place(plot, slot, w));
                 }
+                continue;
             }
         }
         // A one-sample slide edits the held image. Identical pixels already
-        // returned above, so this only runs when the raster changed.
+        // returned above, so this only runs when the raster changed. Failing
+        // that, the rectangle that changed is written over the held root
+        // frame, when it is a small part of the image and the z is the same.
+        // Whether this slot sent a large change less than a gap ago. Only
+        // a change in the same region can be held: the terminal must still
+        // be showing the image the cache names. A new axis range is not
+        // held either, or the old strokes sit under the new labels.
+        let recent = held.is_some()
+            && cache.get(slot).is_some_and(|c| {
+                plot.is_some_and(|p| p.axis == c.plot.axis)
+                    && now.duration_since(c.uploaded) < full_upload_gap()
+            });
         let edit = if !lost && frames_ready() {
             match (cache.get(slot), plot, rgba.as_deref()) {
                 (Some(cached), Some(next), Some(bytes))
                     if cached.same_region(next, cols, (cell_w, cell_h)) =>
-                    frame_edit(&cached.plot, next, slot, w, (cell_w, cell_h), bytes),
+                    match frame_edit(&cached.plot, next, slot, w, (cell_w, cell_h), bytes) {
+                        // A slide sends its new columns, never the image.
+                        Some(slide) => Some((slide, false)),
+                        None => {
+                            let img_w = crop_px(next, cols, cell_w, cell_h).2;
+                            // An opaque fill went up as RGB; a frame edit is
+                            // RGBA, and that pairing was not seen to work, so
+                            // it is uploaded whole instead.
+                            let opaque = |p: &Plot, px: &[u8]| p.fill.is_some()
+                                && !px.is_empty()
+                                && px.chunks_exact(4).all(|px| px[3] == 255);
+                            held.as_deref()
+                                .filter(|old| !placeholders
+                                    && cached.plot.under_text == next.under_text
+                                    && !opaque(&cached.plot, old))
+                                .and_then(|old| edit_rects(old, bytes, img_w))
+                                .map(|(rects, share)| {
+                                    let large = share > SMALL_SHARE;
+                                    // A large edit the cap holds is never
+                                    // sent, so it is not compressed either.
+                                    let edit = if recent && large {
+                                        String::new()
+                                    } else {
+                                        rect_payload(&rects, bytes, img_w, slot)
+                                    };
+                                    (edit, large)
+                                })
+                        }
+                    },
                 _ => None,
             }
         } else {
             None
         };
-        if let Some(edit) = edit {
+        // A large change, edit or whole image, goes at most once per gap per
+        // slot; until then the terminal keeps showing the image it holds, and
+        // the cache still names that one, so the next frame compares against
+        // what is really on screen. A small edit always goes.
+        if recent && edit.as_ref().is_none_or(|(_, large)| *large) {
+            if let Some(plot) = plot.filter(|_| replace_on_heal && !placeholders) {
+                after.push_str(&place(plot, slot, w));
+            }
+            continue;
+        }
+        if let Some((edit, large)) = edit {
             note_frame(slot);
             after.push_str(&edit);
             if let Some(next) = plot {
-                if heal {
+                if replace_on_heal {
                     after.push_str(&place(next, slot, w));
                 }
                 if let Some(previous) = cache.get_mut(slot) {
@@ -1009,6 +1445,9 @@ pub(crate) fn compose(
                     previous.cell_size = (cell_w, cell_h);
                     if let Some(bytes) = rgba {
                         previous.rgba = (bytes.len() <= MAX_CACHED_RGBA).then_some(bytes);
+                    }
+                    if large {
+                        previous.uploaded = now;
                     }
                 }
             }
@@ -1022,8 +1461,8 @@ pub(crate) fn compose(
             // Updates inside the same region still replace without a blank
             // interval, and identical pixels never reach this path.
             if lost || plot.is_none_or(|p| !cached.same_region(p, cols, (cell_w, cell_h))) {
-                before.push_str(&delete(slot));
-            } else {
+                before.push_str(&emit_graphics(&delete(slot), wrap));
+            } else if !placeholders {
                 replaced = Some(PLACEMENTS[slot].load(Ordering::Acquire));
             }
             super::shm::retire_id(image_id(slot));
@@ -1031,12 +1470,12 @@ pub(crate) fn compose(
         if let (Some(plot), Some(rgba)) = (plot, rgba) {
             // Set before writing: a signal during transmission must clean it up.
             LIVE.fetch_or(1 << slot, Ordering::Release);
-            after.push_str(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba));
-            // image_rgba() places at the default z, above the text. The same
-            // placement id is put back underneath, in this write, so a
-            // frame never shows the chart covering its labels.
-            if plot.under_text {
-                after.push_str(&place(plot, slot, w));
+            if placeholders {
+                before.push_str(&emit_graphics(&placeholder_transmit(plot, slot, w, cell_w, cell_h, &rgba), wrap));
+            } else {
+                // An under-text chart carries z=-1 on its own upload, so it
+                // never sits over its labels and needs no second placement.
+                after.push_str(&emit_graphics(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba), wrap));
             }
             if let Some(old) = replaced {
                 after.push_str(&delete_placement(slot, old));
@@ -1046,6 +1485,7 @@ pub(crate) fn compose(
                 cols,
                 cell_size: (cell_w, cell_h),
                 rgba: (rgba.len() <= MAX_CACHED_RGBA).then_some(rgba),
+                uploaded: now,
             };
             if let Some(previous) = cache.get_mut(slot) {
                 *previous = cached;
@@ -1057,7 +1497,99 @@ pub(crate) fn compose(
         }
     }
     cache.truncate(images.len());
+    (before, after)
+    });
     (text, before, after)
+}
+
+/// Placeholder cells for the blanks in an under-text plot. The widget's
+/// glyphs stay, with the colour that applied to them. A placeholder paints
+/// the image id as the foreground, so the next glyph re-applies its own
+/// colour, or a reset when it never had one.
+fn placeholders_keeping_text(row: &str, x: usize, cols: usize, id: u32, image_row: usize) -> String {
+    let row = super::inert(row);
+    let mut out = String::new();
+    let mut column = 0usize;
+    let mut active = String::new();
+    let mut dirty = false;
+    let mut after_placeholder = false;
+    let mut chars = row.chars().peekable();
+    while column < x + cols {
+        let Some(c) = chars.next() else {
+            break;
+        };
+        if c == '\x1b' {
+            let mut seq = String::from("\x1b");
+            for c in chars.by_ref() {
+                seq.push(c);
+                if c == 'm' {
+                    break;
+                }
+            }
+            active.push_str(&seq);
+            dirty = true;
+            continue;
+        }
+        let source_placeholder = c == super::placeholder::PLACEHOLDER;
+        if source_placeholder {
+            while chars
+                .peek()
+                .copied()
+                .is_some_and(super::placeholder::is_placeholder_diacritic)
+            {
+                chars.next();
+            }
+        }
+        let width = if source_placeholder {
+            1
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        };
+        if width == 0 {
+            if (x..x + cols).contains(&column.saturating_sub(1)) && !after_placeholder {
+                out.push(c);
+            }
+            continue;
+        }
+        if column < x + cols && column + width > x {
+            let blank = c == ' ' || source_placeholder;
+            // A wide glyph that starts outside the rectangle, or hangs past
+            // it, is not one cell we can keep. Those columns become
+            // placeholders so the row stays `cols` wide.
+            let fits = column >= x && column + width <= x + cols;
+            if blank || !fits {
+                let start = column.max(x);
+                let end = (column + width).min(x + cols);
+                for col in start..end {
+                    out.push_str(&super::placeholder::placeholder_cell(id, image_row, col - x));
+                }
+                after_placeholder = true;
+                dirty = true;
+            } else if dirty {
+                if active.is_empty() {
+                    if after_placeholder {
+                        out.push_str(super::RST);
+                    }
+                } else {
+                    out.push_str(&active);
+                }
+                dirty = false;
+                after_placeholder = false;
+                out.push(c);
+            } else {
+                after_placeholder = false;
+                out.push(c);
+            }
+        }
+        column += width;
+    }
+    while column < x + cols {
+        if column >= x {
+            out.push_str(&super::placeholder::placeholder_cell(id, image_row, column - x));
+        }
+        column += 1;
+    }
+    out
 }
 
 fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String {
@@ -1078,17 +1610,37 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
             continue;
         }
         let c = rest.chars().next().unwrap();
-        let size = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        rest = &rest[c.len_utf8()..];
+        // A placeholder cell is one column whatever unicode-width says of
+        // U+10EEEE, and the diacritics after it are part of that cell.
+        let placeholder = c == super::placeholder::PLACEHOLDER;
+        let size = if placeholder {
+            1
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        };
         if column >= x && !inserted {
             out.push_str(replacement);
             out.push_str(super::RST);
             inserted = true;
         }
-        if column < x || column >= x + width {
+        let keep = column < x || column >= x + width;
+        if keep {
             out.push(c);
         }
+        if placeholder {
+            while let Some(mark) = rest
+                .chars()
+                .next()
+                .filter(|m| super::placeholder::is_placeholder_diacritic(*m))
+            {
+                rest = &rest[mark.len_utf8()..];
+                if keep {
+                    out.push(mark);
+                }
+            }
+        }
         column += size;
-        rest = &rest[c.len_utf8()..];
     }
     if !inserted {
         out.push_str(&" ".repeat(x.saturating_sub(column)));
@@ -1331,6 +1883,38 @@ fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
 /// 9 saves little more at triple the time. See `docs/terminal-rendering.md`.
 const ZLIB_LEVEL: u8 = 6;
 
+fn graphics_key(bytes: &str, key: &str) -> bool {
+    bytes.split("\x1b_G").skip(1).any(|chunk| {
+        chunk
+            .split(';')
+            .next()
+            .is_some_and(|keys| keys.split(',').any(|item| item == key))
+    })
+}
+
+fn is_frame_edit(bytes: &str) -> bool {
+    graphics_key(bytes, "a=f") || graphics_key(bytes, "a=a") || graphics_key(bytes, "a=c")
+}
+
+fn emit_graphics(bytes: &str, wrap: bool) -> String {
+    // A shared-memory transmission names a filesystem path. Wrapping it
+    // would hand that path to the outer terminal. The direct path may
+    // still send `t=s` unwrapped. The rewrite that emits `t=s` on the
+    // shared-memory branch runs after compose, so this guard does not see
+    // that command. Re-checking it on the rebase is still outstanding.
+    let wrap = wrap || (is_frame_edit(bytes) && passthrough_enabled());
+    if graphics_key(bytes, "t=s") {
+        return if wrap { String::new() } else { bytes.to_string() };
+    }
+    // Frame edits have to be wrapped while placeholders are on, even when
+    // the caller forgot: tmux would otherwise swallow them.
+    if wrap {
+        super::terminal::tmux_passthrough(bytes)
+    } else {
+        bytes.to_string()
+    }
+}
+
 /// A slide of the same chart: same scale, same slot count, N new samples on
 /// the right. `None` keeps today's full upload.
 fn frame_edit(
@@ -1393,8 +1977,8 @@ fn frame_edit(
     out.push_str(&format!(
         "\x1b_Ga=c,i={id},r=2,c=1,X={dx},Y=0,x=0,y=0,w={copied},h={img_h},C=1,q=1\x1b\\"
     ));
-    out.push_str(&frame_payload(id, 0, 1, img_h, &edge));
-    out.push_str(&frame_payload(id, col_x, col_w, img_h, &column));
+    out.push_str(&frame_payload(id, 0, 0, 1, img_h, &edge));
+    out.push_str(&frame_payload(id, col_x, 0, col_w, img_h, &column));
     Some(out)
 }
 
@@ -1607,7 +2191,7 @@ fn column_rgba(rgba: &[u8], img_w: usize, col_x: usize, col_w: usize) -> Vec<u8>
     out
 }
 
-fn frame_payload(id: u32, x: usize, w: usize, h: usize, raw: &[u8]) -> String {
+fn frame_payload(id: u32, x: usize, y: usize, w: usize, h: usize, raw: &[u8]) -> String {
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(raw, ZLIB_LEVEL);
     let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
     let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
@@ -1616,7 +2200,7 @@ fn frame_payload(id: u32, x: usize, w: usize, h: usize, raw: &[u8]) -> String {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=f,f=32,t=d,o=z,s={w},v={h},x={x},y=0,i={id},r=1,X=1,q=1,m={more};"
+                "\x1b_Ga=f,f=32,t=d,o=z,s={w},v={h},x={x},y={y},i={id},r=1,X=1,q=1,m={more};"
             ));
         } else {
             // Later chunks of a frame still name the action.
@@ -1652,18 +2236,71 @@ fn image_rgba(
     } else {
         (32, None)
     };
-    let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
     let id = image_id(slot);
     let rows = h / cell_h;
     let placement = loop {
         let n = PLACEMENT_SEQ.fetch_add(1, Ordering::Relaxed);
-        if n != 0 { break n; }
+        if n != 0 {
+            break n;
+        }
     };
     PLACEMENTS[slot].store(placement, Ordering::Release);
+    let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
+    // z=-1 is under the glyphs and above cells that have a background, the
+    // same z `place` gives an under-text chart. On the upload itself, so the
+    // chart never shows over its labels and needs no second placement.
+    let z = if plot.under_text { ",z=-1" } else { "" };
     let keys = format!(
-        "s={w},v={h},i={id},p={placement},c={cols},r={rows},C=1,q=0"
+        "s={w},v={h},i={id},p={placement},c={cols},r={rows},C=1,q=0{z}"
     );
-    out.push_str(&transmit_pixels(raw.as_deref().unwrap_or(rgba), format, &keys, id, placement));
+    out.push_str(&transmit_pixels(
+        raw.as_deref().unwrap_or(rgba),
+        format,
+        &keys,
+        id,
+        placement,
+    ));
+    out
+}
+
+/// Quiet placeholder upload. A virtual placement is not displayed here, so
+/// the cursor stays put: moving it would move the outer terminal once tmux
+/// passes the sequence through. The bytes stay `t=d`. Shared memory is
+/// chosen inside `transmit_pixels`, and wrapping that command is not this path.
+fn placeholder_transmit(plot: &Plot, slot: usize, pane_width: usize, cell_w: usize, cell_h: usize, rgba: &[u8]) -> String {
+    let cols = plot.width.min(pane_width.saturating_sub(plot.x));
+    let (_, _, w, h) = crop_px(plot, cols, cell_w, cell_h);
+    let opaque =
+        plot.fill.is_some() && !rgba.is_empty() && rgba.chunks_exact(4).all(|px| px[3] == 255);
+    let (format, raw) = if opaque {
+        let rgb: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        (24, rgb)
+    } else {
+        (32, rgba.to_vec())
+    };
+    let id = image_id(slot);
+    let rows = h / cell_h;
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&raw, ZLIB_LEVEL);
+    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
+    let mut out = String::new();
+    let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
+    // q=2 suppresses the response a multiplexer would have to ignore.
+    // U=1 is the virtual placement the placeholder cells refer to.
+    for (i, chunk) in chunks.iter().enumerate() {
+        let more = usize::from(i + 1 < chunks.len());
+        if i == 0 {
+            out.push_str(&format!(
+                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,q=2,U=1,m={more};",
+            ));
+        } else {
+            out.push_str(&format!("\x1b_Gm={more};"));
+        }
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        out.push_str("\x1b\\");
+    }
     out
 }
 
@@ -1688,9 +2325,7 @@ pub(crate) fn transmit_pixels(pixels: &[u8], format: u8, keys: &str, id: u32, pl
     for (i, chunk) in chunks.iter().enumerate() {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
-            out.push_str(&format!(
-                "\x1b_Ga=T,f={format},t=d,o=z,{keys},m={more};"
-            ));
+            out.push_str(&format!("\x1b_Ga=T,f={format},t=d,o=z,{keys},m={more};"));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
         }
@@ -1700,6 +2335,8 @@ pub(crate) fn transmit_pixels(pixels: &[u8], format: u8, keys: &str, id: u32, pl
     out
 }
 
+/// Direct Kitty transmission. Production draws through `image_rgba`; tests
+/// keep this name for the path that places at the cursor.
 #[cfg(test)]
 fn image(plot: &Plot, slot: usize, pane_width: usize, cell_w: usize, cell_h: usize) -> String {
     let cols = plot.width.min(pane_width.saturating_sub(plot.x));
@@ -2014,8 +2651,12 @@ mod tests {
                 let plot = Plot::gradient_meter(0, 1, width, fraction, None, &hue, &track, &mark);
                 let text = plot.text_row(0);
                 assert_eq!(text.iter().map(|(_, t)| t.chars().count()).sum::<usize>(), width);
-                assert_eq!(text.iter().filter(|(_, t)| t == "█").count(),
-                    (finite_fraction(fraction) * width as f64).round() as usize);
+                let eighths = (finite_fraction(fraction) * width as f64 * 8.0).round() as usize;
+                assert_eq!(text.iter().filter(|(_, t)| t == "█").count(), eighths / 8);
+                assert_eq!(
+                    text.iter().filter(|(_, t)| LEFT_EIGHTHS[1..8].iter().any(|g| t == &g.to_string())).count(),
+                    usize::from(eighths % 8 > 0),
+                );
                 let bytes = pixels(&plot);
                 assert_eq!(bytes.len(), width * CELL_W * CELL_H * 4);
                 if width > 0 && fraction == 0.01 {
@@ -2119,21 +2760,138 @@ mod tests {
     }
 
     #[test]
+    fn meters_and_stacked_bars_are_text_in_kitty_mode() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let hue = super::super::rgb(120, 196, 250);
+        let other = super::super::rgb(250, 180, 90);
+        let track = super::super::rgb(60, 70, 80);
+        let mark = format!("{}{}", super::super::bg(10, 12, 18), super::super::rgb(238, 244, 252));
+        let parts = [(0.3, hue.clone()), (0.7, other.clone())];
+        let plots = [
+            Plot::meter(1, 1, 20, 0.43, Some(0.6), &hue, &track, &mark),
+            Plot::ramped_meter(1, 2, 20, 0.43, Some(0.6), &[hue.clone(), other.clone()], &track, &mark),
+            Plot::gradient_meter(1, 3, 20, 0.43, Some(0.6), &hue, &track, &mark),
+            Plot::gradient_meter_between(1, 4, 20, 0.43, None, [40, 90, 200], [120, 200, 255], &track, &mark),
+            Plot::stacked_bar(1, 5, 20, &parts),
+            Plot::gradient_stacked_bar(1, 6, 20, &parts),
+        ];
+        let rows = vec![String::new(); 8];
+        for plot in &plots {
+            for (lost, heal) in [(true, false), (false, false), (false, true)] {
+                let (text, before, after) =
+                    compose(&rows, std::slice::from_ref(plot), 30, 8, true, false, lost, heal);
+                assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"), "{plot:?}");
+                let (plain, _, _) = compose(&rows, std::slice::from_ref(plot), 30, 8, false, false, false, false);
+                assert_eq!(text, plain, "Kitty and text mode draw the same cells");
+            }
+            // Inside tmux too: no placeholder cells for a bar.
+            let (text, before, after) =
+                compose(&rows, std::slice::from_ref(plot), 30, 8, true, true, true, true);
+            assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"));
+            assert!(!text.concat().contains('\u{10EEEE}'));
+        }
+        // 43% of twenty cells is 8.6: eight whole cells and five eighths.
+        let row: String = plots[0].text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(row, "████████▋░░░┃░░░░░░░");
+        // 30% of twenty is six cells exactly; the boundary is one colour each.
+        let row: String = plots[4].text_row(0).iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(row, "█".repeat(20));
+        assert_eq!(plots[4].text_row(0)[5].0, hue);
+        assert_eq!(plots[4].text_row(0)[6].0, other);
+    }
+
+    #[test]
+    fn a_sticky_range_holds_until_the_data_leaves_it_or_it_is_twice_too_wide() {
+        let mut range = StickyRange::default();
+        assert_eq!(range.hold((1.0, 2.0), (0.9, 2.1)), (0.9, 2.1));
+        // Jitter inside the held range keeps it, though a fresh fit moved.
+        assert_eq!(range.hold((1.05, 1.95), (0.95, 2.05)), (0.9, 2.1));
+        assert_eq!(range.hold((0.9, 2.1), (0.8, 2.2)), (0.9, 2.1));
+        // A sample past the edge takes the fresh range.
+        assert_eq!(range.hold((0.9, 2.3), (0.8, 2.4)), (0.8, 2.4));
+        // A spike that left the window lets the axis tighten once the held
+        // range is more than twice the fresh one.
+        assert_eq!(range.hold((1.0, 1.5), (0.95, 1.55)), (0.95, 1.55));
+        // Nonsense never sticks.
+        assert_eq!(range.hold((1.0, 1.0), (f64::NAN, 1.0)).0.is_nan(), true);
+        assert_eq!(range.hold((1.0, 1.2), (0.9, 1.3)), (0.9, 1.3));
+    }
+
+    #[test]
+    fn a_dancing_placeholder_is_text_in_kitty_mode() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let colour = super::super::rgb(120, 196, 250);
+        let rows = vec![String::new(); 10];
+        for tick in 0..4 {
+            let columns: Vec<_> = super::super::dance(12, tick, 0.0)
+                .into_iter().map(|v| (v, colour.clone())).collect();
+            let plots = [
+                Plot::bars(1, 1, &columns, 3, 1.0, false).as_text(),
+                Plot::bars(1, 5, &columns, 3, 1.0, true).as_text(),
+            ];
+            assert!(plots.iter().all(Plot::is_text));
+            let (text, before, after) = compose(&rows, &plots, 20, 10, true, false, tick == 0, false);
+            assert!(!before.contains("\x1b_G") && !after.contains("\x1b_G"), "tick {tick}");
+            let (plain, _, _) = compose(&rows, &plots, 20, 10, false, false, false, false);
+            assert_eq!(text, plain);
+        }
+        // The same bars without it are still pixels.
+        let columns = vec![(0.5, colour.clone()); 12];
+        let plot = Plot::bars(1, 1, &columns, 3, 1.0, false);
+        assert!(!plot.is_text());
+        let (_, _, after) = compose(&rows, &[plot], 20, 10, true, false, true, false);
+        assert!(after.contains("a=T"));
+        cleanup();
+    }
+
+    #[test]
+    fn a_stacked_boundary_inside_a_cell_is_the_left_share_on_the_right_colour() {
+        let a = super::super::rgb(120, 196, 250);
+        let b = super::super::rgb(250, 180, 90);
+        // 0.33 of ten cells is 3.3: three cells, then two eighths of a.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.33, a.clone()), (0.67, b.clone())]);
+        let cells = plot.text_row(0);
+        let glyphs: String = cells.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(glyphs, "███▎██████");
+        assert_eq!(cells[3].0, format!("{a}{}", super::super::bg(250, 180, 90)));
+        assert!(cells[4].0.starts_with(super::super::NOBG), "the next cell clears the background");
+        assert_eq!(plot.fill.as_ref().unwrap().row(0, 10).matches(super::super::NOBG).count(), 1);
+        // A boundary in the last cell still ends its background before any label.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.95, a.clone()), (0.05, b.clone())]);
+        assert!(plot.fill.as_ref().unwrap().row(0, 10).ends_with(super::super::NOBG));
+        // Colours that are not truecolour cannot be painted behind: the larger share wins.
+        let plot = Plot::stacked_bar(0, 1, 10, &[(0.33, "\x1b[31m".into()), (0.67, "\x1b[32m".into())]);
+        assert_eq!(plot.text_row(0)[3], ("\x1b[32m".to_string(), "█".to_string()));
+        // Three categories in one cell: the middle, largest one takes it,
+        // rather than the outer two splitting it between them.
+        let c = super::super::rgb(90, 120, 250);
+        let plot = Plot::stacked_bar(0, 1, 1, &[(0.125, a.clone()), (0.75, b.clone()), (0.125, c.clone())]);
+        assert_eq!(plot.text_row(0)[0], (b.clone(), "█".to_string()));
+        // An empty category between two others is not a third share: the
+        // cell is still three eighths of a on c.
+        let plot = Plot::stacked_bar(0, 1, 1, &[(0.375, a.clone()), (0.0, b.clone()), (0.625, c)]);
+        assert_eq!(plot.text_row(0)[0], (format!("{a}{}", super::super::bg(90, 120, 250)), "▍".to_string()));
+    }
+
+    #[test]
     fn a_sub_cell_fill_needs_a_colour_or_the_pixel_bar_stays_empty() {
         let fill = super::super::rgb(10, 20, 30);
         let track = super::super::rgb(80, 100, 120);
         let mark = super::super::rgb(240, 245, 250);
-        // 1% of eight cells is under half a glyph, so both text fallbacks
-        // round to an empty track. The pixel path still paints the sliver
-        // when it has a colour, and paints nothing when the ramp is empty.
+        // 1% of eight cells is about two thirds of an eighth, so the text
+        // bar paints one eighth when it has a colour and stays an empty
+        // track when the ramp is empty.
         let sliver = Plot::ramped_meter(0, 0, 8, 0.01, None, &[fill], &track, &mark);
         let blank = Plot::ramped_meter(0, 0, 8, 0.01, None, &[], &track, &mark);
         assert_ne!(pixels(&sliver), pixels(&blank));
-        for plot in [&sliver, &blank] {
-            let row = plot.fill.as_ref().unwrap().row(0, 8);
-            assert!(!row.contains('█'), "{row:?}");
-            assert_eq!(row.matches('░').count(), 8, "{row:?}");
-        }
+        let row = sliver.fill.as_ref().unwrap().row(0, 8);
+        assert!(!row.contains('█') && row.contains('▏'), "{row:?}");
+        assert_eq!(row.matches('░').count(), 7, "{row:?}");
+        let row = blank.fill.as_ref().unwrap().row(0, 8);
+        assert!(!row.contains('█') && !row.contains('▏'), "{row:?}");
+        assert_eq!(row.matches('░').count(), 8, "{row:?}");
     }
 
     #[test]
@@ -2239,9 +2997,11 @@ mod tests {
         let mut c = chart(vec![Some(0.0); 5]);
         c.traces[0].baseline = Some(0.0);
         assert!(c.cells(10, 3).iter().flatten().all(|(_, mask)| *mask == 0));
-        assert!(pixels(&Plot::new(0, 1, 10, 3, c.clone()))
-            .iter()
-            .all(|b| *b == 0));
+        assert!(
+            pixels(&Plot::new(0, 1, 10, 3, c.clone()))
+                .iter()
+                .all(|b| *b == 0)
+        );
         c.traces[0].values[2] = Some(1.0);
         assert!(c.cells(10, 3)[0].iter().any(|(_, mask)| *mask != 0));
         assert!(c.cells(10, 3)[2].iter().any(|(_, mask)| *mask != 0));
@@ -2250,36 +3010,31 @@ mod tests {
     #[test]
     fn image_cache_ignores_subpixel_changes_but_updates_visible_changes() {
         let _transport = super::super::shm::guard();
-        let colour = super::super::rgb(80, 210, 160);
-        let track = super::super::rgb(70, 80, 90);
-        let mark = super::super::rgb(240, 240, 240);
         let rows = vec!["title".into()];
         for width in [57, 120] {
-            let meter = |marker| Plot::gradient_meter(
-                3, 2, width - 6, 0.4, Some(marker), &colour, &track, &mark,
-            );
+            let meter = |level| Plot::new(3, 2, width - 6, 3, chart(vec![Some(0.4), Some(level)]));
             let first = meter(0.501);
             let next = meter(0.501 + 1e-12);
             assert_ne!(first, next);
             assert_eq!(raster_pixels(&first, width - 6, CELL_W, CELL_H), raster_pixels(&next, width - 6, CELL_W, CELL_H));
-            let (_, _, after) = compose(&rows, &[first], width, 8, true, true, false);
+            let (_, _, after) = compose(&rows, &[first], width, 8, true, false, true, false);
             assert!(after.contains("a=T"));
             let placement = PLACEMENTS[0].load(Ordering::Acquire);
             let (_, before, after) =
-                compose(&rows, std::slice::from_ref(&next), width, 8, true, false, false);
+                compose(&rows, std::slice::from_ref(&next), width, 8, true, false, false, false);
             assert!(before.is_empty() && after.is_empty());
             assert_eq!(PLACEMENTS[0].load(Ordering::Acquire), placement);
-            let (_, before, after) = compose(&rows, &[meter(0.501 + 2e-12)], width, 8, true, false, true);
+            let (_, before, after) = compose(&rows, &[meter(0.501 + 2e-12)], width, 8, true, false, false, true);
             assert!(before.is_empty() && after.contains("a=p") && !after.contains("a=T"));
-            let (_, before, after) = compose(&rows, &[meter(0.75)], width, 8, true, false, false);
+            let (_, before, after) = compose(&rows, &[meter(0.75)], width, 8, true, false, false, false);
             assert!(before.is_empty() && after.contains("a=T"));
             assert_ne!(PLACEMENTS[0].load(Ordering::Acquire), placement);
             let mut moved = meter(0.75);
             moved.x += 1;
-            let (_, before, after) = compose(&rows, &[moved], width, 8, true, false, false);
+            let (_, before, after) = compose(&rows, &[moved], width, 8, true, false, false, false);
             assert!(before.contains("a=d") && after.contains("a=T"));
-            let (text, _, _) = compose(&rows, &[next], width, 8, false, false, false);
-            let (same_text, _, _) = compose(&rows, &[meter(0.501)], width, 8, false, false, false);
+            let (text, _, _) = compose(&rows, &[next], width, 8, false, false, false, false);
+            let (same_text, _, _) = compose(&rows, &[meter(0.501)], width, 8, false, false, false, false);
             assert_eq!(text, same_text);
         }
         cleanup();
@@ -2292,9 +3047,9 @@ mod tests {
         let rows = vec!["protected title".into()];
         for scroll in [0, 1, 3, 4, 6, 0] {
             let original = base.clone().in_viewport(0, 1, 10).unwrap();
-            compose(&rows, &[original], 40, 12, true, true, false);
+            compose(&rows, &[original], 40, 12, true, false, true, false);
             let next = base.clone().in_viewport(scroll, 1, 10).unwrap();
-            let (_, before, after) = compose(&rows, std::slice::from_ref(&next), 40, 12, true, false, false);
+            let (_, before, after) = compose(&rows, std::slice::from_ref(&next), 40, 12, true, false, false, false);
             if scroll == 0 {
                 assert!(before.is_empty() && after.is_empty());
             } else {
@@ -2302,7 +3057,7 @@ mod tests {
                 assert!(after.contains("a=T"));
             }
             // A steady frame does not delete or upload anything.
-            let (_, before, after) = compose(&rows, &[next], 40, 12, true, false, false);
+            let (_, before, after) = compose(&rows, &[next], 40, 12, true, false, false, false);
             assert!(before.is_empty() && after.is_empty());
         }
         cleanup();
@@ -2317,10 +3072,10 @@ mod tests {
         let colour = super::super::rgb(240, 160, 110);
         let rows = vec!["title".into()];
         let bars = |v: f64| Plot::bars(2, 1, &[(v, colour.clone()), (1.0, colour.clone())], 3, 1.0, false);
-        let (_, _, after) = compose(&rows, &[bars(0.9)], 40, 8, true, true, false);
+        let (_, _, after) = compose(&rows, &[bars(0.9)], 40, 8, true, false, true, false);
         assert!(after.contains("a=T") && !after.contains("a=d"));
         let first = PLACEMENTS[0].load(Ordering::Acquire);
-        let (_, before, after) = compose(&rows, &[bars(0.2)], 40, 8, true, false, false);
+        let (_, before, after) = compose(&rows, &[bars(0.2)], 40, 8, true, false, false, false);
         let second = PLACEMENTS[0].load(Ordering::Acquire);
         assert_ne!(first, second);
         // The new frame goes up before the old one comes down, so nothing
@@ -2334,7 +3089,7 @@ mod tests {
         // A moved chart leaves nothing at its old place either.
         let mut moved = bars(0.2);
         moved.y += 1;
-        let (_, before, after) = compose(&rows, &[moved], 40, 8, true, false, false);
+        let (_, before, after) = compose(&rows, &[moved], 40, 8, true, false, false, false);
         assert!(before.contains(&delete(0)));
         assert!(after.contains("a=T"));
         cleanup();
@@ -2349,7 +3104,7 @@ mod tests {
         let next_rgba = raster_pixels(&next, 12, CELL_W, CELL_H);
         assert_ne!(p, next);
         for buffer in [Some(rgba), None] {
-            let cached = CachedPlot { plot: p.clone(), cols: 12, cell_size: (CELL_W, CELL_H), rgba: buffer };
+            let cached = CachedPlot { plot: p.clone(), cols: 12, cell_size: (CELL_W, CELL_H), rgba: buffer, uploaded: Instant::now() };
             assert!(cached.same_pixels(&next, 12, (CELL_W, CELL_H), &next_rgba));
             assert!(!cached.same_pixels(&next, 11, (CELL_W, CELL_H), &next_rgba));
             assert!(!cached.same_pixels(&next, 12, (20, 40), &next_rgba));
@@ -2365,42 +3120,43 @@ mod tests {
         let _cache = compose_lock();
         let p = Plot::new(2, 1, 10, 3, chart(vec![Some(0.2), Some(0.8)]));
         let rows = vec!["protected title".into(), "axis".into()];
-        let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
+        let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, false, true, false);
         assert!(bytes.contains("a=T"));
-        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, false);
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, false, false);
         assert!(before.is_empty() && after.is_empty());
         // The periodic whole frame re-places the held image, never resends it.
-        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, true);
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, false, true);
         assert!(before.is_empty() && after.contains("a=p") && !after.contains("a=T"));
-        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, true, false);
         assert!(before.contains("a=d") && after.contains("a=T"));
-        let (text, before, after) = compose(&rows, &[p.clone()], 40, 8, false, false, false);
+        let (text, before, after) = compose(&rows, &[p.clone()], 40, 8, false, false, false, false);
         assert!(before.contains("a=d") && after.is_empty());
-        assert!(text
-            .iter()
-            .any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
+        assert!(
+            text.iter()
+                .any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)))
+        );
         let mut header_plot = p.clone();
         header_plot.y = 0;
-        let (text, _, after) = compose(&rows, &[header_plot], 40, 8, true, false, false);
+        let (text, _, after) = compose(&rows, &[header_plot], 40, 8, true, false, false, false);
         assert_eq!(text[0], rows[0]);
         assert!(after.is_empty());
-        compose(&rows, &[p], 40, 8, true, false, false);
-        let (_, before, after) = compose(&rows, &[], 40, 8, true, false, false);
+        compose(&rows, &[p], 40, 8, true, false, false, false);
+        let (_, before, after) = compose(&rows, &[], 40, 8, true, false, false, false);
         assert!(before.contains("a=d") && after.is_empty());
         // A quota overview can have more than sixteen visible bars. Keep
         // every one in Kitty and clean up the highest slot as well.
         let colour = super::super::rgb(120, 196, 250);
-        let plots: Vec<_> = (0..32).map(|i| Plot::gradient_meter(
-            2, i + 1, 4, 0.5, None, &colour, &colour, &colour,
+        let plots: Vec<_> = (0..32).map(|i| Plot::heatmap_levels(
+            2, i + 1, &[vec![Some((colour.clone(), 4)); 4]], &colour,
         )).collect();
         let rows = vec!["          ".into(); 34];
-        let (text, _, after) = compose(&rows, &plots, 10, 34, true, true, false);
+        let (text, _, after) = compose(&rows, &plots, 10, 34, true, false, true, false);
         assert_eq!(after.matches("a=T").count(), 32);
         assert!(!text.iter().any(|row| row.contains('█') || row.contains('░')));
         let ids: std::collections::HashSet<_> = (0..32).map(image_id).collect();
         assert_eq!(ids.len(), 32);
         assert_eq!(LIVE.load(Ordering::Acquire), u32::MAX);
-        let (_, before, after) = compose(&rows, &[], 10, 34, true, false, false);
+        let (_, before, after) = compose(&rows, &[], 10, 34, true, false, false, false);
         assert_eq!(before.matches("a=d").count(), 32);
         assert!(after.is_empty());
         assert_eq!(LIVE.load(Ordering::Acquire), 0);
@@ -2411,19 +3167,19 @@ mod tests {
         let _transport = super::super::shm::guard();
         let rows = vec!["title".into(), "keep".into()];
         let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
-        let (_, _, first) = compose(&rows, &[plain.clone()], 40, 6, true, true, false);
+        let (_, _, first) = compose(&rows, &[plain.clone()], 40, 6, true, false, true, false);
         assert!(first.contains("a=T"));
         assert!(graphics_keys(&first).iter().all(|keys| !keys.contains("z=")));
         let over = plain.clone().under_text();
-        let (_, _, placed) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        let (_, _, placed) = compose(&rows, &[over.clone()], 40, 6, true, false, false, false);
         assert!(!placed.contains("a=T"), "{placed}");
         assert!(placed.contains("a=p") && placed.contains("z=-1"), "{placed}");
-        let (_, _, quiet) = compose(&rows, &[over.clone()], 40, 6, true, false, false);
+        let (_, _, quiet) = compose(&rows, &[over.clone()], 40, 6, true, false, false, false);
         assert!(quiet.is_empty(), "{quiet}");
-        let (_, _, back) = compose(&rows, &[plain], 40, 6, true, false, false);
+        let (_, _, back) = compose(&rows, &[plain], 40, 6, true, false, false, false);
         assert!(!back.contains("a=T"), "{back}");
         assert!(back.contains("a=p") && !back.contains("z="), "{back}");
-        let (_, before, after) = compose(&rows, &[], 40, 6, true, false, false);
+        let (_, before, after) = compose(&rows, &[], 40, 6, true, false, false, false);
         assert!(before.contains("a=d") && after.is_empty());
     }
 
@@ -2593,13 +3349,13 @@ mod tests {
         let plain = Plot::new(2, 1, 8, 2, chart);
         let over = plain.clone().under_text();
         assert!(over.under_text);
-        let (braille, _, _) = compose(&rows, &[plain], 40, 6, false, true, false);
-        let (same, _, quiet) = compose(&rows, &[over.clone()], 40, 6, false, true, false);
+        let (braille, _, _) = compose(&rows, &[plain], 40, 6, false, false, true, false);
+        let (same, _, quiet) = compose(&rows, &[over.clone()], 40, 6, false, false, true, false);
         assert_eq!(braille, same);
         assert!(quiet.is_empty());
         assert!(braille.iter().any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
         assert!(!braille[1].contains("12.3ms"));
-        let (text, _, after) = compose(&rows, &[over], 40, 6, true, true, false);
+        let (text, _, after) = compose(&rows, &[over], 40, 6, true, false, true, false);
         assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
         assert!(text[2].contains("axis"));
         assert!(after.contains("a=T"));
@@ -2609,10 +3365,50 @@ mod tests {
         let bars = Plot::bars(0, 1, &cols, 1, 1.0, false).under_text();
         assert!(!bars.under_text, "a solid bar is not a line chart");
         let bar_rows = vec![String::new(), "keep".into()];
-        let (text, _, after) = compose(&bar_rows, &[bars], 20, 4, true, true, false);
+        let (text, _, after) = compose(&bar_rows, &[bars], 20, 4, true, false, true, false);
         assert!(!text[1].contains("keep"));
         assert!(graphics_keys(&after).iter().all(|keys| !keys.contains("z=")));
-        compose(&rows, &[], 40, 6, true, true, false);
+        compose(&rows, &[], 40, 6, true, false, true, false);
+    }
+
+    #[test]
+    fn placeholders_keep_under_text_readings() {
+        let _transport = super::super::shm::guard();
+        // Four blanks, then the reading. The plot starts on the blanks.
+        let plain = "ab    12.3ms later".to_string();
+        let rows = vec!["title".into(), plain.clone(), "abaxis values".into()];
+        let chart = chart(vec![Some(0.2), Some(0.8)]);
+        let over = Plot::new(2, 1, 10, 2, chart.clone()).under_text();
+        compose(&rows, &[], 40, 6, true, true, true, false);
+        let (text, before, after) = compose(&rows, &[over], 40, 6, true, true, true, false);
+        assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
+        assert!(text[1].contains('\u{10EEEE}'), "{:?}", text[1]);
+        assert!(text[2].contains("axis") && text[2].contains("value"), "{:?}", text[2]);
+        let reading = text[1].find("12.3ms").unwrap();
+        let cell = text[1][..reading].rfind('\u{10EEEE}').unwrap();
+        let reset = text[1][..reading].rfind("\x1b[0m").unwrap();
+        assert!(cell < reset && reset < reading, "{:?}", text[1]);
+        assert_eq!(super::super::display_width(&text[1]), plain.chars().count());
+        assert!(before.contains("q=2,U=1"), "{before:?}");
+        assert!(!before.contains("a=p") && !after.contains("a=p"), "{before:?} {after:?}");
+        // The reading's own colour is put back after the image-id colour.
+        // Row 0 is the pinned title; a plot there is not drawn.
+        let colour = super::super::rgb(30, 220, 180);
+        let coloured = format!("ab    {colour}12.3ms");
+        let rows = vec!["title".into(), coloured];
+        let over = Plot::new(2, 1, 10, 1, chart.clone()).under_text();
+        compose(&rows, &[], 40, 4, true, true, true, false);
+        let (text, _, _) = compose(&rows, &[over], 40, 4, true, true, true, false);
+        let reading = text[1].find("12.3ms").unwrap();
+        let paint = text[1][..reading].rfind(&colour).unwrap();
+        let cell = text[1][..reading].rfind('\u{10EEEE}').unwrap();
+        assert!(cell < paint && paint < reading, "{:?}", text[1]);
+        // A chart that did not ask to keep its text still becomes placeholders.
+        let bare = Plot::new(2, 1, 10, 1, chart);
+        compose(&rows, &[], 40, 4, true, true, true, false);
+        let (text, _, _) = compose(&rows, &[bare], 40, 4, true, true, true, false);
+        assert!(!text[1].contains("12.3ms"), "{:?}", text[1]);
+        compose(&rows, &[], 40, 4, true, true, true, false);
     }
 
     fn graphics_keys(bytes: &str) -> Vec<&str> {
@@ -2621,6 +3417,111 @@ mod tests {
             .skip(1)
             .filter_map(|chunk| chunk.split(';').next())
             .collect()
+    }
+
+    #[test]
+    fn placeholders_are_one_cell_and_direct_placement_stays() {
+        let _transport = super::super::shm::guard();
+        let rows = vec![
+            "title".into(),
+            "ab12.3ms later".into(),
+            "abaxis values".into(),
+        ];
+        let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        compose(&rows, &[], 40, 6, true, true, true, false);
+        let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
+        assert!(text[1].contains('\u{10EEEE}'), "{:?}", text[1]);
+        assert!(before.contains("q=2,U=1"), "{before:?}");
+        assert!(before.contains("a=T"), "{before:?}");
+        assert!(before.contains("\x1bPtmux;"));
+        assert!(!before.contains("a=p"), "{before:?}");
+        assert!(
+            !before.contains("\x1b[2;3H"),
+            "a virtual placement must not move the cursor: {before:?}"
+        );
+        assert!(!after.contains("a=T"), "{after:?}");
+        let frame = format!("{before}{}{after}", text.concat());
+        let upload = frame.find("q=2,U=1").expect("upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(upload < cell, "the virtual placement must precede its cells");
+        // A second transmission deletes the previous image before the new one.
+        let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
+        let frame = format!("{before}{}{after}", text.concat());
+        let delete_at = frame.find("a=d").expect("delete");
+        let upload = frame.find("q=2,U=1").expect("upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(delete_at < upload && upload < cell, "{frame:?}");
+        let cell = crate::placeholder::placeholder_cell(42, 0, 0);
+        let mixed = format!("ab{cell}cd");
+        assert_eq!(super::super::display_width(&mixed), 5);
+        let replaced = replace_cells(&mixed, 2, 1, "Z");
+        let z = replaced.find('Z').expect("replacement");
+        let tail = replaced.find("cd").expect("tail");
+        assert!(z < tail, "{replaced:?}");
+        assert!(!replaced.contains('\u{10EEEE}'), "{replaced:?}");
+        assert_eq!(super::super::display_width(&replaced), 5);
+        // The whole frame resends the quiet upload. A q=1 probe would be
+        // typed into the pane when tmux does not forward the APC reply.
+        let (text, before, again) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, true);
+        assert!(before.contains("q=2,U=1") && before.contains("a=T"), "{before:?}");
+        assert!(!before.contains("a=p") && !again.contains("a=p"), "{before:?} {again:?}");
+        assert!(!before.contains("q=1") && !again.contains("q=1"), "{before:?} {again:?}");
+        let frame = format!("{before}{}{again}", text.concat());
+        let upload = frame.find("q=2,U=1").expect("whole-frame upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(upload < cell, "the resent image must precede its cells");
+        // A frame that is not the whole frame does not resend a static chart.
+        let (_, quiet, still) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, false);
+        assert!(quiet.is_empty() && still.is_empty(), "{quiet:?} {still:?}");
+        let (direct, _, placed) = compose(&rows, &[plot], 40, 6, true, false, true, false);
+        assert!(!direct.iter().any(|row| row.contains('\u{10EEEE}')));
+        assert!(placed.contains("a=T"));
+        assert!(!placed.contains("U=1"));
+        compose(&rows, &[], 40, 6, true, false, true, false);
+    }
+
+    #[test]
+    fn passthrough_wraps_frame_edits_and_leaves_shared_memory_unwrapped() {
+        let _transport = super::super::shm::guard();
+        struct ResetPassthrough;
+        impl Drop for ResetPassthrough {
+            fn drop(&mut self) {
+                set_passthrough(false);
+            }
+        }
+        let _reset = ResetPassthrough;
+        set_passthrough(false);
+        let direct = emit_graphics("\x1b_Ga=T,t=d,i=1,q=1\x1b\\", false);
+        assert_eq!(direct, "\x1b_Ga=T,t=d,i=1,q=1\x1b\\");
+        let shared = emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", false);
+        assert_eq!(shared, "\x1b_Ga=T,t=s,i=1,q=1\x1b\\");
+        assert!(emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", true).is_empty());
+        // The payload can contain the letters of a key. Only the keys count.
+        let payload = emit_graphics("\x1b_Ga=T,t=d,q=1;abcd t=s xyz\x1b\\", true);
+        assert!(payload.starts_with("\x1bPtmux;"), "{payload:?}");
+        assert!(payload.contains("t=s"));
+        set_passthrough(true);
+        for action in ["a=f", "a=a", "a=c"] {
+            let raw = format!("\x1b_G{action},i=1,q=1\x1b\\");
+            let wrapped = emit_graphics(&raw, false);
+            assert!(wrapped.starts_with("\x1bPtmux;"), "{action}: {wrapped:?}");
+            assert!(wrapped.contains(action), "{action}: {wrapped:?}");
+        }
+        let shared = emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", false);
+        assert_eq!(shared, "\x1b_Ga=T,t=s,i=1,q=1\x1b\\");
+        assert!(emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", true).is_empty());
+        let upload = emit_graphics("\x1b_Ga=T,t=d,i=1,q=1\x1b\\", true);
+        assert!(upload.starts_with("\x1bPtmux;"), "{upload:?}");
+        set_passthrough(false);
+    }
+
+    #[test]
+    fn signal_cleanup_wraps_deletes_the_same_way_as_the_query() {
+        let raw = b"\x1b_Ga=d,d=I,i=1,q=2\x1b\\";
+        let mut out = [0u8; 80];
+        let n = wrap_graphics(raw, &mut out);
+        let wrapped = super::super::terminal::tmux_passthrough(std::str::from_utf8(raw).unwrap());
+        assert_eq!(&out[..n], wrapped.as_bytes());
     }
 
     fn decode_image(command: &str) -> (u8, Vec<u8>) {
@@ -2817,23 +3718,23 @@ mod tests {
             3,
             chart_of(&[&repeating_next[..], unique_next.as_slice()]),
         );
-        compose(&rows, &[old], 40, 8, true, true, false);
-        let (_, _, bytes) = compose(&rows, &[new], 40, 8, true, false, false);
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, _, bytes) = compose(&rows, &[new], 40, 8, true, false, false, false);
         assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
-        compose(&rows, &[], 40, 8, true, false, false);
+        compose(&rows, &[], 40, 8, true, false, false, false);
 
         let flat = [0.5; 8];
         let old = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], &unique]));
         let new = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], unique_next.as_slice()]));
-        compose(&rows, &[old], 40, 8, true, true, false);
-        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, false);
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, false, false);
         assert!(
             before.is_empty()
                 && after.contains("a=c")
                 && after.contains("a=f")
                 && !after.contains("a=T")
         );
-        compose(&rows, &[], 40, 8, true, false, false);
+        compose(&rows, &[], 40, 8, true, false, false, false);
     }
 
     fn chart_of(traces: &[&[f64]]) -> LineChart {
@@ -2923,16 +3824,16 @@ mod tests {
         );
         // Until the probe succeeds, a tick is still a full upload.
         FRAMES.with(|cell| cell.set(false));
-        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, true, false);
+        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, false, true, false);
         assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
-        let (_, _, bytes) = compose(&rows, &[new.clone()], 40, 8, true, false, false);
+        let (_, _, bytes) = compose(&rows, &[new.clone()], 40, 8, true, false, false, false);
         assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
-        compose(&rows, &[], 40, 8, true, false, false);
+        compose(&rows, &[], 40, 8, true, false, false, false);
 
         FRAMES.with(|cell| cell.set(true));
-        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, true, false);
+        let (_, _, bytes) = compose(&rows, &[old.clone()], 40, 8, true, false, true, false);
         assert!(bytes.contains("a=T"));
-        let (_, before, after) = compose(&rows, &[new.clone()], 40, 8, true, false, false);
+        let (_, before, after) = compose(&rows, &[new.clone()], 40, 8, true, false, false, false);
         assert!(
             before.is_empty()
                 && after.contains("a=c")
@@ -2945,9 +3846,19 @@ mod tests {
         assert_eq!(frame_column(&after, 0), column_rgba(&rgba, 64, 0, 1));
         assert_eq!(frame_column(&after, 54), column_rgba(&rgba, 64, 54, 10));
 
-        let mut scaled = new.clone();
-        scaled.chart.traces[0].values[3] = Some(0.05);
-        let (_, before, after) = compose(&rows, &[scaled], 40, 8, true, false, false);
+        // One sample that changed in place is a small rectangle of the root.
+        let mut nudged = new.clone();
+        nudged.chart.traces[0].values[7] = Some(0.05);
+        let (_, before, after) = compose(&rows, std::slice::from_ref(&nudged), 40, 8, true, false, false, false);
+        assert!(
+            before.is_empty() && after.contains("a=f") && !after.contains("a=c") && !after.contains("a=T"),
+            "a changed sample edits its rectangle: {after:?}"
+        );
+        let mut scaled = nudged.clone();
+        for value in scaled.chart.traces[0].values.iter_mut() {
+            *value = value.map(|v| v * 0.5);
+        }
+        let (_, before, after) = compose(&rows, &[scaled], 40, 8, true, false, false, false);
         // A replacement upload does not delete the image first. That gap is
         // what an acknowledgement would paint over while the new pixels arrive.
         assert!(before.is_empty() && after.contains("a=T") && !after.contains("a=c"));
@@ -2965,10 +3876,255 @@ mod tests {
             ],
             Some(0.15),
         );
-        compose(&rows, &[old], 40, 8, true, true, false);
-        let (_, before, after) = compose(&rows, &[new], 40, 8, true, true, false);
+        compose(&rows, &[old], 40, 8, true, false, true, false);
+        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, true, false);
         assert!(before.contains("a=d") && after.contains("a=T") && !after.contains("a=c"));
-        compose(&rows, &[], 40, 8, true, false, false);
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    /// Apply every root-frame edit (`a=f,r=1`, any x/y) in `bytes` to a held
+    /// RGBA image. Returns how many rectangles there were.
+    fn apply_rect(held: &mut [u8], img_w: usize, bytes: &str) -> usize {
+        let mut edits: Vec<(String, String)> = Vec::new();
+        for chunk in bytes.split("\x1b_G").skip(1) {
+            let chunk = chunk.trim_end_matches("\x1b\\");
+            let (keys, data) = chunk.split_once(';').unwrap_or((chunk, ""));
+            if keys.contains("a=f") && keys.contains("r=1") {
+                edits.push((keys.to_string(), data.to_string()));
+            } else if keys.starts_with("a=f,m=") {
+                edits.last_mut().unwrap().1.push_str(data);
+            }
+        }
+        for (keys, data) in &edits {
+            let key = |k: &str| keys.split(',').find_map(|kv| kv.strip_prefix(k)).unwrap().parse::<usize>().unwrap();
+            let (x, y, w, h) = (key("x="), key("y="), key("s="), key("v="));
+            let encoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+            let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap();
+            assert_eq!(raw.len(), w * h * 4);
+            for row in 0..h {
+                let at = ((y + row) * img_w + x) * 4;
+                held[at..at + w * 4].copy_from_slice(&raw[row * w * 4..(row + 1) * w * 4]);
+            }
+        }
+        edits.len()
+    }
+
+    #[test]
+    fn a_changed_rectangle_edits_the_root_frame_and_matches_a_full_raster() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["title".into(); 10];
+        // A line chart whose newest sample moves, and a calendar where one
+        // day lands: both change a corner of the image, not all of it.
+        let values: Vec<_> = (0..24).map(|i| Some(0.2 + 0.02 * i as f64)).collect();
+        let line = Plot::new(2, 1, 12, 4, chart(values.clone()));
+        let mut moved = values;
+        *moved.last_mut().unwrap() = Some(0.9);
+        let line_next = Plot::new(2, 1, 12, 4, chart(moved));
+        let green = super::super::rgb(80, 215, 130);
+        let mut days = vec![vec![Some((green.clone(), 2)); 10]; 3];
+        days[2][9] = None; // a missing day keeps alpha, so the image is RGBA
+        let calendar = Plot::heatmap_levels(2, 6, &days, &green);
+        days[1][4] = Some((super::super::rgb(60, 130, 95), 1));
+        let calendar_next = Plot::heatmap_levels(2, 6, &days, &green);
+        for (old, new) in [(line, line_next), (calendar, calendar_next)] {
+            compose(&rows, std::slice::from_ref(&old), 40, 10, true, false, true, false);
+            let (_, before, after) = compose(&rows, std::slice::from_ref(&new), 40, 10, true, false, false, false);
+            assert!(before.is_empty(), "{before:?}");
+            assert!(after.contains("a=f") && after.contains("r=1"), "{after:?}");
+            assert!(!after.contains("a=T") && !after.contains("a=d") && !after.contains("a=c"));
+            let img_w = new.width * CELL_W;
+            let mut held = pixels(&old);
+            apply_rect(&mut held, img_w, &after);
+            assert_eq!(held, pixels(&new), "the edit leaves exactly the new raster");
+            let rects = changed_rects(&pixels(&old), &pixels(&new), img_w);
+            let area: usize = rects.iter().map(|(_, _, w, h)| w * h).sum();
+            assert!(area * 4 < img_w * new.height * CELL_H, "only the changed part: {rects:?}");
+            compose(&rows, &[], 40, 10, true, false, false, false);
+        }
+        // An opaque calendar went up as RGB and is not edited in RGBA.
+        let solid = Plot::heatmap_levels(2, 6, &vec![vec![Some((green.clone(), 2)); 10]; 3], &green);
+        let mut cells = vec![vec![Some((green.clone(), 2)); 10]; 3];
+        cells[0][0] = Some((super::super::rgb(60, 130, 95), 1));
+        let solid_next = Plot::heatmap_levels(2, 6, &cells, &green);
+        compose(&rows, &[solid], 40, 10, true, false, true, false);
+        let (_, _, after) = compose(&rows, &[solid_next], 40, 10, true, false, false, false);
+        assert!(after.contains("a=T") && !after.contains("a=f"));
+        compose(&rows, &[], 40, 10, true, false, false, false);
+    }
+
+    #[test]
+    fn changes_in_separate_bands_are_separate_rectangles() {
+        let img_w = 20;
+        let old = vec![0u8; img_w * 40 * 4];
+        let mut new = old.clone();
+        let mut ink = |x: usize, y: usize| new[(y * img_w + x) * 4 + 3] = 255;
+        // Two strokes far apart, and two rows close enough to share a band.
+        ink(3, 2);
+        ink(5, 4);
+        ink(15, 30);
+        ink(12, 30 + BAND_GAP);
+        assert_eq!(
+            changed_rects(&old, &new, img_w),
+            vec![(3, 2, 3, 3), (12, 30, 4, BAND_GAP + 1)],
+        );
+        assert!(changed_rects(&old, &old, img_w).is_empty());
+        assert!(changed_rects(&old, &new[4..], img_w).is_empty(), "a size change is no edit");
+        // Spread across the image, the bands add up past the share: no edit.
+        let mut busy = old.clone();
+        for y in (0..40).step_by(2) {
+            for x in 0..img_w {
+                busy[(y * img_w + x) * 4 + 3] = 255;
+            }
+        }
+        assert!(rect_edit(&old, &busy, img_w, 0).is_none());
+        let mut held = old.clone();
+        let (edit, share) = rect_edit(&old, &new, img_w, 0).unwrap();
+        assert_eq!(share, (9 + 4 * (BAND_GAP + 1)) as f64 / (img_w * 40) as f64);
+        assert_eq!(apply_rect(&mut held, img_w, &edit), 2);
+        assert_eq!(held, new);
+    }
+
+    #[test]
+    fn a_slot_sends_its_whole_image_at_most_once_per_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 8];
+        let at = |level: f64| Plot::new(2, 1, 12, 4, chart(vec![Some(level), Some(1.0 - level)]));
+        let (_, _, after) = compose(&rows, &[at(0.2)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // A rescale moments later is held: nothing is sent and the terminal
+        // keeps the image it has.
+        let (_, before, after) = compose(&rows, &[at(0.4)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        let (_, before, after) = compose(&rows, &[at(0.5)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty());
+        // The cache still names what is on screen, so a return to it is a no-op.
+        with_cache(|cache| assert_eq!(cache[0].plot, at(0.2)));
+        // Once the gap has passed, the next frame sends the chart as it is then.
+        with_cache(|cache| cache[0].uploaded -= FULL_UPLOAD_GAP);
+        let (_, _, after) = compose(&rows, &[at(0.5)], 40, 8, true, false, false, false);
+        assert!(after.contains("a=T"));
+        assert_eq!(uploaded_pixels(&after), pixels(&at(0.5)));
+        // A size change or a lost screen is never held.
+        let mut wider = at(0.6);
+        wider.width += 2;
+        let (_, before, after) = compose(&rows, &[wider], 40, 8, true, false, false, false);
+        assert!(before.contains("a=d") && after.contains("a=T"));
+        let (_, _, after) = compose(&rows, &[at(0.7)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn a_new_axis_range_is_never_held_by_the_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 8];
+        let at = |level: f64, hi: f64| {
+            Plot::new(2, 1, 12, 4, chart(vec![Some(level), Some(1.0 - level)])).on_axis(0.0, hi)
+        };
+        let (_, _, after) = compose(&rows, &[at(0.2, 1.0)], 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // Same axis: the change waits, as any large change does.
+        let (_, before, after) = compose(&rows, &[at(0.4, 1.0)], 40, 8, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        // The axis moved, so its labels already name the new range: the
+        // strokes go now rather than sit under the wrong scale.
+        let (_, _, after) = compose(&rows, &[at(0.4, 2.0)], 40, 8, true, false, false, false);
+        assert!(after.contains("a=T"), "{after:?}");
+        assert_eq!(uploaded_pixels(&after), pixels(&at(0.4, 2.0)));
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn a_small_edit_always_goes_and_a_large_one_waits_for_the_gap() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        GAP.with(|gap| gap.set(FULL_UPLOAD_GAP));
+        let rows = vec!["title".into(); 10];
+        let line = |values: Vec<Option<f64>>| Plot::new(2, 1, 24, 6, chart(values));
+        let mut values: Vec<_> = (0..48).map(|i| Some(0.5 + 0.004 * i as f64)).collect();
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, true, false);
+        assert!(after.contains("a=T"));
+        // The newest sample moves: a strip at the right edge, sent at once.
+        *values.last_mut().unwrap() = Some(0.9);
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(after.contains("a=f") && !after.contains("a=T"), "{after:?}");
+        // Half the chart moves: more than a small edit, so it waits.
+        for v in values.iter_mut().skip(24) {
+            *v = v.map(|v| v - 0.3);
+        }
+        let (_, before, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        with_cache(|cache| cache[0].uploaded -= FULL_UPLOAD_GAP);
+        let (_, _, after) = compose(&rows, &[line(values.clone())], 40, 10, true, false, false, false);
+        assert!(after.contains("a=f") || after.contains("a=T"), "{after:?}");
+        GAP.with(|gap| gap.set(Duration::ZERO));
+        compose(&rows, &[], 40, 10, true, false, false, false);
+    }
+
+    /// The pixels of the first `a=T` in `bytes`, continuation chunks included.
+    fn uploaded_pixels(bytes: &str) -> Vec<u8> {
+        let start = bytes.find("\x1b_Ga=T").unwrap();
+        let mut command = String::new();
+        for chunk in bytes[start..].split_inclusive("\x1b\\") {
+            command.push_str(chunk);
+            if chunk.contains("m=0;") {
+                break;
+            }
+        }
+        decode_image(&command).1
+    }
+
+    #[test]
+    fn an_under_text_chart_carries_its_z_on_the_upload() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let rows = vec!["title".into(), "label".into()];
+        let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)])).under_text();
+        let (_, _, after) = compose(&rows, &[plot], 40, 8, true, false, true, false);
+        let upload = graphics_keys(&after).into_iter().find(|keys| keys.contains("a=T")).unwrap();
+        assert!(upload.split(',').any(|key| key == "z=-1"), "{upload}");
+        assert!(!after.contains("a=p"), "no second placement: {after:?}");
+        let plain = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        let (_, _, after) = compose(&rows, &[plain], 40, 8, true, false, true, false);
+        assert!(!after.contains("z=-1"));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn the_periodic_whole_frame_does_not_re_place_under_a_relaying_host() {
+        let _transport = super::super::shm::guard();
+        let _cache = compose_lock();
+        let rows = vec!["title".into(), "axis".into()];
+        let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, true, false);
+        let (_, _, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, false, true);
+        assert!(after.contains("a=p"), "a terminal gets the re-place");
+        RELAYS.with(|relays| relays.set(true));
+        let (_, before, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, false, true);
+        assert!(before.is_empty() && after.is_empty(), "{after:?}");
+        // A lost screen still sends the image again.
+        let (_, _, after) = compose(&rows, std::slice::from_ref(&plot), 40, 8, true, false, true, false);
+        assert!(after.contains("a=T"));
+        RELAYS.with(|relays| relays.set(false));
+        compose(&rows, &[], 40, 8, true, false, false, false);
+    }
+
+    #[test]
+    fn the_animation_probe_asks_for_the_ok_it_waits_for() {
+        let probe = animation_probe();
+        for action in ["a=f", "a=c"] {
+            let keys = graphics_keys(&probe).into_iter().find(|keys| keys.contains(action)).unwrap();
+            assert!(keys.split(',').any(|key| key.trim_end_matches("\x1b\\") == "q=0"), "{keys}");
+        }
     }
 
     #[test]
@@ -2981,20 +4137,20 @@ mod tests {
         // is two samples per cell, and (512 - 1) is not divisible by 127.
         let steady = netwatch_plot(64, 4, 128);
         let steady_next = slid_plot(&steady);
-        compose(&rows, &[steady], 80, 12, true, true, false);
-        let (_, _, today) = compose(&rows, &[steady_next], 80, 12, true, false, false);
+        compose(&rows, &[steady], 80, 12, true, false, true, false);
+        let (_, _, today) = compose(&rows, &[steady_next], 80, 12, true, false, false, false);
         assert!(today.contains("a=T") && !today.contains("a=c"));
-        compose(&rows, &[], 80, 12, true, false, false);
+        compose(&rows, &[], 80, 12, true, false, false, false);
 
         // 74 samples on that same width: (512 - 1) / 73 = 7.
         let early = netwatch_plot(64, 4, 74);
         let early_next = slid_plot(&early);
-        let (_, _, full) = compose(&rows, &[early], 80, 12, true, true, false);
+        let (_, _, full) = compose(&rows, &[early], 80, 12, true, false, true, false);
         let full_bytes = full.len();
-        let (_, _, edit) = compose(&rows, &[early_next], 80, 12, true, false, false);
+        let (_, _, edit) = compose(&rows, &[early_next], 80, 12, true, false, false, false);
         assert!(edit.contains("a=c") && edit.contains("a=f") && !edit.contains("a=T"));
         assert!(edit.len() < full_bytes);
-        compose(&rows, &[], 80, 12, true, false, false);
+        compose(&rows, &[], 80, 12, true, false, false, false);
     }
 
     fn netwatch_plot(width: usize, height: usize, slots: usize) -> Plot {

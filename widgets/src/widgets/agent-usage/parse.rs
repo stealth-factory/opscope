@@ -52,27 +52,36 @@ pub fn parse_cursor_cookie(token: &str, now: f64) -> Option<String> {
     Some(format!("WorkosCursorSessionToken={user}%3A%3A{token}"))
 }
 
-/// Claude's optional `cedar_ember` usage block. A grant can hold several
-/// resets; its expiry applies to all of them. No grant identifiers are kept.
-#[derive(Debug, PartialEq)]
-pub struct ClaudeResets {
-    pub left: u64,
-    pub soonest: Option<f64>,
-}
+/// The most resets one inventory is believed to hold.
+///
+/// Every reset is drawn as its own row, and Claude states a grant's resets
+/// as a count, so a count is turned into that many rows. A count past this
+/// is not an inventory any account holds; it makes the body unusable
+/// rather than a pane of a million rows or an allocation sized by the JSON.
+pub const MOST_RESETS: u64 = 1000;
 
+/// Claude's optional `cedar_ember` usage block, as one entry per reset.
+///
+/// A grant holds `resets_left` resets and its `ends_at` applies to every
+/// one of them, so a grant of two is two entries with the same expiry:
+/// nothing is merged. A grant's `type` of `full` is a full reset, which is
+/// what Codex calls its credits, and is named the same way; any other type
+/// is not guessed at and the entry has no kind. The grant's `label` is a
+/// sentence of marketing copy rather than a kind and is not kept, nor are
+/// grant identifiers.
+///
 /// Wire fields verified against Claude Code 2.1.296's grant schema.
 /// Unknown/ineligible blocks are absent, not a guessed empty inventory.
 /// Recheck dates at render time so cached offers cannot outlive their expiry.
-pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
+pub fn parse_claude_resets(text: &str, now: f64) -> Option<ResetBank> {
     let body: serde_json::Value = serde_json::from_str(text).ok()?;
     let block = body.get("cedar_ember")?.as_object()?;
     if !block.get("eligible")?.as_bool()? {
         return None;
     }
     let grants = block.get("grants")?.as_array()?;
+    let mut listed = Vec::new();
     let mut left = 0u64;
-    let mut soonest: Option<f64> = None;
-    let mut undated = false;
     for grant in grants {
         let grant = grant.as_object()?;
         if grant.get("usable_now").and_then(|v| v.as_bool()) != Some(true)
@@ -89,16 +98,32 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
         if expiry.is_some_and(|at| at <= now) || start.is_some_and(|at| at > now) {
             continue;
         }
-        left = left.checked_add(count)?;
-        match expiry {
-            Some(at) => soonest = Some(soonest.map_or(at, |old| old.min(at))),
-            None => undated = true,
+        left = left.checked_add(count).filter(|n| *n <= MOST_RESETS)?;
+        let title = match grant.get("type").and_then(|v| v.as_str()) {
+            Some("full") => Some("Full reset".to_string()),
+            _ => None,
+        };
+        for _ in 0..count {
+            listed.push(ResetCredit { title: title.clone(), expiry });
         }
     }
-    Some(ClaudeResets { left, soonest: if undated { None } else { soonest } })
+    soonest_first(&mut listed);
+    Some(ResetBank { left, credits: listed })
 }
 
-/// One reset credit still usable on a Codex account.
+/// Soonest expiry first, and a reset with no readable expiry after every
+/// dated one. The sort is stable, so equal instants keep the order the
+/// inventory gave them.
+fn soonest_first(credits: &mut [ResetCredit]) {
+    credits.sort_by(|a, b| match (a.expiry, b.expiry) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// One reset still usable on an account, Codex or Claude.
 ///
 /// `title` is the credit's own `title`. Absent, blank, or not a string is
 /// no title, and nothing is put in its place. `expiry` is `expires_at`.
@@ -109,11 +134,13 @@ pub struct ResetCredit {
     pub expiry: Option<f64>,
 }
 
-/// Reset credits still usable on a Codex account.
+/// Reset credits still usable on an account, Codex or Claude.
 ///
-/// `left` is a count the body supports. `credits` is one entry per credit
-/// that count was taken from, soonest first. An empty `credits` is a count
-/// the server stated without listing the credits, so no date row is drawn.
+/// `left` is a count the body supports, and `credits` is one entry per
+/// reset in it, soonest first with undated entries last, so `left` is
+/// always `credits.len()`. A count the server stated without listing the
+/// resets is that many entries with no expiry: each is still a reset, and
+/// none of them is given a date.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResetBank {
     pub left: u64,
@@ -149,10 +176,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     // Null is a count with no list, same as the key being absent. An
     // unreadable list falls through to the count alone below.
     let Some(credits) = obj.get("credits").filter(|value| !value.is_null()) else {
-        return Some(ResetBank {
-            left: reported?,
-            credits: Vec::new(),
-        });
+        return count_only(reported);
     };
     let Some(credits) = credits.as_array() else {
         return count_only(reported);
@@ -160,10 +184,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     // An empty list published a count and no credits to classify. The
     // count is the bank. Zero, when that is the count, is a real empty bank.
     if credits.is_empty() {
-        return Some(ResetBank {
-            left: reported.unwrap_or(0),
-            credits: Vec::new(),
-        });
+        return count_only(Some(reported.unwrap_or(0)));
     }
     let mut listed = Vec::new();
     for credit in credits {
@@ -188,12 +209,7 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
             expiry,
         });
     }
-    listed.sort_by(|a, b| match (a.expiry, b.expiry) {
-        (Some(left), Some(right)) => left.total_cmp(&right),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    soonest_first(&mut listed);
     // The list was readable, so the bank is the credits still in it. A
     // reported count that disagrees is not drawn beside them: the lines
     // under the number have to be that number.
@@ -303,11 +319,14 @@ fn skip_string_sequence(chars: &[char], mut i: usize) -> usize {
     chars.len()
 }
 
-/// The count alone, once the list can no longer be trusted credit by credit.
+/// The count alone, once the list can no longer be trusted credit by credit
+/// or was never sent: that many resets, none of them with a date.
 fn count_only(reported: Option<u64>) -> Option<ResetBank> {
+    let left = reported.filter(|n| *n <= MOST_RESETS)?;
+    let undated = ResetCredit { title: None, expiry: None };
     Some(ResetBank {
-        left: reported?,
-        credits: Vec::new(),
+        left,
+        credits: vec![undated; left as usize],
     })
 }
 
@@ -318,255 +337,6 @@ fn whole_count(value: &serde_json::Value) -> Option<u64> {
     value.as_i64().filter(|n| *n >= 0).map(|n| n as u64)
 }
 
-/// What `coderabbit usage` reports for the current billing period.
-///
-/// Every `label : value` line, in the order the CLI printed them, keyed by
-/// the label in lower case. The CLI documents the report as the review
-/// count, whether usage billing is on, and "when available" the spend and
-/// the reset date, so fields this does not name are kept rather than
-/// dropped: a spend line the widget has never seen still reaches the tab.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CodeRabbitUsage {
-    pub fields: Vec<(String, String)>,
-}
-
-impl CodeRabbitUsage {
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
-    }
-
-    /// `Your reviews`, when it is a whole number.
-    pub fn reviews(&self) -> Option<u64> {
-        self.get("your reviews")?.replace(',', "").parse().ok()
-    }
-
-    /// The first field whose label says it is `kind` of the rolling quota.
-    fn quota_field(&self, kind: QuotaField) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(k, _)| coderabbit_quota_field(k) == Some(kind))
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// Included reviews left in the rolling window, and out of how many
-    /// when the report says. CLI 0.8 added this; 0.7 printed a count only.
-    pub fn available(&self) -> Option<(u64, Option<u64>)> {
-        let nums = leading_numbers(self.quota_field(QuotaField::Available)?);
-        let left = *nums.first()?;
-        let of = nums.get(1).copied().or_else(|| {
-            leading_numbers(self.quota_field(QuotaField::Limit)?).first().copied()
-        });
-        // A limit below what is left is not a limit this count is a share
-        // of, and would draw an empty bar beside `7 of 5`.
-        Some((left, of.filter(|n| *n > 0 && left <= *n)))
-    }
-
-    /// CodeRabbit's own reason, when it says the included reviews could not
-    /// be checked - `Availability : unavailable` beside a `Note`. The
-    /// billing period still arrives with it, so the report is not a failure.
-    pub fn unavailable_why(&self) -> Option<String> {
-        let said = self.quota_field(QuotaField::Available)?;
-        if !said.to_lowercase().starts_with("unavailable") {
-            return None;
-        }
-        Some(self.get("note").unwrap_or(said).trim_end_matches('.').to_string())
-    }
-
-    /// How long the rolling window is, in seconds.
-    pub fn window_secs(&self) -> Option<f64> {
-        coderabbit_span_secs(self.quota_field(QuotaField::Window)?)
-    }
-
-    /// When capacity comes back, as epoch seconds: a stamp as given, or a
-    /// span counted from `read_at`, the moment the report was taken.
-    pub fn returns_at(&self, read_at: f64) -> Option<f64> {
-        let v = self.quota_field(QuotaField::Returns)?;
-        let v = v.trim().trim_start_matches("in ").trim();
-        iso_epoch(v).or_else(|| coderabbit_span_secs(v).map(|s| read_at + s))
-    }
-}
-
-/// Which part of the rolling quota a report line is.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum QuotaField {
-    Available,
-    Limit,
-    Window,
-    Returns,
-}
-
-/// What a `coderabbit usage` label says it is, if it is part of the
-/// rolling quota. Read from words, not exact labels: CLI 0.8's wording is
-/// documented only as "available included reviews, the rolling quota
-/// window, and when capacity returns", so the label's words are matched
-/// rather than a spelling this widget has not seen. The order matters -
-/// "capacity returns" and "available again" are a time, not a count.
-pub fn coderabbit_quota_field(label: &str) -> Option<QuotaField> {
-    let l = label.to_lowercase();
-    if l.contains("return") || l.contains("again") || l.contains("refill") || l.contains("next") {
-        Some(QuotaField::Returns)
-    } else if l.contains("window") {
-        Some(QuotaField::Window)
-    } else if l.contains("availab") || l.contains("remaining") || l.contains("left") {
-        Some(QuotaField::Available)
-    } else if l.contains("limit") || l.contains("quota") || l.contains("allowance") {
-        Some(QuotaField::Limit)
-    } else {
-        None
-    }
-}
-
-/// The whole numbers at the front of a value, as in `3 of 5`, `3/5` or
-/// `5 per hour`. Stops at the first word that is not a number or a joiner,
-/// so a count is never taken from a sentence that follows it.
-fn leading_numbers(value: &str) -> Vec<u64> {
-    let mut out = Vec::new();
-    for word in value.replace('/', " / ").replace(',', "").split_whitespace() {
-        match word.trim_matches(|c: char| c == '(' || c == ')') {
-            "of" | "/" | "out" => continue,
-            w => match w.parse() {
-                Ok(n) => out.push(n),
-                Err(_) => break,
-            },
-        }
-    }
-    out
-}
-
-/// A span in words or short units - `1 hour`, `60 minutes`, `1h 5m`,
-/// `rolling 1 hour` - in seconds. None when there is no number with a unit.
-pub fn coderabbit_span_secs(value: &str) -> Option<f64> {
-    let v = value.to_lowercase();
-    let mut total = 0.0;
-    let mut found = false;
-    let mut num: Option<f64> = None;
-    // Split `1h5m` into `1 h 5 m` so numbers and units are words of their own.
-    let mut spaced = String::new();
-    let mut prev_digit = None;
-    for c in v.chars() {
-        let digit = c.is_ascii_digit() || c == '.';
-        if prev_digit.is_some_and(|p| p != digit) && !c.is_whitespace() {
-            spaced.push(' ');
-        }
-        spaced.push(c);
-        prev_digit = if c.is_whitespace() { None } else { Some(digit) };
-    }
-    for word in spaced.split_whitespace() {
-        if let Ok(n) = word.parse::<f64>() {
-            num = Some(n);
-            continue;
-        }
-        let unit = match word.trim_end_matches([',', '.']) {
-            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
-            "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
-            "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
-            "d" | "day" | "days" => 86400.0,
-            _ => {
-                num = None;
-                continue;
-            }
-        };
-        if let Some(n) = num.take() {
-            total += n * unit;
-            found = true;
-        } else if word.starts_with("hour") && !found {
-            // `rolling hour`: one of the unit, with no number said.
-            total += unit;
-            found = true;
-        }
-    }
-    (found && total > 0.0).then_some(total)
-}
-
-/// `coderabbit usage`, stdout and stderr together.
-///
-/// The report is aligned `Label  : value` lines under a title. None when it
-/// carries none of the three fields that make it a usage report, which is
-/// what a signed-out CLI, a self-hosted login or a changed format all look
-/// like - `coderabbit_signed_out` tells the first apart.
-pub fn parse_coderabbit_usage(text: &str) -> Option<CodeRabbitUsage> {
-    let mut out = CodeRabbitUsage::default();
-    for line in text.lines() {
-        let line = strip_controls(line);
-        let Some((label, value)) = line.split_once(':') else {
-            continue;
-        };
-        let (label, value) = (label.trim().to_lowercase(), value.trim());
-        if label.is_empty() || value.is_empty() || out.get(&label).is_some() {
-            continue;
-        }
-        out.fields.push((label, value.to_string()));
-    }
-    let known = out.reviews().is_some()
-        || out.get("usage billing").is_some()
-        || out.get("period resets").is_some()
-        || out.available().is_some();
-    known.then_some(out)
-}
-
-/// The plan `coderabbit auth status` names on its `Plan :` line, `Team`.
-pub fn parse_coderabbit_plan(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let line = strip_controls(line);
-        let (label, value) = line.split_once(':')?;
-        let value = value.trim();
-        (label.trim().eq_ignore_ascii_case("plan") && !value.is_empty())
-            .then(|| value.to_string())
-    })
-}
-
-/// Where CodeRabbit's fair-use policy puts a developer, from the pull
-/// request reviews they had in the last seven days.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FairUse {
-    /// Reviews an hour. One on the last tier, which is one at a time.
-    pub rate: u32,
-    pub one_at_a_time: bool,
-    /// The seven-day count at which the rate next drops, and what to.
-    pub next: Option<(u64, u32)>,
-}
-
-/// CodeRabbit's published fair-use tiers for a plan, as (the seven-day
-/// count a tier starts at, reviews an hour), from
-/// docs.coderabbit.ai/management/rate-limits as read on 2026-09-29. The
-/// last tier on each is one review at a time. None for a plan the page
-/// does not list, which then gets a count and no rate.
-pub fn coderabbit_fair_use_tiers(plan: &str) -> Option<&'static [(u64, u32)]> {
-    let first = plan.split_whitespace().next().unwrap_or("").to_lowercase();
-    match first.as_str() {
-        "essentials" => Some(&[(0, 5), (30, 4), (40, 3), (50, 2), (60, 1)]),
-        "team" => Some(&[(0, 8), (40, 6), (50, 4), (60, 2), (70, 1)]),
-        "advanced" => Some(&[(0, 10), (50, 8), (60, 4), (70, 2), (80, 1)]),
-        "enterprise" => Some(&[(0, 12), (60, 10), (70, 5), (80, 3), (90, 1)]),
-        _ => None,
-    }
-}
-
-/// The tier `week` pull request reviews in seven days lands on.
-pub fn coderabbit_fair_use(plan: &str, week: u64) -> Option<FairUse> {
-    let tiers = coderabbit_fair_use_tiers(plan)?;
-    let at = tiers.iter().rposition(|(from, _)| week >= *from)?;
-    Some(FairUse {
-        rate: tiers[at].1,
-        one_at_a_time: at + 1 == tiers.len(),
-        next: tiers.get(at + 1).copied(),
-    })
-}
-
-/// Whether the CLI's own words say it is not logged in.
-pub fn coderabbit_signed_out(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    [
-        "not authenticated",
-        "please log in",
-        "auth login",
-        "authentication required",
-        "unauthorized",
-        "no session found",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-}
 
 /// One Notion AI allowance window, from `getCreditRateLimitStatus`.
 ///
@@ -1649,6 +1419,68 @@ pub fn parse_factory_dotenv(text: &str) -> Option<String> {
     None
 }
 
+/// Whether a body is Antigravity's language server refusing a caller for
+/// want of its CSRF token.
+///
+/// `agy` builds from October 2026 on answer every outside request with
+/// `{"code":"unauthenticated","message":"unauthenticated: missing CSRF
+/// token"}`, and hand the token only to processes they start themselves.
+/// Told apart from any other refusal because it is the one that explains a
+/// running app with no local quota - without it the probe reads exactly
+/// like an app that is shut.
+pub fn parse_antigravity_csrf_refusal(text: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    body["code"].as_str() == Some("unauthenticated")
+        && body["message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("csrf"))
+}
+
+/// One model's own allowance, from Antigravity's per-model quota.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelQuota {
+    pub model: String,
+    /// The fraction left, as Google sends it: 1.0 is untouched.
+    pub left: f64,
+    pub reset: Option<f64>,
+}
+
+/// The Gemini models in a `retrieveUserQuota` answer, one entry per model.
+///
+/// That endpoint lists every model the account can call, each with its own
+/// `remainingFraction` - not the grouped weekly and five-hour pair the
+/// summary carries, so nothing here is a group limit and callers must not
+/// draw it as one. Only `gemini-` models are kept: the Claude and GPT-OSS
+/// ones are already covered by the summary's own group, and the `chat_` and
+/// `tab_` entries are internal ids with no reset and no name a reader would
+/// recognise. A model listed twice keeps its first bucket. `None` when the
+/// body is not that shape at all, so an unreadable answer is not mistaken
+/// for an account with no Gemini models.
+pub fn parse_antigravity_model_quota(text: &str) -> Option<Vec<ModelQuota>> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let buckets = body["buckets"].as_array()?;
+    let mut out: Vec<ModelQuota> = Vec::new();
+    for bucket in buckets {
+        let Some(model) = non_empty(&bucket["modelId"]) else {
+            continue;
+        };
+        let Some(left) = bucket["remainingFraction"].as_f64() else {
+            continue;
+        };
+        if !model.starts_with("gemini-") || out.iter().any(|m| m.model == model) {
+            continue;
+        }
+        out.push(ModelQuota {
+            model,
+            left: left.clamp(0.0, 1.0),
+            reset: epoch_from(&bucket["resetTime"], 1e11),
+        });
+    }
+    Some(out)
+}
+
 fn quoted(value: &str) -> Option<&str> {
     let bytes = value.as_bytes();
     if bytes.len() >= 2
@@ -1710,6 +1542,48 @@ pub fn format_balance(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn antigravity_csrf_refusal_is_told_apart_from_other_answers() {
+        // The body the October 2026 `agy` sends to an outside caller.
+        assert!(super::parse_antigravity_csrf_refusal(
+            r#"{"code":"unauthenticated","message":"unauthenticated: missing CSRF token"}"#
+        ));
+        // Unauthenticated for some other reason is not this one.
+        assert!(!super::parse_antigravity_csrf_refusal(
+            r#"{"code":"unauthenticated","message":"token expired"}"#
+        ));
+        // Nor is a real answer, or something that is not JSON at all.
+        assert!(!super::parse_antigravity_csrf_refusal(r#"{"groups":[]}"#));
+        assert!(!super::parse_antigravity_csrf_refusal("Client sent an HTTP request to an HTTPS server."));
+    }
+
+    #[test]
+    fn antigravity_model_quota_keeps_gemini_models_once_each() {
+        // Shaped like a real `retrieveUserQuota` answer: internal ids with
+        // no reset, Claude and GPT-OSS models, and the Gemini ones.
+        let body = r#"{"buckets":[
+            {"tokenType":"WTUS","modelId":"chat_20706","remainingFraction":1},
+            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"claude-sonnet-5-5-high","remainingFraction":1},
+            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"gemini-3-flash","remainingFraction":0.75},
+            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"OTHER","modelId":"gemini-3-flash","remainingFraction":0.1},
+            {"tokenType":"WTUS","modelId":"gemini-2.5-pro","remainingFraction":1},
+            {"resetTime":"2026-10-24T08:53:27Z","tokenType":"WTUS","modelId":"gpt-oss-120b-medium","remainingFraction":1},
+            {"tokenType":"WTUS","modelId":"gemini-no-fraction"},
+            {"tokenType":"WTUS","modelId":"tab_flash_lite_preview","remainingFraction":1}
+        ]}"#;
+        let got = super::parse_antigravity_model_quota(body).unwrap();
+        let names: Vec<_> = got.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(names, ["gemini-3-flash", "gemini-2.5-pro"]);
+        assert_eq!(got[0].left, 0.75, "the first bucket for a model wins");
+        assert_eq!(got[0].reset, crate::iso_epoch("2026-10-24T08:53:27Z"));
+        assert_eq!(got[1].reset, None, "no reset is unknown, not now");
+        // An answer with no Gemini models is an empty list, and an answer
+        // that is not this shape is no answer.
+        assert_eq!(super::parse_antigravity_model_quota(r#"{"buckets":[]}"#), Some(Vec::new()));
+        assert_eq!(super::parse_antigravity_model_quota(r#"{"groups":[]}"#), None);
+        assert_eq!(super::parse_antigravity_model_quota("not json"), None);
+    }
+
+    #[test]
     fn cursor_cookie_reuses_the_token_subject_without_exposing_another_session() {
         use base64::Engine;
         let token = |sub: &str, exp: f64| {
@@ -1733,12 +1607,16 @@ mod tests {
         assert!(super::parse_cursor_cookie(&format!("{valid}\r\nheader"), 100.0).is_none());
     }
 
+    fn grant_of(title: Option<&str>, expiry: Option<f64>) -> ResetCredit {
+        ResetCredit { title: title.map(str::to_string), expiry }
+    }
+
     #[test]
-    fn claude_resets_count_usable_grants_and_expire_cached_offers() {
+    fn claude_resets_list_every_usable_reset_and_expire_cached_offers() {
         let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
         let body = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
-            {"resets_left": 2, "usable_now": true, "ends_at": "2026-10-12T00:00:00Z"},
-            {"resets_left": 1, "usable_now": true, "ends_at": "2026-10-11T00:00:00Z"},
+            {"resets_left": 2, "usable_now": true, "type": "full", "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "full", "ends_at": "2026-10-11T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "ends_at": "2026-10-10T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "starts_at": "2026-10-13T00:00:00Z"},
             {"resets_left": 9, "usable_now": true, "paused": true},
@@ -1746,11 +1624,16 @@ mod tests {
             {"resets_left": 9},
             {"resets_left": 0, "usable_now": true}
         ]}}).to_string();
-        assert_eq!(parse_claude_resets(&body, now), Some(ClaudeResets {
-            left: 3, soonest: iso_epoch("2026-10-11T00:00:00Z")
+        let full = Some("Full reset");
+        let (d11, d12) = (iso_epoch("2026-10-11T00:00:00Z"), iso_epoch("2026-10-12T00:00:00Z"));
+        // A grant of two is two entries with the same expiry, soonest first.
+        assert_eq!(parse_claude_resets(&body, now), Some(ResetBank {
+            left: 3,
+            credits: vec![grant_of(full, d11), grant_of(full, d12), grant_of(full, d12)],
         }));
-        assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ClaudeResets {
-            left: 2, soonest: iso_epoch("2026-10-12T00:00:00Z")
+        assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ResetBank {
+            left: 2,
+            credits: vec![grant_of(full, d12), grant_of(full, d12)],
         }));
     }
 
@@ -1764,17 +1647,23 @@ mod tests {
             assert_eq!(parse_claude_resets(body, now), None, "{body}");
         }
         let mut body = serde_json::json!({"cedar_ember":{"eligible":true,"grants":[]}});
-        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:0, soonest:None}));
-        for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null] {
+        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ResetBank {left:0, credits: Vec::new()}));
+        for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null,
+                      serde_json::json!(MOST_RESETS + 1)] {
             body["cedar_ember"]["grants"] = serde_json::json!([{"resets_left":count,"usable_now":true}]);
             assert_eq!(parse_claude_resets(&body.to_string(), now), None);
         }
+        // An undated grant is kept, after every dated one, and an unknown
+        // type is not named.
         for date in [serde_json::Value::Null, serde_json::json!("bad date")] {
             body["cedar_ember"]["grants"] = serde_json::json!([
-                {"resets_left":1,"usable_now":true,"ends_at":"2026-10-12T00:00:00Z"},
-                {"resets_left":2,"usable_now":true,"ends_at":date}
+                {"resets_left":1,"usable_now":true,"type":"mystery","ends_at":date},
+                {"resets_left":1,"usable_now":true,"type":"full","ends_at":"2026-10-12T00:00:00Z"}
             ]);
-            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:3, soonest:None}));
+            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ResetBank {
+                left: 2,
+                credits: vec![grant_of(Some("Full reset"), iso_epoch("2026-10-12T00:00:00Z")), grant_of(None, None)],
+            }));
         }
     }
 
@@ -1903,7 +1792,7 @@ mod tests {
         let bank = parse_codex_reset_credits(r#"{"available_count":2,"credits":null}"#, 0.0)
             .expect("the count");
         assert_eq!(bank.left, 2);
-        assert!(bank.credits.is_empty(), "null is not a list of credits");
+        assert_eq!(bank.credits, vec![undated(); 2], "null is not a list of credits");
         assert!(parse_codex_reset_credits(r#"{"credits":null}"#, 0.0).is_none());
     }
 
@@ -1945,9 +1834,10 @@ mod tests {
         let stated = parse_codex_reset_credits(r#"{"credits":[],"available_count":2}"#, now)
             .expect("a count without the credits listed");
         assert_eq!(stated.left, 2);
-        assert!(
-            stated.credits.is_empty(),
-            "no expiry was sent, so none is drawn"
+        assert_eq!(
+            stated.credits,
+            vec![undated(); 2],
+            "two resets, and no expiry was sent for either"
         );
     }
 
@@ -1955,7 +1845,31 @@ mod tests {
     fn a_summary_with_only_a_count_is_a_bank_without_expiries() {
         let bank = parse_codex_reset_credits(r#"{"available_count":4}"#, 0.0).expect("a summary");
         assert_eq!(bank.left, 4);
-        assert!(bank.credits.is_empty());
+        assert_eq!(bank.credits, vec![undated(); 4]);
+        // A count no inventory holds is not turned into that many rows.
+        let most = format!(r#"{{"available_count":{}}}"#, MOST_RESETS);
+        assert_eq!(parse_codex_reset_credits(&most, 0.0).map(|b| b.credits.len() as u64), Some(MOST_RESETS));
+        let past = format!(r#"{{"available_count":{}}}"#, MOST_RESETS + 1);
+        assert_eq!(parse_codex_reset_credits(&past, 0.0), None);
+    }
+
+    fn undated() -> ResetCredit {
+        ResetCredit { title: None, expiry: None }
+    }
+
+    #[test]
+    fn two_codex_credits_ending_together_stay_two_entries() {
+        let now = at("2026-07-01T00:00:00Z");
+        let bank = parse_codex_reset_credits(
+            r#"{"available_count":2,"credits":[
+                {"status":"available","title":"Full reset","expires_at":"2026-07-12T00:00:00Z"},
+                {"status":"available","title":"Full reset","expires_at":"2026-07-12T00:00:00Z"}
+            ]}"#,
+            now,
+        )
+        .expect("a list");
+        let one = ResetCredit { title: Some("Full reset".into()), expiry: Some(at("2026-07-12T00:00:00Z")) };
+        assert_eq!(bank, ResetBank { left: 2, credits: vec![one.clone(), one] });
     }
 
     #[test]
@@ -2018,190 +1932,6 @@ mod tests {
         }]);
     }
 
-    #[test]
-    fn a_coderabbit_report_gives_its_fields_in_order() {
-        // The shape the CLI prints, colour and all.
-        let text = "\u{1b}[1mCodeRabbit Usage — current billing period\u{1b}[0m\n\n\
-                    Organization  : Example Org\n\
-                    Usage billing : inactive\n\
-                    User          : example-user\n\
-                    Your reviews  : 1,025\n\
-                    Spend         : $4.20\n\
-                    Period resets : 2026-09-30\n";
-        let u = parse_coderabbit_usage(text).expect("parsed");
-        assert_eq!(u.reviews(), Some(1025));
-        assert_eq!(u.get("organization"), Some("Example Org"));
-        assert_eq!(u.get("usage billing"), Some("inactive"));
-        assert_eq!(u.get("period resets"), Some("2026-09-30"));
-        // A field this does not name is kept, not dropped.
-        assert_eq!(u.get("spend"), Some("$4.20"));
-        assert_eq!(u.fields[0].0, "organization");
-    }
-
-    #[test]
-    fn a_coderabbit_report_with_a_rolling_quota_gives_what_is_left_of_it() {
-        // The 0.8 report adds the rolling allowance; its exact wording is
-        // unseen, so two plausible spellings are read the same way.
-        let text = "Your reviews           : 42\n\
-                    Available reviews      : 3 of 5\n\
-                    Rolling window         : 1 hour\n\
-                    Capacity returns       : in 23m\n\
-                    Period resets          : 2026-09-30\n";
-        let u = parse_coderabbit_usage(text).expect("parsed");
-        assert_eq!(u.available(), Some((3, Some(5))));
-        assert_eq!(u.window_secs(), Some(3600.0));
-        assert_eq!(u.returns_at(1000.0), Some(1000.0 + 23.0 * 60.0));
-        let split = parse_coderabbit_usage(
-            "Included reviews left : 0/8\nQuota window : 60 minutes\n\
-             Available again : 2026-09-29T13:05:00Z\n",
-        )
-        .expect("parsed");
-        assert_eq!(split.available(), Some((0, Some(8))));
-        assert_eq!(split.window_secs(), Some(3600.0));
-        assert_eq!(split.returns_at(0.0), iso_epoch("2026-09-29T13:05:00Z"));
-    }
-
-    #[test]
-    fn a_coderabbit_count_with_no_limit_is_not_given_one() {
-        // A limit on a line of its own is taken; a bare count stays bare.
-        let apart = parse_coderabbit_usage("Available reviews : 4\nReview limit : 5 per hour\n")
-            .expect("parsed");
-        assert_eq!(apart.available(), Some((4, Some(5))));
-        let over = parse_coderabbit_usage("Available reviews : 7 of 5\n").expect("parsed");
-        assert_eq!(over.available(), Some((7, None)));
-        let bare = parse_coderabbit_usage("Available reviews : 4\n").expect("parsed");
-        assert_eq!(bare.available(), Some((4, None)));
-        // The 0.7 report has no quota at all.
-        let old = parse_coderabbit_usage("Your reviews : 25\nPeriod resets : 2026-09-30\n").unwrap();
-        assert_eq!(old.available(), None);
-        assert_eq!(old.window_secs(), None);
-    }
-
-    // `coderabbit usage` from CLI 0.8, captured outside a repository, with
-    // the organisation and user replaced.
-    const CODERABBIT_08_OUTSIDE_A_REPO: &str = "\
-────────────────────────────────────────
-CodeRabbit Usage
-
-Included reviews
-Availability : unavailable
-Note         : Run from a git repository to check included reviews.
-
-Billing period
-Organization  : example-org
-Usage billing : active
-User          : example-user
-Your reviews  : 94
-Your spend    : $5.25
-Review cap    : $40.00 per billing month (shared subscription)
-Period resets : 2026-10-06
-────────────────────────────────────────
-";
-
-    // The same, captured inside a repository.
-    const CODERABBIT_08_IN_A_REPO: &str = "\
-────────────────────────────────────────
-CodeRabbit Usage
-
-Included reviews
-Repository : example-org/example-repo
-Remaining  : 10 of 10
-Window     : rolling 1 hour
-
-Billing period
-Organization  : example-org
-Usage billing : active
-User          : example-user
-Your reviews  : 95
-Your spend    : $5.25
-Review cap    : $40.00 per billing month (shared subscription)
-Period resets : 2026-10-06
-────────────────────────────────────────
-";
-
-    #[test]
-    fn the_plan_is_read_from_auth_status() {
-        // Other lines carry colons too; only `Plan` is the plan.
-        let text = "Status       : signed in\nAccount      : someone@example.com\n\
-                    Plan         : Team\nOrganization : example-org\n";
-        assert_eq!(parse_coderabbit_plan(text).as_deref(), Some("Team"));
-        assert_eq!(parse_coderabbit_plan("Status : signed in\n"), None);
-    }
-
-    #[test]
-    fn a_week_of_pull_request_reviews_lands_on_the_published_tier() {
-        // Team: 0-39 eight an hour, 40-49 six, 50-59 four, 60-69 two, 70 on one at a time.
-        let team = |n| coderabbit_fair_use("Team", n).unwrap();
-        assert_eq!(team(0), FairUse { rate: 8, one_at_a_time: false, next: Some((40, 6)) });
-        assert_eq!(team(39).rate, 8);
-        assert_eq!(team(55), FairUse { rate: 4, one_at_a_time: false, next: Some((60, 2)) });
-        assert_eq!(team(70), FairUse { rate: 1, one_at_a_time: true, next: None });
-        assert_eq!(team(400).rate, 1);
-        // The other three plans the page lists, at each one's first drop.
-        assert_eq!(coderabbit_fair_use("essentials", 30).unwrap().rate, 4);
-        assert_eq!(coderabbit_fair_use("Advanced", 50).unwrap().rate, 8);
-        assert_eq!(coderabbit_fair_use("Enterprise", 59).unwrap().rate, 12);
-        // A plan the page does not list has no rate at all.
-        assert_eq!(coderabbit_fair_use("Free", 10), None);
-        assert_eq!(coderabbit_fair_use("", 10), None);
-    }
-
-    #[test]
-    fn a_captured_coderabbit_report_inside_a_repository_gives_the_allowance() {
-        // `Remaining` is the count and its limit, `Window` the rolling hour;
-        // nothing is spent, so CodeRabbit names no return time.
-        let u = parse_coderabbit_usage(CODERABBIT_08_IN_A_REPO).expect("parsed");
-        assert_eq!(u.available(), Some((10, Some(10))));
-        assert_eq!(u.window_secs(), Some(3600.0));
-        assert_eq!(u.returns_at(1000.0), None);
-        assert_eq!(u.unavailable_why(), None);
-        assert_eq!(u.reviews(), Some(95));
-        assert_eq!(u.get("repository"), Some("example-org/example-repo"));
-    }
-
-    #[test]
-    fn a_captured_coderabbit_report_outside_a_repository_keeps_its_billing_period() {
-        // Availability is a quota line, and `unavailable` is CodeRabbit's
-        // answer rather than a count, so nothing is read as reviews left.
-        let u = parse_coderabbit_usage(CODERABBIT_08_OUTSIDE_A_REPO).expect("parsed");
-        assert_eq!(u.reviews(), Some(94));
-        assert_eq!(u.get("period resets"), Some("2026-10-06"));
-        assert_eq!(u.get("your spend"), Some("$5.25"));
-        assert_eq!(u.available(), None);
-        assert_eq!(u.window_secs(), None);
-        assert_eq!(
-            u.unavailable_why().as_deref(),
-            Some("Run from a git repository to check included reviews")
-        );
-        assert_eq!(coderabbit_quota_field("availability"), Some(QuotaField::Available));
-        // Inside a repository the same line carries the count.
-        let inside = parse_coderabbit_usage("Availability : 3 of 8\n").expect("parsed");
-        assert_eq!(inside.available(), Some((3, Some(8))));
-        assert_eq!(inside.unavailable_why(), None);
-    }
-
-    #[test]
-    fn coderabbit_spans_read_words_and_short_units() {
-        // Words, short units run together, and a window named without a number.
-        assert_eq!(coderabbit_span_secs("1 hour"), Some(3600.0));
-        assert_eq!(coderabbit_span_secs("1h5m"), Some(3900.0));
-        assert_eq!(coderabbit_span_secs("rolling hour"), Some(3600.0));
-        assert_eq!(coderabbit_span_secs("soon"), None);
-        assert_eq!(coderabbit_quota_field("capacity returns"), Some(QuotaField::Returns));
-        assert_eq!(coderabbit_quota_field("your reviews"), None);
-        assert_eq!(coderabbit_quota_field("period resets"), None);
-    }
-
-    #[test]
-    fn a_coderabbit_answer_with_no_usage_fields_is_not_a_report() {
-        // Signed out: an error line with a colon in it is still not a report.
-        let text = "Error: not authenticated. Run `coderabbit auth login`.";
-        assert_eq!(parse_coderabbit_usage(text), None);
-        assert!(coderabbit_signed_out(text));
-        assert!(!coderabbit_signed_out("Your reviews : 3"));
-        // A count that is not a number does not make a report on its own.
-        assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
-    }
 
     const PERPLEXITY: &str = r#"{
         "balance_cents": 7250,

@@ -427,7 +427,6 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "grok" => (120, 196, 250),
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
-        "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
         // Perplexity's dark teal, its brand #20808D lifted only as far as
         // reading needs: the brand measures 2.59 on the selected-row tint,
@@ -473,8 +472,8 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
-    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
-    "perplexity", "devin", "droid",
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "notion", "perplexity",
+    "devin", "droid",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -983,7 +982,6 @@ fn run_hint(name: &str) -> &'static str {
         "cursor" => "cursor-agent",
         "grok" => "grok",
         "copilot" => "copilot",
-        "coderabbit" => "coderabbit auth login",
         _ => "",
     }
 }
@@ -1005,6 +1003,73 @@ fn no_local(what: &str, run: &str, w: usize, p: &Palette) -> Vec<String> {
         ));
     }
     rows
+}
+
+/// How current the figures read from local logs are, said where they are
+/// drawn.
+///
+/// Two states and only two. While a first read is still catching up the
+/// figures are what has been read so far, and they say so in the warning
+/// colour with how many logs are left - a partial count presented as a
+/// total is exactly what this repo will not draw. Otherwise they are as of
+/// the last time the logs were checked against the disk, which a slower
+/// history cadence makes worth stating. Nothing at all before the first
+/// pass, when the loading rows are on screen instead.
+fn history_rows(h: &shared::History, what: &str, w: usize, p: &Palette) -> Vec<String> {
+    // Wrapped to the pane, never clipped by it: a sentence that says the
+    // figures are partial is no use with its end cut off.
+    let width = w.saturating_sub(4).max(8);
+    let (colour, text) = if h.behind > 0 {
+        (
+            p.warn.as_str(),
+            format!(
+                "Still reading local {what}: {} of {} left. The figures from them below are so far, not totals.",
+                h.behind, h.of
+            ),
+        )
+    } else if !h.listed_all {
+        (
+            p.warn.as_str(),
+            format!(
+                "Only the first {} local {what} were listed; the figures from them below are not totals.",
+                h.of
+            ),
+        )
+    } else if h.as_of > 0.0 {
+        (p.dim.as_str(), format!("Local {what} as of {} ago.", ago(h.as_of)))
+    } else {
+        return Vec::new();
+    };
+    wrap_text(&text, width)
+        .into_iter()
+        .map(|line| tc::seg(&[(colour, format!("  {}", line))], w - 1))
+        .collect()
+}
+
+/// The badge a QUOTA heading carries: `live`, or how old a kept reading is.
+fn live_badge(kept: Option<&shared::Kept>, p: &Palette) -> (String, String) {
+    match kept {
+        None => (p.ok.clone(), "live".into()),
+        Some(k) => (p.warn.clone(), format!("kept {}", ago(k.at))),
+    }
+}
+
+/// The row under a QUOTA heading that says why the bars below are a kept
+/// reading and not a new one. The reason has to reach a row: a bar that is
+/// simply older than it looks is the failure this repo keeps paying for.
+fn kept_rows(kept: Option<&shared::Kept>, w: usize, p: &Palette) -> Vec<String> {
+    let Some(k) = kept else {
+        return Vec::new();
+    };
+    let text = format!(
+        "Not current: the last good reading, taken {} ago. This pass: {}.",
+        ago(k.at),
+        k.why.trim_end_matches('.')
+    );
+    wrap_text(&text, w.saturating_sub(4).max(8))
+        .into_iter()
+        .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1))
+        .collect()
 }
 
 /// A rate card: US$ per million tokens, by priced kind.
@@ -1206,6 +1271,23 @@ fn session_rate(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate
 
 /// Token counts by priced kind.
 type Tokens = HashMap<String, f64>;
+
+/// The longest window of token history any tab shows: the METERED rows'
+/// `30 days`. Logs not written to within it (and a day's margin, for the
+/// local midnight it is counted from and a clock that is slightly off) can
+/// hold nothing those rows show, so the readers that feed only those rows
+/// skip them. Change the window here and the label and the skip follow.
+pub const METERED_DAYS: i64 = 30;
+
+/// `METERED_DAYS` as the age, in seconds, past which a log is not read.
+pub fn metered_window() -> f64 {
+    (METERED_DAYS + 1) as f64 * 86_400.0
+}
+
+/// The label for the METERED window, from the same number.
+pub fn metered_label() -> String {
+    format!("{METERED_DAYS} days")
+}
 
 fn cost_of(tokens: &Tokens, rate: &Rate) -> f64 {
     RATE_KINDS
@@ -1566,7 +1648,7 @@ fn metered_rows(
     // A month's list cost against what the month actually cost you. Shown
     // only when the plan price is configured, because it is the one figure
     // in this section that no machine here knows.
-    let month = built.iter().find(|x| x.0 == "30 days");
+    let month = built.iter().find(|x| x.0 == metered_label());
     // What the plan saves is the month's cost minus the plan price, so
     // where that cost is a floor this is one too: fixing the window row and
     // leaving the arithmetic under it unmarked would be half a fix.
@@ -1886,9 +1968,6 @@ struct Config {
     /// one down. Turn it off and the quota lasts an hour past the last time
     /// Antigravity ran, which is the token's life.
     antigravity_start: bool,
-    /// The directory `coderabbit usage` runs in. Empty is this widget's
-    /// own; CodeRabbit reports included reviews only inside a repository.
-    coderabbit_repo: String,
     /// Days a week that count towards a window's pace, from Monday: 5 is
     /// Monday to Friday. Seven, the default, is the wall clock. Clamped to
     /// 1..=7, because no week has more and a pace over no days is nothing.
@@ -2008,7 +2087,6 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .get("antigravity_start")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        coderabbit_repo: tc::cfg_str(&raw, "coderabbit_repo", ""),
         work_days_per_week: tc::cfg_f64(&raw, "work_days_per_week", 7.0).round().clamp(1.0, 7.0) as u8,
         legacy_section,
         // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
@@ -2098,7 +2176,6 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec!["antigravity"],
             vec![under_home(".gemini/antigravity-cli")],
         ),
-        "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
@@ -2447,9 +2524,9 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
         String::new(),
     ];
     for part in wrap_text(
-        "The first pass is the slow one: Claude's transcripts run to hundreds \
-         of megabytes and Cursor's usage events are paged a thousand at a \
-         time. Both are cached afterwards.",
+        "The first pass is the slow one: Cursor's usage events are paged a \
+         thousand at a time, and local logs are read in slices after it. \
+         Both are cached afterwards.",
         w.saturating_sub(4).max(20),
     ) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", part))], w - 1));
@@ -2485,12 +2562,25 @@ fn main() {
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
+        // Resume where the last run left off, rather than reading every
+        // log on disk again from its first byte.
+        let saved_at = store::path();
+        store::restore(&mut caches, &saved_at);
+        // A directory dropped from the config is never read again, so
+        // nothing would ever prune what was saved for it.
+        let wanted: std::collections::HashSet<String> =
+            claude::dirs_of(&poller_cfg).iter().map(|d| claude::projects_path(&d.path)).collect();
+        caches.transcripts.retain(|dir, _| wanted.contains(dir));
+        let mut saver = store::Saver::new(now());
         let mut asked = false;
         loop {
             let work = poller_activity.start();
             if asked {
                 caches.asked_at = now();
             }
+            // One budget for the whole pass, every agent's logs drawing on
+            // it, so a pass is bounded however much history is on disk.
+            caches.budget = shared::Budget::new(shared::PASS_BYTES, shared::PASS_TIME);
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
             //
@@ -2521,6 +2611,12 @@ fn main() {
                         *g = found;
                         g.fetched = now();
                     }
+                    // A save that fails costs the next start a slower first
+                    // read and nothing else; there is nothing on screen it
+                    // could make wrong, so it is not a reason to stop.
+                    if saver.due(&mut caches, now()) {
+                        let _ = store::save(&caches, &saved_at);
+                    }
                 }
                 Err(_) => {
                     if let Ok(mut g) = poller.lock() {
@@ -2539,8 +2635,15 @@ fn main() {
                 Ok(g) => g,
                 Err(_) => return,
             };
+            // A first read still catching up comes back for its next slice
+            // in a couple of seconds rather than a whole refresh later.
+            let wait = if caches.catching_up() {
+                refresh.min(shared::CATCH_UP_EVERY)
+            } else {
+                refresh
+            };
             if !*pressed {
-                pressed = match cond.wait_timeout(pressed, Duration::from_secs_f64(refresh)) {
+                pressed = match cond.wait_timeout(pressed, Duration::from_secs_f64(wait)) {
                     Ok((g, _)) => g,
                     Err(_) => return,
                 };
@@ -2818,9 +2921,9 @@ fn main() {
 // not be five edits to the same file.
 mod parse;
 mod shared;
+mod store;
 mod antigravity;
 mod claude;
-mod coderabbit;
 mod notion;
 mod perplexity;
 mod devin;

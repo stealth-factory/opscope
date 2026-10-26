@@ -21,7 +21,7 @@
 //! per-day figures - the running total alone would credit an entire session
 //! to whichever day it happened to be read on.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use opscope_core as tc;
@@ -75,9 +75,6 @@ const BILLING: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits
 /// only rewritten when the server sends a new one, so the tail has to be
 /// long enough to still contain one after a busy session.
 const LOG_TAIL: u64 = 2 * 1024 * 1024;
-/// Namespace for this reader's per-file cache entries, so the prune below
-/// can find its own and leave every other reader's alone.
-const CACHE: &str = "grok:session:";
 
 /// Grok's credit window, as its own CLI receives it.
 ///
@@ -121,6 +118,8 @@ pub struct Data {
     files: usize,
     total: f64,
     daily: HashMap<NaiveDate, f64>,
+    /// How current the session logs behind `total` and `daily` are.
+    pub history: History,
     /// Newest transcript mtime, as epoch seconds.
     last: f64,
     quota: Option<Quota>,
@@ -163,23 +162,56 @@ fn int_after(line: &str, key: &str) -> Option<f64> {
 /// resumes replays earlier events, so the count can go backwards, and a
 /// decrease is a replay rather than negative usage. Days are UTC because
 /// the timestamp is epoch milliseconds and the Python bucketed it that way.
+#[cfg(test)]
 fn session_days(body: &str) -> (f64, HashMap<String, f64>) {
-    let (mut total, mut prev) = (0.0f64, 0.0f64);
-    let mut days: HashMap<String, f64> = HashMap::new();
+    let mut lines = SessionLines::default();
     for line in body.lines() {
+        lines.line(line);
+    }
+    (lines.total, lines.days)
+}
+
+/// `session_days` a line at a time, carrying the running counter from one
+/// line to the next, so `follow` can hand it only what a live session
+/// appended since the last pass.
+#[derive(Default)]
+pub struct SessionLines {
+    prev: f64,
+    total: f64,
+    days: HashMap<String, f64>,
+}
+
+impl Persist for SessionLines {
+    fn meta(&self) -> serde_json::Value {
+        serde_json::json!({"prev": self.prev, "total": self.total, "days": self.days})
+    }
+    fn records(&self) -> Option<&Records> {
+        None
+    }
+    fn load(v: &serde_json::Value, _: Records) -> Option<SessionLines> {
+        let mut days = HashMap::new();
+        for (day, n) in v["days"].as_object()? {
+            days.insert(day.clone(), n.as_f64()?);
+        }
+        Some(SessionLines { prev: v["prev"].as_f64()?, total: v["total"].as_f64()?, days })
+    }
+}
+
+impl Lines for SessionLines {
+    fn line(&mut self, line: &str) {
         let Some(value) = int_after(line, "\"totalTokens\":") else {
-            continue;
+            return;
         };
-        let step = value - prev;
-        prev = prev.max(value);
+        let step = value - self.prev;
+        self.prev = self.prev.max(value);
         if step <= 0.0 {
-            continue;
+            return;
         }
         // A step whose event carries no timestamp is dropped rather than
         // banked against whichever day was read last: a calendar that
         // invents a day is worse than one that is short by a step.
         let Some(ms) = int_after(line, "\"agentTimestampMs\":") else {
-            continue;
+            return;
         };
         // Local, not UTC, because Claude, Codex and Cursor all bucket
         // locally and day_calendar draws the four on one wall under the
@@ -187,12 +219,11 @@ fn session_days(body: &str) -> (f64, HashMap<String, f64>) {
         // its own to honour, so there is nothing here arguing for UTC the
         // way Copilot's reset boundary does.
         let Some(at) = Local.timestamp_millis_opt(ms as i64).single() else {
-            continue;
+            return;
         };
-        *days.entry(at.date_naive().to_string()).or_insert(0.0) += step;
-        total += step;
+        *self.days.entry(at.date_naive().to_string()).or_insert(0.0) += step;
+        self.total += step;
     }
-    (total, days)
 }
 
 /// A credit figure from the log, which arrives as `{"val": n}`.
@@ -549,11 +580,28 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
     caches.live.remove(&ping_key(token_account().as_deref()));
 }
 
+/// What the session logs add up to, kept for the passes that read
+/// nothing new.
+#[derive(Clone, Default)]
+pub struct Built {
+    sessions: usize,
+    total: f64,
+    daily: HashMap<NaiveDate, f64>,
+}
+
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
-    use std::os::unix::fs::MetadataExt;
-    let mut files = Vec::new();
-    walk(&under_home(SESSIONS), "updates.jsonl", &mut files);
+    // Every session, not a window: the tab's token figure is the whole
+    // history on this disk. Metadata only; contents are read below.
+    let at = now();
+    let (listed, complete) = caches.grok.or_last(list_logs(&under_home(SESSIONS), "updates.jsonl", None, at));
+    let files: Vec<String> = listed.iter().map(|l| l.path.clone()).collect();
     if files.is_empty() {
+        // Every session log is gone, so what was held for them goes too -
+        // when the listing is complete. One cut short has not looked yet.
+        if complete {
+            caches.grok = Logs::default();
+            caches.grok_built = None;
+        }
         // The log is still read. The credit window is account-wide and true
         // whatever this disk holds, and hiding it because the local half is
         // missing is the failure this repo keeps paying for. ok stays false,
@@ -571,50 +619,44 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             quota_at,
             quota_why,
             quota_every: quota_every_secs(cfg),
+            history: History { listed_all: complete, ..History::default() },
             ..Data::default()
         };
     }
-    let (mut total, mut sessions, mut newest) = (0.0f64, 0usize, 0.0f64);
-    let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for path in &files {
-        let Ok(meta) = std::fs::metadata(path) else {
-            continue;
-        };
-        newest = newest.max(meta.mtime() as f64);
-        // Keyed on the file's own (mtime, size): a transcript that has not
-        // been appended to cannot have different deltas, and re-reading
-        // every session on every refresh to learn that is the whole cost
-        // of this tab.
-        let key = format!("{}{}:{}:{}", CACHE, path, meta.mtime(), meta.size());
-        let got = cached_file(caches, &key, PLAN_TTL, || {
-            let (total, days) = session_days(&std::fs::read_to_string(path).ok()?);
-            Some(serde_json::json!({"total": total, "daily": days}))
-        });
-        seen.insert(key);
-        let Some(got) = got else {
-            continue;
-        };
-        let spent = got["total"].as_f64().unwrap_or(0.0);
-        if spent <= 0.0 {
-            continue;
+    let newest = listed.first().map_or(0.0, |l| l.mtime as f64);
+    let asked = caches.asked_at > 0.0;
+    // Read once and then only as it grows: a transcript that has not been
+    // appended to cannot have different deltas, and re-reading every
+    // session on every refresh to learn that is the whole cost of this tab.
+    let pass = caches
+        .grok
+        .pass((listed, complete), asked, at, &mut caches.budget, |_| SessionLines::default());
+    let history = caches.grok.history.clone();
+    let built = match (&caches.grok_built, pass) {
+        (Some(built), Pass::Held) => built.clone(),
+        _ => {
+            let mut built = Built::default();
+            for path in &files {
+                let Some(got) = caches.grok.tails.get(path.as_str()).map(|t| &t.parser) else {
+                    continue;
+                };
+                if got.total <= 0.0 {
+                    continue;
+                }
+                built.sessions += 1;
+                built.total += got.total;
+                for (day, n) in &got.days {
+                    let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+                        continue;
+                    };
+                    *built.daily.entry(at).or_insert(0.0) += n;
+                }
+            }
+            caches.grok_built = Some(built.clone());
+            built
         }
-        sessions += 1;
-        total += spent;
-        for (day, n) in got["daily"].as_object().into_iter().flatten() {
-            let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
-                continue;
-            };
-            *daily.entry(at).or_insert(0.0) += n.as_f64().unwrap_or(0.0);
-        }
-    }
-    // What makes a reading safe to trust - that its key names the size and
-    // mtime it was read at - is also what makes it dead the moment the
-    // session appends a line. Without this the live session's old readings
-    // pile up for as long as the pane runs.
-    caches
-        .live
-        .retain(|key, _| !key.starts_with(CACHE) || seen.contains(key));
+    };
+    let Built { sessions, total, daily } = built;
     // A session that has just ended is the moment the numbers have changed
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean
@@ -651,6 +693,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
+        history,
         sessions,
         files: files.len(),
         total,
@@ -1590,8 +1633,14 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
     // when there is nothing recorded - but the quota above has already been
     // drawn, because it is a fact about the account rather than the disk.
     if !d.ok {
+        // Only a complete listing shows there are none.
+        let none = if d.history.listed_all {
+            "No Grok sessions on this machine."
+        } else {
+            "Grok sessions not listed yet: the directory walk ran out of time."
+        };
         rows.extend(no_local(
-            "No Grok sessions on this machine.",
+            none,
             run_hint("grok"),
             w,
             p,
@@ -1599,9 +1648,13 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         return rows;
     }
 
+    rows.extend(crate::history_rows(&d.history, "session logs", w, p));
     rows.push(tc::seg(
         &[
-            (p.lbl.as_str(), " ── TOTALS ── ".into()),
+            (
+                p.lbl.as_str(),
+                if d.history.partial() { " ── SO FAR ── " } else { " ── TOTALS ── " }.into(),
+            ),
             (
                 p.dim.as_str(),
                 format!("{} sessions · newest {} ago", d.sessions, ago(d.last)),
@@ -1737,6 +1790,37 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_read_as_it_grows_matches_one_read_whole() {
+        let mut lines = Vec::new();
+        for i in 0..40u64 {
+            // The counter steps back once, as a resumed session's replay does.
+            let total = if i == 20 { 500 } else { 1000 * (i + 1) };
+            lines.push(format!(
+                r#"{{"totalTokens":{total},"agentTimestampMs":{},"note":"ünï ✓"}}"#,
+                1_788_000_000_000u64 + i * 3_600_000
+            ));
+        }
+        let body = lines.join("\n") + "\n";
+        let replacement = "{\"totalTokens\":7,\"agentTimestampMs\":1788000000000}\n";
+        let sorted = |(total, days): (f64, HashMap<String, f64>)| {
+            let mut days: Vec<(String, f64)> = days.into_iter().collect();
+            days.sort_by(|a, b| a.0.cmp(&b.0));
+            (total, days)
+        };
+        for step in [1, 17, 300] {
+            growing::check(
+                "grok",
+                &body,
+                step,
+                replacement,
+                SessionLines::default,
+                |text| sorted(session_days(text)),
+                |p: &SessionLines| sorted((p.total, p.days.clone())),
+            );
+        }
+    }
 
     /// A client-log line carrying a credit reading. Invented, but shaped
     /// like the real thing down to the microseconds and the numeric offset
@@ -2503,6 +2587,7 @@ mod tests {
         let p = palette();
         let d = Data {
             ok: true,
+            history: Default::default(),
             sessions: 2,
             files: 3,
             total: 12_345.0,

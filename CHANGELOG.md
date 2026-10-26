@@ -3,6 +3,70 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.0.1] - 2026-10-26
+
+### Bug Fixes
+
+- **agent-usage**: Show Antigravity's Gemini quota after agy locked its local server (OPS-198)
+- **agent-usage**: Read transcripts incrementally instead of whole on every refresh (OPS-207) (#482)
+- **agent-usage**: Show Antigravity's Gemini quota after agy locked its local server (OPS-198) (#479)
+
+### Documentation
+
+- **agents**: Never push to main; every change goes through a PR
+
+### Performance
+
+- **agent-usage**: Read logs less, less often - windowed, gated, budgeted and persisted (OPS-208) (#485)
+- **core**: Draw meters and bars as eighth-cell text (OPS-203) (#477)
+- **core**: Draw loading placeholders as text, never an animated image (OPS-204) (#480)
+- **core**: Upload only the changed part of line charts and heatmaps (OPS-205) (#484)
+
+### Reverted
+
+- Undo the OPS-198 commit pushed straight to main (#478)
+
+## [2.0.0] - 2026-10-24
+
+### Bug Fixes
+
+- **core**: Draw text charts under herdr unless pixels are asked for (OPS-199) (#469)
+
+### Features
+
+- **core**: Add a Google service-account auth helper (OPS-185) (#446)
+- **agent-usage**: Retire the CodeRabbit tab (OPS-200) (#468) — **breaking**
+
+## [1.11.0] - 2026-10-23
+
+### Features
+
+- **agent-usage**: One set of steps for the Perplexity token, and an overview hint for pasted-token agents (OPS-183) (#439)
+- **core**: Anchor tmux pixel charts with Unicode placeholders (OPS-157) (#366)
+
+### Miscellaneous
+
+- Add mattpocock/skills and cursor pstack skills (#457)
+
+## [1.10.0] - 2026-10-22
+
+### Bug Fixes
+
+- **agent-usage**: Clarify the last-check status (#436)
+- **agent-usage**: Show Claude's banked resets on its tab, as Codex does (OPS-190) (#452)
+
+### Features
+
+- **core**: Add Kitty notifications and large text for clocks and months (OPS-152) (#357)
+
+### Performance
+
+- **core**: Append chart samples with Kitty frame edits (OPS-155) (#364)
+
+### Tests
+
+- **agent-usage**: Read the Grok pool window at a fixed moment, not today (#450)
+
 ## [1.9.0] - 2026-10-15
 
 ### Bug Fixes

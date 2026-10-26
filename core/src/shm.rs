@@ -1064,14 +1064,16 @@ mod tests {
         };
         apply_accepted();
         let colour = super::super::rgb(120, 196, 250);
-        let plot =
-            super::super::Plot::gradient_meter(2, 1, 40, 0.5, None, &colour, &colour, &colour);
+        // Two rows of forty solid cells: RGB, over the shared-memory floor.
+        let plot = super::super::Plot::heatmap_levels(
+            2, 1, &vec![vec![Some((colour.clone(), 4)); 40]; 2], &colour,
+        );
         let rows = vec!["title".into(); 4];
         let (_, _, first) =
-            super::super::graphics::compose(&rows, &[plot.clone()], 44, 4, true, true, false);
+            super::super::graphics::compose(&rows, &[plot.clone()], 44, 4, true, false, true, false);
         let old = shared_name(&first);
         let (_, before, second) =
-            super::super::graphics::compose(&rows, &[plot], 44, 4, true, true, false);
+            super::super::graphics::compose(&rows, &[plot], 44, 4, true, false, true, false);
         let new = shared_name(&second);
         assert!(before.contains("a=d"));
         assert_ne!(old, new);

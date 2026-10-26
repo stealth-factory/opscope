@@ -44,6 +44,8 @@ navigation, not itself a widget.
 | [Port decisions](port-decisions.md) | What the Rust port changed from the Python, and why. |
 | [Port discovery](ports.md) | How `ports` acquires listeners and process details on Linux and macOS, including the traffic boundary. |
 | [Link acquisition](link.md) | How `link` maps Linux `ss` and macOS `nettop` onto one session view, including the delivery-rate and loss boundaries. |
+| [Google setup](google-setup.md) | The one Cloud project, three APIs and service-account key the Google widgets sign in with, and the least-privilege access each property needs. |
+| [Building a widget on Google APIs](google-widgets.md) | For widget developers: core's `google` helper, the scopes, the sign-in settings to declare, the shared wording, and testing without key material. |
 | [Building herdr panels](building-herdr-panels.md) | Driving these from Herdr: resize semantics, focus, and the layout mistakes worth skipping. |
 | [Releasing](releasing.md) | How a version is decided, what merging the release PR sets off, and what to do when it goes wrong. |
 | [As a Luvus module](../luvus/README.md) | Every widget as a pane inside a Luvus session: what the module declares, where its binaries come from, and why the manifest is generated. |

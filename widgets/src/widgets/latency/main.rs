@@ -762,6 +762,7 @@ fn graph(
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
     top: usize,
+    range: &mut tc::StickyRange,
 ) -> (Vec<String>, f64) {
     let gw = w.saturating_sub(9).max(10);
     let gh = h.max(4);
@@ -811,9 +812,16 @@ fn graph(
             span,
         );
     }
-    let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min).max(0.05) * 0.8;
-    let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
-    let (llo, lhi) = (lo.log10(), hi.log10());
+    let least = seen.iter().cloned().fold(f64::INFINITY, f64::min).max(0.05);
+    let most = seen.iter().cloned().fold(0.0f64, f64::max);
+    let lo = least * 0.8;
+    let hi = (most * 1.25).max(lo * 1.6);
+    // The axis holds while the samples fit it, so one new reply moves only
+    // the end of the line rather than rescaling the whole chart.
+    let (llo, lhi) = range.hold(
+        (least.log10(), most.max(1e-3).log10()),
+        (lo.log10(), hi.log10()),
+    );
 
     // One model for both terminal backends; samples and gaps never depend on
     // terminal resolution. The widget owns the axis transform and palette.
@@ -829,7 +837,7 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text().on_axis(llo, lhi));
     // The number is the bucket the stroke ends on, in that bucket's column.
     // A later loss-only bucket is a gap, so the line stops short of the
     // right edge and the label has to stop with it. A raw reply inside the
@@ -1020,6 +1028,9 @@ fn main() {
     // can come back to that row once its height is known.
     let mut scroll = 0usize;
     let mut moved = false;
+    // The chart's value axis, held between frames so it does not rescale
+    // on every reply. See `tc::StickyRange`.
+    let mut range = tc::StickyRange::default();
     loop {
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
@@ -1391,7 +1402,7 @@ fn main() {
         let log_h = LOG_ROWS;
         let gh = body_h.saturating_sub(rows.len() + log_h + 4).max(4);
         let mut plots = Vec::new();
-        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p, &mut plots, rows.len());
+        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p, &mut plots, rows.len(), &mut range);
         let drawn = chart.len();
         rows.extend(chart);
         if drawn > 1 {
@@ -1919,14 +1930,41 @@ mod tests {
         let mut other = Target::default();
         other.record(now, Some(80.0), 600);
         let targets = [focused, other];
-        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(0), &palette(), &mut Vec::new(), 1);
+        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(0), &palette(), &mut Vec::new(), 1, &mut tc::StickyRange::default());
         assert_eq!(rows.iter().filter(|row| bare(row).ends_with("10.00ms")).count(), 1);
         assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
         assert!(!rows.iter().any(|row| bare(row).ends_with("80.00ms")));
-        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(1), &palette(), &mut Vec::new(), 1);
+        let (rows, _) = graph(&targets, 40, 4, 5.0, "median", Some(1), &palette(), &mut Vec::new(), 1, &mut tc::StickyRange::default());
         assert!(rows.iter().any(|row| bare(row).ends_with("80.00ms")));
         assert!(!rows.iter().any(|row| bare(row).ends_with("40.00ms")));
         assert!(!rows.iter().any(|row| bare(row).ends_with("10.00ms")));
+    }
+
+    #[test]
+    fn a_reply_inside_the_axis_does_not_rescale_the_chart() {
+        // The axis is held between frames. A reply that fits it moves the
+        // end of the line and nothing else, so the axis labels stay and the
+        // older samples keep their height.
+        let now = tc::now();
+        let mut target = Target::default();
+        for (i, ms) in [20.0, 24.0, 22.0, 30.0].into_iter().enumerate() {
+            target.record(now - 10.0 + i as f64, Some(ms), 600);
+        }
+        let mut range = tc::StickyRange::default();
+        let axis = |rows: &[String]| rows.iter().map(|row| bare(row)[..7].to_string()).collect::<Vec<_>>();
+        let mut first = Vec::new();
+        let (rows, _) = graph(std::slice::from_ref(&target), 40, 6, 1.0, "median", None, &palette(), &mut first, 1, &mut range);
+        let labels = axis(&rows);
+        target.record(now - 5.0, Some(26.0), 600);
+        let mut second = Vec::new();
+        let (rows, _) = graph(std::slice::from_ref(&target), 40, 6, 1.0, "median", None, &palette(), &mut second, 1, &mut range);
+        assert_eq!(axis(&rows), labels, "the axis moved for a reply inside it");
+        let height = |plots: &[tc::Plot]| plots[0].chart.traces[0].values[0];
+        assert_eq!(height(&first), height(&second), "the oldest sample changed height");
+        // A reply far above the axis still rescales it.
+        target.record(now - 4.0, Some(400.0), 600);
+        let (rows, _) = graph(std::slice::from_ref(&target), 40, 6, 1.0, "median", None, &palette(), &mut Vec::new(), 1, &mut range);
+        assert_ne!(axis(&rows), labels);
     }
 
     #[test]
@@ -1941,7 +1979,7 @@ mod tests {
         target.record(now, None, 600);
         assert_eq!(target.stats().now, None);
         let mut plots = Vec::new();
-        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut plots, 1);
+        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut plots, 1, &mut tc::StickyRange::default());
         let trace = &plots[0].chart.traces[0];
         let positions = trace.positions.as_ref().expect("bucket positions");
         let at = trace
@@ -1982,7 +2020,7 @@ mod tests {
         target.record(now - 4.0, Some(10.0), 600);
         target.record(now - 2.0, Some(1000.0), 600);
         target.record(now - 0.2, Some(latest), 600);
-        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut Vec::new(), 1);
+        let (rows, _) = graph(&[target], 40, 4, 1.0, "median", None, &palette(), &mut Vec::new(), 1, &mut tc::StickyRange::default());
         let reading = fmt_ms(Some(latest));
         assert_eq!(reading, "21.97ms");
         assert!(bare(&rows[3]).ends_with(&reading), "{}", bare(&rows[3]));
@@ -2132,14 +2170,14 @@ mod tests {
         // network. The chart used to send the reader to edit a file; the
         // settings screen is one keypress away and already knows which
         // file is in force.
-        let (rows, _) = graph(&[], 80, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0);
+        let (rows, _) = graph(&[], 80, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0, &mut tc::StickyRange::default());
         let shown = rows.join("\n");
         assert!(shown.contains("latency.hosts"), "{shown}");
         assert!(shown.contains(tc::SET_IN_SETTINGS), "{shown}");
         assert!(!shown.contains("collecting"), "{shown}");
         // And at the width the wall actually uses, not only a wide one.
         // The clause may wrap; the key it names must still be on screen.
-        let (narrow, _) = graph(&[], 40, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0);
+        let (narrow, _) = graph(&[], 40, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0, &mut tc::StickyRange::default());
         let shown = narrow.join("\n");
         assert!(shown.contains("`,`"), "{shown}");
         assert!(shown.contains("latency.hosts"), "{shown}");

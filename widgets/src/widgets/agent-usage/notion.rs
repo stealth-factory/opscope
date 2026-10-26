@@ -60,6 +60,8 @@ pub struct Data {
     /// Where the cookie came from: `config`, `env`, or empty for none.
     source: &'static str,
     why: String,
+    /// Set when the allowance is a reading kept from an earlier pass.
+    kept: Option<Kept>,
 }
 
 /// The cookie, and where it came from. `config` wins over the environment.
@@ -181,6 +183,18 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         caches.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
+    // A failure in transit keeps the last good reading on screen, labelled
+    // with its own time and this pass's reason; any other failure does not.
+    let failed = if refused.is_empty() {
+        got.as_ref().map(|g| text(g, "why")).unwrap_or_default()
+    } else {
+        refused.clone()
+    };
+    if let Some((value, k)) = kept(caches, &key, &failed) {
+        got = Some(value);
+        d.kept = Some(k);
+        refused.clear();
+    }
     if !refused.is_empty() {
         d.why = refused;
         return d;
@@ -219,6 +233,17 @@ fn period_secs(ends: f64) -> Option<f64> {
 
 /// The rolling window and the billing period, each against its own limit.
 pub fn lanes(d: &Data) -> Vec<Lane> {
+    let mut out = fresh_lanes(d);
+    // A kept reading is a cached one, and the summary says so.
+    if d.kept.is_some() {
+        for lane in &mut out {
+            lane.stale = true;
+        }
+    }
+    out
+}
+
+fn fresh_lanes(d: &Data) -> Vec<Lane> {
     let Some(a) = d.allowance.as_ref() else {
         return Vec::new();
     };
@@ -320,14 +345,16 @@ pub fn why_no_lane(d: &Data) -> String {
 }
 
 fn allowance_rows_with_plots(d: &Data, a: &NotionAllowance, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let (ink, badge) = crate::live_badge(d.kept.as_ref(), p);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── NOTION AI ── ".into()),
-            (p.ok.as_str(), "live".into()),
+            (ink.as_str(), badge),
             (p.dim.as_str(), format!(" · per member · read {} ago", ago(d.read_at))),
         ],
         w - 1,
     )];
+    rows.extend(crate::kept_rows(d.kept.as_ref(), w, p));
     let hue = agent_hue("notion");
     let label_w = 7;
     for lane in lanes(d) {
@@ -494,6 +521,7 @@ mod tests {
             read_at: now() - 60.0,
             source: "config",
             why: String::new(),
+            kept: None,
         }
     }
 

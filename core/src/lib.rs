@@ -21,13 +21,15 @@
 //! where a choice existed this kept the earlier behaviour.
 
 mod dependencies;
+pub mod google;
 mod settings;
 mod terminal;
 mod graphics;
 mod shm;
+mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
-pub use graphics::{braille, line_col, line_row, LineChart, Plot, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, StickyRange, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
@@ -255,10 +257,12 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 
 /// The terminal columns occupied by printable text.
 ///
-/// Colour and other escapes are not text. An OSC 66 sized block occupies
-/// `scale` times the width of its payload.
+/// A Kitty unicode placeholder is one column: U+10EEEE, the row and column
+/// diacritics, and the image id carried in the foreground colour. Colour and
+/// other escapes are not text. An OSC 66 sized block occupies `scale` times
+/// the width of its payload.
 pub fn display_width(s: &str) -> usize {
-    if !s.contains('\u{1b}') {
+    if !s.contains('\u{1b}') && !s.contains(placeholder::PLACEHOLDER) {
         return s.width();
     }
     let chars: Vec<char> = s.chars().collect();
@@ -275,6 +279,17 @@ pub fn display_width(s: &str) -> usize {
                 continue;
             }
             i = skip_escape(&chars, i);
+            continue;
+        }
+        if chars[i] == placeholder::PLACEHOLDER {
+            // One cell: the placeholder and the row/column diacritics after it.
+            columns += visible.width();
+            visible.clear();
+            i += 1;
+            while i < chars.len() && placeholder::is_placeholder_diacritic(chars[i]) {
+                i += 1;
+            }
+            columns += 1;
             continue;
         }
         visible.push(chars[i]);
@@ -949,16 +964,29 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
     let lost = signalled | whole;
-    // Images are sent again only when the screen may really have lost them.
-    // The periodic whole frame just re-places them: resending every chart
-    // every few seconds is most of a dashboard's bandwidth over SSH.
+    // Direct images are sent again only when the screen may really have
+    // lost them. The periodic whole frame just re-places those: resending
+    // every chart every few seconds is most of a dashboard's bandwidth
+    // over SSH. A placeholder upload is quiet, so that same whole frame
+    // sends the image again. Until it does, a static chart whose image
+    // was dropped stays blank. The resend is an upload, not a heal.
     let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
     // Expire the probe and retired objects before images are published.
     terminal::on_frame();
-    let (rows, before, after) =
-        graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
+    let (rows, before, after) = graphics::compose(
+        rows,
+        plots,
+        w,
+        h,
+        caps.kitty_graphics,
+        caps.kitty_placeholders,
+        reset,
+        whole && !reset,
+    );
     let bytes = paint(&mut shown, &rows, w, h, lost);
+    // Placeholder uploads are in `before`, so the virtual placement exists
+    // before the cells that name it. Direct placements stay in `after`.
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
     // The resize handler only sets a flag. The query goes out here, before
@@ -2748,6 +2776,31 @@ pub fn post_json(
     body: &str,
     seconds: u64,
 ) -> Result<(String, Vec<(String, String)>), String> {
+    let (status, body, found) = post_answer(url, headers, body, seconds)?;
+    if !(200..300).contains(&status) {
+        return Err(refused(status, &body));
+    }
+    Ok((body, found))
+}
+
+/// One HTTPS POST that hands back every answer, refusals included, whole.
+///
+/// `post_json`'s twin of `get_answer`. `refused()` squeezes a refusal onto
+/// one line capped at 200 characters, which is right for showing it and
+/// wrong for reading it: Google puts the quota bucket, the API that is not
+/// enabled and the `error_description` of a refused sign-in inside a JSON
+/// body that routinely runs past the cap. Only a failure to reach the
+/// server at all is an `Err` here.
+///
+/// The body goes in with `--data`, so a caller sending a form passes its
+/// own `Content-Type: application/x-www-form-urlencoded`; nothing here
+/// assumes JSON beyond the name of the function that usually calls it.
+pub fn post_answer(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+) -> Result<(u16, String, Vec<(String, String)>), String> {
     use std::io::Write;
     let mut config = format!(
         "--silent\n--show-error\n--request POST\n--dump-header -\n\
@@ -2795,10 +2848,7 @@ pub fn post_json(
         .filter_map(|line| line.split_once(':'))
         .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
         .collect();
-    if !(200..300).contains(&status) {
-        return Err(refused(status, &body));
-    }
-    Ok((body, found))
+    Ok((status, body, found))
 }
 
 /// What a refused POST says: the status, and the body that explains it.
@@ -4037,9 +4087,14 @@ impl Keyboard {
     }
 
     /// Every key waiting, decoded. Empty when nothing has been pressed.
+    ///
+    /// Never returns once the terminal has gone away: see `leave_after_hangup`.
     pub fn poll(&mut self) -> Vec<String> {
         if self.saved.is_none() {
             return Vec::new();
+        }
+        if hung_up(self.fd) {
+            self.leave_after_hangup();
         }
         if SESSION_CHANGED.swap(false, Ordering::AcqRel) {
             graphics::cleanup();
@@ -4068,6 +4123,45 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+impl Keyboard {
+    /// Exit, because the terminal this widget was drawing on is gone.
+    ///
+    /// When a pane's terminal closes - the tmux server killed, the window
+    /// shut - SIGHUP goes to the terminal's session, and a widget that is
+    /// not in that session, or that inherited SIGHUP ignored, never hears
+    /// it. Nothing else stops it: every read is an empty one, every write
+    /// fails silently, and the pollers carry on polling. One copy of
+    /// agent-usage ran like that for six hours at 95% CPU with nobody able
+    /// to see it. So `poll`, which every widget calls every frame, looks
+    /// for the hang-up itself and leaves.
+    ///
+    /// The terminal is not restored: there is nothing left to restore it
+    /// for, and draining output to a terminal nobody reads is a way to
+    /// block forever. What outlives the process - shared-memory images -
+    /// is still released. `_exit` rather than `exit`, so no flush of
+    /// buffered output can wait on the dead terminal either.
+    fn leave_after_hangup(&mut self) -> ! {
+        self.saved = None;
+        forget_termios();
+        graphics::cleanup();
+        unsafe { libc::_exit(128 + libc::SIGHUP) }
+    }
+}
+
+/// Whether the terminal on `fd` has hung up.
+///
+/// A terminal whose other end has closed is always readable and every read
+/// of it returns nothing, which with `VMIN` at zero is exactly what a live
+/// terminal with no key pressed returns - so a read cannot tell the two
+/// apart and `poll` has to. Only `POLLHUP` counts: `POLLNVAL` is a
+/// descriptor that is not open, which is not this, and some platforms
+/// report it for terminals that are perfectly alive.
+fn hung_up(fd: i32) -> bool {
+    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let ready = unsafe { libc::poll(&mut p, 1, 0) };
+    ready > 0 && p.revents & libc::POLLHUP != 0
 }
 
 impl Drop for Keyboard {
@@ -5098,6 +5192,34 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::hung_up;
+
+    /// A pseudo-terminal pair: the master, and the slave's descriptor.
+    fn pty() -> (i32, i32) {
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0, "no pty");
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let name = libc::ptsname(master);
+            assert!(!name.is_null());
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "could not open the slave");
+            (master, slave)
+        }
+    }
+
+    #[test]
+    fn a_terminal_is_hung_up_only_once_its_other_end_closes() {
+        let (master, slave) = pty();
+        assert!(!hung_up(slave), "a live terminal with nothing typed is not a hang-up");
+        unsafe { libc::write(master, b"x".as_ptr().cast(), 1) };
+        assert!(!hung_up(slave), "nor is one with a key waiting");
+        unsafe { libc::close(master) };
+        assert!(hung_up(slave), "the other end closed");
+        unsafe { libc::close(slave) };
+    }
+
     #[test]
     fn nested_plot_sections_follow_their_text_offsets() {
         let mut rows = vec!["title".into(), "heading".into()];

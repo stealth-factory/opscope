@@ -13,6 +13,24 @@ For a new widget, follow the ordered contributor guide in
 for the owned folder, launcher registration, settings, platform split, tests,
 manual smoke test, and release handoff.
 
+**Never push to `main`.** Every change goes through a pull request, unless
+the user explicitly says to push that specific change to `main`; permission
+for one change is not permission for the next. The maintainer's account can
+bypass branch protection, so a push to `main` *succeeds*: the
+`Changes must be made through a pull request` line GitHub prints is a
+bypass warning, not a rejection. To stay off it:
+
+- create worktree branches with `--no-track` (`git worktree add --no-track
+  -b <branch> <path> origin/main`), or point the upstream at the branch
+  itself;
+- push only with an explicit refspec:
+  `git push -u origin HEAD:refs/heads/<branch>`. Never `git push origin
+  main`, never a bare `git push` from a branch tracking `main`, never
+  `--force` to `main`;
+- after every push, run `git ls-remote origin refs/heads/main` and check
+  `main` did not move. If it did, stop and tell the user. Do not "fix" it
+  with another push to `main`; revert through a pull request.
+
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
@@ -242,6 +260,16 @@ which the compiler now makes impossible. It went with the Python.
 
 ## Gotchas paid for already
 
+- **A push GitHub warns about is a push that landed.** The maintainer's
+  account can bypass branch protection, so `remote: - Changes must be made
+  through a pull request.` is printed *after* the push succeeds, and agents
+  read it as a refusal and carried on. The route in was a worktree made with
+  `git worktree add -b <branch> <path> origin/main`: that tracks
+  `origin/main`, so `git push -u origin <branch>` sent the commit straight to
+  `main`. Its message said `Fixes OPS-…`, which marked the issue Released
+  with nobody having reviewed it. `--no-track`, an explicit
+  `HEAD:refs/heads/<branch>` refspec and an `ls-remote` of `main` after the
+  push each close it on their own; use all three.
 - **A background thread that dies is invisible.** Wrap every poller so it
   records why it stopped; otherwise the pane shows no data and no error, which
   is indistinguishable from a source that has none. `vercel-deployments` sat like
@@ -366,6 +394,8 @@ that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `filter_row()` and `filtered_to_nothing()` for the one wording every pane
 says its filters in, `config_token_warning()` for widgets holding a secret,
+`google` for Google sign-in, scopes and wording
+([docs/google-widgets.md](docs/google-widgets.md)),
 non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.

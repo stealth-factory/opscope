@@ -80,21 +80,37 @@ pub struct Data {
     sampled: usize,
     /// day -> model -> tokens by priced kind.
     daily: HashMap<String, HashMap<String, Tokens>>,
+    /// How current the transcripts behind `daily` and `rates` are.
+    pub history: History,
 }
 
 impl Data {
-    pub(crate) fn reset_summary_line(&self) -> Option<String> {
+    /// The banked resets in this profile's quota reading, or `None` when
+    /// there is no reading or it carries no inventory that could be read.
+    /// Both the `[+]` line and the tab's section are built from this one
+    /// call, so the two cannot count differently.
+    fn reset_bank(&self) -> Option<crate::parse::ResetBank> {
         let quota = self.quota.as_ref()?;
-        let bank = crate::parse::parse_claude_resets(&quota.to_string(), now())?;
+        crate::parse::parse_claude_resets(&quota.to_string(), now())
+    }
+
+    /// `cached 5m ago` when the reading the bank came from is old, which is
+    /// the same test the quota lanes use for their own star.
+    fn reset_cache_note(&self) -> Option<String> {
+        reading_is_old(self.quota_at).then(|| format!("cached {} ago", ago(self.quota_at)))
+    }
+
+    pub(crate) fn reset_summary_line(&self) -> Option<String> {
+        let bank = self.reset_bank()?;
         if bank.left == 0 {
             return None;
         }
-        let mut line = match bank.soonest.and_then(crate::codex::summary_expiry) {
+        let mut line = match crate::codex::soonest_when_every_credit_is_dated(&bank) {
             Some(stamp) => format!("{} reset available {stamp}", bank.left),
             None => format!("{} reset available", bank.left),
         };
-        if reading_is_old(self.quota_at) {
-            line.push_str(&format!(" · cached {} ago", ago(self.quota_at)));
+        if let Some(note) = self.reset_cache_note() {
+            line.push_str(&format!(" · {note}"));
         }
         Some(line)
     }
@@ -417,7 +433,7 @@ fn stats_path(dir: &str) -> String {
     format!("{dir}/stats-cache.json")
 }
 
-fn projects_path(dir: &str) -> String {
+pub(crate) fn projects_path(dir: &str) -> String {
     format!("{dir}/projects")
 }
 
@@ -745,57 +761,67 @@ pub fn usage_kinds(u: &serde_json::Value) -> Tokens {
 /// transcript, and subagent turns are written twice over. Left raw that
 /// inflated one model by 29% against Claude Code's own totals.
 ///
-/// Cached on (mtime, size): a finished transcript never changes, so each is
-/// parsed once.
-pub fn scan_transcript(
-    caches: &mut Caches,
-    path: &str,
-) -> HashMap<String, (String, String, Tokens)> {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return HashMap::new();
-    };
-    use std::os::unix::fs::MetadataExt;
-    let key = (meta.mtime() as u64, meta.size());
-    if let Some((had, records)) = caches.transcripts.get(path) {
-        if *had == key {
-            return records.clone();
+/// Fed a line at a time by `follow`, which reads a transcript once and
+/// after that only what was appended to it.
+#[derive(Default)]
+pub struct TranscriptLines {
+    pub records: Records,
+}
+
+impl Persist for TranscriptLines {
+    fn meta(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn records(&self) -> Option<&Records> {
+        Some(&self.records)
+    }
+    fn load(_: &serde_json::Value, records: Records) -> Option<TranscriptLines> {
+        Some(TranscriptLines { records })
+    }
+}
+
+impl Lines for TranscriptLines {
+    fn line(&mut self, line: &str) {
+        if let Some((uid, record)) = transcript_record(line) {
+            self.records.insert(uid, record);
         }
     }
-    let mut records = HashMap::new();
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return records;
-    };
+}
+
+/// The record one transcript line contributes, keyed by its uuid.
+fn transcript_record(line: &str) -> Option<(String, Record)> {
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let r = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let msg = &r["message"];
+    let u = &msg["usage"];
+    let (model, uid, stamp) = (text(msg, "model"), text(&r, "uuid"), text(&r, "timestamp"));
+    if u.is_null() || model.is_empty() || uid.is_empty() || stamp.is_empty() {
+        return None;
+    }
+    let when = iso_epoch(&stamp)?;
+    let got = usage_kinds(u);
+    if total_tokens(&got) <= 0.0 {
+        return None;
+    }
+    let day = Local
+        .timestamp_opt(when as i64, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    Some((uid, (day, model, got)))
+}
+
+/// Every record in a whole transcript's text, the way `follow` builds it
+/// up a piece at a time. What the incremental reads are measured against.
+#[cfg(test)]
+pub fn transcript_records(body: &str) -> Records {
+    let mut lines = TranscriptLines::default();
     for line in body.lines() {
-        if !line.contains("\"usage\"") {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let msg = &r["message"];
-        let u = &msg["usage"];
-        let (model, uid, stamp) = (text(msg, "model"), text(&r, "uuid"), text(&r, "timestamp"));
-        if u.is_null() || model.is_empty() || uid.is_empty() || stamp.is_empty() {
-            continue;
-        }
-        let Some(when) = iso_epoch(&stamp) else {
-            continue;
-        };
-        let got = usage_kinds(u);
-        if total_tokens(&got) <= 0.0 {
-            continue;
-        }
-        let day = Local
-            .timestamp_opt(when as i64, 0)
-            .single()
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        records.insert(uid, (day, model, got));
+        lines.line(line);
     }
-    caches
-        .transcripts
-        .insert(path.to_string(), (key, records.clone()));
-    records
+    lines.records
 }
 
 /// Every transcript's per-day, per-model tokens, de-duplicated.
@@ -804,30 +830,88 @@ pub fn scan_transcript(
 /// day - and input, output and the two cache kinds differ in price by up to
 /// fifty times, so a total cannot be costed. The transcripts carry the
 /// split, which is why the money comes from here and not from the cache.
+#[cfg(test)]
 fn claude_daily_at(
     caches: &mut Caches,
     projects: &str,
 ) -> HashMap<String, HashMap<String, Tokens>> {
-    let mut files = Vec::new();
+    claude_history_at(caches, projects).daily
+}
+
+/// What one projects directory's transcripts add up to, and how current
+/// that is.
+#[derive(Clone, Default)]
+pub struct Built {
+    pub daily: HashMap<String, HashMap<String, Tokens>>,
+    pub rates: Vec<f64>,
+    pub sampled: usize,
+    pub history: History,
+}
+
+/// Bring one projects directory's transcripts up to date, within this
+/// pass's budget, and build what the tab shows from them.
+///
+/// Only transcripts written within the METERED window are read: the
+/// totals from them are drawn as today and the last `METERED_DAYS`, and
+/// nothing older can reach either row. The rate is the exception, and is
+/// taken from the newest transcripts whatever their age, as it always was.
+///
+/// A pass that read nothing new hands back what the last one built.
+fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
+    let at = now();
+    let asked = caches.asked_at > 0.0;
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
-    walk(projects, ".jsonl", &mut files);
-    let mut seen: HashMap<String, (String, String, Tokens)> = HashMap::new();
-    for path in &files {
-        seen.extend(scan_transcript(caches, path));
+    //
+    // Windowed while listing, not after, so transcripts too old to show
+    // never count towards the listing's entry bound.
+    let logs = caches.transcripts.entry(projects.to_string()).or_default();
+    let (windowed, complete) = logs.or_last(list_logs(projects, ".jsonl", Some(crate::metered_window()), at));
+    let pass = logs.pass((windowed, complete), asked, at, &mut caches.budget, |_| {
+        TranscriptLines::default()
+    });
+    let history = logs.history.clone();
+    if pass == Pass::Held {
+        if let Some(built) = caches.claude_built.get_mut(projects) {
+            built.history = history;
+            return built.clone();
+        }
+    }
+    // Borrowed rather than copied out of the cache. Oldest first, so the
+    // newest file wins a uuid two of them share.
+    let paths: Vec<&str> = logs.paths().collect();
+    let mut seen: HashMap<&str, &Record> = HashMap::new();
+    for path in paths.iter().rev() {
+        if let Some(t) = logs.tails.get(*path) {
+            for (uid, record) in &t.parser.records {
+                seen.insert(uid, record);
+            }
+        }
     }
     let mut merged: HashMap<String, HashMap<String, Tokens>> = HashMap::new();
     for (day, model, tokens) in seen.into_values() {
         let bucket = merged
-            .entry(day)
+            .entry(day.clone())
             .or_default()
-            .entry(model)
+            .entry(model.clone())
             .or_insert_with(empty_tokens);
         for kind in RATE_KINDS {
             *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
         }
     }
-    merged
+    // The newest few in the window are the newest few on disk. Only when
+    // the window holds fewer than the sample is the whole listing walked,
+    // so an idle month still has a rate.
+    let all: Vec<String> = if paths.len() >= RATE_FILES {
+        paths.iter().map(|p| p.to_string()).collect()
+    } else {
+        list_logs(projects, ".jsonl", None, at).0.into_iter().map(|l| l.path).collect()
+    };
+    let newest: Vec<&str> = all.iter().map(String::as_str).collect();
+    let (rates, sampled) = claude_rates_in(&newest);
+    let built = Built { daily: merged, rates, sampled, history };
+    caches.claude_built.insert(projects.to_string(), built.clone());
+    built
 }
 
 /// Per-model token totals over the last N days (1 = today only).
@@ -865,21 +949,10 @@ pub fn window_models(
 /// The median is what gets shown: it barely moves whichever way the outliers
 /// are trimmed, which is the reason to trust it, while the maximum moves by
 /// a factor of twenty on the same data, which is the reason not to show one.
-fn claude_rates_at(projects: &str) -> (Vec<f64>, usize) {
-    let mut files = Vec::new();
-    walk(projects, ".jsonl", &mut files);
-    let mut with_time: Vec<(u64, String)> = files
-        .into_iter()
-        .filter_map(|path| {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&path).ok()?;
-            Some((meta.mtime() as u64, path))
-        })
-        .collect();
-    with_time.sort_by(|a, b| b.0.cmp(&a.0));
+fn claude_rates_in(newest_first: &[&str]) -> (Vec<f64>, usize) {
     let mut out: Vec<f64> = Vec::new();
     let mut sampled = 0usize;
-    for (_, path) in with_time.iter().take(RATE_FILES) {
+    for path in newest_first.iter().take(RATE_FILES) {
         sampled += 1;
         let (mut prev, mut prev_type): (Option<f64>, String) = (None, String::new());
         for line in tail_lines(path, 4 * 1024 * 1024) {
@@ -1006,10 +1079,11 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // Transcripts are written as Claude runs; the optional stats cache is
     // rebuilt separately. A missing cache must not hide recorded usage.
     let projects = projects_path(&dir.path);
-    let (rates, sampled) = claude_rates_at(&projects);
-    claude.rates = rates;
-    claude.sampled = sampled;
-    claude.daily = claude_daily_at(caches, &projects);
+    let built = claude_history_at(caches, &projects);
+    claude.rates = built.rates;
+    claude.sampled = built.sampled;
+    claude.daily = built.daily;
+    claude.history = built.history;
     claude
 }
 
@@ -1730,10 +1804,19 @@ pub fn claude_plan_rows(prof: &serde_json::Value, w: usize, p: &Palette) -> Vec<
 }
 
 pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    let mut rows = claude_metered_windows(c, w, cfg, p);
+    // Under the heading: what the windows below were read from, and when.
+    let at = 1.min(rows.len());
+    let note = crate::history_rows(&c.history, "transcripts", w, p);
+    rows.splice(at..at, note);
+    rows
+}
+
+fn claude_metered_windows(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     metered_rows(
         &[
             ("today".to_string(), window_models(&c.daily, 1)),
-            ("30 days".to_string(), window_models(&c.daily, 30)),
+            (metered_label(), window_models(&c.daily, METERED_DAYS)),
         ],
         w,
         "",
@@ -1744,6 +1827,23 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
         cfg,
         p,
     )
+}
+
+/// The account's banked rate-limit resets, under the quota windows.
+///
+/// Codex's section, drawn by the same `bank_section`: the count in the
+/// title, one row per reset with its own expiry, and - when the reading is
+/// old - its age under them, which is what the `[+]` line adds for the same
+/// profile. A reading with no inventory in it - no quota yet, or an absent,
+/// ineligible or unreadable block - draws no section at all, as Codex does
+/// when its inventory request fails; that is what keeps an unread bank
+/// from looking like an empty one.
+fn claude_bank_rows(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    let Some(bank) = c.reset_bank() else {
+        return Vec::new();
+    };
+    let notes: Vec<String> = c.reset_cache_note().into_iter().collect();
+    crate::codex::bank_section(&bank, &notes, w, p)
 }
 
 fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
@@ -1773,6 +1873,13 @@ fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
                 rows.push(String::new());
             }
         }
+    }
+    let bank = claude_bank_rows(c, w, p);
+    if !bank.is_empty() {
+        // The quota block leaves one empty row before whatever follows it;
+        // the section keeps that, so the next line is not read as its own.
+        rows = add_section(rows, bank);
+        rows.push(String::new());
     }
     if !c.ok {
         rows.extend(no_local(
@@ -2344,6 +2451,17 @@ mod tests {
     }
 
     impl Data {
+        /// A profile whose live reading is `quota`, as the poller stores it.
+        pub(crate) fn with_quota(label: &str, quota: serde_json::Value) -> Self {
+            Self {
+                label: label.into(),
+                quota: Some(quota),
+                quota_live: true,
+                quota_at: now(),
+                ..Self::default()
+            }
+        }
+
         pub(crate) fn with_reset_grants(label: &str, pct: Option<i64>, grants: serde_json::Value, live: bool) -> Self {
             let mut data = Self::with_session_quota(label, pct.unwrap_or(0));
             let quota = data.quota.as_mut().unwrap();
@@ -3812,6 +3930,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A synthetic transcript: usage records, a replayed uuid, lines with
+    /// no usage, and text that is not ASCII so byte cuts land mid-character.
+    fn synthetic_transcript(turns: usize) -> String {
+        let mut lines = vec![r#"{"type":"summary","summary":"naïve ✓ — synthetic"}"#.to_string()];
+        for i in 0..turns {
+            lines.push(
+                serde_json::json!({"type": "user", "uuid": format!("u-{i}"),
+                    "timestamp": format!("2026-09-0{}T10:{:02}:00Z", 1 + i % 3, i % 60),
+                    "message": {"content": "ünïcödé ⚙ prompt"}})
+                .to_string(),
+            );
+            lines.push(
+                serde_json::json!({"type": "assistant", "uuid": format!("a-{}", i % 7),
+                    "timestamp": format!("2026-09-0{}T10:{:02}:30Z", 1 + i % 3, i % 60),
+                    "message": {"model": if i % 2 == 0 { "claude-a" } else { "claude-b" },
+                        "usage": {"input_tokens": 10 + i, "output_tokens": 3 * i + 1,
+                            "cache_read_input_tokens": i,
+                            "cache_creation": {"ephemeral_5m_input_tokens": 2,
+                                "ephemeral_1h_input_tokens": i % 4}}}})
+                .to_string(),
+            );
+        }
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn a_transcript_read_as_it_grows_matches_one_read_whole() {
+        let body = synthetic_transcript(40);
+        let replacement = synthetic_transcript(3).replace("synthetic", "replaced!");
+        for step in [1, 29, 211, 4096] {
+            growing::check(
+                "claude",
+                &body,
+                step,
+                &replacement,
+                TranscriptLines::default,
+                transcript_records,
+                |p: &TranscriptLines| p.records.clone(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_growing_transcript_meters_the_same_totals_as_a_whole_one() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-207-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let body = synthetic_transcript(25);
+        let path = project.join("session.jsonl");
+        let projects = root.join("projects").to_string_lossy().to_string();
+        let mut grown = Caches::default();
+        let (a, b) = body.split_at(body.len() / 2 + 3);
+        std::fs::write(&path, a).unwrap();
+        claude_daily_at(&mut grown, &projects);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut f, b.as_bytes()).unwrap();
+        drop(f);
+        // Asked, as `r` would: within five minutes of the last read a grown
+        // log otherwise waits for the history cadence.
+        grown.asked_at = now();
+        let incremental = claude_daily_at(&mut grown, &projects);
+        let whole = claude_daily_at(&mut Caches::default(), &projects);
+        assert!(!whole.is_empty());
+        assert_eq!(incremental, whole);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_transcript_older_than_the_metered_window_is_not_read() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-208-window-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let projects = root.join("projects").to_string_lossy().to_string();
+        std::fs::write(project.join("recent.jsonl"), synthetic_transcript(4)).unwrap();
+        let old = project.join("old.jsonl");
+        std::fs::write(&old, synthetic_transcript(6).replace("\"a-", "\"z-")).unwrap();
+        // Last written a day past the window, which is METERED_DAYS and a
+        // day's margin: nothing in it can be in either METERED row.
+        let age = crate::metered_window() + 86_400.0;
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs_f64(age);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(then).unwrap();
+        let mut caches = Caches::default();
+        let built = claude_history_at(&mut caches, &projects);
+        let held: Vec<&String> = caches.transcripts[&projects].tails.keys().collect();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert!(held[0].ends_with("recent.jsonl"));
+        // Exactly what the recent transcript alone adds up to.
+        std::fs::remove_file(&old).unwrap();
+        assert_eq!(built.daily, claude_history_at(&mut Caches::default(), &projects).daily);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_transcript_leaves_nothing_behind() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-207-gone-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let projects = root.join("projects").to_string_lossy().to_string();
+        std::fs::write(project.join("kept.jsonl"), synthetic_transcript(5)).unwrap();
+        let gone = project.join("gone.jsonl");
+        std::fs::write(&gone, synthetic_transcript(9).replace("\"a-", "\"b-")).unwrap();
+        let mut caches = Caches::default();
+        // Another configured directory's entry must survive this one's prune.
+        let other = root.join("projects2/example");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("other.jsonl"), synthetic_transcript(2)).unwrap();
+        let elsewhere = root.join("projects2").to_string_lossy().to_string();
+        claude_daily_at(&mut caches, &elsewhere);
+        claude_daily_at(&mut caches, &projects);
+        assert_eq!(caches.transcripts[&projects].tails.len(), 2);
+        std::fs::remove_file(&gone).unwrap();
+        // Dropped on the next pass whether or not it is due to read: what
+        // is held follows the disk.
+        claude_daily_at(&mut caches, &projects);
+        assert_eq!(caches.transcripts[&projects].tails.len(), 1);
+        assert_eq!(caches.transcripts[&elsewhere].tails.len(), 1);
+        caches.asked_at = now();
+        let after = claude_daily_at(&mut caches, &projects);
+        assert_eq!(after, claude_daily_at(&mut Caches::default(), &projects));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn transcripts_are_metered_without_a_readable_stats_cache() {
         let root = std::env::temp_dir().join(format!(
@@ -3910,6 +4156,206 @@ mod tests {
         assert_eq!(num(&got[0].stats, "totalSessions") as i64, 1);
         assert_eq!(num(&got[1].stats, "totalSessions") as i64, 9);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The whole tab, colour escapes removed, one string per row.
+    fn tab_text(c: &Data, w: usize) -> Vec<String> {
+        tab_with_plots(c, w, 40, &Config::default(), &palette(), &mut Vec::new())
+            .iter()
+            .map(|row| bare(row).trim_end().to_string())
+            .collect()
+    }
+
+    /// One full-reset grant of `left` resets, usable now, ending at `ends_at`.
+    fn grant(left: u64, ends_at: Option<&str>) -> serde_json::Value {
+        let mut g = serde_json::json!({"resets_left": left, "usable_now": true, "type": "full"});
+        if let Some(at) = ends_at {
+            g["ends_at"] = serde_json::json!(at);
+        }
+        g
+    }
+
+    /// The rows of the section alone, title included.
+    fn bank_section_of(rows: &[String]) -> Vec<String> {
+        let Some(at) = rows.iter().position(|row| row.starts_with(" ── ") && row.contains(" BANK RESET")) else {
+            return Vec::new();
+        };
+        rows[at..].iter().take_while(|row| !row.is_empty()).cloned().collect()
+    }
+
+    const SOON: &str = "2126-01-02T00:00:00Z";
+    const LATER: &str = "2126-01-09T00:00:00Z";
+
+    fn full_row(iso: &str) -> String {
+        let stamp = crate::codex::local_expiry(iso_epoch(iso).unwrap()).unwrap();
+        format!("  Full reset · expires {stamp}")
+    }
+
+    #[test]
+    fn the_tab_shows_the_bank_the_summary_counts() {
+        let data = Data::with_reset_grants("", Some(25), serde_json::json!([grant(2, Some(SOON))]), true);
+        let rows = tab_text(&data, 100);
+        // Codex's layout, row for row: the count in the title, then one row
+        // per reset - a grant of two is two rows, though they end together.
+        assert_eq!(bank_section_of(&rows), vec![
+            " ── 2 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
+        ], "{rows:#?}");
+        // Under the quota windows and above the machine's own half, as on
+        // the Codex tab, with one empty row on each side.
+        let bank_at = rows.iter().position(|row| row == " ── 2 BANK RESETS ──").unwrap();
+        let quota_at = rows.iter().position(|row| row.contains("session")).expect("a quota lane");
+        let local_at = rows.iter().position(|row| row.contains("No stats cache")).expect("the local note");
+        assert!(quota_at < bank_at && bank_at < local_at, "{rows:#?}");
+        assert!(rows[bank_at - 1].is_empty(), "{rows:#?}");
+        assert!(rows[bank_at + 3].is_empty() && local_at == bank_at + 4, "{rows:#?}");
+    }
+
+    #[test]
+    fn two_grants_ending_together_are_two_rows() {
+        let data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(SOON)), grant(1, Some(SOON))]), true,
+        );
+        assert_eq!(bank_section_of(&tab_text(&data, 100)), vec![
+            " ── 2 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
+        ]);
+    }
+
+    #[test]
+    fn a_bank_of_zero_says_none_as_codex_does() {
+        let data = Data::with_reset_grants("", Some(25), serde_json::json!([]), true);
+        let rows = tab_text(&data, 100);
+        assert_eq!(bank_section_of(&rows), vec![
+            " ── 0 BANK RESETS ──".to_string(),
+            "  None in the account.".to_string(),
+        ], "{rows:#?}");
+        let all = rows.join("\n");
+        assert!(!all.contains("expires"), "{all}");
+        assert!(!all.contains("expiry not given"), "{all}");
+        // And the [+] line adds nothing for a zero, as it does for Codex.
+        assert_eq!(data.reset_summary_line(), None);
+    }
+
+    #[test]
+    fn a_bank_that_was_not_read_is_left_off_the_tab() {
+        let mut unread = Vec::new();
+        // No quota reading at all.
+        unread.push(Data { ok: true, ..Data::default() });
+        // A reading with no block, an ineligible one, and one that does not parse.
+        unread.push(Data::with_session_quota("", 25));
+        for block in [
+            serde_json::json!({"eligible": false}),
+            serde_json::json!({"eligible": true}),
+            serde_json::json!({"eligible": true, "grants": [{"resets_left": "2", "usable_now": true}]}),
+        ] {
+            let mut data = Data::with_session_quota("", 25);
+            data.quota.as_mut().unwrap()["cedar_ember"] = block;
+            unread.push(data);
+        }
+        for data in &unread {
+            assert!(claude_bank_rows(data, 100, &palette()).is_empty());
+            let all = tab_text(data, 100).join("\n");
+            assert!(!all.contains("BANK"), "an unread bank drew a section: {all}");
+            assert!(!all.contains("None in the account"), "unread was worded as zero: {all}");
+            assert_eq!(data.reset_summary_line(), None);
+        }
+    }
+
+    #[test]
+    fn rows_run_soonest_first_and_an_undated_reset_comes_last() {
+        let undated = serde_json::json!({"resets_left": 1, "usable_now": true});
+        let data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(LATER)), undated, grant(2, Some(SOON))]), true,
+        );
+        assert_eq!(bank_section_of(&tab_text(&data, 100)), vec![
+            " ── 4 BANK RESETS ──".to_string(),
+            full_row(SOON),
+            full_row(SOON),
+            full_row(LATER),
+            // No type and no date: neither is guessed.
+            "  Reset · expiry not given".to_string(),
+        ]);
+        // The [+] line drops the date in exactly this case.
+        assert_eq!(data.reset_summary_line().as_deref(), Some("4 reset available"));
+    }
+
+    #[test]
+    fn the_section_says_what_the_summary_line_says() {
+        let soon = iso_epoch(SOON).unwrap();
+        for old in [false, true] {
+            let mut data = Data::with_reset_grants(
+                "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON))]), !old,
+            );
+            if old {
+                data.quota_at = now() - (CLAUDE_FRESH_FOR + 120.0);
+            }
+            let line = data.reset_summary_line().expect("a summary line");
+            let section = bank_section_of(&tab_text(&data, 140));
+            // The same count.
+            assert!(line.starts_with("3 reset available "), "{line}");
+            assert_eq!(section[0], " ── 3 BANK RESETS ──");
+            // The same soonest date: every part of the compact stamp is in
+            // the first row, which adds only the year.
+            let compact = crate::codex::summary_expiry(soon).unwrap();
+            assert!(line.contains(&compact), "{line}");
+            let first: Vec<&str> = section[1].split_whitespace().collect();
+            for part in compact.split_whitespace() {
+                assert!(first.contains(&part), "{part} missing from {section:?}");
+            }
+            // The same age, only when the reading is old.
+            let note = format!("  cached {} ago", ago(data.quota_at));
+            assert_eq!(line.ends_with(note.trim_start()), old, "{line}");
+            assert_eq!(section.last() == Some(&note), old, "{section:?}");
+            assert_eq!(section.len(), if old { 5 } else { 4 }, "{section:?}");
+        }
+    }
+
+    #[test]
+    fn the_section_fits_every_width_and_keeps_every_word() {
+        let undated = serde_json::json!({"resets_left": 1, "usable_now": true});
+        let mut data = Data::with_reset_grants(
+            "", Some(25), serde_json::json!([grant(1, Some(LATER)), grant(2, Some(SOON)), undated]), false,
+        );
+        data.quota_at = now() - (CLAUDE_FRESH_FOR + 120.0);
+        let words = |rows: &[String]| -> Vec<String> {
+            rows.iter().flat_map(|row| row.split_whitespace().map(str::to_string).collect::<Vec<_>>()).collect()
+        };
+        let wide: Vec<String> = claude_bank_rows(&data, 400, &palette()).iter().map(|row| bare(row)).collect();
+        for w in [30, 40, 60, 100, 140] {
+            let shown: Vec<String> = claude_bank_rows(&data, w, &palette()).iter().map(|row| bare(row)).collect();
+            for row in &shown {
+                assert!(
+                    tc::display_width(row) <= w - 1,
+                    "{w} columns: {row:?} is {} wide",
+                    tc::display_width(row)
+                );
+            }
+            assert_eq!(words(&shown), words(&wide), "{w} columns lost or broke a word: {shown:#?}");
+            assert!(!shown.join("").contains('…'), "{shown:#?}");
+            assert_eq!(shown[0].trim_end(), " ── 4 BANK RESETS ──");
+        }
+        // At 30 a dated row does not fit, so its datetime moves under it.
+        let narrow: Vec<String> = claude_bank_rows(&data, 30, &palette()).iter().map(|row| bare(row)).collect();
+        assert_eq!(narrow[1].trim_end(), "  Full reset · expires", "{narrow:#?}");
+    }
+
+    #[test]
+    fn each_profile_shows_its_own_bank() {
+        let main = Data::with_reset_grants("main", Some(25), serde_json::json!([grant(2, Some(SOON))]), true);
+        let overflow = Data::with_reset_grants("overflow", Some(60), serde_json::json!([grant(1, Some(LATER))]), true);
+        let none = Data::with_reset_grants("spare", Some(10), serde_json::json!([]), true);
+        assert_eq!(bank_section_of(&tab_text(&main, 100)), vec![
+            " ── 2 BANK RESETS ──".to_string(), full_row(SOON), full_row(SOON),
+        ]);
+        assert_eq!(bank_section_of(&tab_text(&overflow, 100)), vec![
+            " ── 1 BANK RESET ──".to_string(), full_row(LATER),
+        ]);
+        assert_eq!(bank_section_of(&tab_text(&none, 100)), vec![
+            " ── 0 BANK RESETS ──".to_string(), "  None in the account.".to_string(),
+        ]);
     }
 }
 

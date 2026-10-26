@@ -287,7 +287,15 @@ number it cannot justify:
   like a level meter, in pale versions of their own colours rather than grey,
   so the two halves stay legible while they wait. When the figures land the
   bars **settle** onto them over about two seconds and the colour comes up to
-  full, rather than the chart cutting from placeholder to data.
+  full, rather than the chart cutting from placeholder to data. While the bars
+  bounce or settle they are block text in every terminal, Kitty included; the
+  chart becomes pixels once it is still.
+- An account whose day counts fail stops holding the chart back. The chart
+  draws the accounts that did report, and a red row under it names the one it
+  leaves out and the error, until a later poll reads it. The same failure is in
+  the error line at the top. A failed refresh of the trailing days counts as a
+  failure too, even though the earlier counts are still cached: the chart does
+  not draw last poll's numbers as current.
 
   The placeholder is the same chart, not a stand-in for one: the day count and
   bar width follow from the window and the pane, neither of which needs any

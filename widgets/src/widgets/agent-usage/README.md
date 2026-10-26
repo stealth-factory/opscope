@@ -14,7 +14,6 @@ The agents this widget reads:
 - Grok
 - Copilot
 - Antigravity
-- CodeRabbit
 - Notion
 - Perplexity
 - Devin
@@ -218,6 +217,26 @@ grant has no readable expiry, only the count is shown. Zero or unavailable
 inventory adds no line. Multiple profiles keep their own counts, including
 when an account has no quota lanes. Cached availability carries its age,
 and a grant whose expiry has passed is no longer counted.
+
+The Claude tab carries the same **BANK RESET** section as the Codex tab,
+drawn by the same code: the count in the title, then one row per reset,
+soonest first. A grant of two is two rows with the same expiry - nothing is
+merged. A grant whose `type` is `full` is a `Full reset`, the name Codex's
+credits carry; any other type is a plain `Reset`, and the grant's `label`, a
+sentence rather than a kind, is not shown. A grant with no readable expiry is
+`Reset · expiry not given` (or `Full reset · …`) and comes last. When the
+reading is old the section ends with `cached 5m ago`. An inventory that
+answered with no resets shows `── 0 BANK RESETS ──` and `None in the
+account.`, as Codex does. A reading with no inventory in it - no quota yet,
+or a block that is absent, ineligible or unreadable - draws no section,
+again as Codex does when its inventory request fails, so an unread bank is
+never shown as an empty one. Each profile's tab shows its own bank. The
+`[+]` line agrees with the section for the same profile: the same count as
+the title and, when every reset has a readable expiry, the first row's date
+without its year. When any reset is undated the line gives the count alone,
+and in a pane too narrow for it the line wraps onto the next rows, its date
+moving below the count. A count past 1000 resets is not read
+as an inventory.
 
 This comes from the optional `cedar_ember` block on
 `GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
@@ -636,8 +655,9 @@ machine**.
 
 Shown as **spent**, where the source reports what is remaining, so red means
 the same thing here as on every other tab — and with the same pace column.
-Every plan reports every family it covers, so a Gemini-only account still gets
-a Claude/GPT pair at 0%; those are real limits and are left in.
+Which groups appear is whatever the source sends, and each is followed by
+Google's own list of the models it covers — so "Claude and GPT models" says
+underneath it that the GPT is GPT-OSS.
 
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
@@ -669,6 +689,37 @@ only one that always works, and the only one that runs another program.
 Nothing that runs for the widget outlives the fetch, and **an `agy` you started
 yourself is never shut down by this** — it would have answered as source 1
 long before source 3 was reached.
+
+**`agy` builds from October 2026 close sources 1 and 3.** Their language server
+refuses every outside caller with `missing CSRF token`, and hands the token
+only to processes `agy` starts itself — it is in no file, log or environment
+the widget can read. The tab says so rather than reading like an app that is
+shut, and falls back to Google:
+
+```
+ ── QUOTA ── live · account-wide, from Google - the app's server refused
+  Antigravity's language server now refuses outside readers: it wants a
+  CSRF token it gives only to processes it starts itself. This is Google's
+  summary instead. Google publishes no grouped Gemini limit.
+```
+
+Google's summary has only ever carried the Claude and GPT-OSS group; the
+grouped Gemini limit came from the local server alone. What Google does
+publish for Gemini is **each model's own allowance**, so when the summary has
+no Gemini group the tab draws those instead, under a heading that says what
+they are:
+
+```
+  Gemini, per model
+    Each model's own allowance, from Google - not slices of one shared limit.
+   gemini-3-flash        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
+   gemini-2.5-pro        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
+```
+
+They are not added up or averaged into a group figure, because Google states
+none. `[+]` gets one lane from them, `gemini busiest` — the model with the
+least left — rather than a dozen. If the per-model call fails, the reason is
+drawn where the rows would be.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
@@ -1269,15 +1320,28 @@ reading is missing the separately-metered lanes entirely — which is why the
 source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
-Under the windows, **BANK RESET** is the unused rate-limit reset credits
-still in the account. Each credit the inventory listed is its own title,
-from that credit's `title`, and then `Expires` with the expiry as a date
-and time in this machine's local zone, the zone named. A credit with no
-title is not given one. A credit with no readable `expires_at` still counts
-and the expiry line says the date is unknown. A body that states a count
-and no list shows `N reset available` and no date rows. It is not another
-usage window, and it is not the `resets in` countdown on the quota rows.
-Every one of these numbers and dates comes from
+Under the windows, the **BANK RESET** section is the unused rate-limit
+reset credits still in the account, in the one layout the Claude tab uses
+too. The title carries the count, as in `── 1 BANK RESET ──` or
+`── 2 BANK RESETS ──`, and under it is one row per credit, soonest expiry
+first:
+
+```text
+ ── 2 BANK RESETS ──
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+  Full reset · expires 7 Nov 2026 07:37 +08:00
+```
+
+A row is the credit's `title` when it has one and `Reset` when it does not,
+then the expiry as a date and time in this machine's local zone, the zone
+named. Two credits ending at the same moment are still two rows. A credit
+with no readable `expires_at` still counts, sorts after every dated one, and
+says `· expiry not given`. A body that states a count and no list is that
+many `Reset · expiry not given` rows, since no date was sent for any of
+them. When a row is too wide for the pane its words stay together and the
+datetime moves to the following lines, broken between its parts. It is not
+another usage window, and it is not the `resets in` countdown on the quota
+rows. Every one of these numbers and dates comes from
 `GET /wham/rate-limit-reset-credits` on the same host and credential. A
 credit counts only while it is still available and its expiry, when one
 can be read, is still ahead. An inventory that answers `0` shows that none
@@ -1290,7 +1354,8 @@ rows, with a blank line above it. The soonest expiry is added in the same compac
 form as Claude (`23 Oct 04:58 +08:00`) only
 when every listed credit has a readable expiry. Zero and an unread
 inventory add nothing. The Codex tab's per-credit expiry keeps the full year
-but also omits parentheses around the offset.
+but also omits parentheses around the offset. Both tabs leave one empty
+row between the section and whatever follows it.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
@@ -1316,6 +1381,15 @@ than a sentence blaming a service that was never asked.
 A reading is held for a couple of minutes, because these windows move over
 hours and the pane redraws every thirty seconds. A failure is held too, so
 something that is down is retried occasionally rather than on every frame.
+
+Cursor, Copilot, Devin, Droid, Notion and Perplexity have no fallback of their
+own, so a failure in transit - a timeout, a host that could not be reached, a
+rate limit, a server error - keeps their **last good reading** on screen for
+up to six hours rather than blanking it. The heading's `live` becomes
+`kept 12m`, the row under it says `Not current` with the reading's own time
+and this pass's reason, and the summary marks those lanes as cached. A refused
+or missing token, or a different account, never brings an old reading back:
+any failure that is not in transit drops what was kept.
 
 ### Claude's fallback is our own snapshot, not Claude Code's
 
@@ -1356,110 +1430,6 @@ Four settings, all on by default except the interval:
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
-
-### CodeRabbit has a rolling allowance, from CLI 0.8
-
-CodeRabbit limits reviews per developer over a rolling window, not per month.
-From CLI 0.8, `coderabbit usage` reports the included reviews left in that
-window, how long the window is, and when capacity returns once none are left.
-It is drawn at the top of the `coderabbit` tab, a bar of the share used with
-`2 of 5 left` under it and, when the allowance is spent, when the next review
-comes back. It is not drawn on `[+]`: the report does not say which of
-CodeRabbit's allowances it is, and a bar there would read as the limit on
-pull request reviews, which has been lower while this one read full. `[+]`
-draws the fair-use estimate below instead, or, until there is one, names
-CodeRabbit as publishing no limit for pull request reviews and points at the
-tab. The bar has no pace marker, because a rolling window has no
-start to measure elapsed time from.
-
-Under the allowance the tab shows your reviews this billing period, the reset
-with the days left, then the organisation, the login and any other line the
-report carried, such as spend.
-
-CodeRabbit gives the allowance only when `coderabbit usage` runs inside a
-git repository. Anywhere else it answers `Availability : unavailable` with a
-note saying so, and the billing period alone. The pane runs it wherever the
-widget was started, so set `coderabbit_repo` to any repository on this
-machine that CodeRabbit reviews. Until then, `[+]` passes CodeRabbit's note
-on and names the setting. The tab names the repository the reading came from.
-
-CodeRabbit gives PR, CLI and IDE reviews separate allowances, and the report
-does not say which one this is. Two repositories both read `10 of 10` at a
-time when CodeRabbit's own PR reviews said the PR allowance was 4 an hour, so
-it is most likely the CLI one - an inference, not something the report says.
-
-An older CLI reports the count and no limit. Then there is no bar, and `[+]`
-names CodeRabbit as publishing no quota, with the count beside it and a note
-that CLI 0.8 reports the allowance. A count left with no limit beside it
-draws no bar either. CodeRabbit documents each plan's hourly rate, but a
-limit the CLI did not give is never drawn in its place: the plan may be
-grandfathered, and the fair-use policy lowers the rate as the week gets busy.
-
-### CodeRabbit's fair-use rate is estimated, and says so
-
-CodeRabbit lowers a developer's hourly rate as their pull request reviews
-over the last seven days climb, on a published table per plan. No command
-reports that count, so the tab works it out: every `coderabbit usage` that
-answers adds its `Your reviews` count to
-`$XDG_STATE_HOME/opscope/coderabbit-reviews.json` (`~/.local/state` when that
-is unset), kept per login and pruned to the last week. The reviews added
-across the week are the count, and a reading whose `Period resets` date
-moved, or whose count fell, starts a new billing period, all of it new. A
-reading the file could not take is said in the section, since a restarted
-pane then starts the count over. The FAIR USE section draws it as a bar toward the
-count where reviews go one at a time, then looks the rate up on the plan
-`coderabbit auth status` names, which is asked every six hours.
-
-- **Every figure is marked.** A whole week is `~55 reviews in the last 7
-  days · about 4 reviews an hour on Team`. The readings between two asks
-  may straddle the week's start, and they are counted in, so the count can
-  run over and the rate errs low.
-- **A part week is a floor.** Until the readings reach back seven days, the
-  tab says `at least` for the count and `at most` for the rate, and the date
-  a whole week will be in.
-- **A reset in a long gap can be off either way.** When the billing period
-  reset while no pane read for over an hour, reviews added between the last
-  reading and the reset were never counted, while the week's start can still
-  run over. So the count is neither a floor nor a ceiling, and only the
-  CodeRabbit tab says it may be off either way.
-- **It may overcount.** Only pull request reviews count toward fair use, and
-  `Your reviews` may also count CLI and IDE ones, so the real rate may be
-  higher than the estimate. The tab says so under it.
-- **Only the four plans the page lists get a rate** - Essentials, Team,
-  Advanced and Enterprise, as read on 2026-09-29. Any other plan, or none,
-  gets the count and says why there is no rate.
-- **`[+]` gets the same estimate, as a compact bar.** Once the tab
-  can draw its bar, `[+]` draws it too, labelled `~fair use` and filled
-  toward the count where reviews go one at a time. The `~` marks it as an
-  estimate; cached readings keep their status marker. With one reading,
-  no plan, or a plan the table does not list, `[+]` keeps the no-quota note.
-- **The tab explains the headroom.** Headroom, the current rate, plan context
-  and data-quality caveats appear only in the CodeRabbit tab. For example,
-  it says `~5 more reviews before 2 an hour · about 4 an hour now on Team ·
-  estimate`. Short of a whole week, headroom is `at most`, since the count
-  is a floor.
-- **Gaps are the widget's.** Reviews made while no pane was running are
-  counted at the next reading, so a count is only as good as the readings
-  behind it.
-
-- **The 0.8 wording is read by its words.** CodeRabbit documents what the
-  report holds but not its labels, so a line is taken as the allowance when
-  its label says available (or availability), remaining or left; as the
-  window when it says
-  window; and as the return time when it says returns or again. `3 of 5`,
-  `3/5`, and a limit on a line of its own are all read. Both reports, from
-  inside a repository and outside one, are in the tests as captured.
-- **It runs a program.** Every other agent here reads a file or an endpoint;
-  this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
-  runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is
-  given 15 seconds, and a report is held for ten minutes.
-- **The CLI owns the login.** Nothing here reads or changes its credentials.
-  Signed out, the tab says so and names `coderabbit auth login`. A
-  self-hosted login gets no report from the CLI at all.
-- **The reset date has no zone**, so the days left are counted from today in
-  this machine's zone.
-
-This is the same command CodexBar runs for its CodeRabbit provider.
 
 ### Notion AI asks Notion's web app, with a cookie you hand it
 
@@ -1543,16 +1513,29 @@ window to pace against, so neither has a pace.
   so a quota answer of an empty object, or of its own fields set to null,
   leaves the bar out rather than reporting a fault; any other answer without
   a share is said as a fault; a session that names no plan leaves the heading bare.
-- **It needs your session cookie.** Copy `__Secure-next-auth.session-token`
-  from perplexity.ai - developer tools, then Application (Storage in
-  Firefox), then Cookies - into `perplexity_token` through the settings
-  screen (`,`), or into the variable `perplexity_token_env` names
-  (`PERPLEXITY_SESSION_TOKEN`, the one CodexBar reads too). A whole
-  `Cookie` header copied from a request works as well, including a long
-  session split into `.0`, `.1` chunks. That cookie is a full sign-in to
-  your Perplexity account, not a scoped key, so keep `config.json`
-  `chmod 600`; the tab warns when it is not. The widget never reads it out
-  of a browser, for the reason given above.
+- **It needs your session cookie.** To find it:
+
+  1. Sign in at perplexity.ai and open developer tools: F12, or
+     Cmd-Option-I on a Mac. Safari needs Settings, Advanced, *Show
+     features for web developers* turned on first.
+  2. Open the cookies for `https://www.perplexity.ai`: the **Application**
+     tab in Chrome, Edge, Arc or Brave, the **Storage** tab in Firefox and
+     Safari.
+  3. Copy the Value of `__Secure-next-auth.session-token`. The console
+     cannot read it, since the cookie is HttpOnly. If it is split into
+     `.0` and `.1` cookies, copy the whole `cookie` request header from a
+     request to `www.perplexity.ai` that includes the session cookie, in the
+     **Network** tab instead.
+  4. Press `,` and paste it into `perplexity_token`, or put it in the
+     variable `perplexity_token_env` names (`PERPLEXITY_SESSION_TOKEN`, the
+     one CodexBar reads too).
+
+  The no-token panel, the expired-session panel, and the settings help for
+  `perplexity_token` show these same steps; a test keeps those three in sync.
+  That cookie is a full sign-in to your
+  Perplexity account, not a scoped key, so keep `config.json` `chmod 600`;
+  the tab warns when it is not. The widget never reads it out of a
+  browser, for the reason given above.
 - **`perplexity_token` wins over the variable.** The variable is read only
   when `perplexity_token` is empty, so a stale cookie left in `config.json`
   is the one sent even when the variable holds a fresh one - empty the
@@ -1560,6 +1543,9 @@ window to pace against, so neither has a pace.
 - **Perplexity is here when a token is.** It leaves nothing on this machine
   to discover, so with no token it has no tab, and with one it is asked
   every five minutes - and only while it is one of the agents you chose.
+  So that discovery does not hide it altogether, the `[+]` overview ends
+  with a line naming Notion AI and Perplexity while either has no token -
+  unless you named your agents yourself or excluded it.
 - **API (Sonar) spend is not in it.** That is billed to an API key, which
   this does not read.
 
@@ -1856,8 +1842,10 @@ never did.
 
 All horizontal data bars use opscope-core's smooth gradient: quota lanes in
 the overview and provider tabs, model/token/spend bars, and each category of
-the human/AI split. The same colour stops brighten across text cells and
-Kitty pixels. Core lifts darker hues to keep every filled colour above AA
+the human/AI split. The colour stops brighten across text cells, and the
+fill ends to the nearest eighth of a cell. These bars are text in Kitty too:
+the pace mark follows the clock, and a one-row image re-sent every frame
+bought nothing visible. Core lifts darker hues to keep every filled colour above AA
 4.5 against the dark terminal background and selected-row tint. Empty tracks
 remain separate from the fill; the pace mark keeps its dark surround.
 
@@ -1933,15 +1921,46 @@ refresh makes a tab a row longer.
 
 ## Cost
 
-Small. Local files are read every 30 seconds, and a transcript is read once
-and then left alone, because a finished transcript never changes. A live quota
+Small. Local files are looked at every 30 seconds. Each transcript, rollout,
+session log and prompt history is read once, a line at a time, and after that
+only what the agent has appended since. A live session's log can pass four
+gigabytes, and none of it is ever held whole: what stays in memory is the
+records each file yielded, a byte offset, and its first kilobyte. A file that
+shrinks or is replaced is read again from the start, and one that is deleted
+takes its records with it, so memory follows what is on disk rather than how
+long the pane has been open.
+
+The logs are also read less often than the quotas are asked. Every pass
+looks only at the logs' metadata - a directory walk, no contents - and reads
+them only when one has changed, at most every five minutes unless `r` asks;
+the tab says how old its local figures are (`Local rollouts as of 3m ago`).
+Claude's transcripts are only read if they were written within the METERED
+window, `30 days` and a day's margin, since nothing older can reach those
+rows; Codex and Grok show totals and a calendar over their whole history, so
+every one of their logs is still read. A pass reads at most 64 MiB or 200 ms
+of logs across every agent; a first read bigger than that carries on two
+seconds later from the byte it stopped at, with the log it stopped in sent to
+the back of the queue, and until it is done the figures say `so far` and how
+many logs are left rather than calling themselves totals.
+
+How far each log was read is written to
+`$XDG_STATE_HOME/opscope/agent-usage-logs.jsonl` (or `~/.local/state/...`)
+every five minutes while the logs change, and when a first read finishes, so
+a restart reads only what was appended since rather than every log again. It
+holds counters only - each file's identity, size and offset, a hash of its
+first kilobyte, and the day, model and token counts its lines added up to,
+keyed by the ids that stop a replayed turn counting twice - never a line of
+any transcript. A log replaced while the widget was not running fails the
+same identity check a running widget makes and is read again from the start;
+a file of another format version is ignored. Deleting it costs one slow
+start. A live quota
 is held for a couple of minutes and a plan for an hour, so what a pane left
 open all day asks of each agent is the same whichever tab is on screen.
 
-The first paint is the slow one: a freshly started widget takes **roughly
-fifteen seconds** to put anything on any tab, because Claude's transcripts and
-Cursor's spend history are both read through before there is anything to draw.
-Neither is paid again.
+The first paint is the slow one, because Cursor's spend history is paged
+through before there is anything to draw. The local logs no longer hold it
+up: the first pass reads its budgeted slice of them, and the rest fill in over
+the passes that follow, labelled as partial until they are done.
 
 ## More than one Claude Max
 

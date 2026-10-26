@@ -21,12 +21,15 @@ same. Higher resolution does not imply more samples or faster polling.
 
 `ports` adds pixel traffic bars; `github`, `github-actions`,
 `vercel-deployments`, and `linear` add discrete pixel bar charts.
-`github` and `agent-usage` use gapless calendar tiles, and `linear` and
-all `agent-usage` vendor quota views use fractional progress/quota meters.
+`github` and `agent-usage` use gapless calendar tiles.
 `github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
-`herdr-panes` and `luvus-panes` show measured agent-state distributions,
-and `clocks` adds countdown and pomodoro meters. These use shared text fallbacks:
-block bars, Braille traces and reference marks.
+These use shared text fallbacks: block bars, Braille traces and reference marks.
+
+Meters and stacked bars are text in every mode, Kitty included (OPS-203):
+`linear`'s progress and milestone meters and state distributions, every
+`agent-usage` quota meter, `herdr-panes` and `luvus-panes` agent-state
+distributions, and `clocks`' countdown and pomodoro bars. See
+[Always text](#always-text-meters-and-stacked-bars).
 
 Notifications and text sizing are negotiated in the same window, separately
 from graphics. A terminal advertising OSC 99 title and body support gets one
@@ -54,9 +57,42 @@ OPSCOPE_GRAPHICS=kitty opscope latency  # negotiate; explain an unavailable Kitt
 ```
 
 The variable is inherited by widgets opened through the launcher. `kitty` does
-not bypass detection. Unsupported explicit requests show a notice in the title
+not bypass detection.
+
+Under Herdr (`HERDR_ENV=1`), `auto` means text. Herdr relays each image to its
+own client decoded, so a chart that is a few KB compressed costs the client's
+link its raw size, every frame the chart changes. Over SSH that measured 4.9
+MB/s for `latency` alone (OPS-199). Set `OPSCOPE_GRAPHICS=kitty` to have pixels
+anyway. Since OPS-202 meters, bars and loading placeholders are text in every
+mode, a changed chart sends only its changed rectangles, a whole image goes at
+most once every two seconds per chart, and the periodic whole frame does not
+re-place images under Herdr. See [Pixels under Herdr](#pixels-under-herdr) for
+what that measures. Unsupported explicit requests show a notice in the title
 row and use text. An image transmission error also disables pixels for the
 session and shows why; re-entering the terminal session renegotiates support.
+
+### Pixels under Herdr
+
+`OPSCOPE_GRAPHICS=kitty` under Herdr is an option, not the default. Measured
+with a local fake-terminal harness at 57×48 cells (10×20 px), after each
+chart had filled its window. "Raw" is the decoded size of what was uploaded
+or edited, which is what a relaying host forwards. The harness answers the
+frame probe `OK`, as Kitty does; nothing here was watched in a real Herdr.
+
+| widget | before (v2.0.0), raw | after OPS-202, raw | after, written |
+| --- | --- | --- | --- |
+| `latency` | 2275 KB/s | 138 KB/s | 6.2 KB/s |
+| `link` | 632 KB/s | 545 KB/s | 6.4 KB/s |
+| `clocks`, `agent-usage` | 115 KB/s, 42 KB/s (Kitty, no Herdr) | 0 | their text-mode rate |
+
+`latency` keeps its axis and its newest bucket moves in small strips; once a
+second its time grid steps one slot, which is not a whole number of pixels,
+so that step is a large edit capped at one every two seconds. `link` is
+barely better: it condenses its history to the chart's width, so every new
+sample resamples every point and the whole chart changes each poll. That is
+already one change every two seconds, which is what the cap allows. Over SSH,
+`latency` alone is still about a megabit a second of relayed image, so text
+stays the default under Herdr.
 
 ### Force text rendering on Kitty-capable terminals
 
@@ -157,7 +193,10 @@ column is uploaded the same way. The segment that just left the chart can
 still cover it, and a pure shift would leave that tail behind.
 
 Startup sends a 1×1 probe and a frame compose on it, ahead of the capability
-tail. `OK` enables the path. `ENOENT` or `EINVAL`, or no answer, leaves it
+tail. The frame and the compose ask for a reply (`q=0`). They used to carry
+`q=1`, which suppresses `OK`, so a terminal that supports frames never said so
+and every change stayed a full upload (OPS-205). `OK` enables the path, and an
+error from the compose arriving after it turns it off again. `ENOENT` or `EINVAL`, or no answer, leaves it
 off, and every tick stays a full `a=T` upload. A later frame error,
 including `ENOSPC` when animation storage is exhausted, does the same and
 asks the next frame to send the image again. Graphics stay on. An
@@ -165,10 +204,42 @@ asks the next frame to send the image again. Graphics stay on. An
 image missing or moving, not a frame error, so animation stays on. A
 successful placement acknowledgement carries `p=` too, and is not an error.
 
-A rescale, a cell-size change, a move to another cell,
+A cell-size change, a move to another cell,
 a slot-count change, a resize, a scroll that changes the crop, or a screen
 loss is a full upload too. Changing only whether the image sits under the
 text re-places it, and the pixels stay. Text and Braille are unchanged.
+
+### Changed rectangles
+
+Any other change to a line chart or a heatmap that keeps its cell and its
+size is compared with the pixels the terminal holds (the cached raster, or
+the cached plot rasterised again when it was too large to keep). The rows
+that differ are grouped into bands, joined across gaps of up to eight
+unchanged rows, and each band is written over the root frame as its own
+`a=f,r=1` edit at its `x`, `y`, width and height (`X=1`, no blending). Line
+charts change along their strokes, so a chart whose traces sit in a few bands
+of its height sends a few strips rather than the whole image. When the bands
+add up to more than half the image, it is sent whole instead. An image that
+went up as opaque RGB (`f=24`) is not edited in RGBA; it is sent whole. Edits
+need the frame probe's `OK` and are not used inside tmux. A refused edit
+turns them off and sends the image again, the same as a refused slide.
+
+A whole image for a slot whose size did not change goes at most once every two
+seconds. A change that would need another one sooner is held: nothing is
+sent, the terminal keeps showing the image it has, and the cache still names
+that image, so the first frame after the gap sends the chart as it is then. A
+size change, a move, a scroll that changes the crop and a screen loss are
+never held. A held chart is at most two seconds behind its numbers, which
+stay in text.
+
+`latency` and `link` keep their value axis sticky (`tc::StickyRange`): the
+range holds while every sample fits inside it and it is not more than twice
+as wide as a fresh fit. Before, the axis followed the lowest and highest
+sample, so most samples rescaled the chart and moved every pixel. The axis
+labels move only when the range does. Both pass that range with
+`Plot::on_axis`, as `netwatch` passes each half's peak, and a change of range
+is never held by the two-second cap: the labels are text and move at once, so
+the strokes go with them rather than sit under the wrong scale.
 
 The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
 pixels only for some shapes. A netwatch trace on an 80-column pane is 64
@@ -181,7 +252,8 @@ pixels. A full tick also deletes the previous image first; the frame edit
 does not.
 
 It is still not a general animation player. Nothing is drawn that the full
-raster would not have drawn.
+raster would not have drawn: after a slide or a rectangle edit the terminal
+holds exactly the raster a full upload would have sent.
 
 Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
 on synthetic frames at the sizes the widgets use:
@@ -235,7 +307,8 @@ and the byte product is the same. Thirty-two plots at that cap (327,680,000 raw 
 ceiling, unchanged from the fixed raster. Bigger or extra plots stay text.
 Cell layout is unchanged. It is a raster chart renderer, not a general
 replacement for terminal text or native scaled fonts. Frame edits apply only
-to the sample slides described above, using the current reported cell size.
+to the sample slides and changed rectangles described above, using the
+current reported cell size.
 
 ## Widget API
 
@@ -261,25 +334,71 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
-`Plot::under_text()` is only for line charts. In a Kitty graphics session the
+Inside tmux (`$TMUX` set and non-empty), core does not send XTVERSION.
+tmux already asked, and a second answer through the passthrough is delivered
+to whichever pane is focused, as keystrokes. Detection reads
+`tmux display -p '#{client_termtype}'`, tmux's stored copy of the outer
+terminal's XTVERSION. Placeholders are used when that string names Kitty
+0.28.0 or newer, Ghostty, or another name on the allowlist, and
+`allow-passthrough` is `on` or `all`. If either command fails, the name is
+unknown, or passthrough is `off` or unreadable, charts stay on Braille. A
+command that has not answered after 250 ms is killed and counts as
+unreadable. Both reads run once, at startup. A later reattach from a
+different outer terminal, or `allow-passthrough` changing after that, is
+not noticed until the widget is started again. With several
+clients attached, tmux picks one `client_termtype`. A graphics OK does not decide
+this. `a=q` is try-to-load, and `U` has no meaning on that command, so an
+old Kitty, WezTerm or Konsole can answer OK and then draw the placeholder
+character as tofu. A cursor placement does not survive the multiplexer
+either. Herdr (`HERDR_ENV=1`) is not wrapped. Nothing in Herdr's own
+behaviour shows that it forwards a tmux DCS passthrough, so Herdr stays on
+the direct path.
+
+The upload uses `q=2,U=1`, the quiet mode Kitty specifies for placeholders,
+and is written before the placeholder cells. There is no APC reply to read.
+Each cell is U+10EEEE with the row and column diacritics and the image id in
+the foreground colour. A non-zero high byte of the id, which these ids have,
+is a third diacritic. Inside tmux there is no heal and no `a=p`
+query. Stock tmux does not forward an APC reply, and its key parser would
+type a `q=1` error into the focused pane. The periodic whole frame, every
+5 seconds, sends the same `q=2,U=1` upload again. A static chart whose image was dropped
+stays blank until that upload fires. A frame that is not a whole frame
+leaves an unchanged chart alone. tmux has to allow the passthrough:
+
+```
+set -g allow-passthrough on
+```
+
+Use `all` instead of `on` for a pane that is not visible. Outside tmux, or
+when `client_termtype` does not name a terminal with placeholders, behaviour
+stays as it is today.
+The cells are ordinary text, so a scroll or a pane move is expected to keep
+the image. That was not checked by eye.
+
+`Plot::under_text()` is only for line charts. On a direct Kitty session the
 image is placed at `z=-1`: under the glyphs, and above cells that have a
 background colour. A lower z, below `-1073741824`, would also sit under that
 background, so an opaque selected-row tint would cover the stroke. The widget
 draws labels and the current value in the chart cells. The row a label shares
 with the stroke is `line_row`: the pixel y the chart rounds against, then the
 cell that pixel falls in. Rounding against the cell count instead lands the
-label on a different row. Pixel mode leaves the labels there. Braille and text
-mode still replace those cells with the chart, so the
-fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
+label on a different row. Pixel mode leaves the labels there. Inside tmux
+those labels stay too. A placeholder cell cannot also hold a glyph, so the
+blank cells of the rectangle become the placeholders and the reading is left
+where the widget drew it. An uncoloured glyph after a placeholder is reset,
+because the placeholder's foreground is the image id. There is still no
+`a=p` inside tmux. Braille and text mode still replace those cells with the
+chart, so the fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
 meters or stacked bars: text over a solid fill does not stay readable, and it
 would fail the contrast rule.
 
-The placement is a second graphics command (`a=p` with the same placement id)
-after `image()` transmits the pixels at the default z. `image()` is unchanged.
-Terminals without Kitty graphics never see the command, and the cells are
-drawn as Braille exactly as before.
+The upload itself carries `z=-1` (OPS-205), so the chart is never shown over
+its labels and no second placement follows it. It used to be uploaded at the
+default z and then placed again with `a=p`, which a relaying host forwarded as
+the image a second time. Terminals without Kitty graphics never see the
+command, and the cells are drawn as Braille exactly as before.
 
-This was checked by the PTY fixture, which asserts the `z=-1` placement and
+This was checked by the PTY fixture, which asserts `z=-1` on the upload and
 that the label cell is not blanked. Kitty, Ghostty and WezTerm were not
 available in the build environment, so the z-index under a tinted cell was
 not watched on a real terminal.
@@ -310,17 +429,44 @@ Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
-Kitty meters fill seven eighths of the cell height (14 of 16 pixels at the
-fallback size), with a gap above and below, so quota bars remain readable
-alongside text. Meters clamp the drawn fill to 0–100%, while
+Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. `Plot::ramped_meter` takes a colour per filled
-cell, so a ramp the text bar draws is painted in pixels too rather than
-flattened to one fill. `gradient_meter` and `gradient_stacked_bar` instead
-let core own a smooth ramp: one colour per text cell, continuous interpolation
-per Kitty pixel, with the same readable colour stops. Stacked gradients restart
-inside each category and retain the measured boundaries. The original `meter`
-and `stacked_bar` remain solid for widgets that need that treatment.
+cell. `gradient_meter` and `gradient_stacked_bar` instead
+let core own the ramp: one colour per text cell, with readable colour stops.
+Stacked gradients restart inside each category and retain the measured
+boundaries. The original `meter` and `stacked_bar` remain solid for widgets
+that need that treatment.
+
+### Always text: meters and stacked bars
+
+`Plot::meter`, `ramped_meter`, `gradient_meter`, `gradient_meter_between`,
+`stacked_bar` and `gradient_stacked_bar` never become Kitty images. They are
+drawn with eighth-cell block characters (`▏▎▍▌▋▊▉█`) and their colours in
+every mode, and inside tmux they are not placeholders either. A one-row bar
+gains nothing visible from pixels, and these are the plots that change most:
+`agent-usage`'s pace marker follows the clock, so its quota meters re-uploaded
+an image every frame, and `clocks`' countdown meters moved every second. That
+was about 37 KB/s and 115 KB/s of raw image for a relay to forward.
+
+A meter is whole cells, then one partial cell rounded to the nearest eighth,
+then the track. The marker is one `┃` cell, with its background surround
+cleared on the next cell. A stacked bar rounds each category's edge to an
+eighth; a cell two categories share is the left one's partial block on the
+right one's colour as a background, so the cell stays solid, and the next cell
+clears that background (`CSI 49 m`). Without a truecolour pair the larger
+share takes the whole cell, and a cell three or more categories share goes
+whole to the largest of them. A category smaller than a cell can still lose its
+sliver to its neighbours, as it did in whole cells. Fill colours are the same
+ones the widget passed, so the contrast rule on the selected-row tint is
+unchanged.
+
+No image is animated either (OPS-204). `Plot::as_text()` makes any filled plot
+text in every mode, and `is_text()` reports it. `github` and `linear` use it
+for their flow charts while the bars dance on a `dance` placeholder and while
+they settle onto the real values. An image of those bars was two uploads a
+frame for as long as the figures were loading. Once the chart is still it is
+pixels again.
 `Plot::text_row(0)` exposes the exact fallback cells for composing labels or
 alert frames without duplicating gradient or marker logic. No primitive
 animates a value between API polls.
@@ -333,7 +479,8 @@ For nested sections, `append_plot_rows(&mut rows, &mut plots, |local_plots| ...)
 appends returned text and offsets section-local plots by the existing row count.
 It publishes neither if the section panics. Apply the viewport transform once,
 after all sections are assembled. Stacked bars take normalized fractions that
-sum to one; pixel edges preserve subcell shares and text uses whole-cell shares.
+sum to one; they are always text, with each category's edge rounded to an
+eighth of a cell (see "Always text" above).
 
 The widget owns its axis transform, sample aggregation, labels and colors.
 For timed traces, set `Trace::positions` to horizontal fractions in `0..=1`,
@@ -384,15 +531,15 @@ and intentional text presentation, not unimplemented widget migrations.
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
-| `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
-| `linear` | Pixel created/completed bars, cycle burnup, board/detail progress and milestone meters, and state distributions | Preserve exact scope/percentage labels; validate dense project details |
+| `github` | Pixel PR-flow bars on board and account details once still; text while they dance or settle; contribution heatmap | Keep discrete day buckets and side-by-side figures; validate dense account boards |
+| `linear` | Pixel created/completed bars and cycle burnup; board/detail progress and milestone meters and state distributions in eighth-cell text | Preserve exact scope/percentage labels; validate dense project details |
 | `github-prs` | Pixel opened/merged daily charts and PR-state distribution; elapsed-time loading indicators | Keep review text, counts and tables selectable; unavailable series remain placeholders |
 | `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
 | `vercel-deployments` | Pixel deployment activity and recent-build-duration bars; elapsed-time build indicators | Preserve scrolling and text logs; a spinner does not imply measured build progress |
-| `agent-usage` | Pixel quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
+| `agent-usage` | Eighth-cell text quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
 | `herdr-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Keep status, selection and navigation as text; no invented progress |
 | `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
-| `clocks` | Pixel countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
+| `clocks` | Eighth-cell text countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
 | `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
@@ -487,16 +634,27 @@ cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation,
 plus the cell-size parser and the byte cap.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
-PTY checks exercise both its pixel and text paths. These tests verify emitted
+PTY checks exercise both its pixel and text paths, and that the meter and the distribution stay text
+in both. These tests verify emitted
 bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-This implementation requires replies through the actual pane and does not force
-passthrough wrappers. A multiplexer that drops queries uses the text path. A
-positive reply still needs real visual checks for placement and pane clipping.
-Direct Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
-check; the managed test workspace has no attached graphical terminal.
+Inside tmux, detection reads `client_termtype` once at startup rather than
+sending XTVERSION. A later reattach or a later change to `allow-passthrough`
+is not noticed until the widget starts again. A hung read is abandoned after
+250 ms. Placeholders are used when that string names Kitty 0.28.0 or newer,
+Ghostty, or another allowlisted name, and `allow-passthrough` is `on` or
+`all`. If either command fails, the name is unknown, or passthrough is `off`
+or unreadable, charts stay on Braille. With several clients attached, tmux picks one. Herdr
+is not wrapped. tmux needs `allow-passthrough on`, or `all` for a pane that
+is not visible. Outside tmux the graphics query is not wrapped. A positive
+reply still needs real visual checks for placement and pane clipping. Direct
+Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
+check; the managed test workspace has no attached graphical terminal. A
+scroll or a pane move is expected to keep a placeholder image, and that was
+not checked by eye. A static chart whose image was dropped stays blank until
+the whole-frame upload fires, every 5 seconds. That upload is not a heal.
 
 ## Keyboard protocol
 
