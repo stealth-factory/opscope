@@ -143,7 +143,9 @@ and re-parsed as JSON before the rename, the directory synced after, a
 symlink at the path kept. `write_atomic_if` adds settings' compare-and-swap,
 refusing when the file no longer holds what was read. `with_lock(path, f)`
 holds `flock(LOCK_EX)` on `<path>.lock`, created `0600` and never removed,
-for the closure's duration. clocks, agent-usage and ports still compute
+for the closure's duration. It waits about half a second for another holder
+and then returns an `Err`, so a pane stopped mid-write cannot freeze the
+rest; notices then keeps the dismissal for the session. clocks, agent-usage and ports still compute
 their state paths by hand; new code uses `state_dir()`.
 
 ### The mouse

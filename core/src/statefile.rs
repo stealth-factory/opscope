@@ -393,6 +393,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_lock_held_elsewhere_gives_up_instead_of_waiting_forever() {
+        let dir = temp_dir("state-held");
+        let path = dir.join("held.json");
+        let started = std::time::Instant::now();
+        // A second descriptor in this process conflicts like another pane.
+        let err = with_lock(&path, || with_lock(&path, || ()).unwrap_err()).unwrap();
+        assert!(err.contains("held.json.lock"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the wait is bounded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_write_that_cannot_happen_names_its_path() {
         let dir = temp_dir("state-fail");
         // A file where the directory should be.
