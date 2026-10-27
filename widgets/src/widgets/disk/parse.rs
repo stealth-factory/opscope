@@ -77,6 +77,8 @@ pub struct Space {
     pub reserved: u64,
     pub files: u64,
     pub ffree: u64,
+    /// `f_blocks`. Part of the usage-series key, so a resize starts over.
+    pub blocks: u64,
 }
 
 /// Kernel filesystems that cannot fill a disk. `tmpfs` is absent on
@@ -131,6 +133,7 @@ pub fn space_from_blocks(
         reserved: bfree.saturating_sub(bavail).saturating_mul(frsize),
         files,
         ffree,
+        blocks,
     }
 }
 

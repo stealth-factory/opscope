@@ -15,8 +15,8 @@ A kernel without PSI says so. A Mac does not draw that section.
     disk [-n SECONDS]
 
 Keys: up/down select, enter opens, s cycles the sort of the focused
-section, tab moves between sections, v toggles idle disks, p pauses, esc
-goes back, comma opens settings, q quits.
+section, w cycles the window, tab moves between sections, v toggles idle
+disks, p pauses, esc goes back, comma opens settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read - and dismiss them for this

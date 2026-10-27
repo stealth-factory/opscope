@@ -5,7 +5,8 @@
     "hide_mounts": { "items": "string" },
     "hide_devices": { "items": "string" },
     "warn_percent": { "minimum": 1, "maximum": 100 },
-    "alert_percent": { "minimum": 1, "maximum": 100 }
+    "alert_percent": { "minimum": 1, "maximum": 100 },
+    "window_days": { "choices": [7, 14, 30] }
   },
   "_refresh_comment": "Seconds between samples. Minimum 0.5. -n SECONDS on the command line overrides this for one run.",
   "refresh": 2.0,
@@ -16,5 +17,7 @@
   "_warn_percent_comment": "Percent used at which the bar starts to leave green. At and below this the bar stays quiet.",
   "warn_percent": 80,
   "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",
-  "alert_percent": 90
+  "alert_percent": 90,
+  "_window_days_comment": "How many days of this widget's own samples the FULL IN column and the filesystem trace start from. 7, 14 or 30. w on the pane cycles the same three for this session and does not write the choice back.",
+  "window_days": 7
 }

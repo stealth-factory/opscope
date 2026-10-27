@@ -9,14 +9,14 @@ Which filesystems can still take a write, which disks are busy, and whether writ
  sampled 2s ago · every 2s
  4 of 12 shown · pseudo, bind, read-only hidden
  FILESYSTEMS  usable = f_bavail (root reserve excluded) · sorted: mount
- MOUNT   TYPE   SIZE   USED  USABLE        %  INODES
- ▸ /     ext4   100G    80G     15G  ████  84%     12%
-   /home xfs    200G    40G    160G  ██    20%      4%
+ MOUNT   TYPE   SIZE   USED  USABLE        %   1h Δ     7d Δ      FULL IN  INODES
+ ▸ /     ext4   100G    80G     15G  ████  84%  +1.2G/h  +8.0G/d  ~1d 17h ↑     12%
+   /home xfs    200G    40G    160G  ██    20%       —        —   not filling     4%
  DISKS  whole disks only · /proc/diskstats · 512-byte sectors
  DISK     TYPE    SIZE   READ  WRITE  IOPS  AWAIT  BUSY*  QUEUE
  ▸ sda    ssd     1.0T   12M   40M    1.2K   2ms    18%      1
 
- ↑↓ select  [↵] detail  [s] sort by read  tab section  [v] show idle disks  [p] pause
+ ↑↓ select  [↵] detail  [s] sort by fills soonest  [w] 14d  tab section  [v] show idle disks  [p] pause
 ```
 
 `↑↓` move the selection, including from one section into the next. `tab`
@@ -25,8 +25,10 @@ A mount's detail adds the disk and partition it sits on, `on nvme0n1
 (nvme0n1p2)`. A disk's detail names the model, the type, the size, each
 partition and the mounts on it, the totals since boot, and the current
 rates. `esc` goes back. `s` cycles the sort of the section that has the
-cursor: filesystems through mount order, percent used and inodes; disks
-through write, read and name. `v` shows idle disks, or hides them again.
+cursor: filesystems through mount order, fills soonest, percent used and
+inodes; disks through write, read and name. `w` cycles the projection
+window through 7, 14 and 30 days for this session. `v` shows idle disks,
+or hides them again.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
 
@@ -46,9 +48,11 @@ is zero) shows `n/a` rather than zero. A remote type — nfs, nfs4, cifs,
 smb3, smbfs, afpfs, sshfs, and anything under `fuse.` — is dim in the type
 column only.
 
-`s` orders by mount point as the kernel listed them, then by percent used
-with the fullest first, then by inodes the same way. A row that has not
-answered yet sorts last. The footer names the sort the next press moves to.
+`s` orders by mount point as the kernel listed them, then by which
+filesystem fills soonest, then by percent used with the fullest first, then
+by inodes the same way. `not filling` and `measuring` sort after every
+projection, in mount order. A row that has not answered yet sorts last.
+The footer names the sort the next press moves to.
 
 ## What is hidden
 
@@ -74,9 +78,22 @@ not asked again until it does return. If the mount table itself cannot be
 read, the pane says `mounts unavailable:` and keeps the last sample. A
 poller that stops says `stopped:` and why.
 
-Columns leave as the pane narrows, inodes first, then type, then size. The
-mount point wraps onto the next row rather than being cut. A pane that is
-too short to hold the table scrolls; the title stays put.
+Columns leave as the pane narrows: the one-hour rate, then inodes, then
+type, then size. The window rate and FULL IN stay. A row that still does
+not fit wraps whole cells onto the next line. The mount point wraps onto
+the next row rather than being cut. A pane that is too short to hold the
+table scrolls; the title stays put.
+
+## What this widget measured itself
+
+`1h Δ`, the window `Δ` and `FULL IN` are numbers this widget measured
+itself, kept in `disk/usage.json`. At most one sample a minute for the
+last day, then one every fifteen minutes, and nothing older than thirty
+days: at most 1,440 + 2,784 points, about 4.3k, per filesystem. Twenty
+filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
+gap in the trace, not a slope invented across the time the pane was not
+running. The footnote names the window and when the series started. `↵` on
+a filesystem draws that trace.
 
 ## Disks
 
