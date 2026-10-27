@@ -13,7 +13,7 @@
 //! without stating a mount that may hang. Space comes from `statvfs` on the
 //! mount point, and that call is the one the poller times out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -160,7 +160,8 @@ fn read_inventory() -> Result<Vec<InventoryDisk>, String> {
         }
         names.push(name);
     }
-    let layout = parse::layout_from_links(&links);
+    let known: BTreeSet<String> = names.iter().cloned().collect();
+    let layout = parse::layout_from_links(&links, &known);
     let mut disks = Vec::with_capacity(names.len());
     for name in names {
         let mut partitions = Vec::new();
@@ -219,12 +220,5 @@ fn read_text(path: &str) -> Option<String> {
 }
 
 fn read_dev(path: &str) -> Option<String> {
-    let text = read_text(path)?;
-    if text.contains(':') {
-        return Some(text);
-    }
-    let mut parts = text.split_whitespace();
-    let major = parts.next()?;
-    let minor = parts.next()?;
-    Some(format!("{major}:{minor}"))
+    parse::parse_dev(&read_text(path)?)
 }

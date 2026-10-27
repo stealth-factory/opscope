@@ -22,12 +22,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use super::parse::{self, IoSnapshot, IostatSample, LiveDisk, Mount, Space};
+use super::parse::{self, IoSnapshot, LiveDisk, Mount, Space};
 
 struct IostatState {
-    names: Vec<String>,
-    latest: Vec<IostatSample>,
-    boot: Vec<IostatSample>,
+    track: parse::IostatTrack,
     missing: bool,
     err: String,
 }
@@ -107,9 +105,7 @@ fn space_from_statfs(stat: &libc::statfs) -> Space {
 pub fn sample_io(_mounts: &[Mount], every: f64) -> Result<IoSnapshot, String> {
     let state = IOSTAT.get_or_init(|| {
         Mutex::new(IostatState {
-            names: Vec::new(),
-            latest: Vec::new(),
-            boot: Vec::new(),
+            track: parse::IostatTrack::default(),
             missing: false,
             err: String::new(),
         })
@@ -127,13 +123,10 @@ pub fn sample_io(_mounts: &[Mount], every: f64) -> Result<IoSnapshot, String> {
             ..IoSnapshot::default()
         });
     }
-    let mut disks = Vec::with_capacity(guard.names.len());
-    for (index, name) in guard.names.iter().enumerate() {
-        let mac = guard.latest.get(index).copied();
-        let idle = guard
-            .boot
-            .get(index)
-            .is_some_and(|sample| sample.tps == 0.0 && sample.mb_per_s == 0.0);
+    let mut disks = Vec::with_capacity(guard.track.names.len());
+    for (index, name) in guard.track.names.iter().enumerate() {
+        let mac = guard.track.latest.get(index).copied();
+        let idle = parse::iostat_disk_idle(&guard.track, index);
         disks.push(LiveDisk {
             name: name.clone(),
             kind: String::new(),
@@ -246,8 +239,8 @@ fn run_iostat(every: f64) {
 
 fn publish_iostat(
     names: &[String],
-    latest: Option<Vec<IostatSample>>,
-    boot: Option<Vec<IostatSample>>,
+    latest: Option<Vec<parse::IostatSample>>,
+    boot: Option<Vec<parse::IostatSample>>,
 ) {
     let Some(state) = IOSTAT.get() else {
         return;
@@ -255,14 +248,8 @@ fn publish_iostat(
     let Ok(mut guard) = state.lock() else {
         return;
     };
-    guard.names = names.to_vec();
+    parse::publish_iostat_track(&mut guard.track, names, latest, boot);
     guard.err.clear();
-    if let Some(latest) = latest {
-        guard.latest = latest;
-    }
-    if let Some(boot) = boot {
-        guard.boot = boot;
-    }
 }
 
 fn note_iostat_error(err: String) {

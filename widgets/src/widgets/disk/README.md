@@ -2,7 +2,7 @@
 
 [← all widgets](../../../../docs/README.md)
 
-Which filesystems can still take a write, which disks are busy, and whether writes are stalling.
+Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
 
 ```
 ╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -22,11 +22,16 @@ Which filesystems can still take a write, which disks are busy, and whether writ
 `↑↓` move the selection, including from one section into the next. `tab`
 moves between sections. `↵` opens the selected mount or the selected disk.
 A mount's detail adds the disk and partition it sits on, `on nvme0n1
-(nvme0n1p2)`. A disk's detail names the model, the type, the size, each
-partition and the mounts on it, the totals since boot, and the current
-rates. `esc` goes back. `s` cycles the sort of the section that has the
-cursor: filesystems through mount order, percent used and inodes; disks
-through write, read and name. `v` shows idle disks, or hides them again.
+(nvme0n1p2)`. On Linux a disk's detail names the model, the type, the
+size, each partition and the mounts on it — including a filesystem mounted
+on the whole disk — the totals since boot, and the current rates. macOS
+does not have those: the detail says `iostat` does not provide the model,
+the type, the size, the partitions or the totals. `esc` goes back. `s`
+cycles the sort of the section that has the cursor: filesystems through
+mount order, percent used and inodes; disks through write, read and name.
+On macOS the write key is combined MB/s and the read key is transfers per
+second, and the heading names the one in force. `v` shows idle disks, or
+hides them again.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
 
@@ -52,11 +57,12 @@ answered yet sorts last. The footer names the sort the next press moves to.
 
 ## What is hidden
 
-Four rules, and a mount is counted under the first one that applies:
-`hide_mounts`, then a pseudo filesystem, then read-only, then a second
-mount of a device that is already shown (the shorter path stays). The count
-line names only the rules that hid something. When nothing is hidden the
-line is absent.
+Five rules, and a mount is counted under the first one that applies: a
+later mount at the same path (`covered` — `statvfs` can only answer for
+the one on top), then `hide_mounts`, then a pseudo filesystem, then
+read-only, then a second mount of a device that is already shown (the
+shorter path stays). The count line names only the rules that hid
+something. When nothing is hidden the line is absent.
 
 `tmpfs` is not pseudo. It can fill. The pseudo list is proc, sysfs, cgroup,
 cgroup2, devpts, devtmpfs, debugfs, tracefs, securityfs, pstore, bpf,
@@ -91,14 +97,16 @@ sample says `measuring`. A counter that went backwards is a gap, drawn as
 `—`, not a spike.
 
 A disk with no reads and no writes since boot is hidden until `v`. The
-count is on the filter line (`7 idle hidden`). `hide_devices` is a second
-category on that line. The selected disk keeps a 60-sample read-up,
-write-down chart. Read sits on a zero baseline and write on the top of the
-cell, so an idle stretch draws nothing.
+count is on the filter line (`7 idle hidden`). `hide_devices` matches a
+whole-disk name exactly, and that disk stays hidden when `v` shows idle
+disks. Its count is the next category on the same line. On Linux the
+selected disk keeps a 60-sample read-up, write-down chart. Read sits on a
+zero baseline and write on the top of the cell, so an idle stretch draws
+nothing. On macOS the chart is one trace of combined I/O.
 
 On macOS the same section is `iostat`: read and write are one number, and
-the heading says await, busy and queue need IOKit. PRESSURE is not drawn
-on macOS.
+the heading says await, busy and queue need IOKit. The write sort is that
+combined MB/s and the read sort is tps. PRESSURE is not drawn on macOS.
 
 When `/proc/1/cgroup` is `0::/`, the disk heading also says `host devices,
 container filesystems`.

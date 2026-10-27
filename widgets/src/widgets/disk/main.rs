@@ -6,7 +6,7 @@
 // by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Which filesystems can still take a write, which disks are busy, and whether writes are stalling.
+//! Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
 //!
 //! Linux reads `/proc/self/mountinfo` and `statvfs`. macOS reads `getmntinfo`.
 //! The parsers and the hide/sort rules compile on every target; only the
@@ -285,16 +285,24 @@ impl DiskSort {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// What the body says is in force. On macOS the write key is combined
+    /// MB/s and the read key is transfers per second, which is what `iostat`
+    /// reports.
+    fn label(self, combined: bool) -> &'static str {
         match self {
+            Self::Write if combined => "MB/s",
+            Self::Read if combined => "tps",
             Self::Write => "write",
             Self::Read => "read",
             Self::Name => "name",
         }
     }
 
-    fn hint(self) -> &'static str {
+    /// The sort the next press moves to.
+    fn hint(self, combined: bool) -> &'static str {
         match self {
+            Self::Write if combined => "[s] sort by tps",
+            Self::Name if combined => "[s] sort by MB/s",
             Self::Write => "[s] sort by read",
             Self::Read => "[s] sort by name",
             Self::Name => "[s] sort by write",
@@ -474,6 +482,9 @@ fn main() {
 
     loop {
         let mut keys = keyboard.poll();
+        // Set by `enter`, acted on after the batch's arrows have moved the
+        // cursor, so an arrow and an enter read together open the new row.
+        let mut open = false;
         if screen == Screen::List {
             let current = match focus {
                 0 => fs_at,
@@ -547,19 +558,10 @@ fn main() {
                 }
                 "enter" => {
                     if screen == Screen::List {
-                        match focus {
-                            0 => {
-                                screen = Screen::Detail;
-                                scroll = 0;
-                                chase = true;
-                            }
-                            1 => {
-                                screen = Screen::DiskDetail;
-                                scroll = 0;
-                                chase = true;
-                            }
-                            _ => {}
-                        }
+                        // Acted on after this batch's arrows have moved the
+                        // cursor, so an arrow and an enter read together open
+                        // the row the cursor lands on.
+                        open = true;
                     }
                 }
                 "esc" => {
@@ -641,6 +643,21 @@ fn main() {
                 disk_cursor = board.rows[indexes[at]].disk.name.clone();
             }
         }
+        if open {
+            match focus {
+                0 => {
+                    screen = Screen::Detail;
+                    scroll = 0;
+                    chase = true;
+                }
+                1 => {
+                    screen = Screen::DiskDetail;
+                    scroll = 0;
+                    chase = true;
+                }
+                _ => {}
+            }
+        }
         let view = View {
             snap: snap.as_ref(),
             err: &err,
@@ -689,7 +706,10 @@ fn main() {
                 disk_cursor = name;
             }
         }
-        let (packed, indent) = footer(w, screen, sort, disk_sort, focus, show_idle, paused, &p);
+        let combined = board.as_ref().is_some_and(|board| board.combined);
+        let (packed, indent) = footer(
+            w, screen, sort, disk_sort, focus, show_idle, paused, combined, &p,
+        );
         let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner
             .iter()
@@ -736,6 +756,10 @@ fn main() {
         placed = drawn.placed;
         head = head_rows;
         shown_scroll = scroll;
+        // Frame-local: only the frame a key moved the selection follows it.
+        // Left set, a refresh that reorders the rows would hand the cursor
+        // to whichever mount or disk now sits at the old index.
+        chase = false;
         keyboard.wait(Duration::from_millis(200));
     }
 }
@@ -1000,6 +1024,9 @@ fn refresh_seconds(cfg: &serde_json::Value) -> f64 {
         }
         index += 1;
     }
+    // NaN, infinity and anything past a day would panic in
+    // `Duration::from_secs_f64` outside the poller's guard.
+    let seconds = tc::poll_secs(seconds, 2.0).min(86_400.0);
     if seconds < 0.5 {
         0.5
     } else {
@@ -1519,14 +1546,26 @@ fn pct_text(frac: f64) -> String {
 
 fn chunks(text: &str, room: usize) -> Vec<String> {
     let room = room.max(1);
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if text.is_empty() {
         return vec![String::new()];
     }
-    chars
-        .chunks(room)
-        .map(|piece| piece.iter().collect())
-        .collect()
+    // By display width, not character count: the rows are laid out in cells,
+    // and a wide character counted as one would overflow its piece and be
+    // cut by the pad, never reaching the next row.
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cw = tc::display_width(ch.encode_utf8(&mut [0u8; 4]));
+        if used + cw > room && !piece.is_empty() {
+            pieces.push(std::mem::take(&mut piece));
+            used = 0;
+        }
+        piece.push(ch);
+        used += cw;
+    }
+    pieces.push(piece);
+    pieces
 }
 
 fn clip_chars(text: &str, room: usize) -> String {
@@ -1539,7 +1578,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut line = String::new();
     let mut used = 0usize;
     for word in text.split(' ') {
-        let word_w = word.chars().count();
+        let word_w = tc::display_width(word);
         if word_w > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
@@ -1609,6 +1648,10 @@ fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
             memory.prev.insert(disk.name.clone(), stat);
             (rate, points.0, points.1)
         } else {
+            // A missing counter is not a previous sample. Keeping `prev`
+            // while the shared timestamp moves would divide the whole gap
+            // by the next poll alone.
+            memory.prev.remove(&disk.name);
             (ShownRate::Measuring, None, None)
         };
         let series = memory.series.entry(disk.name.clone()).or_default();
@@ -1763,11 +1806,14 @@ fn paint_disks(
 
 fn disks_heading(view: &View, combined: bool, queue: bool) -> String {
     if combined {
-        return "DISKS  iostat: read and write combined · AWAIT, BUSY and QUEUE need IOKit (OPS-193)".into();
+        return format!(
+            "DISKS  iostat: read and write combined · sorted: {} · AWAIT, BUSY and QUEUE need IOKit (OPS-193)",
+            view.disk_sort.label(true)
+        );
     }
     let mut line = format!(
         "DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: {}",
-        view.disk_sort.label()
+        view.disk_sort.label(false)
     );
     if view.board.is_some_and(|board| board.host_devices) {
         line.push_str(" · host devices, container filesystems");
@@ -2079,6 +2125,9 @@ fn paint_disk_detail(
             format!("size {}", human(disk.size))
         },
     ];
+    if !disk.mounts.is_empty() {
+        lines.push(format!("mounted {}", disk.mounts.join(", ")));
+    }
     if disk.partitions.is_empty() && !board.combined {
         lines.push("no partitions".into());
     }
@@ -2182,22 +2231,7 @@ fn push_chart(
     plots: &mut Vec<tc::Plot>,
 ) {
     let peak = peak_of(&row.read, &row.write).max(1.0);
-    let now_read = row.read.iter().rev().find_map(|value| *value);
-    let now_write = row.write.iter().rev().find_map(|value| *value);
-    let caption = if combined {
-        format!(
-            "peak {}/s   now {}/s combined",
-            human(peak.round() as u64),
-            human(now_read.unwrap_or(0.0).round() as u64)
-        )
-    } else {
-        format!(
-            "peak {}/s   now {}/s read  {}/s write",
-            human(peak.round() as u64),
-            human(now_read.unwrap_or(0.0).round() as u64),
-            human(now_write.unwrap_or(0.0).round() as u64)
-        )
-    };
+    let caption = chart_caption(&row.read, &row.write, combined);
     for line in wrap(&caption, width.saturating_sub(1)) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
     }
@@ -2242,6 +2276,32 @@ fn push_chart(
         )
         .under_text(),
     );
+}
+
+/// The latest sample is `now`. A gap there stays a dash; an older rate is
+/// not borrowed, and an empty series is not drawn as zero with a 1 B/s peak.
+fn chart_caption(read: &[Option<f64>], write: &[Option<f64>], combined: bool) -> String {
+    let any = read.iter().chain(write.iter()).any(|value| value.is_some());
+    if !any {
+        return "no rate yet".into();
+    }
+    let peak = human(peak_of(read, write).round() as u64);
+    if combined {
+        format!("peak {peak}/s   now {} combined", rate_now(read))
+    } else {
+        format!(
+            "peak {peak}/s   now {} read  {} write",
+            rate_now(read),
+            rate_now(write)
+        )
+    }
+}
+
+fn rate_now(series: &[Option<f64>]) -> String {
+    match series.last() {
+        Some(Some(value)) if value.is_finite() => format!("{}/s", human(value.round() as u64)),
+        _ => "—".into(),
+    }
 }
 
 fn chart_frac(value: Option<f64>, peak: f64, invert: bool) -> Option<f64> {
@@ -2318,6 +2378,7 @@ fn footer(
     focus: usize,
     show_idle: bool,
     paused: bool,
+    combined: bool,
     p: &Palette,
 ) -> (tc::Footer, usize) {
     let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
@@ -2328,7 +2389,7 @@ fn footer(
         hints.push(vec![(p.dim.as_str(), "[↵] detail".into())]);
         if focus != 2 {
             let hint = if focus == 1 {
-                disk_sort.hint()
+                disk_sort.hint(combined)
             } else {
                 sort.hint()
             };
@@ -2366,6 +2427,37 @@ fn footer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_with_wide_characters_wraps_whole_by_cells() {
+        let path = "/mnt/\u{6570}\u{636e}\u{76d8}/\u{5907}\u{4efd}";
+        for room in 1..=12 {
+            let pieces = chunks(path, room);
+            assert_eq!(pieces.concat(), path, "nothing lost at {room}");
+            for piece in &pieces {
+                // A single wide character is wider than one cell of room and
+                // still gets a row of its own rather than vanishing.
+                assert!(
+                    tc::display_width(piece) <= room.max(2),
+                    "{piece:?} is wider than {room}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_is_not_a_number_of_seconds_falls_back() {
+        let at =
+            |value: serde_json::Value| refresh_seconds(&serde_json::json!({ "refresh": value }));
+        assert_eq!(
+            at(serde_json::json!(1e300)),
+            86_400.0,
+            "capped, so Duration cannot panic"
+        );
+        assert_eq!(at(serde_json::json!(-3)), 2.0, "not positive: the default");
+        assert_eq!(at(serde_json::json!(0.1)), 0.5, "floored");
+        assert_eq!(at(serde_json::json!(5)), 5.0);
+    }
+
     use super::*;
 
     fn space(used: u64, usable: u64, files: u64, ffree: u64) -> Space {
@@ -2396,7 +2488,12 @@ mod tests {
     }
 
     fn snap(rows: Vec<Row>, hidden: Hidden) -> Snap {
-        let total = rows.len() + hidden.pseudo + hidden.bind + hidden.read_only + hidden.configured;
+        let total = rows.len()
+            + hidden.pseudo
+            + hidden.bind
+            + hidden.read_only
+            + hidden.configured
+            + hidden.covered;
         Snap {
             all: rows.iter().map(|row| row.mount.clone()).collect(),
             rows,
@@ -2472,6 +2569,7 @@ mod tests {
             bind: 1,
             read_only: 1,
             configured: 0,
+            covered: 0,
         };
         let snap = snap(rows, hidden);
         let p = palette();
@@ -2508,6 +2606,7 @@ mod tests {
                 Sort::Mount,
                 DiskSort::Write,
                 0,
+                false,
                 false,
                 false,
                 &p,
@@ -2865,9 +2964,82 @@ mod tests {
 
     #[test]
     fn sort_hints_name_the_next_disk_order() {
-        assert_eq!(DiskSort::Write.hint(), "[s] sort by read");
-        assert_eq!(DiskSort::Read.hint(), "[s] sort by name");
-        assert_eq!(DiskSort::Name.hint(), "[s] sort by write");
+        assert_eq!(DiskSort::Write.hint(false), "[s] sort by read");
+        assert_eq!(DiskSort::Read.hint(false), "[s] sort by name");
+        assert_eq!(DiskSort::Name.hint(false), "[s] sort by write");
+        assert_eq!(DiskSort::Write.hint(true), "[s] sort by tps");
+        assert_eq!(DiskSort::Read.hint(true), "[s] sort by name");
+        assert_eq!(DiskSort::Name.hint(true), "[s] sort by MB/s");
+        assert_eq!(DiskSort::Write.label(true), "MB/s");
+        assert_eq!(DiskSort::Read.label(true), "tps");
+        assert_eq!(DiskSort::Write.label(false), "write");
         assert_eq!(DiskSort::Write.next(), DiskSort::Read);
+    }
+
+    #[test]
+    fn a_gap_at_the_end_of_the_chart_is_not_labelled_as_now() {
+        let caption = chart_caption(&[Some(100.0), None], &[Some(50.0), None], false);
+        assert!(caption.contains("peak 100B/s"), "{caption}");
+        assert!(caption.contains("now — read"), "{caption}");
+        assert!(caption.contains("— write"), "{caption}");
+        assert!(!caption.contains("50B"), "{caption}");
+        assert_eq!(chart_caption(&[], &[], false), "no rate yet");
+        assert_eq!(chart_caption(&[None, None], &[None], true), "no rate yet");
+        let zero = chart_caption(&[Some(0.0)], &[], true);
+        assert!(zero.contains("now 0B/s"), "{zero}");
+        assert!(!zero.contains("1B"), "{zero}");
+    }
+
+    #[test]
+    fn a_missing_counter_does_not_become_a_peak_when_it_returns() {
+        let mut memory = RateMemory::default();
+        let mut disk = disk_row("sda", 0, 0, 0.0).disk;
+        let first = parse::IoSnapshot {
+            disks: vec![disk.clone()],
+            ..parse::IoSnapshot::default()
+        };
+        let _ = board_from(&first, &mut memory);
+        assert!(memory.prev.contains_key("sda"));
+        disk.stat = None;
+        let hole = parse::IoSnapshot {
+            disks: vec![disk.clone()],
+            ..parse::IoSnapshot::default()
+        };
+        let _ = board_from(&hole, &mut memory);
+        assert!(!memory.prev.contains_key("sda"));
+        memory.at = Some(Instant::now() - Duration::from_secs(1));
+        let mut jumped = disk_row("sda", 0, 10_000_000, 0.0).disk;
+        if let Some(stat) = jumped.stat.as_mut() {
+            stat.sectors_written = 10_000_000;
+        }
+        let back = parse::IoSnapshot {
+            disks: vec![jumped],
+            ..parse::IoSnapshot::default()
+        };
+        let board = board_from(&back, &mut memory);
+        assert!(matches!(board.rows[0].rate, ShownRate::Measuring));
+    }
+
+    #[test]
+    fn a_whole_disk_mount_is_named_in_the_detail() {
+        let mut row = disk_row("sdb", 1, 1, 1.0);
+        row.disk.mounts = vec!["/data".into()];
+        row.disk.partitions.clear();
+        let rows = board(vec![row]);
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.screen = Screen::DiskDetail;
+        frame.board = Some(&rows);
+        frame.disk_cursor = "sdb";
+        frame.focus = 1;
+        let drawn = draw_body(&frame, 80, &p, None);
+        let plain = drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("mounted /data"), "{plain}");
+        assert!(plain.contains("no partitions"), "{plain}");
     }
 }
