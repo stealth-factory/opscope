@@ -447,6 +447,12 @@ PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
 `github-prs` and `github-actions` each hold their own GitHub token rather
 than borrowing one. Every other widget needs no configuration to start.
 
+All three GitHub widgets also reach **GitHub Enterprise**: set
+`enterprise_hostname` in each one's section (for example `acme.ghe.com`), or
+name a variable holding the host in `enterprise_hostname_env`, and use a token
+that host issued. If both are empty, the widget uses github.com. Each
+widget's README has the details.
+
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
 defaults, and `config.json` is git-ignored along with `.env` files and
