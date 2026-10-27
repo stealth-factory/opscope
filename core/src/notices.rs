@@ -502,29 +502,24 @@ impl Registry {
         );
     }
 
-    /// Read-modify-write `notices.json` under its lock: expired entries and
-    /// entries taken against content that has since changed are dropped,
-    /// `change` is applied, and the result is written atomically. Returns
-    /// what the file now holds.
+    /// Read-modify-write `notices.json` under its lock: expired entries are
+    /// dropped, `change` is applied, and the result is written atomically.
+    /// Returns what the file now holds.
+    ///
+    /// An entry whose hash differs from this pane's live notice is kept: two
+    /// panes can hold the same key with different content, and this one
+    /// cannot tell that from content that changed, so dropping it would undo
+    /// the other pane's dismissal. It holds nothing here, since `holds`
+    /// compares the hash, and it goes when it expires.
     fn persist(
         &self,
         path: &Path,
         now: f64,
         change: impl FnOnce(&mut BTreeMap<String, Dismissal>),
     ) -> Result<BTreeMap<String, Dismissal>, Unsaved> {
-        let current: Vec<(String, u64)> = self
-            .live
-            .iter()
-            .map(|l| (self.key(&l.notice), l.hash))
-            .collect();
         crate::statefile::with_lock(path, || {
             let mut kept = read_file(path).map_err(Unsaved::Unreadable)?;
             kept.retain(|_, d| d.until.is_some_and(|u| u > now));
-            for (key, hash) in &current {
-                if kept.get(key).is_some_and(|d| d.hash != *hash) {
-                    kept.remove(key);
-                }
-            }
             change(&mut kept);
             crate::statefile::write_atomic(path, &render_file(&kept)).map_err(Unsaved::Failed)?;
             Ok(kept)
@@ -2020,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_and_stale_entries_are_dropped() {
+    fn expired_entries_are_dropped_and_another_panes_content_is_kept() {
         let dir = temp_dir("notices-expired");
         let file = dir.join("notices.json");
         let live = Notice::warn("live", "still here");
@@ -2041,12 +2036,14 @@ mod tests {
         let ids: Vec<&str> = r.outstanding(NOW).iter().map(|l| l.notice.id).collect();
         assert!(ids.contains(&"changed"), "a changed problem shows again: {ids:?}");
         assert!(!ids.contains(&"live"));
-        // The next write drops the stale entry and keeps the others,
-        // another widget's included.
+        // The next write keeps every unexpired entry, including the one
+        // for content this pane no longer has: another pane may still have
+        // it, and dismissed it.
         r.dismiss_for((Scope::Widget, "new"), 7.0, NOW).unwrap();
         let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let keys: Vec<&str> = written.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["other/theirs", "test/live", "test/new"]);
+        assert_eq!(keys, vec!["other/theirs", "test/changed", "test/live", "test/new"]);
+        assert!(r.outstanding(NOW).iter().any(|l| l.notice.id == "changed"), "and it still shows here");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

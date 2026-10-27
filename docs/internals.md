@@ -115,8 +115,10 @@ hash is a 16-digit hex string rather than a number, because a u64 above
 2^53 survives serde_json but not every editor that might open the file. A
 write is a read-modify-write under `tc::statefile::with_lock` - `flock` on
 `notices.json.lock` - then `write_atomic`, so two panes dismissing at once
-merge; each write also drops what has expired and any entry taken against
-content a live notice no longer has. `start()` reads the file and `hint()`
+merge; each write also drops what has expired. An entry taken against
+content this pane's notice no longer has is kept, since another pane may
+still show that content and have dismissed it; it hides nothing here and
+goes when it expires. `start()` reads the file and `hint()`
 and `banner_rows()` read it again at most once a minute, on the drawing
 thread: it is a few hundred bytes, and a thread for it would be one more
 poller to keep alive. `u` removes the entry from the file as well.
