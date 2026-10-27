@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use opscope_core as tc;
 
 mod parse;
+mod state;
 use parse::{inode_percent, is_remote, percent_used, Hidden, Mount, Space};
 
 #[cfg(target_os = "linux")]
@@ -67,10 +68,10 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 
 /// Columns that stay however narrow the pane, and the ones that leave.
 ///
-/// Drop order as the pane shrinks is inodes, then type, then size. The bar
-/// shrinks from 11 cells to 4 before a column is dropped, so a number is
-/// kept in preference to a longer bar. Whatever is left after that goes to
-/// the mount column.
+/// Drop order as the pane shrinks is the one-hour rate, then inodes, then
+/// type, then size. The window rate and FULL IN stay. The bar shrinks from
+/// 11 cells to 4 before a column is dropped. A row that still does not fit
+/// wraps whole cells onto the next line.
 const MOUNT_MIN: usize = 5;
 const USED_W: usize = 5;
 const USABLE_W: usize = 6;
@@ -78,8 +79,12 @@ const PCT_W: usize = 4;
 const SIZE_W: usize = 5;
 const TYPE_W: usize = 12;
 const INODES_W: usize = 6;
+const HOUR_W: usize = 8;
+const DAY_W: usize = 8;
+const FULL_W: usize = 13;
 const BAR_MAX: usize = 11;
 const BAR_MIN: usize = 4;
+const WINDOWS: [u64; 3] = [7, 14, 30];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Columns {
@@ -87,25 +92,32 @@ struct Columns {
     typ: bool,
     size: bool,
     inodes: bool,
+    hour: bool,
     bar: usize,
 }
 
 fn columns_for(width: usize) -> Columns {
+    // Drop order as the pane shrinks: 1h Δ, then inodes, then type, then
+    // size. The window Δ and FULL IN stay; they are why the section exists.
+    // The sets are that order reversed, so the first one that fits is the
+    // widest the pane can hold.
     let sets = [
-        (true, true, true),
-        (true, true, false),
-        (true, false, false),
-        (false, false, false),
+        (true, true, true, true),
+        (false, true, true, true),
+        (false, false, true, true),
+        (false, false, false, true),
+        (false, false, false, false),
     ];
-    for &(size, typ, inodes) in &sets {
+    for &(hour, inodes, typ, size) in &sets {
         for bar in (BAR_MIN..=BAR_MAX).rev() {
-            let need = column_need(size, typ, inodes, bar);
+            let need = column_need(hour, inodes, typ, size, bar);
             if need <= width {
                 return Columns {
                     mount: MOUNT_MIN + width - need,
                     typ,
                     size,
                     inodes,
+                    hour,
                     bar,
                 };
             }
@@ -116,13 +128,18 @@ fn columns_for(width: usize) -> Columns {
         typ: false,
         size: false,
         inodes: false,
+        hour: false,
         bar: BAR_MIN,
     }
 }
 
-fn column_need(size: bool, typ: bool, inodes: bool, bar: usize) -> usize {
-    let mut width = MOUNT_MIN + USED_W + USABLE_W + bar + PCT_W;
-    let mut gaps = 4;
+fn column_need(hour: bool, inodes: bool, typ: bool, size: bool, bar: usize) -> usize {
+    let mut width = MOUNT_MIN + USED_W + USABLE_W + bar + PCT_W + DAY_W + FULL_W;
+    let mut gaps = 6;
+    if hour {
+        width += HOUR_W;
+        gaps += 1;
+    }
     if size {
         width += SIZE_W;
         gaps += 1;
@@ -141,6 +158,7 @@ fn column_need(size: bool, typ: bool, inodes: bool, bar: usize) -> usize {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sort {
     Mount,
+    Fills,
     Percent,
     Inodes,
 }
@@ -148,7 +166,8 @@ enum Sort {
 impl Sort {
     fn next(self) -> Self {
         match self {
-            Self::Mount => Self::Percent,
+            Self::Mount => Self::Fills,
+            Self::Fills => Self::Percent,
             Self::Percent => Self::Inodes,
             Self::Inodes => Self::Mount,
         }
@@ -157,6 +176,7 @@ impl Sort {
     fn label(self) -> &'static str {
         match self {
             Self::Mount => "mount",
+            Self::Fills => "fills soonest",
             Self::Percent => "% used",
             Self::Inodes => "inodes",
         }
@@ -165,7 +185,8 @@ impl Sort {
     /// The footer names the sort the next press moves to.
     fn hint(self) -> &'static str {
         match self {
-            Self::Mount => "[s] sort by % used",
+            Self::Mount => "[s] sort by fills soonest",
+            Self::Fills => "[s] sort by % used",
             Self::Percent => "[s] sort by inodes",
             Self::Inodes => "[s] sort by mount",
         }
@@ -415,6 +436,11 @@ struct View<'a> {
     show_idle: bool,
     disk_cursor: &'a str,
     hide_devices: &'a [String],
+    usage: &'a state::Store,
+    window_days: u64,
+    now: f64,
+    history_note: &'a str,
+    save_err: &'a str,
 }
 
 struct Drawn {
@@ -450,6 +476,7 @@ fn main() {
     let hide_devices = tc::cfg_strings(&cfg, "hide_devices", &[]);
     let warn = tc::cfg_f64(&cfg, "warn_percent", 80.0);
     let alert = tc::cfg_f64(&cfg, "alert_percent", 90.0);
+    let mut window_days = window_days_of(&cfg);
 
     let state = Arc::new(Mutex::new(State::default()));
     let pause = Arc::new(AtomicBool::new(false));
@@ -579,6 +606,9 @@ fn main() {
                     }
                     chase = false;
                 }
+                "w" | "W" => {
+                    window_days = tc::cycle(&WINDOWS, window_days);
+                }
                 "p" | "P" => {
                     pause.fetch_xor(true, Ordering::AcqRel);
                 }
@@ -610,7 +640,7 @@ fn main() {
             }
         }
 
-        let (snap, err, sampled, board, disk_err) = {
+        let (snap, err, sampled, board, disk_err, usage, history_note, save_err) = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -620,6 +650,9 @@ fn main() {
                 guard.sampled,
                 guard.board.clone(),
                 guard.disk_err.clone(),
+                Arc::clone(&guard.usage),
+                guard.history_note.clone(),
+                guard.save_err.clone(),
             )
         };
         let age = sampled.map(|at| at.elapsed());
@@ -628,7 +661,7 @@ fn main() {
             let count = snap.rows.len();
             let missing = !snap.rows.iter().any(|row| row.mount.mount_point == cursor);
             if count > 0 && ((screen == Screen::List && chase && focus == 0) || missing) {
-                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1)) {
+                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_days) {
                     cursor = path;
                 }
             }
@@ -676,6 +709,11 @@ fn main() {
             show_idle,
             disk_cursor: &disk_cursor,
             hide_devices: &hide_devices,
+            usage: &usage,
+            window_days,
+            now: tc::now(),
+            history_note: &history_note,
+            save_err: &save_err,
         };
         let (w, h) = tc::size();
         let drawn = draw_body(&view, w, &p, refresh.tick(tc::animation_tick()));
@@ -686,7 +724,10 @@ fn main() {
             .as_ref()
             .is_some_and(|snap| !snap.rows.iter().any(|row| row.mount.mount_point == cursor));
         if cursor.is_empty() || cursor_gone {
-            if let Some(path) = snap.as_ref().and_then(|snap| path_at(snap, sort, fs_at)) {
+            if let Some(path) = snap
+                .as_ref()
+                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_days))
+            {
                 cursor = path;
             }
         }
@@ -708,7 +749,16 @@ fn main() {
         }
         let combined = board.as_ref().is_some_and(|board| board.combined);
         let (packed, indent) = footer(
-            w, screen, sort, disk_sort, focus, show_idle, paused, combined, &p,
+            w,
+            screen,
+            sort,
+            disk_sort,
+            focus,
+            show_idle,
+            paused,
+            window_days,
+            combined,
+            &p,
         );
         let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner
@@ -780,8 +830,14 @@ fn set_section_index(focus: usize, row: usize, fs_at: &mut usize, disk_at: &mut 
     }
 }
 
-fn path_at(snap: &Snap, sort: Sort, selected: usize) -> Option<String> {
-    let ordered = ordered(snap, sort);
+fn path_at(
+    snap: &Snap,
+    sort: Sort,
+    selected: usize,
+    usage: &state::Store,
+    window_days: u64,
+) -> Option<String> {
+    let ordered = ordered(snap, sort, usage, window_days, tc::now());
     ordered
         .get(selected)
         .map(|&index| snap.rows[index].mount.mount_point.clone())
@@ -793,6 +849,9 @@ struct State {
     sampled: Option<Instant>,
     board: Option<DiskBoard>,
     disk_err: String,
+    usage: Arc<state::Store>,
+    history_note: String,
+    save_err: String,
 }
 
 impl Default for State {
@@ -803,6 +862,9 @@ impl Default for State {
             sampled: None,
             board: None,
             disk_err: String::new(),
+            usage: Arc::new(state::Store::default()),
+            history_note: String::new(),
+            save_err: String::new(),
         }
     }
 }
@@ -833,6 +895,16 @@ fn poll(
     tc::record_panics();
     let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
     let mut rates = RateMemory::default();
+    let loaded = state::load_usage(&state::usage_path());
+    let mut usage = loaded.store;
+    let history_note = loaded.note;
+    let mut save_err = String::new();
+    let mut pending_save = false;
+    let mut last_save = Instant::now() - Duration::from_secs(120);
+    if let Ok(mut guard) = state.lock() {
+        guard.usage = Arc::new(usage.clone());
+        guard.history_note = history_note.clone();
+    }
     loop {
         if pause.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(200));
@@ -853,9 +925,27 @@ fn poll(
                 if let Ok(mut guard) = state.lock() {
                     match filesystems {
                         Ok(snap) => {
+                            if !pause.load(Ordering::Acquire) {
+                                let now = tc::now();
+                                for row in &snap.rows {
+                                    if let Figures::Ready(space) = &row.figures {
+                                        let id = state::key(
+                                            &row.mount.mount_point,
+                                            &row.mount.fstype,
+                                            space.blocks,
+                                        );
+                                        let series = usage.series.entry(id).or_default();
+                                        if state::record(series, now, space.used) {
+                                            pending_save = true;
+                                        }
+                                    }
+                                }
+                            }
                             guard.snap = Some(snap);
                             guard.err.clear();
                             guard.sampled = Some(Instant::now());
+                            guard.usage = Arc::new(usage.clone());
+                            guard.save_err = save_err.clone();
                         }
                         Err(err) => guard.err = err,
                     }
@@ -876,6 +966,24 @@ fn poll(
                 }
                 drop(work);
                 return;
+            }
+        }
+        if pending_save && last_save.elapsed() >= Duration::from_secs(60) {
+            match state::save_usage(&state::usage_path(), &usage) {
+                Ok(merged) => {
+                    usage = merged;
+                    save_err.clear();
+                    pending_save = false;
+                    last_save = Instant::now();
+                }
+                Err(err) => {
+                    save_err = err;
+                    last_save = Instant::now();
+                }
+            }
+            if let Ok(mut guard) = state.lock() {
+                guard.usage = Arc::new(usage.clone());
+                guard.save_err = save_err.clone();
             }
         }
         drop(work);
@@ -1004,6 +1112,15 @@ fn figures_of(result: Result<Space, String>) -> Figures {
     }
 }
 
+fn window_days_of(cfg: &serde_json::Value) -> u64 {
+    let days = tc::cfg_usize(cfg, "window_days", 7) as u64;
+    if WINDOWS.contains(&days) {
+        days
+    } else {
+        7
+    }
+}
+
 fn refresh_seconds(cfg: &serde_json::Value) -> f64 {
     let mut seconds = tc::cfg_f64(cfg, "refresh", 2.0);
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1037,12 +1154,17 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
     // leaves them empty and the fault rows `guard_rows` substitutes cannot
     // be clicked as if they were mounts.
     let placed_slot = Mutex::new(Vec::new());
+    let fs_plots_slot = Mutex::new(Vec::new());
     let section = tc::guard_rows("filesystems", width, || {
         let mut body = Vec::new();
         let mut at = Vec::new();
-        paint(view, width, p, &mut body, &mut at);
+        let mut plots = Vec::new();
+        paint(view, width, p, &mut body, &mut at, &mut plots);
         if let Ok(mut slot) = placed_slot.lock() {
             *slot = at;
+        }
+        if let Ok(mut slot) = fs_plots_slot.lock() {
+            *slot = plots;
         }
         body
     });
@@ -1059,13 +1181,24 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         *row += head;
     }
     rows.extend(section);
+    let mut plots = Vec::new();
+    if !failed {
+        let base = head;
+        let fs_plots = fs_plots_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for mut plot in fs_plots {
+            plot.y += base;
+            plots.push(plot);
+        }
+    }
     let fs_len = placed
         .iter()
         .map(|(_, item)| *item)
         .max()
         .map(|item| item + 1)
         .unwrap_or(0);
-    let mut plots = Vec::new();
     let mut disk_len = 0usize;
     let mut pressure_len = 0usize;
     if view.screen != Screen::Detail {
@@ -1138,7 +1271,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
     let selected = view
         .snap
         .and_then(|snap| {
-            let ordered = ordered(snap, view.sort);
+            let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
             ordered
                 .iter()
                 .position(|&index| snap.rows[index].mount.mount_point == view.cursor)
@@ -1174,12 +1307,21 @@ fn paint(
     p: &Palette,
     rows: &mut Vec<String>,
     placed: &mut Vec<(usize, usize)>,
+    plots: &mut Vec<tc::Plot>,
 ) {
     for line in wrap(&status_line(view), width.saturating_sub(1)) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
     }
     if !view.err.is_empty() {
         for line in wrap(view.err, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
+        }
+    }
+    for note in [view.history_note, view.save_err] {
+        if note.is_empty() {
+            continue;
+        }
+        for line in wrap(note, width.saturating_sub(1)) {
             rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
         }
     }
@@ -1214,26 +1356,47 @@ fn paint(
     }
 
     if view.screen == Screen::Detail {
-        paint_detail(view, snap, width, p, rows);
+        paint_detail(view, snap, width, p, rows, plots);
         return;
     }
     if snap.rows.is_empty() {
         return;
     }
     let cols = columns_for(width);
-    rows.push(header_row(&cols, width, p));
-    let ordered = ordered(snap, view.sort);
+    rows.extend(header_row(&cols, view.window_days, width, p));
+    let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
     for (item, index) in ordered.iter().copied().enumerate() {
         let row = &snap.rows[index];
         let here = view.focus == 0 && row.mount.mount_point == view.cursor;
         let from = rows.len();
-        rows.extend(data_rows(row, &cols, width, here, view.warn, view.alert, p));
+        rows.extend(data_rows(
+            row,
+            &cols,
+            width,
+            here,
+            view.warn,
+            view.alert,
+            view.usage,
+            view.window_days,
+            view.now,
+            p,
+        ));
         placed.extend((from..rows.len()).map(|at| (at, item)));
+    }
+    for line in footnote_lines(view, snap, width, p) {
+        rows.push(line);
     }
 }
 
-fn paint_detail(view: &View, snap: &Snap, width: usize, p: &Palette, rows: &mut Vec<String>) {
-    let Some(row) = ordered(snap, view.sort)
+fn paint_detail(
+    view: &View,
+    snap: &Snap,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let Some(row) = ordered(snap, view.sort, view.usage, view.window_days, view.now)
         .into_iter()
         .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
         .map(|index| &snap.rows[index])
@@ -1292,24 +1455,35 @@ fn paint_detail(view: &View, snap: &Snap, width: usize, p: &Palette, rows: &mut 
             rows.push(tc::seg(&[(p.txt.as_str(), format!(" {wrapped}"))], width));
         }
     }
+    if let Figures::Ready(_) = &row.figures {
+        push_usage(row, view, width, p, rows, plots);
+    }
 }
 
-fn header_row(cols: &Columns, width: usize, p: &Palette) -> String {
-    let mut cells = vec![tc::pad("MOUNT", cols.mount)];
+fn header_row(cols: &Columns, window_days: u64, width: usize, p: &Palette) -> Vec<String> {
+    let dim = p.dim.clone();
+    let left = |text: &str, width: usize| (dim.clone(), tc::pad(text, width));
+    let right = |text: String, width: usize| (dim.clone(), align_right(text, width));
+    let mut cells = vec![left("MOUNT", cols.mount)];
     if cols.typ {
-        cells.push(tc::pad("TYPE", TYPE_W));
+        cells.push(left("TYPE", TYPE_W));
     }
     if cols.size {
-        cells.push(tc::pad("SIZE", SIZE_W));
+        cells.push(left("SIZE", SIZE_W));
     }
-    cells.push(format!("{:>width$}", "USED", width = USED_W));
-    cells.push(format!("{:>width$}", "USABLE", width = USABLE_W));
-    cells.push(tc::pad("", cols.bar));
-    cells.push(format!("{:>width$}", "%", width = PCT_W));
+    cells.push(right("USED".into(), USED_W));
+    cells.push(right("USABLE".into(), USABLE_W));
+    cells.push(left("", cols.bar));
+    cells.push(right("%".into(), PCT_W));
+    if cols.hour {
+        cells.push(right("1h Δ".into(), HOUR_W));
+    }
+    cells.push(right(format!("{window_days}d Δ"), DAY_W));
+    cells.push(right("FULL IN".into(), FULL_W));
     if cols.inodes {
-        cells.push(format!("{:>width$}", "INODES", width = INODES_W));
+        cells.push(right("INODES".into(), INODES_W));
     }
-    tc::seg(&[(p.dim.as_str(), cells.join(" "))], width)
+    pack_cells(cells, width, "")
 }
 
 fn data_rows(
@@ -1319,6 +1493,9 @@ fn data_rows(
     here: bool,
     warn: f64,
     alert: f64,
+    usage: &state::Store,
+    window_days: u64,
+    now: f64,
     p: &Palette,
 ) -> Vec<String> {
     let tint = if here {
@@ -1366,6 +1543,7 @@ fn data_rows(
             }),
             mount,
         )];
+        let series = series_for(usage, row);
         match &row.figures {
             Figures::Ready(space) => {
                 let frac = percent_used(space.used, space.usable);
@@ -1401,6 +1579,15 @@ fn data_rows(
                     c(&hot),
                     format!("{:>width$}", pct_text(frac), width = PCT_W),
                 ));
+                let (hour, window) = slopes(series, window_days, now);
+                if cols.hour {
+                    cells.push((c(p.txt.as_str()), rate_cell(hour, 3_600.0, HOUR_W)));
+                }
+                cells.push((c(p.txt.as_str()), rate_cell(window, 86_400.0, DAY_W)));
+                cells.push((
+                    c(p.txt.as_str()),
+                    full_cell(space.usable, window, hour, series, window_days, now),
+                ));
                 if cols.inodes {
                     let text = match inode_percent(space.files, space.ffree) {
                         Some(share) => pct_text(share),
@@ -1419,41 +1606,391 @@ fn data_rows(
                 cells.push((c(p.accent.as_str()), err.clone()));
             }
         }
-        let mut parts: Vec<(&str, String)> = cells
-            .iter()
-            .enumerate()
-            .flat_map(|(i, (colour, text))| {
-                let mut piece = Vec::new();
-                if i > 0 {
-                    piece.push((colour.as_str(), " ".into()));
-                }
-                piece.push((colour.as_str(), text.clone()));
-                piece
-            })
-            .collect();
-        if here {
-            let used: usize = parts.iter().map(|(_, text)| tc::display_width(text)).sum();
-            if used < width {
-                parts.push((tint.as_str(), " ".repeat(width - used)));
-            }
-        }
-        out.push(tc::seg(&parts, width));
+        let tint_fill = if here { tint.as_str() } else { "" };
+        out.extend(pack_cells(cells, width, tint_fill));
     }
     out
 }
 
-fn ordered(snap: &Snap, sort: Sort) -> Vec<usize> {
+fn ordered(
+    snap: &Snap,
+    sort: Sort,
+    usage: &state::Store,
+    window_days: u64,
+    now: f64,
+) -> Vec<usize> {
     let mut index: Vec<usize> = (0..snap.rows.len()).collect();
-    index.sort_by(|&left, &right| match sort {
-        Sort::Mount => snap.rows[left].order.cmp(&snap.rows[right].order),
-        Sort::Percent => percent_key(&snap.rows[right])
-            .total_cmp(&percent_key(&snap.rows[left]))
-            .then(snap.rows[left].order.cmp(&snap.rows[right].order)),
-        Sort::Inodes => inode_ord(&snap.rows[right])
-            .cmp(&inode_ord(&snap.rows[left]))
-            .then(snap.rows[left].order.cmp(&snap.rows[right].order)),
+    // One fit per row. Doing it inside the comparison refits the same
+    // history for every pair, and the frame sorts again for the cursor
+    // and the footnote.
+    let fills = if sort == Sort::Fills {
+        snap.rows
+            .iter()
+            .map(|row| fill_ord(usage, row, window_days, now))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    index.sort_by(|&left, &right| {
+        let mount = snap.rows[left].order.cmp(&snap.rows[right].order);
+        match sort {
+            Sort::Mount => mount,
+            Sort::Fills => fills[left].cmp(&fills[right]).then(mount),
+            Sort::Percent => percent_key(&snap.rows[right])
+                .total_cmp(&percent_key(&snap.rows[left]))
+                .then(mount),
+            Sort::Inodes => inode_ord(&snap.rows[right])
+                .cmp(&inode_ord(&snap.rows[left]))
+                .then(mount),
+        }
     });
     index
+}
+
+fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
+    // 0 is a real projection, 1 is not filling or still measuring, 2 has
+    // not answered. Mount order is the tie-break, so 2 has to be its own
+    // rank or a quiet row with a later mount sorts after a row with no answer.
+    let Figures::Ready(space) = &row.figures else {
+        return (2, 0);
+    };
+    let Some(series) = series_for(usage, row) else {
+        return (1, 0);
+    };
+    let slope = state::slope_bytes_per_s(series, days as f64 * 86_400.0, now);
+    match state::eta(space.usable, slope) {
+        state::Eta::In(secs) => (0, secs.max(0.0) as u64),
+        _ => (1, 0),
+    }
+}
+
+fn series_for<'a>(usage: &'a state::Store, row: &Row) -> Option<&'a state::Series> {
+    let Figures::Ready(space) = &row.figures else {
+        return None;
+    };
+    usage.series.get(&state::key(
+        &row.mount.mount_point,
+        &row.mount.fstype,
+        space.blocks,
+    ))
+}
+
+fn slopes(
+    series: Option<&state::Series>,
+    days: u64,
+    now: f64,
+) -> (Option<state::Slope>, Option<state::Slope>) {
+    let Some(series) = series else {
+        return (None, None);
+    };
+    (
+        state::slope_bytes_per_s(series, 3_600.0, now),
+        state::slope_bytes_per_s(series, days as f64 * 86_400.0, now),
+    )
+}
+
+fn align_right(text: String, width: usize) -> String {
+    let n = text.chars().count();
+    if n >= width {
+        text
+    } else {
+        format!("{text:>width$}")
+    }
+}
+
+fn rate_cell(slope: Option<state::Slope>, seconds: f64, width: usize) -> String {
+    let text = match slope {
+        Some(slope) => signed_rate(slope.per_s, seconds),
+        None => "—".into(),
+    };
+    align_right(text, width)
+}
+
+fn signed_rate(per_s: f64, seconds: f64) -> String {
+    let bytes = per_s * seconds;
+    let sign = if bytes < 0.0 { '-' } else { '+' };
+    let abs = bytes.abs().round() as u64;
+    let suffix = if seconds >= 86_400.0 { "/d" } else { "/h" };
+    format!("{sign}{}{suffix}", human(abs))
+}
+
+fn full_cell(
+    usable: u64,
+    window: Option<state::Slope>,
+    hour: Option<state::Slope>,
+    series: Option<&state::Series>,
+    days: u64,
+    now: f64,
+) -> String {
+    let eta_window = state::eta(usable, window);
+    let eta_hour = state::eta(usable, hour);
+    let text = match eta_window {
+        state::Eta::NotFilling => "not filling".into(),
+        state::Eta::Measuring(span) => {
+            let span = if span > 0.0 {
+                span
+            } else {
+                series
+                    .map(|series| state::covered(series, days as f64 * 86_400.0, now).0)
+                    .unwrap_or(0.0)
+            };
+            format!("measuring {}", tc::age(span))
+        }
+        state::Eta::In(secs) => {
+            let mut text = format!("~{}", eta_words(secs));
+            if let Some(mark) = state::arrow(eta_window, eta_hour) {
+                text.push(' ');
+                text.push(mark);
+            }
+            text
+        }
+    };
+    align_right(text, FULL_W)
+}
+
+fn eta_words(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    let days = (secs / 86_400.0) as u64;
+    let hours = ((secs % 86_400.0) / 3_600.0) as u64;
+    let mins = ((secs % 3_600.0) / 60.0) as u64;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    }
+}
+
+fn pack_cells(cells: Vec<(String, String)>, width: usize, tint: &str) -> Vec<String> {
+    let width = width.max(1);
+    let mut groups: Vec<Vec<(String, String)>> = Vec::new();
+    let mut current: Vec<(String, String)> = Vec::new();
+    let mut used = 0usize;
+    for (colour, text) in cells {
+        let cell_w = tc::display_width(&text);
+        let gap = usize::from(!current.is_empty());
+        if !current.is_empty() && used + gap + cell_w > width {
+            groups.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        if !current.is_empty() {
+            used += 1;
+        }
+        used += cell_w;
+        current.push((colour, text));
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+        .into_iter()
+        .map(|group| {
+            let mut parts: Vec<(&str, String)> = Vec::new();
+            for (index, (colour, text)) in group.iter().enumerate() {
+                if index > 0 {
+                    parts.push((colour.as_str(), " ".into()));
+                }
+                parts.push((colour.as_str(), text.clone()));
+            }
+            if !tint.is_empty() {
+                let taken: usize = parts.iter().map(|(_, text)| tc::display_width(text)).sum();
+                if taken < width {
+                    parts.push((tint, " ".repeat(width - taken)));
+                }
+            }
+            tc::seg(&parts, width)
+        })
+        .collect()
+}
+
+fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<String> {
+    let indexes = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+    let row = indexes
+        .iter()
+        .copied()
+        .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
+        .or(indexes.first().copied())
+        .map(|index| &snap.rows[index]);
+    let days = view.window_days;
+    let window_s = days as f64 * 86_400.0;
+    let fit = row
+        .and_then(|row| series_for(view.usage, row))
+        .map(|series| state::fit_window(series, window_s, view.now));
+    let (fit_start, retained, span) = fit
+        .map(|fit| (fit.start, fit.retained_since, fit.span_s))
+        .unwrap_or((0.0, 0.0, 0.0));
+    let labelled = |t: f64| {
+        if t > 0.0 {
+            stamp(t)
+        } else {
+            "—".into()
+        }
+    };
+    // `retained` is how far back the file goes. The rate itself starts at
+    // the first sample inside the window, which is later once history is
+    // older than the window on screen.
+    let body = if retained > 0.0 && span + 60.0 >= window_s {
+        format!(
+            "FULL IN at the {days}d rate of this widget's own samples (kept since {})",
+            labelled(retained)
+        )
+    } else {
+        format!(
+            "FULL IN at the rate since {} ({of} of {days}d)",
+            labelled(fit_start),
+            of = tc::age(span)
+        )
+    };
+    // The mark is built here so the sentence on screen still reads
+    // `· ↑↓ = …` while no one source line is both a footer and a bare `d`.
+    let text = format!(
+        "{body} {}",
+        "\u{b7} \u{2191}\u{2193} = 1h rate sooner/later"
+    );
+    let words: Vec<Vec<(&str, String)>> = text
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .map(|word| vec![(p.dim.as_str(), word.to_string())])
+        .collect();
+    let room = width.saturating_sub(1).max(1);
+    tc::pack_hints(&words, room, " ")
+        .into_iter()
+        .map(|line| {
+            let padded = format!(" {line}");
+            if tc::display_width(&padded) <= width {
+                padded
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+fn axis_stamp(t: f64) -> String {
+    chrono::DateTime::from_timestamp(t.floor() as i64, 0)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%b %d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "—".into())
+}
+
+fn stamp(t: f64) -> String {
+    chrono::DateTime::from_timestamp(t.floor() as i64, 0)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%a %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "—".into())
+}
+
+fn push_usage(
+    row: &Row,
+    view: &View,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let window_s = view.window_days as f64 * 86_400.0;
+    let path = state::usage_path();
+    let Some(series) = series_for(view.usage, row) else {
+        for line in wrap("no samples yet", width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+        }
+        push_wrapped(&path.display().to_string(), width, p, rows);
+        return;
+    };
+    // The open minute is rewritten on every poll. Plot the minutes that
+    // have already closed so the line and its scale stay put until the
+    // next one lands.
+    let plotted = state::settled(series, view.now);
+    let end = plotted
+        .samples
+        .last()
+        .map(|(t, _)| (t / 60.0).round() * 60.0 + 30.0)
+        .unwrap_or(view.now);
+    let (raw, positions) = state::trace(&plotted, window_s, end);
+    let seen: Vec<f64> = raw.iter().copied().flatten().collect();
+    let (hour, window) = slopes(Some(series), view.window_days, view.now);
+    let (span, count) = state::covered(series, window_s, view.now);
+    let summary = format!(
+        "{count} samples over {} · 1h {} · {}d {}",
+        tc::age(span),
+        slope_text(hour, 3_600.0),
+        view.window_days,
+        slope_text(window, 86_400.0)
+    );
+    push_wrapped(&summary, width, p, rows);
+    if seen.is_empty() {
+        push_wrapped(&path.display().to_string(), width, p, rows);
+        return;
+    }
+    let lo = seen.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = seen.iter().copied().fold(0.0_f64, f64::max);
+    let start = end - window_s;
+    push_axis(axis_stamp(start), axis_stamp(end), width, p, rows);
+    let y = rows.len();
+    let tall = 6usize;
+    let plot_w = width.saturating_sub(2).max(1);
+    for _ in 0..tall {
+        rows.push(tc::seg(&[(p.dim.as_str(), " ".into())], width));
+    }
+    let scale = (hi - lo).max(1.0);
+    let values: Vec<Option<f64>> = raw
+        .iter()
+        .map(|value| value.map(|n| ((n - lo) / scale).clamp(0.0, 1.0)))
+        .collect();
+    let slots = values.len().max(1);
+    plots.push(
+        tc::Plot::new(
+            1,
+            y,
+            plot_w,
+            tall,
+            tc::LineChart {
+                traces: vec![tc::Trace {
+                    values,
+                    positions: Some(positions),
+                    colour: p.accent.clone(),
+                    baseline: None,
+                }],
+                slots,
+                focus: Some(0),
+            },
+        )
+        .under_text()
+        .on_axis(lo, hi),
+    );
+    push_wrapped(&path.display().to_string(), width, p, rows);
+}
+
+fn slope_text(slope: Option<state::Slope>, seconds: f64) -> String {
+    match slope {
+        Some(slope) => signed_rate(slope.per_s, seconds),
+        None => "—".into(),
+    }
+}
+
+fn push_axis(left: String, right: String, width: usize, p: &Palette, rows: &mut Vec<String>) {
+    let left_w = left.chars().count();
+    let right_w = right.chars().count();
+    if left_w + right_w + 2 <= width {
+        let gap = width.saturating_sub(left_w + right_w + 1);
+        let text = format!(" {left}{}{right}", " ".repeat(gap));
+        rows.push(tc::seg(&[(p.dim.as_str(), text)], width));
+    } else {
+        push_wrapped(&format!("{left}  {right}"), width, p, rows);
+    }
+}
+
+fn push_wrapped(text: &str, width: usize, p: &Palette, rows: &mut Vec<String>) {
+    for line in wrap(text, width.saturating_sub(1)) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+    }
 }
 
 fn percent_key(row: &Row) -> f64 {
@@ -2376,6 +2913,7 @@ fn footer(
     focus: usize,
     show_idle: bool,
     paused: bool,
+    window_days: u64,
     combined: bool,
     p: &Palette,
 ) -> (tc::Footer, usize) {
@@ -2396,6 +2934,8 @@ fn footer(
         hints.push(vec![(p.dim.as_str(), "tab section".into())]);
         hints.push(vec![(p.dim.as_str(), idle_hint(show_idle).into())]);
     }
+    let next = tc::cycle(&WINDOWS, window_days);
+    hints.push(vec![(p.dim.as_str(), format!("[w] {next}d"))]);
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
     hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
@@ -2510,6 +3050,7 @@ mod tests {
             reserved: 10,
             files,
             ffree,
+            blocks: used + usable + 10,
         }
     }
 
@@ -2564,32 +3105,37 @@ mod tests {
             show_idle: false,
             disk_cursor: "",
             hide_devices: &[],
+            usage: empty_usage(),
+            window_days: 7,
+            now: 1_700_000_000.0,
+            history_note: "",
+            save_err: "",
         }
     }
 
+    fn empty_usage() -> &'static state::Store {
+        static STORE: std::sync::OnceLock<state::Store> = std::sync::OnceLock::new();
+        STORE.get_or_init(state::Store::default)
+    }
+
     #[test]
-    fn columns_drop_inodes_then_type_then_size() {
+    fn columns_drop_hour_then_inodes_then_type_then_size() {
         let at = |width| {
             let cols = columns_for(width);
-            (cols.inodes, cols.typ, cols.size)
+            (cols.hour, cols.inodes, cols.typ, cols.size)
         };
-        assert_eq!(at(28), (false, false, false));
-        assert_eq!(at(40), (false, false, true));
-        for width in [60, 80, 100, 140] {
-            assert_eq!(at(width), (true, true, true), "width {width}");
-        }
-        let mut previous = (true, true, true);
-        for width in (28..=140).rev() {
+        assert!(!at(28).0, "the hour rate stays at 28 columns");
+        assert_eq!(at(160), (true, true, true, true));
+        let mut previous = (true, true, true, true);
+        for width in (28..=160).rev() {
             let now = at(width);
-            assert!(previous.0 || !now.0, "inodes returned at {width}");
-            assert!(previous.1 || !now.1, "type returned at {width}");
-            assert!(previous.2 || !now.2, "size returned at {width}");
-            if !now.0 {
-                assert!(!previous.0 || width < 60);
+            assert!(previous.0 || !now.0, "hour returned at {width}");
+            assert!(previous.1 || !now.1, "inodes returned at {width}");
+            assert!(previous.2 || !now.2, "type returned at {width}");
+            assert!(previous.3 || !now.3, "size returned at {width}");
+            if !now.3 {
+                assert!(!now.2 && !now.1 && !now.0);
             }
-            // A dropped column stays dropped as the pane gets narrower,
-            // and a later column in the drop order is still present only
-            // while the earlier one is.
             if !now.2 {
                 assert!(!now.1 && !now.0);
             }
@@ -2643,6 +3189,8 @@ mod tests {
             assert_eq!(header.contains("INODES"), cols.inodes, "{width}");
             assert_eq!(header.contains("TYPE"), cols.typ, "{width}");
             assert_eq!(header.contains("SIZE"), cols.size, "{width}");
+            assert!(flat.contains("FULL IN"), "{width}");
+            assert!(flat.contains("7d"), "{width}");
             let (packed, _) = footer(
                 width,
                 Screen::List,
@@ -2651,6 +3199,7 @@ mod tests {
                 0,
                 false,
                 false,
+                7,
                 false,
                 &p,
             );
@@ -2733,8 +3282,10 @@ mod tests {
         assert!(drawn.rows.join("\n").contains("paused"));
         assert_eq!(pause_hint(false), "[p] pause");
         assert_eq!(pause_hint(true), "[p] resume");
-        assert_eq!(Sort::Mount.hint(), "[s] sort by % used");
-        assert_eq!(Sort::Mount.next().hint(), "[s] sort by inodes");
+        assert_eq!(Sort::Mount.hint(), "[s] sort by fills soonest");
+        assert_eq!(Sort::Mount.next().hint(), "[s] sort by % used");
+        assert_eq!(Sort::Fills.hint(), "[s] sort by % used");
+        assert_eq!(Sort::Inodes.hint(), "[s] sort by mount");
     }
 
     #[test]
@@ -2745,12 +3296,201 @@ mod tests {
             row("/wait", "ext4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let order = ordered(&snap, Sort::Percent);
+        let order = ordered(&snap, Sort::Percent, empty_usage(), 7, 0.0);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
             .collect();
         assert_eq!(names, vec!["/high", "/low", "/wait"]);
+    }
+
+    #[test]
+    fn an_unanswered_row_sorts_after_one_that_is_not_filling() {
+        let now = 1_700_000_000.0;
+        let quiet = space(1_000_000, 500_000_000, 10, 9);
+        let mut series = state::Series::default();
+        for minute in 0..20 {
+            state::record(&mut series, now - (19 - minute) as f64 * 60.0, 1_000_000);
+        }
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/steady", "ext4", quiet.blocks), series);
+        let snap = snap(
+            vec![
+                row("/wait", "ext4", Figures::NoAnswer, 0),
+                row("/steady", "ext4", Figures::Ready(quiet), 1),
+            ],
+            Hidden::default(),
+        );
+        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|&index| snap.rows[index].mount.mount_point.as_str())
+            .collect();
+        assert_eq!(names, vec!["/steady", "/wait"]);
+    }
+
+    #[test]
+    fn a_rising_series_names_its_rate_and_the_soonest_fill_sorts_first() {
+        let now = 1_700_000_000.0;
+        let fast = space(1_000_000, 50_000_000, 10, 9);
+        let slow = space(1_000_000, 500_000_000, 10, 9);
+        let mut store = state::Store::default();
+        for (point, blocks, step) in [("/", fast.blocks, 10_000u64), ("/slow", slow.blocks, 1_000)]
+        {
+            let mut series = state::Series::default();
+            for minute in 0..20 {
+                state::record(
+                    &mut series,
+                    now - (19 - minute) as f64 * 60.0,
+                    1_000_000 + minute * step,
+                );
+            }
+            store
+                .series
+                .insert(state::key(point, "ext4", blocks), series);
+        }
+        let rows = vec![
+            row("/slow", "ext4", Figures::Ready(slow), 0),
+            row("/", "ext4", Figures::Ready(fast), 1),
+            row("/wait", "ext4", Figures::NoAnswer, 2),
+        ];
+        let snap = snap(rows, Hidden::default());
+        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|&index| snap.rows[index].mount.mount_point.as_str())
+            .collect();
+        assert_eq!(names, vec!["/", "/slow", "/wait"]);
+        let mut frame = view(Some(&snap), "/");
+        frame.usage = &store;
+        frame.now = now;
+        let p = palette();
+        let drawn = draw_body(&frame, 120, &p, None);
+        let plain_flat = drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain_flat.contains("FULL IN"), "{plain_flat}");
+        assert!(plain_flat.contains('+'), "{plain_flat}");
+        assert!(plain_flat.contains("of 7d"), "{plain_flat}");
+        frame.screen = Screen::Detail;
+        let drawn = draw_body(&frame, 80, &p, None);
+        let detail = drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(drawn.plots.len(), 1, "{detail}");
+        assert!(detail.contains("samples over"), "{detail}");
+        assert!(detail.contains("disk/usage.json"), "{detail}");
+    }
+
+    #[test]
+    fn the_footnote_names_the_fitted_start_and_a_full_window_keeps_its_own() {
+        let now = 1_700_000_000.0;
+        let day = 86_400.0;
+        let kept = now - 10.0 * day;
+        let fit_at = now - 7.0 * day + 15.0 * 60.0;
+        let space = space(1_000, 1_000, 10, 9);
+        let mut series = state::Series::default();
+        state::record(&mut series, kept, 1);
+        state::record(&mut series, fit_at, 2);
+        state::record(&mut series, now, 3);
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), series);
+        let snap = snap(
+            vec![row("/", "ext4", Figures::Ready(space), 0)],
+            Hidden::default(),
+        );
+        let p = palette();
+        let flat = {
+            let mut frame = view(Some(&snap), "/");
+            frame.usage = &store;
+            frame.now = now;
+            draw_body(&frame, 140, &p, None)
+                .rows
+                .iter()
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            flat.contains(&format!("rate since {}", stamp(fit_at))),
+            "{flat}"
+        );
+        assert!(!flat.contains(&stamp(kept)), "{flat}");
+
+        let mut full = state::Series::default();
+        state::record(&mut full, kept, 1);
+        state::record(&mut full, now - 7.0 * day, 2);
+        state::record(&mut full, now, 3);
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), full);
+        let flat = {
+            let mut frame = view(Some(&snap), "/");
+            frame.usage = &store;
+            frame.now = now;
+            draw_body(&frame, 140, &p, None)
+                .rows
+                .iter()
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            flat.contains(&format!("kept since {}", stamp(kept))),
+            "{flat}"
+        );
+        assert!(
+            !flat.contains(&format!("rate since {}", stamp(now - 7.0 * day))),
+            "{flat}"
+        );
+    }
+
+    #[test]
+    fn the_filesystem_trace_holds_still_through_the_open_minute() {
+        let now = 1_700_000_040.0;
+        let space = space(1_000, 1_000, 10, 9);
+        let mut series = state::Series::default();
+        state::record(&mut series, now - 120.0, 10);
+        state::record(&mut series, now - 60.0, 20);
+        state::record(&mut series, now, 30);
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), series);
+        let snap = snap(
+            vec![row("/", "ext4", Figures::Ready(space), 0)],
+            Hidden::default(),
+        );
+        let p = palette();
+        let draw = |store: &state::Store| {
+            let mut frame = view(Some(&snap), "/");
+            frame.screen = Screen::Detail;
+            frame.usage = store;
+            frame.now = now;
+            draw_body(&frame, 80, &p, None)
+        };
+        let first = draw(&store);
+        state::record(store.series.values_mut().next().unwrap(), now + 10.0, 9_000);
+        let second = draw(&store);
+        assert_eq!(first.plots.len(), 1, "closed minutes should still draw");
+        assert_eq!(
+            first.plots[0].chart.traces[0].values,
+            second.plots[0].chart.traces[0].values
+        );
+        assert_eq!(
+            first.plots[0].chart.traces[0].positions,
+            second.plots[0].chart.traces[0].positions
+        );
     }
 
     #[test]
@@ -2761,6 +3501,21 @@ mod tests {
         pending.age = None;
         let drawn = draw_body(&pending, 60, &p, None);
         assert!(drawn.rows.iter().any(|line| line.contains("stopped:")));
+    }
+
+    #[test]
+    fn a_history_note_is_a_row() {
+        let p = palette();
+        let mut pending = view(None, "");
+        pending.history_note = "saved history would not read (expected value) · started fresh · the old file is usage.json.bad";
+        pending.save_err = "could not save history: permission denied";
+        let drawn = draw_body(&pending, 40, &p, None);
+        let flat = drawn.rows.join("\n");
+        assert!(flat.contains("usage.json.bad"), "{flat}");
+        assert!(flat.contains("could not save history:"), "{flat}");
+        for line in &drawn.rows {
+            assert!(tc::display_width(line) <= 40, "{line:?}");
+        }
     }
 
     fn disk_row(name: &str, reads: u64, writes: u64, write_bps: f64) -> DiskViewRow {
