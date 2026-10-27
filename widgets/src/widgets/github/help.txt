@@ -25,6 +25,12 @@ repositories, and `read:org` to enumerate your orgs. Missing either one does
 not fail, it silently undercounts, so the granted scopes are checked and named.
 The API is called directly, so the `gh` CLI is not required.
 
+GitHub Enterprise: set `enterprise_hostname` to the web host, for example
+`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other host
+is treated as Enterprise Server (untested). Or name a variable in
+`enterprise_hostname_env` and set the host there; none is read unless named.
+The token must come from that host.
+
 Keys: up/down select an account, i shows a legend above the table for
 those of the HELD, R24 and T2D columns the pane is wide enough to draw,
 and hides it again, r refreshes now, w cycles the window (7/14/30/60/90

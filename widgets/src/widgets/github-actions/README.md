@@ -175,6 +175,23 @@ re-run, cancel, or write anything.
 A missing token is said on the widget's own screen. So is an account list
 that yielded no repos with workflows.
 
+## GitHub Enterprise
+
+Set `enterprise_hostname` to your Enterprise Cloud web host, for example
+`acme.ghe.com`, and the widget calls `https://api.acme.ghe.com` instead of
+`api.github.com`. Any other hostname is treated as Enterprise Server and
+called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
+
+To keep the host out of `config.json`, name a variable in
+`enterprise_hostname_env` (for example `GITHUB_ENTERPRISE_HOSTNAME`) and set
+the host there. No variable is read unless one is named, so a host some
+other tool exported never moves the widget, or the token it holds, off
+github.com. Both empty, the default, is github.com.
+
+The token must be one that host issued; a github.com token is refused there.
+The host is read once at start, like the token, and saving a change on the
+settings screen restarts the widget to pick it up.
+
 ## Settings
 
 `github_actions` in `config.json`:
@@ -183,6 +200,8 @@ that yielded no repos with workflows.
 |---|---|---|
 | `token` | _(unset)_ | classic PAT. Empty falls through to `token_env`. |
 | `token_env` | `GITHUB_TOKEN` | environment variable to read when no `github_actions.token` is set. |
+| `enterprise_hostname` | _(unset)_ | Enterprise web host, for example `acme.ghe.com`. Empty is github.com. |
+| `enterprise_hostname_env` | _(unset)_ | environment variable to read the host from when `enterprise_hostname` is empty. Empty reads none. |
 | `accounts` | discovered | org or user logins. Empty discovers the viewer and every org they belong to. |
 | `repos` | `[]` | `owner/name` list. Empty means recently-pushed-with-workflows, capped per owner. |
 | `window_hours` | `48` | the labelled window the counts and list cover. `w` cycles it live. |
