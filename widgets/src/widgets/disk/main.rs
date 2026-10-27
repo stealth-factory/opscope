@@ -6,7 +6,7 @@
 // by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
+//! Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
 //!
 //! Linux reads `/proc/self/mountinfo` and `statvfs`. macOS reads `getmntinfo`.
 //! The parsers and the hide/sort rules compile on every target; only the

@@ -1,4 +1,4 @@
-Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
+Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
 
 Space and inodes come from the kernel. Linux reads the mount table and
 statvfs; macOS reads getmntinfo. Pseudo filesystems, bind mounts and

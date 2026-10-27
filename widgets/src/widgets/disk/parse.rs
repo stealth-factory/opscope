@@ -834,7 +834,8 @@ pub fn visible_disk_indexes(
 
 /// What one poll learned about devices. `missing` is the macOS row shown
 /// when `iostat` is not on `PATH`. `err` is a source that failed but did
-/// not stop the filesystem sample.
+/// not stop the filesystem sample. `host_devices` is set inside a container,
+/// where `/proc/diskstats` is still the host's block devices.
 #[derive(Clone, Debug, Default)]
 pub struct IoSnapshot {
     pub disks: Vec<LiveDisk>,
@@ -848,11 +849,18 @@ pub struct IoSnapshot {
     pub err: String,
 }
 
-/// True when pid 1's cgroup file is the v2 root. That is the host, so the
-/// block devices in the table are the host's while the mount table may be
-/// a container's.
-pub fn cgroup_is_host(text: &str) -> bool {
-    text.lines().any(|line| line.trim() == "0::/")
+/// True when pid 1's environment names a container runtime.
+///
+/// `/proc/1/environ` is NUL-separated `KEY=value` pairs. An empty
+/// `container=` does not count. A cgroup path is not this signal: `0::/`
+/// is what pid 1 sees in a private cgroup namespace and on a host whose
+/// init stays in the root cgroup.
+pub fn parse_container_env(text: &str) -> bool {
+    text.split('\0').any(|entry| {
+        entry
+            .strip_prefix("container=")
+            .is_some_and(|value| !value.is_empty())
+    })
 }
 
 #[cfg(test)]
@@ -927,9 +935,11 @@ mod tests {
         assert_eq!(hidden.configured, 1);
         // The longer bind is no longer a duplicate of a visible root.
         assert_eq!(hidden.bind, 0);
-        assert!(visible
-            .iter()
-            .any(|mount| mount.mount_point == "/var/lib/app"));
+        assert!(
+            visible
+                .iter()
+                .any(|mount| mount.mount_point == "/var/lib/app")
+        );
     }
 
     #[test]
@@ -1345,9 +1355,12 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
     }
 
     #[test]
-    fn a_root_cgroup_line_marks_the_host() {
-        assert!(cgroup_is_host("0::/\n"));
-        assert!(!cgroup_is_host("0::/init.scope\n"));
-        assert!(!cgroup_is_host(""));
+    fn a_container_variable_names_a_runtime_and_an_empty_one_does_not() {
+        assert!(parse_container_env("container=podman\0PATH=/bin"));
+        assert!(parse_container_env("PATH=/bin\0container=docker"));
+        assert!(!parse_container_env("container=\0PATH=/bin"));
+        assert!(!parse_container_env("container_name=web\0"));
+        assert!(!parse_container_env(""));
+        assert!(!parse_container_env("0::/\n"));
     }
 }
