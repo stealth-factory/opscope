@@ -7,9 +7,10 @@ shown as Google states it, with what changed since the last look.
 
 ```text
 ╺━ TRENDS US ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v1.9.0
- fetched 2m ago · Google's Trending Now feed, every 5 min · ←→ 1 of 2
+ [US]·1  GB ·
+ fetched 2m ago · Google's Trending Now feed, every 5 min
 
- TRENDING NOW · US
+ TRENDING NOW
  Google's "approx traffic" is a bucket, not a count · 4 of 4 · 1 new since 14:05
   SEARCH              TRAFFIC STARTED   SEEN NEWS
 ▸ zorblax festival    5000+   13:10 65m 4×   Example News · Sample Gazette
@@ -20,15 +21,24 @@ shown as Google states it, with what changed since the last look.
  LEFT THE FEED
  this widget's own observation · gone since the fetch before, kept an hour
   old example term  was 1000+ · in 9 fetches over 40m · gone 7m ago
-
- REGIONS
-  US ◂ newest: quux launch 500+ · fetched 2m ago
-  GB   newest: example derby 1000+ · fetched 2m ago
  ↑↓ select  tab section  ←→ region  [↵] news  [/] filter  [c] copy link
  [r] refresh  [,] settings  [q]uit
 ```
 
 Every trend, bucket and story above is made up; the layout is the widget's.
+
+The strip under the title is the regions: the open one is in brackets and
+tinted, and `←`/`→` or a click on a tab switches to it. When the regions wrap
+past the pane, the strip keeps the open tab on screen and leaves the feed a
+row; the arrows still reach every region. The cell after each name says how
+the last fetch went — `·` it succeeded, `!` it failed or would not parse (the
+rows shown for that region are from the fetch before), `×` Google rejected
+the region code outright (HTTP 400) — and is blank until the first fetch
+lands. A number after the marker is how many trends are new
+since the fetch before: the widget's own observation, the same count as
+`N new since HH:MM` in the open region's header, absent when zero, on a
+first check, or after Google rejects the region (the rows that count named
+are gone; a failed fetch keeps both the rows and the count).
 
 ## The source
 
@@ -95,9 +105,9 @@ Every failure is a named row, never an empty table:
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a row; the cursor walks across sections |
-| `tab` | jump to the next section: TRENDING NOW, LEFT THE FEED, REGIONS |
-| `←` `→` | previous / next region, when there are several |
-| `↵` | open the selected trend's news; on a REGIONS row, switch to that region |
+| `tab` | jump to the next section: TRENDING NOW, LEFT THE FEED |
+| `←` `→` | switch region (also a click on its tab) |
+| `↵` | open the selected trend's news |
 | `/` | filter by search term, story headline or news source; `↵` keeps it, `esc` clears it |
 | `esc` | clear the filter |
 | `c` | in the list: copy the trend's Google Trends **Explore** link (`trends.google.com/trends/explore?q=…&geo=…`) — copied, never fetched. In the news view: copy the selected story's URL |
@@ -105,6 +115,7 @@ Every failure is a named row, never an empty table:
 | `pgup` `pgdn` `home` `end` | scroll a screen, or go to either end |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 In the news view, `↑` `↓` select a story, `c` copies its URL, and `esc`, `←` or

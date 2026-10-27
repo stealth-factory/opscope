@@ -11,13 +11,26 @@ the feed - is this widget's own observation, and is labelled that way.
 Polls every 300s by default (-n changes it, minimum 60s). Region codes on the
 command line replace google_trends.geos for that run.
 
-Keys while running: up/down select a row, tab moves between TRENDING NOW,
-LEFT THE FEED and REGIONS, left/right step between regions, Enter opens the
-news for the selected trend (or switches to the selected region), / filters
+Keys while running: up/down select a row, tab moves between TRENDING NOW and
+LEFT THE FEED, left/right switch region and a click on a region's tab does
+the same, Enter opens the news for the selected trend, / filters
 by term, story headline or news source, esc clears the filter. In the list c
 copies the trend's Google Trends Explore link; in the news view c copies the
 selected story's URL, and esc, left or backspace go back. r refreshes now,
 comma opens settings, q quits.
+
+On the region tabs, the marker · says the last fetch succeeded, ! that it
+failed or would not parse, and × that Google rejected the region code; a
+number after it counts the trends new since the fetch before, and is
+absent when that count is zero, on a first check, or after Google rejects
+the region, because those rows are gone. When the tabs
+wrap past the pane, the strip keeps the open region on screen and the feed
+keeps a row.
+
+Press ! to read this widget's notices - warnings that are not about a number
+on screen, such as a config file others can read - and dismiss them for this
+session, for 7 days or for 30. A new notice shows above the footer for a
+minute, then as a [!] count in the footer for as long as it is still true.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it. If your
 terminal blocks OSC 52, the link is shown on screen instead.
