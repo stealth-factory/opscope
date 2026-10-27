@@ -1939,6 +1939,112 @@ pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str)
     Footer { lines, spots }
 }
 
+/// One tab of a strip: the title, an optional one-cell state marker in its
+/// own colour, and an optional badge (e.g. a count) drawn dim after the marker.
+pub struct Tab {
+    pub title: String,
+    pub marker: Option<(String, &'static str)>, // (colour, one display cell)
+    pub badge: Option<String>,
+}
+
+/// Draws the strip; `open` is the full colour for the open tab (the caller
+/// composes tint+accent), `closed` the colour for the others, `dim` the
+/// badge colour. Returns the lines and, per column of each tab's title,
+/// `(line, col, tab index)` for clicks.
+///
+/// The placements come back with the row because this is where the widths
+/// are known - a tab is its title plus the two brackets, and working the
+/// layout out again at the click would be a second copy that drifts the
+/// first time a tab changed shape. One entry per column rather than a
+/// range, the same idiom the row placements use along the other axis: an
+/// exact match then says a click landed on a tab rather than in the gap
+/// beside it.
+///
+/// Brackets as well as the tint mark the open tab: which tab is open must
+/// not depend on a background colour surviving. Both forms are the title
+/// plus two columns - `[TITLE]` and ` TITLE ` - which is what lets the
+/// brackets mark it without the strip shifting under them.
+///
+/// A tab is never split across lines, for the reason `pack_hints` never
+/// splits a key hint: half a name teaches a tab that does not exist. It
+/// goes to the next line whole, or - where a single tab is wider than the
+/// pane - it stays on a line of its own and `seg` clips it, which is the
+/// safe end of it. The marker and badge are inside the fit check for the
+/// same reason: leaving the marker out let `seg` clip a `·` and a marked
+/// tab read as an unmarked one. A badge that still does not fit on a line
+/// of its own is left off: `seg` would clip `100` down to `1`, and a
+/// shorter count is a different count. The gap after the badge is not part
+/// of that fit: clipping the gap leaves the count whole, and requiring the
+/// gap dropped a one-cell count the line could hold.
+pub fn tab_strip(
+    active: usize,
+    tabs: &[Tab],
+    w: usize,
+    open: &str,
+    closed: &str,
+    dim: &str,
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
+    let mut parts: Vec<(String, String)> = vec![(RST.to_string(), " ".into())];
+    let mut at = 1usize;
+    let flush = |parts: &mut Vec<(String, String)>, lines: &mut Vec<String>| {
+        let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        lines.push(seg(&refs, w.saturating_sub(1)));
+        *parts = vec![(RST.to_string(), " ".into())];
+    };
+    for (i, tab) in tabs.iter().enumerate() {
+        let wide = display_width(&tab.title) + 2;
+        let room = w.saturating_sub(1);
+        let mut badge_len = tab.badge.as_deref().map(display_width).unwrap_or(0);
+        if at > 1 && at + wide + 1 + badge_len + 1 > room {
+            flush(&mut parts, &mut lines);
+            at = 1;
+        }
+        // The badge's own cells have to fit. The gap after it may be clipped;
+        // a clipped count would not.
+        let show_badge = badge_len > 0 && at + wide + 1 + badge_len <= room;
+        if !show_badge {
+            badge_len = 0;
+        }
+        let here = i == active;
+        parts.push((
+            if here { open.to_string() } else { closed.to_string() },
+            if here {
+                format!("[{}]", tab.title)
+            } else {
+                format!(" {} ", tab.title)
+            },
+        ));
+        placed.extend((at..at + wide).map(|col| (lines.len(), col, i)));
+        at += wide + 1 + badge_len + 1;
+        parts.push(match &tab.marker {
+            Some((colour, cell)) => (colour.clone(), (*cell).to_string()),
+            None => (RST.to_string(), " ".into()),
+        });
+        if show_badge {
+            if let Some(badge) = &tab.badge {
+                parts.push((dim.to_string(), badge.clone()));
+            }
+        }
+        parts.push((RST.to_string(), " ".into()));
+    }
+    flush(&mut parts, &mut lines);
+    (lines, placed)
+}
+
+/// Where a tab cursor lands after moving `by` tabs among `count`.
+///
+/// rem_euclid rather than %, because the left key drives this negative
+/// and Rust's % keeps the sign where Python's does not. Named rather than
+/// inlined so a test can reach the arithmetic the loop actually runs.
+pub fn step_tab(at: i64, by: i64, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (at + by).rem_euclid(count as i64) as usize
+}
+
 /// The frame cell a click key names, or nothing if the key is not one.
 ///
 /// Zero-based and in the widget's own coordinates: `(0, 0)` is the first
@@ -8299,5 +8405,155 @@ mod tests {
             .expect_err("a child that never reads is a timeout");
         assert!(why.contains("did not answer in 1s"), "{:?}", why);
         assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
+    }
+
+    /// The text a line draws, escapes removed.
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn tab(title: &str) -> Tab {
+        Tab { title: title.into(), marker: None, badge: None }
+    }
+
+    #[test]
+    fn the_open_tab_is_bracketed_and_both_forms_share_a_width() {
+        let tabs = || vec![tab("A"), tab("B"), tab("C")];
+        let (lines, _) = tab_strip(1, &tabs(), 40, "", "", "");
+        let text = plain(&lines.join("\n"));
+        assert!(text.contains("[B]"), "{text}");
+        assert!(text.contains(" A "), "{text}");
+        assert!(text.contains(" C "), "{text}");
+        // The bracketed and the spaced form are the same two columns
+        // wider than the title, so switching which is open moves nothing.
+        let wide: Vec<usize> = (0..3)
+            .map(|active| display_width(&plain(&tab_strip(active, &tabs(), 40, "", "", "").0[0])))
+            .collect();
+        assert!(wide.iter().all(|&n| n == wide[0]), "{wide:?}");
+    }
+
+    #[test]
+    fn tabs_wrap_whole_and_placements_follow_the_line() {
+        // From 11 up a tab (its 8 columns, marker, gap) fits whole; below
+        // it `seg` clips, which is the documented end of a too-wide tab.
+        let tabs = || (0..6).map(|_| tab("REGION")).collect::<Vec<_>>();
+        for w in 11..=40 {
+            let (lines, placed) = tab_strip(0, &tabs(), w, "", "", "");
+            let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+            for line in &text {
+                assert!(display_width(line) <= w - 1, "w {w}: {line:?}");
+            }
+            // Every title lands whole on one line - a split one would sit
+            // cut at a line's end.
+            assert_eq!(text.concat().matches("REGION").count(), 6, "w {w}: {text:?}");
+            for &(row, col, i) in &placed {
+                let want = if i == 0 { "[REGION]" } else { " REGION " };
+                let on: String = text[row].chars().skip(col).take(1).collect();
+                assert!(want.contains(on.as_str()), "w {w} col {col}: {on:?} in {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_is_never_clipped() {
+        let tabs = || {
+            (0..4)
+                .map(|_| Tab {
+                    title: "REGION".into(),
+                    marker: Some((String::new(), "·")),
+                    badge: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for w in 11..=40 {
+            let (lines, placed) = tab_strip(0, &tabs(), w, "", "", "");
+            let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+            // Every marker a line holds is drawn on it; a clipped one
+            // would leave the count short.
+            for (row, line) in text.iter().enumerate() {
+                let mut tabs_here: Vec<usize> = placed
+                    .iter()
+                    .filter(|&&(r, _, _)| r == row)
+                    .map(|&(_, _, i)| i)
+                    .collect();
+                tabs_here.dedup();
+                assert_eq!(line.matches('·').count(), tabs_here.len(), "w {w}: {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_badge_shows_only_when_given() {
+        let tabs = vec![
+            Tab { title: "US".into(), marker: Some((String::new(), "·")), badge: Some("2".into()) },
+            tab("GB"),
+        ];
+        let (lines, _) = tab_strip(0, &tabs, 40, "", "", "");
+        let text = plain(&lines.join("\n"));
+        // The badge sits right after the marker cell.
+        assert!(text.contains("·2"), "{text}");
+        assert!(!text.contains(" GB 2"), "{text}");
+        let (lines, _) = tab_strip(
+            0,
+            &[Tab { title: "US".into(), marker: Some((String::new(), "·")), badge: None }],
+            40,
+            "",
+            "",
+            "",
+        );
+        assert!(!plain(&lines.join("\n")).contains('2'));
+    }
+
+    #[test]
+    fn a_badge_that_does_not_fit_is_left_off() {
+        // Width 8, room 7. `[US]` plus the marker and the gap fill the line,
+        // so `100` would be clipped to `1`.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("100".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines.join("\n"));
+        assert!(text.contains("[US]"), "{text}");
+        assert!(text.contains('·'), "{text}");
+        assert!(!text.contains('1'), "{text}");
+        assert!(!text.contains("100"), "{text}");
+    }
+
+    #[test]
+    fn a_badge_that_fits_without_the_trailing_gap_is_shown() {
+        // Width 8, room 7. ` [US]·1` fills the line; the gap after the count
+        // does not, and clipping that gap leaves the count whole.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("1".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines[0]);
+        assert_eq!(text, " [US]·1", "{text}");
+    }
+
+    #[test]
+    fn step_tab_wraps_at_every_count() {
+        for count in 1..=6 {
+            assert_eq!(step_tab(0, -1, count), count - 1, "left from the first of {count}");
+            assert_eq!(step_tab(count as i64 - 1, 1, count), 0, "right from the last of {count}");
+        }
+        assert_eq!(step_tab(0, -1, 0), 0);
     }
 }

@@ -22,12 +22,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use super::parse::{self, IoSnapshot, IostatSample, LiveDisk, Mount, Space};
+use super::parse::{self, IoSnapshot, LiveDisk, Mount, Space};
 
 struct IostatState {
-    names: Vec<String>,
-    latest: Vec<IostatSample>,
-    boot: Vec<IostatSample>,
+    track: parse::IostatTrack,
     missing: bool,
     err: String,
 }
@@ -64,23 +62,26 @@ pub fn read_mounts() -> Result<Vec<Mount>, String> {
 /// what `MNT_NOWAIT` avoided. The poller still calls this once per shown
 /// mount so the Linux timeout has one shape on both hosts; here it does
 /// not enter the kernel.
-pub fn stat_mount(path: &str) -> Result<Space, String> {
+pub fn stat_mount(path: &[u8]) -> Result<Space, String> {
+    let key = String::from_utf8_lossy(path);
     let guard = SPACES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard
         .as_ref()
-        .and_then(|spaces| spaces.get(path).copied())
-        .ok_or_else(|| format!("no statfs entry for {path}"))
+        .and_then(|spaces| spaces.get(key.as_ref()).copied())
+        .ok_or_else(|| format!("no statfs entry for {key}"))
 }
 
 fn mount_from_statfs(stat: &libc::statfs) -> Mount {
     let read_only = (stat.f_flags & libc::MNT_RDONLY as u32) != 0;
     let source = c_buf(&stat.f_mntfromname);
+    let path = c_bytes(&stat.f_mntonname);
     Mount {
         dev: source.clone(),
         root: "/".to_string(),
-        mount_point: c_buf(&stat.f_mntonname),
+        mount_point: String::from_utf8_lossy(&path).into_owned(),
+        path,
         fstype: c_buf(&stat.f_fstypename),
         source,
         read_only,
@@ -107,9 +108,7 @@ fn space_from_statfs(stat: &libc::statfs) -> Space {
 pub fn sample_io(_mounts: &[Mount], every: f64) -> Result<IoSnapshot, String> {
     let state = IOSTAT.get_or_init(|| {
         Mutex::new(IostatState {
-            names: Vec::new(),
-            latest: Vec::new(),
-            boot: Vec::new(),
+            track: parse::IostatTrack::default(),
             missing: false,
             err: String::new(),
         })
@@ -127,13 +126,10 @@ pub fn sample_io(_mounts: &[Mount], every: f64) -> Result<IoSnapshot, String> {
             ..IoSnapshot::default()
         });
     }
-    let mut disks = Vec::with_capacity(guard.names.len());
-    for (index, name) in guard.names.iter().enumerate() {
-        let mac = guard.latest.get(index).copied();
-        let idle = guard
-            .boot
-            .get(index)
-            .is_some_and(|sample| sample.tps == 0.0 && sample.mb_per_s == 0.0);
+    let mut disks = Vec::with_capacity(guard.track.names.len());
+    for (index, name) in guard.track.names.iter().enumerate() {
+        let mac = guard.track.latest.get(index).copied();
+        let idle = parse::iostat_disk_idle(&guard.track, index);
         disks.push(LiveDisk {
             name: name.clone(),
             kind: String::new(),
@@ -246,8 +242,8 @@ fn run_iostat(every: f64) {
 
 fn publish_iostat(
     names: &[String],
-    latest: Option<Vec<IostatSample>>,
-    boot: Option<Vec<IostatSample>>,
+    latest: Option<Vec<parse::IostatSample>>,
+    boot: Option<Vec<parse::IostatSample>>,
 ) {
     let Some(state) = IOSTAT.get() else {
         return;
@@ -255,14 +251,8 @@ fn publish_iostat(
     let Ok(mut guard) = state.lock() else {
         return;
     };
-    guard.names = names.to_vec();
+    parse::publish_iostat_track(&mut guard.track, names, latest, boot);
     guard.err.clear();
-    if let Some(latest) = latest {
-        guard.latest = latest;
-    }
-    if let Some(boot) = boot {
-        guard.boot = boot;
-    }
 }
 
 fn note_iostat_error(err: String) {
@@ -274,11 +264,13 @@ fn note_iostat_error(err: String) {
     }
 }
 
-fn c_buf(buf: &[libc::c_char]) -> String {
-    let bytes: Vec<u8> = buf
-        .iter()
+fn c_bytes(buf: &[libc::c_char]) -> Vec<u8> {
+    buf.iter()
         .take_while(|byte| **byte != 0)
         .map(|byte| *byte as u8)
-        .collect();
-    String::from_utf8_lossy(&bytes).into_owned()
+        .collect()
+}
+
+fn c_buf(buf: &[libc::c_char]) -> String {
+    String::from_utf8_lossy(&c_bytes(buf)).into_owned()
 }

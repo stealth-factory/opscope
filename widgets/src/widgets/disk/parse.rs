@@ -25,7 +25,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub struct Mount {
     pub dev: String,
     pub root: String,
+    /// The mount point as text. Bytes that are not UTF-8 become the
+    /// replacement character, so this is what the pane draws and what
+    /// `hide_mounts` compares. `path` keeps those bytes for `statvfs`.
     pub mount_point: String,
+    /// Mount-point bytes after octal escapes, with no text conversion.
+    pub path: Vec<u8>,
     pub fstype: String,
     pub source: String,
     pub read_only: bool,
@@ -33,19 +38,24 @@ pub struct Mount {
 }
 
 /// How many mounts each rule held back. A mount is counted once, under the
-/// first rule that hid it: a configured path, then a pseudo filesystem,
-/// then a read-only mount, then a bind of something still visible.
+/// first rule that hid it: covered by a later mount at the same path, then
+/// a configured path, then a pseudo filesystem, then a read-only mount,
+/// then a bind of something still visible.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hidden {
     pub pseudo: usize,
     pub bind: usize,
     pub read_only: usize,
     pub configured: usize,
+    /// Mounted over by a later mount at the same path, so `statvfs` on that
+    /// path can only ever answer for the one on top.
+    pub covered: usize,
 }
 
 impl Hidden {
     /// The categories that actually hid something, in the order the header
-    /// names them. Empty when every mount is on screen.
+    /// names them. That order is not the order the rules are applied.
+    /// Empty when every mount is on screen.
     pub fn categories(self) -> Vec<&'static str> {
         let mut names = Vec::new();
         if self.pseudo > 0 {
@@ -59,6 +69,9 @@ impl Hidden {
         }
         if self.configured > 0 {
             names.push("hide_mounts");
+        }
+        if self.covered > 0 {
+            names.push("covered");
         }
         names
     }
@@ -159,29 +172,51 @@ pub fn inode_percent(files: u64, ffree: u64) -> Option<f64> {
 
 /// The mount table Linux publishes, one mount per line.
 ///
+/// This is the `&str` entry the other parsers have. Linux reads the file as
+/// bytes and calls [`parse_mountinfo_bytes`], because the table is not
+/// always text.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
+    parse_mountinfo_bytes(text.as_bytes())
+}
+
+/// The same table as [`parse_mountinfo`], read as the bytes the kernel wrote.
+///
 /// Optional tag fields sit between the mount options and the ` - `
 /// separator. A line that does not have that separator is skipped: a
 /// partial read is not a mount.
-pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
+///
+/// Space, tab, newline and backslash are octal escapes. Every other byte is
+/// raw, including ones that are not UTF-8. Turning the whole file into text
+/// first would fail the read, or replace those bytes, and `statvfs` would
+/// then miss a mount that is really there. `Mount::path` keeps the bytes;
+/// `mount_point` is only the text the pane shows.
+pub fn parse_mountinfo_bytes(text: &[u8]) -> Vec<Mount> {
     let mut out = Vec::new();
-    for line in text.lines() {
+    for line in text.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split(' ').filter(|field| !field.is_empty()).collect();
-        let Some(sep) = fields.iter().position(|field| *field == "-") else {
+        let fields: Vec<&[u8]> = line
+            .split(|byte| *byte == b' ')
+            .filter(|field| !field.is_empty())
+            .collect();
+        let Some(sep) = fields.iter().position(|field| *field == b"-") else {
             continue;
         };
         if sep < 6 || fields.len() < sep + 3 {
             continue;
         }
-        let options = unescape(fields[5]);
+        let path = unescape(fields[4]);
+        let options = text_of(&unescape(fields[5]));
         out.push(Mount {
-            dev: fields[2].to_string(),
-            root: unescape(fields[3]),
-            mount_point: unescape(fields[4]),
-            fstype: unescape(fields[sep + 1]),
-            source: unescape(fields[sep + 2]),
+            dev: text_of(fields[2]),
+            root: text_of(&unescape(fields[3])),
+            mount_point: text_of(&path),
+            path,
+            fstype: text_of(&unescape(fields[sep + 1])),
+            source: text_of(&unescape(fields[sep + 2])),
             read_only: options.split(',').any(|option| option == "ro"),
             options,
         });
@@ -200,7 +235,18 @@ pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
 pub fn visible_mounts(mounts: &[Mount], hide_mounts: &[String]) -> (Vec<Mount>, Hidden) {
     let mut hidden = Hidden::default();
     let mut rest: Vec<&Mount> = Vec::new();
-    for mount in mounts {
+    // The mount table lists mounts in the order they were made, so the last
+    // one at a path is the one a lookup by that path reaches. The path is
+    // the bytes `statvfs` will be given, not the text shown for it.
+    let mut top: HashMap<&[u8], usize> = HashMap::new();
+    for (index, mount) in mounts.iter().enumerate() {
+        top.insert(mount.path.as_slice(), index);
+    }
+    for (index, mount) in mounts.iter().enumerate() {
+        if top.get(mount.path.as_slice()).copied() != Some(index) {
+            hidden.covered += 1;
+            continue;
+        }
         if hidden_by_config(&mount.mount_point, hide_mounts) {
             hidden.configured += 1;
         } else if PSEUDO.contains(&mount.fstype.as_str()) {
@@ -250,27 +296,37 @@ fn hidden_by_config(mount: &str, patterns: &[String]) -> bool {
     })
 }
 
-/// `\040` and the other octal escapes the mount table uses. A backslash
-/// that is not three octal digits is left as it was written.
-fn unescape(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut out = String::new();
+/// `\040` and the other octal escapes the mount table uses, as bytes.
+///
+/// A backslash that is not three octal digits is left as it was written.
+/// The window is taken from the byte slice: slicing the text there panics
+/// when the next bytes sit inside a multibyte character, and that panic
+/// stops the poller.
+fn unescape(raw: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+    while index < raw.len() {
+        if raw[index] == b'\\' && index + 3 < raw.len() {
             let octal = &raw[index + 1..index + 4];
-            if octal.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
-                if let Ok(value) = u8::from_str_radix(octal, 8) {
-                    out.push(value as char);
+            if octal.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+                let value = octal
+                    .iter()
+                    .fold(0u32, |acc, digit| acc * 8 + u32::from(digit - b'0'));
+                if let Ok(value) = u8::try_from(value) {
+                    out.push(value);
                     index += 4;
                     continue;
                 }
             }
         }
-        out.push(bytes[index] as char);
+        out.push(raw[index]);
         index += 1;
     }
     out
+}
+
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// One line of `/proc/diskstats`. Counters are cumulative since boot.
@@ -512,16 +568,18 @@ pub fn parse_iostat_line(text: &str, disks: usize) -> Vec<IostatSample> {
 /// `slaves/`.
 ///
 /// `links` maps the path that was read to the symlink target `readlink`
-/// returned. A `/sys/dev/block/<maj>:<min>` target ending in
-/// `<disk>/<partition>` is that partition. A path containing `slaves` names
-/// the device one level under a dm or md disk. No entry is opened here.
+/// returned. The last two components of a target are a partition when the
+/// parent is one of `disks`. NVMe has no `block` directory
+/// (`.../nvme0n1/nvme0n1p1`); SCSI does (`.../block/sda/sda1`). A path
+/// containing `slaves` names the device one level under a dm or md disk.
+/// No entry is opened here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SysLayout {
     pub partitions: BTreeMap<String, String>,
     pub slaves: BTreeMap<String, Vec<String>>,
 }
 
-pub fn layout_from_links(links: &BTreeMap<String, String>) -> SysLayout {
+pub fn layout_from_links(links: &BTreeMap<String, String>, disks: &BTreeSet<String>) -> SysLayout {
     let mut partitions = BTreeMap::new();
     let mut slaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, target) in links {
@@ -535,7 +593,9 @@ pub fn layout_from_links(links: &BTreeMap<String, String>) -> SysLayout {
             continue;
         }
         if let Some((disk, part)) = partition_in_target(target) {
-            partitions.insert(part, disk);
+            if disks.contains(&disk) {
+                partitions.insert(part, disk);
+            }
         }
     }
     for names in slaves.values_mut() {
@@ -555,14 +615,83 @@ fn disk_before_slaves(path: &str) -> Option<String> {
 }
 
 fn partition_in_target(target: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = target
+    let mut parts = target
         .split('/')
-        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
-        .collect();
-    let at = parts.iter().position(|part| *part == "block")?;
-    let disk = (*parts.get(at + 1)?).to_string();
-    let part = (*parts.get(at + 2)?).to_string();
-    Some((disk, part))
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..");
+    let part = parts.next_back()?;
+    let disk = parts.next_back()?;
+    Some((disk.to_string(), part.to_string()))
+}
+
+/// `maj:min` from a sysfs `dev` file. The file is either `8:0` or two
+/// whitespace-separated numbers.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_dev(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.contains(':') {
+        return Some(text.to_string());
+    }
+    let mut parts = text.split_whitespace();
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    Some(format!("{major}:{minor}"))
+}
+
+/// Names, the since-boot line, and later intervals from one `iostat` child.
+///
+/// `moved` sticks once an interval is non-zero, so a disk that was idle at
+/// boot and then starts work stays visible after that interval goes quiet.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct IostatTrack {
+    pub names: Vec<String>,
+    pub latest: Vec<IostatSample>,
+    pub boot: Vec<IostatSample>,
+    pub moved: Vec<bool>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn publish_iostat_track(
+    track: &mut IostatTrack,
+    names: &[String],
+    latest: Option<Vec<IostatSample>>,
+    boot: Option<Vec<IostatSample>>,
+) {
+    let renamed = track.names != names;
+    track.names = names.to_vec();
+    if boot.is_some() || renamed {
+        if let Some(boot) = boot {
+            track.boot = boot;
+        } else if track.boot.len() != track.names.len() {
+            track.boot.clear();
+        }
+        // The previous child's intervals are a different device list.
+        track.latest.clear();
+        track.moved = vec![false; track.names.len()];
+    }
+    if let Some(latest) = latest {
+        if track.moved.len() != latest.len() {
+            track.moved = vec![false; latest.len()];
+        }
+        for (index, sample) in latest.iter().enumerate() {
+            if sample.tps != 0.0 || sample.mb_per_s != 0.0 {
+                track.moved[index] = true;
+            }
+        }
+        track.latest = latest;
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn iostat_disk_idle(track: &IostatTrack, index: usize) -> bool {
+    let boot_idle = track
+        .boot
+        .get(index)
+        .is_some_and(|sample| sample.tps == 0.0 && sample.mb_per_s == 0.0);
+    boot_idle && !track.moved.get(index).copied().unwrap_or(false)
 }
 
 /// A whole disk as sysfs described it, before counters are attached.
@@ -776,6 +905,7 @@ mod tests {
                 bind: 1,
                 read_only: 1,
                 configured: 0,
+                covered: 0,
             }
         );
 
@@ -819,6 +949,73 @@ mod tests {
         assert_eq!(inode_percent(0, 0), None);
         let share = inode_percent(100, 40).unwrap();
         assert!((share - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_non_ascii_mount_point_survives_decoding() {
+        // `café` is UTF-8 in the table; only space, tab, newline and
+        // backslash are octal escapes.
+        let table = "50 35 8:3 / /mnt/caf\u{e9}\\040x rw,relatime - ext4 /dev/sdc1 rw\n";
+        let mounts = parse_mountinfo(table);
+        assert_eq!(mounts[0].mount_point, "/mnt/caf\u{e9} x");
+        assert_eq!(mounts[0].path, "/mnt/caf\u{e9} x".as_bytes());
+    }
+
+    #[test]
+    fn a_non_utf8_mount_point_keeps_its_bytes_and_the_next_mount() {
+        // 0xFF is not UTF-8. The kernel writes it raw. Reading the table as
+        // text would fail the whole sample, and a lossy path would make
+        // `statvfs` miss this mount.
+        let mut table = b"50 35 8:3 / /mnt/".to_vec();
+        table.push(0xff);
+        table.extend_from_slice(b" rw - ext4 /dev/sdc1 rw\n");
+        table.extend_from_slice(b"51 35 8:4 / /home rw - ext4 /dev/sdd1 rw\n");
+        let mounts = parse_mountinfo_bytes(&table);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].path, b"/mnt/\xff");
+        assert!(mounts[0].mount_point.contains('\u{FFFD}'));
+        assert_eq!(mounts[1].mount_point, "/home");
+        assert_eq!(mounts[1].path, b"/home");
+    }
+
+    #[test]
+    fn an_octal_escape_of_a_non_utf8_byte_stays_a_byte() {
+        let table = "50 35 8:3 / /mnt/\\377 rw - ext4 /dev/sdc1 rw\n";
+        let mounts = parse_mountinfo(table);
+        assert_eq!(mounts[0].path, b"/mnt/\xff");
+    }
+
+    #[test]
+    fn a_backslash_before_a_multibyte_character_is_left_as_written() {
+        // Slicing this as text at the four-byte escape window used to panic:
+        // the window ends inside the second `é`.
+        let raw = "\\\u{e9}\u{e9}";
+        let table = format!("50 35 8:3 / {raw} rw - ext4 /dev/sdc1 rw\n");
+        let mounts = parse_mountinfo(&table);
+        assert_eq!(mounts[0].path, raw.as_bytes());
+        assert_eq!(mounts[0].mount_point, raw);
+    }
+
+    #[test]
+    fn a_mount_covered_by_a_later_one_at_the_same_path_is_hidden() {
+        let table = "\
+36 35 98:0 / / rw,relatime - ext4 /dev/root rw
+60 36 8:2 / /data rw,relatime - ext4 /dev/sdb1 rw
+61 36 8:3 / /data rw,relatime - xfs /dev/sdc1 rw
+";
+        let (visible, hidden) = visible_mounts(&parse_mountinfo(table), &[]);
+        let data: Vec<&str> = visible
+            .iter()
+            .filter(|mount| mount.mount_point == "/data")
+            .map(|mount| mount.source.as_str())
+            .collect();
+        assert_eq!(
+            data,
+            vec!["/dev/sdc1"],
+            "only the mount on top, which statvfs reaches"
+        );
+        assert_eq!(hidden.covered, 1);
+        assert!(hidden.categories().contains(&"covered"));
     }
 
     #[test]
@@ -970,7 +1167,12 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
         links.insert("dev/block/8:1".into(), "../../block/sda/sda1".into());
         links.insert(
             "dev/block/259:1".into(),
-            "../../devices/pci0000:00/block/nvme0n1/nvme0n1p1".into(),
+            "../../devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1/nvme0n1p1"
+                .into(),
+        );
+        links.insert(
+            "dev/block/259:0".into(),
+            "../../devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1".into(),
         );
         links.insert(
             "dev/block/179:1".into(),
@@ -978,7 +1180,11 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
         );
         links.insert("dev/block/8:0".into(), "../../block/sda".into());
         links.insert("block/dm-0/slaves/sda".into(), "../../../sda".into());
-        let layout = layout_from_links(&links);
+        let disks: BTreeSet<String> = ["sda", "nvme0n1", "mmcblk0"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let layout = layout_from_links(&links, &disks);
         assert_eq!(
             layout.partitions.get("sda1").map(String::as_str),
             Some("sda")
@@ -992,6 +1198,11 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
             Some("mmcblk0")
         );
         assert!(!layout.partitions.contains_key("sda"));
+        assert!(!layout.partitions.contains_key("nvme0n1"));
+        assert_eq!(parse_dev("8:0\n").as_deref(), Some("8:0"));
+        assert_eq!(parse_dev("  259 1 ").as_deref(), Some("259:1"));
+        assert_eq!(parse_dev("8"), None);
+        assert_eq!(parse_dev(""), None);
         assert_eq!(
             layout.slaves.get("dm-0").map(Vec::as_slice),
             Some(["sda".to_string()].as_slice())
@@ -1077,6 +1288,60 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
         assert_eq!(hidden.configured, 1);
         assert_eq!(hidden.labels(), vec!["1 hide_devices hidden".to_string()]);
         let _ = busy;
+    }
+
+    #[test]
+    fn an_idle_boot_sample_stops_being_idle_once_an_interval_moves() {
+        let mut track = IostatTrack::default();
+        let names = vec!["disk0".to_string(), "disk1".to_string()];
+        let quiet = IostatSample {
+            kb_per_transfer: 0.0,
+            tps: 0.0,
+            mb_per_s: 0.0,
+        };
+        let busy = IostatSample {
+            kb_per_transfer: 8.0,
+            tps: 10.0,
+            mb_per_s: 1.0,
+        };
+        publish_iostat_track(&mut track, &names, None, Some(vec![quiet, quiet]));
+        assert!(iostat_disk_idle(&track, 0));
+        assert!(iostat_disk_idle(&track, 1));
+        publish_iostat_track(&mut track, &names, Some(vec![busy, quiet]), None);
+        assert!(!iostat_disk_idle(&track, 0), "later traffic clears idle");
+        assert!(iostat_disk_idle(&track, 1));
+        publish_iostat_track(&mut track, &names, Some(vec![quiet, quiet]), None);
+        assert!(
+            !iostat_disk_idle(&track, 0),
+            "a quiet interval does not hide a disk that has moved"
+        );
+    }
+
+    #[test]
+    fn a_new_iostat_child_drops_the_previous_intervals() {
+        let mut track = IostatTrack::default();
+        let first = vec!["disk0".to_string(), "disk2".to_string()];
+        let sample = IostatSample {
+            kb_per_transfer: 1.0,
+            tps: 4.0,
+            mb_per_s: 2.0,
+        };
+        publish_iostat_track(&mut track, &first, None, Some(vec![sample, sample]));
+        publish_iostat_track(&mut track, &first, Some(vec![sample, sample]), None);
+        assert_eq!(track.latest.len(), 2);
+        let second = vec!["disk0".to_string()];
+        let quiet = IostatSample {
+            kb_per_transfer: 0.0,
+            tps: 0.0,
+            mb_per_s: 0.0,
+        };
+        publish_iostat_track(&mut track, &second, None, Some(vec![quiet]));
+        assert!(
+            track.latest.is_empty(),
+            "old intervals are not paired by position"
+        );
+        assert_eq!(track.names, second);
+        assert!(iostat_disk_idle(&track, 0));
     }
 
     #[test]

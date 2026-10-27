@@ -7,11 +7,26 @@
 # - a build that edits its own source produces a binary no checkout can
 # reproduce, which is a strange thing to hand somebody. release-pr.yml does
 # the bump, in a real commit, before the tag exists.
+#
+# A push to main is the other way in, and it is not a release: the same
+# three builds are packed under a canary prerelease version (npm/canary.js)
+# and published to npm under the `canary` dist-tag, so `npx opscope@canary`
+# runs whatever main is now. No tag, no GitHub release, no Homebrew or APT,
+# and `latest` does not move. It lives in this file rather than its own
+# because this is the file the four packages already trust for publishing.
 name: release
 
 on:
   push:
     tags: ['v*']
+    branches: [main]
+    # A canary whose binaries are the previous canary's is noise. Path
+    # filters are not evaluated for tag pushes, so this never holds back
+    # a release.
+    paths-ignore:
+      - 'docs/**'
+      - 'wiki/**'
+      - '**/*.md'
   # Two uses. Dispatching at a branch exercises the whole build without
   # cutting a release, because the publish job is gated on the ref being a
   # tag. Dispatching at a tag does publish, and is how tag-release.yml
@@ -34,8 +49,16 @@ on:
 
 permissions:
   # PR builds and post-release smoke tests only need read access.
-  # The tag-only publish job grants its own write permissions.
+  # The tag-only publish job grants its own write permissions, and the
+  # canary job only id-token.
   contents: read
+
+# Canary runs replace each other: only the newest main is worth
+# publishing, so a merge that lands mid-build cancels the older run.
+# Every other run is its own group and is never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'release-canary' || format('release-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
   build:
@@ -252,11 +275,13 @@ jobs:
         shell: bash
         run: |
           # On a tag this is v0.2.0; on a pull request it is "41/merge",
-          # whose slash would become a directory in the tarball. Anything
-          # that is not a version is just called dev.
-          case "${GITHUB_REF_NAME}" in
-            v[0-9]*) version="${GITHUB_REF_NAME}" ;;
-            *)       version="dev" ;;
+          # whose slash would become a directory in the tarball. A push to
+          # main is named for the canary it will be published as. Anything
+          # else is not a version and is just called dev.
+          case "${GITHUB_EVENT_NAME}:${GITHUB_REF}" in
+            *:refs/tags/v[0-9]*)    version="${GITHUB_REF_NAME}" ;;
+            push:refs/heads/main)   version="v$(node npm/canary.js)" ;;
+            *)                      version="dev" ;;
           esac
           name="opscope-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
@@ -564,6 +589,140 @@ jobs:
             --notes-file CHANGELOG-release.md \
             artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
             artifacts/*_amd64.deb artifacts/*_amd64.deb.sha256
+
+  # Main, published as a prerelease under the `canary` dist-tag. npm
+  # requires --tag to publish a prerelease at all, and a publish with
+  # --tag moves that tag and nothing else, so `latest` stays on the last
+  # release. This is the same trusted-publishing write as `publish` -
+  # OIDC inside `npm publish`, no stored credential - which is why it
+  # works where moving a dist-tag after the fact (npm/cli#8547) does not.
+  canary:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      # false when a newer canary already owns the tag and this run
+      # left it alone, so smoke-canary has nothing of its to install.
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # canary.js reads the commit's time and sha.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          # Keep package caching disabled in the privileged OIDC publish job.
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: npm that can do trusted publishing
+        run: |
+          npm install -g npm@11.5.1
+          test "$(npm --version)" = "11.5.1"
+
+      - name: Pack the canary from those tarballs
+        id: pack
+        run: |
+          set -euo pipefail
+          version="$(node npm/canary.js)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          node npm/pack.js --version "$version" --artifacts artifacts --out npm-dist
+          ls -la npm-dist
+
+      - name: Publish to npm under canary
+        id: publish
+        run: |
+          set -euo pipefail
+          # The same reason as publish: any credential at all, an empty
+          # one included, makes npm skip the OIDC exchange.
+          npm config delete '//registry.npmjs.org/:_authToken' || true
+          npm config delete always-auth || true
+          version="${{ steps.pack.outputs.version }}"
+          # The concurrency group cancels an older run, but a re-run of
+          # an older commit after a newer one published would still move
+          # the tag backwards. Its version would be new to npm, so the
+          # already-published skip below would not catch it.
+          current=$(npm view opscope@canary version 2>/dev/null || true)
+          if ! node npm/canary.js --may-take-tag "$current" "$version"; then
+            echo "leaving canary on ${current}; ${version} is older"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          canary() {
+            local pkg="$1"
+            local name
+            name=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name' "$pkg/package.json")
+            # The version names its commit, so one that is already on
+            # npm is a re-run of this commit and is done.
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already on npm"
+            else
+              npm publish "./$pkg" --tag canary --access public --provenance
+            fi
+          }
+          # Platforms first, as in publish: the launcher names them as
+          # optionalDependencies at this same version.
+          for pkg in npm-dist/opscope-*; do
+            canary "$pkg"
+          done
+          canary npm-dist/opscope
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "npx opscope@canary is now ${version}"
+
+  # Reports, like the release smoke jobs; it gates nothing, because the
+  # canary tag has already moved. By version, not by tag, for the same
+  # reason, and checked against the commit rather than the version: the
+  # binary says the release it was built on (Cargo.toml) and the commit.
+  smoke-canary:
+    needs: canary
+    if: needs.canary.outputs.published == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: npx fetches this canary
+        env:
+          VERSION: ${{ needs.canary.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA:0:7}"
+          said=""
+          for attempt in $(seq 1 16); do
+            if said=$(npx -y "opscope@${VERSION}" --version 2>&1); then
+              break
+            fi
+            echo "attempt ${attempt}: not yet installable"
+            echo "$said"
+            said=""
+            sleep 30
+          done
+          if [ -z "$said" ]; then
+            echo "opscope@${VERSION} was not installable from npm eight minutes after publish" >&2
+            exit 1
+          fi
+          echo "$said"
+          # `opscope 2.2.0 (1a2b3c4, 2026-10-27)`: the release it was
+          # built on, then the commit, which is the part that is this run.
+          # git may abbreviate past seven, so the sha is a prefix.
+          if ! printf '%s\n' "$said" | grep -q "^opscope [^ ]* (${sha}[0-9a-f]*,"; then
+            echo "npx opscope@${VERSION} did not report commit ${sha}" >&2
+            exit 1
+          fi
 
   apt-repository:
     needs: publish

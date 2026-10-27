@@ -392,12 +392,33 @@ to borrow `github.token`, which was fine while both held the same string and
 wrong as soon as they did not: a settings screen showing `unset` while the
 widget quietly ran on somebody else's credential.
 
+## GitHub Enterprise
+
+Set `enterprise_hostname` to your Enterprise Cloud web host, for example
+`acme.ghe.com`, and the widget calls `https://api.acme.ghe.com` instead of
+`api.github.com`. `github.com` and `api.github.com` stay on the public API;
+any other host is treated as Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
+On Server, the widget omits the `stack` and `stackEntry` fields and infers
+stacks from branches instead.
+
+To keep the host out of `config.json`, name a variable in
+`enterprise_hostname_env` (for example `GITHUB_ENTERPRISE_HOSTNAME`) and set
+the host there. No variable is read unless one is named, so a host some
+other tool exported never moves the widget, or the token it holds, off
+github.com. If both settings are empty, the widget uses github.com.
+
+The token must be one that host issued; a github.com token is refused there.
+The host is read once at start, like the token, and saving a change on the
+settings screen restarts the widget to pick it up.
+
 ## Configuration
 
 ```json
 "github_prs": {
   "token": "",
   "token_env": "GITHUB_TOKEN",
+  "enterprise_hostname": "",
+  "enterprise_hostname_env": "",
   "sources": {
     "orgs":     "is:open is:pr @mine",
     "authored": "is:open is:pr author:@me",

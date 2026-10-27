@@ -13,7 +13,7 @@
 //! without stating a mount that may hang. Space comes from `statvfs` on the
 //! mount point, and that call is the one the poller times out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -27,11 +27,13 @@ struct InventoryCache {
 static INVENTORY: Mutex<Option<InventoryCache>> = Mutex::new(None);
 
 pub fn read_mounts() -> Result<Vec<Mount>, String> {
-    let text = std::fs::read_to_string("/proc/self/mountinfo").map_err(|err| err.to_string())?;
-    Ok(parse::parse_mountinfo(&text))
+    // Bytes, not `read_to_string`: one mount point that is not UTF-8 would
+    // otherwise fail this read and the pane would show no mounts at all.
+    let bytes = std::fs::read("/proc/self/mountinfo").map_err(|err| err.to_string())?;
+    Ok(parse::parse_mountinfo_bytes(&bytes))
 }
 
-pub fn stat_mount(path: &str) -> Result<Space, String> {
+pub fn stat_mount(path: &[u8]) -> Result<Space, String> {
     let c_path =
         std::ffi::CString::new(path).map_err(|_| "mount point contains a nul".to_string())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -160,7 +162,8 @@ fn read_inventory() -> Result<Vec<InventoryDisk>, String> {
         }
         names.push(name);
     }
-    let layout = parse::layout_from_links(&links);
+    let known: BTreeSet<String> = names.iter().cloned().collect();
+    let layout = parse::layout_from_links(&links, &known);
     let mut disks = Vec::with_capacity(names.len());
     for name in names {
         let mut partitions = Vec::new();
@@ -219,12 +222,5 @@ fn read_text(path: &str) -> Option<String> {
 }
 
 fn read_dev(path: &str) -> Option<String> {
-    let text = read_text(path)?;
-    if text.contains(':') {
-        return Some(text);
-    }
-    let mut parts = text.split_whitespace();
-    let major = parts.next()?;
-    let minor = parts.next()?;
-    Some(format!("{major}:{minor}"))
+    parse::parse_dev(&read_text(path)?)
 }

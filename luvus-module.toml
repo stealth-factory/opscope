@@ -53,7 +53,7 @@ title = "clocks"
 placement = "split"
 command = ["./luvus/bin/opscope", "clocks"]
 
-# Which filesystems can still take a write, which disks are busy, and whether writes are stalling.
+# Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
 [[panes]]
 id = "disk"
 title = "disk"

@@ -20,6 +20,13 @@ A classic token with `repo` and `read:org`, the same one github uses. This
 widget only reads. An old `gha` section is still read if `github_actions` is
 absent, and the pane says so.
 
+GitHub Enterprise: set `enterprise_hostname` to the web host, for example
+`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other
+host but github.com or api.github.com is treated as Enterprise Server
+(untested). Or name a variable in
+`enterprise_hostname_env` and set the host there; none is read unless named.
+The token must come from that host.
+
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
 repo, workflow, branch, event, conclusion and title, w cycles the window

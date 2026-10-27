@@ -51,7 +51,7 @@ you are back. It is the launcher, not another widget.
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or to publish it over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ip` + `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
-| **`disk`** | Which filesystems can still take a write, which disks are busy, and whether writes are stalling — space and inodes from the kernel, per-disk I/O, and Linux pressure. | Linux, macOS | [read →](widgets/src/widgets/disk/README.md) |
+| **`disk`** | Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling — space and inodes from the kernel, per-disk I/O, and Linux I/O pressure. | Linux, macOS | [read →](widgets/src/widgets/disk/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`google-trends`** | What a region is searching for right now, from Google's own Trending Now feed: every trend in Google's order with its traffic bucket as Google writes it, when it started and the news attached — plus, labelled as the widget's own count, what is new since the last look and what has left the feed. No account or key. | `curl` | [read →](widgets/src/widgets/google-trends/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
@@ -114,7 +114,13 @@ nothing at all — it just looks good, and it knows it.
 npx opscope                 # the menu
 npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
+npx opscope@canary clocks   # whatever is on main right now
 ```
+
+`@canary` is built and published from every merge to `main`, before it is in
+any release. It is for trying a fix or a new widget early, and it can break;
+`--version` names the commit it was built from. Plain `npx opscope` and
+`@latest` are never moved by a canary.
 
 It fetches the launcher and eighteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
@@ -447,6 +453,12 @@ PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
 `linear` a personal API key from Settings → Security & access, and
 `github-prs` and `github-actions` each hold their own GitHub token rather
 than borrowing one. Every other widget needs no configuration to start.
+
+All three GitHub widgets also reach **GitHub Enterprise**: set
+`enterprise_hostname` in each one's section (for example `acme.ghe.com`), or
+name a variable holding the host in `enterprise_hostname_env`, and use a token
+that host issued. If both are empty, the widget uses github.com. Each
+widget's README has the details.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic

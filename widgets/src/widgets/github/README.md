@@ -438,12 +438,31 @@ widget carries no dependency on another tool being installed and authenticated.
 `config.json` holds a secret once you put a token in it; `chmod 600` it. The
 file is git-ignored and the token is never printed.
 
+## GitHub Enterprise
+
+Set `enterprise_hostname` to your Enterprise Cloud web host, for example
+`acme.ghe.com`, and the widget calls `https://api.acme.ghe.com` instead of
+`api.github.com`. `github.com` and `api.github.com` stay on the public API;
+any other host is treated as Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
+
+To keep the host out of `config.json`, name a variable in
+`enterprise_hostname_env` (for example `GITHUB_ENTERPRISE_HOSTNAME`) and set
+the host there. No variable is read unless one is named, so a host some
+other tool exported never moves the widget, or the token it holds, off
+github.com. If both settings are empty, the widget uses github.com.
+
+The token must be one that host issued; a github.com token is refused there.
+The host is read once at start, like the token, and saving a change on the
+settings screen restarts the widget to pick it up.
+
 ## Configuration
 
 ```json
 "github": {
   "token": "",
   "token_env": "GITHUB_TOKEN",
+  "enterprise_hostname": "",
+  "enterprise_hostname_env": "",
   "accounts": [],
   "window_days": 14,
   "refresh": 120
