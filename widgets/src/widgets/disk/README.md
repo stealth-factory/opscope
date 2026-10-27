@@ -59,6 +59,19 @@ rpc_pipefs, nsfs, ramfs, devfs and fdesc.
 `hide_mounts` is an exact path, or a prefix when the entry ends in `/`.
 The entry `/` hides only the root mount.
 
+## Settings
+
+`,` opens the settings screen. The section is `disk`.
+
+`refresh` is the seconds between samples. It defaults to 2. Anything below
+0.5 is raised to 0.5, anything above a day is cut to a day, and a value
+that is not a positive number falls back to 2. `disk -n SECONDS` overrides
+it for that run, with the same limits.
+
+`warn_percent` and `alert_percent` default to 80 and 90. At and below the
+warning the bar stays quiet; at the alert it is fully hot, and between
+them it climbs in a straight line.
+
 ## When a number is missing
 
 The first frame says `sampling…` and draws no zeroes. A `statvfs` that does
