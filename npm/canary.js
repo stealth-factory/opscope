@@ -81,13 +81,50 @@ function fromCheckout(repoRoot) {
   return canaryVersion(versionFromCargo(repoRoot), Number(time), sha);
 }
 
+// The commit time a canary was named for, or null for anything else.
+function canaryStamp(version) {
+  const m = String(version).match(/-canary\.(\d{14})\.g[0-9a-f]{7}$/);
+  return m ? m[1] : null;
+}
+
+// Whether a canary named `mine` may take the tag from `current`, which
+// is what `npm view opscope@canary version` answers. Cancelling older
+// runs is not enough on its own: a re-run of an older commit after a
+// newer one published would otherwise move the tag backwards. A tag
+// that names no canary yet is free. The stamps are fixed-width, so
+// comparing them as strings orders them by time.
+function mayTakeTag(current, mine) {
+  const theirs = canaryStamp(current);
+  if (theirs === null) return true;
+  const ours = canaryStamp(mine);
+  return ours !== null && ours >= theirs;
+}
+
+// Before the command line runs: pack.js requires this file, and a
+// cycle hands it whatever module.exports holds at that moment.
+module.exports = {
+  canaryVersion,
+  isCanaryOf,
+  utcStamp,
+  canaryStamp,
+  mayTakeTag,
+  fromCheckout,
+};
+
 if (require.main === module) {
   try {
-    process.stdout.write(`${fromCheckout(path.resolve(__dirname, '..'))}\n`);
+    const args = process.argv.slice(2);
+    if (args[0] === '--may-take-tag') {
+      const [current, mine] = args.slice(1);
+      if (!mayTakeTag(current || '', mine || '')) {
+        console.error(`opscope@canary is already ${current}, newer than ${mine}`);
+        process.exit(1);
+      }
+    } else {
+      process.stdout.write(`${fromCheckout(path.resolve(__dirname, '..'))}\n`);
+    }
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
 }
-
-module.exports = { canaryVersion, isCanaryOf, utcStamp, fromCheckout };

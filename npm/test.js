@@ -687,6 +687,57 @@ test('canaries sort by the time their commit landed', () => {
   assert.ok(stamp(newer) > stamp(older));
 });
 
+test('an older canary never takes the tag from a newer one', () => {
+  const { mayTakeTag } = require('./canary');
+  const older = '2.2.1-canary.20261027040700.g1a2b3c4';
+  const newer = '2.2.1-canary.20261027050000.g0aaaaaa';
+  assert.ok(mayTakeTag('', older), 'an unset tag is free');
+  assert.ok(mayTakeTag(older, newer));
+  assert.ok(mayTakeTag(older, older), 'a re-run of the same commit');
+  assert.ok(!mayTakeTag(newer, older));
+  // Across a release: the next patch moves, the stamp still decides.
+  assert.ok(!mayTakeTag('2.3.1-canary.20261028000000.gbbbbbbb', older));
+  assert.ok(!mayTakeTag(older, 'not-a-canary'));
+});
+
+test('canary.js prints a version when it is the program that starts', () => {
+  // pack.js requires canary.js back. Run as the entry point, canary.js
+  // used to reach pack.js before its exports were set, which left
+  // pack.js holding an undefined isCanaryOf.
+  // So the exports have to be set before the command line runs, which is
+  // where the file runs pack.js from.
+  const src = fs.readFileSync(path.join(__dirname, 'canary.js'), 'utf8');
+  const exportsAt = src.indexOf('module.exports =');
+  const mainAt = src.indexOf('if (require.main === module)');
+  assert.ok(exportsAt !== -1 && mainAt !== -1);
+  assert.ok(exportsAt < mainAt, 'canary.js sets its exports after running');
+  const printed = spawnSync('node', ['npm/canary.js'], { cwd: repoRoot, encoding: 'utf8' });
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.ok(
+    require('./canary').isCanaryOf(printed.stdout.trim(), packer.versionFromCargo(repoRoot)),
+    printed.stdout,
+  );
+  const cli = spawnSync('node', ['npm/canary.js', '--may-take-tag', '', '2.2.1-canary.20261027040700.g1a2b3c4'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  const refused = spawnSync(
+    'node',
+    ['npm/canary.js', '--may-take-tag', '2.2.1-canary.20261027050000.g0aaaaaa', '2.2.1-canary.20261027040700.g1a2b3c4'],
+    { cwd: repoRoot, encoding: 'utf8' },
+  );
+  assert.equal(refused.status, 1);
+  assert.match(
+    jobBlock(
+      fs.readFileSync(path.join(repoRoot, '.github/workflows/release.yml'), 'utf8'),
+      'canary',
+    ),
+    /node npm\/canary\.js --may-take-tag "\$current" "\$version"/,
+    'the canary job no longer refuses an older commit',
+  );
+});
+
 test('pack.js packs a canary of the manifest version', () => {
   const dir = scratch();
   try {

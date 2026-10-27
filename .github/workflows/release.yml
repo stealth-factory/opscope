@@ -646,6 +646,15 @@ jobs:
           npm config delete '//registry.npmjs.org/:_authToken' || true
           npm config delete always-auth || true
           version="${{ steps.pack.outputs.version }}"
+          # The concurrency group cancels an older run, but a re-run of
+          # an older commit after a newer one published would still move
+          # the tag backwards. Its version would be new to npm, so the
+          # already-published skip below would not catch it.
+          current=$(npm view opscope@canary version 2>/dev/null || true)
+          if ! node npm/canary.js --may-take-tag "$current" "$version"; then
+            echo "leaving canary on ${current}; ${version} is older"
+            exit 0
+          fi
           canary() {
             local pkg="$1"
             local name
