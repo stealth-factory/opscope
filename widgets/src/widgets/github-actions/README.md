@@ -200,7 +200,7 @@ settings screen restarts the widget to pick it up.
 |---|---|---|
 | `token` | _(unset)_ | classic PAT. Empty falls through to `token_env`. |
 | `token_env` | `GITHUB_TOKEN` | environment variable to read when no `github_actions.token` is set. |
-| `enterprise_hostname` | _(unset)_ | Enterprise web host, for example `acme.ghe.com`. Empty is github.com. |
+| `enterprise_hostname` | _(unset)_ | Enterprise web host, for example `acme.ghe.com`. Empty falls through to `enterprise_hostname_env`; both empty is github.com. |
 | `enterprise_hostname_env` | _(unset)_ | environment variable to read the host from when `enterprise_hostname` is empty. Empty reads none. |
 | `accounts` | discovered | org or user logins. Empty discovers the viewer and every org they belong to. |
 | `repos` | `[]` | `owner/name` list. Empty means recently-pushed-with-workflows, capped per owner. |
