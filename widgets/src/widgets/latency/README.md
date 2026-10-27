@@ -99,7 +99,7 @@ A terminal without underline styles draws a plain line under the same digits.
 | `c` | seconds per graph column — 1 ping/col / 2 / 5 / 10s |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 Set any interval of at least one second through `,` settings. Saving and

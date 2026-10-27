@@ -1247,9 +1247,38 @@ fn footer(
     cw: usize,
     p: &Palette,
 ) -> (tc::Footer, Vec<String>) {
+    let mut hints = hints.to_vec();
+    // While a filter is being typed, `!` is a character, so the counter
+    // stays off that footer. Everywhere else it sits just before settings,
+    // or before quit on the news view, which has no settings key.
+    let typing = hints
+        .iter()
+        .any(|h| h.iter().any(|(_, t)| t.contains("type to filter")));
+    if !typing {
+        let room = cw.saturating_sub(1).max(1);
+        if let Some(notices) = tc::notices::hint(room) {
+            let at = hints
+                .iter()
+                .position(|h| h.iter().any(|(_, t)| t.contains("settings")))
+                .or_else(|| {
+                    hints
+                        .iter()
+                        .position(|h| h.iter().any(|(_, t)| t.contains("[q]")))
+                })
+                .unwrap_or(hints.len());
+            hints.insert(at, notices);
+        }
+    }
     let coloured: Vec<Vec<(&str, String)>> = hints
         .iter()
-        .map(|h| h.iter().map(|(_, t)| (p.dim.as_str(), t.clone())).collect())
+        .map(|h| {
+            h.iter()
+                .map(|(c, t)| {
+                    let colour = if c.is_empty() { p.dim.as_str() } else { *c };
+                    (colour, t.clone())
+                })
+                .collect()
+        })
         .collect();
     let packed = tc::pack_hints_placed(&coloured, cw.saturating_sub(1), "  ");
     let lines = packed
@@ -1272,6 +1301,7 @@ fn window(body: &[String], scroll: usize, room: usize) -> (Vec<String>, usize) {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("google-trends");
     if !tc::dependencies_available(
         "google-trends",
         include_str!("dependencies.json"),
@@ -1483,6 +1513,9 @@ fn main() {
             if let Some(d) = &mut detail {
                 match key.as_str() {
                     "q" | "Q" => quit = true,
+                    "!" => {
+                        tc::notices::run(&mut keyboard);
+                    }
                     "esc" | "left" | "backspace" | "h" => {
                         detail = None;
                         scroll = 0;
@@ -1544,6 +1577,10 @@ fn main() {
                 "q" | "Q" => quit = true,
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "/" => {
@@ -1712,7 +1749,12 @@ fn main() {
             body.cursor = body.cursor.map(|c| c + n);
         }
         let (packed, foot) = footer(&hints, cw, &p);
-        room = h.saturating_sub(HEAD + foot.len()).max(1);
+        // The banner is pinned with the footer: the body window shrinks
+        // for it rather than scrolling underneath.
+        let banner = tc::notices::banner_rows(w, h);
+        room = h
+            .saturating_sub(HEAD + banner.len() + foot.len())
+            .max(1);
         if moved {
             if let Some(c) = body.cursor {
                 scroll = tc::follow(scroll, c, room);
@@ -1729,6 +1771,7 @@ fn main() {
         slots = body.slots.clone();
         let mut frame = vec![title];
         frame.extend(shown);
+        frame.extend(banner);
         let foot_top = frame.len();
         frame.extend(foot);
         tc::draw(&frame, w, h);

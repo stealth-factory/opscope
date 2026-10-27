@@ -348,7 +348,7 @@ support OSC 8. `c` remains the keyboard route for copying the URL.
 | `r` | refresh now, ignoring the day cache |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit, from either screen |
 
 ## One account on its own screen

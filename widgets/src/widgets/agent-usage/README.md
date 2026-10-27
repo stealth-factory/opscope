@@ -1948,7 +1948,7 @@ refresh makes a tab a row longer.
 | `r` | re-read the files now, and ask each agent's endpoint again for any quota over 30s old (one that refused keeps its backoff) |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 ## Cost
