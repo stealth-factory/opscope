@@ -150,9 +150,14 @@ fn apply(region: &mut Region, answer: Answer, memory: &mut Memory, now: f64, ref
         }
         Answer::Rejected(said) => {
             // Not a region Google knows: there were never rows to keep.
+            // The new-since count named those rows, so it goes with them.
+            // A failed or unreadable fetch leaves both, because those rows stay.
             region.items.clear();
             region.seen.clear();
             region.left.clear();
+            region.new_count = 0;
+            region.since = None;
+            region.stale = None;
             region.failure = Some(Failure::Rejected(said));
         }
         Answer::Failed(said) => region.failure = Some(Failure::Failed(said)),
@@ -518,6 +523,16 @@ fn region_tabs(shared: &Shared, p: &Palette) -> Vec<tc::Tab> {
         .collect()
 }
 
+/// The region a click on tab `clicked` opens, when it is not already open.
+///
+/// The open tab is already selected. Resetting the cursor and the scroll
+/// for that click moves the list without changing region, and a row click
+/// later in the same poll is then resolved against a scroll the frame was
+/// not drawn at.
+fn tab_switch(open: usize, clicked: usize) -> Option<usize> {
+    (clicked != open).then_some(clicked)
+}
+
 /// The tab a frame click `(x, y)` landed on, the strip being rows
 /// `1..head`. None on anything else.
 fn tab_clicked(
@@ -673,7 +688,11 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         None if region.items.is_empty() => {}
         None => about.push(format!("{} of {}", b.lens[TRENDING], region.items.len())),
     }
-    if region.fetched > 0.0 {
+    // A rejection cleared the rows and the count. "first check" would
+    // describe a comparison that no longer exists; the error row below
+    // says why the feed is gone.
+    let rejected = matches!(region.failure, Some(Failure::Rejected(_)));
+    if region.fetched > 0.0 && !rejected {
         match region.since {
             Some(at) => about.push(format!("{} new since {}", region.new_count, clock(at, now))),
             None => match region.stale {
@@ -717,7 +736,6 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         None => {}
     }
 
-    let rejected = matches!(region.failure, Some(Failure::Rejected(_)));
     if region.fetched <= 0.0 && region.failure.is_none() {
         b.rows.extend(line(
             &p.dim,
@@ -1532,10 +1550,12 @@ fn main() {
             for key in keys.iter_mut() {
                 if let Some((x, y)) = tc::click_at(key) {
                     if let Some(i) = tab_clicked(&tabs_at, x, y, head) {
-                        switched |= i != view.region;
-                        view.region = i;
-                        view.at = [0; 2];
-                        scroll = 0;
+                        if let Some(next) = tab_switch(view.region, i) {
+                            switched = true;
+                            view.region = next;
+                            view.at = [0; 2];
+                            scroll = 0;
+                        }
                         key.clear();
                     }
                 }
@@ -2486,6 +2506,82 @@ mod tests {
             tc::step_tab(0, -1, sample().regions.len()),
             sample().regions.len() - 1
         );
+    }
+
+    #[test]
+    fn a_click_on_the_open_tab_does_not_switch() {
+        assert_eq!(tab_switch(1, 1), None);
+        assert_eq!(tab_switch(1, 0), Some(0));
+    }
+
+    #[test]
+    fn a_rejected_region_drops_the_count_of_rows_it_no_longer_has() {
+        let p = palette();
+        let mut region = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        let mut mem = Memory::default();
+        apply(
+            &mut region,
+            Answer::Items(vec![trend("alpha", "200+", None, &[])]),
+            &mut mem,
+            NOW,
+            300.0,
+        );
+        apply(
+            &mut region,
+            Answer::Items(vec![
+                trend("alpha", "200+", None, &[]),
+                trend("beta", "100+", None, &[]),
+            ]),
+            &mut mem,
+            NOW + 300.0,
+            300.0,
+        );
+        assert!(region.new_count > 0);
+        let fetched = region.fetched;
+        // A failure keeps the earlier rows, so the ! count stays.
+        let mut failed = region.clone();
+        apply(
+            &mut failed,
+            Answer::Failed("HTTP 429".into()),
+            &mut Memory::default(),
+            NOW + 600.0,
+            300.0,
+        );
+        assert!(failed.new_count > 0 && !failed.items.is_empty());
+        let kept = Shared {
+            regions: vec![failed],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&kept, &p), 40, "", "", "");
+        let kept_text = tc::source_text(&lines.join("\n"));
+        assert!(kept_text.contains('!'), "{kept_text}");
+        assert!(kept_text.contains('1') || kept_text.contains('2'), "{kept_text}");
+
+        apply(
+            &mut region,
+            Answer::Rejected("nope".into()),
+            &mut mem,
+            NOW + 600.0,
+            300.0,
+        );
+        assert_eq!(region.new_count, 0);
+        assert!(region.since.is_none());
+        assert!(region.items.is_empty());
+        assert_eq!(region.fetched, fetched);
+        let shared = Shared {
+            regions: vec![region],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 40, "", "", "");
+        let text = tc::source_text(&lines.join("\n"));
+        assert!(text.contains('×'), "{text}");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        let body = plain(&list_body(&shared, &View::default(), 300.0, 80, NOW + 600.0, &p).rows);
+        assert!(!body.contains("new since"), "{body}");
+        assert!(!body.contains("first check"), "{body}");
     }
 
     #[test]

@@ -36,8 +36,9 @@ rows shown for that region are from the fetch before), `×` Google rejected
 the region code outright (HTTP 400) — and is blank until the first fetch
 lands. A number after the marker is how many trends are new
 since the fetch before: the widget's own observation, the same count as
-`N new since HH:MM` in the open region's header, absent when zero or on a
-first check.
+`N new since HH:MM` in the open region's header, absent when zero, on a
+first check, or after Google rejects the region (the rows that count named
+are gone; a failed fetch keeps both the rows and the count).
 
 ## The source
 
