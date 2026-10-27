@@ -3,6 +3,22 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.3.0] - 2026-10-27
+
+### CI
+
+- Publish main to npm as opscope@canary (#531)
+
+### Documentation
+
+- Explain GitHub Enterprise setup for the GitHub widgets (#532)
+
+### Features
+
+- **google-trends**: New widget showing Google's Trending Now feed (OPS-188) (#447)
+- **core**: Persist 7- and 30-day notice dismissals and share a state-file writer (OPS-212) (#517)
+- **google-trends**: Show regions as tabs (OPS-239) (#525)
+
 ## [2.2.0] - 2026-10-26
 
 ### Features
