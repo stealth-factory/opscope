@@ -617,6 +617,29 @@ fn body_for_keys(
     }
 }
 
+/// Opens region `next` and hands back the body the rest of this poll's
+/// keys read.
+///
+/// The arrows and a tab click both land here, so neither can change region
+/// and leave `enter` reading the old region's list: `before` goes in and
+/// its replacement comes out, and the caller has nothing else to use.
+#[allow(clippy::too_many_arguments)]
+fn open_region(
+    view: &mut View,
+    next: usize,
+    shared: &Shared,
+    refresh: f64,
+    cw: usize,
+    now: f64,
+    p: &Palette,
+    before: Body,
+) -> Body {
+    let was = view.region;
+    view.region = next;
+    view.at = [0; 2];
+    body_for_keys(shared, view, refresh, cw, now, p, before, was)
+}
+
 /// The list screen's body, below the pinned title.
 fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p: &Palette) -> Body {
     let mut b = Body::default();
@@ -1540,7 +1563,6 @@ fn main() {
                 .iter()
                 .position(|&s| s == (view.focus, view.at[view.focus])),
         };
-        let region_drawn = view.region;
         let mut switched = false;
         if detail.is_none() {
             // A click on a tab opens it, which is what stepping to it
@@ -1552,8 +1574,9 @@ fn main() {
                     if let Some(i) = tab_clicked(&tabs_at, x, y, head) {
                         if let Some(next) = tab_switch(view.region, i) {
                             switched = true;
-                            view.region = next;
-                            view.at = [0; 2];
+                            before = open_region(
+                                &mut view, next, &snapshot, refresh, cw, now, &p, before,
+                            );
                             scroll = 0;
                         }
                         key.clear();
@@ -1583,7 +1606,6 @@ fn main() {
             }
             moved = true;
         }
-        before = body_for_keys(&snapshot, &view, refresh, cw, now, &p, before, region_drawn);
         let mut quit = false;
         for key in keys {
             if key.is_empty() {
@@ -1699,12 +1721,10 @@ fn main() {
                     }
                 }
                 "left" | "right" if several => {
-                    let was = view.region;
                     let by = if key == "left" { -1 } else { 1 };
-                    view.region = tc::step_tab(view.region as i64, by, snapshot.regions.len());
-                    view.at = [0; 2];
+                    let next = tc::step_tab(view.region as i64, by, snapshot.regions.len());
+                    before = open_region(&mut view, next, &snapshot, refresh, cw, now, &p, before);
                     scroll = 0;
-                    before = body_for_keys(&snapshot, &view, refresh, cw, now, &p, before, was);
                 }
                 "up" | "k" | "down" | "j" => {
                     let down = key == "down" || key == "j";
@@ -2676,17 +2696,31 @@ mod tests {
             ..View::default()
         };
         let drawn = list_body(&shared, &drawn_view, 300.0, 80, NOW, &p);
-        let mut view = drawn_view;
-        view.region = 1;
-        view.at = [0; 2];
         // The body from before the switch still points at US's first hit,
         // which is a different row in GB.
-        let stale = detail_for(&shared, &view, &drawn, NOW).unwrap();
+        let mut moved = drawn_view.clone();
+        moved.region = 1;
+        let stale = detail_for(&shared, &moved, &drawn, NOW).unwrap();
         assert_eq!(stale.title, "other");
-        let fresh = body_for_keys(&shared, &view, 300.0, 80, NOW, &p, drawn, 0);
-        let opened = detail_for(&shared, &view, &fresh, NOW).unwrap();
-        assert_eq!(opened.geo, "GB");
-        assert_eq!(opened.title, "zorblax");
+
+        // A click on GB's tab, then `enter`, as the list loop takes them.
+        let (_, placed) = tc::tab_strip(0, &region_tabs(&shared, &p), 80, "", "", "");
+        let &(row, col, _) = placed.iter().find(|&&(_, _, i)| i == 1).unwrap();
+        let head = 2;
+        let mut view = drawn_view.clone();
+        let clicked = tab_clicked(&placed, col, 1 + row, head).unwrap();
+        let next = tab_switch(view.region, clicked).unwrap();
+        let before = list_body(&shared, &view, 300.0, 80, NOW, &p);
+        let before = open_region(&mut view, next, &shared, 300.0, 80, NOW, &p, before);
+        let opened = detail_for(&shared, &view, &before, NOW).unwrap();
+        assert_eq!((opened.geo.as_str(), opened.title.as_str()), ("GB", "zorblax"));
+
+        // `→`, then `enter`.
+        let mut view = drawn_view;
+        let next = tc::step_tab(view.region as i64, 1, shared.regions.len());
+        let before = open_region(&mut view, next, &shared, 300.0, 80, NOW, &p, drawn);
+        let opened = detail_for(&shared, &view, &before, NOW).unwrap();
+        assert_eq!((opened.geo.as_str(), opened.title.as_str()), ("GB", "zorblax"));
     }
 
     #[test]
