@@ -88,7 +88,9 @@ pub fn write_atomic_if(path: &Path, contents: &str, expected: &str) -> Result<()
 /// let a third take a lock on a new file and run alongside the second. The
 /// lock is released when `f` returns, by closing the descriptor. `flock`
 /// conflicts between two descriptors in the same process too, so threads
-/// are serialised as well as processes.
+/// are serialised as well as processes. A busy lock is taken
+/// non-blocking: `EINTR` retries, and `WouldBlock` sleeps 10ms for up to
+/// 50 attempts, then the error is returned.
 pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
     let name = path
         .file_name()
@@ -110,15 +112,21 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&lock)
         .map_err(|e| format!("{}: {e}", lock.display()))?;
+    let mut waits = 0;
     loop {
         // SAFETY: a valid descriptor owned by `file` for this whole call.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
             break;
         }
         let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(format!("{}: {err}", lock.display()));
+        match err.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock if waits < 50 => {
+                waits += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => return Err(format!("{}: {err}", lock.display())),
         }
     }
     let out = f();

@@ -451,14 +451,7 @@ impl Registry {
     /// in memory - including one for days that could not be written, since
     /// a restart is what ends it.
     fn lasts(&self, live: &Live, now: f64) -> Option<(f64, String)> {
-        let key = self.key(&live.notice);
-        if let Some(d) = self.kept.get(&key).filter(|d| d.holds(live.hash, now)) {
-            return Some((d.at, d.lasts()));
-        }
-        self.dismissed
-            .get(&key)
-            .filter(|d| d.holds(live.hash, now))
-            .map(|d| (d.at, "this session".to_string()))
+        self.dismissal(live, now).map(|d| (d.at, d.lasts()))
     }
 
     /// Name the widget and read the file, as `start` does in a new process.
@@ -2161,6 +2154,11 @@ mod tests {
         second.raise(Notice::error("a", "disk nearly full").detail("d"), NOW + 5.0);
         let ids: Vec<&str> = second.outstanding(NOW + 6.0).iter().map(|l| l.notice.id).collect();
         assert_eq!(ids, vec!["a"], "the same title and detail, now an error, shows");
+        let live = second.live.iter().find(|l| l.notice.id == "a").unwrap();
+        assert!(
+            second.lasts(live, NOW + 6.0).is_none(),
+            "the saved until-date does not apply to the error"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
