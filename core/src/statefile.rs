@@ -41,18 +41,12 @@ use serde_json::Value;
 /// panic or a path at the root of the filesystem. A writer that then fails
 /// says which path it tried.
 pub fn state_dir() -> PathBuf {
-    state_dir_from(
-        std::env::var_os("XDG_STATE_HOME"),
-        std::env::var_os("HOME"),
-    )
+    state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
 }
 
 /// [`state_dir`] from the two variables it reads, so the rule is tested
 /// without changing `HOME` under every other test in the process.
-fn state_dir_from(
-    xdg: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> PathBuf {
+fn state_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
     if let Some(base) = xdg.filter(|v| !v.is_empty()) {
         return PathBuf::from(base).join("opscope");
     }
@@ -92,6 +86,13 @@ pub fn write_atomic_if(path: &Path, contents: &str, expected: &str) -> Result<()
 /// non-blocking: `EINTR` retries, and `WouldBlock` sleeps 10ms for up to
 /// 50 attempts, then the error is returned.
 pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
+    with_lock_waiting(path, 50, f)
+}
+
+/// [`with_lock`] with an explicit number of 10ms waits. The lock test asks
+/// for more than 50: `flock` is not fair, and `sync_all` inside the critical
+/// section can hold the lock longer than half a second on a loaded disk.
+fn with_lock_waiting<T>(path: &Path, attempts: u32, f: impl FnOnce() -> T) -> Result<T, String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -99,8 +100,7 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
     let lock = path.with_file_name(format!("{name}.lock"));
     if let Some(parent) = lock.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("{}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
     }
     let file = OpenOptions::new()
@@ -112,7 +112,7 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&lock)
         .map_err(|e| format!("{}: {e}", lock.display()))?;
-    let mut waits = 0;
+    let mut waits = 0u32;
     loop {
         // SAFETY: a valid descriptor owned by `file` for this whole call.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -122,7 +122,7 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
         let err = std::io::Error::last_os_error();
         match err.kind() {
             std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock if waits < 50 => {
+            std::io::ErrorKind::WouldBlock if waits < attempts => {
                 waits += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -135,20 +135,19 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 fn write(path: &Path, contents: &str, expected: Option<&str>) -> Result<(), String> {
-    serde_json::from_str::<Value>(contents)
-        .map_err(|e| format!("refusing to write: {e}"))?;
+    serde_json::from_str::<Value>(contents).map_err(|e| format!("refusing to write: {e}"))?;
     // Keep an intentional config symlink intact. Rename over its resolved
     // target; renaming over the link itself would silently replace it.
     let destination = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?,
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?
+        }
         _ => path.to_path_buf(),
     };
     let path = destination.as_path();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("{}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
     }
     let name = path
@@ -202,8 +201,7 @@ fn write(path: &Path, contents: &str, expected: Option<&str>) -> Result<(), Stri
             tmp.display()
         ));
     }
-    let read_back =
-        std::fs::read_to_string(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let read_back = std::fs::read_to_string(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     if let Err(e) = serde_json::from_str::<Value>(&read_back) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("wrote a file that does not parse: {e}"));
@@ -219,7 +217,9 @@ fn write(path: &Path, contents: &str, expected: Option<&str>) -> Result<(), Stri
         };
         if current != expected {
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!("{name} changed again while saving · retry the edit"));
+            return Err(format!(
+                "{name} changed again while saving · retry the edit"
+            ));
         }
     }
     std::fs::rename(&tmp, path).map_err(|e| {
@@ -305,7 +305,10 @@ pub(crate) mod tests {
             PathBuf::from("/home-dir/.local/state/opscope")
         );
         assert_eq!(state_dir_from(None, None), PathBuf::from(".opscope-state"));
-        assert_eq!(state_dir_from(os(""), os("")), PathBuf::from(".opscope-state"));
+        assert_eq!(
+            state_dir_from(os(""), os("")),
+            PathBuf::from(".opscope-state")
+        );
         // And the real one reads XDG_STATE_HOME.
         let _guard = env_lock();
         let _xdg = EnvVar::set("XDG_STATE_HOME", Some("/xdg-state".as_ref()));
@@ -330,34 +333,33 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
         assert!(write_atomic_if(&path, "{", "{\"a\":1}\n").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
-        assert!(
-            write_atomic_if(&path, "{\"a\":2}\n", "{\"other\":true}\n").is_err()
-        );
+        assert!(write_atomic_if(&path, "{\"a\":2}\n", "{\"other\":true}\n").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
         let leftover: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(leftover.len(), 1, "a refused write left a temp file: {leftover:?}");
+        assert_eq!(
+            leftover.len(),
+            1,
+            "a refused write left a temp file: {leftover:?}"
+        );
         let target = dir.join("target.json");
         let linked = dir.join("linked.json");
         std::fs::write(&target, "{\"linked\":false}\n").unwrap();
         std::os::unix::fs::symlink(&target, &linked).unwrap();
-        write_atomic_if(
-            &linked,
-            "{\"linked\":true}\n",
-            "{\"linked\":false}\n",
-        )
-        .unwrap();
-        assert!(std::fs::symlink_metadata(&linked).unwrap().file_type().is_symlink());
+        write_atomic_if(&linked, "{\"linked\":true}\n", "{\"linked\":false}\n").unwrap();
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "{\"linked\":true}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     #[test]
     fn the_lock_file_is_0600_and_serialises_read_modify_write() {
@@ -369,7 +371,9 @@ pub(crate) mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for _ in 0..25 {
-                        with_lock(&path, || {
+                        // More than the half-second a pane waits. A fair
+                        // schedule is not guaranteed, and each write syncs.
+                        with_lock_waiting(&path, 300, || {
                             let n: u64 = std::fs::read_to_string(&path)
                                 .unwrap()
                                 .trim()
@@ -385,7 +389,11 @@ pub(crate) mod tests {
         for t in threads {
             t.join().unwrap();
         }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "100\n", "no update was lost");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "100\n",
+            "no update was lost"
+        );
         let lock = dir.join("count.json.lock");
         let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -400,7 +408,10 @@ pub(crate) mod tests {
         // A second descriptor in this process conflicts like another pane.
         let err = with_lock(&path, || with_lock(&path, || ()).unwrap_err()).unwrap();
         assert!(err.contains("held.json.lock"), "{err}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the wait is bounded");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the wait is bounded"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

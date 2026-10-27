@@ -1625,10 +1625,13 @@ fn ordered(
 }
 
 fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
-    let Some(series) = series_for(usage, row) else {
-        return (1, 0);
-    };
+    // 0 is a real projection, 1 is not filling or still measuring, 2 has
+    // not answered. Mount order is the tie-break, so 2 has to be its own
+    // rank or a quiet row with a later mount sorts after a row with no answer.
     let Figures::Ready(space) = &row.figures else {
+        return (2, 0);
+    };
+    let Some(series) = series_for(usage, row) else {
         return (1, 0);
     };
     let slope = state::slope_bytes_per_s(series, days as f64 * 86_400.0, now);
@@ -3158,6 +3161,33 @@ mod tests {
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
             .collect();
         assert_eq!(names, vec!["/high", "/low", "/wait"]);
+    }
+
+    #[test]
+    fn an_unanswered_row_sorts_after_one_that_is_not_filling() {
+        let now = 1_700_000_000.0;
+        let quiet = space(1_000_000, 500_000_000, 10, 9);
+        let mut series = state::Series::default();
+        for minute in 0..20 {
+            state::record(&mut series, now - (19 - minute) as f64 * 60.0, 1_000_000);
+        }
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/steady", "ext4", quiet.blocks), series);
+        let snap = snap(
+            vec![
+                row("/wait", "ext4", Figures::NoAnswer, 0),
+                row("/steady", "ext4", Figures::Ready(quiet), 1),
+            ],
+            Hidden::default(),
+        );
+        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|&index| snap.rows[index].mount.mount_point.as_str())
+            .collect();
+        assert_eq!(names, vec!["/steady", "/wait"]);
     }
 
     #[test]

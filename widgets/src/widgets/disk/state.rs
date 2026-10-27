@@ -395,11 +395,15 @@ fn load_usage_locked(path: &Path) -> Loaded {
                 note: String::new(),
             };
         }
+        // A permission or I/O error is not a corrupt file. Moving it aside
+        // would drop history the next save could still have read.
         Err(err) => {
-            quarantine(path);
             return Loaded {
                 store: Store::default(),
-                note: fresh_note(&err.to_string()),
+                note: format!(
+                    "saved history could not be read ({}) · left in place",
+                    public_reason(&err.to_string())
+                ),
             };
         }
     };
@@ -475,6 +479,7 @@ fn save_loaded(
     for series in merged.series.values_mut() {
         compact(series, now);
     }
+    merged.series.retain(|_, series| !series.samples.is_empty());
     let body = render_store(&merged).map_err(|err| format!("could not save history: {err}"))?;
     tc::statefile::write_atomic(path, &body)
         .map_err(|err| format!("could not save history: {}", public_reason(&err)))?;
@@ -810,26 +815,52 @@ mod tests {
 
     #[test]
     fn a_corrupt_history_file_is_quarantined_and_the_next_write_works() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("opscope-disk-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: this test is the only one that reads the state directory,
-        // and the mutex above keeps a second call from overlapping it.
-        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
-        let path = usage_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = dir.join("usage.json");
         std::fs::write(&path, b"not json").unwrap();
         let loaded = load_usage(&path);
         assert!(loaded.note.starts_with("saved history would not read ("));
         assert!(loaded.note.contains("usage.json.bad"));
         assert!(!path.exists());
-        assert!(path.parent().unwrap().join("usage.json.bad").exists());
+        assert!(dir.join("usage.json.bad").exists());
         let saved = save_usage(&path, &Store::default());
         assert!(saved.is_ok(), "{saved:?}");
         assert!(path.exists());
-        unsafe { std::env::remove_var("XDG_STATE_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_io_error_leaves_the_history_file_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("opscope-disk-iodir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        std::fs::create_dir(&path).unwrap();
+        let loaded = load_usage(&path);
+        assert!(loaded.note.contains("left in place"), "{}", loaded.note);
+        assert!(path.is_dir());
+        assert!(!dir.join("usage.json.bad").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_drops_a_series_with_nothing_left() {
+        let dir = std::env::temp_dir().join(format!("opscope-disk-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        let mut store = Store::default();
+        let mut old = Series::default();
+        record(&mut old, 1_000.0, 5);
+        store.series.insert("old".into(), old);
+        let mut live = Series::default();
+        record(&mut live, tc::now(), 5);
+        store.series.insert("live".into(), live);
+        let saved = save_usage(&path, &store).unwrap();
+        assert!(saved.series.contains_key("live"));
+        assert!(!saved.series.contains_key("old"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
