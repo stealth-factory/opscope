@@ -80,6 +80,14 @@ const ERRORS_SESSION_ONLY: &str = "errors can only be dismissed for this session
 const FILE_UNREADABLE: &str = "notices-file-unreadable";
 const FILE_UNWRITABLE: &str = "notices-file-unwritable";
 
+/// Which write `saved` is reporting on, so a failure says what it left in
+/// force: a dismissal that holds for the session, or one that still holds.
+#[derive(Clone, Copy)]
+enum Change {
+    Dismiss,
+    Restore,
+}
+
 /// How bad it is. Ordered so that `max()` is the worst.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -529,7 +537,13 @@ impl Registry {
 
     /// Note how a write went: the file's contents on success, and a Core
     /// notice on failure, cleared by the next write that works.
-    fn saved(&mut self, path: &Path, result: Result<BTreeMap<String, Dismissal>, Unsaved>, now: f64) -> bool {
+    fn saved(
+        &mut self,
+        path: &Path,
+        change: Change,
+        result: Result<BTreeMap<String, Dismissal>, Unsaved>,
+        now: f64,
+    ) -> bool {
         match result {
             Ok(kept) => {
                 self.kept = kept;
@@ -543,13 +557,23 @@ impl Registry {
                 false
             }
             Err(Unsaved::Failed(e)) => {
+                let (title, detail) = match change {
+                    Change::Dismiss => (
+                        format!("could not save a dismissal: {e}"),
+                        "The dismissal holds for this session only. Other panes \
+                         will not see it, and this widget shows the notice again \
+                         when it restarts.",
+                    ),
+                    Change::Restore => (
+                        format!("could not save a restore: {e}"),
+                        "The notice stays dismissed, here and in every other pane, \
+                         because notices.json still holds the dismissal. Press u \
+                         again once the file can be written.",
+                    ),
+                };
                 self.raise(
-                    Notice::warn(FILE_UNWRITABLE, format!("could not save a dismissal: {e}"))
-                        .detail(
-                            "The dismissal holds for this session only. Other panes \
-                             will not see it, and this widget shows the notice again \
-                             when it restarts.",
-                        )
+                    Notice::warn(FILE_UNWRITABLE, title)
+                        .detail(detail)
                         .source("notices")
                         .core(),
                     now,
@@ -590,7 +614,7 @@ impl Registry {
         let result = self.persist(&path, now, move |kept| {
             kept.insert(entry.0, entry.1);
         });
-        if !self.saved(&path, result, now) {
+        if !self.saved(&path, Change::Dismiss, result, now) {
             self.dismissed.insert(name, session);
         }
         Ok(())
@@ -686,7 +710,7 @@ impl Registry {
             // A restore that could not be written did not happen: the next
             // reload would hide the notice again. Keep the dismissal, and let
             // the unwritable notice `saved` raised say why.
-            if !self.saved(&path, result, now) {
+            if !self.saved(&path, Change::Restore, result, now) {
                 self.kept.insert(key, was);
             }
         }
@@ -2161,7 +2185,8 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(now, vec!["a"], "a restore that was not written is not shown as made");
         assert_eq!(later, vec!["a"], "and the reload agrees");
-        assert!(r.live.iter().any(|l| l.notice.id == FILE_UNWRITABLE), "and the reason is a notice");
+        let reason = r.live.iter().find(|l| l.notice.id == FILE_UNWRITABLE).expect("and the reason is a notice");
+        assert!(reason.notice.title.contains("could not save a restore"), "{}", reason.notice.title);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
