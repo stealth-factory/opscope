@@ -6,13 +6,14 @@
 // by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Mount tables and the arithmetic both hosts share.
+//! Mount tables, disk counters and the arithmetic both hosts share.
 //!
 //! Nothing here opens a file or runs a tool. Linux hands `parse_mountinfo`
-//! the text of its mount table; macOS builds the same `Mount` values from
-//! `getmntinfo` and then calls `visible_mounts`.
+//! the text of its mount table and `parse_diskstats` the text of
+//! `/proc/diskstats`. macOS builds the same `Mount` values from
+//! `getmntinfo` and the same device rows from `iostat` lines.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One mount, after the kernel's escapes have been decoded.
 ///
@@ -269,6 +270,459 @@ fn unescape(raw: &str) -> String {
     out
 }
 
+/// One line of `/proc/diskstats`. Counters are cumulative since boot.
+///
+/// The kernel writes 14 fields, 18 since 4.18 (discards) or 20 since 5.5
+/// (flush). Anything past the eleventh counter is discarded: the rates
+/// below do not use it. Sectors in this file are always 512 bytes, whatever
+/// the device itself claims.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskStat {
+    pub major: u32,
+    pub minor: u32,
+    pub name: String,
+    pub reads: u64,
+    pub reads_merged: u64,
+    pub sectors_read: u64,
+    pub ms_reading: u64,
+    pub writes: u64,
+    pub writes_merged: u64,
+    pub sectors_written: u64,
+    pub ms_writing: u64,
+    pub in_flight: u64,
+    pub ms_io: u64,
+    pub weighted_ms_io: u64,
+}
+
+/// Bytes in one `/proc/diskstats` sector. Not the device's logical sector.
+pub const SECTOR_BYTES: u64 = 512;
+
+pub fn parse_diskstats(text: &str) -> Vec<DiskStat> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(major) = parts.next().and_then(|token| token.parse().ok()) else {
+            continue;
+        };
+        let Some(minor) = parts.next().and_then(|token| token.parse().ok()) else {
+            continue;
+        };
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let mut nums = Vec::with_capacity(11);
+        for token in parts.take(11) {
+            let Ok(value) = token.parse::<u64>() else {
+                nums.clear();
+                break;
+            };
+            nums.push(value);
+        }
+        if nums.len() < 11 {
+            continue;
+        }
+        out.push(DiskStat {
+            major,
+            minor,
+            name: name.to_string(),
+            reads: nums[0],
+            reads_merged: nums[1],
+            sectors_read: nums[2],
+            ms_reading: nums[3],
+            writes: nums[4],
+            writes_merged: nums[5],
+            sectors_written: nums[6],
+            ms_writing: nums[7],
+            in_flight: nums[8],
+            ms_io: nums[9],
+            weighted_ms_io: nums[10],
+        });
+    }
+    out
+}
+
+/// Rates between two samples of one device.
+///
+/// `busy` is the share of the interval during which at least one request
+/// was in flight (`Δms_io / (elapsed × 1000)`), not a utilisation the
+/// device cannot exceed. `queue` is `in_flight` at `next`, a gauge, so a
+/// fall there is not a counter reset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rates {
+    pub read_bps: f64,
+    pub write_bps: f64,
+    pub iops: f64,
+    pub await_ms: Option<f64>,
+    pub busy: f64,
+    pub queue: u64,
+}
+
+pub fn disk_rates(prev: &DiskStat, next: &DiskStat, elapsed_s: f64) -> Option<Rates> {
+    if elapsed_s <= 0.0 {
+        return None;
+    }
+    let counters = [
+        (prev.reads, next.reads),
+        (prev.reads_merged, next.reads_merged),
+        (prev.sectors_read, next.sectors_read),
+        (prev.ms_reading, next.ms_reading),
+        (prev.writes, next.writes),
+        (prev.writes_merged, next.writes_merged),
+        (prev.sectors_written, next.sectors_written),
+        (prev.ms_writing, next.ms_writing),
+        (prev.ms_io, next.ms_io),
+        (prev.weighted_ms_io, next.weighted_ms_io),
+    ];
+    if counters.iter().any(|(before, after)| after < before) {
+        return None;
+    }
+    let reads = next.reads - prev.reads;
+    let writes = next.writes - prev.writes;
+    let ios = reads + writes;
+    let await_ms = (ios > 0).then(|| {
+        let waited = (next.ms_reading - prev.ms_reading) + (next.ms_writing - prev.ms_writing);
+        waited as f64 / ios as f64
+    });
+    Some(Rates {
+        read_bps: (next.sectors_read - prev.sectors_read) as f64 * SECTOR_BYTES as f64 / elapsed_s,
+        write_bps: (next.sectors_written - prev.sectors_written) as f64 * SECTOR_BYTES as f64
+            / elapsed_s,
+        iops: ios as f64 / elapsed_s,
+        await_ms,
+        busy: (next.ms_io - prev.ms_io) as f64 / (elapsed_s * 1000.0),
+        queue: next.in_flight,
+    })
+}
+
+/// One `/proc/pressure/io` sample. Averages are percents, already scaled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pressure {
+    pub some: [f64; 3],
+    pub full: [f64; 3],
+    pub some_total: u64,
+    pub full_total: u64,
+}
+
+pub fn parse_pressure(text: &str) -> Option<Pressure> {
+    let mut some = None;
+    let mut full = None;
+    for line in text.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(kind) = tokens.next() else {
+            continue;
+        };
+        let mut avgs = [0.0; 3];
+        let mut total = 0u64;
+        let mut saw = false;
+        for token in tokens {
+            if let Some(value) = token.strip_prefix("avg10=") {
+                avgs[0] = value.parse().ok()?;
+                saw = true;
+            } else if let Some(value) = token.strip_prefix("avg60=") {
+                avgs[1] = value.parse().ok()?;
+            } else if let Some(value) = token.strip_prefix("avg300=") {
+                avgs[2] = value.parse().ok()?;
+            } else if let Some(value) = token.strip_prefix("total=") {
+                total = value.parse().ok()?;
+            }
+        }
+        if !saw {
+            continue;
+        }
+        match kind {
+            "some" => some = Some((avgs, total)),
+            "full" => full = Some((avgs, total)),
+            _ => {}
+        }
+    }
+    let (some, some_total) = some?;
+    let (full, full_total) = full.unwrap_or(([0.0; 3], 0));
+    Some(Pressure {
+        some,
+        full,
+        some_total,
+        full_total,
+    })
+}
+
+/// `/sys/block/<disk>/size` is a count of 512-byte sectors. The result is bytes.
+pub fn parse_sys_block_size(text: &str) -> Option<u64> {
+    let sectors: u64 = text.trim().parse().ok()?;
+    Some(sectors.saturating_mul(SECTOR_BYTES))
+}
+
+/// `queue/rotational`: `0` is an SSD, `1` is spinning rust. Anything else,
+/// including an empty read, means the file did not say.
+pub fn parse_rotational(text: &str) -> Option<bool> {
+    match text.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// One disk's triplet from `iostat -d -K -w`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IostatSample {
+    pub kb_per_transfer: f64,
+    pub tps: f64,
+    pub mb_per_s: f64,
+}
+
+/// Disk names from an `iostat` header line. The `KB/t tps MB/s` line
+/// contributes nothing: those words are the column titles, not disks.
+///
+/// The binary calls these only on macOS. They stay compiled everywhere so
+/// the fixtures run on the Linux CI host too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn parse_iostat_header(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|token| token.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .filter(|token| !matches!(*token, "KB/t" | "tps" | "MB/s"))
+        .map(|token| token.to_string())
+        .collect()
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn parse_iostat_line(text: &str, disks: usize) -> Vec<IostatSample> {
+    if disks == 0 {
+        return Vec::new();
+    }
+    let nums: Vec<f64> = text
+        .split_whitespace()
+        .filter_map(|token| token.parse().ok())
+        .collect();
+    if nums.len() < disks * 3 {
+        return Vec::new();
+    }
+    nums.chunks(3)
+        .take(disks)
+        .map(|chunk| IostatSample {
+            kb_per_transfer: chunk[0],
+            tps: chunk[1],
+            mb_per_s: chunk[2],
+        })
+        .collect()
+}
+
+/// Where a partition sits, and which devices a stacked disk names under
+/// `slaves/`.
+///
+/// `links` maps the path that was read to the symlink target `readlink`
+/// returned. A `/sys/dev/block/<maj>:<min>` target ending in
+/// `<disk>/<partition>` is that partition. A path containing `slaves` names
+/// the device one level under a dm or md disk. No entry is opened here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SysLayout {
+    pub partitions: BTreeMap<String, String>,
+    pub slaves: BTreeMap<String, Vec<String>>,
+}
+
+pub fn layout_from_links(links: &BTreeMap<String, String>) -> SysLayout {
+    let mut partitions = BTreeMap::new();
+    let mut slaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, target) in links {
+        if let Some(disk) = disk_before_slaves(path) {
+            if let Some(slave) = target
+                .rsplit('/')
+                .find(|part| !part.is_empty() && *part != "..")
+            {
+                slaves.entry(disk).or_default().push(slave.to_string());
+            }
+            continue;
+        }
+        if let Some((disk, part)) = partition_in_target(target) {
+            partitions.insert(part, disk);
+        }
+    }
+    for names in slaves.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    SysLayout { partitions, slaves }
+}
+
+fn disk_before_slaves(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let at = parts.iter().position(|part| *part == "slaves")?;
+    if at == 0 {
+        return None;
+    }
+    Some(parts[at - 1].to_string())
+}
+
+fn partition_in_target(target: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = target
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect();
+    let at = parts.iter().position(|part| *part == "block")?;
+    let disk = (*parts.get(at + 1)?).to_string();
+    let part = (*parts.get(at + 2)?).to_string();
+    Some((disk, part))
+}
+
+/// A whole disk as sysfs described it, before counters are attached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InventoryDisk {
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+    pub model: String,
+    pub dev: String,
+    pub partitions: Vec<PartMount>,
+    pub slaves: Vec<String>,
+}
+
+/// A partition and the mount points whose `maj:min` is this partition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartMount {
+    pub name: String,
+    pub dev: String,
+    pub mounts: Vec<String>,
+}
+
+/// One whole disk the table can show. Partitions are fields, never rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveDisk {
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+    pub model: String,
+    pub dev: String,
+    pub stat: Option<DiskStat>,
+    pub mac: Option<IostatSample>,
+    pub idle: bool,
+    pub partitions: Vec<PartMount>,
+    pub mounts: Vec<String>,
+    pub slaves: Vec<String>,
+}
+
+/// Whole disks only. A name in `stats` that is not in the inventory is a
+/// partition (or something sysfs did not call a disk) and is left out, not
+/// added into its parent.
+pub fn live_disks(stats: &[DiskStat], inventory: &[InventoryDisk]) -> Vec<LiveDisk> {
+    inventory
+        .iter()
+        .map(|disk| {
+            let stat = stats.iter().find(|stat| stat.name == disk.name).cloned();
+            let idle = stat
+                .as_ref()
+                .is_some_and(|stat| stat.reads == 0 && stat.writes == 0);
+            LiveDisk {
+                name: disk.name.clone(),
+                kind: disk.kind.clone(),
+                size: disk.size,
+                model: disk.model.clone(),
+                dev: disk.dev.clone(),
+                stat,
+                mac: None,
+                idle,
+                partitions: disk.partitions.clone(),
+                mounts: Vec::new(),
+                slaves: disk.slaves.clone(),
+            }
+        })
+        .collect()
+}
+
+pub fn attach_mounts(disks: &mut [LiveDisk], mounts: &[Mount]) {
+    for disk in disks {
+        disk.mounts = mounts
+            .iter()
+            .filter(|mount| mount.dev == disk.dev)
+            .map(|mount| mount.mount_point.clone())
+            .collect();
+        for part in &mut disk.partitions {
+            part.mounts = mounts
+                .iter()
+                .filter(|mount| mount.dev == part.dev)
+                .map(|mount| mount.mount_point.clone())
+                .collect();
+        }
+    }
+}
+
+/// `on nvme0n1 (nvme0n1p2)` when the mount's device is that partition.
+/// A mount of the whole disk is `on nvme0n1` with no partition in parentheses.
+pub fn device_of(dev: &str, disks: &[LiveDisk]) -> Option<String> {
+    for disk in disks {
+        if let Some(part) = disk.partitions.iter().find(|part| part.dev == dev) {
+            return Some(format!("on {} ({})", disk.name, part.name));
+        }
+        if !disk.dev.is_empty() && disk.dev == dev {
+            return Some(format!("on {}", disk.name));
+        }
+    }
+    None
+}
+
+/// How many whole disks each rule held back. A disk is counted once:
+/// a configured name, then an idle disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskHidden {
+    pub idle: usize,
+    pub configured: usize,
+}
+
+impl DiskHidden {
+    pub fn labels(self) -> Vec<String> {
+        let mut names = Vec::new();
+        if self.idle > 0 {
+            names.push(format!("{} idle hidden", self.idle));
+        }
+        if self.configured > 0 {
+            names.push(format!("{} hide_devices hidden", self.configured));
+        }
+        names
+    }
+}
+
+pub fn visible_disk_indexes(
+    disks: &[LiveDisk],
+    show_idle: bool,
+    hide: &[String],
+) -> (Vec<usize>, DiskHidden) {
+    let hidden_names: BTreeSet<&str> = hide.iter().map(String::as_str).collect();
+    let mut hidden = DiskHidden::default();
+    let mut shown = Vec::new();
+    for (index, disk) in disks.iter().enumerate() {
+        if hidden_names.contains(disk.name.as_str()) {
+            hidden.configured += 1;
+            continue;
+        }
+        if disk.idle && !show_idle {
+            hidden.idle += 1;
+            continue;
+        }
+        shown.push(index);
+    }
+    (shown, hidden)
+}
+
+/// What one poll learned about devices. `missing` is the macOS row shown
+/// when `iostat` is not on `PATH`. `err` is a source that failed but did
+/// not stop the filesystem sample.
+#[derive(Clone, Debug, Default)]
+pub struct IoSnapshot {
+    pub disks: Vec<LiveDisk>,
+    pub show_pressure: bool,
+    pub pressure: Option<Pressure>,
+    pub pressure_absent: bool,
+    pub pressure_err: String,
+    pub host_devices: bool,
+    pub combined: bool,
+    pub missing: String,
+    pub err: String,
+}
+
+/// True when pid 1's cgroup file is the v2 root. That is the host, so the
+/// block devices in the table are the host's while the mount table may be
+/// a container's.
+pub fn cgroup_is_host(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == "0::/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +821,265 @@ mod tests {
     #[test]
     fn a_line_without_the_separator_is_not_a_mount() {
         assert!(parse_mountinfo("not a mount table\n").is_empty());
+    }
+
+    fn stat_line(name: &str, extra: &[&str]) -> String {
+        let mut tokens = vec![
+            "8", "0", name, "10", "1", "20", "5", "4", "0", "8", "3", "1", "6", "9",
+        ];
+        tokens.extend(extra);
+        tokens.join(" ")
+    }
+
+    fn stat_at(
+        name: &str,
+        reads: u64,
+        sectors_read: u64,
+        writes: u64,
+        sectors_written: u64,
+    ) -> DiskStat {
+        DiskStat {
+            major: 8,
+            minor: 0,
+            name: name.into(),
+            reads,
+            reads_merged: 0,
+            sectors_read,
+            ms_reading: reads,
+            writes,
+            writes_merged: 0,
+            sectors_written,
+            ms_writing: writes,
+            in_flight: 2,
+            ms_io: 100,
+            weighted_ms_io: 100,
+        }
+    }
+
+    #[test]
+    fn diskstats_accepts_14_18_and_20_fields() {
+        let text = format!(
+            "{}\n{}\n{}\n",
+            stat_line("sda", &[]),
+            stat_line("nvme0n1", &["1", "2", "3", "4"]),
+            stat_line("mmcblk0", &["1", "2", "3", "4", "5", "6"])
+        );
+        let rows = parse_diskstats(&text);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "sda");
+        assert_eq!(rows[0].reads, 10);
+        assert_eq!(rows[0].sectors_read, 20);
+        assert_eq!(rows[0].writes, 4);
+        assert_eq!(rows[0].sectors_written, 8);
+        assert_eq!(rows[0].in_flight, 1);
+        assert_eq!(rows[0].ms_io, 6);
+        assert_eq!(rows[1].name, "nvme0n1");
+        assert_eq!(rows[2].weighted_ms_io, 9);
+        assert!(parse_diskstats("8 0 only-three\n").is_empty());
+    }
+
+    #[test]
+    fn rates_use_512_byte_sectors_and_a_reset_is_a_gap() {
+        let prev = stat_at("sda", 0, 0, 0, 0);
+        let next = stat_at("sda", 0, 1, 0, 0);
+        let rates = disk_rates(&prev, &next, 1.0).unwrap();
+        assert!((rates.read_bps - 512.0).abs() < 1e-9);
+        assert!((rates.read_bps - 4096.0).abs() > 1.0);
+
+        let busy = stat_at("sda", 4, 8, 6, 10);
+        let rates = disk_rates(&prev, &busy, 2.0).unwrap();
+        assert!((rates.read_bps - (8.0 * 512.0 / 2.0)).abs() < 1e-9);
+        assert!((rates.write_bps - (10.0 * 512.0 / 2.0)).abs() < 1e-9);
+        assert!((rates.iops - 5.0).abs() < 1e-9);
+        assert!((rates.await_ms.unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(rates.queue, 2);
+
+        let reset = stat_at("sda", 0, 0, 0, 0);
+        let later = stat_at("sda", 3, 3, 3, 3);
+        assert!(disk_rates(&later, &reset, 1.0).is_none());
+        assert!(disk_rates(&prev, &next, 0.0).is_none());
+    }
+
+    #[test]
+    fn await_is_absent_when_no_io_completed() {
+        let prev = stat_at("sda", 5, 5, 5, 5);
+        let next = stat_at("sda", 5, 9, 5, 5);
+        let rates = disk_rates(&prev, &next, 1.0).unwrap();
+        assert!(rates.await_ms.is_none());
+        assert!((rates.read_bps - 4.0 * 512.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pressure_parses_both_lines_some_only_and_empty() {
+        let both = "\
+some avg10=23.1 avg60=18.4 avg300=9.7 total=100
+full avg10=7.2 avg60=5.1 avg300=2.0 total=40
+";
+        let pressure = parse_pressure(both).unwrap();
+        assert!((pressure.some[0] - 23.1).abs() < 1e-9);
+        assert!((pressure.some[1] - 18.4).abs() < 1e-9);
+        assert!((pressure.some[2] - 9.7).abs() < 1e-9);
+        assert!((pressure.full[0] - 7.2).abs() < 1e-9);
+        assert_eq!(pressure.some_total, 100);
+        assert_eq!(pressure.full_total, 40);
+
+        let some = parse_pressure("some avg10=1 avg60=2 avg300=3 total=4\n").unwrap();
+        assert_eq!(some.full, [0.0, 0.0, 0.0]);
+        assert_eq!(some.full_total, 0);
+        assert!(parse_pressure("").is_none());
+        assert!(parse_pressure("\n").is_none());
+    }
+
+    #[test]
+    fn sysfs_size_is_512_byte_sectors_and_rotational_is_a_flag() {
+        assert_eq!(parse_sys_block_size("2048\n"), Some(2048 * 512));
+        assert_eq!(parse_sys_block_size("nope"), None);
+        assert_eq!(parse_rotational("0\n"), Some(false));
+        assert_eq!(parse_rotational("1"), Some(true));
+        assert_eq!(parse_rotational(""), None);
+    }
+
+    #[test]
+    fn iostat_header_and_three_lines() {
+        let header = parse_iostat_header("          disk0               disk2 ");
+        assert_eq!(header, vec!["disk0".to_string(), "disk2".to_string()]);
+        assert!(parse_iostat_header("    KB/t  tps  MB/s     KB/t  tps  MB/s ").is_empty());
+        let lines = [
+            "   12.50    3.00   0.04    8.00    1.00   0.01",
+            "   20.00   10.00   0.20    0.00    0.00   0.00",
+            "    1.00    1.00   0.00    2.00    2.00   0.01",
+        ];
+        for line in lines {
+            let samples = parse_iostat_line(line, header.len());
+            assert_eq!(samples.len(), 2, "{line}");
+            assert!(samples[0].tps.is_finite());
+        }
+        let first = parse_iostat_line(lines[0], 2);
+        assert!((first[0].kb_per_transfer - 12.5).abs() < 1e-9);
+        assert!((first[0].tps - 3.0).abs() < 1e-9);
+        assert!((first[1].mb_per_s - 0.01).abs() < 1e-9);
+        assert!(parse_iostat_line("1 2", 2).is_empty());
+    }
+
+    #[test]
+    fn partition_links_map_sda_nvme_mmc_and_one_dm_slave() {
+        let mut links = BTreeMap::new();
+        links.insert("dev/block/8:1".into(), "../../block/sda/sda1".into());
+        links.insert(
+            "dev/block/259:1".into(),
+            "../../devices/pci0000:00/block/nvme0n1/nvme0n1p1".into(),
+        );
+        links.insert(
+            "dev/block/179:1".into(),
+            "../../block/mmcblk0/mmcblk0p1".into(),
+        );
+        links.insert("dev/block/8:0".into(), "../../block/sda".into());
+        links.insert("block/dm-0/slaves/sda".into(), "../../../sda".into());
+        let layout = layout_from_links(&links);
+        assert_eq!(
+            layout.partitions.get("sda1").map(String::as_str),
+            Some("sda")
+        );
+        assert_eq!(
+            layout.partitions.get("nvme0n1p1").map(String::as_str),
+            Some("nvme0n1")
+        );
+        assert_eq!(
+            layout.partitions.get("mmcblk0p1").map(String::as_str),
+            Some("mmcblk0")
+        );
+        assert!(!layout.partitions.contains_key("sda"));
+        assert_eq!(
+            layout.slaves.get("dm-0").map(Vec::as_slice),
+            Some(["sda".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_disk_and_its_partitions_become_one_row() {
+        let stats = parse_diskstats(&format!(
+            "{}\n{}\n{}\n",
+            stat_line("sda", &[]),
+            "8 1 sda1 1 0 2 1 1 0 2 1 0 1 1",
+            "8 2 sda2 1 0 2 1 1 0 2 1 0 1 1"
+        ));
+        assert_eq!(stats.len(), 3);
+        let inventory = vec![InventoryDisk {
+            name: "sda".into(),
+            kind: "ssd".into(),
+            size: 1024,
+            model: "Example SSD 1TB".into(),
+            dev: "8:0".into(),
+            partitions: vec![
+                PartMount {
+                    name: "sda1".into(),
+                    dev: "8:1".into(),
+                    mounts: vec!["/".into()],
+                },
+                PartMount {
+                    name: "sda2".into(),
+                    dev: "8:2".into(),
+                    mounts: vec![],
+                },
+            ],
+            slaves: vec![],
+        }];
+        let live = live_disks(&stats, &inventory);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].name, "sda");
+        assert_eq!(live[0].partitions.len(), 2);
+        assert!(!live[0].idle);
+        assert_eq!(device_of("8:1", &live).as_deref(), Some("on sda (sda1)"));
+        assert_eq!(device_of("8:0", &live).as_deref(), Some("on sda"));
+    }
+
+    #[test]
+    fn idle_disks_and_named_devices_are_separate_filters() {
+        let idle = LiveDisk {
+            name: "loop0".into(),
+            kind: "virtual".into(),
+            size: 0,
+            model: String::new(),
+            dev: "7:0".into(),
+            stat: Some(stat_at("loop0", 0, 0, 0, 0)),
+            mac: None,
+            idle: true,
+            partitions: vec![],
+            mounts: vec![],
+            slaves: vec![],
+        };
+        let busy = LiveDisk {
+            name: "sda".into(),
+            kind: "ssd".into(),
+            size: 1,
+            model: "Example SSD 1TB".into(),
+            dev: "8:0".into(),
+            stat: Some(stat_at("sda", 3, 3, 1, 1)),
+            mac: None,
+            idle: false,
+            partitions: vec![],
+            mounts: vec![],
+            slaves: vec![],
+        };
+        let disks = vec![idle, busy.clone()];
+        let (shown, hidden) = visible_disk_indexes(&disks, false, &[]);
+        assert_eq!(shown, vec![1]);
+        assert_eq!(hidden.idle, 1);
+        assert_eq!(hidden.configured, 0);
+        assert_eq!(hidden.labels(), vec!["1 idle hidden".to_string()]);
+
+        let (shown, hidden) = visible_disk_indexes(&disks, true, &["sda".into()]);
+        assert_eq!(shown, vec![0]);
+        assert_eq!(hidden.idle, 0);
+        assert_eq!(hidden.configured, 1);
+        assert_eq!(hidden.labels(), vec!["1 hide_devices hidden".to_string()]);
+        let _ = busy;
+    }
+
+    #[test]
+    fn a_root_cgroup_line_marks_the_host() {
+        assert!(cgroup_is_host("0::/\n"));
+        assert!(!cgroup_is_host("0::/init.scope\n"));
+        assert!(!cgroup_is_host(""));
     }
 }

@@ -2,7 +2,7 @@
 
 [← all widgets](../../../../docs/README.md)
 
-Which filesystems can still take a write, and which are running out of inodes.
+Which filesystems can still take a write, which disks are busy, and whether writes are stalling.
 
 ```
 ╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -12,15 +12,23 @@ Which filesystems can still take a write, and which are running out of inodes.
  MOUNT   TYPE   SIZE   USED  USABLE        %  INODES
  ▸ /     ext4   100G    80G     15G  ████  84%     12%
    /home xfs    200G    40G    160G  ██    20%      4%
+ DISKS  whole disks only · /proc/diskstats · 512-byte sectors
+ DISK     TYPE    SIZE   READ  WRITE  IOPS  AWAIT  BUSY*  QUEUE
+ ▸ sda    ssd     1.0T   12M   40M    1.2K   2ms    18%      1
 
- ↑↓ select  [↵] detail  [s] sort by % used  [p] pause  [,] settings  [q]uit
+ ↑↓ select  [↵] detail  [s] sort by read  tab section  [v] show idle disks  [p] pause
 ```
 
-`↑↓` move the selection. `↵` opens the selected mount: its source, type,
-options, size, used, usable, the root reserve, the inodes, and every other
-mount on the same device. `esc` goes back. `s` cycles the sort through
-mount order, percent used and inodes. `p` pauses the sample and the header
-says so. `,` opens settings. `!` opens notices. `q` quits.
+`↑↓` move the selection, including from one section into the next. `tab`
+moves between sections. `↵` opens the selected mount or the selected disk.
+A mount's detail adds the disk and partition it sits on, `on nvme0n1
+(nvme0n1p2)`. A disk's detail names the model, the type, the size, each
+partition and the mounts on it, the totals since boot, and the current
+rates. `esc` goes back. `s` cycles the sort of the section that has the
+cursor: filesystems through mount order, percent used and inodes; disks
+through write, read and name. `v` shows idle disks, or hides them again.
+`p` pauses the sample and the header says so. `,` opens settings. `!`
+opens notices. `q` quits.
 
 The wheel, `ctrl-y` and `ctrl-e` scroll the view and leave the selection
 where it is. `pgup`, `pgdn`, `home` and `end` move that same view.
@@ -69,3 +77,35 @@ poller that stops says `stopped:` and why.
 Columns leave as the pane narrows, inodes first, then type, then size. The
 mount point wraps onto the next row rather than being cut. A pane that is
 too short to hold the table scrolls; the title stays put.
+
+## Disks
+
+Whole disks only. A partition is not a row and is not added into its disk.
+The heading says `whole disks only`, that the counters are
+`/proc/diskstats`, and that those sectors are `512-byte sectors`. Linux
+columns are disk, type, size, read, write, iops, await, busy and queue.
+They leave in that order from the right: queue, then await, then type,
+then size, then iops. Busy is the share of the interval with at least one
+request in flight. Queue is the instantaneous in-flight count. The first
+sample says `measuring`. A counter that went backwards is a gap, drawn as
+`—`, not a spike.
+
+A disk with no reads and no writes since boot is hidden until `v`. The
+count is on the filter line (`7 idle hidden`). `hide_devices` is a second
+category on that line. The selected disk keeps a 60-sample read-up,
+write-down chart. Read sits on a zero baseline and write on the top of the
+cell, so an idle stretch draws nothing.
+
+On macOS the same section is `iostat`: read and write are one number, and
+the heading says await, busy and queue need IOKit. PRESSURE is not drawn
+on macOS.
+
+When `/proc/1/cgroup` is `0::/`, the disk heading also says `host devices,
+container filesystems`.
+
+## Pressure
+
+Linux only. The row is stall time from `/proc/pressure/io`, some and full,
+over 10, 60 and 300 seconds. The heading says it is stall time, not busy
+time. A kernel built without PSI, or one booted with `psi=0`, shows `PSI
+not available on this kernel (CONFIG_PSI or psi=0)` and never a zero.

@@ -56,6 +56,7 @@ pub enum Tool {
     Ss,
     Tailscale,
     Who,
+    Iostat,
 }
 
 impl Tool {
@@ -77,6 +78,7 @@ impl Tool {
             "ss" => Some(Self::Ss),
             "tailscale" => Some(Self::Tailscale),
             "who" => Some(Self::Who),
+            "iostat" => Some(Self::Iostat),
             _ => None,
         }
     }
@@ -99,6 +101,7 @@ impl Tool {
             Self::Ss => "ss",
             Self::Tailscale => "tailscale",
             Self::Who => "who",
+            Self::Iostat => "iostat",
         }
     }
 
@@ -123,6 +126,7 @@ impl Tool {
             Self::Ss => "recommended-ss",
             Self::Tailscale => "recommended-tailscale",
             Self::Who => "recommended-who",
+            Self::Iostat => "recommended-iostat",
         }
     }
 
@@ -529,6 +533,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Fedora => match tool {
@@ -541,6 +546,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps-ng"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Arch => match tool {
@@ -553,6 +559,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps-ng"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Alpine => match tool {
@@ -565,6 +572,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Unknown => None,
@@ -976,5 +984,31 @@ mod tests {
         assert!(required.contains("required reason"));
         assert!(!required.contains("recommended reason"));
         assert!(recommended.contains("recommended reason"));
+    }
+
+    #[test]
+    fn iostat_is_recommended_and_packaged_on_every_linux_family() {
+        assert_eq!(Tool::parse("iostat"), Some(Tool::Iostat));
+        assert_eq!(Tool::Iostat.command(), "iostat");
+        assert_eq!(Tool::Iostat.recommended_notice_id(), "recommended-iostat");
+        for family in [
+            LinuxFamily::Debian,
+            LinuxFamily::Fedora,
+            LinuxFamily::Arch,
+            LinuxFamily::Alpine,
+        ] {
+            let host = Host {
+                platform: Platform::Linux,
+                linux: family,
+                name: String::new(),
+            };
+            assert_eq!(package(Tool::Iostat, &host), Some("sysstat"), "{family:?}");
+        }
+        let mac = Host {
+            platform: Platform::Macos,
+            linux: LinuxFamily::Unknown,
+            name: String::new(),
+        };
+        assert_eq!(package(Tool::Iostat, &mac), None);
     }
 }
