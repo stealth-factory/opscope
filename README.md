@@ -450,8 +450,8 @@ than borrowing one. Every other widget needs no configuration to start.
 All three GitHub widgets also reach **GitHub Enterprise**: set
 `enterprise_hostname` in each one's section (for example `acme.ghe.com`), or
 name a variable holding the host in `enterprise_hostname_env`, and use a token
-that host issued. Both empty is github.com. Each widget's README has the
-details.
+that host issued. If both are empty, the widget uses github.com. Each
+widget's README has the details.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic

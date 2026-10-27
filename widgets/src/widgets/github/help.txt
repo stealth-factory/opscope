@@ -26,8 +26,8 @@ not fail, it silently undercounts, so the granted scopes are checked and named.
 The API is called directly, so the `gh` CLI is not required.
 
 GitHub Enterprise: set `enterprise_hostname` to the web host, for example
-`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other host
-is treated as Enterprise Server (untested). Or name a variable in
+`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other
+host but github.com is treated as Enterprise Server (untested). Or name a variable in
 `enterprise_hostname_env` and set the host there; none is read unless named.
 The token must come from that host.
 
