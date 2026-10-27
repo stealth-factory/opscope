@@ -605,6 +605,9 @@ jobs:
       id-token: write
     outputs:
       version: ${{ steps.pack.outputs.version }}
+      # false when a newer canary already owns the tag and this run
+      # left it alone, so smoke-canary has nothing of its to install.
+      published: ${{ steps.publish.outputs.published }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -639,6 +642,7 @@ jobs:
           ls -la npm-dist
 
       - name: Publish to npm under canary
+        id: publish
         run: |
           set -euo pipefail
           # The same reason as publish: any credential at all, an empty
@@ -653,6 +657,7 @@ jobs:
           current=$(npm view opscope@canary version 2>/dev/null || true)
           if ! node npm/canary.js --may-take-tag "$current" "$version"; then
             echo "leaving canary on ${current}; ${version} is older"
+            echo "published=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           canary() {
@@ -673,6 +678,7 @@ jobs:
             canary "$pkg"
           done
           canary npm-dist/opscope
+          echo "published=true" >> "$GITHUB_OUTPUT"
           echo "npx opscope@canary is now ${version}"
 
   # Reports, like the release smoke jobs; it gates nothing, because the
@@ -681,6 +687,7 @@ jobs:
   # binary says the release it was built on (Cargo.toml) and the commit.
   smoke-canary:
     needs: canary
+    if: needs.canary.outputs.published == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0

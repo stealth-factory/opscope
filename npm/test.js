@@ -736,6 +736,15 @@ test('canary.js prints a version when it is the program that starts', () => {
     /node npm\/canary\.js --may-take-tag "\$current" "\$version"/,
     'the canary job no longer refuses an older commit',
   );
+  // And a run that stood down publishes nothing for smoke-canary to
+  // install, so it must not spend eight minutes failing to.
+  const yml = fs.readFileSync(path.join(repoRoot, '.github/workflows/release.yml'), 'utf8');
+  assert.match(jobBlock(yml, 'canary'), /echo "published=false" >> "\$GITHUB_OUTPUT"/);
+  assert.match(
+    jobBlock(yml, 'smoke-canary'),
+    /^ {4}if: needs\.canary\.outputs\.published == 'true'$/m,
+    'smoke-canary runs even when the canary was not published',
+  );
 });
 
 test('pack.js packs a canary of the manifest version', () => {
