@@ -54,11 +54,11 @@ is zero) shows `n/a` rather than zero. A remote type — nfs, nfs4, cifs,
 smb3, smbfs, afpfs, sshfs, and anything under `fuse.` — is dim in the type
 column only.
 
-`s` orders by mount point as the kernel listed them, then by which
-filesystem fills soonest, then by percent used with the fullest first, then
-by inodes the same way. `not filling` and `measuring` sort after every
-projection, in mount order. A row that has not answered yet sorts last.
-The footer names the sort the next press moves to.
+`s` cycles four orders: mount point as the kernel listed them; which
+filesystem fills soonest; percent used, fullest first; inodes the same
+way. Mount order breaks the ties. `not filling` and `measuring` sort
+after every projection, in mount order. A row that has not answered yet
+sorts last. The footer names the sort the next press moves to.
 
 ## What is hidden
 
@@ -91,12 +91,14 @@ not fit wraps whole cells onto the next line. The mount point wraps onto
 the next row rather than being cut. A pane that is too short to hold the
 table scrolls; the title stays put.
 
-## What this widget measured itself
+## What this widget kept
 
-`1h Δ`, the window `Δ` and `FULL IN` are numbers this widget measured
-itself, kept in `disk/usage.json`. At most one sample a minute for the
-last day, then one every fifteen minutes, and nothing older than thirty
-days: at most 1,440 + 2,784 points, about 4.3k, per filesystem. Twenty
+The one-hour rate and the window rate come from samples this widget took
+itself. `FULL IN` projects that window rate onto the usable space now.
+`disk/usage.json` keeps the samples, not those rates. At most one sample
+a minute for the last day, then one every fifteen minutes, and nothing
+older than thirty days: at most 1,440 + 2,784 points, about 4.3k, per
+filesystem. Twenty
 filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
 gap in the trace, not a slope invented across the time the pane was not
 running. The footnote says the rate is since the first fitted sample, and
