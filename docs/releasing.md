@@ -229,6 +229,54 @@ What it cannot do is *run* the result, so that leg builds and packages but
 does not execute its tests — the same sources are tested on the native arm64
 leg in the same run.
 
+## Canary
+
+Every push to main also runs `release.yml`, and that run is not a release.
+The same three targets are built and tested, the tarballs are named for a
+canary version, and the `canary` job packs the four npm packages from them
+and publishes each with `--tag canary`. So `npx opscope@canary` runs
+whatever main is now, and `latest` does not move.
+
+```
+push to main (docs-only pushes excepted)
+        │
+        └─► release.yml   build ─► canary ─► smoke-canary
+                          no tag, no changelog, no GitHub release,
+                          no Homebrew, no APT
+```
+
+**The version.** `npm/canary.js` takes the next patch after `Cargo.toml`
+and adds the commit's UTC time and short sha:
+`2.2.0` on main becomes `2.2.1-canary.20261027040700.g1a2b3c4`. That sorts
+above the release it was built on and below the next one, and canaries sort
+in the order they landed. The manifest is not edited: the binaries still say
+`opscope 2.2.0 (1a2b3c4, …)`, and the commit is how to tell a canary from
+the release. A re-run of the same commit finds its version already on npm
+and skips it.
+
+**Why it is in `release.yml`.** The four packages already trust this file
+for trusted publishing. A separate canary workflow would need a second
+trusted-publisher entry added by hand on all four packages, which npm has
+allowed only since
+[September 2026](https://github.blog/changelog/2026-09-03-multiple-trusted-publishing-configurations-for-npm),
+or a stored token, which this pipeline does not keep. A publish with `--tag` is still the one OIDC write `npm publish`
+makes, so it works where moving a dist-tag after the fact does not
+([npm/cli#8547](https://github.com/npm/cli/issues/8547)).
+
+**Overlapping merges.** Canary runs share one concurrency group that cancels
+the older run, so only the newest main is published. A run cancelled after
+some platform packages landed leaves them without a launcher, which nothing
+installs; the next canary supersedes them.
+
+**`smoke-canary` reports; it does not gate.** It installs the exact canary
+version on a clean Linux runner and checks the binary reports this commit.
+As with `smoke-npm`, the tag has already moved by the time it can look.
+
+Homebrew and APT have no canary. Each would be a separate channel rather than
+a flag on the existing one: a second formula (`opscope-canary`, conflicting
+with `opscope`) fed from a rolling prerelease, and a separate suite in the APT
+repository. Both are possible later; neither is wired up.
+
 ## Homebrew
 
 After `publish` has created the public GitHub release, the `homebrew` job

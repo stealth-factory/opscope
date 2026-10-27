@@ -571,7 +571,8 @@ test('release.yml publishes untagged, so one write creates and advertises', () =
     path.join(repoRoot, '.github/workflows/release.yml'),
     'utf8',
   );
-  const publishes = yml.match(/npm publish "\.\/\$dir"[^\n]*/g) || [];
+  const publishes =
+    jobBlock(yml, 'publish').match(/npm publish "\.\/\$dir"[^\n]*/g) || [];
   assert.equal(publishes.length, 1, 'expected exactly one npm publish line');
   assert.doesNotMatch(
     publishes[0],
@@ -652,6 +653,113 @@ test('publish serializes tagged runs so latest cannot move backwards', () => {
     /node npm\/refuse-stale-latest\.js "\$version"/,
     'publish no longer refuses a queued older tag',
   );
+});
+
+test('a canary is the next patch as a prerelease, named for its commit', () => {
+  const { canaryVersion, isCanaryOf } = require('./canary');
+  const sha = '014901a3c2b1d0e9f8a7b6c5d4e3f2a1b0c9d8e7';
+  // 2026-10-27T04:07:00Z
+  const v = canaryVersion('2.2.0', 1793074020, sha);
+  assert.equal(v, '2.2.1-canary.20261027040700.g014901a');
+  assert.ok(isCanaryOf(v, '2.2.0'));
+  // Not a canary of a different release, and a release is not a canary.
+  assert.ok(!isCanaryOf(v, '2.1.9'));
+  assert.ok(!isCanaryOf('2.2.0', '2.2.0'));
+  assert.ok(!isCanaryOf('2.2.1', '2.2.0'));
+  // An all-digit short sha with a leading zero is not a legal semver
+  // identifier; the g keeps it alphanumeric.
+  assert.match(
+    canaryVersion('0.9.9', 0, '0123456' + 'a'.repeat(33)),
+    /^0\.9\.10-canary\.19700101000000\.g0123456$/,
+  );
+  assert.throws(() => canaryVersion('2.2.0-rc.1', 0, sha), /not x\.y\.z/);
+  assert.throws(() => canaryVersion('2.2.0', 0, 'abc1234'), /full commit sha/);
+});
+
+test('canaries sort by the time their commit landed', () => {
+  const { canaryVersion } = require('./canary');
+  const sha = (c) => c.repeat(40);
+  const older = canaryVersion('2.2.0', 1793074020, sha('f'));
+  const newer = canaryVersion('2.2.0', 1793074021, sha('0'));
+  // Semver compares prerelease identifiers left to right, numerically
+  // where both are numbers: the timestamp decides before the sha.
+  const stamp = (v) => Number(v.split('.')[3]);
+  assert.ok(stamp(newer) > stamp(older));
+});
+
+test('pack.js packs a canary of the manifest version', () => {
+  const dir = scratch();
+  try {
+    const { canaryVersion } = require('./canary');
+    const version = canaryVersion(
+      packer.versionFromCargo(repoRoot),
+      1793074020,
+      'a'.repeat(40),
+    );
+    const bins = platform.binsFromManifest(repoRoot);
+    const artifacts = path.join(dir, 'artifacts');
+    fs.mkdirSync(artifacts);
+    for (const p of platform.PLATFORMS) {
+      makeTarball(artifacts, p.rust, `v${version}`, bins);
+    }
+    const result = packer.pack({
+      repoRoot,
+      version,
+      artifacts,
+      out: path.join(dir, 'out'),
+    });
+    const launcher = JSON.parse(
+      fs.readFileSync(path.join(result.launcher, 'package.json'), 'utf8'),
+    );
+    assert.equal(launcher.version, version);
+    for (const p of platform.PLATFORMS) {
+      assert.equal(launcher.optionalDependencies[p.pkg], version);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pack.js refuses a canary of some other release', () => {
+  assert.throws(
+    () =>
+      packer.pack({
+        repoRoot,
+        version: '9.9.10-canary.20261027040700.gabcdef0',
+        artifacts: repoRoot,
+        out: path.join(os.tmpdir(), 'nope'),
+      }),
+    /Cargo\.toml says/,
+  );
+});
+
+test('the canary publishes only under --tag canary, only from main', () => {
+  // A prerelease publish with --tag moves that tag and nothing else, so
+  // latest stays on the last release. One publish line here without it
+  // would make every merge to main the latest release.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const canary = jobBlock(yml, 'canary');
+  assert.match(
+    canary,
+    /^ {4}if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'$/m,
+    'the canary job is not limited to pushes to main',
+  );
+  const publishes = canary.match(/^[^#\n]*\bnpm publish\b[^\n]*/gm) || [];
+  assert.equal(publishes.length, 1, 'expected exactly one npm publish line');
+  assert.match(publishes[0], /--tag canary\b/);
+  assert.match(publishes[0], /--provenance\b/);
+  assert.match(canary, /node npm\/pack\.js --version "\$version"/);
+  // And nothing tag-only runs on a push to main.
+  for (const job of ['publish', 'debian-lifecycle', 'apt-repository', 'homebrew', 'smoke-npm', 'smoke-module']) {
+    assert.match(
+      jobBlock(yml, job),
+      /^ {4}if: startsWith\(github\.ref, 'refs\/tags\/v'\)$/m,
+      `${job} is no longer limited to tags`,
+    );
+  }
 });
 
 test('refuse-stale-latest lets equal or older latest through and stops a newer one', () => {
