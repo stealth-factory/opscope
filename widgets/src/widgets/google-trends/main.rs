@@ -150,9 +150,14 @@ fn apply(region: &mut Region, answer: Answer, memory: &mut Memory, now: f64, ref
         }
         Answer::Rejected(said) => {
             // Not a region Google knows: there were never rows to keep.
+            // The new-since count named those rows, so it goes with them.
+            // A failed or unreadable fetch leaves both, because those rows stay.
             region.items.clear();
             region.seen.clear();
             region.left.clear();
+            region.new_count = 0;
+            region.since = None;
+            region.stale = None;
             region.failure = Some(Failure::Rejected(said));
         }
         Answer::Failed(said) => region.failure = Some(Failure::Failed(said)),
@@ -209,7 +214,11 @@ fn save_memory(geo: &str, memory: &Memory) -> Result<(), String> {
 
 /// The memory note after a save: a failure replaces it, a success ends a
 /// failure, and the started-fresh notice goes once there is a fetch to compare with.
-fn note_after_save(note: Option<String>, saved: Result<(), String>, compared: bool) -> Option<String> {
+fn note_after_save(
+    note: Option<String>,
+    saved: Result<(), String>,
+    compared: bool,
+) -> Option<String> {
     match saved {
         Err(why) => Some(format!("could not save what was seen ({why})")),
         Ok(()) => match note {
@@ -373,7 +382,6 @@ fn seen_cell(polls: u32, first_check: bool) -> String {
 /// Section indices.
 const TRENDING: usize = 0;
 const LEFT: usize = 1;
-const REGIONS: usize = 2;
 
 /// Everything the list screen needs from the keyboard side.
 #[derive(Clone, Debug, Default)]
@@ -385,7 +393,7 @@ struct View {
     /// section while this one is empty - before the first fetch, or under a
     /// filter - and returns here as soon as it has rows again.
     wanted: usize,
-    at: [usize; 3],
+    at: [usize; 2],
     needle: String,
     typing: bool,
     note: String,
@@ -402,9 +410,9 @@ struct Body {
     slots: Vec<(usize, usize)>,
     cursor: Option<usize>,
     /// How many rows each section has to select, after the filter.
-    lens: [usize; 3],
+    lens: [usize; 2],
     /// Visible indices per section, after the filter.
-    visible: [Vec<usize>; 3],
+    visible: [Vec<usize>; 2],
 }
 
 /// Widths of the trending table's columns, or `0` for a dropped one.
@@ -469,7 +477,11 @@ fn columns(
             + if with_started { started + gap } else { 0 }
             + if with_seen { seen + gap } else { 0 };
         // The last table needs only SEARCH's heading, since its terms wrap.
-        let least = if with_started { search_min } else { "SEARCH".len() };
+        let least = if with_started {
+            search_min
+        } else {
+            "SEARCH".len()
+        };
         if room >= fixed + least {
             return Columns {
                 search: room - fixed,
@@ -491,6 +503,143 @@ fn columns(
     }
 }
 
+/// The region tab strip: each geo, its state marker, and how many are new.
+fn region_tabs(shared: &Shared, p: &Palette) -> Vec<tc::Tab> {
+    shared
+        .regions
+        .iter()
+        .map(|r| tc::Tab {
+            title: r.geo.clone(),
+            marker: match &r.failure {
+                Some(Failure::Rejected(_)) => Some((p.bad.clone(), "×")),
+                Some(Failure::Failed(_)) | Some(Failure::Unreadable(_)) => {
+                    Some((p.warn.clone(), "!"))
+                }
+                None if r.fetched > 0.0 => Some((p.ok.clone(), "·")),
+                None => None,
+            },
+            badge: (r.since.is_some() && r.new_count > 0).then(|| r.new_count.to_string()),
+        })
+        .collect()
+}
+
+/// The region a click on tab `clicked` opens, when it is not already open.
+///
+/// The open tab is already selected. Resetting the cursor and the scroll
+/// for that click moves the list without changing region, and a row click
+/// later in the same poll is then resolved against a scroll the frame was
+/// not drawn at.
+fn tab_switch(open: usize, clicked: usize) -> Option<usize> {
+    (clicked != open).then_some(clicked)
+}
+
+/// The tab a frame click `(x, y)` landed on, the strip being rows
+/// `1..head`. None on anything else.
+fn tab_clicked(
+    placements: &[(usize, usize, usize)],
+    x: usize,
+    y: usize,
+    head: usize,
+) -> Option<usize> {
+    if y < 1 || y >= head {
+        return None;
+    }
+    let line = y - 1;
+    placements
+        .iter()
+        .find(|&&(row, col, _)| row == line && col == x)
+        .map(|&(_, _, i)| i)
+}
+
+/// Rows the pinned strip may take.
+///
+/// The title, one row of the feed, the notices banner and the footer are
+/// reserved first. A strip that wrapped without a limit filled a short pane
+/// on its own, and the feed sat below the screen where the wheel cannot
+/// reach it: scrolling moves the body, and the strip is not part of the body.
+fn strip_rows(h: usize, foot: usize, banner: usize) -> usize {
+    h.saturating_sub(2 + foot + banner)
+}
+
+/// The strip lines that fit in `rows`, with the active tab's line kept.
+///
+/// Placements come back in that window's coordinates, so a click still
+/// matches the row on screen. No rows draws nothing: the arrows still
+/// change region, and the feed keeps the pane.
+fn window_strip(
+    lines: Vec<String>,
+    placed: Vec<(usize, usize, usize)>,
+    active: usize,
+    rows: usize,
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    if rows == 0 || lines.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if lines.len() <= rows {
+        return (lines, placed);
+    }
+    let active_row = placed
+        .iter()
+        .find(|&&(_, _, i)| i == active)
+        .map(|&(row, _, _)| row)
+        .unwrap_or(0)
+        .min(lines.len() - 1);
+    let start = active_row.saturating_sub(rows / 2).min(lines.len() - rows);
+    let shown = lines.into_iter().skip(start).take(rows).collect();
+    let placed = placed
+        .into_iter()
+        .filter(|&(row, _, _)| (start..start + rows).contains(&row))
+        .map(|(row, col, i)| (row - start, col, i))
+        .collect();
+    (shown, placed)
+}
+
+/// The list the keys after a region change read.
+///
+/// `drawn` belongs to the region that was on screen. A click or an arrow
+/// in this poll can open another region before `enter`, and `enter` indexes
+/// that body's `visible` into the region now showing. The old `visible` is
+/// the previous region's filtered positions, so it opens a different trend.
+fn body_for_keys(
+    shared: &Shared,
+    view: &View,
+    refresh: f64,
+    cw: usize,
+    now: f64,
+    p: &Palette,
+    drawn: Body,
+    region_drawn: usize,
+) -> Body {
+    if view.region == region_drawn {
+        drawn
+    } else {
+        list_body(shared, view, refresh, cw, now, p)
+    }
+}
+
+/// Opens region `next` and hands back the body the rest of this poll's
+/// keys read.
+///
+/// The arrows and a tab click both land here, so neither can change region
+/// and leave `enter` reading the old region's list: `before` goes in and
+/// its replacement comes out, and the caller has nothing else to use.
+#[allow(clippy::too_many_arguments)]
+fn open_region(
+    view: &mut View,
+    next: usize,
+    shared: &Shared,
+    refresh: f64,
+    cw: usize,
+    now: f64,
+    p: &Palette,
+    before: Body,
+) -> Body {
+    let was = view.region;
+    view.region = next;
+    view.at = [0; 2];
+    body_for_keys(shared, view, refresh, cw, now, p, before, was)
+}
+
 /// The list screen's body, below the pinned title.
 fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p: &Palette) -> Body {
     let mut b = Body::default();
@@ -501,10 +650,9 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         b.rows.extend(line(&p.dim, 1, "no regions configured", cw));
         return b;
     };
-    let several = shared.regions.len() > 1;
     let first_check = region.since.is_none();
 
-    // Status: when, where from, and which region of how many.
+    // Status: when this region was fetched, and where the feed comes from.
     let mut status = vec![if region.fetched > 0.0 {
         format!("fetched {} ago", tc::age(now - region.fetched))
     } else if region.failure.is_some() {
@@ -513,9 +661,6 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         "fetching…".to_string()
     }];
     status.push(format!("Google's Trending Now feed, {}", cadence(refresh)));
-    if several {
-        status.push(region_index(view.region, shared.regions.len()));
-    }
     for l in pack(&status, cw.saturating_sub(1)) {
         b.rows.extend(line(&p.dim, 1, &l, cw));
     }
@@ -548,29 +693,29 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         .filter(|&i| now - region.left[i].left_at <= state::LEFT_KEPT)
         .filter(|&i| {
             let l = &region.left[i];
-            matches(&view.needle, &l.title, l.news.as_deref().unwrap_or_default())
+            matches(
+                &view.needle,
+                &l.title,
+                l.news.as_deref().unwrap_or_default(),
+            )
         })
         .collect();
-    if several {
-        b.visible[REGIONS] = (0..shared.regions.len()).collect();
-    }
-    for s in 0..3 {
+    for s in 0..2 {
         b.lens[s] = b.visible[s].len();
     }
 
-    b.rows.extend(line(
-        &p.head,
-        1,
-        &format!("TRENDING NOW{SEP}{}", region.geo),
-        cw,
-    ));
+    b.rows.extend(line(&p.head, 1, "TRENDING NOW", cw));
     let mut about = vec!["Google's \"approx traffic\" is a bucket, not a count".to_string()];
     match tc::filter_row(b.lens[TRENDING], region.items.len(), &filters) {
         Some(f) => about.push(f),
         None if region.items.is_empty() => {}
         None => about.push(format!("{} of {}", b.lens[TRENDING], region.items.len())),
     }
-    if region.fetched > 0.0 {
+    // A rejection cleared the rows and the count. "first check" would
+    // describe a comparison that no longer exists; the error row below
+    // says why the feed is gone.
+    let rejected = matches!(region.failure, Some(Failure::Rejected(_)));
+    if region.fetched > 0.0 && !rejected {
         match region.since {
             Some(at) => about.push(format!("{} new since {}", region.new_count, clock(at, now))),
             None => match region.stale {
@@ -614,7 +759,6 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         None => {}
     }
 
-    let rejected = matches!(region.failure, Some(Failure::Rejected(_)));
     if region.fetched <= 0.0 && region.failure.is_none() {
         b.rows.extend(line(
             &p.dim,
@@ -669,19 +813,7 @@ fn list_body(shared: &Shared, view: &View, refresh: f64, cw: usize, now: f64, p:
         left_rows(&mut b, region, view, cw, now, p);
     }
 
-    // REGIONS
-    if several {
-        b.rows.push(String::new());
-        b.rows.extend(line(&p.head, 1, "REGIONS", cw));
-        region_rows(&mut b, shared, view, cw, now, p);
-    }
     b
-}
-
-/// `←→ 1 of 3`, on a line of its own so the arrows never share a string
-/// with a separator.
-fn region_index(at: usize, of: usize) -> String {
-    format!("←→ {} of {}", at + 1, of)
 }
 
 /// Push one selectable item's rows, recording where they landed.
@@ -984,70 +1116,6 @@ fn left_rows(b: &mut Body, region: &Region, view: &View, cw: usize, now: f64, p:
     }
 }
 
-/// The trend that started most recently, Google's order breaking a tie.
-fn newest(region: &Region) -> Option<&Trend> {
-    let mut best: Option<&Trend> = None;
-    for t in &region.items {
-        match (best, t.started) {
-            (None, _) => best = Some(t),
-            (Some(b), Some(s)) if b.started.is_none_or(|bs| s > bs) => best = Some(t),
-            _ => {}
-        }
-    }
-    best
-}
-
-fn region_rows(b: &mut Body, shared: &Shared, view: &View, cw: usize, now: f64, p: &Palette) {
-    let selected = (view.focus == REGIONS).then(|| view.at[REGIONS]);
-    let name_want = shared
-        .regions
-        .iter()
-        .map(|r| tc::display_width(&r.geo) + 2)
-        .max()
-        .unwrap_or(1);
-    for (k, r) in shared.regions.iter().enumerate() {
-        let mut facts = Vec::new();
-        let colour = match &r.failure {
-            Some(Failure::Rejected(said)) => {
-                facts.push(format!("{said} (HTTP 400)"));
-                &p.bad
-            }
-            other => {
-                match newest(r) {
-                    Some(t) if t.traffic.is_empty() => facts.push(format!("newest: {}", t.title)),
-                    Some(t) => facts.push(format!("newest: {} {}", t.title, t.traffic)),
-                    None if r.fetched > 0.0 => facts.push("no items right now".into()),
-                    None => {}
-                }
-                if r.fetched > 0.0 {
-                    facts.push(format!("fetched {} ago", tc::age(now - r.fetched)));
-                } else if other.is_none() {
-                    facts.push("fetching…".into());
-                }
-                match other {
-                    Some(Failure::Failed(said)) => {
-                        facts.push(format!("last fetch failed: {said}"));
-                        &p.warn
-                    }
-                    Some(Failure::Unreadable(_)) => {
-                        facts.push("last fetch would not parse".into());
-                        &p.warn
-                    }
-                    _ => &p.text,
-                }
-            }
-        };
-        let name = if k == view.region {
-            format!("{} ◂", r.geo)
-        } else {
-            r.geo.clone()
-        };
-        let sel = selected == Some(k);
-        let rows = named_rows(&name, name_want, colour, &facts, p, sel, cw);
-        push_item(b, REGIONS, k, rows, sel);
-    }
-}
-
 /// What the detail screen is showing.
 #[derive(Clone, Debug, Default)]
 struct Detail {
@@ -1098,7 +1166,8 @@ fn detail_body(d: &Detail, cw: usize, now: f64, p: &Palette) -> Body {
     }
     b.rows.push(String::new());
     if !d.news_kept {
-        b.rows.extend(line(&p.head, 1, &format!("NEWS{SEP}not kept"), cw));
+        b.rows
+            .extend(line(&p.head, 1, &format!("NEWS{SEP}not kept"), cw));
         let why = "stories are kept only while the widget runs, and it has \
                    restarted since this trend left";
         for l in tc::wrap_words(why, room) {
@@ -1239,6 +1308,27 @@ fn detail_hints() -> Vec<Vec<(&'static str, String)>> {
         vec![("", "esc back".to_string())],
         vec![("", "[q]uit".to_string())],
     ]
+}
+
+/// Which screen answers a key. Scroll is the same on every screen. `!` is
+/// left to that screen: the list and the news view open notices, and a
+/// filter being typed takes it as a character because its footer has no
+/// notices hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Scroll,
+    Detail,
+    Typing,
+    List,
+}
+
+fn route_key(key: &str, in_detail: bool, typing: bool) -> Route {
+    match key {
+        "ctrl-y" | "wheel-up" | "ctrl-e" | "wheel-down" | "pgup" | "pgdn" => Route::Scroll,
+        _ if in_detail => Route::Detail,
+        _ if typing => Route::Typing,
+        _ => Route::List,
+    }
 }
 
 /// Footer lines, coloured, and the placements for clicks.
@@ -1438,9 +1528,10 @@ fn main() {
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut slots: Vec<(usize, usize)> = Vec::new();
     let mut room = 1usize;
+    let mut head = 1usize;
+    let mut tabs_at: Vec<(usize, usize, usize)> = Vec::new();
     let mut note_at = 0.0f64;
     let mut was: Picked = (0, [None, None]);
-    const HEAD: usize = 1;
 
     loop {
         let (w, h) = tc::size();
@@ -1462,7 +1553,7 @@ fn main() {
         let several = snapshot.regions.len() > 1;
         // The body as it stands before this frame's keys, for resolving
         // what a key or click refers to.
-        let before = list_body(&snapshot, &view, refresh, cw, now, &p);
+        let mut before = list_body(&snapshot, &view, refresh, cw, now, &p);
         follow_titles(&mut view, &snapshot, &before, &was);
 
         let mut keys = keyboard.poll();
@@ -1472,7 +1563,37 @@ fn main() {
                 .iter()
                 .position(|&s| s == (view.focus, view.at[view.focus])),
         };
-        if let Some(at) = tc::rows_clicked(&mut keys, current, HEAD, scroll, &placed, None) {
+        let mut switched = false;
+        if detail.is_none() {
+            // A click on a tab opens it, which is what stepping to it
+            // with the arrows does - the same rule as everywhere else,
+            // that the mouse is a second route to something a key
+            // already reaches.
+            for key in keys.iter_mut() {
+                if let Some((x, y)) = tc::click_at(key) {
+                    if let Some(i) = tab_clicked(&tabs_at, x, y, head) {
+                        if let Some(next) = tab_switch(view.region, i) {
+                            switched = true;
+                            before = open_region(
+                                &mut view, next, &snapshot, refresh, cw, now, &p, before,
+                            );
+                            scroll = 0;
+                        }
+                        key.clear();
+                    }
+                }
+            }
+        }
+        // A row click in this poll landed on the region that was drawn.
+        // Applying it after the tab click would index that row into the
+        // region just opened.
+        if switched {
+            for key in keys.iter_mut() {
+                if tc::click_at(key).is_some() {
+                    key.clear();
+                }
+            }
+        } else if let Some(at) = tc::rows_clicked(&mut keys, current, head, scroll, &placed, None) {
             match &mut detail {
                 Some(d) => d.at = at,
                 None => {
@@ -1490,25 +1611,21 @@ fn main() {
             if key.is_empty() {
                 continue;
             }
-            // The view keys answer the same on every screen.
-            match key.as_str() {
-                "ctrl-y" | "wheel-up" => {
-                    scroll = scroll.saturating_sub(1);
+            // The view keys answer the same on every screen. `!` is not one
+            // of them: the list and the news view open notices, and a filter
+            // being typed takes the character.
+            match route_key(&key, detail.is_some(), view.typing) {
+                Route::Scroll => {
+                    match key.as_str() {
+                        "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                        "ctrl-e" | "wheel-down" => scroll += 1,
+                        "pgup" => scroll = scroll.saturating_sub(room.max(1)),
+                        "pgdn" => scroll += room.max(1),
+                        _ => {}
+                    }
                     continue;
                 }
-                "ctrl-e" | "wheel-down" => {
-                    scroll += 1;
-                    continue;
-                }
-                "pgup" => {
-                    scroll = scroll.saturating_sub(room.max(1));
-                    continue;
-                }
-                "pgdn" => {
-                    scroll += room.max(1);
-                    continue;
-                }
-                _ => {}
+                Route::Detail | Route::Typing | Route::List => {}
             }
             if let Some(d) = &mut detail {
                 match key.as_str() {
@@ -1569,7 +1686,7 @@ fn main() {
                     other if other.chars().count() == 1 => view.needle.push_str(other),
                     _ => {}
                 }
-                view.at = [0; 3];
+                view.at = [0; 2];
                 moved = true;
                 continue;
             }
@@ -1604,17 +1721,9 @@ fn main() {
                     }
                 }
                 "left" | "right" if several => {
-                    let n = snapshot.regions.len();
-                    view.region = if key == "left" {
-                        (view.region + n - 1) % n
-                    } else {
-                        (view.region + 1) % n
-                    };
-                    view.at[TRENDING] = 0;
-                    view.at[LEFT] = 0;
-                    // REGIONS follows, so a fallback into it lands on the
-                    // region being shown rather than the first one.
-                    view.at[REGIONS] = view.region;
+                    let by = if key == "left" { -1 } else { 1 };
+                    let next = tc::step_tab(view.region as i64, by, snapshot.regions.len());
+                    before = open_region(&mut view, next, &snapshot, refresh, cw, now, &p, before);
                     scroll = 0;
                 }
                 "up" | "k" | "down" | "j" => {
@@ -1649,7 +1758,7 @@ fn main() {
                     }
                 }
                 "end" => {
-                    if let Some(last) = (0..3).rev().find(|&s| before.lens[s] > 0) {
+                    if let Some(last) = (0..2).rev().find(|&s| before.lens[s] > 0) {
                         view.focus = last;
                         view.wanted = last;
                         view.at[last] = before.lens[last] - 1;
@@ -1657,14 +1766,7 @@ fn main() {
                     }
                 }
                 "enter" => {
-                    if view.focus == REGIONS {
-                        if let Some(&r) = before.visible[REGIONS].get(view.at[REGIONS]) {
-                            view.region = r;
-                            view.at[TRENDING] = 0;
-                            view.at[LEFT] = 0;
-                            scroll = 0;
-                        }
-                    } else if let Some(d) = detail_for(&snapshot, &view, &before, now) {
+                    if let Some(d) = detail_for(&snapshot, &view, &before, now) {
                         detail = Some(d);
                         scroll = 0;
                     }
@@ -1708,7 +1810,7 @@ fn main() {
         } else {
             tc::next_section(None, &body.lens).unwrap_or(view.wanted)
         };
-        for s in 0..3 {
+        for s in 0..2 {
             view.at[s] = view.at[s].min(body.lens[s].saturating_sub(1));
         }
         was = picked(&snapshot, &view, &body);
@@ -1748,13 +1850,37 @@ fn main() {
             }
             body.cursor = body.cursor.map(|c| c + n);
         }
-        let (packed, foot) = footer(&hints, cw, &p);
-        // The banner is pinned with the footer: the body window shrinks
-        // for it rather than scrolling underneath.
+        // The notices counter is inserted by `footer`, just before settings.
+        // The banner is pinned with the footer: the body window shrinks for
+        // it rather than scrolling underneath. The strip is pinned under the
+        // title and is not part of that window; lines that do not fit are
+        // kept around the open tab, after a row is reserved for the feed.
         let banner = tc::notices::banner_rows(w, h);
-        room = h
-            .saturating_sub(HEAD + banner.len() + foot.len())
-            .max(1);
+        let (packed, foot) = footer(&hints, cw, &p);
+        let strip = if detail.is_some() {
+            tabs_at.clear();
+            Vec::new()
+        } else {
+            let open = format!("{}{}", p.tint, p.accent);
+            let (lines, at) = tc::tab_strip(
+                view.region,
+                &region_tabs(&snapshot, &p),
+                w,
+                &open,
+                &p.dim,
+                &p.dim,
+            );
+            let (lines, at) = window_strip(
+                lines,
+                at,
+                view.region,
+                strip_rows(h, foot.len(), banner.len()),
+            );
+            tabs_at = at;
+            lines
+        };
+        head = 1 + strip.len();
+        room = h.saturating_sub(head + foot.len() + banner.len()).max(1);
         if moved {
             if let Some(c) = body.cursor {
                 scroll = tc::follow(scroll, c, room);
@@ -1766,10 +1892,11 @@ fn main() {
         placed = body
             .placed
             .iter()
-            .map(|&(row, slot)| (row + HEAD, slot))
+            .map(|&(row, slot)| (row + head, slot))
             .collect();
         slots = body.slots.clone();
         let mut frame = vec![title];
+        frame.extend(strip);
         frame.extend(shown);
         frame.extend(banner);
         let foot_top = frame.len();
@@ -1911,7 +2038,7 @@ mod tests {
         let shared = sample();
         let mut screens = Vec::new();
         for region in 0..shared.regions.len() {
-            for focus in [TRENDING, LEFT, REGIONS] {
+            for focus in [TRENDING, LEFT] {
                 let view = View {
                     region,
                     focus,
@@ -2023,7 +2150,11 @@ mod tests {
     fn a_stale_previous_fetch_says_why_nothing_is_compared() {
         let p = palette();
         let mut memory = Memory::default();
-        memory.observe(&[trend("alpha", "200+", None, &[])], NOW - 86_400.0, f64::INFINITY);
+        memory.observe(
+            &[trend("alpha", "200+", None, &[])],
+            NOW - 86_400.0,
+            f64::INFINITY,
+        );
         let mut us = Region {
             geo: "US".into(),
             ..Region::default()
@@ -2077,9 +2208,15 @@ mod tests {
         };
         let restarted = text_of(gone(None));
         assert!(restarted.contains("not kept"), "{restarted}");
-        assert!(!restarted.contains("Google lists no stories"), "{restarted}");
+        assert!(
+            !restarted.contains("Google lists no stories"),
+            "{restarted}"
+        );
         assert!(restarted.contains("start time not kept"), "{restarted}");
-        assert!(!restarted.contains("no start time in the feed"), "{restarted}");
+        assert!(
+            !restarted.contains("no start time in the feed"),
+            "{restarted}"
+        );
         let empty = text_of(gone(Some(Vec::new())));
         assert!(empty.contains("Google lists no stories"), "{empty}");
     }
@@ -2279,12 +2416,332 @@ mod tests {
     }
 
     #[test]
-    fn the_region_index_is_shown_when_there_are_several() {
+    fn the_strip_names_every_region_and_marks_the_open_one() {
         let p = palette();
-        let text = plain(&list_body(&sample(), &View::default(), 300.0, 99, NOW, &p).rows);
-        assert!(text.contains("1 of 3"));
-        assert!(text.contains("REGIONS"));
-        assert!(text.contains("every 5 min"));
+        let shared = sample();
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 80, "", "", "");
+        let text = tc::source_text(&lines.join(
+            "
+",
+        ));
+        assert!(text.contains("[US]"), "{text}");
+        assert!(text.contains(" ZZ "), "{text}");
+        assert!(text.contains(" GB "), "{text}");
+        // One region still gets a strip.
+        let one = Shared {
+            regions: vec![shared.regions[0].clone()],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&one, &p), 80, "", "", "");
+        assert!(tc::source_text(&lines.join(
+            "
+"
+        ))
+        .contains("[US]"));
+    }
+
+    #[test]
+    fn the_strip_fits_at_every_width() {
+        let p = palette();
+        let shared = sample();
+        for w in [30, 40, 60, 100, 140] {
+            let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), w, "", "", "");
+            for l in &lines {
+                assert!(tc::display_width(l) <= w - 1, "w {w}: {l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn markers_and_badges_follow_the_region_state() {
+        let p = palette();
+        let mut ok_new = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        let mut mem = Memory::default();
+        apply(
+            &mut ok_new,
+            Answer::Items(vec![trend("alpha", "200+", None, &[])]),
+            &mut mem,
+            NOW,
+            300.0,
+        );
+        apply(
+            &mut ok_new,
+            Answer::Items(vec![
+                trend("alpha", "200+", None, &[]),
+                trend("beta", "100+", None, &[]),
+                trend("gamma", "50+", None, &[]),
+            ]),
+            &mut mem,
+            NOW + 300.0,
+            300.0,
+        );
+        let mut failed = Region {
+            geo: "GB".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut failed,
+            Answer::Failed("HTTP 429".into()),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let mut rejected = Region {
+            geo: "ZZ".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut rejected,
+            Answer::Rejected("nope".into()),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let unfetched = Region {
+            geo: "FR".into(),
+            ..Region::default()
+        };
+        let shared = Shared {
+            regions: vec![ok_new, failed, rejected, unfetched],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 120, "", "", "");
+        let text = tc::source_text(&lines.join(
+            "
+",
+        ));
+        assert!(text.contains("·2"), "{text}");
+        assert!(text.contains(" GB !"), "{text}");
+        assert!(text.contains("×"), "{text}");
+        assert!(text.contains(" FR "), "{text}");
+        assert!(!text.contains("FR!") && !text.contains("FR×"), "{text}");
+    }
+
+    #[test]
+    fn left_from_the_first_tab_lands_on_the_last() {
+        assert_eq!(
+            tc::step_tab(0, -1, sample().regions.len()),
+            sample().regions.len() - 1
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_open_tab_does_not_switch() {
+        assert_eq!(tab_switch(1, 1), None);
+        assert_eq!(tab_switch(1, 0), Some(0));
+    }
+
+    #[test]
+    fn a_rejected_region_drops_the_count_of_rows_it_no_longer_has() {
+        let p = palette();
+        let mut region = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        let mut mem = Memory::default();
+        apply(
+            &mut region,
+            Answer::Items(vec![trend("alpha", "200+", None, &[])]),
+            &mut mem,
+            NOW,
+            300.0,
+        );
+        apply(
+            &mut region,
+            Answer::Items(vec![
+                trend("alpha", "200+", None, &[]),
+                trend("beta", "100+", None, &[]),
+            ]),
+            &mut mem,
+            NOW + 300.0,
+            300.0,
+        );
+        assert!(region.new_count > 0);
+        let fetched = region.fetched;
+        // A failure keeps the earlier rows, so the ! count stays.
+        let mut failed = region.clone();
+        apply(
+            &mut failed,
+            Answer::Failed("HTTP 429".into()),
+            &mut Memory::default(),
+            NOW + 600.0,
+            300.0,
+        );
+        assert!(failed.new_count > 0 && !failed.items.is_empty());
+        let kept = Shared {
+            regions: vec![failed],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&kept, &p), 40, "", "", "");
+        let kept_text = tc::source_text(&lines.join("\n"));
+        assert!(kept_text.contains('!'), "{kept_text}");
+        assert!(kept_text.contains('1') || kept_text.contains('2'), "{kept_text}");
+
+        apply(
+            &mut region,
+            Answer::Rejected("nope".into()),
+            &mut mem,
+            NOW + 600.0,
+            300.0,
+        );
+        assert_eq!(region.new_count, 0);
+        assert!(region.since.is_none());
+        assert!(region.items.is_empty());
+        assert_eq!(region.fetched, fetched);
+        let shared = Shared {
+            regions: vec![region],
+            err: String::new(),
+        };
+        let (lines, _) = tc::tab_strip(0, &region_tabs(&shared, &p), 40, "", "", "");
+        let text = tc::source_text(&lines.join("\n"));
+        assert!(text.contains('×'), "{text}");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        let body = plain(&list_body(&shared, &View::default(), 300.0, 80, NOW + 600.0, &p).rows);
+        assert!(!body.contains("new since"), "{body}");
+        assert!(!body.contains("first check"), "{body}");
+    }
+
+    #[test]
+    fn a_click_on_a_tab_switches_region() {
+        let p = palette();
+        let shared = sample();
+        let (_, placed) = tc::tab_strip(0, &region_tabs(&shared, &p), 80, "", "", "");
+        let (row, col, i) = placed.iter().copied().find(|&(_, _, i)| i == 2).unwrap();
+        assert_eq!(tab_clicked(&placed, col, row + 1, 2), Some(2));
+        // Below the strip is the body; nothing answers there.
+        assert_eq!(tab_clicked(&placed, col, 4, 2), None);
+    }
+
+    #[test]
+    fn a_tall_strip_keeps_the_open_tab_and_leaves_the_feed_a_row() {
+        let p = palette();
+        // Forty two-letter regions at width 30 wrap to more rows than a
+        // short pane has. The reviewers' case: a 30×10 pane, footer of 2.
+        let shared = Shared {
+            regions: (0..40)
+                .map(|i| Region {
+                    geo: format!("{i:02}"),
+                    ..Region::default()
+                })
+                .collect(),
+            err: String::new(),
+        };
+        let h = 10;
+        let foot = 2;
+        let banner = 0;
+        let budget = strip_rows(h, foot, banner);
+        assert_eq!(budget, 6);
+        let tabs = region_tabs(&shared, &p);
+        for active in [0usize, 39] {
+            let (lines, placed) = tc::tab_strip(active, &tabs, 30, "", "", "");
+            assert!(lines.len() > budget, "{} lines", lines.len());
+            let (shown, vis) = window_strip(lines, placed, active, budget);
+            assert!(shown.len() <= budget);
+            let text = tc::source_text(&shown.concat());
+            let name = format!("{active:02}");
+            assert!(text.contains(&format!("[{name}]")), "{text}");
+            let head = 1 + shown.len();
+            let room = h - head - foot - banner;
+            assert!(room >= 1, "feed row gone at active {active}");
+            assert!(head + room + foot + banner <= h);
+            let (row, col, _) = vis.iter().copied().find(|&(_, _, i)| i == active).unwrap();
+            assert_eq!(tab_clicked(&vis, col, row + 1, head), Some(active));
+        }
+    }
+
+    #[test]
+    fn a_strip_steps_aside_when_the_pane_cannot_hold_one() {
+        assert_eq!(strip_rows(3, 2, 0), 0);
+        let (shown, vis) = window_strip(vec![" [US]".into()], vec![(0, 1, 0)], 0, 0);
+        assert!(shown.is_empty());
+        assert!(vis.is_empty());
+        assert_eq!(tab_clicked(&vis, 1, 1, 1), None);
+    }
+
+    #[test]
+    fn enter_after_a_region_change_opens_the_new_regions_trend() {
+        let p = palette();
+        let item = |title: &str| trend(title, "200+", None, &[]);
+        let mut us = Region {
+            geo: "US".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut us,
+            Answer::Items(vec![item("zorblax"), item("other")]),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let mut gb = Region {
+            geo: "GB".into(),
+            ..Region::default()
+        };
+        apply(
+            &mut gb,
+            Answer::Items(vec![item("other"), item("zorblax")]),
+            &mut Memory::default(),
+            NOW,
+            300.0,
+        );
+        let shared = Shared {
+            regions: vec![us, gb],
+            err: String::new(),
+        };
+        let drawn_view = View {
+            needle: "zor".into(),
+            ..View::default()
+        };
+        let drawn = list_body(&shared, &drawn_view, 300.0, 80, NOW, &p);
+        // The body from before the switch still points at US's first hit,
+        // which is a different row in GB.
+        let mut moved = drawn_view.clone();
+        moved.region = 1;
+        let stale = detail_for(&shared, &moved, &drawn, NOW).unwrap();
+        assert_eq!(stale.title, "other");
+
+        // A click on GB's tab, then `enter`, as the list loop takes them.
+        let (_, placed) = tc::tab_strip(0, &region_tabs(&shared, &p), 80, "", "", "");
+        let &(row, col, _) = placed.iter().find(|&&(_, _, i)| i == 1).unwrap();
+        let head = 2;
+        let mut view = drawn_view.clone();
+        let clicked = tab_clicked(&placed, col, 1 + row, head).unwrap();
+        let next = tab_switch(view.region, clicked).unwrap();
+        let before = list_body(&shared, &view, 300.0, 80, NOW, &p);
+        let before = open_region(&mut view, next, &shared, 300.0, 80, NOW, &p, before);
+        let opened = detail_for(&shared, &view, &before, NOW).unwrap();
+        assert_eq!((opened.geo.as_str(), opened.title.as_str()), ("GB", "zorblax"));
+
+        // `→`, then `enter`.
+        let mut view = drawn_view;
+        let next = tc::step_tab(view.region as i64, 1, shared.regions.len());
+        let before = open_region(&mut view, next, &shared, 300.0, 80, NOW, &p, drawn);
+        let opened = detail_for(&shared, &view, &before, NOW).unwrap();
+        assert_eq!((opened.geo.as_str(), opened.title.as_str()), ("GB", "zorblax"));
+    }
+
+    #[test]
+    fn notices_reach_the_screen_that_shows_their_hint() {
+        assert_eq!(route_key("!", true, false), Route::Detail);
+        // A filter being typed has no notices hint, so `!` is a character.
+        assert_eq!(route_key("!", false, true), Route::Typing);
+        assert_eq!(route_key("!", false, false), Route::List);
+        assert_eq!(route_key("left", true, false), Route::Detail);
+        assert_eq!(route_key("x", false, true), Route::Typing);
+        assert_eq!(route_key("left", false, false), Route::List);
+    }
+
+    #[test]
+    fn no_screen_mentions_regions() {
+        let p = palette();
+        for cw in [30, 60, 99] {
+            let text = plain(&list_body(&sample(), &View::default(), 300.0, cw, NOW, &p).rows);
+            assert!(!text.contains("REGIONS"), "{cw}: {text}");
+            assert!(!text.contains("newest:"), "{cw}: {text}");
+        }
     }
 
     #[test]
