@@ -113,7 +113,13 @@ nothing at all — it just looks good, and it knows it.
 npx opscope                 # the menu
 npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
+npx opscope@canary clocks   # whatever is on main right now
 ```
+
+`@canary` is built and published from every merge to `main`, before it is in
+any release. It is for trying a fix or a new widget early, and it can break;
+`--version` names the commit it was built from. Plain `npx opscope` and
+`@latest` are never moved by a canary.
 
 It fetches the launcher and seventeen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
