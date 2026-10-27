@@ -16,11 +16,13 @@
 use super::parse::{self, Mount, Space};
 
 pub fn read_mounts() -> Result<Vec<Mount>, String> {
-    let text = std::fs::read_to_string("/proc/self/mountinfo").map_err(|err| err.to_string())?;
-    Ok(parse::parse_mountinfo(&text))
+    // Bytes, not `read_to_string`: one mount point that is not UTF-8 would
+    // otherwise fail this read and the pane would show no mounts at all.
+    let bytes = std::fs::read("/proc/self/mountinfo").map_err(|err| err.to_string())?;
+    Ok(parse::parse_mountinfo_bytes(&bytes))
 }
 
-pub fn stat_mount(path: &str) -> Result<Space, String> {
+pub fn stat_mount(path: &[u8]) -> Result<Space, String> {
     let c_path =
         std::ffi::CString::new(path).map_err(|_| "mount point contains a nul".to_string())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
