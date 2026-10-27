@@ -665,17 +665,23 @@ impl Registry {
             return;
         };
         let key = self.key(&live.notice);
+        let hash = live.hash;
         self.dismissed.remove(&key);
         let Some(path) = self.file.clone() else {
             self.kept.remove(&key);
             return;
         };
         // Read first: another pane may have written this key since the
-        // last load, and restoring here should take that back too.
+        // last load, and restoring here should take that back too. Only an
+        // entry for the content shown here is this restore's to remove: one
+        // for other content is another pane's, and hides nothing here.
         self.load(now);
-        if let Some(was) = self.kept.remove(&key) {
+        if self.kept.get(&key).is_some_and(|d| d.hash == hash) {
+            let was = self.kept.remove(&key).expect("checked above");
             let result = self.persist(&path, now, |kept| {
-                kept.remove(&key);
+                if kept.get(&key).is_some_and(|d| d.hash == hash) {
+                    kept.remove(&key);
+                }
             });
             // A restore that could not be written did not happen: the next
             // reload would hide the notice again. Keep the dismissal, and let
@@ -2044,6 +2050,25 @@ mod tests {
         let keys: Vec<&str> = written.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["other/theirs", "test/changed", "test/live", "test/new"]);
         assert!(r.outstanding(NOW).iter().any(|l| l.notice.id == "changed"), "and it still shows here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_leaves_another_panes_dismissal_of_other_content() {
+        let dir = temp_dir("notices-restore-other");
+        let file = dir.join("notices.json");
+        let mut there = opened(&file, NOW);
+        there.raise(Notice::warn("a", "content A"), NOW);
+        there.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        let mut here = opened(&file, NOW + 1.0);
+        here.raise(Notice::warn("a", "content B"), NOW + 1.0);
+        here.dismiss((Scope::Widget, "a"), NOW + 1.0);
+        here.restore((Scope::Widget, "a"), NOW + 2.0);
+        assert_eq!(here.outstanding(NOW + 2.0).len(), 1, "B shows again here");
+        let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(written.contains_key("test/a"), "A's dismissal stays in the file");
+        there.reload_if_stale(NOW + 2.0 + RELOAD_SECS);
+        assert!(there.outstanding(NOW + 2.0 + RELOAD_SECS).is_empty(), "and A stays dismissed there");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
