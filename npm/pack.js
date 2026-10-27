@@ -31,6 +31,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const platform = require('./platform');
+const { isCanaryOf } = require('./canary');
 
 function versionFromCargo(repoRoot) {
   const toml = fs.readFileSync(path.join(repoRoot, 'Cargo.toml'), 'utf8');
@@ -155,9 +156,11 @@ function pack(opts) {
   const artifacts = opts.artifacts;
   const out = opts.out;
   const cargo = versionFromCargo(repoRoot);
-  if (version !== cargo) {
+  // The release version, or a canary of it built from main. Anything
+  // else is a number this script would be inventing.
+  if (version !== cargo && !isCanaryOf(version, cargo)) {
     throw new Error(
-      `asked to pack ${version} but Cargo.toml says ${cargo} — the npm version is the release version, not a number this script invents`,
+      `asked to pack ${version} but Cargo.toml says ${cargo} — the npm version is the release version or a canary of it (npm/canary.js), not a number this script invents`,
     );
   }
 
@@ -220,7 +223,7 @@ function parseArgs(argv) {
     else if (a === '--repo') opts.repoRoot = argv[++i];
     else if (a === '--help' || a === '-h') {
       process.stdout.write(
-        'pack.js --version X.Y.Z --artifacts DIR --out DIR\n' +
+        'pack.js --version X.Y.Z[-canary.N.gSHA] --artifacts DIR --out DIR\n' +
           'Build the four npm packages from a release\'s tarballs.\n',
       );
       process.exit(0);

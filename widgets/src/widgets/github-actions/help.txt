@@ -20,6 +20,13 @@ A classic token with `repo` and `read:org`, the same one github uses. This
 widget only reads. An old `gha` section is still read if `github_actions` is
 absent, and the pane says so.
 
+GitHub Enterprise: set `enterprise_hostname` to the web host, for example
+`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other
+host but github.com or api.github.com is treated as Enterprise Server
+(untested). Or name a variable in
+`enterprise_hostname_env` and set the host there; none is read unless named.
+The token must come from that host.
+
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
 repo, workflow, branch, event, conclusion and title, w cycles the window
@@ -28,9 +35,9 @@ its URL, esc closes.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read or a recommended tool that is
-missing - and dismiss them for this session. A new notice shows above the
-footer for a minute, then as a [!] count in the footer for as long as it is
-still true.
+missing - and dismiss them for this session, for 7 days or for 30. A new
+notice shows above the footer for a minute, then as a [!] count in the footer
+for as long as it is still true.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same. They move the pane and never the selection,

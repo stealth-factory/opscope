@@ -57,12 +57,12 @@ answered yet sorts last. The footer names the sort the next press moves to.
 
 ## What is hidden
 
-Five rules, and a mount is counted under the first one that applies: a
-later mount at the same path (`covered` — `statvfs` can only answer for
-the one on top), then `hide_mounts`, then a pseudo filesystem, then
-read-only, then a second mount of a device that is already shown (the
-shorter path stays). The count line names only the rules that hid
-something. When nothing is hidden the line is absent.
+Five rules, and a mount is counted under the first one that applies:
+covered by a later mount at the same path, then `hide_mounts`, then a
+pseudo filesystem, then read-only, then a second mount of a device that is
+already shown (the shorter path stays). The count line names only the
+rules that hid something, and it calls a mount hidden by a later one at
+the same path `covered`. When nothing is hidden the line is absent.
 
 `tmpfs` is not pseudo. It can fill. The pseudo list is proc, sysfs, cgroup,
 cgroup2, devpts, devtmpfs, debugfs, tracefs, securityfs, pstore, bpf,

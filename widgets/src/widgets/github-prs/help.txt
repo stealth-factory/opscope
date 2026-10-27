@@ -15,13 +15,22 @@ Credentials: `github_prs.token` in config.json, or the variable named by
 `token_env` (`$GITHUB_TOKEN` when that key is unset). A classic token with
 `repo` and `read:org`.
 
+GitHub Enterprise: set `enterprise_hostname` to the web host, for example
+`acme.ghe.com`, and requests go to `https://api.acme.ghe.com`; any other
+host but github.com or api.github.com is treated as Enterprise Server
+(untested). Or name a variable in
+`enterprise_hostname_env` and set the host there; none is read unless named.
+The token must come from that host. On Server, stacks are inferred from
+branches.
+
 Keys: up/down select, enter opens a PR, esc goes back, / filters, s cycles the
 sort, o reverses it, comma opens settings, r refreshes, q quits.
 
-Press ! to read this widget's notices - warnings that are not about a number
-on screen, such as a config file others can read or a recommended tool that is
-missing - and dismiss them for this session. A new notice shows above the footer
-for a minute, then as a [!] count in the footer for as long as it is still true.
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows above the footer for a minute, then as a [!] count in the footer for as
+long as it is still true.
 
 ctrl-y and ctrl-e scroll the whole widget a line at a time, as in vim, and
 the mouse wheel does the same: the stats scroll off the top with everything

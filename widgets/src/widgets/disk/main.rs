@@ -45,7 +45,7 @@ mod host {
         Err(opscope_core::unsupported())
     }
 
-    pub fn stat_mount(_path: &str) -> Result<Space, String> {
+    pub fn stat_mount(_path: &[u8]) -> Result<Space, String> {
         Err(opscope_core::unsupported())
     }
 
@@ -831,7 +831,7 @@ fn poll(
     every: f64,
 ) {
     tc::record_panics();
-    let mut inflight: HashMap<String, Receiver<Result<Space, String>>> = HashMap::new();
+    let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
     let mut rates = RateMemory::default();
     loop {
         if pause.load(Ordering::Acquire) {
@@ -898,18 +898,17 @@ fn poll(
 /// call cannot be cancelled.
 fn sample(
     hide: &[String],
-    inflight: &mut HashMap<String, Receiver<Result<Space, String>>>,
+    inflight: &mut HashMap<Vec<u8>, Receiver<Result<Space, String>>>,
 ) -> Result<Snap, String> {
     let all = host::read_mounts().map_err(|err| format!("mounts unavailable: {err}"))?;
     let (visible, hidden) = parse::visible_mounts(&all, hide);
-    let live: Vec<String> = visible
-        .iter()
-        .map(|mount| mount.mount_point.clone())
-        .collect();
+    // The raw path, not the display text: `statvfs` has to be given the
+    // bytes the kernel published, including ones that are not UTF-8.
+    let live: Vec<Vec<u8>> = visible.iter().map(|mount| mount.path.clone()).collect();
     inflight.retain(|path, _| live.iter().any(|live| live == path));
 
     let mut fresh = Vec::new();
-    let mut figures: HashMap<String, Figures> = HashMap::new();
+    let mut figures: HashMap<Vec<u8>, Figures> = HashMap::new();
     for path in &live {
         if !inflight.contains_key(path) {
             let (tx, rx) = mpsc::channel();
@@ -976,9 +975,7 @@ fn sample(
         .into_iter()
         .enumerate()
         .map(|(order, mount)| {
-            let figures = figures
-                .remove(&mount.mount_point)
-                .unwrap_or(Figures::NoAnswer);
+            let figures = figures.remove(&mount.path).unwrap_or(Figures::NoAnswer);
             Row {
                 mount,
                 figures,
@@ -1178,7 +1175,7 @@ fn paint(
     rows: &mut Vec<String>,
     placed: &mut Vec<(usize, usize)>,
 ) {
-    for line in wrap(&status_line(view), width) {
+    for line in wrap(&status_line(view), width.saturating_sub(1)) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
     }
     if !view.err.is_empty() {
@@ -1585,12 +1582,13 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
                 used = 0;
             }
             for ch in word.chars() {
-                if used >= width {
+                let cw = tc::display_width(ch.encode_utf8(&mut [0u8; 4]));
+                if used + cw > width && !line.is_empty() {
                     lines.push(std::mem::take(&mut line));
                     used = 0;
                 }
                 line.push(ch);
-                used += 1;
+                used += cw;
             }
             continue;
         }
@@ -2445,6 +2443,50 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_word_on_the_detail_screen_wraps_by_cells() {
+        let word: String = "\u{6570}".repeat(40);
+        let lines = wrap(&word, 28);
+        assert!(lines.len() > 1, "a 80-cell word fits a 28-cell line");
+        assert_eq!(lines.concat(), word, "nothing lost");
+        for line in &lines {
+            assert!(
+                tc::display_width(line) <= 28,
+                "{line:?} is {} cells",
+                tc::display_width(line)
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_status_line_keeps_its_last_character() {
+        let rows = vec![row("/", "ext4", Figures::Ready(space(1, 1, 10, 9)), 0)];
+        let snap = snap(rows, Hidden::default());
+        let mut shown = view(Some(&snap), "/");
+        shown.paused = true;
+        shown.age = Some(Duration::from_secs(12));
+        let p = palette();
+        let drawn = draw_body(&shown, 20, &p, None);
+        for line in &drawn.rows {
+            assert!(
+                tc::display_width(line) <= 20,
+                "{} cells: {line:?}",
+                tc::display_width(line)
+            );
+        }
+        let plain = drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plain.contains("12s"),
+            "the prefixed wrap cut the status line:\n{plain}"
+        );
+        assert!(plain.contains("every"), "{plain}");
+    }
+
+    #[test]
     fn a_refresh_that_is_not_a_number_of_seconds_falls_back() {
         let at =
             |value: serde_json::Value| refresh_seconds(&serde_json::json!({ "refresh": value }));
@@ -2477,6 +2519,7 @@ mod tests {
                 dev: "9:0".into(),
                 root: "/".into(),
                 mount_point: point.into(),
+                path: point.as_bytes().to_vec(),
                 fstype: fstype.into(),
                 source: "/dev/example".into(),
                 read_only: false,

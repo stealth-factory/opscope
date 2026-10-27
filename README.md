@@ -114,7 +114,13 @@ nothing at all — it just looks good, and it knows it.
 npx opscope                 # the menu
 npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
+npx opscope@canary clocks   # whatever is on main right now
 ```
+
+`@canary` is built and published from every merge to `main`, before it is in
+any release. It is for trying a fix or a new widget early, and it can break;
+`--version` names the commit it was built from. Plain `npx opscope` and
+`@latest` are never moved by a canary.
 
 It fetches the launcher and eighteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
@@ -390,8 +396,13 @@ by other users, an old section name still being read, a recommended tool
 that is not installed. A new one shows above the footer for a minute, then
 as a coloured `[!] 1 warning` in the footer for as long as it is still
 true. The screen shows each in full with what to do about it, and dismisses
-one, or all of them, for this session; dismissed notices are listed there
-and can be restored. A warning that explains a missing or partial number is
+one for this session, for 7 days or for 30, or all of them for this session;
+an error is only ever dismissed for the session. A dismissal for days is kept
+in `notices.json` in opscope's state directory (`$XDG_STATE_HOME/opscope`, or
+`~/.local/state/opscope`) and every widget reads it again within a minute, so
+the config warning dismissed in one pane goes quiet in the others. Dismissed
+notices are listed on the screen, with how long each lasts, and can be
+restored. A warning that explains a missing or partial number is
 never a notice — it stays beside the number.
 
 ### Editing `config.json` by hand
@@ -442,6 +453,12 @@ PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
 `linear` a personal API key from Settings → Security & access, and
 `github-prs` and `github-actions` each hold their own GitHub token rather
 than borrowing one. Every other widget needs no configuration to start.
+
+All three GitHub widgets also reach **GitHub Enterprise**: set
+`enterprise_hostname` in each one's section (for example `acme.ghe.com`), or
+name a variable holding the host in `enterprise_hostname_env`, and use a token
+that host issued. If both are empty, the widget uses github.com. Each
+widget's README has the details.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
