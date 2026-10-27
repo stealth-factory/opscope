@@ -1269,13 +1269,13 @@ fn detail_hints() -> Vec<Vec<(&'static str, String)>> {
     ]
 }
 
-/// Which screen answers a key. Notices are the widget's, so `!` is taken
-/// before the news view or a filter can swallow it: both of those screens
-/// show the hint.
+/// Which screen answers a key. Scroll is the same on every screen. `!` is
+/// left to that screen: the list and the news view open notices, and a
+/// filter being typed takes it as a character because its footer has no
+/// notices hint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
     Scroll,
-    Notices,
     Detail,
     Typing,
     List,
@@ -1284,7 +1284,6 @@ enum Route {
 fn route_key(key: &str, in_detail: bool, typing: bool) -> Route {
     match key {
         "ctrl-y" | "wheel-up" | "ctrl-e" | "wheel-down" | "pgup" | "pgdn" => Route::Scroll,
-        "!" => Route::Notices,
         _ if in_detail => Route::Detail,
         _ if typing => Route::Typing,
         _ => Route::List,
@@ -1297,9 +1296,38 @@ fn footer(
     cw: usize,
     p: &Palette,
 ) -> (tc::Footer, Vec<String>) {
+    let mut hints = hints.to_vec();
+    // While a filter is being typed, `!` is a character, so the counter
+    // stays off that footer. Everywhere else it sits just before settings,
+    // or before quit on the news view, which has no settings key.
+    let typing = hints
+        .iter()
+        .any(|h| h.iter().any(|(_, t)| t.contains("type to filter")));
+    if !typing {
+        let room = cw.saturating_sub(1).max(1);
+        if let Some(notices) = tc::notices::hint(room) {
+            let at = hints
+                .iter()
+                .position(|h| h.iter().any(|(_, t)| t.contains("settings")))
+                .or_else(|| {
+                    hints
+                        .iter()
+                        .position(|h| h.iter().any(|(_, t)| t.contains("[q]")))
+                })
+                .unwrap_or(hints.len());
+            hints.insert(at, notices);
+        }
+    }
     let coloured: Vec<Vec<(&str, String)>> = hints
         .iter()
-        .map(|h| h.iter().map(|(_, t)| (p.dim.as_str(), t.clone())).collect())
+        .map(|h| {
+            h.iter()
+                .map(|(c, t)| {
+                    let colour = if c.is_empty() { p.dim.as_str() } else { *c };
+                    (colour, t.clone())
+                })
+                .collect()
+        })
         .collect();
     let packed = tc::pack_hints_placed(&coloured, cw.saturating_sub(1), "  ");
     let lines = packed
@@ -1322,6 +1350,7 @@ fn window(body: &[String], scroll: usize, room: usize) -> (Vec<String>, usize) {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("google-trends");
     if !tc::dependencies_available(
         "google-trends",
         include_str!("dependencies.json"),
@@ -1451,7 +1480,6 @@ fn main() {
     }
 
     tc::setup();
-    tc::notices::start("google-trends");
     let mut keyboard = tc::Keyboard::new();
     let mut view = View::default();
     let mut detail: Option<Detail> = None;
@@ -1541,9 +1569,9 @@ fn main() {
             if key.is_empty() {
                 continue;
             }
-            // Scroll and notices answer on every screen. `!` in particular
-            // is taken before the news view and the filter, which both show
-            // its hint; the filter would otherwise type the character.
+            // The view keys answer the same on every screen. `!` is not one
+            // of them: the list and the news view open notices, and a filter
+            // being typed takes the character.
             match route_key(&key, detail.is_some(), view.typing) {
                 Route::Scroll => {
                     match key.as_str() {
@@ -1555,15 +1583,14 @@ fn main() {
                     }
                     continue;
                 }
-                Route::Notices => {
-                    tc::notices::run(&mut keyboard);
-                    continue;
-                }
                 Route::Detail | Route::Typing | Route::List => {}
             }
             if let Some(d) = &mut detail {
                 match key.as_str() {
                     "q" | "Q" => quit = true,
+                    "!" => {
+                        tc::notices::run(&mut keyboard);
+                    }
                     "esc" | "left" | "backspace" | "h" => {
                         detail = None;
                         scroll = 0;
@@ -1625,6 +1652,10 @@ fn main() {
                 "q" | "Q" => quit = true,
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
+                }
+                "!" => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "/" => {
@@ -1759,7 +1790,7 @@ fn main() {
             &p.title,
             activity.tick(tc::animation_tick()),
         );
-        let (body, mut hints) = match &detail {
+        let (body, hints) = match &detail {
             Some(d) => (detail_body(d, cw, now, &p), detail_hints()),
             None => (
                 list_body(&snapshot, &view, refresh, cw, now, &p),
@@ -1779,15 +1810,13 @@ fn main() {
             }
             body.cursor = body.cursor.map(|c| c + n);
         }
-        // The notices counter rides the footer; the banner sits above it
-        // and counts as footer, so the body never scrolls under it.
-        hints.extend(tc::notices::hint(w - 2));
+        // The notices counter is inserted by `footer`, just before settings.
+        // The banner is pinned with the footer: the body window shrinks for
+        // it rather than scrolling underneath. The strip is pinned under the
+        // title and is not part of that window; lines that do not fit are
+        // kept around the open tab, after a row is reserved for the feed.
         let banner = tc::notices::banner_rows(w, h);
         let (packed, foot) = footer(&hints, cw, &p);
-        // The strip is pinned under the title, not part of the scrolling
-        // body; the detail screen has none. Its placements are kept for
-        // the frame a click is answered against. Lines that do not fit are
-        // windowed around the open tab, after a row is reserved for the feed.
         let strip = if detail.is_some() {
             tabs_at.clear();
             Vec::new()
@@ -2565,10 +2594,11 @@ mod tests {
     }
 
     #[test]
-    fn notices_are_answered_before_the_news_view_and_the_filter() {
-        assert_eq!(route_key("!", true, false), Route::Notices);
-        assert_eq!(route_key("!", false, true), Route::Notices);
-        assert_eq!(route_key("!", false, false), Route::Notices);
+    fn notices_reach_the_screen_that_shows_their_hint() {
+        assert_eq!(route_key("!", true, false), Route::Detail);
+        // A filter being typed has no notices hint, so `!` is a character.
+        assert_eq!(route_key("!", false, true), Route::Typing);
+        assert_eq!(route_key("!", false, false), Route::List);
         assert_eq!(route_key("left", true, false), Route::Detail);
         assert_eq!(route_key("x", false, true), Route::Typing);
         assert_eq!(route_key("left", false, false), Route::List);

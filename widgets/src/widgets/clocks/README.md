@@ -120,7 +120,7 @@ shown — are not tied to the day and survive.
 | `?` `h` | hide/show the pomodoro controls |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 ## Configuration
