@@ -118,6 +118,8 @@
     "refresh": 2.0,
     "_hide_mounts_comment": "Mount points to hide. An entry is an exact path, or a prefix of every mount under it when it ends in /. The entry / hides only the root mount; a prefix of / would hide every absolute path.",
     "hide_mounts": [],
+    "_hide_devices_comment": "Whole-disk names to hide, matched exactly. An idle disk with no reads and no writes since boot is already hidden until v is pressed; this list hides a disk whether or not it is idle.",
+    "hide_devices": [],
     "_warn_percent_comment": "Percent used at which the bar starts to leave green. At and below this the bar stays quiet.",
     "warn_percent": 80,
     "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",

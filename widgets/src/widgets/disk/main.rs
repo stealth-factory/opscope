@@ -6,7 +6,7 @@
 // by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Which filesystems can still take a write, and which are running out of inodes.
+//! Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
 //!
 //! Linux reads `/proc/self/mountinfo` and `statvfs`. macOS reads `getmntinfo`.
 //! The parsers and the hide/sort rules compile on every target; only the
@@ -46,6 +46,13 @@ mod host {
     }
 
     pub fn stat_mount(_path: &[u8]) -> Result<Space, String> {
+        Err(opscope_core::unsupported())
+    }
+
+    pub fn sample_io(
+        _mounts: &[super::parse::Mount],
+        _every: f64,
+    ) -> Result<super::parse::IoSnapshot, String> {
         Err(opscope_core::unsupported())
     }
 }
@@ -173,10 +180,177 @@ fn pause_hint(paused: bool) -> &'static str {
     }
 }
 
+/// Item ids for a click. Filesystem rows stay below this so a phase-1
+/// index is unchanged. Disks and the pressure row sit above it.
+const DISK_BASE: usize = 1_000_000;
+const PRESSURE_ID: usize = 2_000_000;
+const SERIES_CAP: usize = 60;
+
+const DISK_MIN: usize = 9;
+const DISK_TYPE_W: usize = 7;
+const DISK_SIZE_W: usize = 5;
+const READ_W: usize = 5;
+const WRITE_W: usize = 5;
+const IOPS_W: usize = 5;
+const AWAIT_W: usize = 5;
+const BUSY_W: usize = 5;
+const QUEUE_W: usize = 5;
+const TPS_W: usize = 6;
+const MB_W: usize = 6;
+
+/// Linux DISKS columns. Drop order as the pane shrinks: queue, await,
+/// type, size, then iops. The name, the two rates and the busy share stay.
+#[derive(Clone, Copy)]
+struct DiskCols {
+    disk: usize,
+    typ: bool,
+    size: bool,
+    iops: bool,
+    await_ms: bool,
+    queue: bool,
+}
+
+fn disk_columns(width: usize) -> DiskCols {
+    // (iops, size, typ, await, queue) — the reverse of the drop order.
+    let sets = [
+        (true, true, true, true, true),
+        (true, true, true, true, false),
+        (true, true, true, false, false),
+        (true, true, false, false, false),
+        (true, false, false, false, false),
+        (false, false, false, false, false),
+    ];
+    for &(iops, size, typ, await_ms, queue) in &sets {
+        let need = disk_need(iops, size, typ, await_ms, queue);
+        if need <= width {
+            return DiskCols {
+                disk: DISK_MIN + width - need,
+                typ,
+                size,
+                iops,
+                await_ms,
+                queue,
+            };
+        }
+    }
+    DiskCols {
+        disk: DISK_MIN,
+        typ: false,
+        size: false,
+        iops: false,
+        await_ms: false,
+        queue: false,
+    }
+}
+
+fn disk_need(iops: bool, size: bool, typ: bool, await_ms: bool, queue: bool) -> usize {
+    let mut width = DISK_MIN + READ_W + WRITE_W + BUSY_W;
+    let mut gaps = 3;
+    if iops {
+        width += IOPS_W;
+        gaps += 1;
+    }
+    if size {
+        width += DISK_SIZE_W;
+        gaps += 1;
+    }
+    if typ {
+        width += DISK_TYPE_W;
+        gaps += 1;
+    }
+    if await_ms {
+        width += AWAIT_W;
+        gaps += 1;
+    }
+    if queue {
+        width += QUEUE_W;
+        gaps += 1;
+    }
+    width + gaps
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskSort {
+    Write,
+    Read,
+    Name,
+}
+
+impl DiskSort {
+    fn next(self) -> Self {
+        match self {
+            Self::Write => Self::Read,
+            Self::Read => Self::Name,
+            Self::Name => Self::Write,
+        }
+    }
+
+    /// What the body says is in force. On macOS the write key is combined
+    /// MB/s and the read key is transfers per second, which is what `iostat`
+    /// reports.
+    fn label(self, combined: bool) -> &'static str {
+        match self {
+            Self::Write if combined => "MB/s",
+            Self::Read if combined => "tps",
+            Self::Write => "write",
+            Self::Read => "read",
+            Self::Name => "name",
+        }
+    }
+
+    /// The sort the next press moves to.
+    fn hint(self, combined: bool) -> &'static str {
+        match self {
+            Self::Write if combined => "[s] sort by tps",
+            Self::Name if combined => "[s] sort by MB/s",
+            Self::Write => "[s] sort by read",
+            Self::Read => "[s] sort by name",
+            Self::Name => "[s] sort by write",
+        }
+    }
+}
+
+fn idle_hint(show_idle: bool) -> &'static str {
+    if show_idle {
+        "[v] hide idle disks"
+    } else {
+        "[v] show idle disks"
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ShownRate {
+    Measuring,
+    Gap,
+    Linux(parse::Rates),
+    Mac(parse::IostatSample),
+}
+
+#[derive(Clone, Debug)]
+struct DiskViewRow {
+    disk: parse::LiveDisk,
+    rate: ShownRate,
+    read: Vec<Option<f64>>,
+    write: Vec<Option<f64>>,
+}
+
+#[derive(Clone, Debug)]
+struct DiskBoard {
+    rows: Vec<DiskViewRow>,
+    show_pressure: bool,
+    pressure: Option<parse::Pressure>,
+    pressure_absent: bool,
+    pressure_err: String,
+    host_devices: bool,
+    combined: bool,
+    missing: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     List,
     Detail,
+    DiskDetail,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +381,7 @@ struct Palette {
     dim_lit: String,
     lbl: String,
     accent: String,
+    down: String,
 }
 
 fn palette() -> Palette {
@@ -218,6 +393,7 @@ fn palette() -> Palette {
         dim_lit: tc::rgb(140, 170, 195),
         lbl: tc::rgb(130, 165, 200),
         accent: tc::rgb(150, 210, 255),
+        down: tc::rgb(255, 176, 110),
     }
 }
 
@@ -232,6 +408,13 @@ struct View<'a> {
     screen: Screen,
     warn: f64,
     alert: f64,
+    board: Option<&'a DiskBoard>,
+    disk_err: &'a str,
+    disk_sort: DiskSort,
+    focus: usize,
+    show_idle: bool,
+    disk_cursor: &'a str,
+    hide_devices: &'a [String],
 }
 
 struct Drawn {
@@ -239,6 +422,9 @@ struct Drawn {
     placed: Vec<(usize, usize)>,
     head: usize,
     selected: usize,
+    disk_selected: usize,
+    plots: Vec<tc::Plot>,
+    lens: [usize; 3],
 }
 
 fn main() {
@@ -261,6 +447,7 @@ fn main() {
     let cfg = tc::load_config("disk");
     let every = refresh_seconds(&cfg);
     let hide = tc::cfg_strings(&cfg, "hide_mounts", &[]);
+    let hide_devices = tc::cfg_strings(&cfg, "hide_devices", &[]);
     let warn = tc::cfg_f64(&cfg, "warn_percent", 80.0);
     let alert = tc::cfg_f64(&cfg, "alert_percent", 90.0);
 
@@ -278,14 +465,20 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut sort = Sort::Mount;
+    let mut disk_sort = DiskSort::Write;
     let mut screen = Screen::List;
     let mut cursor = String::new();
+    let mut disk_cursor = String::new();
     let mut scroll = 0usize;
     let mut chase = true;
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut head = 1usize;
     let mut shown_scroll = 0usize;
-    let mut selected = 0usize;
+    let mut fs_at = 0usize;
+    let mut disk_at = 0usize;
+    let mut focus = 0usize;
+    let mut lens = [0usize; 3];
+    let mut show_idle = false;
 
     loop {
         let mut keys = keyboard.poll();
@@ -293,10 +486,23 @@ fn main() {
         // cursor, so an arrow and an enter read together open the new row.
         let mut open = false;
         if screen == Screen::List {
+            let current = match focus {
+                0 => fs_at,
+                1 => DISK_BASE + disk_at,
+                _ => PRESSURE_ID,
+            };
             if let Some(at) =
-                tc::rows_clicked(&mut keys, Some(selected), head, shown_scroll, &placed, None)
+                tc::rows_clicked(&mut keys, Some(current), head, shown_scroll, &placed, None)
             {
-                selected = at;
+                if at >= PRESSURE_ID {
+                    focus = 2;
+                } else if at >= DISK_BASE {
+                    focus = 1;
+                    disk_at = at - DISK_BASE;
+                } else {
+                    focus = 0;
+                    fs_at = at;
+                }
                 chase = true;
             }
         } else {
@@ -319,30 +525,58 @@ fn main() {
                 }
                 "up" | "k" | "K" => {
                     if screen == Screen::List {
-                        selected = selected.saturating_sub(1);
-                        chase = true;
+                        let at = section_index(focus, fs_at, disk_at);
+                        if let Some((next, row)) = tc::step_across_sections(focus, at, &lens, false)
+                        {
+                            focus = next;
+                            set_section_index(next, row, &mut fs_at, &mut disk_at);
+                            chase = true;
+                        }
                     }
                 }
                 "down" | "j" | "J" => {
                     if screen == Screen::List {
-                        selected = selected.saturating_add(1);
+                        let at = section_index(focus, fs_at, disk_at);
+                        if let Some((next, row)) = tc::step_across_sections(focus, at, &lens, true)
+                        {
+                            focus = next;
+                            set_section_index(next, row, &mut fs_at, &mut disk_at);
+                            chase = true;
+                        }
+                    }
+                }
+                "tab" => {
+                    if screen == Screen::List {
+                        focus = tc::next_section(Some(focus), &lens)
+                            .or_else(|| tc::next_section(None, &lens))
+                            .unwrap_or(focus);
                         chase = true;
                     }
                 }
+                "v" | "V" => {
+                    show_idle = !show_idle;
+                }
                 "enter" => {
                     if screen == Screen::List {
+                        // Acted on after this batch's arrows have moved the
+                        // cursor, so an arrow and an enter read together open
+                        // the row the cursor lands on.
                         open = true;
                     }
                 }
                 "esc" => {
-                    if screen == Screen::Detail {
+                    if screen != Screen::List {
                         screen = Screen::List;
                         scroll = 0;
                         chase = true;
                     }
                 }
                 "s" | "S" => {
-                    sort = sort.next();
+                    match focus {
+                        0 => sort = sort.next(),
+                        1 => disk_sort = disk_sort.next(),
+                        _ => {}
+                    }
                     chase = false;
                 }
                 "p" | "P" => {
@@ -376,27 +610,53 @@ fn main() {
             }
         }
 
-        let (snap, err, sampled) = {
+        let (snap, err, sampled, board, disk_err) = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (guard.snap.clone(), guard.err.clone(), guard.sampled)
+            (
+                guard.snap.clone(),
+                guard.err.clone(),
+                guard.sampled,
+                guard.board.clone(),
+                guard.disk_err.clone(),
+            )
         };
         let age = sampled.map(|at| at.elapsed());
         let paused = pause.load(Ordering::Acquire);
         if let Some(snap) = snap.as_ref() {
             let count = snap.rows.len();
             let missing = !snap.rows.iter().any(|row| row.mount.mount_point == cursor);
-            if count > 0 && (screen == Screen::List && chase || missing) {
-                if let Some(path) = path_at(snap, sort, selected.min(count - 1)) {
+            if count > 0 && ((screen == Screen::List && chase && focus == 0) || missing) {
+                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1)) {
                     cursor = path;
                 }
             }
         }
+        if let Some(board) = board.as_ref() {
+            let indexes = ordered_disks(board, disk_sort, show_idle, &hide_devices);
+            let missing = !indexes
+                .iter()
+                .any(|&index| board.rows[index].disk.name == disk_cursor);
+            if !indexes.is_empty() && ((screen == Screen::List && chase && focus == 1) || missing) {
+                let at = disk_at.min(indexes.len() - 1);
+                disk_cursor = board.rows[indexes[at]].disk.name.clone();
+            }
+        }
         if open {
-            screen = Screen::Detail;
-            scroll = 0;
-            chase = true;
+            match focus {
+                0 => {
+                    screen = Screen::Detail;
+                    scroll = 0;
+                    chase = true;
+                }
+                1 => {
+                    screen = Screen::DiskDetail;
+                    scroll = 0;
+                    chase = true;
+                }
+                _ => {}
+            }
         }
         let view = View {
             snap: snap.as_ref(),
@@ -409,19 +669,47 @@ fn main() {
             screen,
             warn,
             alert,
+            board: board.as_ref(),
+            disk_err: &disk_err,
+            disk_sort,
+            focus,
+            show_idle,
+            disk_cursor: &disk_cursor,
+            hide_devices: &hide_devices,
         };
         let (w, h) = tc::size();
         let drawn = draw_body(&view, w, &p, refresh.tick(tc::animation_tick()));
-        selected = drawn.selected;
+        fs_at = drawn.selected;
+        disk_at = drawn.disk_selected;
+        lens = drawn.lens;
         let cursor_gone = snap
             .as_ref()
             .is_some_and(|snap| !snap.rows.iter().any(|row| row.mount.mount_point == cursor));
         if cursor.is_empty() || cursor_gone {
-            if let Some(path) = snap.as_ref().and_then(|snap| path_at(snap, sort, selected)) {
+            if let Some(path) = snap.as_ref().and_then(|snap| path_at(snap, sort, fs_at)) {
                 cursor = path;
             }
         }
-        let (packed, indent) = footer(w, screen, sort, paused, &p);
+        if disk_cursor.is_empty()
+            || board.as_ref().is_some_and(|board| {
+                ordered_disks(board, disk_sort, show_idle, &hide_devices)
+                    .iter()
+                    .all(|&index| board.rows[index].disk.name != disk_cursor)
+            })
+        {
+            if let Some(name) = board.as_ref().and_then(|board| {
+                let indexes = ordered_disks(board, disk_sort, show_idle, &hide_devices);
+                indexes
+                    .get(disk_at)
+                    .map(|&index| board.rows[index].disk.name.clone())
+            }) {
+                disk_cursor = name;
+            }
+        }
+        let combined = board.as_ref().is_some_and(|board| board.combined);
+        let (packed, indent) = footer(
+            w, screen, sort, disk_sort, focus, show_idle, paused, combined, &p,
+        );
         let banner = tc::notices::banner_rows(w, h);
         let foot: Vec<String> = banner
             .iter()
@@ -432,11 +720,16 @@ fn main() {
         let head_rows = drawn.head.min(drawn.rows.len());
         let rest = drawn.rows.len().saturating_sub(head_rows);
         let room_below = room.saturating_sub(head_rows).max(1);
+        let follow_id = match focus {
+            0 => fs_at,
+            1 => DISK_BASE + disk_at,
+            _ => PRESSURE_ID,
+        };
         if chase {
             if let Some(at) = drawn
                 .placed
                 .iter()
-                .find(|(_, item)| *item == selected)
+                .find(|(_, item)| *item == follow_id)
                 .map(|(row, _)| *row)
             {
                 let in_rest = at.saturating_sub(head_rows);
@@ -453,16 +746,37 @@ fn main() {
         }
         let foot_top = rows.len();
         rows.extend(foot);
-        tc::draw(&rows, w, h);
+        let plots: Vec<tc::Plot> = drawn
+            .plots
+            .into_iter()
+            .filter_map(|plot| plot.in_viewport(scroll, head_rows, room_below))
+            .collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, indent);
         placed = drawn.placed;
         head = head_rows;
         shown_scroll = scroll;
         // Frame-local: only the frame a key moved the selection follows it.
         // Left set, a refresh that reorders the rows would hand the cursor
-        // to whichever mount now sits at the old index.
+        // to whichever mount or disk now sits at the old index.
         chase = false;
         keyboard.wait(Duration::from_millis(200));
+    }
+}
+
+fn section_index(focus: usize, fs_at: usize, disk_at: usize) -> usize {
+    match focus {
+        0 => fs_at,
+        1 => disk_at,
+        _ => 0,
+    }
+}
+
+fn set_section_index(focus: usize, row: usize, fs_at: &mut usize, disk_at: &mut usize) {
+    match focus {
+        0 => *fs_at = row,
+        1 => *disk_at = row,
+        _ => {}
     }
 }
 
@@ -477,6 +791,8 @@ struct State {
     snap: Option<Snap>,
     err: String,
     sampled: Option<Instant>,
+    board: Option<DiskBoard>,
+    disk_err: String,
 }
 
 impl Default for State {
@@ -485,6 +801,24 @@ impl Default for State {
             snap: None,
             err: String::new(),
             sampled: None,
+            board: None,
+            disk_err: String::new(),
+        }
+    }
+}
+
+struct RateMemory {
+    prev: HashMap<String, parse::DiskStat>,
+    at: Option<Instant>,
+    series: HashMap<String, (Vec<Option<f64>>, Vec<Option<f64>>)>,
+}
+
+impl Default for RateMemory {
+    fn default() -> Self {
+        Self {
+            prev: HashMap::new(),
+            at: None,
+            series: HashMap::new(),
         }
     }
 }
@@ -498,6 +832,7 @@ fn poll(
 ) {
     tc::record_panics();
     let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
+    let mut rates = RateMemory::default();
     loop {
         if pause.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(200));
@@ -505,19 +840,32 @@ fn poll(
         }
         let work = refresh.start();
         let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sample(&hide, &mut inflight)
+            let filesystems = sample(&hide, &mut inflight);
+            let mounts = filesystems
+                .as_ref()
+                .map(|snap| snap.all.clone())
+                .unwrap_or_default();
+            let io = host::sample_io(&mounts, every);
+            (filesystems, io)
         }));
         match round {
-            Ok(Ok(snap)) => {
+            Ok((filesystems, io)) => {
                 if let Ok(mut guard) = state.lock() {
-                    guard.snap = Some(snap);
-                    guard.err.clear();
-                    guard.sampled = Some(Instant::now());
-                }
-            }
-            Ok(Err(err)) => {
-                if let Ok(mut guard) = state.lock() {
-                    guard.err = err;
+                    match filesystems {
+                        Ok(snap) => {
+                            guard.snap = Some(snap);
+                            guard.err.clear();
+                            guard.sampled = Some(Instant::now());
+                        }
+                        Err(err) => guard.err = err,
+                    }
+                    match io {
+                        Ok(snap) => {
+                            guard.disk_err = snap.err.clone();
+                            guard.board = Some(board_from(&snap, &mut rates));
+                        }
+                        Err(err) => guard.disk_err = err,
+                    }
                 }
             }
             Err(_) => {
@@ -711,6 +1059,82 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         *row += head;
     }
     rows.extend(section);
+    let fs_len = placed
+        .iter()
+        .map(|(_, item)| *item)
+        .max()
+        .map(|item| item + 1)
+        .unwrap_or(0);
+    let mut plots = Vec::new();
+    let mut disk_len = 0usize;
+    let mut pressure_len = 0usize;
+    if view.screen != Screen::Detail {
+        let disk_slot: Mutex<(Vec<(usize, usize)>, Vec<tc::Plot>, usize)> =
+            Mutex::new((Vec::new(), Vec::new(), 0));
+        let disk_section = tc::guard_rows("disks", width, || {
+            let mut body = Vec::new();
+            let mut at = Vec::new();
+            let mut local_plots = Vec::new();
+            let count = paint_disks(view, width, p, &mut body, &mut at, &mut local_plots);
+            if let Ok(mut slot) = disk_slot.lock() {
+                *slot = (at, local_plots, count);
+            }
+            body
+        });
+        let disk_failed = disk_section
+            .iter()
+            .any(|line| line.contains("could not draw"));
+        let (mut disk_placed, disk_plots, count) = disk_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if disk_failed {
+            disk_placed.clear();
+        } else {
+            disk_len = count;
+            let base = rows.len();
+            for (row, _) in &mut disk_placed {
+                *row += base;
+            }
+            for plot in disk_plots {
+                let mut plot = plot;
+                plot.y += base;
+                plots.push(plot);
+            }
+            placed.extend(disk_placed);
+        }
+        rows.extend(disk_section);
+        if view.screen == Screen::List {
+            if let Some(board) = view.board {
+                if board.show_pressure {
+                    let pressure_slot = Mutex::new(Vec::new());
+                    let pressure = tc::guard_rows("pressure", width, || {
+                        let mut body = Vec::new();
+                        let mut at = Vec::new();
+                        paint_pressure(board, view.focus, width, p, &mut body, &mut at);
+                        if let Ok(mut slot) = pressure_slot.lock() {
+                            *slot = at;
+                        }
+                        body
+                    });
+                    let failed = pressure.iter().any(|line| line.contains("could not draw"));
+                    let mut at = pressure_slot
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    if !failed {
+                        pressure_len = usize::from(!at.is_empty());
+                        let base = rows.len();
+                        for (row, _) in &mut at {
+                            *row += base;
+                        }
+                        placed.extend(at);
+                    }
+                    rows.extend(pressure);
+                }
+            }
+        }
+    }
     let selected = view
         .snap
         .and_then(|snap| {
@@ -720,11 +1144,27 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
                 .position(|&index| snap.rows[index].mount.mount_point == view.cursor)
         })
         .unwrap_or(0);
+    let disk_selected = view
+        .board
+        .and_then(|board| {
+            ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices)
+                .iter()
+                .position(|&index| board.rows[index].disk.name == view.disk_cursor)
+        })
+        .unwrap_or(0);
+    let lens = if view.screen == Screen::List {
+        [fs_len, disk_len, pressure_len]
+    } else {
+        [0, 0, 0]
+    };
     Drawn {
         rows,
         placed,
         head,
         selected,
+        disk_selected,
+        plots,
+        lens,
     }
 }
 
@@ -742,6 +1182,9 @@ fn paint(
         for line in wrap(view.err, width.saturating_sub(1)) {
             rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
         }
+    }
+    if view.screen == Screen::DiskDetail {
+        return;
     }
     let Some(snap) = view.snap else {
         rows.push(tc::seg(&[(p.dim.as_str(), " sampling…".into())], width));
@@ -782,7 +1225,7 @@ fn paint(
     let ordered = ordered(snap, view.sort);
     for (item, index) in ordered.iter().copied().enumerate() {
         let row = &snap.rows[index];
-        let here = row.mount.mount_point == view.cursor;
+        let here = view.focus == 0 && row.mount.mount_point == view.cursor;
         let from = rows.len();
         rows.extend(data_rows(row, &cols, width, here, view.warn, view.alert, p));
         placed.extend((from..rows.len()).map(|at| (at, item)));
@@ -808,6 +1251,12 @@ fn paint_detail(view: &View, snap: &Snap, width: usize, p: &Palette, rows: &mut 
         format!("type {}", mount.fstype),
         format!("options {}", mount.options),
     ];
+    if let Some(board) = view.board {
+        let lives: Vec<parse::LiveDisk> = board.rows.iter().map(|row| row.disk.clone()).collect();
+        if let Some(line) = parse::device_of(&mount.dev, &lives) {
+            lines.insert(2, line);
+        }
+    }
     match &row.figures {
         Figures::Ready(space) => {
             lines.push(format!(
@@ -1164,14 +1613,788 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn footer(w: usize, screen: Screen, sort: Sort, paused: bool, p: &Palette) -> (tc::Footer, usize) {
+fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
+    let now = Instant::now();
+    let elapsed = memory
+        .at
+        .map(|at| now.saturating_duration_since(at).as_secs_f64())
+        .unwrap_or(0.0);
+    let mut rows = Vec::with_capacity(snap.disks.len());
+    let mut live = std::collections::BTreeSet::new();
+    for disk in &snap.disks {
+        live.insert(disk.name.clone());
+        let (rate, read_point, write_point) = if snap.combined {
+            match disk.mac {
+                Some(sample) => {
+                    let bytes = sample.mb_per_s * 1024.0 * 1024.0;
+                    (ShownRate::Mac(sample), Some(bytes), None)
+                }
+                None => (ShownRate::Measuring, None, None),
+            }
+        } else if let Some(stat) = disk.stat.clone() {
+            let rate = match memory.prev.get(&disk.name) {
+                Some(prev) => match parse::disk_rates(prev, &stat, elapsed) {
+                    Some(rates) => ShownRate::Linux(rates),
+                    None => ShownRate::Gap,
+                },
+                None => ShownRate::Measuring,
+            };
+            let points = match &rate {
+                ShownRate::Linux(rates) => (Some(rates.read_bps), Some(rates.write_bps)),
+                _ => (None, None),
+            };
+            memory.prev.insert(disk.name.clone(), stat);
+            (rate, points.0, points.1)
+        } else {
+            // A missing counter is not a previous sample. Keeping `prev`
+            // while the shared timestamp moves would divide the whole gap
+            // by the next poll alone.
+            memory.prev.remove(&disk.name);
+            (ShownRate::Measuring, None, None)
+        };
+        let series = memory.series.entry(disk.name.clone()).or_default();
+        push_sample(&mut series.0, read_point);
+        push_sample(&mut series.1, write_point);
+        rows.push(DiskViewRow {
+            disk: disk.clone(),
+            rate,
+            read: series.0.clone(),
+            write: series.1.clone(),
+        });
+    }
+    memory.series.retain(|name, _| live.contains(name));
+    memory.prev.retain(|name, _| live.contains(name));
+    memory.at = Some(now);
+    DiskBoard {
+        rows,
+        show_pressure: snap.show_pressure,
+        pressure: snap.pressure,
+        pressure_absent: snap.pressure_absent,
+        pressure_err: snap.pressure_err.clone(),
+        host_devices: snap.host_devices,
+        combined: snap.combined,
+        missing: snap.missing.clone(),
+    }
+}
+
+fn push_sample(series: &mut Vec<Option<f64>>, value: Option<f64>) {
+    series.push(value);
+    if series.len() > SERIES_CAP {
+        let extra = series.len() - SERIES_CAP;
+        series.drain(0..extra);
+    }
+}
+
+fn ordered_disks(
+    board: &DiskBoard,
+    sort: DiskSort,
+    show_idle: bool,
+    hide: &[String],
+) -> Vec<usize> {
+    let lives: Vec<parse::LiveDisk> = board.rows.iter().map(|row| row.disk.clone()).collect();
+    let (mut indexes, _) = parse::visible_disk_indexes(&lives, show_idle, hide);
+    indexes.sort_by(|&left, &right| match sort {
+        DiskSort::Name => board.rows[left].disk.name.cmp(&board.rows[right].disk.name),
+        DiskSort::Read => rate_key(&board.rows[right], false)
+            .total_cmp(&rate_key(&board.rows[left], false))
+            .then(left.cmp(&right)),
+        DiskSort::Write => rate_key(&board.rows[right], true)
+            .total_cmp(&rate_key(&board.rows[left], true))
+            .then(left.cmp(&right)),
+    });
+    indexes
+}
+
+fn rate_key(row: &DiskViewRow, write: bool) -> f64 {
+    match &row.rate {
+        ShownRate::Linux(rates) => {
+            if write {
+                rates.write_bps
+            } else {
+                rates.read_bps
+            }
+        }
+        ShownRate::Mac(sample) => {
+            if write {
+                sample.mb_per_s
+            } else {
+                sample.tps
+            }
+        }
+        _ => -1.0,
+    }
+}
+
+fn paint_disks(
+    view: &View,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    placed: &mut Vec<(usize, usize)>,
+    plots: &mut Vec<tc::Plot>,
+) -> usize {
+    let combined = view.board.is_some_and(|board| board.combined);
+    let cols = disk_columns(width);
+    let heading = disks_heading(view, combined, cols.queue);
+    for line in wrap(&heading, width.saturating_sub(1)) {
+        rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
+    }
+    if !view.disk_err.is_empty() {
+        for line in wrap(view.disk_err, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
+        }
+    }
+    let Some(board) = view.board else {
+        rows.push(tc::seg(&[(p.dim.as_str(), " measuring".into())], width));
+        return 0;
+    };
+    if !board.missing.is_empty() {
+        for line in wrap(&board.missing, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {line}"))], width));
+        }
+        return 0;
+    }
+    if view.screen == Screen::DiskDetail {
+        paint_disk_detail(view, board, width, p, rows, plots);
+        return 0;
+    }
+    let lives: Vec<parse::LiveDisk> = board.rows.iter().map(|row| row.disk.clone()).collect();
+    let (visible, hidden) = parse::visible_disk_indexes(&lives, view.show_idle, view.hide_devices);
+    let labels = hidden.labels();
+    if let Some(line) = tc::filter_row(visible.len(), lives.len(), &labels) {
+        for line in wrap(&line, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+        }
+    }
+    let indexes = ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices);
+    if indexes.is_empty() {
+        if let Some(line) = tc::filtered_to_nothing(lives.len(), &labels) {
+            for line in wrap(&line, width.saturating_sub(1)) {
+                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {line}"))], width));
+            }
+        } else if view.disk_err.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), " no disks".into())], width));
+        }
+        return 0;
+    }
+    rows.push(disk_header(board.combined, &cols, width, p));
+    for (item, index) in indexes.iter().copied().enumerate() {
+        let row = &board.rows[index];
+        let here = view.focus == 1 && row.disk.name == view.disk_cursor;
+        let from = rows.len();
+        rows.extend(disk_data_rows(row, board.combined, &cols, width, here, p));
+        placed.extend((from..rows.len()).map(|at| (at, DISK_BASE + item)));
+    }
+    if !board.combined {
+        let note = "* BUSY = share of time with at least one request in flight (field 10); an NVMe reaches 100% with headroom";
+        for line in wrap(note, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+        }
+    }
+    if let Some(row) = indexes
+        .iter()
+        .copied()
+        .find(|&index| board.rows[index].disk.name == view.disk_cursor)
+        .map(|index| &board.rows[index])
+    {
+        push_chart(row, 4, board.combined, width, p, rows, plots);
+    }
+    indexes.len()
+}
+
+fn disks_heading(view: &View, combined: bool, queue: bool) -> String {
+    if combined {
+        return format!(
+            "DISKS  iostat: read and write combined · sorted: {} · AWAIT, BUSY and QUEUE need IOKit (OPS-193)",
+            view.disk_sort.label(true)
+        );
+    }
+    let mut line = format!(
+        "DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: {}",
+        view.disk_sort.label(false)
+    );
+    if view.board.is_some_and(|board| board.host_devices) {
+        line.push_str(" · host devices, container filesystems");
+    }
+    if queue {
+        line.push_str(" · QUEUE is instantaneous");
+    }
+    line
+}
+
+fn disk_header(combined: bool, cols: &DiskCols, width: usize, p: &Palette) -> String {
+    if combined {
+        let cells = vec![
+            tc::pad("DISK", cols.disk),
+            format!("{:>width$}", "TPS", width = TPS_W),
+            format!("{:>width$}", "MB/s", width = MB_W),
+        ];
+        return tc::seg(&[(p.dim.as_str(), cells.join(" "))], width);
+    }
+    let mut cells = vec![tc::pad("DISK", cols.disk)];
+    if cols.typ {
+        cells.push(tc::pad("TYPE", DISK_TYPE_W));
+    }
+    if cols.size {
+        cells.push(tc::pad("SIZE", DISK_SIZE_W));
+    }
+    cells.push(format!("{:>width$}", "READ", width = READ_W));
+    cells.push(format!("{:>width$}", "WRITE", width = WRITE_W));
+    if cols.iops {
+        cells.push(format!("{:>width$}", "IOPS", width = IOPS_W));
+    }
+    if cols.await_ms {
+        cells.push(format!("{:>width$}", "AWAIT", width = AWAIT_W));
+    }
+    cells.push(format!("{:>width$}", "BUSY*", width = BUSY_W));
+    if cols.queue {
+        cells.push(format!("{:>width$}", "QUEUE", width = QUEUE_W));
+    }
+    tc::seg(&[(p.dim.as_str(), cells.join(" "))], width)
+}
+
+fn disk_data_rows(
+    row: &DiskViewRow,
+    combined: bool,
+    cols: &DiskCols,
+    width: usize,
+    here: bool,
+    p: &Palette,
+) -> Vec<String> {
+    let tint = if here {
+        tc::bg(38, 56, 76)
+    } else {
+        String::new()
+    };
+    let c = |colour: &str| {
+        let colour = if tint.is_empty() {
+            colour
+        } else if colour == p.dim {
+            p.dim_lit.as_str()
+        } else {
+            colour
+        };
+        format!("{}{}", tint, colour)
+    };
+    let room = cols.disk.saturating_sub(2).max(1);
+    let chunks = chunks(&row.disk.name, room);
+    let mut out = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let marker = if index == 0 {
+            if here {
+                "▸ "
+            } else {
+                "  "
+            }
+        } else {
+            "  "
+        };
+        let name = tc::pad(&format!("{marker}{}", tc::pad(chunk, room)), cols.disk);
+        if index > 0 {
+            out.push(tc::seg(&[(c(p.txt.as_str()).as_str(), name)], width));
+            continue;
+        }
+        let mut cells = vec![(
+            c(if here {
+                p.accent.as_str()
+            } else {
+                p.txt.as_str()
+            }),
+            name,
+        )];
+        if combined {
+            match &row.rate {
+                ShownRate::Mac(sample) => {
+                    cells.push((
+                        c(p.txt.as_str()),
+                        format!("{:>width$}", tps_text(sample.tps), width = TPS_W),
+                    ));
+                    cells.push((
+                        c(p.txt.as_str()),
+                        format!("{:>width$}", mb_text(sample.mb_per_s), width = MB_W),
+                    ));
+                }
+                ShownRate::Gap => {
+                    cells.push((c(p.dim.as_str()), format!("{:>width$}", "—", width = TPS_W)));
+                    cells.push((c(p.dim.as_str()), format!("{:>width$}", "—", width = MB_W)));
+                }
+                ShownRate::Measuring | ShownRate::Linux(_) => {
+                    cells.push((c(p.accent.as_str()), "measuring".into()));
+                }
+            }
+        } else {
+            match &row.rate {
+                ShownRate::Linux(rates) => {
+                    push_linux_rates(&mut cells, row, cols, rates, &c, p);
+                }
+                ShownRate::Gap => {
+                    push_gap(&mut cells, row, cols, &c, p);
+                }
+                ShownRate::Measuring | ShownRate::Mac(_) => {
+                    if cols.typ {
+                        cells.push((
+                            c(p.dim.as_str()),
+                            tc::pad(&clip_chars(&row.disk.kind, DISK_TYPE_W), DISK_TYPE_W),
+                        ));
+                    }
+                    if cols.size {
+                        cells.push((
+                            c(p.txt.as_str()),
+                            format!("{:>width$}", human(row.disk.size), width = DISK_SIZE_W),
+                        ));
+                    }
+                    cells.push((c(p.accent.as_str()), "measuring".into()));
+                }
+            }
+        }
+        out.push(join_cells(&cells, width, here, &tint));
+    }
+    out
+}
+
+fn push_linux_rates(
+    cells: &mut Vec<(String, String)>,
+    row: &DiskViewRow,
+    cols: &DiskCols,
+    rates: &parse::Rates,
+    c: &impl Fn(&str) -> String,
+    p: &Palette,
+) {
+    if cols.typ {
+        cells.push((
+            c(p.dim.as_str()),
+            tc::pad(&clip_chars(&row.disk.kind, DISK_TYPE_W), DISK_TYPE_W),
+        ));
+    }
+    if cols.size {
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", human(row.disk.size), width = DISK_SIZE_W),
+        ));
+    }
+    cells.push((
+        c(p.txt.as_str()),
+        format!(
+            "{:>width$}",
+            human(rates.read_bps.round() as u64),
+            width = READ_W
+        ),
+    ));
+    cells.push((
+        c(p.txt.as_str()),
+        format!(
+            "{:>width$}",
+            human(rates.write_bps.round() as u64),
+            width = WRITE_W
+        ),
+    ));
+    if cols.iops {
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", iops_text(rates.iops), width = IOPS_W),
+        ));
+    }
+    if cols.await_ms {
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", await_text(rates.await_ms), width = AWAIT_W),
+        ));
+    }
+    cells.push((
+        c(p.txt.as_str()),
+        format!("{:>width$}", busy_text(rates.busy), width = BUSY_W),
+    ));
+    if cols.queue {
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", queue_text(rates.queue), width = QUEUE_W),
+        ));
+    }
+}
+
+fn push_gap(
+    cells: &mut Vec<(String, String)>,
+    row: &DiskViewRow,
+    cols: &DiskCols,
+    c: &impl Fn(&str) -> String,
+    p: &Palette,
+) {
+    if cols.typ {
+        cells.push((
+            c(p.dim.as_str()),
+            tc::pad(&clip_chars(&row.disk.kind, DISK_TYPE_W), DISK_TYPE_W),
+        ));
+    }
+    if cols.size {
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", human(row.disk.size), width = DISK_SIZE_W),
+        ));
+    }
+    let dash = |width: usize| format!("{:>width$}", "—", width = width);
+    cells.push((c(p.dim.as_str()), dash(READ_W)));
+    cells.push((c(p.dim.as_str()), dash(WRITE_W)));
+    if cols.iops {
+        cells.push((c(p.dim.as_str()), dash(IOPS_W)));
+    }
+    if cols.await_ms {
+        cells.push((c(p.dim.as_str()), dash(AWAIT_W)));
+    }
+    cells.push((c(p.dim.as_str()), dash(BUSY_W)));
+    if cols.queue {
+        let queue = row
+            .disk
+            .stat
+            .as_ref()
+            .map(|stat| stat.in_flight)
+            .unwrap_or(0);
+        cells.push((
+            c(p.txt.as_str()),
+            format!("{:>width$}", queue_text(queue), width = QUEUE_W),
+        ));
+    }
+}
+
+fn join_cells(cells: &[(String, String)], width: usize, here: bool, tint: &str) -> String {
+    let mut parts: Vec<(&str, String)> = cells
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (colour, text))| {
+            let mut piece = Vec::new();
+            if index > 0 {
+                piece.push((colour.as_str(), " ".into()));
+            }
+            piece.push((colour.as_str(), text.clone()));
+            piece
+        })
+        .collect();
+    if here {
+        let used: usize = parts.iter().map(|(_, text)| tc::display_width(text)).sum();
+        if used < width {
+            parts.push((tint, " ".repeat(width - used)));
+        }
+    }
+    tc::seg(&parts, width)
+}
+
+fn paint_disk_detail(
+    view: &View,
+    board: &DiskBoard,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let Some(row) = board
+        .rows
+        .iter()
+        .find(|row| row.disk.name == view.disk_cursor)
+    else {
+        rows.push(tc::seg(
+            &[(p.dim.as_str(), " nothing selected".into())],
+            width,
+        ));
+        return;
+    };
+    let disk = &row.disk;
+    let mut lines = vec![
+        format!("disk {}", disk.name),
+        if disk.model.is_empty() {
+            if board.combined {
+                "model not provided by iostat".into()
+            } else {
+                "model unavailable".into()
+            }
+        } else {
+            format!("model {}", disk.model)
+        },
+        if disk.kind.is_empty() {
+            if board.combined {
+                "type not provided by iostat".into()
+            } else {
+                "type unavailable".into()
+            }
+        } else {
+            format!("type {}", disk.kind)
+        },
+        if board.combined {
+            "size not provided by iostat".into()
+        } else {
+            format!("size {}", human(disk.size))
+        },
+    ];
+    if !disk.mounts.is_empty() {
+        lines.push(format!("mounted {}", disk.mounts.join(", ")));
+    }
+    if disk.partitions.is_empty() && !board.combined {
+        lines.push("no partitions".into());
+    }
+    for part in &disk.partitions {
+        let mounts = if part.mounts.is_empty() {
+            "unmounted".into()
+        } else {
+            part.mounts.join(", ")
+        };
+        lines.push(format!("partition {} {}", part.name, mounts));
+    }
+    if !disk.slaves.is_empty() {
+        lines.push(format!("slaves {}", disk.slaves.join(", ")));
+    }
+    if let Some(stat) = &disk.stat {
+        lines.push(format!(
+            "since boot read {}  written {}  ios {}",
+            human(stat.sectors_read.saturating_mul(parse::SECTOR_BYTES)),
+            human(stat.sectors_written.saturating_mul(parse::SECTOR_BYTES)),
+            stat.reads.saturating_add(stat.writes)
+        ));
+    } else if board.combined {
+        lines.push("totals since boot are not in iostat".into());
+    }
+    match &row.rate {
+        ShownRate::Linux(rates) => lines.push(format!(
+            "read {}/s  write {}/s  iops {}  await {}  busy {}  queue {}",
+            human(rates.read_bps.round() as u64),
+            human(rates.write_bps.round() as u64),
+            iops_text(rates.iops),
+            await_text(rates.await_ms),
+            busy_text(rates.busy),
+            queue_text(rates.queue)
+        )),
+        ShownRate::Mac(sample) => lines.push(format!(
+            "tps {}  MB/s {} combined",
+            tps_text(sample.tps),
+            mb_text(sample.mb_per_s)
+        )),
+        ShownRate::Gap => lines.push("counter reset —".into()),
+        ShownRate::Measuring => lines.push("measuring".into()),
+    }
+    for line in lines {
+        for wrapped in wrap(&line, width.saturating_sub(1)) {
+            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {wrapped}"))], width));
+        }
+    }
+    push_chart(row, 8, board.combined, width, p, rows, plots);
+}
+
+fn paint_pressure(
+    board: &DiskBoard,
+    focus: usize,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    placed: &mut Vec<(usize, usize)>,
+) {
+    let heading = "/proc/pressure/io · stall time, not busy time";
+    for line in wrap(heading, width.saturating_sub(1)) {
+        rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
+    }
+    let text = if !board.pressure_err.is_empty() {
+        board.pressure_err.clone()
+    } else if board.pressure_absent || board.pressure.is_none() {
+        "PSI not available on this kernel (CONFIG_PSI or psi=0)".into()
+    } else {
+        let pressure = board.pressure.unwrap();
+        format!(
+            "some {:.1}% avg10 · {:.1}% avg60 · {:.1}% avg300   full {:.1}% · {:.1}% · {:.1}%",
+            pressure.some[0],
+            pressure.some[1],
+            pressure.some[2],
+            pressure.full[0],
+            pressure.full[1],
+            pressure.full[2]
+        )
+    };
+    let tint = if focus == 2 {
+        tc::bg(38, 56, 76)
+    } else {
+        String::new()
+    };
+    let colour = if focus == 2 { &p.accent } else { &p.txt };
+    for (index, line) in wrap(&text, width.saturating_sub(1)).into_iter().enumerate() {
+        let ink = format!("{tint}{colour}");
+        rows.push(tc::seg(&[(ink.as_str(), format!(" {line}"))], width));
+        if index == 0 {
+            placed.push((rows.len() - 1, PRESSURE_ID));
+        }
+    }
+}
+
+fn push_chart(
+    row: &DiskViewRow,
+    tall: usize,
+    combined: bool,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let peak = peak_of(&row.read, &row.write).max(1.0);
+    let caption = chart_caption(&row.read, &row.write, combined);
+    for line in wrap(&caption, width.saturating_sub(1)) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+    }
+    let y = rows.len();
+    let plot_w = width.saturating_sub(2).max(1);
+    for _ in 0..tall {
+        rows.push(tc::seg(&[(p.dim.as_str(), " ".into())], width));
+    }
+    let mut traces = vec![tc::Trace {
+        values: row
+            .read
+            .iter()
+            .map(|value| chart_frac(*value, peak, false))
+            .collect(),
+        positions: None,
+        colour: p.accent.clone(),
+        baseline: Some(0.0),
+    }];
+    if !combined {
+        traces.push(tc::Trace {
+            values: row
+                .write
+                .iter()
+                .map(|value| chart_frac(*value, peak, true))
+                .collect(),
+            positions: None,
+            colour: p.down.clone(),
+            baseline: Some(1.0),
+        });
+    }
+    plots.push(
+        tc::Plot::new(
+            1,
+            y,
+            plot_w,
+            tall,
+            tc::LineChart {
+                traces,
+                slots: SERIES_CAP,
+                focus: Some(0),
+            },
+        )
+        .under_text(),
+    );
+}
+
+/// The latest sample is `now`. A gap there stays a dash; an older rate is
+/// not borrowed, and an empty series is not drawn as zero with a 1 B/s peak.
+fn chart_caption(read: &[Option<f64>], write: &[Option<f64>], combined: bool) -> String {
+    let any = read.iter().chain(write.iter()).any(|value| value.is_some());
+    if !any {
+        return "no rate yet".into();
+    }
+    let peak = human(peak_of(read, write).round() as u64);
+    if combined {
+        format!("peak {peak}/s   now {} combined", rate_now(read))
+    } else {
+        format!(
+            "peak {peak}/s   now {} read  {} write",
+            rate_now(read),
+            rate_now(write)
+        )
+    }
+}
+
+fn rate_now(series: &[Option<f64>]) -> String {
+    match series.last() {
+        Some(Some(value)) if value.is_finite() => format!("{}/s", human(value.round() as u64)),
+        _ => "—".into(),
+    }
+}
+
+fn chart_frac(value: Option<f64>, peak: f64, invert: bool) -> Option<f64> {
+    let value = value?;
+    if !value.is_finite() || peak <= 0.0 {
+        return None;
+    }
+    let fraction = (value / peak).clamp(0.0, 1.0);
+    Some(if invert { 1.0 - fraction } else { fraction })
+}
+
+fn peak_of(read: &[Option<f64>], write: &[Option<f64>]) -> f64 {
+    read.iter()
+        .chain(write.iter())
+        .filter_map(|value| *value)
+        .filter(|value| value.is_finite())
+        .fold(0.0, f64::max)
+}
+
+fn iops_text(iops: f64) -> String {
+    if iops >= 10_000.0 {
+        format!("{:.0}K", iops / 1000.0)
+    } else if iops >= 100.0 {
+        format!("{:.0}", iops)
+    } else {
+        format!("{:.1}", iops)
+    }
+}
+
+fn await_text(ms: Option<f64>) -> String {
+    match ms {
+        None => "—".into(),
+        Some(ms) if ms >= 10_000.0 => format!("{:.0}s", ms / 1000.0),
+        Some(ms) if ms >= 1000.0 => format!("{:.1}s", ms / 1000.0),
+        Some(ms) => format!("{:.0}ms", ms),
+    }
+}
+
+fn busy_text(share: f64) -> String {
+    format!("{:.0}%", (share * 100.0).round())
+}
+
+fn queue_text(queue: u64) -> String {
+    if queue >= 100_000 {
+        format!("{}K", queue / 1000)
+    } else {
+        queue.to_string()
+    }
+}
+
+fn tps_text(tps: f64) -> String {
+    if tps >= 100.0 {
+        format!("{:.0}", tps)
+    } else {
+        format!("{:.1}", tps)
+    }
+}
+
+fn mb_text(mb: f64) -> String {
+    if mb >= 100.0 {
+        format!("{:.0}", mb)
+    } else if mb >= 10.0 {
+        format!("{:.1}", mb)
+    } else {
+        format!("{:.2}", mb)
+    }
+}
+
+fn footer(
+    w: usize,
+    screen: Screen,
+    sort: Sort,
+    disk_sort: DiskSort,
+    focus: usize,
+    show_idle: bool,
+    paused: bool,
+    combined: bool,
+    p: &Palette,
+) -> (tc::Footer, usize) {
     let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
-    if screen == Screen::Detail {
+    if screen != Screen::List {
         hints.push(vec![(p.dim.as_str(), "esc back".into())]);
     } else {
         hints.push(vec![(p.dim.as_str(), "↑↓ select".into())]);
         hints.push(vec![(p.dim.as_str(), "[↵] detail".into())]);
-        hints.push(vec![(p.dim.as_str(), sort.hint().into())]);
+        if focus != 2 {
+            let hint = if focus == 1 {
+                disk_sort.hint(combined)
+            } else {
+                sort.hint()
+            };
+            hints.push(vec![(p.dim.as_str(), hint.into())]);
+        }
+        hints.push(vec![(p.dim.as_str(), "tab section".into())]);
+        hints.push(vec![(p.dim.as_str(), idle_hint(show_idle).into())]);
     }
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
@@ -1334,6 +2557,13 @@ mod tests {
             screen: Screen::List,
             warn: 80.0,
             alert: 90.0,
+            board: None,
+            disk_err: "",
+            disk_sort: DiskSort::Write,
+            focus: 0,
+            show_idle: false,
+            disk_cursor: "",
+            hide_devices: &[],
         }
     }
 
@@ -1413,7 +2643,17 @@ mod tests {
             assert_eq!(header.contains("INODES"), cols.inodes, "{width}");
             assert_eq!(header.contains("TYPE"), cols.typ, "{width}");
             assert_eq!(header.contains("SIZE"), cols.size, "{width}");
-            let (packed, _) = footer(width, Screen::List, Sort::Mount, false, &p);
+            let (packed, _) = footer(
+                width,
+                Screen::List,
+                Sort::Mount,
+                DiskSort::Write,
+                0,
+                false,
+                false,
+                false,
+                &p,
+            );
             for line in &packed.lines {
                 assert!(
                     tc::display_width(line) <= width,
@@ -1521,5 +2761,328 @@ mod tests {
         pending.age = None;
         let drawn = draw_body(&pending, 60, &p, None);
         assert!(drawn.rows.iter().any(|line| line.contains("stopped:")));
+    }
+
+    fn disk_row(name: &str, reads: u64, writes: u64, write_bps: f64) -> DiskViewRow {
+        let stat = parse::DiskStat {
+            major: 8,
+            minor: 0,
+            name: name.into(),
+            reads,
+            reads_merged: 0,
+            sectors_read: reads,
+            ms_reading: reads,
+            writes,
+            writes_merged: 0,
+            sectors_written: writes,
+            ms_writing: writes,
+            in_flight: 1,
+            ms_io: 10,
+            weighted_ms_io: 10,
+        };
+        DiskViewRow {
+            disk: parse::LiveDisk {
+                name: name.into(),
+                kind: "ssd".into(),
+                size: 1 << 40,
+                model: "Example SSD 1TB".into(),
+                dev: "8:0".into(),
+                stat: Some(stat),
+                mac: None,
+                idle: reads == 0 && writes == 0,
+                partitions: vec![parse::PartMount {
+                    name: format!("{name}1"),
+                    dev: "8:1".into(),
+                    mounts: vec!["/".into()],
+                }],
+                mounts: vec![],
+                slaves: vec![],
+            },
+            rate: ShownRate::Linux(parse::Rates {
+                read_bps: 512.0,
+                write_bps,
+                iops: 1.0,
+                await_ms: Some(2.0),
+                busy: 0.1,
+                queue: 1,
+            }),
+            read: vec![Some(512.0); 3],
+            write: vec![Some(write_bps); 3],
+        }
+    }
+
+    fn board(rows: Vec<DiskViewRow>) -> DiskBoard {
+        DiskBoard {
+            rows,
+            show_pressure: true,
+            pressure: Some(parse::Pressure {
+                some: [23.1, 18.4, 9.7],
+                full: [7.2, 5.1, 2.0],
+                some_total: 1,
+                full_total: 1,
+            }),
+            pressure_absent: false,
+            pressure_err: String::new(),
+            host_devices: false,
+            combined: false,
+            missing: String::new(),
+        }
+    }
+
+    #[test]
+    fn disk_columns_drop_queue_then_await_then_type_then_size_then_iops() {
+        let flags = |width| {
+            let cols = disk_columns(width);
+            (cols.queue, cols.await_ms, cols.typ, cols.size, cols.iops)
+        };
+        assert_eq!(flags(140), (true, true, true, true, true));
+        assert_eq!(flags(80), (true, true, true, true, true));
+        let narrow = flags(28);
+        assert!(!narrow.0 && !narrow.1 && !narrow.2 && !narrow.3 && !narrow.4);
+        let mut dropped = [None; 5];
+        let mut previous = (true, true, true, true, true);
+        for width in (28..=140).rev() {
+            let now = flags(width);
+            let present = [now.0, now.1, now.2, now.3, now.4];
+            let before = [previous.0, previous.1, previous.2, previous.3, previous.4];
+            for (index, on) in present.iter().copied().enumerate() {
+                assert!(before[index] || !on, "a dropped column returned at {width}");
+                if !on && dropped[index].is_none() {
+                    dropped[index] = Some(width);
+                }
+            }
+            previous = now;
+        }
+        // Queue leaves first, then await, type, size, iops. A higher width
+        // is a column that gave up while the pane was still wider.
+        for pair in dropped.windows(2) {
+            assert!(pair[0] > pair[1], "drop order {dropped:?}");
+        }
+    }
+
+    #[test]
+    fn a_disk_and_two_partitions_render_one_row() {
+        let stats = parse::parse_diskstats(
+            "8 0 sda 10 0 20 1 4 0 8 1 0 1 1\n8 1 sda1 1 0 2 1 1 0 2 1 0 1 1\n8 2 sda2 1 0 2 1 1 0 2 1 0 1 1\n",
+        );
+        let inventory = vec![parse::InventoryDisk {
+            name: "sda".into(),
+            kind: "ssd".into(),
+            size: 1024,
+            model: "Example SSD 1TB".into(),
+            dev: "8:0".into(),
+            partitions: vec![
+                parse::PartMount {
+                    name: "sda1".into(),
+                    dev: "8:1".into(),
+                    mounts: vec!["/".into()],
+                },
+                parse::PartMount {
+                    name: "sda2".into(),
+                    dev: "8:2".into(),
+                    mounts: vec![],
+                },
+            ],
+            slaves: vec![],
+        }];
+        let live = parse::live_disks(&stats, &inventory);
+        assert_eq!(live.len(), 1);
+        let mut row = disk_row("sda", 10, 4, 4096.0);
+        row.disk = live.into_iter().next().unwrap();
+        row.disk.model = "Example SSD 1TB".into();
+        let board = board(vec![row]);
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        frame.focus = 1;
+        for width in [28, 40, 60, 80, 100, 140] {
+            let drawn = draw_body(&frame, width, &p, None);
+            for line in &drawn.rows {
+                assert!(
+                    tc::display_width(line) <= width,
+                    "width {width} drew {} cells",
+                    tc::display_width(line)
+                );
+            }
+            let plain = drawn
+                .rows
+                .iter()
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for phrase in ["whole disks only", "/proc/diskstats", "512-byte", "sectors"] {
+                assert!(plain.contains(phrase), "{width} missing {phrase}");
+            }
+            assert!(!plain.contains("sda1"), "partition rendered at {width}");
+            assert!(!plain.contains("sda2"), "partition rendered at {width}");
+            assert_eq!(
+                drawn
+                    .placed
+                    .iter()
+                    .filter(|(_, item)| *item >= DISK_BASE && *item < PRESSURE_ID)
+                    .map(|(_, item)| *item)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                1,
+                "width {width}"
+            );
+        }
+        assert!(draw_body(&frame, 80, &p, None).rows.len() > 10);
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert_eq!(drawn.plots.len(), 1);
+        assert_eq!(drawn.plots[0].height, 4);
+        assert_eq!(drawn.plots[0].chart.traces.len(), 2);
+        assert_eq!(drawn.plots[0].chart.traces[0].baseline, Some(0.0));
+        assert_eq!(drawn.plots[0].chart.traces[1].baseline, Some(1.0));
+        assert!(drawn.plots[0]
+            .clone()
+            .in_viewport(0, drawn.head, 40)
+            .is_some());
+        assert!(plain_has(&drawn, "23.1%"));
+        assert!(plain_has(&drawn, "stall time, not busy time"));
+    }
+
+    fn plain_has(drawn: &Drawn, text: &str) -> bool {
+        drawn.rows.iter().any(|line| plain(line).contains(text))
+    }
+
+    #[test]
+    fn idle_and_hide_devices_are_named_in_the_filter_row() {
+        let rows = vec![disk_row("loop0", 0, 0, 0.0), disk_row("sda", 4, 9, 9000.0)];
+        let board = board(rows);
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        frame.show_idle = false;
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(plain_has(&drawn, "1 idle hidden"));
+        assert_eq!(idle_hint(false), "[v] show idle disks");
+        assert_eq!(idle_hint(true), "[v] hide idle disks");
+        frame.show_idle = true;
+        let hidden = vec!["sda".to_string()];
+        frame.hide_devices = &hidden;
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(plain_has(&drawn, "1 hide_devices hidden"));
+        assert!(plain_has(&drawn, "loop0"));
+    }
+
+    #[test]
+    fn a_missing_psi_file_is_named_and_a_reset_is_a_dash() {
+        let mut rows = board(vec![disk_row("sda", 1, 1, 100.0)]);
+        rows.pressure = None;
+        rows.pressure_absent = true;
+        let p = palette();
+        {
+            let mut frame = view(None, "");
+            frame.board = Some(&rows);
+            let drawn = draw_body(&frame, 80, &p, None);
+            assert!(plain_has(
+                &drawn,
+                "PSI not available on this kernel (CONFIG_PSI or psi=0)"
+            ));
+        }
+        rows.rows[0].rate = ShownRate::Gap;
+        rows.pressure_absent = false;
+        rows.show_pressure = false;
+        let mut frame = view(None, "");
+        frame.board = Some(&rows);
+        frame.disk_err = "diskstats unavailable: gone";
+        let drawn = draw_body(&frame, 120, &p, None);
+        assert!(plain_has(&drawn, "—"));
+        assert!(plain_has(&drawn, "diskstats unavailable:"));
+    }
+
+    #[test]
+    fn the_chart_series_stays_at_sixty_samples() {
+        let mut series = Vec::new();
+        for index in 0..80 {
+            push_sample(&mut series, Some(index as f64));
+        }
+        assert_eq!(series.len(), 60);
+        assert_eq!(series[0], Some(20.0));
+        assert_eq!(series[59], Some(79.0));
+    }
+
+    #[test]
+    fn sort_hints_name_the_next_disk_order() {
+        assert_eq!(DiskSort::Write.hint(false), "[s] sort by read");
+        assert_eq!(DiskSort::Read.hint(false), "[s] sort by name");
+        assert_eq!(DiskSort::Name.hint(false), "[s] sort by write");
+        assert_eq!(DiskSort::Write.hint(true), "[s] sort by tps");
+        assert_eq!(DiskSort::Read.hint(true), "[s] sort by name");
+        assert_eq!(DiskSort::Name.hint(true), "[s] sort by MB/s");
+        assert_eq!(DiskSort::Write.label(true), "MB/s");
+        assert_eq!(DiskSort::Read.label(true), "tps");
+        assert_eq!(DiskSort::Write.label(false), "write");
+        assert_eq!(DiskSort::Write.next(), DiskSort::Read);
+    }
+
+    #[test]
+    fn a_gap_at_the_end_of_the_chart_is_not_labelled_as_now() {
+        let caption = chart_caption(&[Some(100.0), None], &[Some(50.0), None], false);
+        assert!(caption.contains("peak 100B/s"), "{caption}");
+        assert!(caption.contains("now — read"), "{caption}");
+        assert!(caption.contains("— write"), "{caption}");
+        assert!(!caption.contains("50B"), "{caption}");
+        assert_eq!(chart_caption(&[], &[], false), "no rate yet");
+        assert_eq!(chart_caption(&[None, None], &[None], true), "no rate yet");
+        let zero = chart_caption(&[Some(0.0)], &[], true);
+        assert!(zero.contains("now 0B/s"), "{zero}");
+        assert!(!zero.contains("1B"), "{zero}");
+    }
+
+    #[test]
+    fn a_missing_counter_does_not_become_a_peak_when_it_returns() {
+        let mut memory = RateMemory::default();
+        let mut disk = disk_row("sda", 0, 0, 0.0).disk;
+        let first = parse::IoSnapshot {
+            disks: vec![disk.clone()],
+            ..parse::IoSnapshot::default()
+        };
+        let _ = board_from(&first, &mut memory);
+        assert!(memory.prev.contains_key("sda"));
+        disk.stat = None;
+        let hole = parse::IoSnapshot {
+            disks: vec![disk.clone()],
+            ..parse::IoSnapshot::default()
+        };
+        let _ = board_from(&hole, &mut memory);
+        assert!(!memory.prev.contains_key("sda"));
+        memory.at = Some(Instant::now() - Duration::from_secs(1));
+        let mut jumped = disk_row("sda", 0, 10_000_000, 0.0).disk;
+        if let Some(stat) = jumped.stat.as_mut() {
+            stat.sectors_written = 10_000_000;
+        }
+        let back = parse::IoSnapshot {
+            disks: vec![jumped],
+            ..parse::IoSnapshot::default()
+        };
+        let board = board_from(&back, &mut memory);
+        assert!(matches!(board.rows[0].rate, ShownRate::Measuring));
+    }
+
+    #[test]
+    fn a_whole_disk_mount_is_named_in_the_detail() {
+        let mut row = disk_row("sdb", 1, 1, 1.0);
+        row.disk.mounts = vec!["/data".into()];
+        row.disk.partitions.clear();
+        let rows = board(vec![row]);
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.screen = Screen::DiskDetail;
+        frame.board = Some(&rows);
+        frame.disk_cursor = "sdb";
+        frame.focus = 1;
+        let drawn = draw_body(&frame, 80, &p, None);
+        let plain = drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("mounted /data"), "{plain}");
+        assert!(plain.contains("no partitions"), "{plain}");
     }
 }
