@@ -2,7 +2,9 @@
 
 [← all widgets](../../../../docs/README.md)
 
-Which filesystems can still take a write, which disks are busy, and, on Linux, whether I/O is stalling.
+Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
+
+Linux example:
 
 ```
 ╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -108,8 +110,11 @@ On macOS the same section is `iostat`: read and write are one number, and
 the heading says await, busy and queue need IOKit. The write sort is that
 combined MB/s and the read sort is tps. PRESSURE is not drawn on macOS.
 
-When `/proc/1/cgroup` is `0::/`, the disk heading also says `host devices,
-container filesystems`.
+Inside a container (`/.dockerenv`, `/run/.containerenv`, or a non-empty
+`container=` on pid 1) the disk heading also says `host devices, container
+filesystems`. `/proc/diskstats` there is still the host's devices. A
+`0::/` cgroup line is not that test: it is also what a private cgroup
+namespace shows, and what a host shows when pid 1 stays in the root cgroup.
 
 ## Pressure
 
