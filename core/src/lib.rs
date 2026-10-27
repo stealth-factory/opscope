@@ -1971,7 +1971,9 @@ pub struct Tab {
 /// pane - it stays on a line of its own and `seg` clips it, which is the
 /// safe end of it. The marker and badge are inside the fit check for the
 /// same reason: leaving the marker out let `seg` clip a `·` and a marked
-/// tab read as an unmarked one.
+/// tab read as an unmarked one. A badge that still does not fit on a line
+/// of its own is left off: `seg` would clip `100` down to `1`, and a
+/// shorter count is a different count.
 pub fn tab_strip(
     active: usize,
     tabs: &[Tab],
@@ -1991,10 +1993,16 @@ pub fn tab_strip(
     };
     for (i, tab) in tabs.iter().enumerate() {
         let wide = display_width(&tab.title) + 2;
-        let badge_len = tab.badge.as_deref().map(display_width).unwrap_or(0);
-        if at > 1 && at + wide + 1 + badge_len + 1 > w.saturating_sub(1) {
+        let room = w.saturating_sub(1);
+        let mut badge_len = tab.badge.as_deref().map(display_width).unwrap_or(0);
+        if at > 1 && at + wide + 1 + badge_len + 1 > room {
             flush(&mut parts, &mut lines);
             at = 1;
+        }
+        // Alone on the line, seg would clip a badge into a shorter number.
+        let show_badge = badge_len > 0 && at + wide + 1 + badge_len + 1 <= room;
+        if !show_badge {
+            badge_len = 0;
         }
         let here = i == active;
         parts.push((
@@ -2011,8 +2019,10 @@ pub fn tab_strip(
             Some((colour, cell)) => (colour.clone(), (*cell).to_string()),
             None => (RST.to_string(), " ".into()),
         });
-        if let Some(badge) = &tab.badge {
-            parts.push((dim.to_string(), badge.clone()));
+        if show_badge {
+            if let Some(badge) = &tab.badge {
+                parts.push((dim.to_string(), badge.clone()));
+            }
         }
         parts.push((RST.to_string(), " ".into()));
     }
@@ -8502,6 +8512,23 @@ mod tests {
             "",
         );
         assert!(!plain(&lines.join("\n")).contains('2'));
+    }
+
+    #[test]
+    fn a_badge_that_does_not_fit_is_left_off() {
+        // Width 8, room 7. `[US]` plus the marker and the gap fill the line,
+        // so `100` would be clipped to `1`.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("100".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines.join("\n"));
+        assert!(text.contains("[US]"), "{text}");
+        assert!(text.contains('·'), "{text}");
+        assert!(!text.contains('1'), "{text}");
+        assert!(!text.contains("100"), "{text}");
     }
 
     #[test]
