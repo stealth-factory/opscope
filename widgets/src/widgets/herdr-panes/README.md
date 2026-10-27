@@ -124,7 +124,7 @@ behind it.
 | `l` | workspace labels vs pane ids |
 | `r` | refresh now |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 Agents have a focus-by-id command; other panes do not, so those focus their

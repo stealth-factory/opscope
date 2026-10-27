@@ -257,7 +257,7 @@ two disagreed by years on the same PR.
 | `r` | refetch now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the whole widget a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
-| `!` | notices: read warnings not tied to a number, and dismiss them for this session |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 Sorting is done locally on the fetched set, so both keys are instant.

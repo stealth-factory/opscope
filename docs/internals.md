@@ -92,13 +92,63 @@ the `[!]` counter still counts it. It is drawn above the footer and counted in i
 `draw()`, which would move the footer out from under the placements
 `footer_at` registered. `run(keyboard)` is the screen, on `!`.
 
-Core raises three of its own: `config-world-readable` (Core scope, from
+Core raises its own: `config-world-readable` (Core scope, from
 `load_config()`, and looked at again every five seconds from `hint` and
 `banner_rows`, so a `chmod 600` clears it and a file rewritten wider raises
 it without a restart), and one Info per recommended tool `dependencies_available()`
-finds missing. Dismissals are for the session and live in memory, keyed
-`core/<id>` or `<widget>/<id>` with the hash they were taken against, which
-is the shape a persisted dismissal for N days will need.
+finds missing, and two about its own file below.
+
+A dismissal is keyed `core/<id>` or `<widget>/<id>` with the hash it was
+taken against. `s` dismisses for this session, in memory only, so a restart
+forgets it. `d` and `m` dismiss a Warn or Info for 7 or 30 days, and on an
+Error do nothing but say on the status line that errors can only be
+dismissed for this session. Those two are written to
+`tc::state_dir()/notices.json`, one file for every widget:
+
+```json
+{"version": 1, "dismissed": {"core/config-world-readable":
+  {"hash": "566dda1943ee58c7", "at": 1800000000.0, "until": 1800604800.0}}}
+```
+
+`until` is absolute unix seconds, `at + 7 * 86400` or `at + 30 * 86400`. The
+hash is a 16-digit hex string rather than a number, because a u64 above
+2^53 survives serde_json but not every editor that might open the file. A
+write is a read-modify-write under `tc::statefile::with_lock` - `flock` on
+`notices.json.lock` - then `write_atomic`, so two panes dismissing at once
+merge; each write also drops what has expired. An entry taken against
+content this pane's notice no longer has is kept, since another pane may
+still show that content and have dismissed it; it hides nothing here and
+goes when it expires. `start()` reads the file and `hint()`
+and `banner_rows()` read it again at most once a minute, on the drawing
+thread: it is a few hundred bytes, and a thread for it would be one more
+poller to keep alive. `u` removes the entry from the file as well.
+
+A file that does not parse, or names a version this build does not know,
+is read as empty and **never overwritten**: a dismissal for days taken
+meanwhile holds for this session only, and the Core Warn
+`notices-file-unreadable` says the path cannot be read, with the error, until
+it reads again; the same notice covers a file that cannot be opened at all.
+A write that fails for another reason raises `notices-file-unwritable` and
+keeps the dismissal for the session; a restore that cannot be written is not
+made. Errors ignore dismissals saved in the file, since a notice's hash does
+not include its level.
+
+### State files
+
+`core/src/statefile.rs`, used as `tc::statefile`, is where a widget keeps
+what it learned between runs. `tc::state_dir()` is `$XDG_STATE_HOME/opscope`,
+else `$HOME/.local/state/opscope`, else `./.opscope-state` when neither is
+set - never a panic. `write_atomic(path, contents)` is the writer the
+settings screen uses for `config.json`, lifted rather than rewritten: a
+same-directory temporary created `O_EXCL | O_NOFOLLOW` at `0600`, re-read
+and re-parsed as JSON before the rename, the directory synced after, a
+symlink at the path kept. `write_atomic_if` adds settings' compare-and-swap,
+refusing when the file no longer holds what was read. `with_lock(path, f)`
+holds `flock(LOCK_EX)` on `<path>.lock`, created `0600` and never removed,
+for the closure's duration. It waits about half a second for another holder
+and then returns an `Err`, so a pane stopped mid-write cannot freeze the
+rest; notices then keeps the dismissal for the session. clocks, agent-usage and ports still compute
+their state paths by hand; new code uses `state_dir()`.
 
 ### The mouse
 
