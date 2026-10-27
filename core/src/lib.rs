@@ -1973,7 +1973,9 @@ pub struct Tab {
 /// same reason: leaving the marker out let `seg` clip a `·` and a marked
 /// tab read as an unmarked one. A badge that still does not fit on a line
 /// of its own is left off: `seg` would clip `100` down to `1`, and a
-/// shorter count is a different count.
+/// shorter count is a different count. The gap after the badge is not part
+/// of that fit: clipping the gap leaves the count whole, and requiring the
+/// gap dropped a one-cell count the line could hold.
 pub fn tab_strip(
     active: usize,
     tabs: &[Tab],
@@ -1999,8 +2001,9 @@ pub fn tab_strip(
             flush(&mut parts, &mut lines);
             at = 1;
         }
-        // Alone on the line, seg would clip a badge into a shorter number.
-        let show_badge = badge_len > 0 && at + wide + 1 + badge_len + 1 <= room;
+        // The badge's own cells have to fit. The gap after it may be clipped;
+        // a clipped count would not.
+        let show_badge = badge_len > 0 && at + wide + 1 + badge_len <= room;
         if !show_badge {
             badge_len = 0;
         }
@@ -8529,6 +8532,20 @@ mod tests {
         assert!(text.contains('·'), "{text}");
         assert!(!text.contains('1'), "{text}");
         assert!(!text.contains("100"), "{text}");
+    }
+
+    #[test]
+    fn a_badge_that_fits_without_the_trailing_gap_is_shown() {
+        // Width 8, room 7. ` [US]·1` fills the line; the gap after the count
+        // does not, and clipping that gap leaves the count whole.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("1".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines[0]);
+        assert_eq!(text, " [US]·1", "{text}");
     }
 
     #[test]
