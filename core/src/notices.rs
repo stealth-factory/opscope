@@ -26,22 +26,35 @@
 //!   timed out collapses into a counter rather than vanishing while the
 //!   notice is still true;
 //! - the **`!` screen**, which core draws, to read each notice whole and
-//!   dismiss it for this session, or bring a dismissed one back.
+//!   dismiss it - for this session, for 7 days or for 30 - or bring a
+//!   dismissed one back.
 //!
 //! Nothing here can panic or return an error. A poisoned lock is recovered
 //! rather than propagated, because the registry is written from poller
 //! threads and a pane that died over a warning would be the failure this
 //! whole tree spends its checks avoiding.
 //!
-//! Dismissals are session-only for now. They are keyed and hashed the way a
-//! persisted dismissal will need to be - `core/<id>` or `<widget>/<id>`,
-//! with the content hash it was taken against - so dismissing for N days is
-//! a new `until` on [`Dismissal`] and a file, not a new shape.
+//! A dismissal is keyed `core/<id>` or `<widget>/<id>` and holds the content
+//! hash it was taken against, so a *changed* problem shows again. One for
+//! this session lives in memory and a restart forgets it. One for 7 or 30
+//! days is written to `notices.json` in [`crate::state_dir`], shared by every
+//! widget, under `flock` and through the atomic `0600` writer, and re-read at
+//! most once a minute from `hint` and `banner_rows` - so a Core notice
+//! dismissed in one pane is dismissed in the others within a minute, with
+//! no thread of its own. An error is dismissed for the session only: it is
+//! the level that should not quietly go away for a month.
+//!
+//! The file is never overwritten when it does not parse. A dismissal for
+//! days taken meanwhile is kept for this session, and the Core notice
+//! `notices-file-unreadable` names the file and the error until it parses.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+use serde_json::{json, Map, Value};
 
 /// How long a new or changed notice banners before it collapses into the
 /// footer counter. Fixed rather than a setting: it is long enough to be read
@@ -52,6 +65,28 @@ pub const BANNER_SECS: f64 = 60.0;
 /// The most notices the banner shows at once. More than two and the banner
 /// is a second body; the rest are one keypress away on the `!` screen.
 pub const BANNER_MAX: usize = 2;
+
+/// How often a running widget reads `notices.json` again, so a dismissal
+/// taken in another pane reaches this one. The file is a few hundred bytes.
+pub const RELOAD_SECS: f64 = 60.0;
+
+/// One day, for `until`: 7 days is `at + 7 * DAY`, with no setting.
+const DAY: f64 = 86_400.0;
+
+/// The status line for `d` or `m` on an error.
+const ERRORS_SESSION_ONLY: &str = "errors can only be dismissed for this session";
+
+/// The Core notices this module raises about its own file.
+const FILE_UNREADABLE: &str = "notices-file-unreadable";
+const FILE_UNWRITABLE: &str = "notices-file-unwritable";
+
+/// Which write `saved` is reporting on, so a failure says what it left in
+/// force: a dismissal that holds for the session, or one that still holds.
+#[derive(Clone, Copy)]
+enum Change {
+    Dismiss,
+    Restore,
+}
 
 /// How bad it is. Ordered so that `max()` is the worst.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -211,12 +246,117 @@ impl Notice {
 ///
 /// A notice whose title or detail changes after it was dismissed shows
 /// again: a *changed* problem is a new one. `until` is `None` for this
-/// session, which is the only kind there is yet.
+/// session, and absolute unix seconds for one taken for days - the only
+/// kind written to `notices.json`.
 #[derive(Clone, Debug, PartialEq)]
 struct Dismissal {
     hash: u64,
     at: f64,
     until: Option<f64>,
+}
+
+impl Dismissal {
+    fn holds(&self, hash: u64, now: f64) -> bool {
+        self.hash == hash && self.until.is_none_or(|u| u > now)
+    }
+
+    /// `this session`, or `until 2026-11-02` in local time.
+    fn lasts(&self) -> String {
+        match self.until {
+            None => "this session".to_string(),
+            Some(until) => format!("until {}", local_date(until)),
+        }
+    }
+}
+
+fn local_date(secs: f64) -> String {
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|| "a date out of range".to_string())
+}
+
+/// Read `notices.json`'s text. Empty text is an empty file, not a broken
+/// one. A file that is not JSON, or not this shape, or a version this build
+/// does not know, is an `Err` with the reason - and is then never written
+/// over, since a newer build's file is somebody's dismissals.
+///
+/// A single entry that is malformed is skipped rather than failing the
+/// file; it is dropped on the next write, as an expired one is.
+fn parse_file(text: &str) -> Result<BTreeMap<String, Dismissal>, String> {
+    let mut out = BTreeMap::new();
+    if text.trim().is_empty() {
+        return Ok(out);
+    }
+    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let version = value.get("version").and_then(Value::as_u64);
+    if version != Some(1) {
+        return Err(match value.get("version") {
+            Some(v) => format!("version {v} is not one this build reads"),
+            None => "no version".to_string(),
+        });
+    }
+    let Some(entries) = value.get("dismissed").and_then(Value::as_object) else {
+        return Err("no \"dismissed\" object".to_string());
+    };
+    for (key, entry) in entries {
+        let hash = entry
+            .get("hash")
+            .and_then(Value::as_str)
+            .filter(|h| h.len() == 16)
+            .and_then(|h| u64::from_str_radix(h, 16).ok());
+        let at = entry.get("at").and_then(Value::as_f64);
+        let until = entry.get("until").and_then(Value::as_f64);
+        if let (Some(hash), Some(at), Some(until)) = (hash, at, until) {
+            out.insert(
+                key.clone(),
+                Dismissal {
+                    hash,
+                    at,
+                    until: Some(until),
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The file's text. The hash is a 16-digit lowercase hex string rather
+/// than a JSON number: a u64 above 2^53 survives serde_json but not every
+/// editor or tool somebody might open the file with.
+fn render_file(kept: &BTreeMap<String, Dismissal>) -> String {
+    let mut entries = Map::new();
+    for (key, d) in kept {
+        let Some(until) = d.until else { continue };
+        entries.insert(
+            key.clone(),
+            json!({ "hash": format!("{:016x}", d.hash), "at": d.at, "until": until }),
+        );
+    }
+    let value = json!({ "version": 1, "dismissed": Value::Object(entries) });
+    let mut text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+    text.push('\n');
+    text
+}
+
+/// The file's dismissals; a missing file is an empty one.
+fn read_file(path: &Path) -> Result<BTreeMap<String, Dismissal>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_file(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Why a write to `notices.json` did not happen.
+enum Unsaved {
+    /// The file is there and does not parse, so it is left alone.
+    Unreadable(String),
+    /// The lock or the write failed.
+    Failed(String),
 }
 
 /// A notice as the registry holds it.
@@ -236,7 +376,16 @@ struct Live {
 struct Registry {
     widget: &'static str,
     live: Vec<Live>,
+    /// Dismissals for this session, and any for days that could not be
+    /// written. Never written.
     dismissed: BTreeMap<String, Dismissal>,
+    /// Dismissals for days, as `notices.json` last held them.
+    kept: BTreeMap<String, Dismissal>,
+    /// `notices.json`, once `start` has named the widget. `None` before
+    /// that, so a registry nobody started never touches the disk.
+    file: Option<PathBuf>,
+    /// When `kept` was last read from the file.
+    loaded: f64,
     seq: u64,
 }
 
@@ -284,9 +433,191 @@ impl Registry {
     }
 
     fn is_dismissed(&self, live: &Live, now: f64) -> bool {
-        self.dismissed
-            .get(&self.key(&live.notice))
-            .is_some_and(|d| d.hash == live.hash && d.until.is_none_or(|u| u > now))
+        self.dismissal(live, now).is_some()
+    }
+
+    /// The dismissal holding `live` down, if one does: the one for days
+    /// first, since it outlasts one for this session.
+    fn dismissal(&self, live: &Live, now: f64) -> Option<&Dismissal> {
+        let key = self.key(&live.notice);
+        // An error is dismissed for this session only. The hash covers the
+        // title and detail but not the level, so a warning dismissed for
+        // days would otherwise go on hiding the same notice once it became
+        // an error.
+        let kept = match live.notice.level {
+            Level::Error => None,
+            _ => self.kept.get(&key),
+        };
+        [kept, self.dismissed.get(&key)]
+            .into_iter()
+            .flatten()
+            .find(|d| d.holds(live.hash, now))
+    }
+
+    /// How long the dismissal holding `live` lasts, and when it was taken:
+    /// `until <date>` for one in `notices.json`, and `this session` for one
+    /// in memory - including one for days that could not be written, since
+    /// a restart is what ends it.
+    fn lasts(&self, live: &Live, now: f64) -> Option<(f64, String)> {
+        self.dismissal(live, now).map(|d| (d.at, d.lasts()))
+    }
+
+    /// Name the widget and read the file, as `start` does in a new process.
+    fn open(&mut self, widget: &'static str, file: Option<PathBuf>, now: f64) {
+        self.widget = widget;
+        self.file = file;
+        self.load(now);
+    }
+
+    fn reload_if_stale(&mut self, now: f64) {
+        if self.file.is_some() && (now - self.loaded >= RELOAD_SECS || now < self.loaded) {
+            self.load(now);
+        }
+    }
+
+    /// Read `notices.json` into `kept`, dropping what has expired. A file
+    /// that does not parse leaves `kept` as it was and says so.
+    fn load(&mut self, now: f64) {
+        let Some(path) = self.file.clone() else {
+            return;
+        };
+        self.loaded = now;
+        match read_file(&path) {
+            Ok(mut kept) => {
+                kept.retain(|_, d| d.until.is_some_and(|u| u > now));
+                self.kept = kept;
+                self.clear((Scope::Core, FILE_UNREADABLE));
+            }
+            Err(e) => self.unreadable(&path, &e, now),
+        }
+    }
+
+    fn unreadable(&mut self, path: &Path, error: &str, now: f64) {
+        self.raise(
+            Notice::warn(
+                FILE_UNREADABLE,
+                format!("{} cannot be read: {error}", path.display()),
+            )
+            .detail(
+                "Dismissals for 7 or 30 days are read from this file and written \
+                 to it. It is left exactly as it is rather than overwritten, so \
+                 one taken meanwhile lasts for this session only. Fix or delete \
+                 the file and this clears within a minute.",
+            )
+            .source("notices")
+            .core(),
+            now,
+        );
+    }
+
+    /// Read-modify-write `notices.json` under its lock: expired entries are
+    /// dropped, `change` is applied, and the result is written atomically.
+    /// Returns what the file now holds.
+    ///
+    /// An entry whose hash differs from this pane's live notice is kept: two
+    /// panes can hold the same key with different content, and this one
+    /// cannot tell that from content that changed, so dropping it would undo
+    /// the other pane's dismissal. It holds nothing here, since `holds`
+    /// compares the hash, and it goes when it expires.
+    fn persist(
+        &self,
+        path: &Path,
+        now: f64,
+        change: impl FnOnce(&mut BTreeMap<String, Dismissal>),
+    ) -> Result<BTreeMap<String, Dismissal>, Unsaved> {
+        crate::statefile::with_lock(path, || {
+            let mut kept = read_file(path).map_err(Unsaved::Unreadable)?;
+            kept.retain(|_, d| d.until.is_some_and(|u| u > now));
+            change(&mut kept);
+            crate::statefile::write_atomic(path, &render_file(&kept)).map_err(Unsaved::Failed)?;
+            Ok(kept)
+        })
+        .map_err(Unsaved::Failed)?
+    }
+
+    /// Note how a write went: the file's contents on success, and a Core
+    /// notice on failure, cleared by the next write that works.
+    fn saved(
+        &mut self,
+        path: &Path,
+        change: Change,
+        result: Result<BTreeMap<String, Dismissal>, Unsaved>,
+        now: f64,
+    ) -> bool {
+        match result {
+            Ok(kept) => {
+                self.kept = kept;
+                self.loaded = now;
+                self.clear((Scope::Core, FILE_UNREADABLE));
+                self.clear((Scope::Core, FILE_UNWRITABLE));
+                true
+            }
+            Err(Unsaved::Unreadable(e)) => {
+                self.unreadable(path, &e, now);
+                false
+            }
+            Err(Unsaved::Failed(e)) => {
+                let (title, detail) = match change {
+                    Change::Dismiss => (
+                        format!("could not save a dismissal: {e}"),
+                        "The dismissal holds for this session only. Other panes \
+                         will not see it, and this widget shows the notice again \
+                         when it restarts.",
+                    ),
+                    Change::Restore => (
+                        format!("could not save a restore: {e}"),
+                        "The notice stays dismissed, here and in every other pane, \
+                         because notices.json still holds the dismissal. Press u \
+                         again once the file can be written.",
+                    ),
+                };
+                self.raise(
+                    Notice::warn(FILE_UNWRITABLE, title)
+                        .detail(detail)
+                        .source("notices")
+                        .core(),
+                    now,
+                );
+                false
+            }
+        }
+    }
+
+    /// Dismiss for `days`, written to `notices.json`. Refused on an error,
+    /// with the reason for the status line. Without a file - a registry
+    /// nobody started, or a file that cannot be written - it holds for this
+    /// session.
+    fn dismiss_for(&mut self, key: Key, days: f64, now: f64) -> Result<(), &'static str> {
+        let Some(live) = self.live.iter().find(|l| l.notice.key() == key) else {
+            return Ok(());
+        };
+        if live.notice.level == Level::Error {
+            return Err(ERRORS_SESSION_ONLY);
+        }
+        let name = self.key(&live.notice);
+        let dismissal = Dismissal {
+            hash: live.hash,
+            at: now,
+            until: Some(now + days * DAY),
+        };
+        // Unsaved, it lasts as long as a session dismissal - until a restart,
+        // not for the days asked for - since that is what the screen says.
+        let session = Dismissal {
+            until: None,
+            ..dismissal.clone()
+        };
+        let Some(path) = self.file.clone() else {
+            self.dismissed.insert(name, session);
+            return Ok(());
+        };
+        let entry = (name.clone(), dismissal);
+        let result = self.persist(&path, now, move |kept| {
+            kept.insert(entry.0, entry.1);
+        });
+        if !self.saved(&path, Change::Dismiss, result, now) {
+            self.dismissed.insert(name, session);
+        }
+        Ok(())
     }
 
     /// Worst first, then newest.
@@ -352,16 +683,37 @@ impl Registry {
         }
     }
 
-    fn restore(&mut self, key: Key) {
+    /// Bring a dismissed notice back, here and in `notices.json`.
+    fn restore(&mut self, key: Key, now: f64) {
         let Some(live) = self.live.iter().find(|l| l.notice.key() == key) else {
             return;
         };
         let key = self.key(&live.notice);
+        let hash = live.hash;
         self.dismissed.remove(&key);
-    }
-
-    fn dismissed_at(&self, live: &Live) -> Option<f64> {
-        self.dismissed.get(&self.key(&live.notice)).map(|d| d.at)
+        let Some(path) = self.file.clone() else {
+            self.kept.remove(&key);
+            return;
+        };
+        // Read first: another pane may have written this key since the
+        // last load, and restoring here should take that back too. Only an
+        // entry for the content shown here is this restore's to remove: one
+        // for other content is another pane's, and hides nothing here.
+        self.load(now);
+        if self.kept.get(&key).is_some_and(|d| d.hash == hash) {
+            let was = self.kept.remove(&key).expect("checked above");
+            let result = self.persist(&path, now, |kept| {
+                if kept.get(&key).is_some_and(|d| d.hash == hash) {
+                    kept.remove(&key);
+                }
+            });
+            // A restore that could not be written did not happen: the next
+            // reload would hide the notice again. Keep the dismissal, and let
+            // the unwritable notice `saved` raised say why.
+            if !self.saved(&path, Change::Restore, result, now) {
+                self.kept.insert(key, was);
+            }
+        }
     }
 }
 
@@ -382,8 +734,13 @@ fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 ///
 /// The name titles the `!` screen and keys this widget's dismissals apart
 /// from another widget's notice with the same id.
+///
+/// It also reads `notices.json`, so a dismissal for days taken in an
+/// earlier run or another pane holds from the first frame.
 pub fn start(widget: &'static str) {
-    with(|r| r.widget = widget);
+    let file = crate::statefile::state_dir().join("notices.json");
+    let now = crate::now();
+    with(|r| r.open(widget, Some(file), now));
 }
 
 /// Raise a notice, or update it in place if its id is already raised.
@@ -454,7 +811,10 @@ const TINT: (u8, u8, u8) = (38, 56, 76);
 pub fn hint(room: usize) -> Option<Vec<(&'static str, String)>> {
     let now = crate::now();
     recheck_config_permissions(now);
-    with(|r| hint_of(r, now, room))
+    with(|r| {
+        r.reload_if_stale(now);
+        hint_of(r, now, room)
+    })
 }
 
 fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, String)>> {
@@ -499,7 +859,10 @@ fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, Str
 pub fn banner_rows(w: usize, h: usize) -> Vec<String> {
     let now = crate::now();
     recheck_config_permissions(now);
-    with(|r| banner_of(r, now, w, h))
+    with(|r| {
+        r.reload_if_stale(now);
+        banner_of(r, now, w, h)
+    })
 }
 
 /// The most rows the banner may take on a pane `h` tall.
@@ -549,6 +912,8 @@ struct Screen {
     count: usize,
     /// The notices in the order the frame on screen listed them.
     ids: Vec<Key>,
+    /// Why the last key did nothing, until the next key.
+    status: Option<&'static str>,
 }
 
 impl Screen {
@@ -565,6 +930,7 @@ impl Screen {
             shown_scroll: 0,
             count: 0,
             ids: Vec::new(),
+            status: None,
         }
     }
 
@@ -624,15 +990,30 @@ pub fn run(keyboard: &mut crate::Keyboard) {
             }
         }
         let (w, h) = crate::size();
-        let (rows, footer, foot_top) = with(|r| frame(r, &mut screen, now, w, h));
+        let (rows, footer, foot_top) = with(|r| {
+            r.reload_if_stale(now);
+            frame(r, &mut screen, now, w, h)
+        });
         crate::draw(&rows, w, h);
         keyboard.footer_at(&footer, foot_top, 1);
         keyboard.wait(Duration::from_millis(80));
     }
 }
 
+/// Dismiss `id` for `days`, or say on the status line why not.
+fn dismiss_days(screen: &mut Screen, id: Key, days: f64, now: f64) -> bool {
+    match with(|r| r.dismiss_for(id, days, now)) {
+        Ok(()) => true,
+        Err(why) => {
+            screen.status = Some(why);
+            false
+        }
+    }
+}
+
 /// Answer one key. True when the screen should close.
 fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
+    screen.status = None;
     if screen.open.is_some() {
         match key {
             "esc" | "!" | "backspace" => screen.close(),
@@ -643,9 +1024,17 @@ fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
                     screen.close();
                 }
             }
+            "d" | "D" | "m" | "M" => {
+                if let Some(id) = screen.open {
+                    let days = if key.eq_ignore_ascii_case("d") { 7.0 } else { 30.0 };
+                    if dismiss_days(screen, id, days, now) {
+                        screen.close();
+                    }
+                }
+            }
             "u" | "U" => {
                 if let Some(id) = screen.open {
-                    with(|r| r.restore(id));
+                    with(|r| r.restore(id, now));
                     screen.close();
                 }
             }
@@ -689,6 +1078,13 @@ fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
                 screen.chase = true;
             }
         }
+        "d" | "D" | "m" | "M" if screen.view == View::Outstanding => {
+            if let Some(id) = screen.selected_id() {
+                let days = if key.eq_ignore_ascii_case("d") { 7.0 } else { 30.0 };
+                dismiss_days(screen, id, days, now);
+                screen.chase = true;
+            }
+        }
         "a" | "A" if screen.view == View::Outstanding => {
             with(|r| r.dismiss_all(now));
             screen.selected = 0;
@@ -696,7 +1092,7 @@ fn handle(screen: &mut Screen, key: &str, now: f64) -> bool {
         }
         "u" | "U" if screen.view == View::Dismissed => {
             if let Some(id) = screen.selected_id() {
-                with(|r| r.restore(id));
+                with(|r| r.restore(id, now));
                 screen.chase = true;
             }
         }
@@ -729,17 +1125,25 @@ fn hint_pair(key: &str, rest: &str) -> Vec<(&'static str, String)> {
 /// The screen's footer hints, for the view and mode on show.
 ///
 /// A hint is never split, so on a pane too narrow for the full wording the
-/// shorter one is drawn: still the verb, without "this session".
+/// shorter one is drawn: still the verb, without "this session", and the
+/// two for days as how long.
 fn hints_for(screen: &Screen, dismissed: bool, room: usize) -> Vec<Vec<(&'static str, String)>> {
     let narrow = room < 30;
     let dismiss = if narrow { "[s] dismiss" } else { "[s] dismiss this session" };
+    let week = if narrow { "[d] 7 days" } else { "[d] dismiss 7 days" };
+    let month = if narrow { "[m] 30 days" } else { "[m] dismiss 30 days" };
     let all = if narrow { "[a] dismiss all" } else { "[a] dismiss all this session" };
+    let dismissing = |hints: &mut Vec<Vec<(&'static str, String)>>| {
+        for hint in [dismiss, week, month] {
+            hints.push(vec![(DIM, hint.to_string())]);
+        }
+    };
     let mut hints = Vec::new();
     if screen.open.is_some() {
         if dismissed {
             hints.push(vec![(DIM, "[u] restore".to_string())]);
         } else {
-            hints.push(vec![(DIM, dismiss.to_string())]);
+            dismissing(&mut hints);
         }
         hints.push(vec![(DIM, "esc / [!] back".to_string())]);
         return hints;
@@ -752,7 +1156,7 @@ fn hints_for(screen: &Screen, dismissed: bool, room: usize) -> Vec<Vec<(&'static
     match screen.view {
         View::Outstanding => {
             if screen.count > 0 {
-                hints.push(vec![(DIM, dismiss.to_string())]);
+                dismissing(&mut hints);
                 hints.push(vec![(DIM, all.to_string())]);
             }
             hints.push(vec![(DIM, "[h] show dismissed".to_string())]);
@@ -829,11 +1233,11 @@ fn frame(
             ("first seen", format!("{} ago", crate::age(now - live.first))),
             ("status", "still true".to_string()),
         ];
-        if open_dismissed {
-            let at = r.dismissed_at(live).unwrap_or(now);
+        if let Some((at, lasts)) = r.lasts(live, now) {
+            let lasts = if lasts.starts_with("until") { lasts } else { format!("for {lasts}") };
             facts.push((
                 "dismissed",
-                format!("{} ago, for this session", crate::age(now - at)),
+                format!("{} ago, {lasts}", crate::age(now - at)),
             ));
         }
         for (label, value) in facts {
@@ -858,17 +1262,29 @@ fn frame(
         let options = if open_dismissed {
             "Restoring it puts it back in the footer counter."
         } else {
-            "Dismissing it hides it from the banner and the footer counter until \
-             this widget restarts, or until what it says changes."
+            match n.level {
+                Level::Error => {
+                    "Dismissing it hides it from the banner and the footer counter until \
+                     this widget restarts, or until what it says changes. An error is \
+                     dismissed for this session only."
+                }
+                _ => {
+                    "Dismissing it hides it from the banner and the footer counter until \
+                     this widget restarts, or for 7 or 30 days in every widget - and \
+                     either way only until what it says changes."
+                }
+            }
         };
         say(&mut body, DIM, "  ", options, w);
     } else {
         let summary = format!(
-            " {} outstanding · {} dismissed this session",
+            "{} outstanding · {} dismissed",
             outstanding.len(),
             dismissed.len()
         );
-        body.push(crate::seg(&[(DIM, summary)], width));
+        // Wrapped rather than cut: on a narrow pane the count of what is
+        // dismissed is the half that would go.
+        say(&mut body, DIM, " ", &summary, w);
         if list.is_empty() {
             body.push(String::new());
             let empty = match screen.view {
@@ -876,18 +1292,23 @@ fn frame(
                     "Nothing outstanding. Nothing this widget has raised is still true."
                 }
                 View::Outstanding => {
-                    "Nothing outstanding. Press h to see what was dismissed this session."
+                    "Nothing outstanding. Press h to see what was dismissed."
                 }
-                View::Dismissed => "Nothing dismissed this session.",
+                View::Dismissed => "Nothing dismissed.",
             };
             say(&mut body, TXT, " ", empty, w);
         } else {
             // Columns as the pane allows: more width is more columns, and
             // the notice itself wraps rather than being cut.
-            let show_since = w >= 40;
+            // The dismissed list says how long each lasts where the other
+            // says how long each has been true: `this session` or
+            // `until 2026-11-02`, under the title on a pane too narrow
+            // for the column.
+            let lasting = screen.view == View::Dismissed;
+            let show_since = if lasting { w >= 50 } else { w >= 40 };
             let show_source = w >= 56;
             let source_w = 9usize;
-            let since_w = 6usize;
+            let since_w = if lasting { 17usize } else { 6usize };
             let lead = 2 + 7; // the mark, then LEVEL
             let notice_w = w
                 .saturating_sub(lead + 1)
@@ -899,7 +1320,7 @@ fn frame(
                 header.push_str(&crate::pad("SOURCE", source_w));
             }
             if show_since {
-                header.push_str("SINCE");
+                header.push_str(if lasting { "DISMISSED" } else { "SINCE" });
             }
             body.push(crate::seg(&[(LBL, header)], width));
             for (i, live) in list.iter().enumerate() {
@@ -935,7 +1356,11 @@ fn frame(
                 } else {
                     n.source
                 };
-                let lines = crate::wrap_words(&n.title, notice_w.saturating_sub(1).max(4));
+                let lasts = r.lasts(live, now).map(|(_, l)| l).unwrap_or_default();
+                let mut lines = crate::wrap_words(&n.title, notice_w.saturating_sub(1).max(4));
+                if lasting && !show_since {
+                    lines.extend(crate::wrap_words(&lasts, notice_w.saturating_sub(1).max(4)));
+                }
                 for (j, line) in lines.iter().enumerate() {
                     placed.push((body.len(), i));
                     let mut parts: Vec<(String, String)> = Vec::new();
@@ -954,7 +1379,12 @@ fn frame(
                             parts.push((on(DIM), crate::pad(source, source_w)));
                         }
                         if show_since {
-                            parts.push((on(DIM), crate::age(now - live.first)));
+                            let since = if lasting {
+                                lasts.clone()
+                            } else {
+                                crate::age(now - live.first)
+                            };
+                            parts.push((on(DIM), since));
                         }
                     }
                     if here {
@@ -970,7 +1400,17 @@ fn frame(
 
     let hints = hints_for(screen, open_dismissed, w.saturating_sub(2));
     let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
-    let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
+    // Why the last key did nothing, pinned above the hints so it is seen
+    // wherever the body is scrolled.
+    let mut said = Vec::new();
+    if let Some(status) = screen.status {
+        say(&mut said, WARN, " ", status, w);
+    }
+    let foot: Vec<String> = said
+        .into_iter()
+        .chain(packed.lines.iter().map(|l| format!(" {l}")))
+        .collect();
+    let said_rows = foot.len() - packed.lines.len();
     let room = h.saturating_sub(1 + foot.len()).max(1);
     if screen.chase && screen.open.is_none() {
         screen.scroll = crate::follow(screen.scroll, cursor_row, room);
@@ -983,7 +1423,7 @@ fn frame(
     while out.len() + foot.len() < h {
         out.push(String::new());
     }
-    let foot_top = out.len();
+    let foot_top = out.len() + said_rows;
     out.extend(foot);
     out.truncate(h);
     // Only rows in the window are clickable: a record scrolled out of view
@@ -1239,7 +1679,7 @@ mod tests {
         assert!(r.outstanding(2.0).is_empty());
         assert_eq!(r.dismissed_live(2.0).len(), 2, "a dismissed notice is findable");
         assert!(hint_of(&r, 2.0, 80).is_none());
-        r.restore((Scope::Widget, "b"));
+        r.restore((Scope::Widget, "b"), 2.5);
         assert_eq!(r.outstanding(3.0).len(), 1);
         // A dismissal outlives a clear and re-raise of the same content.
         r.clear((Scope::Widget, "a"));
@@ -1494,5 +1934,374 @@ mod tests {
         handle(&mut screen, "wheel-down", now);
         assert_eq!(screen.selected, before);
         assert!(handle(&mut screen, "esc", now));
+    }
+
+    // ---- dismissals for days, and notices.json ----
+
+    use crate::statefile::tests::{env_lock, temp_dir, EnvVar};
+    use std::os::unix::fs::PermissionsExt;
+
+    const NOW: f64 = 1_800_000_000.0;
+
+    fn opened(file: &Path, now: f64) -> Registry {
+        let mut r = Registry::default();
+        r.open("test", Some(file.to_path_buf()), now);
+        r
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_dismissal_for_days_reaches_a_fresh_start() {
+        let _guard = env_lock();
+        let dir = temp_dir("notices-start");
+        let _xdg = EnvVar::set("XDG_STATE_HOME", Some(dir.as_os_str()));
+        let file = crate::statefile::state_dir().join("notices.json");
+        assert_eq!(file, dir.join("opscope/notices.json"));
+
+        let mut first = opened(&file, NOW);
+        first.raise(config_notice(), NOW);
+        first.raise(Notice::info("tip", "a tip").detail("more"), NOW);
+        assert_eq!(first.dismiss_for((Scope::Core, "config-world-readable"), 7.0, NOW), Ok(()));
+        assert_eq!(first.dismiss_for((Scope::Widget, "tip"), 30.0, NOW), Ok(()));
+        assert!(first.outstanding(NOW + 1.0).is_empty());
+        assert!(first.dismissed.is_empty(), "nothing fell back to the session");
+
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&dir.join("opscope/notices.json.lock")), 0o600);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 1);
+        let entry = &value["dismissed"]["core/config-world-readable"];
+        assert_eq!(entry["hash"], format!("{:016x}", config_notice().hash()));
+        assert!(entry["hash"].is_string(), "the hash is a string, not a number");
+        assert_eq!(entry["at"], NOW);
+        assert_eq!(entry["until"], NOW + 7.0 * DAY);
+        assert_eq!(value["dismissed"]["test/tip"]["until"], NOW + 30.0 * DAY);
+
+        // A new process: a fresh registry, started the way `start` starts.
+        let mut second = Registry::default();
+        second.open("test", Some(crate::statefile::state_dir().join("notices.json")), NOW + 5.0);
+        second.raise(config_notice(), NOW + 5.0);
+        second.raise(Notice::info("tip", "a tip").detail("more"), NOW + 5.0);
+        assert!(second.outstanding(NOW + 6.0).is_empty(), "both are still dismissed");
+        let live = second.dismissed_live(NOW + 6.0);
+        let lasts: Vec<String> = live
+            .iter()
+            .map(|l| second.lasts(l, NOW + 6.0).unwrap().1)
+            .collect();
+        assert!(lasts.iter().all(|l| l.starts_with("until 20")), "{lasts:?}");
+
+        // A changed problem shows again.
+        second.raise(Notice::info("tip", "a tip").detail("changed"), NOW + 7.0);
+        assert_eq!(second.outstanding(NOW + 8.0).len(), 1);
+        // And a week later the week is over.
+        assert_eq!(second.outstanding(NOW + 7.0 * DAY + 1.0).len(), 2);
+
+        // Another widget sees the Core dismissal but not this widget's own.
+        let mut other = Registry::default();
+        other.open("other", Some(file.clone()), NOW + 9.0);
+        other.raise(config_notice(), NOW + 9.0);
+        other.raise(Notice::info("tip", "a tip").detail("more"), NOW + 9.0);
+        let ids: Vec<&str> = other.outstanding(NOW + 9.0).iter().map(|l| l.notice.id).collect();
+        assert_eq!(ids, vec!["tip"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_error_is_dismissed_for_this_session_only() {
+        let dir = temp_dir("notices-error");
+        let file = dir.join("notices.json");
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::error("broken", "it broke"), NOW);
+        assert_eq!(
+            r.dismiss_for((Scope::Widget, "broken"), 7.0, NOW),
+            Err(ERRORS_SESSION_ONLY)
+        );
+        assert_eq!(r.outstanding(NOW).len(), 1, "it is still outstanding");
+        assert!(!file.exists(), "nothing was written");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // And the screen says why, on a row of its own above the footer.
+        let mut screen = Screen::new();
+        screen.ids = vec![(Scope::Widget, "refused")];
+        screen.count = 1;
+        raise(Notice::error("refused", "an error"));
+        handle(&mut screen, "d", crate::now());
+        assert_eq!(screen.status, Some(ERRORS_SESSION_ONLY));
+        let now = crate::now();
+        let (rows, _, top) = with(|r| frame(r, &mut screen, now, 40, 24));
+        let text = plain(&rows).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("errors can only be dismissed for this session"), "{text}");
+        assert!(plain(&rows[top..]).contains("[d]"), "the hints follow the status");
+        for row in &rows {
+            assert!(crate::display_width(row) <= 40, "{row:?}");
+        }
+        handle(&mut screen, "down", now);
+        assert_eq!(screen.status, None, "the next key clears it");
+        clear("refused");
+    }
+
+    #[test]
+    fn expired_entries_are_dropped_and_another_panes_content_is_kept() {
+        let dir = temp_dir("notices-expired");
+        let file = dir.join("notices.json");
+        let live = Notice::warn("live", "still here");
+        let changed = Notice::warn("changed", "now says this");
+        let entry = |hash: u64, until: f64| json!({ "hash": format!("{hash:016x}"), "at": NOW - 10.0, "until": until });
+        let text = json!({ "version": 1, "dismissed": {
+            "test/old": entry(1, NOW - 1.0),
+            "test/live": entry(live.hash(), NOW + DAY),
+            "test/changed": entry(Notice::warn("changed", "said that").hash(), NOW + DAY),
+            "other/theirs": entry(7, NOW + DAY),
+        }});
+        std::fs::write(&file, text.to_string()).unwrap();
+        let mut r = opened(&file, NOW);
+        assert!(!r.kept.contains_key("test/old"), "an expired entry is dropped on load");
+        r.raise(live, NOW);
+        r.raise(changed, NOW);
+        r.raise(Notice::warn("new", "another"), NOW);
+        let ids: Vec<&str> = r.outstanding(NOW).iter().map(|l| l.notice.id).collect();
+        assert!(ids.contains(&"changed"), "a changed problem shows again: {ids:?}");
+        assert!(!ids.contains(&"live"));
+        // The next write keeps every unexpired entry, including the one
+        // for content this pane no longer has: another pane may still have
+        // it, and dismissed it.
+        r.dismiss_for((Scope::Widget, "new"), 7.0, NOW).unwrap();
+        let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let keys: Vec<&str> = written.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["other/theirs", "test/changed", "test/live", "test/new"]);
+        assert!(r.outstanding(NOW).iter().any(|l| l.notice.id == "changed"), "and it still shows here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_leaves_another_panes_dismissal_of_other_content() {
+        let dir = temp_dir("notices-restore-other");
+        let file = dir.join("notices.json");
+        let mut there = opened(&file, NOW);
+        there.raise(Notice::warn("a", "content A"), NOW);
+        there.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        let mut here = opened(&file, NOW + 1.0);
+        here.raise(Notice::warn("a", "content B"), NOW + 1.0);
+        here.dismiss((Scope::Widget, "a"), NOW + 1.0);
+        here.restore((Scope::Widget, "a"), NOW + 2.0);
+        assert_eq!(here.outstanding(NOW + 2.0).len(), 1, "B shows again here");
+        let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(written.contains_key("test/a"), "A's dismissal stays in the file");
+        there.reload_if_stale(NOW + 2.0 + RELOAD_SECS);
+        assert!(there.outstanding(NOW + 2.0 + RELOAD_SECS).is_empty(), "and A stays dismissed there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_removes_the_entry_from_the_file() {
+        let dir = temp_dir("notices-restore");
+        let file = dir.join("notices.json");
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::warn("a", "x"), NOW);
+        r.raise(Notice::warn("b", "y"), NOW);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        r.dismiss_for((Scope::Widget, "b"), 30.0, NOW).unwrap();
+        r.restore((Scope::Widget, "a"), NOW + 1.0);
+        assert_eq!(r.outstanding(NOW + 2.0).len(), 1);
+        let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written.keys().collect::<Vec<_>>(), vec!["test/b"]);
+        // A fresh start agrees.
+        let mut again = opened(&file, NOW + 3.0);
+        again.raise(Notice::warn("a", "x"), NOW + 3.0);
+        assert_eq!(again.outstanding(NOW + 3.0).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_file_is_reported_and_never_overwritten() {
+        let dir = temp_dir("notices-corrupt");
+        let file = dir.join("notices.json");
+        std::fs::write(&file, "{\n").unwrap();
+        let mut r = opened(&file, NOW);
+        let warning = r
+            .live
+            .iter()
+            .find(|l| l.notice.id == FILE_UNREADABLE)
+            .expect("the unreadable file is a notice");
+        assert_eq!(warning.notice.scope, Scope::Core);
+        assert_eq!(warning.notice.level, Level::Warn);
+        assert!(warning.notice.title.contains("notices.json"), "{}", warning.notice.title);
+        r.raise(Notice::warn("a", "x"), NOW);
+        assert_eq!(r.dismiss_for((Scope::Widget, "a"), 7.0, NOW), Ok(()));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\n", "the file is untouched");
+        let dismissed: Vec<&str> = r.dismissed_live(NOW + 1.0).iter().map(|l| l.notice.id).collect();
+        assert_eq!(dismissed, vec!["a"], "it holds for this session");
+        let live = r.live.iter().find(|l| l.notice.id == "a").unwrap();
+        assert_eq!(r.lasts(live, NOW + 1.0).unwrap().1, "this session", "and says so");
+        // Another build's version is somebody's dismissals: also left alone.
+        std::fs::write(&file, "{\"version\":2,\"dismissed\":{}}").unwrap();
+        r.load(NOW + 2.0);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW + 2.0).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"version\":2,\"dismissed\":{}}");
+        // Fixed, the notice clears on the next load.
+        std::fs::write(&file, "{\"version\":1,\"dismissed\":{}}").unwrap();
+        r.reload_if_stale(NOW + 3.0 + RELOAD_SECS);
+        assert!(!r.live.iter().any(|l| l.notice.id == FILE_UNREADABLE));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unsaved_dismissal_for_days_lasts_the_session_not_the_days() {
+        let dir = temp_dir("notices-unsaved");
+        let file = dir.join("notices.json");
+        std::fs::write(&file, "{\n").unwrap();
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::warn("a", "x"), NOW);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        // The screen says "this session", so a widget left running past the
+        // seven days must not bring it back.
+        let later = NOW + 8.0 * DAY;
+        assert!(!r.outstanding(later).iter().any(|l| l.notice.id == "a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restore_that_cannot_be_written_does_not_pretend_it_was() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes through the read-only directory below
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("notices-restore-ro");
+        let file = dir.join("notices.json");
+        let mut r = opened(&file, NOW);
+        r.raise(Notice::warn("a", "x"), NOW);
+        r.dismiss_for((Scope::Widget, "a"), 7.0, NOW).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        r.restore((Scope::Widget, "a"), NOW + 1.0);
+        // Right after the failed restore: not shown as restored, since the
+        // next reload would hide it again from the unchanged file.
+        let now: Vec<&str> = r.dismissed_live(NOW + 1.5).iter().map(|l| l.notice.id).collect();
+        r.reload_if_stale(NOW + 2.0 + RELOAD_SECS);
+        let later: Vec<&str> = r.dismissed_live(NOW + 3.0 + RELOAD_SECS).iter().map(|l| l.notice.id).collect();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(now, vec!["a"], "a restore that was not written is not shown as made");
+        assert_eq!(later, vec!["a"], "and the reload agrees");
+        let reason = r.live.iter().find(|l| l.notice.id == FILE_UNWRITABLE).expect("and the reason is a notice");
+        assert!(reason.notice.title.contains("could not save a restore"), "{}", reason.notice.title);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dismissal_saved_for_a_warning_does_not_hide_the_same_notice_as_an_error() {
+        let dir = temp_dir("notices-error-level");
+        let file = dir.join("notices.json");
+        let mut first = opened(&file, NOW);
+        first.raise(Notice::warn("a", "disk nearly full").detail("d"), NOW);
+        first.dismiss_for((Scope::Widget, "a"), 30.0, NOW).unwrap();
+        let mut second = opened(&file, NOW + 5.0);
+        second.raise(Notice::error("a", "disk nearly full").detail("d"), NOW + 5.0);
+        let ids: Vec<&str> = second.outstanding(NOW + 6.0).iter().map(|l| l.notice.id).collect();
+        assert_eq!(ids, vec!["a"], "the same title and detail, now an error, shows");
+        let live = second.live.iter().find(|l| l.notice.id == "a").unwrap();
+        assert!(
+            second.lasts(live, NOW + 6.0).is_none(),
+            "the saved until-date does not apply to the error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_panes_writing_at_once_merge_rather_than_replace() {
+        let dir = temp_dir("notices-merge");
+        let file = dir.join("notices.json");
+        // Both opened before either wrote, so neither has the other's entry.
+        let mut one = opened(&file, NOW);
+        let mut two = opened(&file, NOW);
+        one.raise(Notice::warn("a", "x"), NOW);
+        two.raise(Notice::warn("b", "y"), NOW);
+        let one = std::thread::spawn(move || {
+            for i in 0..20 {
+                one.dismiss_for((Scope::Widget, "a"), 7.0, NOW + i as f64).unwrap();
+            }
+        });
+        let two = std::thread::spawn(move || {
+            for i in 0..20 {
+                two.dismiss_for((Scope::Widget, "b"), 30.0, NOW + i as f64).unwrap();
+            }
+        });
+        one.join().unwrap();
+        two.join().unwrap();
+        let written = parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written.keys().collect::<Vec<_>>(), vec!["test/a", "test/b"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn another_panes_dismissal_arrives_within_a_minute() {
+        let dir = temp_dir("notices-reload");
+        let file = dir.join("notices.json");
+        let mut here = opened(&file, NOW);
+        let mut there = opened(&file, NOW);
+        here.raise(config_notice(), NOW);
+        there.raise(config_notice(), NOW);
+        there.dismiss_for((Scope::Core, "config-world-readable"), 7.0, NOW + 1.0).unwrap();
+        here.reload_if_stale(NOW + 30.0);
+        assert_eq!(here.outstanding(NOW + 30.0).len(), 1, "not re-read yet");
+        here.reload_if_stale(NOW + RELOAD_SECS + 1.0);
+        assert!(here.outstanding(NOW + RELOAD_SECS + 1.0).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_file_format_round_trips() {
+        let mut kept = BTreeMap::new();
+        kept.insert(
+            "core/x".to_string(),
+            Dismissal { hash: u64::MAX - 1, at: 1.5, until: Some(2.5) },
+        );
+        let text = render_file(&kept);
+        assert!(text.contains("\"fffffffffffffffe\""), "{text}");
+        assert_eq!(parse_file(&text).unwrap(), kept);
+        assert_eq!(parse_file("").unwrap(), BTreeMap::new(), "an empty file is empty");
+        assert!(parse_file("{").is_err());
+        assert!(parse_file("[]").is_err());
+        assert!(parse_file("{\"version\":2,\"dismissed\":{}}").is_err());
+        // One bad entry is skipped, not the whole file.
+        let one_bad = "{\"version\":1,\"dismissed\":{\"a/b\":{\"hash\":12,\"at\":1,\"until\":2}}}";
+        assert_eq!(parse_file(one_bad).unwrap(), BTreeMap::new());
+    }
+
+    #[test]
+    fn the_screen_offers_and_answers_days() {
+        let mut screen = Screen::new();
+        screen.count = 1;
+        let text = |hints: Vec<Vec<(&'static str, String)>>| -> Vec<String> {
+            hints.into_iter().map(|h| h.into_iter().map(|(_, t)| t).collect()).collect()
+        };
+        let wide = text(hints_for(&screen, false, 80));
+        for hint in ["[s] dismiss this session", "[d] dismiss 7 days", "[m] dismiss 30 days"] {
+            assert!(wide.iter().any(|h| h == hint), "{hint}: {wide:?}");
+        }
+        let narrow = text(hints_for(&screen, false, 20));
+        assert!(narrow.iter().any(|h| h == "[d] 7 days"), "{narrow:?}");
+        screen.open = Some((Scope::Widget, "x"));
+        let detail = text(hints_for(&screen, false, 80));
+        assert!(detail.iter().any(|h| h == "[m] dismiss 30 days"), "{detail:?}");
+
+        raise(Notice::warn("days-test", "dismiss me for days"));
+        for key in ["d", "m"] {
+            let mut screen = Screen::new();
+            let now = crate::now();
+            with(|r| frame(r, &mut screen, now, 80, 24));
+            let at = screen.ids.iter().position(|id| *id == (Scope::Widget, "days-test")).unwrap();
+            screen.selected = at;
+            handle(&mut screen, key, now);
+            assert_eq!(screen.status, None);
+            assert!(
+                with(|r| r.dismissed_live(now).iter().any(|l| l.notice.id == "days-test")),
+                "{key} dismissed it"
+            );
+            with(|r| r.restore((Scope::Widget, "days-test"), now));
+        }
+        clear("days-test");
     }
 }

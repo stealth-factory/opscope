@@ -870,6 +870,11 @@ selected effective JSON value, validates the result, writes a private
 same-directory temporary file with exclusive no-follow creation, then renames
 it. Unrelated concurrent edits survive.
 
+That writer is shared: a widget keeping state between runs puts it under
+`tc::state_dir()` and writes it with `tc::statefile::write_atomic` (and
+`tc::statefile::with_lock` when several panes change the same file), rather
+than computing `$XDG_STATE_HOME` by hand.
+
 `config.example.json` is **generated** from every `settings.json`. The exact
 fresh-checkout command and the reason it has no Python dependency are in
 [step 7 above](#7-generate-configuration-and-run-the-gates).

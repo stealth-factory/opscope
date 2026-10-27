@@ -17,14 +17,12 @@
 //! The settings screen every configurable widget owns.
 //!
 //! A widget supplies its own `settings.json`; this module supplies one
-//! interaction model and the secure raw-JSON writer. Writes go to the file
+//! interaction model, and writes through the secure raw-JSON writer in
+//! `statefile` that every state file shares. Writes go to the file
 //! `load_config` actually reads and patch only the selected value, so key
 //! order, comments-as-keys, and concurrent unrelated edits survive.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -709,112 +707,6 @@ fn insert_member(text: &str, obj_open: usize, key: &str, value: &str) -> Result<
     Ok(out)
 }
 
-/// Write `contents` via a temp file in the same directory, then rename.
-///
-/// The temp is `0600` on creation, not chmodded afterwards. A file that
-/// does not re-parse is refused and the temp is removed, so an interrupted
-/// or refused save cannot leave a truncated config that every widget then
-/// fails to parse.
-fn atomic_write(path: &Path, contents: &str, expected: Option<&str>) -> Result<(), String> {
-    serde_json::from_str::<Value>(contents)
-        .map_err(|e| format!("refusing to write: {e}"))?;
-    // Keep an intentional config symlink intact. Rename over its resolved
-    // target; renaming over the link itself would silently replace it.
-    let destination = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?,
-        _ => path.to_path_buf(),
-    };
-    let path = destination.as_path();
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-    }
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("config.json");
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut created = None;
-    for attempt in 0..32 {
-        let tmp = path.with_file_name(format!(
-            ".{name}.tmp-{}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        let mut opts = OpenOptions::new();
-        opts.write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW);
-        let mut file = match opts.open(&tmp) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("{}: {e}", tmp.display())),
-        };
-        file.write_all(contents.as_bytes())
-            .and_then(|_| file.sync_all())
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("{}: {e}", tmp.display())
-            })?;
-        created = Some(tmp);
-        break;
-    }
-    let tmp = created.ok_or_else(|| {
-        format!(
-            "{}: could not reserve a private temporary file",
-            path.display()
-        )
-    })?;
-    let mode = std::fs::metadata(&tmp)
-        .map_err(|e| format!("{}: {e}", tmp.display()))?
-        .permissions()
-        .mode()
-        & 0o777;
-    if mode != 0o600 {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "{} was created with mode {mode:04o}, not 0600",
-            tmp.display()
-        ));
-    }
-    let read_back =
-        std::fs::read_to_string(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    if let Err(e) = serde_json::from_str::<Value>(&read_back) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("wrote a file that does not parse: {e}"));
-    }
-    if let Some(expected) = expected {
-        let current = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(format!("{}: {e}", path.display()));
-            }
-        };
-        if current != expected {
-            let _ = std::fs::remove_file(&tmp);
-            return Err("config changed again while saving · retry the edit".into());
-        }
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", path.display())
-    })?;
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-    Ok(())
-}
-
 fn parse_edit(
     raw: &str,
     expected: &Value,
@@ -1319,7 +1211,7 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
     path.extend(steps.iter().map(String::as_str));
     let next = set_json_path(&fresh_raw, &path, &value)?;
     serde_json::from_str::<Value>(&next).map_err(|e| format!("refusing to write: {e}"))?;
-    atomic_write(&app.path, &next, Some(&fresh_raw))?;
+    crate::statefile::write_atomic_if(&app.path, &next, &fresh_raw)?;
     app.wrote = true;
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
@@ -1398,7 +1290,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
             break;
         }
     }
-    atomic_write(&app.path, &next, Some(&fresh_raw))?;
+    crate::statefile::write_atomic_if(&app.path, &next, &fresh_raw)?;
     app.wrote = true;
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
@@ -6028,52 +5920,6 @@ mod tests {
             matches!(app.mode, Mode::Edit { .. }),
             "an empty non-secret still tries to write"
         );
-    }
-
-    #[test]
-    fn atomic_write_is_0600_and_refuses_junk() {
-        let dir = std::env::temp_dir().join(format!(
-            "opscope-config-write-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        atomic_write(&path, "{\"a\":1}\n", Some("")).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
-        assert!(atomic_write(&path, "{", Some("{\"a\":1}\n")).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
-        assert!(
-            atomic_write(&path, "{\"a\":2}\n", Some("{\"other\":true}\n")).is_err()
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n");
-        let leftover: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name())
-            .collect();
-        assert_eq!(leftover.len(), 1, "a refused write left a temp file: {leftover:?}");
-        let target = dir.join("target.json");
-        let linked = dir.join("linked.json");
-        std::fs::write(&target, "{\"linked\":false}\n").unwrap();
-        std::os::unix::fs::symlink(&target, &linked).unwrap();
-        atomic_write(
-            &linked,
-            "{\"linked\":true}\n",
-            Some("{\"linked\":false}\n"),
-        )
-        .unwrap();
-        assert!(std::fs::symlink_metadata(&linked).unwrap().file_type().is_symlink());
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "{\"linked\":true}\n"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
