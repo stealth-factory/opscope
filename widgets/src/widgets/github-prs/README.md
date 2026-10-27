@@ -396,8 +396,8 @@ widget quietly ran on somebody else's credential.
 
 Set `enterprise_hostname` to your Enterprise Cloud web host, for example
 `acme.ghe.com`, and the widget calls `https://api.acme.ghe.com` instead of
-`api.github.com`. Any other host that is not `github.com` is treated as
-Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
+`api.github.com`. `github.com` and `api.github.com` stay on the public API;
+any other host is treated as Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
 On Server, the widget omits the `stack` and `stackEntry` fields and infers
 stacks from branches instead.
 

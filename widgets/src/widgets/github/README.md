@@ -442,8 +442,8 @@ file is git-ignored and the token is never printed.
 
 Set `enterprise_hostname` to your Enterprise Cloud web host, for example
 `acme.ghe.com`, and the widget calls `https://api.acme.ghe.com` instead of
-`api.github.com`. Any other host that is not `github.com` is treated as
-Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
+`api.github.com`. `github.com` and `api.github.com` stay on the public API;
+any other host is treated as Enterprise Server and called at `https://<host>/api/graphql` and `/api/v3`; Server is untested.
 
 To keep the host out of `config.json`, name a variable in
 `enterprise_hostname_env` (for example `GITHUB_ENTERPRISE_HOSTNAME`) and set
