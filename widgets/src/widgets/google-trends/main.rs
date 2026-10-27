@@ -1247,11 +1247,23 @@ fn footer(
     cw: usize,
     p: &Palette,
 ) -> (tc::Footer, Vec<String>) {
-    let coloured: Vec<Vec<(&str, String)>> = hints
+    let mut coloured: Vec<Vec<(&str, String)>> = hints
         .iter()
         .map(|h| h.iter().map(|(_, t)| (p.dim.as_str(), t.clone())).collect())
         .collect();
-    let packed = tc::pack_hints_placed(&coloured, cw.saturating_sub(1), "  ");
+    // The notices counter sits beside `[,] settings` on the list, and just
+    // before quit on the news view, which has no settings hint. It is only
+    // present while a notice is outstanding, and it already carries the
+    // worst level's colour, so it is not recoloured with the rest.
+    let width = cw.saturating_sub(1).max(1);
+    if let Some(notices) = tc::notices::hint(width) {
+        let at = coloured
+            .iter()
+            .position(|h| h.iter().any(|(_, t)| t.contains("[,] settings")))
+            .unwrap_or_else(|| coloured.len().saturating_sub(1));
+        coloured.insert(at, notices);
+    }
+    let packed = tc::pack_hints_placed(&coloured, width, "  ");
     let lines = packed
         .lines
         .iter()
@@ -1272,6 +1284,7 @@ fn window(body: &[String], scroll: usize, room: usize) -> (Vec<String>, usize) {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::notices::start("google-trends");
     if !tc::dependencies_available(
         "google-trends",
         include_str!("dependencies.json"),
@@ -1476,6 +1489,13 @@ fn main() {
                 }
                 "pgdn" => {
                     scroll += room.max(1);
+                    continue;
+                }
+                // From the list and from the news view. While a filter is
+                // being typed the guard fails and the typing match further
+                // down keeps `!` as a character in the needle.
+                "!" if !view.typing => {
+                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 _ => {}
@@ -1712,7 +1732,10 @@ fn main() {
             body.cursor = body.cursor.map(|c| c + n);
         }
         let (packed, foot) = footer(&hints, cw, &p);
-        room = h.saturating_sub(HEAD + foot.len()).max(1);
+        // Above the hints, and counted as footer, so the body scrolls
+        // under neither. A short pane scrolls; it does not drop the banner.
+        let banner = tc::notices::banner_rows(w, h);
+        room = h.saturating_sub(HEAD + banner.len() + foot.len()).max(1);
         if moved {
             if let Some(c) = body.cursor {
                 scroll = tc::follow(scroll, c, room);
@@ -1729,6 +1752,8 @@ fn main() {
         slots = body.slots.clone();
         let mut frame = vec![title];
         frame.extend(shown);
+        frame.extend(banner);
+        // Past the banner: a click on the banner is not a click on a hint.
         let foot_top = frame.len();
         frame.extend(foot);
         tc::draw(&frame, w, h);

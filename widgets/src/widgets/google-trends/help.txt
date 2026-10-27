@@ -19,6 +19,12 @@ copies the trend's Google Trends Explore link; in the news view c copies the
 selected story's URL, and esc, left or backspace go back. r refreshes now,
 comma opens settings, q quits.
 
+Press ! to read this widget's notices - warnings that are not about a number
+on screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session. A new notice shows above the
+footer for a minute, then as a [!] count in the footer for as long as it is
+still true. While a filter is being typed, ! is a character in the filter.
+
 Copying uses OSC 52, so the terminal you are sitting at performs it. If your
 terminal blocks OSC 52, the link is shown on screen instead.
 

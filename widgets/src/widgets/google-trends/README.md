@@ -104,7 +104,8 @@ Every failure is a named row, never an empty table:
 | `r` | fetch every region now |
 | `pgup` `pgdn` `home` `end` | scroll a screen, or go to either end |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
-| `,` | open settings |
+| `,` | open settings (while entering a filter, types a comma) |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, from the list or the news view (while entering a filter, types a !) |
 | `q` | quit |
 
 In the news view, `↑` `↓` select a story, `c` copies its URL, and `esc`, `←` or
