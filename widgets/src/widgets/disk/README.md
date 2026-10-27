@@ -97,8 +97,7 @@ The one-hour rate and the window rate come from samples this widget took
 itself. `FULL IN` projects that window rate onto the usable space now.
 `disk/usage.json` keeps the samples, not those rates. At most one sample
 a minute for the last day, then one every fifteen minutes, and nothing
-older than thirty days: at most 1,440 + 2,784 points, about 4.3k, per
-filesystem. Twenty
+older than thirty days: about 4.2k points per filesystem. Twenty
 filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
 gap in the trace, not a slope invented across the time the pane was not
 running. The footnote says the rate is since the first fitted sample, and
