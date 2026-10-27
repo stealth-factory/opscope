@@ -289,6 +289,9 @@ fn main() {
 
     loop {
         let mut keys = keyboard.poll();
+        // Set by `enter`, acted on after the batch's arrows have moved the
+        // cursor, so an arrow and an enter read together open the new row.
+        let mut open = false;
         if screen == Screen::List {
             if let Some(at) =
                 tc::rows_clicked(&mut keys, Some(selected), head, shown_scroll, &placed, None)
@@ -328,9 +331,7 @@ fn main() {
                 }
                 "enter" => {
                     if screen == Screen::List {
-                        screen = Screen::Detail;
-                        scroll = 0;
-                        chase = true;
+                        open = true;
                     }
                 }
                 "esc" => {
@@ -392,6 +393,11 @@ fn main() {
                 }
             }
         }
+        if open {
+            screen = Screen::Detail;
+            scroll = 0;
+            chase = true;
+        }
         let view = View {
             snap: snap.as_ref(),
             err: &err,
@@ -452,6 +458,10 @@ fn main() {
         placed = drawn.placed;
         head = head_rows;
         shown_scroll = scroll;
+        // Frame-local: only the frame a key moved the selection follows it.
+        // Left set, a refresh that reorders the rows would hand the cursor
+        // to whichever mount now sits at the old index.
+        chase = false;
         keyboard.wait(Duration::from_millis(200));
     }
 }
@@ -666,6 +676,9 @@ fn refresh_seconds(cfg: &serde_json::Value) -> f64 {
         }
         index += 1;
     }
+    // NaN, infinity and anything past a day would panic in
+    // `Duration::from_secs_f64` outside the poller's guard.
+    let seconds = tc::poll_secs(seconds, 2.0).min(86_400.0);
     if seconds < 0.5 {
         0.5
     } else {
@@ -1084,14 +1097,26 @@ fn pct_text(frac: f64) -> String {
 
 fn chunks(text: &str, room: usize) -> Vec<String> {
     let room = room.max(1);
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if text.is_empty() {
         return vec![String::new()];
     }
-    chars
-        .chunks(room)
-        .map(|piece| piece.iter().collect())
-        .collect()
+    // By display width, not character count: the rows are laid out in cells,
+    // and a wide character counted as one would overflow its piece and be
+    // cut by the pad, never reaching the next row.
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cw = tc::display_width(ch.encode_utf8(&mut [0u8; 4]));
+        if used + cw > room && !piece.is_empty() {
+            pieces.push(std::mem::take(&mut piece));
+            used = 0;
+        }
+        piece.push(ch);
+        used += cw;
+    }
+    pieces.push(piece);
+    pieces
 }
 
 fn clip_chars(text: &str, room: usize) -> String {
@@ -1104,7 +1129,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut line = String::new();
     let mut used = 0usize;
     for word in text.split(' ') {
-        let word_w = word.chars().count();
+        let word_w = tc::display_width(word);
         if word_w > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
@@ -1179,6 +1204,32 @@ fn footer(w: usize, screen: Screen, sort: Sort, paused: bool, p: &Palette) -> (t
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_with_wide_characters_wraps_whole_by_cells() {
+        let path = "/mnt/\u{6570}\u{636e}\u{76d8}/\u{5907}\u{4efd}";
+        for room in 1..=12 {
+            let pieces = chunks(path, room);
+            assert_eq!(pieces.concat(), path, "nothing lost at {room}");
+            for piece in &pieces {
+                // A single wide character is wider than one cell of room and
+                // still gets a row of its own rather than vanishing.
+                assert!(
+                    tc::display_width(piece) <= room.max(2),
+                    "{piece:?} is wider than {room}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_is_not_a_number_of_seconds_falls_back() {
+        let at = |value: serde_json::Value| refresh_seconds(&serde_json::json!({ "refresh": value }));
+        assert_eq!(at(serde_json::json!(1e300)), 86_400.0, "capped, so Duration cannot panic");
+        assert_eq!(at(serde_json::json!(-3)), 2.0, "not positive: the default");
+        assert_eq!(at(serde_json::json!(0.1)), 0.5, "floored");
+        assert_eq!(at(serde_json::json!(5)), 5.0);
+    }
+
     use super::*;
 
     fn space(used: u64, usable: u64, files: u64, ffree: u64) -> Space {
@@ -1209,7 +1260,12 @@ mod tests {
     }
 
     fn snap(rows: Vec<Row>, hidden: Hidden) -> Snap {
-        let total = rows.len() + hidden.pseudo + hidden.bind + hidden.read_only + hidden.configured;
+        let total = rows.len()
+            + hidden.pseudo
+            + hidden.bind
+            + hidden.read_only
+            + hidden.configured
+            + hidden.covered;
         Snap {
             all: rows.iter().map(|row| row.mount.clone()).collect(),
             rows,
@@ -1278,6 +1334,7 @@ mod tests {
             bind: 1,
             read_only: 1,
             configured: 0,
+            covered: 0,
         };
         let snap = snap(rows, hidden);
         let p = palette();

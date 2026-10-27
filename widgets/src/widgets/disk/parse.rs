@@ -40,6 +40,9 @@ pub struct Hidden {
     pub bind: usize,
     pub read_only: usize,
     pub configured: usize,
+    /// Mounted over by a later mount at the same path, so `statvfs` on that
+    /// path can only ever answer for the one on top.
+    pub covered: usize,
 }
 
 impl Hidden {
@@ -58,6 +61,9 @@ impl Hidden {
         }
         if self.configured > 0 {
             names.push("hide_mounts");
+        }
+        if self.covered > 0 {
+            names.push("covered");
         }
         names
     }
@@ -196,7 +202,17 @@ pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
 pub fn visible_mounts(mounts: &[Mount], hide_mounts: &[String]) -> (Vec<Mount>, Hidden) {
     let mut hidden = Hidden::default();
     let mut rest: Vec<&Mount> = Vec::new();
-    for mount in mounts {
+    // The mount table lists mounts in the order they were made, so the last
+    // one at a path is the one a lookup by that path reaches.
+    let mut top: HashMap<&str, usize> = HashMap::new();
+    for (index, mount) in mounts.iter().enumerate() {
+        top.insert(mount.mount_point.as_str(), index);
+    }
+    for (index, mount) in mounts.iter().enumerate() {
+        if top.get(mount.mount_point.as_str()) != Some(&index) {
+            hidden.covered += 1;
+            continue;
+        }
         if hidden_by_config(&mount.mount_point, hide_mounts) {
             hidden.configured += 1;
         } else if PSEUDO.contains(&mount.fstype.as_str()) {
@@ -250,23 +266,25 @@ fn hidden_by_config(mount: &str, patterns: &[String]) -> bool {
 /// that is not three octal digits is left as it was written.
 fn unescape(raw: &str) -> String {
     let bytes = raw.as_bytes();
-    let mut out = String::new();
+    // Bytes, not chars: the table is UTF-8, and pushing each byte as a char
+    // turns `/mnt/café` into `/mnt/cafÃ©`, a path `statvfs` cannot find.
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'\\' && index + 3 < bytes.len() {
             let octal = &raw[index + 1..index + 4];
             if octal.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
                 if let Ok(value) = u8::from_str_radix(octal, 8) {
-                    out.push(value as char);
+                    out.push(value);
                     index += 4;
                     continue;
                 }
             }
         }
-        out.push(bytes[index] as char);
+        out.push(bytes[index]);
         index += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -319,6 +337,7 @@ mod tests {
                 bind: 1,
                 read_only: 1,
                 configured: 0,
+                covered: 0,
             }
         );
 
@@ -362,6 +381,33 @@ mod tests {
         assert_eq!(inode_percent(0, 0), None);
         let share = inode_percent(100, 40).unwrap();
         assert!((share - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_non_ascii_mount_point_survives_decoding() {
+        // `café` is UTF-8 in the table; only space, tab, newline and
+        // backslash are octal escapes.
+        let table = "50 35 8:3 / /mnt/caf\u{e9}\\040x rw,relatime - ext4 /dev/sdc1 rw\n";
+        let mounts = parse_mountinfo(table);
+        assert_eq!(mounts[0].mount_point, "/mnt/caf\u{e9} x");
+    }
+
+    #[test]
+    fn a_mount_covered_by_a_later_one_at_the_same_path_is_hidden() {
+        let table = "\
+36 35 98:0 / / rw,relatime - ext4 /dev/root rw
+60 36 8:2 / /data rw,relatime - ext4 /dev/sdb1 rw
+61 36 8:3 / /data rw,relatime - xfs /dev/sdc1 rw
+";
+        let (visible, hidden) = visible_mounts(&parse_mountinfo(table), &[]);
+        let data: Vec<&str> = visible
+            .iter()
+            .filter(|mount| mount.mount_point == "/data")
+            .map(|mount| mount.source.as_str())
+            .collect();
+        assert_eq!(data, vec!["/dev/sdc1"], "only the mount on top, which statvfs reaches");
+        assert_eq!(hidden.covered, 1);
+        assert!(hidden.categories().contains(&"covered"));
     }
 
     #[test]
