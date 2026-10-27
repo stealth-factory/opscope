@@ -156,19 +156,23 @@ pub fn restart_after_gap(series: &mut Series, window_s: f64) {
     }
 }
 
+/// Samples the fit is allowed to see: after a gap longer than the window,
+/// and no earlier than `now - window_s`. `retained_since` is the series
+/// start after that gap, which can be older than the first fitted sample.
+fn window_points(series: &Series, window_s: f64, now: f64) -> (f64, Vec<(f64, u64)>) {
+    let mut series = series.clone();
+    restart_after_gap(&mut series, window_s);
+    let retained = series.since;
+    let start = now - window_s;
+    series.samples.retain(|(t, _)| *t >= start && *t <= now);
+    (retained, series.samples)
+}
+
 /// Least-squares bytes per second over the samples inside the window, after
 /// a gap longer than the window has restarted the series. `None` when fewer
 /// than two samples remain or they span under fifteen minutes.
 pub fn slope_bytes_per_s(series: &Series, window_s: f64, now: f64) -> Option<Slope> {
-    let mut series = series.clone();
-    restart_after_gap(&mut series, window_s);
-    let start = now - window_s;
-    let points: Vec<(f64, u64)> = series
-        .samples
-        .iter()
-        .copied()
-        .filter(|(t, _)| *t >= start && *t <= now)
-        .collect();
+    let (_, points) = window_points(series, window_s, now);
     if points.len() < 2 {
         return None;
     }
@@ -183,23 +187,51 @@ pub fn slope_bytes_per_s(series: &Series, window_s: f64, now: f64) -> Option<Slo
     })
 }
 
+/// Where a rate was fitted, separate from how long the file has kept the series.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitWindow {
+    /// First sample inside the window. Zero when the window has none.
+    pub start: f64,
+    /// `since` after a gap longer than the window. This can be earlier than
+    /// [`Self::start`] once retained history is older than the window.
+    pub retained_since: f64,
+    pub span_s: f64,
+    pub samples: usize,
+}
+
+/// The samples a footnote may name. `start` is the fit; `retained_since` is
+/// how far back the file still goes.
+pub fn fit_window(series: &Series, window_s: f64, now: f64) -> FitWindow {
+    let (retained_since, points) = window_points(series, window_s, now);
+    let samples = points.len();
+    let (start, span_s) = match (points.first(), points.last()) {
+        (Some(first), Some(last)) if samples >= 2 => (first.0, last.0 - first.0),
+        (Some(first), Some(_)) => (first.0, 0.0),
+        _ => (0.0, 0.0),
+    };
+    FitWindow {
+        start,
+        retained_since,
+        span_s,
+        samples,
+    }
+}
+
 /// How long the samples inside the window actually cover, after a gap reset.
 /// Used to say `measuring 4m` when [`slope_bytes_per_s`] has refused the fit.
 pub fn covered(series: &Series, window_s: f64, now: f64) -> (f64, usize) {
-    let mut series = series.clone();
-    restart_after_gap(&mut series, window_s);
-    let start = now - window_s;
-    let points: Vec<f64> = series
-        .samples
-        .iter()
-        .map(|(t, _)| *t)
-        .filter(|t| *t >= start && *t <= now)
-        .collect();
-    match (points.first(), points.last()) {
-        (Some(first), Some(last)) if points.len() >= 2 => (last - first, points.len()),
-        (Some(_), Some(_)) => (0.0, points.len()),
-        _ => (0.0, 0),
-    }
+    let fit = fit_window(series, window_s, now);
+    (fit.span_s, fit.samples)
+}
+
+/// A copy without the minute that is still open. [`record`] replaces that
+/// sample on every poll; a chart that plotted it would move and rescale
+/// until the minute closed.
+pub fn settled(series: &Series, now: f64) -> Series {
+    let open = minute_of(now);
+    let mut copy = series.clone();
+    copy.samples.retain(|(t, _)| minute_of(*t) != open);
+    copy
 }
 
 fn least_squares(points: &[(f64, u64)]) -> f64 {
@@ -255,8 +287,9 @@ pub fn arrow(eta_window: Eta, eta_hour: Eta) -> Option<char> {
     }
 }
 
-/// Union by minute. The later timestamp in a shared minute wins. `since` stays
-/// at the earlier start, so one pane cannot erase the other's history.
+/// Union by minute in one pass. The later timestamp in a shared minute wins,
+/// and that minute is kept once. `since` stays at the earlier start, so one
+/// pane cannot erase the other's history.
 pub fn union_series(into: &mut Series, extra: &Series) {
     if extra.samples.is_empty() {
         return;
@@ -268,21 +301,58 @@ pub fn union_series(into: &mut Series, extra: &Series) {
     if extra.since > 0.0 && (into.since == 0.0 || extra.since < into.since) {
         into.since = extra.since;
     }
-    for (t, used) in &extra.samples {
-        let minute = minute_of(*t);
-        if let Some(slot) = into
-            .samples
-            .iter_mut()
-            .find(|sample| minute_of(sample.0) == minute)
-        {
-            if *t >= slot.0 {
-                *slot = (*t, *used);
-            }
+    let left = std::mem::take(&mut into.samples);
+    into.samples = merge_minutes(left, &extra.samples);
+}
+
+fn merge_minutes(mut left: Vec<(f64, u64)>, right: &[(f64, u64)]) -> Vec<(f64, u64)> {
+    left.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut right = right.to_vec();
+    right.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() && j < right.len() {
+        let left_minute = minute_of(left[i].0);
+        let right_minute = minute_of(right[j].0);
+        if left_minute < right_minute {
+            push_minute(&mut out, left[i]);
+            i += 1;
+        } else if right_minute < left_minute {
+            push_minute(&mut out, right[j]);
+            j += 1;
         } else {
-            into.samples.push((*t, *used));
+            let chosen = if right[j].0 >= left[i].0 {
+                right[j]
+            } else {
+                left[i]
+            };
+            push_minute(&mut out, chosen);
+            i += 1;
+            j += 1;
         }
     }
-    into.samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+    while i < left.len() {
+        push_minute(&mut out, left[i]);
+        i += 1;
+    }
+    while j < right.len() {
+        push_minute(&mut out, right[j]);
+        j += 1;
+    }
+    out
+}
+
+fn push_minute(out: &mut Vec<(f64, u64)>, sample: (f64, u64)) {
+    if let Some(last) = out.last_mut() {
+        if minute_of(last.0) == minute_of(sample.0) {
+            if sample.0 >= last.0 {
+                *last = sample;
+            }
+            return;
+        }
+    }
+    out.push(sample);
 }
 
 pub fn union_store(into: &mut Store, extra: &Store) {
@@ -301,6 +371,22 @@ pub struct Loaded {
 }
 
 pub fn load_usage(path: &Path) -> Loaded {
+    // The read and any move share the save lock. A pane that already
+    // replaced a corrupt file must not have that replacement moved aside
+    // by a load that saw the old bytes.
+    match tc::statefile::with_lock(path, || load_usage_locked(path)) {
+        Ok(loaded) => loaded,
+        Err(err) => Loaded {
+            store: Store::default(),
+            note: format!(
+                "saved history could not be read ({}) · left in place",
+                public_reason(&err)
+            ),
+        },
+    }
+}
+
+fn load_usage_locked(path: &Path) -> Loaded {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -353,28 +439,46 @@ fn quarantine(path: &Path) {
 
 /// Read the file, union it with `memory`, compact, and write. The merged
 /// store is what both panes now agree on. An error leaves `memory` untouched.
+/// A read error other than a missing file also leaves the file in place.
 pub fn save_usage(path: &Path, memory: &Store) -> Result<Store, String> {
     match tc::statefile::with_lock(path, || {
-        let mut merged = memory.clone();
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(on_disk) = parse_store(&text) {
-                union_store(&mut merged, &on_disk);
-            } else {
-                quarantine(path);
-            }
-        }
-        let now = tc::now();
-        for series in merged.series.values_mut() {
-            compact(series, now);
-        }
-        let body = render_store(&merged).map_err(|err| format!("could not save history: {err}"))?;
-        tc::statefile::write_atomic(path, &body)
-            .map_err(|err| format!("could not save history: {}", public_reason(&err)))?;
-        Ok(merged)
+        save_loaded(path, memory, std::fs::read_to_string(path))
     }) {
         Ok(inner) => inner,
         Err(err) => Err(format!("could not save history: {}", public_reason(&err))),
     }
+}
+
+fn save_loaded(
+    path: &Path,
+    memory: &Store,
+    read: std::io::Result<String>,
+) -> Result<Store, String> {
+    let mut merged = memory.clone();
+    match read {
+        Ok(text) => match parse_store(&text) {
+            Ok(on_disk) => union_store(&mut merged, &on_disk),
+            Err(_) => quarantine(path),
+        },
+        // A missing file is the first save. Any other read error must not
+        // replace the file with this pane's memory: the bytes are still
+        // there, and another pane's samples are in them.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "could not save history: {}",
+                public_reason(&err.to_string())
+            ));
+        }
+    }
+    let now = tc::now();
+    for series in merged.series.values_mut() {
+        compact(series, now);
+    }
+    let body = render_store(&merged).map_err(|err| format!("could not save history: {err}"))?;
+    tc::statefile::write_atomic(path, &body)
+        .map_err(|err| format!("could not save history: {}", public_reason(&err)))?;
+    Ok(merged)
 }
 
 fn parse_store(text: &str) -> Result<Store, String> {
@@ -596,6 +700,70 @@ mod tests {
     }
 
     #[test]
+    fn union_keeps_the_later_sample_in_a_minute_and_merges_in_order() {
+        let mut left = Series {
+            since: 1_000.0,
+            samples: vec![(1_030.0, 9), (1_030.4, 8)],
+        };
+        let right = Series {
+            since: 1_000.0,
+            samples: vec![(1_000.0, 1), (1_120.0, 4)],
+        };
+        union_series(&mut left, &right);
+        assert_eq!(left.samples.len(), 2);
+        assert_eq!(left.samples[0], (1_030.4, 8));
+        assert_eq!(left.samples[1].1, 4);
+
+        let mut left = Series::default();
+        let mut right = Series::default();
+        for index in 0..100 {
+            record(&mut left, 10_000.0 + (index * 2) as f64 * MINUTE, index);
+            record(
+                &mut right,
+                10_000.0 + (index * 2 + 1) as f64 * MINUTE,
+                1_000 + index,
+            );
+        }
+        union_series(&mut left, &right);
+        assert_eq!(left.samples.len(), 200);
+        assert!(left.samples.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn the_fit_starts_inside_the_window_and_the_open_minute_stays_off_the_trace() {
+        let now = 1_700_000_040.0;
+        let mut series = Series::default();
+        let kept = now - 10.0 * DAY;
+        let inside = now - 7.0 * DAY + 15.0 * MINUTE;
+        record(&mut series, kept, 1);
+        record(&mut series, inside, 2);
+        record(&mut series, now, 3);
+        record(&mut series, now - MINUTE, 4);
+        let fit = fit_window(&series, 7.0 * DAY, now);
+        assert!(
+            (fit.retained_since - kept).abs() < 1.0,
+            "{}",
+            fit.retained_since
+        );
+        assert!((fit.start - inside).abs() < 1.0, "{}", fit.start);
+        assert!(fit.span_s + 60.0 < 7.0 * DAY);
+
+        let first = settled(&series, now);
+        record(&mut series, now + 10.0, 99);
+        let second = settled(&series, now);
+        assert_eq!(first.samples, second.samples);
+        assert!(first
+            .samples
+            .iter()
+            .all(|(t, _)| minute_of(*t) != minute_of(now)));
+        let end = (first.samples.last().unwrap().0 / MINUTE).round() * MINUTE + 30.0;
+        let (values, places) = trace(&first, 7.0 * DAY, end);
+        let (again, again_places) = trace(&second, 7.0 * DAY, end);
+        assert_eq!(values, again);
+        assert_eq!(places, again_places);
+    }
+
+    #[test]
     fn a_file_from_another_pane_is_merged_not_replaced() {
         let dir = std::env::temp_dir().join(format!("opscope-disk-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -662,6 +830,71 @@ mod tests {
         assert!(saved.is_ok(), "{saved:?}");
         assert!(path.exists());
         unsafe { std::env::remove_var("XDG_STATE_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_error_does_not_replace_the_history_file() {
+        let dir =
+            std::env::temp_dir().join(format!("opscope-disk-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        let mut kept = Store::default();
+        let mut series = Series::default();
+        record(&mut series, 1_000.0, 10);
+        kept.series.insert("k".into(), series);
+        let body = render_store(&kept).unwrap();
+        std::fs::write(&path, &body).unwrap();
+        let err = save_loaded(
+            &path,
+            &Store::default(),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_load_waits_for_the_save_that_repaired_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-disk-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let mut repaired = Store::default();
+        let mut series = Series::default();
+        record(&mut series, 1_000.0, 10);
+        repaired.series.insert("k".into(), series);
+        let valid = render_store(&repaired).unwrap();
+        let go = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let holder_path = path.clone();
+        let holder_go = go.clone();
+        let holder = std::thread::spawn(move || {
+            tc::statefile::with_lock(&holder_path, || {
+                holder_go.wait();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::fs::write(&holder_path, &valid).unwrap();
+            })
+            .unwrap();
+        });
+        go.wait();
+        let loaded = load_usage(&path);
+        holder.join().unwrap();
+        assert!(loaded.note.is_empty(), "{}", loaded.note);
+        assert_eq!(loaded.store.series["k"].samples.len(), 1);
+        assert!(!dir.join("usage.json.bad").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

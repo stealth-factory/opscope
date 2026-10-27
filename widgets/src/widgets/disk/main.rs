@@ -1597,13 +1597,22 @@ fn ordered(
     now: f64,
 ) -> Vec<usize> {
     let mut index: Vec<usize> = (0..snap.rows.len()).collect();
+    // One fit per row. Doing it inside the comparison refits the same
+    // history for every pair, and the frame sorts again for the cursor
+    // and the footnote.
+    let fills = if sort == Sort::Fills {
+        snap.rows
+            .iter()
+            .map(|row| fill_ord(usage, row, window_days, now))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     index.sort_by(|&left, &right| {
         let mount = snap.rows[left].order.cmp(&snap.rows[right].order);
         match sort {
             Sort::Mount => mount,
-            Sort::Fills => fill_ord(usage, &snap.rows[left], window_days, now)
-                .cmp(&fill_ord(usage, &snap.rows[right], window_days, now))
-                .then(mount),
+            Sort::Fills => fills[left].cmp(&fills[right]).then(mount),
             Sort::Percent => percent_key(&snap.rows[right])
                 .total_cmp(&percent_key(&snap.rows[left]))
                 .then(mount),
@@ -1779,24 +1788,31 @@ fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<St
         .map(|index| &snap.rows[index]);
     let days = view.window_days;
     let window_s = days as f64 * 86_400.0;
-    let (since, span) = if let Some(series) = row.and_then(|row| series_for(view.usage, row)) {
-        let mut shown = series.clone();
-        state::restart_after_gap(&mut shown, window_s);
-        let (span, _) = state::covered(series, window_s, view.now);
-        (shown.since, span)
-    } else {
-        (0.0, 0.0)
+    let fit = row
+        .and_then(|row| series_for(view.usage, row))
+        .map(|series| state::fit_window(series, window_s, view.now));
+    let (fit_start, retained, span) = fit
+        .map(|fit| (fit.start, fit.retained_since, fit.span_s))
+        .unwrap_or((0.0, 0.0, 0.0));
+    let labelled = |t: f64| {
+        if t > 0.0 {
+            stamp(t)
+        } else {
+            "—".into()
+        }
     };
-    let when = if since > 0.0 {
-        stamp(since)
-    } else {
-        "—".into()
-    };
-    let body = if since > 0.0 && span + 60.0 >= window_s {
-        format!("FULL IN at the {days}d rate of this widget's own samples (kept since {when})")
+    // `retained` is how far back the file goes. The rate itself starts at
+    // the first sample inside the window, which is later once history is
+    // older than the window on screen.
+    let body = if retained > 0.0 && span + 60.0 >= window_s {
+        format!(
+            "FULL IN at the {days}d rate of this widget's own samples (kept since {})",
+            labelled(retained)
+        )
     } else {
         format!(
-            "FULL IN at the rate since {when} ({of} of {days}d)",
+            "FULL IN at the rate since {} ({of} of {days}d)",
+            labelled(fit_start),
             of = tc::age(span)
         )
     };
@@ -1862,12 +1878,16 @@ fn push_usage(
         push_wrapped(&path.display().to_string(), width, p, rows);
         return;
     };
-    let end = series
+    // The open minute is rewritten on every poll. Plot the minutes that
+    // have already closed so the line and its scale stay put until the
+    // next one lands.
+    let plotted = state::settled(series, view.now);
+    let end = plotted
         .samples
         .last()
         .map(|(t, _)| (t / 60.0).round() * 60.0 + 30.0)
         .unwrap_or(view.now);
-    let (raw, positions) = state::trace(series, window_s, end);
+    let (raw, positions) = state::trace(&plotted, window_s, end);
     let seen: Vec<f64> = raw.iter().copied().flatten().collect();
     let (hour, window) = slopes(Some(series), view.window_days, view.now);
     let (span, count) = state::covered(series, window_s, view.now);
@@ -3197,6 +3217,109 @@ mod tests {
         assert_eq!(drawn.plots.len(), 1, "{detail}");
         assert!(detail.contains("samples over"), "{detail}");
         assert!(detail.contains("disk/usage.json"), "{detail}");
+    }
+
+    #[test]
+    fn the_footnote_names_the_fitted_start_and_a_full_window_keeps_its_own() {
+        let now = 1_700_000_000.0;
+        let day = 86_400.0;
+        let kept = now - 10.0 * day;
+        let fit_at = now - 7.0 * day + 15.0 * 60.0;
+        let space = space(1_000, 1_000, 10, 9);
+        let mut series = state::Series::default();
+        state::record(&mut series, kept, 1);
+        state::record(&mut series, fit_at, 2);
+        state::record(&mut series, now, 3);
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), series);
+        let snap = snap(
+            vec![row("/", "ext4", Figures::Ready(space), 0)],
+            Hidden::default(),
+        );
+        let p = palette();
+        let flat = {
+            let mut frame = view(Some(&snap), "/");
+            frame.usage = &store;
+            frame.now = now;
+            draw_body(&frame, 140, &p, None)
+                .rows
+                .iter()
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            flat.contains(&format!("rate since {}", stamp(fit_at))),
+            "{flat}"
+        );
+        assert!(!flat.contains(&stamp(kept)), "{flat}");
+
+        let mut full = state::Series::default();
+        state::record(&mut full, kept, 1);
+        state::record(&mut full, now - 7.0 * day, 2);
+        state::record(&mut full, now, 3);
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), full);
+        let flat = {
+            let mut frame = view(Some(&snap), "/");
+            frame.usage = &store;
+            frame.now = now;
+            draw_body(&frame, 140, &p, None)
+                .rows
+                .iter()
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            flat.contains(&format!("kept since {}", stamp(kept))),
+            "{flat}"
+        );
+        assert!(
+            !flat.contains(&format!("rate since {}", stamp(now - 7.0 * day))),
+            "{flat}"
+        );
+    }
+
+    #[test]
+    fn the_filesystem_trace_holds_still_through_the_open_minute() {
+        let now = 1_700_000_040.0;
+        let space = space(1_000, 1_000, 10, 9);
+        let mut series = state::Series::default();
+        state::record(&mut series, now - 120.0, 10);
+        state::record(&mut series, now - 60.0, 20);
+        state::record(&mut series, now, 30);
+        let mut store = state::Store::default();
+        store
+            .series
+            .insert(state::key("/", "ext4", space.blocks), series);
+        let snap = snap(
+            vec![row("/", "ext4", Figures::Ready(space), 0)],
+            Hidden::default(),
+        );
+        let p = palette();
+        let draw = |store: &state::Store| {
+            let mut frame = view(Some(&snap), "/");
+            frame.screen = Screen::Detail;
+            frame.usage = store;
+            frame.now = now;
+            draw_body(&frame, 80, &p, None)
+        };
+        let first = draw(&store);
+        state::record(store.series.values_mut().next().unwrap(), now + 10.0, 9_000);
+        let second = draw(&store);
+        assert_eq!(first.plots.len(), 1, "closed minutes should still draw");
+        assert_eq!(
+            first.plots[0].chart.traces[0].values,
+            second.plots[0].chart.traces[0].values
+        );
+        assert_eq!(
+            first.plots[0].chart.traces[0].positions,
+            second.plots[0].chart.traces[0].positions
+        );
     }
 
     #[test]

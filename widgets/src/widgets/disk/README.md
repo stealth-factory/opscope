@@ -92,8 +92,10 @@ last day, then one every fifteen minutes, and nothing older than thirty
 days: at most 1,440 + 2,784 points, about 4.3k, per filesystem. Twenty
 filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
 gap in the trace, not a slope invented across the time the pane was not
-running. The footnote names the window and when the series started. `↵` on
-a filesystem draws that trace.
+running. The footnote says the rate is since the first fitted sample, and
+a full window also says when the series has been kept. `↵` on a filesystem
+draws that trace through the last closed minute, so a sample still being
+taken does not move it.
 
 ## Disks
 
