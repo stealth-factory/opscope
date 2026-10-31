@@ -1700,20 +1700,54 @@ fn plan_rows(
     caveat: &str,
     p: &Palette,
 ) -> Vec<String> {
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── SUBSCRIPTION ── ".into()),
-            (
-                p.txt.as_str(),
-                if headline.is_empty() { "unknown".into() } else { headline.to_string() },
-            ),
-            (
-                p.dim.as_str(),
-                if note.is_empty() { String::new() } else { format!("   {}", note) },
-            ),
-        ],
-        w - 1,
-    )];
+    let name = if headline.is_empty() { "unknown".to_string() } else { headline.to_string() };
+    let label = " ── SUBSCRIPTION ── ";
+    let note_bit = if note.is_empty() { String::new() } else { format!("   {note}") };
+    let room = w.saturating_sub(1).max(1);
+    // The name is the point of the row. A pane too narrow for it beside the
+    // label used to clip the name (`Ultra` became `Ult`), which is a
+    // different plan. The label stays on the first line and the name moves
+    // under it, whole.
+    let mut rows = Vec::new();
+    let together = format!("{label}{name}{note_bit}");
+    if together.chars().count() <= room {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.txt.as_str(), name),
+                (p.dim.as_str(), note_bit),
+            ],
+            room,
+        ));
+    } else if label.chars().count() + name.chars().count() <= room {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.txt.as_str(), name.clone()),
+            ],
+            room,
+        ));
+        if !note_bit.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {note}"))], room));
+        }
+    } else {
+        rows.push(tc::seg(&[(p.lbl.as_str(), label.into())], room));
+        let named = format!(" {name}{note_bit}");
+        if named.chars().count() <= room {
+            rows.push(tc::seg(
+                &[
+                    (p.txt.as_str(), format!(" {name}")),
+                    (p.dim.as_str(), note_bit),
+                ],
+                room,
+            ));
+        } else {
+            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {name}"))], room));
+            if !note.is_empty() {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {note}"))], room));
+            }
+        }
+    }
     if !caveat.is_empty() {
         for line in wrap_text(caveat, w.saturating_sub(4).max(20)) {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));

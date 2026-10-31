@@ -413,7 +413,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
 /// Token and setting failures are the reader's to fix; a server that
 /// answered and published no percentage is not.
 fn quiet_is_actionable(note: &str) -> bool {
-    !note.contains("answered, and published no")
+    !note.contains("answered, and published no") && !note.contains("no 5-hour limit")
 }
 
 fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> Vec<String> {
@@ -1211,6 +1211,9 @@ mod tests {
         assert!(!quiet_is_actionable(
             "no quota · x.ai answered, and published no credit figure for this period."
         ));
+        // Ultra with no five-hour window is a fact about the plan, not a
+        // failure the reader can fix.
+        assert!(!quiet_is_actionable("no 5-hour limit (Ultra)"));
     }
 
     #[test]
@@ -1286,6 +1289,75 @@ mod tests {
             .position(|r| r.contains("main - CLAUDE"))
             .unwrap();
         assert!(overflow < main, "profiles were not ranked apart:\n{joined}");
+    }
+
+    /// `20%` contains the characters `0%`. A zero reading is its own token:
+    /// `0%`, `+0%`, `~+0%`.
+    fn reads_as_zero_percent(text: &str) -> bool {
+        text.split_whitespace().any(|word| {
+            word.trim_start_matches(['~', '+', '-']) == "0%"
+        })
+    }
+
+    /// The usage body the Claude tests use for a plan that still has a
+    /// weekly window and no session window. Repeated here because that
+    /// helper is private to `claude`.
+    fn weekly_without_session() -> serde_json::Value {
+        serde_json::json!({
+            "limits": [{
+                "group": "weekly", "kind": "weekly_all", "percent": 41,
+                "resets_at": "2126-06-01T00:00:00Z", "severity": "normal"
+            }],
+            "spend": {
+                "enabled": true, "percent": 20, "severity": "normal",
+                "limit": {"amount_minor": 5000, "currency": "USD", "exponent": 2},
+                "used": {"amount_minor": 1000, "currency": "USD", "exponent": 2}
+            },
+            "extra_usage": {
+                "is_enabled": true, "currency": "USD", "decimal_places": 2,
+                "monthly_limit": 5000, "used_credits": 10.0
+            }
+        })
+    }
+
+    #[test]
+    fn the_overview_does_not_invent_a_five_hour_bar_for_ultra() {
+        let p = palette();
+        let present = State {
+            claude: vec![crate::claude::Data::with_plan_quota(
+                "max",
+                "default_claude_max_20x",
+                weekly_without_session(),
+            )],
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&present, 100, &p, &["claude"]));
+        let text = rows.join("\n");
+        assert!(text.contains("overall") || text.contains("weekly"), "{text}");
+        assert!(!text.contains("5h"), "a session lane was drawn for a window the server did not send:\n{text}");
+        assert!(!text.contains("not reported"), "{text}");
+        assert!(!reads_as_zero_percent(&text), "{text}");
+        assert!(!text.contains("published no limit"), "{text}");
+        // Pace is a cell on a real lane. With no session lane there is no
+        // pace for that window, and the weekly lane's own pace is not a zero.
+        assert!(
+            rows.iter().any(|row| row.contains('%') && !reads_as_zero_percent(row)),
+            "{text}"
+        );
+
+        let gone = State {
+            claude: vec![crate::claude::Data::with_plan_quota(
+                "max",
+                "default_claude_max_20x",
+                serde_json::json!({"limits": []}),
+            )],
+            ..State::default()
+        };
+        let text = plain(&summary_for(&gone, 80, &p, &["claude"])).join("\n");
+        assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+        assert!(!text.contains("not reported"), "{text}");
+        assert!(!reads_as_zero_percent(&text), "{text}");
+        assert!(!text.contains("published no limit"), "{text}");
     }
 
     #[test]

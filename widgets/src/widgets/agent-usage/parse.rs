@@ -111,6 +111,32 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ResetBank> {
     Some(ResetBank { left, credits: listed })
 }
 
+/// The name to show for a Claude plan, or `None` when these ids are not in
+/// the table.
+///
+/// Checked 31 Oct 2026, the day after the rename. Claude Code 2.1.314 still
+/// has no id named ultra. The $200 plan is `max` plus a tier ending
+/// `_max_20x` (today `default_claude_max_20x`), and the $100 plan is `max`
+/// plus a tier ending `_max_5x`. `pro` is Pro. A value that names ultra —
+/// the plan or the tier equal to `ultra`, or a tier containing `_ultra` —
+/// is Ultra too, so a later id still reads as that plan. `ultra_effort` is
+/// an effort mode, not a plan, and does not match.
+///
+/// Anything else returns `None`. The caller shows the server's string
+/// unchanged. A tier of `max` alone is not enough: the 5x and 20x plans
+/// share that plan id, and guessing one of them would name the wrong one.
+pub fn parse_claude_plan(plan: &str, tier: &str) -> Option<&'static str> {
+    if plan == "ultra" || tier == "ultra" || tier.contains("_ultra") {
+        return Some("Ultra");
+    }
+    match plan {
+        "pro" => Some("Pro"),
+        "max" if tier.ends_with("_max_20x") => Some("Ultra"),
+        "max" if tier.ends_with("_max_5x") => Some("Max"),
+        _ => None,
+    }
+}
+
 /// Soonest expiry first, and a reset with no readable expiry after every
 /// dated one. The sort is stable, so equal instants keep the order the
 /// inventory gave them.
@@ -2741,5 +2767,40 @@ mod tests {
         assert_eq!(format_balance(2.5), "2.5");
         assert_eq!(format_balance(0.0), "0");
         assert!(!format_balance(12.5).contains('$'));
+    }
+
+    #[test]
+    fn claude_plan_names_follow_the_ids_shipped_on_31_oct_2026() {
+        assert_eq!(
+            parse_claude_plan("max", "default_claude_max_20x"),
+            Some("Ultra")
+        );
+        assert_eq!(
+            parse_claude_plan("max", "default_claude_max_5x"),
+            Some("Max")
+        );
+        assert_eq!(parse_claude_plan("pro", ""), Some("Pro"));
+        assert_eq!(parse_claude_plan("pro", "default_claude_max_20x"), Some("Pro"));
+        // A later tier with the same suffix, still not a guess at a new name.
+        assert_eq!(parse_claude_plan("max", "other_max_20x"), Some("Ultra"));
+        assert_eq!(parse_claude_plan("max", "other_max_5x"), Some("Max"));
+        // The server naming the plan, whenever that id arrives.
+        assert_eq!(parse_claude_plan("ultra", ""), Some("Ultra"));
+        assert_eq!(parse_claude_plan("max", "default_claude_ultra"), Some("Ultra"));
+        assert_eq!(parse_claude_plan("max", "ultra"), Some("Ultra"));
+    }
+
+    #[test]
+    fn an_unrecognised_claude_plan_is_not_given_a_name() {
+        assert_eq!(parse_claude_plan("team", "default_claude_team"), None);
+        assert_eq!(parse_claude_plan("max", ""), None);
+        assert_eq!(parse_claude_plan("max", "default_claude_max"), None);
+        assert_eq!(parse_claude_plan("Max", "default_claude_max_20x"), None);
+        assert_eq!(parse_claude_plan("MAX", "default_claude_max_5x"), None);
+        // An effort mode, not a plan. Matching it would invent Ultra.
+        assert_eq!(parse_claude_plan("max", "ultra_effort"), None);
+        assert_eq!(parse_claude_plan("ultra_effort", ""), None);
+        assert_eq!(parse_claude_plan("free", ""), None);
+        assert_eq!(parse_claude_plan("", "default_claude_max_20x"), None);
     }
 }
