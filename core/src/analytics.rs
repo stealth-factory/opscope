@@ -317,30 +317,35 @@ enum AfterAsk {
 /// First answer wins. A second pane that was still on the splash sends a
 /// start only when the winner turned counting on, and sends nothing when
 /// the winner turned it off — its own key is not a second choice.
-fn save_answer(config: &Path, state: &Path, on: bool, now: u64) -> AfterAsk {
+/// The error is the reason the choice was not kept, so the splash can say
+/// it before it closes: a choice that silently fails to save is asked for
+/// again on the next launch with nothing on screen to say why.
+fn save_answer(config: &Path, state: &Path, on: bool, now: u64) -> (AfterAsk, Option<String>) {
     let saved = crate::statefile::with_lock(state, || {
         if read_stamp(state).is_some() {
             match read_choice_file(config) {
-                Some(true) => return AfterAsk::SendStart,
-                Some(false) => return AfterAsk::Quiet,
+                Some(true) => return (AfterAsk::SendStart, None),
+                Some(false) => return (AfterAsk::Quiet, None),
                 None => {}
             }
         }
-        if write_enabled(config, on).is_err() {
-            return AfterAsk::Quiet;
+        if let Err(error) = write_enabled(config, on) {
+            return (AfterAsk::Quiet, Some(unsaved_reason(config, &error)));
         }
         if write_stamp(state, now).is_err() {
             // Off is retried by the missing-timestamp path. On is not: a
             // later launch sends a start only, so the choice has to go now.
+            // Either way the choice itself is in config.json and is not
+            // asked again, so there is nothing to tell the reader.
             return if on {
-                AfterAsk::SendChoice { on: true }
+                (AfterAsk::SendChoice { on: true }, None)
             } else {
-                AfterAsk::Quiet
+                (AfterAsk::Quiet, None)
             };
         }
-        AfterAsk::SendChoice { on }
+        (AfterAsk::SendChoice { on }, None)
     });
-    saved.unwrap_or(AfterAsk::Quiet)
+    saved.unwrap_or_else(|error| (AfterAsk::Quiet, Some(error)))
 }
 
 fn read_choice_file(path: &Path) -> Option<bool> {
@@ -413,13 +418,17 @@ pub(crate) fn on_launch(binary: &str) {
         Planned::Ask => {
             if !interactive() {
                 None
-            } else if let Some(on) = ask() {
+            } else if let Some(fact) = ask(|on| {
                 let now = now_secs();
-                match save_answer(&config, &state, on, now) {
+                let (after, error) = save_answer(&config, &state, on, now);
+                let fact = match after {
                     AfterAsk::SendChoice { on } => Some(Fact::choice(&name, on, now)),
                     AfterAsk::SendStart => Some(Fact::start(&name)),
                     AfterAsk::Quiet => None,
-                }
+                };
+                (fact, error)
+            }) {
+                fact
             } else {
                 None
             }
@@ -449,7 +458,7 @@ fn scrolled(scroll: usize, key: &str, len: usize, room: usize) -> usize {
 const PROSE: &[&str] = &[
     "Starts are counted so the project can be supported and so we can see which widgets are used.",
     "An event carries the widget or launcher name and that a start happened. This choice is sent once and also says whether you opted in or opted out.",
-    "The time of the choice is stored on this machine. Nothing asks again.",
+    "The time of the choice is stored on this machine. Once you choose, you are not asked again.",
     "Accepting turns counting on. Later starts send only that a start happened. Declining turns it off and still sends this one opt-out, then nothing further while counting stays off.",
     "Nothing in an event is a hostname, an account, the contents of config, or an identity. The choice is saved in config.json and can be edited later.",
     "Leave without choosing and this question stays until you answer it.",
@@ -522,16 +531,63 @@ fn splash_lines(width: usize) -> Vec<String> {
     lines
 }
 
-fn ask() -> Option<bool> {
+/// Ask, and save the answer before the splash closes, so a save that failed
+/// is said on the splash rather than discovered by being asked again.
+fn ask<T>(save: impl FnOnce(bool) -> (T, Option<String>)) -> Option<T> {
     if !interactive() {
         return None;
     }
     crate::setup();
     let mut keyboard = crate::Keyboard::new();
     let answer = ask_loop(&mut keyboard);
+    let (after, error) = save(answer);
+    if let Some(error) = error {
+        show_unsaved(&mut keyboard, &error);
+    }
     keyboard.restore();
     crate::restore_screen();
-    Some(answer)
+    Some(after)
+}
+
+/// The splash's last screen when the choice could not be written: why, and
+/// that the question comes back. Waits for any key, so it is read.
+fn show_unsaved(keyboard: &mut crate::Keyboard, error: &str) {
+    let lines = unsaved_lines(error);
+    loop {
+        let (w, h) = crate::size();
+        let accent = crate::rgb(150, 210, 255);
+        let warn = crate::rgb(255, 200, 120);
+        let dim = crate::rgb(127, 147, 172);
+        let mut frame = vec![crate::title("help improve opscope", w, &accent)];
+        for line in lines.iter().flat_map(|l| wrap_paragraph(l, w.saturating_sub(2))) {
+            frame.push(crate::seg(&[(warn.as_str(), format!(" {line}"))], w));
+        }
+        frame.push(String::new());
+        frame.push(crate::seg(&[(dim.as_str(), " any key continues".to_string())], w));
+        while frame.len() < h {
+            frame.push(String::new());
+        }
+        frame.truncate(h);
+        crate::draw(&frame, w, h);
+        keyboard.wait(std::time::Duration::from_millis(200));
+        if !keyboard.poll().is_empty() {
+            return;
+        }
+    }
+}
+
+/// The file the reader would fix and the OS's reason, without the
+/// temporary file the atomic write was using when it failed.
+fn unsaved_reason(config: &Path, error: &str) -> String {
+    let reason = error.rsplit(": ").next().unwrap_or(error);
+    format!("{} could not be written ({reason})", config.display())
+}
+
+fn unsaved_lines(error: &str) -> Vec<String> {
+    vec![
+        format!("Your choice could not be saved: {error}."),
+        "Nothing was sent. Make the file writable, or set analytics.enabled to true or false in it yourself; until then you will be asked again on the next launch.".to_string(),
+    ]
 }
 
 fn ask_loop(keyboard: &mut crate::Keyboard) -> bool {
@@ -551,7 +607,7 @@ fn ask_loop(keyboard: &mut crate::Keyboard) -> bool {
         let room = h.saturating_sub(foot.len());
         let room_below = room.saturating_sub(1).max(1);
         scroll = clamped_scroll(scroll, body.len(), room_below);
-        let mut frame = vec![crate::title("usage", w, &accent)];
+        let mut frame = vec![crate::title("help improve opscope", w, &accent)];
         for line in body.iter().skip(scroll).take(room_below) {
             frame.push(if line.is_empty() {
                 String::new()
@@ -581,6 +637,19 @@ fn ask_loop(keyboard: &mut crate::Keyboard) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_save_names_config_json_not_the_temporary_file() {
+        let reason = unsaved_reason(
+            Path::new("/home/someone/.config/opscope/config.json"),
+            "/home/someone/.config/opscope/.config.json.tmp-1-2-0: Permission denied (os error 13)",
+        );
+        assert_eq!(
+            reason,
+            "/home/someone/.config/opscope/config.json could not be written (Permission denied (os error 13))"
+        );
+        assert!(!reason.contains(".tmp-"));
+    }
 
     #[test]
     fn the_choice_matrix_matches_the_decision() {
@@ -763,7 +832,7 @@ mod tests {
             "opted in",
             "opted out",
             "time of the choice is stored",
-            "Nothing asks again",
+            "not asked again",
             "one opt-out",
             "nothing further",
             "hostname",
@@ -813,7 +882,7 @@ mod tests {
         let config = dir.join("config.json");
         let state = dir.join("usage.json");
         std::fs::write(&config, "{\n  \"clocks\": {\"show_hints\": true}\n}\n").unwrap();
-        match save_answer(&config, &state, true, 1_700_000_111) {
+        match save_answer(&config, &state, true, 1_700_000_111).0 {
             AfterAsk::SendChoice { on: true } => {}
             other => panic!("expected the choice to be sent, got {other:?}"),
         }
@@ -822,7 +891,7 @@ mod tests {
         assert_eq!(parse_stored_choice(&raw), Some(true));
         assert_eq!(read_stamp(&state), Some(1_700_000_111));
         // A second pane does not overwrite the choice, and it counts a start.
-        match save_answer(&config, &state, false, 1_700_000_999) {
+        match save_answer(&config, &state, false, 1_700_000_999).0 {
             AfterAsk::SendStart => {}
             other => panic!("expected a start once the choice was already on, got {other:?}"),
         }
@@ -839,7 +908,7 @@ mod tests {
         let dir = temp_dir("decline");
         let config = dir.join("config.json");
         let state = dir.join("usage.json");
-        match save_answer(&config, &state, false, 50) {
+        match save_answer(&config, &state, false, 50).0 {
             AfterAsk::SendChoice { on: false } => {}
             other => panic!("expected the opt-out, got {other:?}"),
         }
