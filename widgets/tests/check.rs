@@ -1864,8 +1864,21 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
 
 /// The shared analytics section lives in core, not in a widget folder.
 fn analytics_source() -> String {
-    std::fs::read_to_string(root().join("core/src/analytics.rs")).expect("core/src/analytics.rs")
+    // Without its tests, as every widget is read: the tests name each key as
+    // a string literal, so a key production code stopped reading would
+    // still look read.
+    without_tests(
+        &std::fs::read_to_string(root().join("core/src/analytics.rs"))
+            .expect("core/src/analytics.rs"),
+    )
 }
+
+/// Analytics keys that are left out of the example on purpose.
+///
+/// `enabled` absent is the consent question: the first interactive launch
+/// asks once and writes the answer into `config.json` itself. Listed in the
+/// example, a copied `config.json` would carry an answer nobody gave.
+const ANALYTICS_ASKED_NOT_DEFAULTED: &[&str] = &["enabled"];
 
 /// The example config, as section -> keys.
 fn example() -> BTreeMap<String, BTreeSet<String>> {
@@ -1934,6 +1947,23 @@ fn every_footer_hint_is_in_the_widgets_doc() {
 }
 
 #[test]
+fn the_example_never_answers_the_consent_question() {
+    // A copy of the example is how most people start a config.json. An
+    // `analytics.enabled` in it would opt them in, or out, without the
+    // question the first launch is meant to ask.
+    let example = example();
+    let answered: Vec<&str> = ANALYTICS_ASKED_NOT_DEFAULTED
+        .iter()
+        .copied()
+        .filter(|key| example.get("analytics").is_some_and(|keys| keys.contains(*key)))
+        .collect();
+    assert!(
+        answered.is_empty(),
+        "config.example.json sets analytics.{answered:?}; leave it out so the first launch asks"
+    );
+}
+
+#[test]
 fn every_key_a_widget_reads_is_in_the_example() {
     // The direction check.py did not check. All eleven pomodoro_* keys
     // were read by clocks.py and absent from config.example.json since
@@ -1958,6 +1988,9 @@ fn every_key_a_widget_reads_is_in_the_example() {
     }
     let (sections, keys) = config_use(&analytics_source());
     for key in keys {
+        if ANALYTICS_ASKED_NOT_DEFAULTED.contains(&key.as_str()) {
+            continue;
+        }
         let known = sections
             .iter()
             .any(|s| example.get(s).is_some_and(|ks| ks.contains(&key)));
