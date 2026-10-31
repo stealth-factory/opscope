@@ -124,13 +124,21 @@ fn main() {
             }
         }
         let (nw, nh) = tc::size();
-        if (nw, nh) != (w, h) {
+        if nw != w {
             w = nw;
             h = nh;
             drops = (0..w).map(|_| Drop::new(h, &mut rng)).collect();
             field = (0..h)
                 .map(|_| (0..w).map(|_| glyphs[rng.below(glyphs.len())]).collect())
                 .collect();
+        } else if nh != h {
+            // Only the height moved - core's notices banner arriving under
+            // the rain or leaving it, or a pane dragged taller. The drops
+            // keep falling where they were rather than all starting over:
+            // the field gains or loses rows at the bottom, and a drop that
+            // is now below it is recycled the way every drop is.
+            h = nh;
+            field.resize_with(h, || (0..w).map(|_| glyphs[rng.below(glyphs.len())]).collect());
         }
 
         // A handful of cells change character every frame, wherever they

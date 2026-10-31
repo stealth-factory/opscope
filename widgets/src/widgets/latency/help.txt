@@ -11,11 +11,11 @@ drawing every target alike, as does esc - g cycles the
 column aggregation, c cycles seconds per graph column, comma opens settings, q
 quits.
 
-Press ! to read this widget's notices - warnings that are not about a number
-on screen, such as a config file others can read or a recommended tool that is
-missing - and dismiss them for this session, for 7 days or for 30. A new
-notice shows above the footer for a minute, then as a [!] count in the footer
-for as long as it is still true.
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows under the footer for a minute, and a [!] count stays on the top row for
+as long as it is still true. Clicking the count opens the same screen.
 
 Set the ping interval in comma settings (minimum 1 second). Saving restarts
 the widget with the configured value. -i overrides the interval at launch. -g picks how samples sharing a column combine

@@ -4,4 +4,10 @@ Falling glyphs with truecolor fade trails: near-white head, bright green
 shoulder, and a smooth decay over each drop's length. Glyphs mutate in place
 independently of the drops, and the field reflows on terminal resize.
 
+Press ! to read the notices core raises for every widget - a config file
+others can read, say - and dismiss them for this session, for 7 days or for
+30. A new notice shows along the bottom for a minute, and a [!] count stays on
+the top row, over the rain, for as long as it is still true. Clicking the
+count opens the same screen.
+
     matrix

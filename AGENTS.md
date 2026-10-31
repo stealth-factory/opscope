@@ -176,10 +176,15 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   missing: a notice, raised by a stable id with `tc::notices::when(cond, ||
   Notice::warn("id", ..))` from any thread. Never glue one onto a fetch
   error with `·` - that made a working pane read as a failing one - and
-  never drop one. Every widget that can hold a notice calls
-  `tc::notices::start()` in `main`, puts `tc::notices::hint()` in its footer
-  and `tc::notices::banner_rows()` above it, and answers `!` with
-  `tc::notices::run()`, as `,` opens settings. A dead poller keeps its body
+  never drop one. Raising is all a widget does: **core shows notices for
+  every binary.** `maybe_widget_help` starts the channel under the binary's
+  name, `Keyboard::poll` answers `!` with the screen, the `[!]` counter is
+  stamped on the top row before the version, and the 60 s banner goes on
+  the rows under the widget's frame - `size()` hands the widget a pane that
+  many rows shorter, so it lays out as on any shorter pane and nothing it
+  registered with `footer_at` moves. A widget with a text field (a filter
+  box, a `/` search, a line editor) calls `keyboard.typing()` before `poll`
+  on every pass the field is open, so `!` is a character there. A dead poller keeps its body
   row and raises no notice. On that screen a notice is dismissed for this
   session, for 7 days or for 30; the two for days go to one `notices.json`
   under `tc::state_dir()` that every widget reads again each minute, so a
@@ -255,12 +260,14 @@ screen, exactly like "there is no data":
   (`every_notice_has_a_stable_id`) — the id is what de-duplicates a notice
   and keys its dismissal, so a `format!` id raises a new one each time its
   input moves and a dismissal never holds;
-- **a widget that can hold a notice and never shows it**
-  (`a_widget_that_raises_a_notice_shows_it`) — one that loads config,
-  declares a recommended tool, or raises its own must start the channel,
-  draw the banner and the `[!]` hint, and answer `!` with the screen. A
-  call to `tc::notices::hint(` counts as hinting `!`, so the key and README
-  checks hold that key like any other;
+- **a widget that wires notices itself**
+  (`a_widget_never_wires_notices_itself`) — a widget or the launcher that
+  calls `notices::start`, `run`, `hint` or `banner_rows` is a second copy of
+  what core does for every binary, and the four calls were four chances to
+  leave one out: google-trends merged without them and `matrix` had no way
+  to show a Core warning. The same check fails when core stops starting the
+  channel, answering `!`, reserving the banner or stamping the counter. The
+  key checks count `!` as answered by every widget;
 - **a widget with a notices screen of its own**
   (`only_core_draws_the_notices_screen`) — a type called `Notice`, or a
   module or function with `notices` in its name. ports' kill confirmation is
@@ -426,7 +433,8 @@ that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it
 says its filters in, `config_token_warning()` for widgets holding a secret
 (raised for them as the Core notice `config-world-readable` by
 `load_config()`), `notices` (`tc::notices`) for warnings not tied to a row -
-the 60 s banner, the `[!]` footer counter and the `!` screen - `google` for
+the 60 s banner under the frame, the `[!]` counter on the top row and the
+`!` screen, all wired by core for every binary - `google` for
 Google sign-in, scopes and wording
 ([docs/google-widgets.md](docs/google-widgets.md)), non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /

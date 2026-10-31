@@ -656,6 +656,75 @@ scroll or a pane move is expected to keep a placeholder image, and that was
 not checked by eye. A static chart whose image was dropped stays blank until
 the whole-frame upload fires, every 5 seconds. That upload is not a heal.
 
+## Notices: the counter and the banner
+
+Core draws a raised notice in every binary, `matrix` included, and no widget
+places any of it (OPS-243). There are two pieces, and each goes where core
+already owns the screen rather than where a widget would have to leave room.
+
+**The counter goes on the top row**, after the title's `╸` and before the
+version: `╺━ CLOCKS ━━━━╸ [!] 1 warning v2.2.0`. `draw` already cuts that
+row short and appends the version after a reset, so nothing a widget hands
+it can cover the counter either, and `title()` is already built short by
+what `draw` will append - it now leaves room for both. The counter shortens
+to `[!] 3 notices` and then `[!] 3` rather than overflow, and the shortest
+always goes down: on a pane too narrow for both, the version stands down
+first, the way it already does below about twenty-two columns, because the
+counter is the one of the two a reader can act on. It is in the worst
+level's colour, and a click on its cells arrives as `!`, so it is clickable
+in every widget without one of them registering it. A full-screen
+animation keeps it too: `matrix` has no title, and its top row of rain is
+cut for the counter exactly as for the version.
+
+**The banner goes under the widget's frame**, on the bottom rows of the
+pane. `size()` decides it once a frame - at most a quarter of the pane, and
+nothing at all on a pane under ten rows - and returns the pane *less those
+rows*. The widget lays itself out in what it was handed, exactly as on a
+pane that much shorter: its body scrolls, its footer is pinned to the bottom
+of its frame, and the rows it registers with `footer_at` are rows of that
+frame. `draw` then appends the banner below. Why under rather than above the
+footer, which is where widgets used to put it:
+
+- **The footer and its click placements do not move.** Above the footer, the
+  banner would have to be inserted at a row only the widget knows, and every
+  hint the widget registered would shift by the banner's height under the
+  pointer - the bug `footer_at` exists to prevent. Under it, the frame the
+  widget drew is the top of the screen row for row, so a click lands on the
+  hint the widget put there. No coordinate is translated anywhere.
+- **A short pane scrolls rather than hides.** The widget never sees the
+  banner's rows, so it cannot draw into them or under them; it sees a
+  shorter pane and does what it already does at every height. The budget
+  and the floor mean the banner stands down before content does: below ten
+  rows it is not drawn, and the counter still says the notice is there.
+- **Nothing is truncated.** Each notice is its title alone, wrapped whole by
+  `error_rows()`; one that does not fit whole in the budget is left to the
+  counter rather than cut.
+- **It holds for widgets that never thought about it.** Detail screens,
+  overlays, loading screens, the settings screen and `cannot_start` all get
+  their height from `size()`, so all of them carry the banner. The OPS-195
+  and OPS-212 reviews found five widgets whose detail screens had no
+  banner or counter; that class of finding is gone.
+
+`draw` adds the banner only when it is handed the height `size()` returned,
+so a frame drawn at any other height is drawn without it, never over it.
+`matrix` keeps falling through a banner arriving or leaving: it reseeds its
+drops on a width change only, and a height change grows or shrinks the
+field at the bottom. While the notices screen is up nothing is reserved or
+stamped; it is the list they would repeat.
+
+**`!` is answered in `Keyboard::poll`**, before the widget sees the key, and
+the widget's next frame paints over the screen when it closes. A text field
+- a filter box, a `/` search, the settings editor - calls
+`keyboard.typing()` before `poll` on each pass it has the keyboard, and that
+poll hands `!` back as a character. The flag is spent by the poll that reads
+it, so a widget that closes its field without saying so cannot leave `!`
+dead for the session.
+
+Measured with the OPS-201 harness at 57x40 for 60 s after 6 s warm-up, the
+counter and the banner change nothing a frame sends once they are on
+screen: they are rows that do not change, and only rows that change are
+sent.
+
 ## Keyboard protocol
 
 Core asks `CSI ? u` in the same negotiation as graphics and synchronized

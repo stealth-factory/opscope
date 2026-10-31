@@ -406,34 +406,37 @@ failed command into an empty result.
 beside the number. Anything else - an old section name still being read, a
 fallback the reader would not guess - is a notice, not a row and not a
 clause glued onto the fetch error. Raise it by a stable id, from whichever
-thread finds out, and answer `!` beside `,`:
+thread finds out - that is all a widget does:
 
 ```rust
-tc::notices::start("example-widget");                       // once, in main
 tc::notices::when(on_legacy_section(), || {                 // any thread, every pass
     tc::notices::Notice::info("legacy-config-section", "config: reading the old section")
 });
-"!" => { tc::notices::run(&mut keyboard); continue; }       // beside ","
 ```
 
-Then put the counter in the footer and the banner above it - the banner
-counts as footer rows, so a scrolling body never runs under it, and
-`footer_at` is handed the row the hints start on, below the banner:
+Core shows it, in every binary, with nothing wired: `maybe_widget_help`
+starts the channel under the binary's name, the `[!]` counter is stamped on
+the top row before the version, the 60 s banner goes on the rows under your
+frame, and `Keyboard::poll` opens the screen on `!` and on a click on the
+counter. The banner's rows come out of the height `tc::size()` returns, so
+call it once a frame and hand `draw` the same height: your frame is laid out
+exactly as on a pane that much shorter, and the footer you register with
+`footer_at` stays where you drew it.
+
+The one thing a widget does say is when a text field has the keyboard - a
+filter box, a `/` search, a line editor - so a `!` typed there is text:
 
 ```rust
-hints.extend(tc::notices::hint(w - 2));                     // before [,] settings
-let banner = tc::notices::banner_rows(w, h);                // h: the pane's height
-let foot: Vec<String> = banner.iter().cloned()
-    .chain(packed.lines.iter().map(|l| format!(" {l}"))).collect();
-// ... pad to h - foot.len(), then:
-let foot_top = rows.len() + banner.len();
+if typing {
+    keyboard.typing();                                      // every pass, before poll
+}
+let mut keys = keyboard.poll();
 ```
 
-Core raises two kinds for you: `config.json` readable by others, from
-`load_config()`, and each missing *recommended* tool, from
-`dependencies_available()`. So nearly every widget can hold a notice and
-has to show it; `a_widget_that_raises_a_notice_shows_it` says which call
-is missing.
+Core raises two kinds for you: `config.json` readable by others, at start
+and from `load_config()`, and each missing *recommended* tool, from
+`dependencies_available()`. `a_widget_never_wires_notices_itself` fails a
+widget that calls `notices::start`, `run`, `hint` or `banner_rows` itself.
 
 ### 7. Generate configuration and run the gates
 
@@ -503,7 +506,7 @@ and npm publication path is separate from PR merge; it is documented in
 | registering the footer, so its hints are clickable | `every_widget_registers_its_footer` |
 | answering a click on a row | `every_widget_with_a_cursor_answers_a_click` |
 | a notice id that is a literal or a const, and no Core notice from a widget | `every_notice_has_a_stable_id` |
-| starting the notices channel, its banner, its `[!]` hint and the `!` arm | `a_widget_that_raises_a_notice_shows_it`, then the README and key checks for `!` |
+| leaving the notices channel, its counter, banner and `!` to core | `a_widget_never_wires_notices_itself` |
 | no notices screen of a widget's own | `only_core_draws_the_notices_screen` |
 
 `every_widget_is_on_the_launcher_menu` is the repository check: it fails
@@ -601,7 +604,9 @@ Three rules the tests measure:
 
 `!` joins `,` as a key every widget answers: `,` opens the shared settings
 screen and `!` the shared notices screen, both drawn by core and both
-borrowing the widget's `Keyboard`. Do not bind `!` to anything else.
+borrowing the widget's `Keyboard`. Core answers `!` inside `poll`, before
+the widget sees a key, so there is no arm to write and none to bind `!` to
+anything else - except a text field, which calls `keyboard.typing()` first.
 
 ### Refresh activity in the title
 

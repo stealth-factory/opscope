@@ -27,10 +27,11 @@ the region, because those rows are gone. When the tabs
 wrap past the pane, the strip keeps the open region on screen and the feed
 keeps a row.
 
-Press ! to read this widget's notices - warnings that are not about a number
-on screen, such as a config file others can read - and dismiss them for this
-session, for 7 days or for 30. A new notice shows above the footer for a
-minute, then as a [!] count in the footer for as long as it is still true.
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read - and dismiss them for this
+session, for 7 days or for 30. A new notice shows under the footer for a
+minute, and a [!] count stays on the top row for as long as it is still true.
+Clicking the count opens the same screen.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it. If your
 terminal blocks OSC 52, the link is shown on screen instead.

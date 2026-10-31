@@ -1875,7 +1875,6 @@ fn tidy(v: f64) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("linear");
     if !tc::dependencies_available("linear", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -2059,10 +2058,6 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -2328,16 +2323,10 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
             drop(s);
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
-            hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-            let banner = tc::notices::banner_rows(w, h);
-            let foot: Vec<String> = banner
-                .iter()
-                .cloned()
-                .chain(packed.lines.iter().map(|line| format!(" {}", line)))
-                .collect();
+            let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
@@ -2346,8 +2335,7 @@ fn main() {
             // on screen. Leaving them would answer a click here with
             // whichever row happened to be drawn behind it.
             placed.clear();
-            // The hints start under the banner.
-            let foot_top = rows.len() + banner.len();
+            let foot_top = rows.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
@@ -3161,16 +3149,10 @@ fn main() {
                     ),
                 ]);
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
-                hints.extend(tc::notices::hint(w - 2));
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-                let banner = tc::notices::banner_rows(w, h);
-                let foot: Vec<String> = banner
-                    .iter()
-                    .cloned()
-                    .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-                    .collect();
+                let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
                 // The title is pinned here as it is on the board. A detail
@@ -3206,7 +3188,7 @@ fn main() {
                     }
                 }
                 placed.clear();
-                let foot_top = out.len() + banner.len();
+                let foot_top = out.len();
                 out.extend(foot);
                 let detail_plots: Vec<_> = detail_plots.into_iter().filter_map(|p| p.in_viewport(from, 1, room_below)).collect();
                 tc::draw_plots(&out, w, h, &detail_plots);
@@ -3251,16 +3233,10 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "pgup/pgdn page".into())]);
         hints.push(vec![(p.dim.as_str(), "[w]indow".into())]);
         hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
-        hints.extend(tc::notices::hint(w - 2));
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // The board is longer than most panes are tall, and every section
         // is now drawn whole - so the frame is a window onto it. With a
         // section focused the window chases its cursor; with none, the
@@ -3291,7 +3267,7 @@ fn main() {
         while out.len() < room {
             out.push(String::new());
         }
-        let foot_top = out.len() + banner.len();
+        let foot_top = out.len();
         out.extend(footer);
         let plots: Vec<_> = plots.drain(..).filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
         tc::draw_plots(&out, w, h, &plots);

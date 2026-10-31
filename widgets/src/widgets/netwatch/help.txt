@@ -29,11 +29,11 @@ Keys: up/down select, enter opens one, esc goes back, 1 sorts by total,
 2 by current rate, o shows the daemons you do not own, r rezeroes,
 comma opens settings, q quits.
 
-Press ! to read this widget's notices - warnings that are not about a number
-on screen, such as a config file others can read or a recommended tool that is
-missing - and dismiss them for this session, for 7 days or for 30. A new
-notice shows above the footer for a minute, then as a [!] count in the footer
-for as long as it is still true.
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows under the footer for a minute, and a [!] count stays on the top row for
+as long as it is still true. Clicking the count opens the same screen.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same. They move the pane and never the selection,
