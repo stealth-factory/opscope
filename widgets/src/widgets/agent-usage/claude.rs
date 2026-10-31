@@ -1281,13 +1281,18 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
     let room = w.saturating_sub(1).max(1);
     let label = " ── QUOTA ── ";
     let ink = if c.quota_live { p.ok.as_str() } else { p.warn.as_str() };
-    // The plan name is the token the scope clause must not eat. When even
-    // a one-cell gap would clip it, the name moves under the heading.
-    let reserved = tc::display_width(label) + tc::display_width(&src) + tc::display_width(&shown);
-    let scope = scope_phrase(w, reserved);
-    let head_fits = !scope.is_empty() && reserved + tc::display_width(scope) <= room;
+    // The plan name and the refusal are what the scope clause must not eat.
+    // A cached "too many requests" is longer than a 40-column heading, and
+    // clipping it is how a failed refresh disappears. The name, then the
+    // refusal, move under the label whole.
+    let label_w = tc::display_width(label);
+    let src_w = tc::display_width(&src);
+    let name_w = tc::display_width(&shown);
+    let scope = scope_phrase(w, label_w + src_w + name_w);
+    let one_line = !scope.is_empty() && label_w + src_w + tc::display_width(scope) + name_w <= room;
+    let budget = room.saturating_sub(1).max(1);
     let mut rows = Vec::new();
-    if shown.is_empty() || head_fits {
+    if one_line || (shown.is_empty() && label_w + src_w <= room) {
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), label.into()),
@@ -1297,8 +1302,8 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
             ],
             room,
         ));
-    } else {
-        let scope = scope_phrase(w, tc::display_width(label) + tc::display_width(&src));
+    } else if label_w + src_w <= room {
+        let scope = scope_phrase(w, label_w + src_w);
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), label.into()),
@@ -1307,9 +1312,25 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
             ],
             room,
         ));
-        let budget = room.saturating_sub(1).max(1);
         for part in crate::flow_cells(&shown, budget) {
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], room));
+        }
+    } else {
+        let scope = scope_phrase(w, label_w);
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.dim.as_str(), scope.to_string()),
+            ],
+            room,
+        ));
+        for part in crate::flow_cells(&src, budget) {
+            rows.push(tc::seg(&[(ink, format!(" {part}"))], room));
+        }
+        if !shown.is_empty() {
+            for part in crate::flow_cells(&shown, budget) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], room));
+            }
         }
     }
     // Where the session bar would have been. A percentage lane still sorts
@@ -4742,6 +4763,28 @@ mod tests {
         let text = joined(&tab_text(&data, 80));
         assert!(text.contains("too many requests"), "{text}");
         assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_failed_refresh_keeps_the_refusal_whole() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            serde_json::json!({"limits": []}),
+        )
+        .failed_refresh("too many requests", 4.0 * 3600.0);
+        let rows = tab_text(&data, 40);
+        let text = joined(&rows);
+        assert!(text.contains("cached 4h ago"), "{text}");
+        assert!(text.contains("too many requests"), "{text}");
+        assert!(text.split_whitespace().any(|word| word == "Ultra"), "{text}");
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 39,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
     }
 
     #[test]
