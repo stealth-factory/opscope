@@ -24,7 +24,7 @@ The agents this widget reads:
  Checked 16s ago   · = detected
  [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
 
- ── QUOTA ── live · account-wide, not this machine   max
+ ── QUOTA ── live · account-wide, not this machine   Ultra
  session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
  overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
  Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
@@ -62,7 +62,7 @@ The agents this widget reads:
  Sun    ·     ░░    ▒▒    ░░    ·
   less ░░▒▒▓▓██ more
 
- ── SUBSCRIPTION ── max
+ ── SUBSCRIPTION ── Ultra
   member since     8 Mar 2024 · 2.4y ago
   status           active
   rate limit tier  default_claude_max_20x
@@ -1246,6 +1246,37 @@ unreachable it falls back to what the local credential already says, which
 needs no network at all, and labels itself `from credentials` so it is never
 mistaken for the fuller reading.
 
+### Claude plan names (30 Oct 2026)
+
+Anthropic renamed Max 5x ($100/mo) to **Max** and Max 20x ($200/mo) to
+**Ultra**, and removed the five-hour session limit on Ultra for verified
+accounts. Pro is unchanged. The weekly limits are unchanged: Ultra is still
+10× Pro for the week, and the old "20x" was the five-hour window. Checked
+again on 31 Oct 2026: Claude Code 2.1.314 still sends the old ids, `max`
+with `default_claude_max_20x` or `default_claude_max_5x`. There is no new
+plan id yet. The headline uses the name, and the rate-limit tier row keeps
+the id, so the source stays visible. An id this table does not know is
+shown as it arrived.
+
+When an Ultra reading has no session limit — the `limits[]` entry is
+missing, or its `percent` is null, and `five_hour.utilization` is not a
+number either — the five-hour row says `5h  no 5-hour limit (Ultra)` and
+draws no bar. A session limit that is still present is drawn as before.
+On Pro or Max a missing session limit stays a missing reading, because
+those plans still have the window. The `[+]` overview does not turn the
+absence into a 0% bar or a "not reported" line.
+
+The monthly Claude Platform credit is not in the usage reply or the
+profile this widget reads, so it is not shown. A figure taken from the
+plan name would not be a reading.
+
+The rename was announced by the Claude account on X and on the pricing
+page. As of 30 Oct 2026 there was no anthropic.com news post. Reports of
+the same change: [ShiftDelete](https://en.shiftdelete.net/claude-ultra-plan/),
+[Windows Report](https://windowsreport.com/anthropic-renames-claude-max-5x-and-20x-plans-removes-ultras-5-hour-limit/),
+[explainx](https://explainx.ai/blog/claude-ultra-plan-no-5-hour-limit-max-rename-weekly-limits-api-credits-2026),
+[FourWeekMBA](https://fourweekmba.com/ai-claude-ultra-drops-5-hour-limit-for-verified-users-at-200/).
+
 ## Empty tabs say two things and stop
 
 An agent with no local data gets exactly two lines: what is missing, and the
@@ -1994,9 +2025,10 @@ through before there is anything to draw. The local logs no longer hold it
 up: the first pass reads its budgeted slice of them, and the rest fill in over
 the passes that follow, labelled as partial until they are done.
 
-## More than one Claude Max
+## More than one Claude account
 
-A second Max seat is a second Claude Code config directory. This widget
+A second seat — Max, Ultra, or another plan — is a second Claude Code
+config directory. This widget
 does not invent that layout, does not read `$CLAUDE_CONFIG_DIR`, and does
 not scan `~/.claude-*`. Name the directories:
 
