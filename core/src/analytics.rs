@@ -511,7 +511,7 @@ fn blocks(name: &str) -> Vec<Block> {
     vec![
         Block::Headline("Help choose which widgets get the attention"),
         Block::Para(
-            "Starts are counted so the project can be supported and so we can see which widgets are used. The widgets you open are the ones that get the attention.",
+            "Widget launches are tracked anonymously so the project can be supported and so we can see which widgets are used. The widgets you open are the ones that get the attention.",
         ),
         Block::Blank,
         Block::Row("sent", "the widget or launcher name and that a start happened".into()),
