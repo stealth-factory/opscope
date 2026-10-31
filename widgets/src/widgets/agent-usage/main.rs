@@ -911,6 +911,47 @@ fn paced_bar_with_plot(
     parts
 }
 
+/// Plain text flowed to a width, splitting a word that is wider than the row.
+///
+/// `wrap_text` leaves a long word whole, and `seg` then cuts it. A cut plan
+/// id is a different id. The break is by cells, the same way a labelled
+/// value already splits an enterprise sku.
+fn flow_cells(text: &str, budget: usize) -> Vec<String> {
+    let budget = budget.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > budget {
+            lines.push(std::mem::take(&mut line));
+        }
+        while word.chars().count() > budget {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            lines.push(word.chars().take(budget).collect());
+            word = word.chars().skip(budget).collect();
+        }
+        if word.is_empty() {
+            continue;
+        }
+        if line.is_empty() {
+            line = word;
+        } else {
+            line.push(' ');
+            line.push_str(&word);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
 /// Plain text flowed to a width. Clipping a sentence loses its end.
 fn wrap_text(t: &str, budget: usize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -1707,7 +1748,9 @@ fn plan_rows(
     // The name is the point of the row. A pane too narrow for it beside the
     // label used to clip the name (`Ultra` became `Ult`), which is a
     // different plan. The label stays on the first line and the name moves
-    // under it, whole.
+    // under it, whole. A name wider than that line is split across rows:
+    // one word longer than the pane is still the whole id, and clipping it
+    // is how `enterprise-australia-2026` lost its year.
     let mut rows = Vec::new();
     let together = format!("{label}{name}{note_bit}");
     if together.chars().count() <= room {
@@ -1742,7 +1785,10 @@ fn plan_rows(
                 room,
             ));
         } else {
-            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {name}"))], room));
+            let budget = room.saturating_sub(1).max(1);
+            for part in flow_cells(&name, budget) {
+                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {part}"))], room));
+            }
             if !note.is_empty() {
                 rows.push(tc::seg(&[(p.dim.as_str(), format!(" {note}"))], room));
             }

@@ -412,8 +412,15 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
 
 /// Token and setting failures are the reader's to fix; a server that
 /// answered and published no percentage is not.
+///
+/// Ultra with no five-hour window is the plan, and that sentence alone is
+/// not a failure. The same sentence with a refusal after it is the refresh
+/// that failed. Matching the plan words wherever they sat hid that refusal.
 fn quiet_is_actionable(note: &str) -> bool {
-    !note.contains("answered, and published no") && !note.contains("no 5-hour limit")
+    if note.contains("answered, and published no") {
+        return false;
+    }
+    note != "no 5-hour limit (Ultra)"
 }
 
 fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> Vec<String> {
@@ -1212,8 +1219,12 @@ mod tests {
             "no quota · x.ai answered, and published no credit figure for this period."
         ));
         // Ultra with no five-hour window is a fact about the plan, not a
-        // failure the reader can fix.
+        // failure the reader can fix. The same sentence with a refusal
+        // after it is the refresh that failed.
         assert!(!quiet_is_actionable("no 5-hour limit (Ultra)"));
+        assert!(quiet_is_actionable(
+            "no 5-hour limit (Ultra) · cached 4h ago · too many requests"
+        ));
     }
 
     #[test]
@@ -1353,11 +1364,38 @@ mod tests {
             )],
             ..State::default()
         };
-        let text = plain(&summary_for(&gone, 80, &p, &["claude"])).join("\n");
+        let gone_rows = summary_for(&gone, 80, &p, &["claude"]);
+        let text = plain(&gone_rows).join("\n");
         assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
         assert!(!text.contains("not reported"), "{text}");
         assert!(!reads_as_zero_percent(&text), "{text}");
         assert!(!text.contains("published no limit"), "{text}");
+        let warn = tc::rgb(255, 200, 90);
+        assert!(
+            !gone_rows.iter().any(|row| row.contains(&warn) && row.contains("5-hour")),
+            "a live plan with no session window was drawn as a failure:\n{text}"
+        );
+
+        let failed = State {
+            claude: vec![crate::claude::Data::with_plan_quota(
+                "max",
+                "default_claude_max_20x",
+                serde_json::json!({"limits": []}),
+            )
+            .failed_refresh("too many requests", 4.0 * 3600.0)],
+            ..State::default()
+        };
+        let failed_rows = summary_for(&failed, 90, &p, &["claude"]);
+        let failed_text = plain(&failed_rows).join("\n");
+        assert!(failed_text.contains("no 5-hour limit (Ultra)"), "{failed_text}");
+        assert!(failed_text.contains("cached 4h ago"), "{failed_text}");
+        assert!(failed_text.contains("too many requests"), "{failed_text}");
+        assert!(
+            failed_rows
+                .iter()
+                .any(|row| row.contains(&warn) && row.contains("too many requests")),
+            "the failed refresh was not a warning:\n{failed_text}"
+        );
     }
 
     #[test]

@@ -152,6 +152,15 @@ impl Data {
             ..Self::default()
         }
     }
+
+    /// The same reading after the next fetch failed and the snapshot was kept.
+    #[cfg(test)]
+    pub(crate) fn failed_refresh(mut self, why: &str, age_secs: f64) -> Self {
+        self.quota_live = false;
+        self.quota_at = now() - age_secs;
+        self.quota_why = why.into();
+        self
+    }
 }
 
 /// One `claude_config_dirs` entry as it was written.
@@ -1124,19 +1133,32 @@ pub fn claude_lane_rank(limit: &serde_json::Value) -> usize {
     }
 }
 
-/// The scope note, shortened before it can push a reset off the line.
+/// The scope note, shortened before it can push what follows it off the line.
 ///
-/// "not this machine" is the point of the sentence, but it is also sixteen
-/// characters, and seg() clips whatever runs past the pane. Losing the
-/// clause leaves a shorter true line; losing the end of "resets in 15d"
-/// leaves "resets in 1", which is a different and wrong number.
+/// `used` is the cells already spoken for, including the token that comes
+/// after this phrase: a reset, or the plan name. "not this machine" is the
+/// point of the sentence, and it is also the first thing to go. seg() clips
+/// whatever runs past the pane. Losing the clause leaves a shorter true
+/// line; losing the end of "resets in 15d" leaves "resets in 1", and losing
+/// the end of "Ultra" leaves a different plan.
 pub fn scope_phrase(w: usize, used: usize) -> &'static str {
-    let full = " · account-wide, not this machine   ";
-    if used + full.len() <= w - 1 {
-        full
-    } else {
-        " · account-wide   "
+    let room = w.saturating_sub(1);
+    // Longest first. The trailing spaces are only the gap before the token
+    // `used` already counted, so they go before the words do. A single
+    // space is the last form that still keeps that token off the clause.
+    const PHRASES: &[&str] = &[
+        " · account-wide, not this machine   ",
+        " · account-wide   ",
+        " · account-wide ",
+        " · ",
+        " ",
+    ];
+    for phrase in PHRASES {
+        if used + tc::display_width(phrase) <= room {
+            return phrase;
+        }
     }
+    ""
 }
 
 /// The subscription id and the rate-limit tier, from the profile when it
@@ -1256,21 +1278,40 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
         format!("cached {} ago · {}", ago(c.quota_at), c.quota_why)
     };
     let hue = agent_hue("claude");
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (
-                if c.quota_live { p.ok.as_str() } else { p.warn.as_str() },
-                src.clone(),
-            ),
-            (
-                p.dim.as_str(),
-                scope_phrase(w, 13 + src.len() + shown.chars().count()).to_string(),
-            ),
-            (p.dim.as_str(), shown),
-        ],
-        w - 1,
-    )];
+    let room = w.saturating_sub(1).max(1);
+    let label = " ── QUOTA ── ";
+    let ink = if c.quota_live { p.ok.as_str() } else { p.warn.as_str() };
+    // The plan name is the token the scope clause must not eat. When even
+    // a one-cell gap would clip it, the name moves under the heading.
+    let reserved = tc::display_width(label) + tc::display_width(&src) + tc::display_width(&shown);
+    let scope = scope_phrase(w, reserved);
+    let head_fits = !scope.is_empty() && reserved + tc::display_width(scope) <= room;
+    let mut rows = Vec::new();
+    if shown.is_empty() || head_fits {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (ink, src.clone()),
+                (p.dim.as_str(), scope.to_string()),
+                (p.dim.as_str(), shown.clone()),
+            ],
+            room,
+        ));
+    } else {
+        let scope = scope_phrase(w, tc::display_width(label) + tc::display_width(&src));
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (ink, src.clone()),
+                (p.dim.as_str(), scope.to_string()),
+            ],
+            room,
+        ));
+        let budget = room.saturating_sub(1).max(1);
+        for part in crate::flow_cells(&shown, budget) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], room));
+        }
+    }
     // Where the session bar would have been. A percentage lane still sorts
     // ahead of the weekly ones, so this row only exists when that lane was
     // not reported.
@@ -2398,7 +2439,20 @@ pub fn why_no_lane(c: &Data) -> String {
         // would otherwise say the server published no percentages, which
         // is how a missing reading looks, and would draw no row where the
         // session lane went.
-        return "no 5-hour limit (Ultra)".into();
+        //
+        // A refresh that failed and fell back to that snapshot is a
+        // different fact. The plan note stays, and the age and the refusal
+        // stay with it. Without them a lapsed login reads as a healthy
+        // account that simply has no five-hour window.
+        if c.quota_why.is_empty() {
+            return "no 5-hour limit (Ultra)".into();
+        }
+        let refusal = if !c.quota_live && c.quota_at > 0.0 {
+            format!("cached {} ago · {}", ago(c.quota_at), c.quota_why)
+        } else {
+            c.quota_why.clone()
+        };
+        return format!("no 5-hour limit (Ultra) · {refusal}");
     }
     why_no_limits(c)
 }
@@ -4670,6 +4724,65 @@ mod tests {
         assert!(!text.contains("published no limit"), "{text}");
         assert_eq!(why_no_lane(&data), "no 5-hour limit (Ultra)");
         assert!(lanes(&data).is_empty());
+    }
+
+    #[test]
+    fn a_failed_refresh_of_unlimited_ultra_keeps_the_refusal() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            serde_json::json!({"limits": []}),
+        )
+        .failed_refresh("too many requests", 4.0 * 3600.0);
+        let note = why_no_lane(&data);
+        assert!(note.contains("no 5-hour limit (Ultra)"), "{note}");
+        assert!(note.contains("cached 4h ago"), "{note}");
+        assert!(note.contains("too many requests"), "{note}");
+        assert_ne!(note, "no 5-hour limit (Ultra)");
+        let text = joined(&tab_text(&data, 80));
+        assert!(text.contains("too many requests"), "{text}");
+        assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+    }
+
+    #[test]
+    fn the_quota_heading_keeps_ultra_whole_at_40_columns() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            weekly_without_session(),
+        );
+        let rows = tab_text(&data, 40);
+        let head = rows.iter().find(|row| row.contains("QUOTA")).expect("a heading");
+        assert!(
+            head.split_whitespace().any(|word| word == "Ultra"),
+            "the plan name was clipped: {head}"
+        );
+        assert!(tc::display_width(head) <= 39, "{head} is {} wide", tc::display_width(head));
+    }
+
+    #[test]
+    fn a_long_plan_id_is_split_rather_than_clipped_at_24_columns() {
+        let unknown = serde_json::json!({
+            "_plan": "enterprise-australia-2026",
+            "organization": {"rate_limit_tier": "default_claude_team"},
+        });
+        let rows = claude_plan_rows(&unknown, 24, &palette())
+            .iter()
+            .map(|row| bare(row))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 23,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
+        let flat: String = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join("");
+        assert!(
+            flat.contains("enterprise-australia-2026"),
+            "the id was clipped: {rows:#?}"
+        );
+        assert!(!flat.contains('…'), "{rows:#?}");
     }
 
     #[test]

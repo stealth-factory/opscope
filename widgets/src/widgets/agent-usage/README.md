@@ -1262,9 +1262,11 @@ When an Ultra reading has no session limit — the `limits[]` entry is
 missing, or its `percent` is null, and `five_hour.utilization` is not a
 number either — the five-hour row says `5h  no 5-hour limit (Ultra)` and
 draws no bar. A session limit that is still present is drawn as before.
-On Pro or Max a missing session limit stays a missing reading, because
+On Pro or Max a missing session limit stays a missing reading because
 those plans still have the window. The `[+]` overview does not turn the
-absence into a 0% bar or a "not reported" line.
+absence into a 0% bar or a "not reported" line. A live Ultra reading is
+not a warning. A refresh that failed and kept that reading still names
+the refusal and how old the saved reading is, and that line is a warning.
 
 The monthly Claude Platform credit is not in the usage reply or the
 profile this widget reads, so it is not shown. A figure taken from the
