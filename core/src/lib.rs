@@ -20,6 +20,7 @@
 //! a time, and while both versions ran they had to agree on screen, so
 //! where a choice existed this kept the earlier behaviour.
 
+mod analytics;
 mod dependencies;
 pub mod google;
 pub mod notices;
@@ -5543,6 +5544,10 @@ pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
         std::process::exit(0);
     }
     maybe_help(doc);
+    // After help and version have already exited. A `--help` process is not
+    // a start, and neither is `--configure-help`. Every binary calls this,
+    // so the launcher and the widgets share one place that asks and counts.
+    analytics::on_launch(&binary_name());
 }
 
 /// What this binary is, in one line.

@@ -20,7 +20,9 @@ required and recommended tools separately, and prints host-specific installation
 guidance for the detected macOS or Linux family. It never installs anything.
 
 Keys: up/down select, enter launches, q quits. The launcher has no settings
-of its own; each widget owns its own, on its own comma screen.
+of its own; each widget owns its own, on its own comma screen. Whether
+starts are counted is one shared choice, asked once and stored in
+config.json, not a setting of this menu.
 
 The Python original rescanned its directory on r. This one has no directory
 to rescan - the list is compiled in - so there is no recheck key here, and

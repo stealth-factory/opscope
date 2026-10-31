@@ -1046,11 +1046,11 @@ fn only_core_draws_the_notices_screen() {
 
 /// The header the generated file carries, naming what regenerates it.
 const CONFIG_EXAMPLE_COMMENT: &str = "Generated from each widget's \
-settings.json by widgets/tests/check.rs - \
+settings.json and core/analytics.settings.json by widgets/tests/check.rs - \
 rewrite it with \
 `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. \
 Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every \
-key is optional; anything omitted keeps the widget's default.";
+key is optional; anything omitted keeps that section's default.";
 
 /// A JSON value that remembers the order its keys were written in.
 ///
@@ -1188,29 +1188,37 @@ fn render_config_example() -> String {
         "_comment".to_string(),
         Ordered::Leaf(serde_json::Value::String(CONFIG_EXAMPLE_COMMENT.to_string())),
     )];
-    // Every section is a widget's. A shared `terminal` one used to lead
-    // the file, out of alphabetical position, carrying the single key that
-    // decided whether widgets asked for mouse reports. That key is gone
-    // and nothing replaced it - and nothing here would have caught it
-    // being left behind, because the two checks that read this file skip
-    // any section whose name is not a widget folder.
-    // Sorted by folder, which is the order the file has always been in:
+    // Widget sections, plus the shared analytics section. A shared
+    // `terminal` one used to lead the file and was left behind when its
+    // only key went away, because the checks that read this file skipped
+    // any section that was not a widget folder. Those checks now read
+    // core/src/analytics.rs for a section no widget owns.
+    // Sorted by folder name, which is the order the file has always been in:
     // `github`, `github-actions`, `github-prs` sort by the hyphenated name
-    // rather than by the underscored section it becomes.
+    // rather than by the underscored section it becomes. `analytics` sorts
+    // as that name.
     let dir = root.join("widgets/src/widgets");
-    let mut folders: Vec<String> = std::fs::read_dir(&dir)
+    let mut sections: Vec<(String, String, std::path::PathBuf)> = std::fs::read_dir(&dir)
         .expect("the widget directory")
         .flatten()
         .filter(|entry| entry.path().join("settings.json").exists())
         .filter_map(|entry| entry.file_name().into_string().ok())
+        .map(|folder| {
+            let path = dir.join(&folder).join("settings.json");
+            let section = folder.replace('-', "_");
+            (folder, section, path)
+        })
         .collect();
-    folders.sort();
-    assert!(!folders.is_empty(), "no widget declares any settings");
-    for folder in folders {
-        top.push((
-            folder.replace('-', "_"),
-            without_schema(read_ordered(&dir.join(&folder).join("settings.json"))),
-        ));
+    let analytics = root.join("core/analytics.settings.json");
+    assert!(
+        analytics.is_file(),
+        "core/analytics.settings.json is the shared section"
+    );
+    sections.push(("analytics".into(), "analytics".into(), analytics));
+    sections.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(sections.len() > 1, "no widget declares any settings");
+    for (_, section, path) in sections {
+        top.push((section, without_schema(read_ordered(&path))));
     }
     let mut out = serde_json::to_string_pretty(&Ordered::Object(top))
         .expect("the config example serialises");
@@ -1854,6 +1862,24 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     (sections, keys)
 }
 
+/// The shared analytics section lives in core, not in a widget folder.
+fn analytics_source() -> String {
+    // Without its tests, as every widget is read: the tests name each key as
+    // a string literal, so a key production code stopped reading would
+    // still look read.
+    without_tests(
+        &std::fs::read_to_string(root().join("core/src/analytics.rs"))
+            .expect("core/src/analytics.rs"),
+    )
+}
+
+/// Analytics keys that are left out of the example on purpose.
+///
+/// `enabled` absent is the consent question: the first interactive launch
+/// asks once and writes the answer into `config.json` itself. Listed in the
+/// example, a copied `config.json` would carry an answer nobody gave.
+const ANALYTICS_ASKED_NOT_DEFAULTED: &[&str] = &["enabled"];
+
 /// The example config, as section -> keys.
 fn example() -> BTreeMap<String, BTreeSet<String>> {
     let text = std::fs::read_to_string(root().join("config.example.json"))
@@ -1921,6 +1947,23 @@ fn every_footer_hint_is_in_the_widgets_doc() {
 }
 
 #[test]
+fn the_example_never_answers_the_consent_question() {
+    // A copy of the example is how most people start a config.json. An
+    // `analytics.enabled` in it would opt them in, or out, without the
+    // question the first launch is meant to ask.
+    let example = example();
+    let answered: Vec<&str> = ANALYTICS_ASKED_NOT_DEFAULTED
+        .iter()
+        .copied()
+        .filter(|key| example.get("analytics").is_some_and(|keys| keys.contains(*key)))
+        .collect();
+    assert!(
+        answered.is_empty(),
+        "config.example.json sets analytics.{answered:?}; leave it out so the first launch asks"
+    );
+}
+
+#[test]
 fn every_key_a_widget_reads_is_in_the_example() {
     // The direction check.py did not check. All eleven pomodoro_* keys
     // were read by clocks.py and absent from config.example.json since
@@ -1943,6 +1986,20 @@ fn every_key_a_widget_reads_is_in_the_example() {
             }
         }
     }
+    let (sections, keys) = config_use(&analytics_source());
+    for key in keys {
+        if ANALYTICS_ASKED_NOT_DEFAULTED.contains(&key.as_str()) {
+            continue;
+        }
+        let known = sections
+            .iter()
+            .any(|s| example.get(s).is_some_and(|ks| ks.contains(&key)));
+        if !known && !sections.is_empty() {
+            wrong.push(format!(
+                "analytics: reads {key:?} from {sections:?}, which config.example.json does not document"
+            ));
+        }
+    }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
@@ -1958,7 +2015,14 @@ fn every_section_in_the_example_is_read_by_the_widget_it_names() {
         // Sections are named for widgets, with _ where the file has -.
         let stem = section.replace('_', "-");
         let Some(src) = widgets.get(section).or_else(|| widgets.get(&stem)) else {
-            continue; // a section for something that is not a Rust widget
+            let src = analytics_source();
+            let (declared, _) = config_use(&src);
+            if !declared.contains(section) {
+                wrong.push(format!(
+                    "config.example.json has a {section:?} section and core/src/analytics.rs never calls load_config for it"
+                ));
+            }
+            continue;
         };
         let (declared, _) = config_use(src);
         if !declared.contains(section) {
@@ -2380,7 +2444,15 @@ fn every_key_in_the_example_is_read_by_the_widget_it_belongs_to() {
     for (section, keys) in &example {
         let stem = section.replace('_', "-");
         let Some(src) = widgets.get(section).or_else(|| widgets.get(&stem)) else {
-            continue; // a section for something that is not a Rust widget
+            let src = analytics_source();
+            for key in keys {
+                if !src.contains(&format!("\"{key}\"")) {
+                    wrong.push(format!(
+                        "config.example.json documents {section}.{key} and core/src/analytics.rs never reads it"
+                    ));
+                }
+            }
+            continue;
         };
         for key in keys {
             // Any mention of the key as a string literal counts. The point
