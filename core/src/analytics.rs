@@ -729,7 +729,9 @@ mod tests {
         ] {
             assert_eq!(settings[key], "", "{key}");
         }
-        assert_eq!(settings["enabled"], true);
+        // Absent, so the first launch asks; a shipped answer would be one
+        // nobody gave.
+        assert!(settings.get("enabled").is_none(), "enabled is not shipped");
     }
 
     #[test]
