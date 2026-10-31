@@ -418,7 +418,7 @@ pub(crate) fn on_launch(binary: &str) {
         Planned::Ask => {
             if !interactive() {
                 None
-            } else if let Some(fact) = ask(|on| {
+            } else if let Some(fact) = ask(&name, |on| {
                 let now = now_secs();
                 let (after, error) = save_answer(&config, &state, on, now);
                 let fact = match after {
@@ -455,14 +455,238 @@ fn scrolled(scroll: usize, key: &str, len: usize, room: usize) -> usize {
     clamped_scroll(next, len, room)
 }
 
-const PROSE: &[&str] = &[
-    "Starts are counted so the project can be supported and so we can see which widgets are used.",
-    "An event carries the widget or launcher name and that a start happened. This choice is sent once and also says whether you opted in or opted out.",
-    "The time of the choice is stored on this machine. Once you choose, you are not asked again.",
-    "Accepting turns counting on. Later starts send only that a start happened. Declining turns it off and still sends this one opt-out, then nothing further while counting stays off.",
-    "Nothing in an event is a hostname, an account, the contents of config, or an identity. The choice is saved in config.json and can be edited later.",
-    "Leave without choosing and this question stays until you answer it.",
-];
+/// Where the code that sends every event lives. The splash links it and
+/// copies it, so "read it yourself" costs one key.
+pub const SOURCE_URL: &str =
+    "https://github.com/stealth-factory/opscope/blob/main/core/src/analytics.rs";
+
+/// The splash's colours. Every one is measured against the background and
+/// the accept tint in `every_splash_colour_clears_aa`, because the palette
+/// checks in check.rs read widgets and this screen lives in core.
+struct Palette {
+    accent: String,
+    text: String,
+    dim: String,
+    ok: String,
+    warn: String,
+    /// The one tinted thing on the screen: the accept hint, so the default
+    /// reads as the button it is. Foreground and background together.
+    accept: String,
+}
+
+impl Palette {
+    fn new() -> Self {
+        Self {
+            accent: crate::rgb(150, 210, 255),
+            text: crate::rgb(225, 235, 245),
+            dim: crate::rgb(127, 147, 172),
+            ok: crate::rgb(130, 220, 160),
+            warn: crate::rgb(255, 200, 120),
+            accept: format!("{}{}", crate::bg(28, 72, 56), crate::rgb(190, 255, 215)),
+        }
+    }
+}
+
+/// What a `c` press left to say, under the link it copied.
+struct Note {
+    text: String,
+    copied: bool,
+}
+
+/// One block of the splash. Prose wraps to the pane; a labelled row keeps
+/// its label in a column so `sent` / `never` / `stored` scan down the left.
+enum Block {
+    Headline(&'static str),
+    Para(&'static str),
+    Row(&'static str, String),
+    Link,
+    Quiet(&'static str),
+    Blank,
+}
+
+/// The copy, in order. `name` is this binary, so the event shown is the one
+/// this launch would send and not an example.
+fn blocks(name: &str) -> Vec<Block> {
+    let event = serde_json::to_string(&properties(&Fact::start(name))).unwrap_or_default();
+    vec![
+        Block::Headline("Help choose which widgets get the attention"),
+        Block::Para(
+            "Starts are counted so the project can be supported and so we can see which widgets are used. The widgets you open are the ones that get the attention.",
+        ),
+        Block::Blank,
+        Block::Row("sent", "the widget or launcher name and that a start happened".into()),
+        Block::Row("event", event),
+        Block::Row(
+            "once",
+            "this choice, opted in or opted out, as \"opted\" and \"decided_at\", the time of the choice".into(),
+        ),
+        Block::Row(
+            "never",
+            "a hostname, an account, the contents of config, or an identity".into(),
+        ),
+        Block::Row(
+            "also",
+            "the opscope version (Vercel), a throwaway id for that one send (Google), and the analytics id if config.json sets one".into(),
+        ),
+        Block::Row(
+            "where",
+            "Vercel Analytics and Google Analytics, https only; one not set in config.json is skipped".into(),
+        ),
+        Block::Row(
+            "stored",
+            "the time of the choice, on this machine, and the choice itself in config.json, where it can be edited later".into(),
+        ),
+        Block::Blank,
+        Block::Para(
+            "Accept turns counting on: later starts send only that a start happened. Decline turns it off and still sends this one opt-out, then nothing further while counting stays off. Either way you are not asked again.",
+        ),
+        Block::Blank,
+        Block::Headline("Read the code that sends it. It is this one file:"),
+        Block::Link,
+        Block::Blank,
+        Block::Quiet("Close this without choosing and it is asked again next time."),
+    ]
+}
+
+/// The widest label, so every row's text starts in the same column.
+fn label_width(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Row(label, _) => Some(crate::display_width(label)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// A labelled row: the label in its column, the text wrapped beside it and
+/// every later line indented under the first. A pane too narrow for a
+/// column puts the label on its own line, so nothing is cut.
+fn labelled(p: &Palette, label: &str, text: &str, label_w: usize, w: usize) -> Vec<String> {
+    let room = w.saturating_sub(1);
+    let beside = label_w + 1 + 16 <= room;
+    let text_w = if beside { room - label_w - 1 } else { room };
+    let mut out = Vec::new();
+    if !beside {
+        out.push(crate::seg(&[(p.accent.as_str(), format!(" {label}"))], w));
+    }
+    for (i, line) in wrap_paragraph(text, text_w).into_iter().enumerate() {
+        let lead = if beside && i == 0 {
+            format!(" {label:<label_w$} ")
+        } else if beside {
+            " ".repeat(label_w + 2)
+        } else {
+            " ".to_string()
+        };
+        out.push(crate::seg(
+            &[(p.accent.as_str(), lead), (p.text.as_str(), line)],
+            w,
+        ));
+    }
+    out
+}
+
+/// The body at `w` columns, built at whatever height it needs. The frame
+/// is a window onto it.
+fn splash_rows(name: &str, w: usize, note: Option<&Note>) -> Vec<String> {
+    let p = Palette::new();
+    let blocks = blocks(name);
+    let label_w = label_width(&blocks);
+    let room = w.saturating_sub(1);
+    let mut rows = Vec::new();
+    for block in &blocks {
+        match block {
+            Block::Headline(text) => {
+                for line in wrap_paragraph(text, room) {
+                    rows.push(crate::seg(&[(p.accent.as_str(), format!(" {line}"))], w));
+                }
+            }
+            Block::Para(text) => {
+                for line in wrap_paragraph(text, room) {
+                    rows.push(crate::seg(&[(p.text.as_str(), format!(" {line}"))], w));
+                }
+            }
+            Block::Row(label, text) => rows.extend(labelled(&p, label, text, label_w, w)),
+            Block::Link => {
+                // Wrapped as plain text first, then each piece made a link
+                // to the whole address, so a narrow pane still has every
+                // character of it on screen and every piece opens it.
+                for piece in wrap_paragraph(SOURCE_URL, room) {
+                    let linked = crate::link(SOURCE_URL, &piece);
+                    rows.push(crate::seg(&[(p.accent.as_str(), format!(" {linked}"))], w));
+                }
+                if let Some(note) = note {
+                    let colour = if note.copied { &p.ok } else { &p.warn };
+                    for line in wrap_paragraph(&note.text, room) {
+                        rows.push(crate::seg(&[(colour.as_str(), format!(" {line}"))], w));
+                    }
+                }
+            }
+            Block::Quiet(text) => {
+                for line in wrap_paragraph(text, room) {
+                    rows.push(crate::seg(&[(p.dim.as_str(), format!(" {line}"))], w));
+                }
+            }
+            Block::Blank => rows.push(String::new()),
+        }
+    }
+    rows
+}
+
+/// The footer: accept first and tinted, because Enter is what the screen
+/// recommends; decline beside it in full body contrast, because a choice
+/// that is hard to read is not a choice.
+fn hints(p: &Palette) -> Vec<Vec<(&str, String)>> {
+    vec![
+        vec![
+            (p.accept.as_str(), " [\u{21b5}] accept ".to_string()),
+            (crate::RST, String::new()),
+        ],
+        vec![(p.text.as_str(), "[d]ecline".to_string())],
+        vec![(p.dim.as_str(), "[c]opy link".to_string())],
+    ]
+}
+
+/// One frame of the splash: the title pinned, a window onto the body, and
+/// the hints pinned under it whatever the height.
+struct Frame {
+    rows: Vec<String>,
+    footer: crate::Footer,
+    foot_top: usize,
+    /// Body rows the window shows, which is what a scroll is clamped to.
+    window: usize,
+    body_len: usize,
+}
+
+fn frame(name: &str, w: usize, h: usize, scroll: usize, note: Option<&Note>) -> Frame {
+    let p = Palette::new();
+    let body = splash_rows(name, w, note);
+    let packed = crate::pack_hints_placed(&hints(&p), w.saturating_sub(2), "  ");
+    let foot: Vec<String> = packed
+        .lines
+        .iter()
+        .map(|line| format!(" {line}{}", crate::RST))
+        .collect();
+    let room = h.saturating_sub(foot.len());
+    let window = room.saturating_sub(1).max(1);
+    let scroll = clamped_scroll(scroll, body.len(), window);
+    let mut rows = vec![crate::title("help improve opscope", w, &p.accent)];
+    rows.extend(body.iter().skip(scroll).take(window).cloned());
+    while rows.len() < room {
+        rows.push(String::new());
+    }
+    let foot_top = rows.len();
+    rows.extend(foot);
+    rows.truncate(h);
+    Frame {
+        rows,
+        footer: packed,
+        foot_top,
+        window,
+        body_len: body.len(),
+    }
+}
 
 fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
@@ -520,26 +744,15 @@ fn split_long(word: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn splash_lines(width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for (i, paragraph) in PROSE.iter().enumerate() {
-        if i > 0 {
-            lines.push(String::new());
-        }
-        lines.extend(wrap_paragraph(paragraph, width));
-    }
-    lines
-}
-
 /// Ask, and save the answer before the splash closes, so a save that failed
 /// is said on the splash rather than discovered by being asked again.
-fn ask<T>(save: impl FnOnce(bool) -> (T, Option<String>)) -> Option<T> {
+fn ask<T>(name: &str, save: impl FnOnce(bool) -> (T, Option<String>)) -> Option<T> {
     if !interactive() {
         return None;
     }
     crate::setup();
     let mut keyboard = crate::Keyboard::new();
-    let answer = ask_loop(&mut keyboard);
+    let answer = ask_loop(&mut keyboard, name);
     let (after, error) = save(answer);
     if let Some(error) = error {
         show_unsaved(&mut keyboard, &error);
@@ -590,45 +803,36 @@ fn unsaved_lines(error: &str) -> Vec<String> {
     ]
 }
 
-fn ask_loop(keyboard: &mut crate::Keyboard) -> bool {
+fn ask_loop(keyboard: &mut crate::Keyboard, name: &str) -> bool {
     let mut scroll = 0usize;
+    let mut note: Option<Note> = None;
     loop {
         let (w, h) = crate::size();
-        let accent = crate::rgb(150, 210, 255);
-        let text = crate::rgb(225, 235, 245);
-        let dim = crate::rgb(127, 147, 172);
-        let body = splash_lines(w);
-        let hints = vec![
-            vec![(dim.as_str(), "[a]ccept".to_string())],
-            vec![(dim.as_str(), "[d]ecline".to_string())],
-        ];
-        let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
-        let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {line}")).collect();
-        let room = h.saturating_sub(foot.len());
-        let room_below = room.saturating_sub(1).max(1);
-        scroll = clamped_scroll(scroll, body.len(), room_below);
-        let mut frame = vec![crate::title("help improve opscope", w, &accent)];
-        for line in body.iter().skip(scroll).take(room_below) {
-            frame.push(if line.is_empty() {
-                String::new()
-            } else {
-                crate::seg(&[(text.as_str(), line.clone())], w)
-            });
-        }
-        while frame.len() < room {
-            frame.push(String::new());
-        }
-        let foot_top = frame.len();
-        frame.extend(foot);
-        frame.truncate(h);
-        crate::draw(&frame, w, h);
-        keyboard.footer_at(&packed, foot_top, 1);
+        let f = frame(name, w, h, scroll, note.as_ref());
+        scroll = clamped_scroll(scroll, f.body_len, f.window);
+        crate::draw(&f.rows, w, h);
+        keyboard.footer_at(&f.footer, f.foot_top, 1);
         keyboard.wait(std::time::Duration::from_millis(200));
         for key in keyboard.poll() {
             match key.as_str() {
-                "a" | "A" => return true,
+                "enter" | "a" | "A" => return true,
                 "d" | "D" => return false,
-                other => scroll = scrolled(scroll, other, body.len(), room_below),
+                "c" | "C" => {
+                    // The address stays on screen either way: OSC 52 is
+                    // refused by some terminals and swallowed by some
+                    // multiplexers, and a copy that silently did nothing
+                    // would leave nothing to read instead.
+                    let copied = crate::clipboard(SOURCE_URL);
+                    note = Some(Note {
+                        text: if copied {
+                            "copied to your clipboard".to_string()
+                        } else {
+                            "no clipboard here; the link above still opens, or select it".to_string()
+                        },
+                        copied,
+                    });
+                }
+                other => scroll = scrolled(scroll, other, f.body_len, f.window),
             }
         }
     }
@@ -821,9 +1025,19 @@ mod tests {
         assert!(settings.get("enabled").is_none(), "enabled is not shipped");
     }
 
+    /// The splash as text, every row's escapes stripped, one string.
+    fn splash_text(name: &str, w: usize) -> String {
+        splash_rows(name, w, None)
+            .iter()
+            .map(|row| crate::source_text(row).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[test]
     fn the_splash_says_what_is_sent_and_that_the_time_is_stored() {
-        let joined = PROSE.join(" ");
+        // Wide enough that no phrase is split across rows.
+        let joined = splash_text("clocks", 400);
         for phrase in [
             "supported",
             "which widgets are used",
@@ -831,26 +1045,202 @@ mod tests {
             "a start happened",
             "opted in",
             "opted out",
-            "time of the choice is stored",
+            "the time of the choice",
+            "stored",
+            "on this machine",
             "not asked again",
             "one opt-out",
             "nothing further",
             "hostname",
+            "an account",
+            "contents of config",
+            "identity",
             "config.json",
             "can be edited later",
+            "https only",
+            "Vercel Analytics and Google Analytics",
+            SOURCE_URL,
         ] {
             assert!(joined.contains(phrase), "missing {phrase}");
         }
         assert!(!joined.to_lowercase().contains("remind"));
         assert!(!joined.contains("weeks"));
         for width in [8usize, 20, 40, 80] {
-            for line in splash_lines(width) {
+            for line in splash_rows("clocks", width, None) {
                 assert!(
                     crate::display_width(&line) <= width,
                     "width {width}: {line:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_event_on_the_splash_is_the_one_a_start_sends() {
+        // The literal comes from `properties`, so the screen cannot drift
+        // from the code: the row says exactly what a later start carries.
+        let joined = splash_text("ports", 400);
+        let shown = serde_json::to_string(&properties(&Fact::start("ports"))).unwrap();
+        assert_eq!(shown, "{\"name\":\"ports\",\"start\":1}");
+        assert!(joined.contains(&shown), "{joined}");
+        // And the choice event's two extra fields are named by their keys.
+        assert!(joined.contains("\"opted\"") && joined.contains("\"decided_at\""));
+        let launcher = splash_text("launcher", 400);
+        assert!(launcher.contains("{\"name\":\"launcher\",\"start\":1}"));
+    }
+
+    #[test]
+    fn the_link_is_clickable_and_whole_at_every_width() {
+        // One OSC 8 opener per piece, all to the one address, and the
+        // pieces together are the address. A pane narrower than the URL
+        // wraps it; nothing is cut.
+        for w in [40usize, 60, 80, 200] {
+            let rows = splash_rows("clocks", w, None);
+            let linked: Vec<&String> = rows
+                .iter()
+                .filter(|r| r.contains(&format!("\x1b]8;;{SOURCE_URL}\x1b\\")))
+                .collect();
+            assert!(!linked.is_empty(), "{w}: no link row");
+            let text: String = linked
+                .iter()
+                .map(|r| crate::source_text(r).trim().to_string())
+                .collect();
+            assert_eq!(text, SOURCE_URL, "{w}");
+            for row in &linked {
+                assert!(crate::display_width(row) <= w, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_splash_fits_every_pane_from_40x12_to_200x60() {
+        let widths = [40usize, 41, 47, 48, 60, 79, 80, 100, 120, 160, 200];
+        for w in widths {
+            let body = splash_rows("clocks", w, None);
+            let first = crate::source_text(&body[0]).trim().to_string();
+            let last = body
+                .iter()
+                .rev()
+                .find(|r| !r.is_empty())
+                .map(|r| crate::source_text(r).trim().to_string())
+                .unwrap();
+            for h in 12..=60 {
+                let f = frame("clocks", w, h, 0, None);
+                assert_eq!(f.rows.len(), h, "{w}x{h}");
+                for row in &f.rows {
+                    assert!(crate::display_width(row) <= w, "{w}x{h}: {row:?}");
+                }
+                // The hints are on screen, whole, below the body window.
+                assert!(f.foot_top + f.footer.lines.len() <= h, "{w}x{h}: hints off screen");
+                let foot: String = f.rows[f.foot_top..]
+                    .iter()
+                    .map(|r| crate::source_text(r))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for hint in ["[\u{21b5}] accept", "[d]ecline", "[c]opy link"] {
+                    assert!(foot.contains(hint), "{w}x{h}: {hint} missing from {foot:?}");
+                }
+                // The window is at least a row, and the title is pinned.
+                assert!(f.window >= 1, "{w}x{h}");
+                assert!(crate::source_text(&f.rows[0]).contains("HELP IMPROVE OPSCOPE"));
+                // The top of the body at scroll 0, the bottom at the end:
+                // a short pane is one you scroll, not one that hides.
+                assert!(crate::source_text(&f.rows[1]).contains(&first), "{w}x{h}");
+                let end = frame("clocks", w, h, usize::MAX, None);
+                let shown: Vec<String> = end.rows[1..end.foot_top]
+                    .iter()
+                    .map(|r| crate::source_text(r).trim().to_string())
+                    .collect();
+                assert!(shown.contains(&last), "{w}x{h}: last row {last:?} unreachable");
+                // The clicks land on the hints as drawn.
+                for spot in &end.footer.spots {
+                    assert!(end.foot_top + spot.line < h, "{w}x{h}: spot off screen");
+                }
+                assert!(end.footer.spots.iter().any(|s| s.key == "enter"));
+                assert!(end.footer.spots.iter().any(|s| s.key == "d"));
+                assert!(end.footer.spots.iter().any(|s| s.key == "c"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_copy_note_sits_under_the_link_and_fits() {
+        for (copied, word) in [(true, "copied"), (false, "no clipboard")] {
+            let note = Note {
+                text: if copied {
+                    "copied to your clipboard".into()
+                } else {
+                    "no clipboard here; the link above still opens, or select it".into()
+                },
+                copied,
+            };
+            for w in [40usize, 80] {
+                let rows = splash_rows("clocks", w, Some(&note));
+                let at = rows
+                    .iter()
+                    .position(|r| crate::source_text(r).contains(word))
+                    .unwrap_or_else(|| panic!("{w}: {word} missing"));
+                assert!(rows[at - 1].contains("\x1b]8;;"), "{w}: note not under the link");
+                for row in &rows {
+                    assert!(crate::display_width(row) <= w, "{w}: {row:?}");
+                }
+            }
+        }
+    }
+
+    fn luminance(c: (f64, f64, f64)) -> f64 {
+        let ch = |v: f64| {
+            let v = v / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    }
+
+    fn contrast(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The first `(r, g, b)` triple after `call` in `s`.
+    fn triple(s: &str, call: &str) -> (f64, f64, f64) {
+        let at = s.find(call).unwrap_or_else(|| panic!("{call} in {s:?}"));
+        let open = s[at..].find('(').unwrap() + at;
+        let close = s[open..].find(')').unwrap() + open;
+        let n: Vec<f64> = s[open + 1..close]
+            .split(',')
+            .map(|x| x.trim().parse().unwrap())
+            .collect();
+        (n[0], n[1], n[2])
+    }
+
+    /// Every colour the splash declares, measured: the palette checks in
+    /// check.rs read widget sources and never see this screen.
+    #[test]
+    fn every_splash_colour_clears_aa() {
+        let src = include_str!("analytics.rs");
+        let body = src.split("impl Palette {").nth(1).unwrap();
+        let body = body.split("\n}\n").next().unwrap();
+        let background = (0.0, 0.0, 0.0);
+        let tint = triple(body, "crate::bg(");
+        let mut measured = 0;
+        let mut wrong = Vec::new();
+        for line in body.lines() {
+            let Some((field, _)) = line.trim().split_once(':') else { continue };
+            if !line.contains("crate::rgb(") {
+                continue;
+            }
+            let c = triple(line, "crate::rgb(");
+            measured += 1;
+            let on = if field == "accept" { tint } else { background };
+            let r = contrast(c, on);
+            if r < 4.5 {
+                wrong.push(format!("{field} {c:?} on {on:?} measures {r:.2}"));
+            }
+        }
+        assert_eq!(measured, 6, "a palette field was not measured");
+        assert!(wrong.is_empty(), "under AA 4.5:\n{}", wrong.join("\n"));
+        // A deliberately bad pair has to fail, or this cannot.
+        assert!(contrast((80.0, 30.0, 30.0), background) < 4.5);
     }
 
     #[test]

@@ -15,7 +15,9 @@ for Vercel Analytics and Google Analytics live in the same `analytics`
 section; a destination left empty is skipped. An event carries the widget
 or launcher name and that a start happened, and the first choice also says
 opted in or opted out. Nothing in an event is a hostname, an account, the
-contents of config, or an identity.
+contents of config, or an identity. On the splash, Enter accepts, `d`
+declines, and `c` copies the link to `core/src/analytics.rs`, the one file
+that sends; the link itself opens in a terminal that supports OSC 8.
 
 It used to own the one shared key, `terminal.mouse`, which decided whether
 widgets asked the terminal for mouse reports. Reporting is unconditional
