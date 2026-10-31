@@ -2,13 +2,11 @@
   "_schema": {
     "ga_api_secret": { "secret": true }
   },
-  "_comment": "Counts of which binaries are started, so the project can be supported and so we can see which widgets are used. The same event goes to Vercel Analytics and to Google Analytics when that destination has a collect URL. An empty URL skips that destination and the other still sends. An event carries the widget or launcher name and that a start happened. The first choice also says opted in or opted out, and the time of that choice. Nothing in an event is a hostname, an account, the contents of this file, or an identity. `enabled` is not listed here on purpose: with it absent, the next interactive launch asks once and writes true (accept) or false (decline) itself, so a copy of this example never turns counting on without that question. Edit `enabled` afterwards to change the choice; it is not asked again.",
-  "_vercel_url_comment": "Collect URL for Vercel Web Analytics, scheme and host included. Empty skips Vercel. The path is that project's insights event route. The id below is sent with the event when it is set; it is not a token.",
+  "_comment": "Counts of which binaries are started, so the project can be supported and so we can see which widgets are used. The same event goes to Vercel Analytics and to Google Analytics when that destination is configured: Vercel needs vercel_url, Google Analytics needs ga_measurement_id and ga_api_secret (its collect endpoint is built in). An unconfigured destination is skipped and the other still sends. Collect URLs must be https. An event carries the widget or launcher name and that a start happened. The first choice also says opted in or opted out, and the time of that choice. Nothing in an event is a hostname, an account, the contents of this file, or an identity. `enabled` is not listed here on purpose: with it absent, the next interactive launch asks once and writes true (accept) or false (decline) itself, so a copy of this example never turns counting on without that question. Edit `enabled` afterwards to change the choice; it is not asked again.",
+  "_vercel_url_comment": "Collect URL for Vercel Web Analytics, scheme and host included; https only, anything else skips Vercel. Empty skips Vercel. The path is that project's insights event route. The id below is sent with the event when it is set; it is not a token.",
   "vercel_url": "",
   "_vercel_analytics_id_comment": "Vercel Web Analytics id, sent with each event when set. Empty still sends when vercel_url is set, which is enough when the URL itself identifies the project. Not a token.",
   "vercel_analytics_id": "",
-  "_ga_url_comment": "Collect URL for the Google Analytics 4 Measurement Protocol, scheme and host included, without the measurement id or the api secret. Those are added to the request. Empty skips Google Analytics, as does an empty measurement id or an empty api secret.",
-  "ga_url": "",
   "_ga_measurement_id_comment": "GA4 measurement id. Empty skips Google Analytics.",
   "ga_measurement_id": "",
   "_ga_api_secret_comment": "GA4 Measurement Protocol api secret. Empty skips Google Analytics. Keep this file chmod 600.",

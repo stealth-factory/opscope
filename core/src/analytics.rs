@@ -26,6 +26,11 @@ use serde_json::{json, Value};
 const EVENT: &str = "opscope_start";
 const STATE_FILE: &str = "usage.json";
 
+/// Google Analytics 4's Measurement Protocol endpoint. Fixed and public, so
+/// it is not a setting: a configurable URL is one that can be pointed at
+/// plain HTTP, and the api secret travels in its query string.
+const GA_COLLECT: &str = "https://www.google-analytics.com/mp/collect";
+
 /// What this launch should do, before any file is written.
 ///
 /// `On` sends a start and does not touch the timestamp: the choice was
@@ -127,8 +132,10 @@ fn properties(fact: &Fact) -> Value {
 /// Scheme and host of a collect URL, so the event can name the destination
 /// it was addressed to and nothing about this machine.
 fn origin_of(url: &str) -> Option<String> {
+    // HTTPS only: an event over plain HTTP can be read, or rewritten, by
+    // anyone on the path.
     let (scheme, rest) = url.split_once("://")?;
-    if scheme != "https" && scheme != "http" {
+    if scheme != "https" {
         return None;
     }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -236,12 +243,11 @@ fn deliveries(cfg: &Value, fact: &Fact, client_id: &str, now_ms: u64) -> Vec<Del
             });
         }
     }
-    let ga_url = crate::cfg_str(cfg, "ga_url", "");
     let measurement_id = crate::cfg_str(cfg, "ga_measurement_id", "");
     let api_secret = crate::cfg_str(cfg, "ga_api_secret", "");
-    if origin_of(&ga_url).is_some() && !measurement_id.is_empty() && !api_secret.is_empty() {
+    if !measurement_id.is_empty() && !api_secret.is_empty() {
         let url = append_query(
-            &ga_url,
+            GA_COLLECT,
             &[
                 ("measurement_id", measurement_id.as_str()),
                 ("api_secret", api_secret.as_str()),
@@ -649,12 +655,25 @@ mod tests {
     }
 
     #[test]
+    fn a_collect_url_that_is_not_https_is_never_sent_to() {
+        let fact = Fact::start("latency");
+        for url in ["http://collect.example/event", "ftp://collect.example/event"] {
+            let cfg = json!({ "vercel_url": url, "vercel_analytics_id": "id-test" });
+            assert!(deliveries(&cfg, &fact, "1.2", 1).is_empty(), "{url} was sent to");
+        }
+        // Google's endpoint is built in, and HTTPS.
+        let ga = json!({ "ga_measurement_id": "mid-test", "ga_api_secret": "s" });
+        let sent = deliveries(&ga, &fact, "1.2", 1);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].url.starts_with("https://www.google-analytics.com/mp/collect?"));
+    }
+
+    #[test]
     fn an_unconfigured_destination_is_skipped_and_the_other_still_sends() {
         let fact = Fact::start("latency");
         let both = json!({
             "vercel_url": "https://collect.example/event",
             "vercel_analytics_id": "id-test",
-            "ga_url": "https://collect.example/mp",
             "ga_measurement_id": "mid-test",
             "ga_api_secret": "secret/test"
         });
@@ -670,6 +689,7 @@ mod tests {
         assert_eq!(vercel["dsn"], "id-test");
         assert_eq!(vercel["r"], "");
         assert!(!sent[0].body.contains("secret"));
+        assert!(sent[1].url.starts_with(GA_COLLECT), "{}", sent[1].url);
         assert!(sent[1].url.contains("measurement_id=mid-test"));
         assert!(sent[1].url.contains("api_secret=secret%2Ftest"));
         let ga: Value = serde_json::from_str(&sent[1].body).unwrap();
@@ -689,7 +709,6 @@ mod tests {
             .is_none());
 
         let ga_half = json!({
-            "ga_url": "https://collect.example/mp",
             "ga_measurement_id": "mid-test"
         });
         assert!(deliveries(&ga_half, &fact, "1.2", 1).is_empty());
@@ -723,7 +742,6 @@ mod tests {
         for key in [
             "vercel_url",
             "vercel_analytics_id",
-            "ga_url",
             "ga_measurement_id",
             "ga_api_secret",
         ] {
