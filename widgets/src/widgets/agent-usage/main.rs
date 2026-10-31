@@ -913,43 +913,10 @@ fn paced_bar_with_plot(
 
 /// Plain text flowed to a width, splitting a word that is wider than the row.
 ///
-/// `wrap_text` leaves a long word whole, and `seg` then cuts it. A cut plan
-/// id is a different id. The break is by cells, the same way a labelled
-/// value already splits an enterprise sku.
+/// Width is display cells, the same measure `seg` clips by. Counting
+/// characters keeps a fullwidth name on one line, and `seg` then cuts it.
 fn flow_cells(text: &str, budget: usize) -> Vec<String> {
-    let budget = budget.max(1);
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let mut word = word.to_string();
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > budget {
-            lines.push(std::mem::take(&mut line));
-        }
-        while word.chars().count() > budget {
-            if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-            }
-            lines.push(word.chars().take(budget).collect());
-            word = word.chars().skip(budget).collect();
-        }
-        if word.is_empty() {
-            continue;
-        }
-        if line.is_empty() {
-            line = word;
-        } else {
-            line.push(' ');
-            line.push_str(&word);
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        vec![String::new()]
-    } else {
-        lines
-    }
+    tc::wrap_words(text, budget.max(1))
 }
 
 /// Plain text flowed to a width. Clipping a sentence loses its end.
@@ -1753,7 +1720,10 @@ fn plan_rows(
     // is how `enterprise-australia-2026` lost its year.
     let mut rows = Vec::new();
     let together = format!("{label}{name}{note_bit}");
-    if together.chars().count() <= room {
+    // Cells, not characters. A fullwidth letter is one character and two
+    // cells, and a count that ignores that keeps the name on a line seg
+    // then cuts.
+    if tc::display_width(&together) <= room {
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), label.into()),
@@ -1762,7 +1732,7 @@ fn plan_rows(
             ],
             room,
         ));
-    } else if label.chars().count() + name.chars().count() <= room {
+    } else if tc::display_width(label) + tc::display_width(&name) <= room {
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), label.into()),
@@ -1776,7 +1746,7 @@ fn plan_rows(
     } else {
         rows.push(tc::seg(&[(p.lbl.as_str(), label.into())], room));
         let named = format!(" {name}{note_bit}");
-        if named.chars().count() <= room {
+        if tc::display_width(&named) <= room {
             rows.push(tc::seg(
                 &[
                     (p.txt.as_str(), format!(" {name}")),

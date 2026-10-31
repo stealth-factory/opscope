@@ -4829,6 +4829,31 @@ mod tests {
     }
 
     #[test]
+    fn a_fullwidth_plan_name_is_split_on_cells() {
+        // Twelve fullwidth letters are twelve characters and twenty-four
+        // cells. A character budget of twenty-two keeps them on one line,
+        // and seg then cuts the last letter.
+        let name = "Ａ".repeat(12);
+        let unknown = serde_json::json!({
+            "_plan": name,
+            "organization": {"rate_limit_tier": ""},
+        });
+        let rows = claude_plan_rows(&unknown, 24, &palette())
+            .iter()
+            .map(|row| bare(row))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 23,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
+        let flat: String = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join("");
+        assert!(flat.contains(&name), "the wide name was clipped: {rows:#?}");
+    }
+
+    #[test]
     fn the_no_limit_row_keeps_every_word_from_24_columns_up() {
         let data = Data::with_plan_quota(
             "max",
