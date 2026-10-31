@@ -509,7 +509,11 @@ enum Block {
 fn blocks(name: &str) -> Vec<Block> {
     let event = serde_json::to_string(&properties(&Fact::start(name))).unwrap_or_default();
     vec![
+        // A blank row above and below the headline, so it reads as the
+        // screen's heading rather than the first line of the paragraph.
+        Block::Blank,
         Block::Headline("Help choose which widgets get the attention"),
+        Block::Blank,
         Block::Para(
             "Widget launches are tracked anonymously so the project can be supported and so we can see which widgets are used. The widgets you open are the ones that get the attention.",
         ),
