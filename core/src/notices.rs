@@ -17,17 +17,18 @@
 //! quietly less than it could be.
 //!
 //! So a notice is raised once, by id, from any thread, and core shows it in
-//! three places nobody has to wire twice:
+//! three places, in every binary, with no widget wiring any of them:
 //!
-//! - a **banner** of at most two wrapped lines above the footer, for sixty
-//!   seconds after a notice first appears or its content changes;
-//! - a **footer hint**, `[!] 1 error, 2 warnings`, coloured by the worst
-//!   level, for as long as anything is outstanding - so a banner that has
-//!   timed out collapses into a counter rather than vanishing while the
-//!   notice is still true;
-//! - the **`!` screen**, which core draws, to read each notice whole and
-//!   dismiss it - for this session, for 7 days or for 30 - or bring a
-//!   dismissed one back.
+//! - a **banner** of at most two wrapped lines under the widget's frame,
+//!   for sixty seconds after a notice first appears or its content changes;
+//!   `size()` hands the widget a pane that many rows shorter;
+//! - a **counter**, `[!] 1 error, 2 warnings`, coloured by the worst level,
+//!   on the top row before the version, for as long as anything is
+//!   outstanding - so a banner that has timed out collapses into a counter
+//!   rather than vanishing while the notice is still true;
+//! - the **`!` screen**, which core draws and `Keyboard::poll` opens, to
+//!   read each notice whole and dismiss it - for this session, for 7 days or
+//!   for 30 - or bring a dismissed one back.
 //!
 //! Nothing here can panic or return an error. A poisoned lock is recovered
 //! rather than propagated, because the registry is written from poller
@@ -39,7 +40,7 @@
 //! this session lives in memory and a restart forgets it. One for 7 or 30
 //! days is written to `notices.json` in [`crate::state_dir`], shared by every
 //! widget, under `flock` and through the atomic `0600` writer, and re-read at
-//! most once a minute from `hint` and `banner_rows` - so a Core notice
+//! most once a minute from `reserve` - so a Core notice
 //! dismissed in one pane is dismissed in the others within a minute, with
 //! no thread of its own. An error is dismissed for the session only: it is
 //! the level that should not quietly go away for a month.
@@ -50,7 +51,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -730,17 +731,35 @@ fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     f(&mut guard)
 }
 
-/// Name the widget, once, at the top of `main`.
+/// Start the channel under `widget`'s name.
+///
+/// Core does this for every binary, from `maybe_widget_help`, with the name
+/// the binary was invoked as - see [`start_for_this_binary`]. A widget never
+/// calls it: `a_widget_never_wires_notices_itself` in `check.rs` fails one
+/// that does, because the four calls a widget used to make were four
+/// chances to leave one out, and two widgets shipped having done it.
 ///
 /// The name titles the `!` screen and keys this widget's dismissals apart
-/// from another widget's notice with the same id.
-///
-/// It also reads `notices.json`, so a dismissal for days taken in an
-/// earlier run or another pane holds from the first frame.
+/// from another widget's notice with the same id. It also reads
+/// `notices.json`, so a dismissal for days taken in an earlier run or
+/// another pane holds from the first frame.
 pub fn start(widget: &'static str) {
     let file = crate::statefile::state_dir().join("notices.json");
     let now = crate::now();
     with(|r| r.open(widget, Some(file), now));
+    STARTED.store(true, Ordering::Relaxed);
+}
+
+/// Start the channel for whichever binary this is, and look at the config
+/// file's permissions once - so a pane that never loads config, `matrix`
+/// among them, still says when the file holding everyone's tokens is
+/// readable by others. It is the same file whichever pane says so.
+pub(crate) fn start_for_this_binary() {
+    // Leaked once, at start: the registry keeps the name for the life of
+    // the process, which is exactly how long a leak lasts.
+    let name: &'static str = Box::leak(crate::binary_name().into_boxed_str());
+    start(name);
+    raise_config_permissions();
 }
 
 /// Raise a notice, or update it in place if its id is already raised.
@@ -792,31 +811,17 @@ const DIM_LIT: &str = "\x1b[38;2;140;170;195m";
 const ACCENT: &str = "\x1b[38;2;150;210;255m";
 const TINT: (u8, u8, u8) = (38, 56, 76);
 
-/// The footer hint, or `None` when nothing is outstanding.
+/// The counter, or `None` when nothing is outstanding.
 ///
-/// One hint, so `pack_hints` wraps it whole: `[!] 1 error, 2 warnings`,
-/// worst level first, zero levels left out, in the worst level's colour.
-/// Push it beside `[,] settings`:
+/// One piece of text, `[!] 1 error, 2 warnings`, worst level first, zero
+/// levels left out, in the worst level's colour. Core stamps it on the top
+/// row, before the version: see [`reserve`].
 ///
-/// ```ignore
-/// hints.extend(tc::notices::hint(w - 2));
-/// ```
-///
-/// `hint_key` reads the `[!]`, so it is clickable through `footer_at` with
-/// nothing more done.
-///
-/// `room` is the width the footer is packed to. A hint is never split, so
-/// one wider than the pane would overflow it; below the full wording's
-/// width it says `[!] 4 notices`, and below that `[!] 4`.
-pub fn hint(room: usize) -> Option<Vec<(&'static str, String)>> {
-    let now = crate::now();
-    recheck_config_permissions(now);
-    with(|r| {
-        r.reload_if_stale(now);
-        hint_of(r, now, room)
-    })
-}
-
+/// `room` is what the top row can give it. Below the full wording's width
+/// it says `[!] 4 notices`, and below that `[!] 4` - which is put down
+/// whatever `room` says, because a counter that stood down would be a
+/// notice nobody can find, and the title it squeezes is the widget's name,
+/// which the reader already knows.
 fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, String)>> {
     let outstanding = r.outstanding(now);
     let worst = outstanding.iter().map(|l| l.notice.level).max()?;
@@ -840,36 +845,30 @@ fn hint_of(r: &Registry, now: f64, room: usize) -> Option<Vec<(&'static str, Str
     Some(vec![(worst.colour(), text)])
 }
 
-/// The banner: 0 to 2 notices, newest first, each its title alone wrapped
-/// to `w` by [`crate::error_rows`] and never clipped.
-///
-/// Draw these directly above the footer, and count them in the rows the
-/// footer takes, so a body that scrolls does not scroll under them. Not
-/// injected by `draw()`: that would move the footer out from under the
-/// placements `footer_at` registered.
-///
-/// `h` is the pane's height. The banner takes at most a quarter of it,
-/// because it is pinned: only the body scrolls, so a banner as tall as the
-/// pane pushes the footer - the `[!]` counter and `[q]uit` with it - below
-/// the bottom edge for the minute it shows, and nothing the reader can do
-/// brings it back. So the title only, never the detail, which waits on the
-/// `!` screen; and a notice whose title does not fit whole in what is left
-/// is not shown rather than cut. The counter still counts it, so leaving
-/// it out hides nothing.
-pub fn banner_rows(w: usize, h: usize) -> Vec<String> {
-    let now = crate::now();
-    recheck_config_permissions(now);
-    with(|r| {
-        r.reload_if_stale(now);
-        banner_of(r, now, w, h)
-    })
-}
-
 /// The most rows the banner may take on a pane `h` tall.
+///
+/// A quarter of the pane, and nothing at all below [`BANNER_MIN_PANE`]
+/// rows. Every row the banner takes is a row the widget's own frame does
+/// not get, so on a short pane the banner is what stands down: the counter
+/// on the top row still says the notice is there, and `!` still reads it.
 fn banner_budget(h: usize) -> usize {
-    h / 4
+    if h < BANNER_MIN_PANE {
+        0
+    } else {
+        h / 4
+    }
 }
 
+/// The shortest pane that gives any row to the banner. Ten leaves a widget
+/// eight rows under a two-row banner: a title, a footer line or two and a
+/// body that scrolls - the same pane it would have drawn at eight.
+pub const BANNER_MIN_PANE: usize = 10;
+
+/// The banner: 0 to 2 notices, newest first, each its title alone wrapped
+/// to `w` by [`crate::error_rows`] and never clipped. The detail waits on
+/// the `!` screen, and a notice whose title does not fit whole in what the
+/// budget leaves is not shown rather than cut. The counter still counts
+/// it, so leaving it out hides nothing.
 fn banner_of(r: &Registry, now: f64, w: usize, h: usize) -> Vec<String> {
     let budget = banner_budget(h);
     let mut rows = Vec::new();
@@ -884,6 +883,87 @@ fn banner_of(r: &Registry, now: f64, w: usize, h: usize) -> Vec<String> {
         rows.extend(wrapped);
     }
     rows
+}
+
+/// Whether core has started the channel in this process. Until it has,
+/// nothing is reserved and nothing is stamped, so a test or a tool that
+/// draws without ever starting one draws exactly what it was handed.
+static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the `!` screen is up. It draws through `draw` like everything
+/// else, and a counter and banner on the screen that lists the very same
+/// notices would be the one place they say nothing new.
+static SCREEN_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// What core adds to the frame a widget draws, decided once per frame by
+/// [`reserve`] and read back by `draw` and `title`, so the room `title`
+/// leaves, the rows the widget was told it has and what `draw` puts in
+/// them all come from the same reading of the registry.
+#[derive(Clone, Default)]
+pub(crate) struct Chrome {
+    /// The width and the whole height of the pane this was decided for.
+    pub w: usize,
+    pub h: usize,
+    /// The counter's colour and text, without the space before it.
+    pub counter: Option<(&'static str, String)>,
+    /// The banner, drawn under the widget's frame. `size()` handed the
+    /// widget `h - banner.len()` rows.
+    pub banner: Vec<String>,
+}
+
+static CHROME: Mutex<Option<Chrome>> = Mutex::new(None);
+
+/// Decide what core adds to the next frame on a `w` x `h` pane, and return
+/// how many rows that takes from the bottom of it.
+///
+/// Called from `size()`, which every widget calls once a frame before it
+/// lays anything out: the widget is then handed a pane that many rows
+/// shorter and lays itself out exactly as it would on one, scrolling its
+/// body and pinning its footer the way every widget already does at every
+/// height. That is what makes the banner impossible to place wrong - no
+/// widget places it.
+///
+/// `counter_room` is what the top row can spare the counter before the
+/// title or the version has to give way.
+pub(crate) fn reserve(w: usize, h: usize, counter_room: usize) -> usize {
+    if !STARTED.load(Ordering::Relaxed) || SCREEN_OPEN.load(Ordering::Relaxed) {
+        *CHROME.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        return 0;
+    }
+    let now = crate::now();
+    recheck_config_permissions(now);
+    let chrome = with(|r| {
+        r.reload_if_stale(now);
+        chrome_of(r, now, w, h, counter_room)
+    });
+    let taken = chrome.banner.len();
+    *CHROME.lock().unwrap_or_else(|e| e.into_inner()) = Some(chrome);
+    taken
+}
+
+fn chrome_of(r: &Registry, now: f64, w: usize, h: usize, counter_room: usize) -> Chrome {
+    Chrome {
+        w,
+        h,
+        counter: hint_of(r, now, counter_room).and_then(|mut hint| hint.pop()),
+        banner: banner_of(r, now, w, h),
+    }
+}
+
+/// What [`reserve`] decided for a pane `w` wide, if it was this width.
+pub(crate) fn chrome(w: usize) -> Option<Chrome> {
+    CHROME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|c| c.w == w)
+        .cloned()
+}
+
+/// Whether `!` should open the screen: the channel is running and the
+/// screen is not already up - on it, `!` is the key that closes it.
+pub(crate) fn answers_bang() -> bool {
+    STARTED.load(Ordering::Relaxed) && !SCREEN_OPEN.load(Ordering::Relaxed)
 }
 
 /// Which list the screen is showing.
@@ -956,12 +1036,23 @@ impl Screen {
     }
 }
 
-/// The `!` screen. Call it from the widget's `"!"` arm, the way `,` calls
-/// `run_settings`; it returns when the reader backs out.
+/// The `!` screen. `Keyboard::poll` opens it when `!` arrives, for every
+/// widget, and it returns when the reader backs out; the widget's next
+/// frame paints over it.
 ///
 /// Core draws it so that every widget's notices read and dismiss the same
 /// way - the same reason only core draws the settings screen.
-pub fn run(keyboard: &mut crate::Keyboard) {
+pub(crate) fn run(keyboard: &mut crate::Keyboard) {
+    SCREEN_OPEN.store(true, Ordering::Relaxed);
+    // Cleared on the way out however that happens, so a panic inside the
+    // screen cannot leave every later frame without its counter.
+    struct Closed;
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            SCREEN_OPEN.store(false, Ordering::Relaxed);
+        }
+    }
+    let _closed = Closed;
     // Borrowing the caller's keyboard means inheriting its footer
     // placements; this loop polls before it draws, so drop them on the way
     // in and again on the way out, as settings does.
@@ -1453,7 +1544,7 @@ const CONFIG_RECHECK_SECS: f64 = 5.0;
 
 /// Raise the config file's permissions as the one Core notice every pane
 /// shares. Called from `load_config`, so a widget does not have to, and
-/// again every few seconds from `hint` and `banner_rows`: widgets load
+/// again every few seconds from `reserve`, once a frame: widgets load
 /// config once at startup, so a check made only there would keep saying
 /// "readable by others" after the `chmod 600` it asks for, and would never
 /// see a file an editor later rewrote with wider permissions.
@@ -1508,6 +1599,143 @@ mod tests {
             .map(|r| crate::source_text(r))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A pane `w` x `h` as a widget draws it through core with one warning
+    /// outstanding and bannering: the widget is handed the height `size()`
+    /// would hand it and pins its footer to the bottom of that, and core
+    /// stamps the counter and adds the banner. Returns the lines `draw`
+    /// would put on screen, the widget's footer, where it registered that
+    /// footer, and the chrome.
+    fn drawn_through_core(
+        r: &Registry,
+        w: usize,
+        h: usize,
+    ) -> (Vec<String>, crate::Footer, usize, Chrome) {
+        let chrome = chrome_of(r, 1.0, w, h, crate::counter_room(w));
+        let given = h - chrome.banner.len();
+        let counter = chrome.counter.clone();
+        let room = crate::top_room_with(w, counter.as_ref().map(|(_, t)| t.as_str()));
+        let mut rows = vec![crate::title_short_of("clocks", w, "", None, room)];
+        // A body taller than any pane here, which the widget windows.
+        for i in 0..60 {
+            rows.push(format!(" body row {i}"));
+        }
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![("", "↑↓ cities".to_string())],
+            vec![("", "[p]omodoro".to_string())],
+            vec![("", "[,] settings".to_string())],
+            vec![("", "[q]uit".to_string())],
+        ];
+        let packed = crate::pack_hints_placed(&hints, w - 2, "  ");
+        rows.truncate(given.saturating_sub(packed.lines.len()).max(1));
+        while rows.len() < given.saturating_sub(packed.lines.len()) {
+            rows.push(String::new());
+        }
+        let foot_top = rows.len();
+        rows.extend(packed.lines.iter().map(|l| format!(" {l}")));
+        assert_eq!(rows.len(), given, "the widget filled the pane it was handed");
+        rows.extend(chrome.banner.iter().cloned());
+        let lines = crate::lines_with(&rows, w, h, counter.as_ref());
+        (lines, packed, foot_top, chrome)
+    }
+
+    #[test]
+    fn the_counter_and_banner_fit_every_pane_without_moving_the_footer() {
+        let mut r = reg();
+        r.raise(
+            Notice::warn("config-world-readable", "config.json is readable by others; chmod 600 it"),
+            0.0,
+        );
+        let title = "config.json is readable by others; chmod 600 it";
+        for w in 24..=140 {
+            for h in 8..=50 {
+                let (lines, packed, foot_top, chrome) = drawn_through_core(&r, w, h);
+                let at = format!("{w}x{h}");
+                assert_eq!(lines.len(), h, "{at}");
+                // Nothing wider than the pane: the terminal would wrap it
+                // and push the title off the top.
+                for (i, line) in lines.iter().enumerate() {
+                    let plain = crate::source_text(line);
+                    assert!(crate::display_width(&plain) <= w, "{at} row {i}: {plain:?}");
+                }
+                // The counter is on the top row, whole, after the title's
+                // `╸` - the widget's own rule was built short for it.
+                let (_, counter) = chrome.counter.clone().expect("a warning is outstanding");
+                let top = crate::source_text(&lines[0]);
+                assert!(top.contains(&format!("╸ {counter}")), "{at}: {top:?}");
+                assert!(top.contains("CLOCKS"), "{at}: the title lost its name: {top:?}");
+                // The version is there whenever the counter leaves it room.
+                let taken = crate::display_width(&counter) + crate::COUNTER_GAP;
+                if crate::version_room(w - taken) > 0 {
+                    assert!(top.ends_with(&crate::version_tag()), "{at}: {top:?}");
+                }
+                // A click on the counter's cells is answered as `!`: the
+                // column the click map holds is where the text really is.
+                let col = w - crate::top_room_with(w, Some(&counter)) + crate::COUNTER_GAP;
+                let cells: String = top.chars().skip(col).take(counter.chars().count()).collect();
+                assert_eq!(cells, counter, "{at}: the click map is off the counter");
+                // The banner is under the widget's frame, a quarter of the
+                // pane at most, and nothing at all on a pane under ten rows.
+                let k = chrome.banner.len();
+                assert!(k <= h / 4, "{at}: banner of {k}");
+                if h < BANNER_MIN_PANE {
+                    assert_eq!(k, 0, "{at}: the banner stands down first");
+                } else if w >= 60 {
+                    assert!(k >= 1, "{at}: a one-line title fits and is shown");
+                }
+                if k > 0 {
+                    let said: String = lines[h - k..]
+                        .iter()
+                        .map(|l| crate::source_text(l).trim().trim_start_matches('!').trim().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert_eq!(said, title, "{at}: the banner is the whole title, never cut");
+                }
+                // The footer is exactly where the widget registered it,
+                // every line of it, and the banner did not displace it: a
+                // click on each hint lands on that hint.
+                for (n, line) in packed.lines.iter().enumerate() {
+                    assert_eq!(
+                        crate::source_text(&lines[foot_top + n]),
+                        format!(" {line}"),
+                        "{at}: footer line {n} moved"
+                    );
+                }
+                assert!(foot_top + packed.lines.len() <= h - k, "{at}: the footer runs into the banner");
+                let mut keyboard = crate::Keyboard::new();
+                keyboard.footer_at(&packed, foot_top, 1);
+                for spot in &packed.spots {
+                    let click = format!("click:{},{}", 1 + spot.col, foot_top + spot.line);
+                    assert_eq!(keyboard.hint_under(click), spot.key, "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_stamped_or_reserved_with_nothing_outstanding() {
+        let r = reg();
+        for (w, h) in [(24, 8), (80, 24), (140, 50)] {
+            let chrome = chrome_of(&r, 1.0, w, h, crate::counter_room(w));
+            assert!(chrome.counter.is_none());
+            assert!(chrome.banner.is_empty());
+            // So the top row is byte for byte what it was before core
+            // drew a counter at all.
+            let title = crate::title_short_of("clocks", w, "", None, crate::version_room(w));
+            assert_eq!(crate::stamped_with(&title, w, None), crate::stamped(&title, w));
+        }
+    }
+
+    #[test]
+    fn the_counter_names_bang_and_shortens_rather_than_overflowing() {
+        let mut r = reg();
+        r.raise(Notice::error("e", "x"), 0.0);
+        r.raise(Notice::warn("w", "y"), 0.0);
+        let wide = chrome_of(&r, 1.0, 140, 30, crate::counter_room(140)).counter.unwrap();
+        assert_eq!(wide, (BAD, "[!] 1 error, 1 warning".to_string()));
+        let narrow = chrome_of(&r, 1.0, 24, 30, crate::counter_room(24)).counter.unwrap();
+        assert_eq!(narrow.1, "[!] 2", "the shortest wording goes down regardless");
     }
 
     #[test]
@@ -1791,8 +2019,7 @@ mod tests {
                     for i in 0..200 {
                         let id = IDS[(t + i) % IDS.len()];
                         raise(Notice::info(id, format!("pass {}", i % 3)));
-                        let _ = hint(40);
-                        let _ = banner_rows(40, 24);
+                        let _ = reserve(40, 24, 40);
                         if i % 7 == 0 {
                             clear(id);
                         }

@@ -738,7 +738,12 @@ pub fn title(text: &str, w: usize, colour: &str) -> String {
 
 /// Spend only rule fill on a refresh spinner; the title and version take priority.
 pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> String {
-    let w = w - version_room(w);
+    title_short_of(text, w, colour, tick, top_room(w))
+}
+
+/// `title_busy`, built `room` cells short of `w` for what core stamps after it.
+fn title_short_of(text: &str, w: usize, colour: &str, tick: Option<usize>, room: usize) -> String {
+    let w = w - room;
     let left = "╺━";
     let chrome = display_width(left) + 1;
     if w <= chrome {
@@ -773,8 +778,26 @@ pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> St
     )
 }
 
-/// The terminal's size, or a sane pair if it will not say.
+/// The pane a widget has to lay itself out in: the terminal's size, less
+/// the rows core is about to put under it.
+///
+/// Those rows are the notices banner - see [`notices::reserve`]. A widget
+/// handed a pane a row or two shorter lays itself out exactly as it would
+/// on one: its body scrolls, its footer stays pinned to the bottom of what
+/// it was given, and every placement it registers with `footer_at` is in
+/// the frame it drew. `draw` then puts the banner on the rows below.
+///
+/// So call it once a frame, before laying anything out, and hand `draw`
+/// the height it returned. A frame drawn at any other height is drawn
+/// without the banner, never over it.
 pub fn size() -> (usize, usize) {
+    let (w, h) = pane_size();
+    let taken = notices::reserve(w, h, counter_room(w));
+    (w, h - taken)
+}
+
+/// The terminal's size, or a sane pair if it will not say.
+fn pane_size() -> (usize, usize) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
     if ok == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -961,6 +984,27 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // What core adds: the counter on the top row and the banner under the
+    // widget's frame, both as `size()` decided them for this frame. The
+    // banner goes on only when the widget drew at the height `size()`
+    // handed it, so it can never be laid over rows the widget thinks it has.
+    let chrome = notices::chrome(w);
+    let counter = top_counter(w);
+    let with_banner: Vec<String>;
+    let (rows, h) = match &chrome {
+        Some(c) if !c.banner.is_empty() && c.h == h + c.banner.len() => {
+            let mut full: Vec<String> = rows.iter().take(h).cloned().collect();
+            full.resize(h, String::new());
+            full.extend(c.banner.iter().cloned());
+            with_banner = full;
+            (with_banner.as_slice(), c.h)
+        }
+        _ => (rows, h),
+    };
+    *COUNTER_SPOT.lock().unwrap_or_else(|e| e.into_inner()) = counter.as_ref().map(|(_, text)| {
+        // After the space that leads it, from where the top row's tail starts.
+        (w - top_room_with(w, Some(text)) + 1, display_width(text))
+    });
     // A font change is a SIGWINCH. Read the window's pixel fields before
     // this frame is rasterised, unless a cell-size reply already won.
     terminal::apply_pending_cell_size();
@@ -988,7 +1032,7 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         reset,
         whole && !reset,
     );
-    let bytes = paint(&mut shown, &rows, w, h, lost);
+    let bytes = paint(&mut shown, &rows, w, h, lost, counter.as_ref());
     // Placeholder uploads are in `before`, so the virtual placement exists
     // before the cells that name it. Direct placements stay in `after`.
     let bytes = format!("{before}{bytes}{after}");
@@ -1111,8 +1155,15 @@ fn forget_frame() {
 /// reached with a cursor move of core's own and erased from column 0
 /// before they are written, exactly as `painted` does it. A frame identical
 /// to the last writes nothing at all.
-fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: bool) -> String {
-    let lines = lines(rows, w, h);
+fn paint(
+    shown: &mut Option<Shown>,
+    rows: &[String],
+    w: usize,
+    h: usize,
+    lost: bool,
+    counter: Option<&(&'static str, String)>,
+) -> String {
+    let lines = lines_with(rows, w, h, counter);
     let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
@@ -1168,6 +1219,46 @@ fn version_room(w: usize) -> usize {
     }
 }
 
+/// Where the notices counter was put on the top row by the last frame:
+/// its first column and its width. A click there arrives as `!`, the key
+/// it names, so the counter is clickable in every widget without any of
+/// them registering it.
+static COUNTER_SPOT: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+
+/// The space before the counter, which keeps it off the title's `╸`.
+const COUNTER_GAP: usize = 1;
+
+/// The most the counter may take of a top row `w` wide before the title or
+/// the version gives way: what is left after a title of [`TITLE_KEEPS`],
+/// the version and the gap. `notices::hint_of` picks the widest wording
+/// that fits, and its shortest, `[!] 3`, goes down regardless.
+fn counter_room(w: usize) -> usize {
+    w.saturating_sub(TITLE_KEEPS + display_width(&version_tag()) + COUNTER_GAP)
+}
+
+/// The counter the top row of a pane `w` wide carries this frame, if a
+/// notice is outstanding - as `size()` decided it.
+fn top_counter(w: usize) -> Option<(&'static str, String)> {
+    notices::chrome(w)
+        .and_then(|c| c.counter)
+        .filter(|(_, text)| display_width(text) + COUNTER_GAP <= w)
+}
+
+/// Everything core puts on the end of the top row: the counter when there
+/// is one, then the version if what the counter leaves still holds it.
+/// The counter comes first because it is the one of the two the reader can
+/// act on; the version stands down the way it already does on a narrow
+/// pane, all of it or none.
+fn top_room_with(w: usize, counter: Option<&str>) -> usize {
+    let taken = counter.map_or(0, |text| display_width(text) + COUNTER_GAP);
+    taken + version_room(w - taken)
+}
+
+/// The cells `title` leaves for core on a pane `w` wide this frame.
+fn top_room(w: usize) -> usize {
+    top_room_with(w, top_counter(w).as_ref().map(|(_, text)| text.as_str()))
+}
+
 /// The `h` rows `draw` puts on screen: each made inert, and the top one
 /// stamped with the version. These are what it compares from one frame to
 /// the next, so a row is only the same as last time if it would look the
@@ -1195,7 +1286,19 @@ fn version_room(w: usize) -> usize {
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
 /// the half that watches for that.
+#[cfg(test)]
 fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
+    lines_with(rows, w, h, None)
+}
+
+/// `lines`, with the notices counter stamped before the version.
+fn lines_with(
+    rows: &[String],
+    w: usize,
+    h: usize,
+    counter: Option<&(&'static str, String)>,
+) -> Vec<String> {
+    let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
     (0..h)
         .map(|i| {
             let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
@@ -1208,10 +1311,10 @@ fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
             }
             if i == 0 {
                 let line = match graphics_notice() {
-                    Some(notice) => with_notice(&line, notice, w),
+                    Some(notice) => with_notice(&line, notice, w, room),
                     None => line,
                 };
-                stamped(&line, w)
+                stamped_with(&line, w, counter)
             } else {
                 line
             }
@@ -1529,7 +1632,7 @@ fn inert(row: &str) -> String {
 /// pane, so it stays first. The notice is never cut: where it does not fit
 /// whole, its short form (`Kitty unavailable`) is used, and where that does
 /// not fit either, the row is left as it was.
-fn with_notice(title: &str, notice: &str, w: usize) -> String {
+fn with_notice(title: &str, notice: &str, w: usize, room: usize) -> String {
     let mut name_end = 0;
     let mut text = String::new();
     let mut i = 0;
@@ -1547,7 +1650,7 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
         i += n;
     }
     let name = display_width(text.trim_end_matches(['━', '╸', ' ']));
-    let keep = w.saturating_sub(version_room(w));
+    let keep = w.saturating_sub(room);
     let short = notice.split(';').next().unwrap_or(notice);
     match [notice, short]
         .into_iter()
@@ -1558,8 +1661,15 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn stamped(row: &str, w: usize) -> String {
-    let room = version_room(w);
+    stamped_with(row, w, None)
+}
+
+/// The top row cut to what core's tail leaves, then the tail: the notices
+/// counter in its level's colour, and the version.
+fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -> String {
+    let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
     if room == 0 {
         return row.to_string();
     }
@@ -1590,12 +1700,16 @@ fn stamped(row: &str, w: usize) -> String {
     }
     let cut = close_dangling_link(&cut);
     let (r, g, b) = VERSION_INK;
-    format!(
-        "{cut}{RST}{}{}{}",
-        " ".repeat(keep - used),
-        rgb(r, g, b),
-        version_tag()
-    )
+    let mut tail = String::new();
+    let mut taken = 0;
+    if let Some((colour, text)) = counter {
+        tail.push_str(&format!("{}{colour}{text}{RST}", " ".repeat(COUNTER_GAP)));
+        taken = display_width(text) + COUNTER_GAP;
+    }
+    if version_room(w - taken) > 0 {
+        tail.push_str(&format!("{}{}", rgb(r, g, b), version_tag()));
+    }
+    format!("{cut}{RST}{}{tail}", " ".repeat(keep - used))
 }
 
 /// Hide the cursor and clear, and put it all back on the way out.
@@ -4296,6 +4410,9 @@ pub struct Keyboard {
     /// something a widget opts into rather than something that happens to
     /// it.
     hints: Vec<(String, usize, usize, usize)>,
+    /// Set by `typing` and spent by the next `poll`: a text field is open,
+    /// so `!` is a character for it rather than the notices screen.
+    typing: bool,
 }
 
 impl Keyboard {
@@ -4331,6 +4448,7 @@ impl Keyboard {
             saved,
             buf: Vec::new(),
             hints: Vec::new(),
+            typing: false,
         }
     }
 
@@ -4451,6 +4569,14 @@ impl Keyboard {
         let Some((x, y)) = click_at(&key) else {
             return key;
         };
+        // The notices counter core stamped on the top row names `!`.
+        if y == 0 {
+            if let Some((col, width)) = *COUNTER_SPOT.lock().unwrap_or_else(|e| e.into_inner()) {
+                if x >= col && x < col + width {
+                    return "!".to_string();
+                }
+            }
+        }
         for (name, row, col, width) in &self.hints {
             if y == *row && x >= *col && x < col + width {
                 return name.clone();
@@ -4480,10 +4606,48 @@ impl Keyboard {
         }
     }
 
+    /// Say a text field is open, so the next `poll` hands `!` back as the
+    /// character typed rather than opening the notices screen.
+    ///
+    /// Call it on every pass that a filter box, a `/` search or a line
+    /// editor has the keyboard, just before `poll`:
+    ///
+    /// ```ignore
+    /// if typing {
+    ///     keyboard.typing();
+    /// }
+    /// let mut keys = keyboard.poll();
+    /// ```
+    ///
+    /// Spent by that one poll rather than held until someone turns it off,
+    /// so a widget that closes its field without saying so cannot leave `!`
+    /// dead for the rest of the session - the worst it can do is open the
+    /// screen from a field, which is on screen at once rather than silent.
+    pub fn typing(&mut self) {
+        self.typing = true;
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
+    ///
+    /// `!` is answered here, for every widget: it opens the notices screen
+    /// and comes back when the reader backs out, and the widget's next
+    /// frame paints over it. Keys that arrived before it in the same read
+    /// are handed back as usual; those after it went to the screen's
+    /// moment and are dropped. Not while a text field is open - see
+    /// `typing`.
     ///
     /// Never returns once the terminal has gone away: see `leave_after_hangup`.
     pub fn poll(&mut self) -> Vec<String> {
+        let typing = std::mem::take(&mut self.typing);
+        let mut keys = self.poll_keys();
+        if let Some(at) = bang_at(&keys, typing, notices::answers_bang()) {
+            keys.truncate(at);
+            notices::run(self);
+        }
+        keys
+    }
+
+    fn poll_keys(&mut self) -> Vec<String> {
         if self.saved.is_none() {
             return Vec::new();
         }
@@ -4517,6 +4681,16 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+/// Where in `keys` the notices screen opens: the first `!`, unless a text
+/// field has the keyboard or the channel cannot answer it - not started, or
+/// its screen already up, where `!` is the key that closes it.
+fn bang_at(keys: &[String], typing: bool, answers: bool) -> Option<usize> {
+    if typing || !answers {
+        return None;
+    }
+    keys.iter().position(|k| k == "!")
 }
 
 impl Keyboard {
@@ -5543,6 +5717,10 @@ pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
         std::process::exit(0);
     }
     maybe_help(doc);
+    // Every binary passes through here, after the arguments that print and
+    // leave and before it draws anything, so this is where core opens the
+    // notices channel for it. No widget does: see `notices::start`.
+    notices::start_for_this_binary();
 }
 
 /// What this binary is, in one line.
@@ -5577,11 +5755,33 @@ pub fn version_number() -> &'static str {
 }
 
 /// The name this binary was invoked as, for the first word of `--version`.
-fn binary_name() -> String {
+pub(crate) fn binary_name() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "opscope".into())
+}
+
+#[cfg(test)]
+mod bang_tests {
+    use super::bang_at;
+
+    fn keys(k: &[&str]) -> Vec<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bang_opens_the_screen_unless_a_text_field_has_the_keyboard() {
+        let typed = keys(&["a", "!", "b"]);
+        assert_eq!(bang_at(&typed, false, true), Some(1), "keys before it are handed back");
+        // A filter box, a `/` search or a line editor said `typing()`: the
+        // `!` is a character in it, handed back where it was typed.
+        assert_eq!(bang_at(&typed, true, true), None);
+        // On the notices screen itself `!` closes it, so it is not reopened;
+        // and before core has started the channel there is nothing to open.
+        assert_eq!(bang_at(&typed, false, false), None);
+        assert_eq!(bang_at(&keys(&["q", "j"]), false, true), None);
+    }
 }
 
 #[cfg(test)]
@@ -5659,7 +5859,7 @@ mod tests {
         // The notice once went first and took a 40-column pane's whole top
         // row, so the pane no longer said which widget it was.
         let notice = "Kitty unavailable; using text";
-        let at = |w| super::stamped(&super::with_notice(&super::title("latency", w, ""), notice, w), w);
+        let at = |w| super::stamped(&super::with_notice(&super::title("latency", w, ""), notice, w, super::version_room(w)), w);
         assert!(at(80).contains("LATENCY") && at(80).contains(notice));
         assert!(at(40).contains("LATENCY") && at(40).contains("Kitty unavailable") && !at(40).contains("using"));
         assert!(at(24).contains("LATENCY") && !at(24).contains("Kitty"));
@@ -6083,13 +6283,13 @@ mod tests {
         let w = 40;
         let rows = vec![super::title("clocks", w, ""), "12:00:00".into(), "".into()];
         let mut shown = None;
-        let first = super::paint(&mut shown, &rows, w, 3, false);
+        let first = super::paint(&mut shown, &rows, w, 3, false, None);
         assert_eq!(
             first,
             super::frame(&rows, w, 3),
             "the first frame is not painted whole"
         );
-        assert_eq!(super::paint(&mut shown, &rows, w, 3, false), "");
+        assert_eq!(super::paint(&mut shown, &rows, w, 3, false, None), "");
     }
 
     #[test]
@@ -6101,9 +6301,9 @@ mod tests {
         let top = super::title("clocks", w, "");
         let mut shown = None;
         let before = [top.clone(), "12:00:00".into(), "steady".into()];
-        super::paint(&mut shown, &before, w, 3, false);
+        super::paint(&mut shown, &before, w, 3, false, None);
         let after = [top.clone(), "12:00:01".into(), "steady".into()];
-        let bytes = super::paint(&mut shown, &after, w, 3, false);
+        let bytes = super::paint(&mut shown, &after, w, 3, false, None);
         assert_eq!(rewritten(&bytes), vec![(2, "12:00:01".to_string())]);
         let erased = format!("\x1b[2H{}{}", super::RST, super::EL);
         assert!(bytes.starts_with(&erased), "{bytes:?}");
@@ -6115,7 +6315,7 @@ mod tests {
             "12:00:01".into(),
             "steady".into(),
         ];
-        let again = rewritten(&super::paint(&mut shown, &retitled, w, 3, false));
+        let again = rewritten(&super::paint(&mut shown, &retitled, w, 3, false, None));
         assert_eq!(again.len(), 1, "{again:?}");
         assert_eq!(again[0].0, 1);
         assert!(again[0].1.ends_with(&tag), "{:?}", again[0].1);
@@ -6138,7 +6338,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        super::paint(&mut shown, &big, w, 6, false);
+        super::paint(&mut shown, &big, w, 6, false, None);
         let small = vec![
             "title".into(),
             super::sized_sequence("12:34:56", 2),
@@ -6147,7 +6347,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        let bytes = super::paint(&mut shown, &small, w, 6, false);
+        let bytes = super::paint(&mut shown, &small, w, 6, false, None);
         let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
         assert!(rows.contains(&2), "the smaller face was not sent: {rows:?}");
         assert!(
@@ -6167,7 +6367,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        let bytes = super::paint(&mut shown, &plain, w, 6, false);
+        let bytes = super::paint(&mut shown, &plain, w, 6, false, None);
         let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
         assert!(rows.contains(&2), "{rows:?}");
         assert!(rows.contains(&3), "the last covered row was left: {rows:?}");
@@ -6180,8 +6380,8 @@ mod tests {
         // drawn there stays on screen for good.
         let w = 30;
         let mut shown = None;
-        super::paint(&mut shown, &["t".into(), "loading".into()], w, 2, false);
-        let bytes = super::paint(&mut shown, &["t".into()], w, 2, false);
+        super::paint(&mut shown, &["t".into(), "loading".into()], w, 2, false, None);
+        let bytes = super::paint(&mut shown, &["t".into()], w, 2, false, None);
         assert_eq!(
             bytes,
             format!("\x1b[2H{}{}{}", super::RST, super::EL, super::RST)
@@ -6197,22 +6397,22 @@ mod tests {
         // them, nothing stored says what is on screen.
         let rows = vec!["top".to_string(), "same".into(), "same".into()];
         let mut shown = None;
-        super::paint(&mut shown, &rows, 40, 3, false);
+        super::paint(&mut shown, &rows, 40, 3, false, None);
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 3, false),
+            super::paint(&mut shown, &rows, 41, 3, false, None),
             super::frame(&rows, 41, 3)
         );
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 4, false),
+            super::paint(&mut shown, &rows, 41, 4, false, None),
             super::frame(&rows, 41, 4)
         );
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 4, true),
+            super::paint(&mut shown, &rows, 41, 4, true, None),
             super::frame(&rows, 41, 4)
         );
         let mut lost = None;
         assert_eq!(
-            super::paint(&mut lost, &rows, 41, 4, false),
+            super::paint(&mut lost, &rows, 41, 4, false, None),
             super::frame(&rows, 41, 4)
         );
     }
@@ -6225,10 +6425,10 @@ mod tests {
         let rows = vec!["top".to_string(), "12:00:00".into()];
         let mut shown = None;
         assert!(!super::due(&shown, std::time::Instant::now()));
-        super::paint(&mut shown, &rows, 40, 2, false);
+        super::paint(&mut shown, &rows, 40, 2, false, None);
         let whole_at = shown.as_ref().unwrap().whole_at;
         let ticked = vec!["top".to_string(), "12:00:01".into()];
-        assert_ne!(super::paint(&mut shown, &ticked, 40, 2, false), "");
+        assert_ne!(super::paint(&mut shown, &ticked, 40, 2, false, None), "");
         assert_eq!(shown.as_ref().unwrap().whole_at, whole_at);
         let almost = whole_at + super::WHOLE_EVERY - std::time::Duration::from_millis(1);
         assert!(!super::due(&shown, almost));
@@ -6286,7 +6486,7 @@ mod tests {
         let stamped = super::stamped(&row, 40);
         assert!(stamped.find(close).is_some_and(|at| at < stamped.find(&super::version_tag()).unwrap()));
         let row = super::link("https://example.com", "LATENCY");
-        let notice = super::with_notice(&row, "Kitty unavailable", 80);
+        let notice = super::with_notice(&row, "Kitty unavailable", 80, super::version_room(80));
         assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
         assert_eq!(super::display_width(&stamped), 40);
     }

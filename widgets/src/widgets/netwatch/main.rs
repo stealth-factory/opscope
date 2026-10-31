@@ -1672,7 +1672,6 @@ fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("netwatch");
     if !tc::dependencies_available(
         "netwatch",
         include_str!("dependencies.json"),
@@ -1862,9 +1861,6 @@ fn main() {
                     }
                     // The notices are the widget's, not the list's: a
                     // warning raised while a process is open is read here.
-                    "!" => {
-                        tc::notices::run(&mut keyboard);
-                    }
                     "r" | "R" => {
                         if let Ok(mut guard) = state.lock() {
                             guard.totals.clear();
@@ -1970,10 +1966,6 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "1" => sort_live = false,
@@ -2132,10 +2124,7 @@ fn main() {
                     (p.dim.as_str(), "/esc back".into()),
                 ],
             ];
-            hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-            // Above the footer and counted in it, as on the list.
-            let banner = tc::notices::banner_rows(w, h);
             let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let mut foot: Vec<String> =
                 packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -2147,7 +2136,7 @@ fn main() {
             // else. An empty footer is how a widget takes them back off.
                 packed = tc::Footer::default();
             }
-            let room = h.saturating_sub(foot.len() + banner.len() + 1).max(1);
+            let room = h.saturating_sub(foot.len() + 1).max(1);
             // Built at the height it wants rather than the height it has:
             // the lists are drawn in full and the charts get their rows, and
             // what does not fit is scrolled to rather than dropped.
@@ -2226,11 +2215,10 @@ fn main() {
                     foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
                     packed = tc::Footer::default();
                 }
-                while shown.len() + banner.len() + foot.len() < h {
+                while shown.len() + foot.len() < h {
                     shown.push(String::new());
                 }
             }
-            shown.extend(banner);
             // The detail screen keeps a cursor per section of its own. The
             // list's placements describe a frame that is no longer on
             // screen, so they come off rather than answering for it.
@@ -2367,9 +2355,8 @@ fn main() {
         }
         out.push(String::new());
 
-        // Packed before the chart and the table are sized. The notice
-        // counter wraps these hints onto a third row on a 60-column pane,
-        // and that row stays after the banner expires. Reserving a fixed
+        // Packed before the chart and the table are sized. These hints wrap
+        // onto a third row on a narrow pane. Reserving a fixed
         // heading-plus-two instead made the frame one row taller than the
         // pane, and `draw_plots` dropped the last of it — `[q]uit`.
         let mut hints: Vec<Vec<(&str, String)>> = vec![
@@ -2392,7 +2379,6 @@ fn main() {
             )],
             vec![(p.dim.as_str(), "[r]ezero".into())],
         ];
-        hints.extend(tc::notices::hint(w - 2));
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
@@ -2405,10 +2391,7 @@ fn main() {
         // when even a two-row plot would leave the list fewer than five
         // rows the chart stands down — this screen does not scroll, so a
         // chart that overruns its budget pushes the list off the pane.
-        // The notices banner sits above the footer and is part of it, so
-        // the chart and the table are sized with it already taken.
-        let banner = tc::notices::banner_rows(w, h);
-        let spare = chart_spare(h, out.len(), packed.lines.len(), banner.len());
+        let spare = chart_spare(h, out.len(), packed.lines.len());
         let series: Vec<(f64, f64)> = guard
             .series
             .iter()
@@ -2451,7 +2434,7 @@ fn main() {
             out.push(String::new());
         }
 
-        let room = process_room(h, out.len(), packed.lines.len(), banner.len());
+        let room = process_room(h, out.len(), packed.lines.len());
         let show = if limit > 0 { limit.min(room) } else { room };
         // The window follows the cursor, as it does in the detail screen and
         // in github's account list. It did not before: the table always drew
@@ -2513,11 +2496,7 @@ fn main() {
         }
 
         drop(guard);
-        let foot: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // Nothing is pinned on this screen - the whole frame is built to
         // the pane and the table windows itself - so the head is zero and
         // a frame row is a body row.
@@ -2528,9 +2507,9 @@ fn main() {
         // Each screen registers its own as it draws, and the last draw
         // wins - which is what a click arriving next has to be measured
         // against.
-        let foot_top = out.len() + banner.len();
+        let foot_top = out.len();
         out.extend(foot);
-        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1 + banner.len()))).collect();
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
         tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
     }
@@ -2772,12 +2751,11 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
 /// The process table, dropping columns rather than clipping them.
 /// Process rows that fit under `drawn` header rows.
 ///
-/// One row is the table heading, `footer` is the packed hint rows and
-/// `banner` the notice rows above them. At least one process row is kept,
-/// so a short pane still names a process rather than showing a heading
-/// over nothing.
-fn process_room(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
-    h.saturating_sub(drawn + footer + banner + 1).max(1)
+/// One row is the table heading and `footer` is the packed hint rows. At
+/// least one process row is kept, so a short pane still names a process
+/// rather than showing a heading over nothing.
+fn process_room(h: usize, drawn: usize, footer: usize) -> usize {
+    h.saturating_sub(drawn + footer + 1).max(1)
 }
 
 /// Rows left for the chart and the table together, before either is drawn.
@@ -2785,8 +2763,8 @@ fn process_room(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
 /// Two past [`process_room`]: the table heading, and the blank line a chart
 /// leaves under itself. No `.max(1)` — a pane with nothing left stands the
 /// chart down rather than drawing it into the heading.
-fn chart_spare(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
-    h.saturating_sub(drawn + footer + banner + 2)
+fn chart_spare(h: usize, drawn: usize, footer: usize) -> usize {
+    h.saturating_sub(drawn + footer + 2)
 }
 
 /// Where the process table starts so the cursor is on it.
@@ -2923,23 +2901,19 @@ mod tests {
         let h = 24;
         let drawn = 10;
         // Two hint rows was the old constant (`+ 3` = heading + those two).
-        // A notice counter wraps a third on a 60-column pane and stays
-        // after the banner expires. Reserving three then makes the frame
-        // one row taller than the pane, and draw drops the last footer row.
+        // The hints wrap onto a third on a narrow pane. Reserving three then
+        // makes the frame one row taller than the pane, and draw drops the
+        // last footer row.
         let footer = 3;
-        let room = process_room(h, drawn, footer, 0);
+        let room = process_room(h, drawn, footer);
         assert_eq!(drawn + 1 + room + footer, h);
         let old = h.saturating_sub(drawn + 3).max(1);
         assert_eq!(drawn + 1 + old + footer, h + 1);
         // The chart keeps the same reservation plus the blank under it.
-        assert_eq!(
-            chart_spare(h, drawn, footer, 0),
-            process_room(h, drawn, footer, 0) - 1
-        );
-        // A two-row footer and a two-row banner is the case the fixed `3`
-        // already covered, so the reservation does not move.
-        assert_eq!(process_room(h, drawn, 2, 2), h - drawn - 5);
-        assert_eq!(chart_spare(h, drawn, 2, 2), h - drawn - 6);
+        assert_eq!(chart_spare(h, drawn, footer), process_room(h, drawn, footer) - 1);
+        // A two-row footer is the case the fixed `3` already covered.
+        assert_eq!(process_room(h, drawn, 2), h - drawn - 3);
+        assert_eq!(chart_spare(h, drawn, 2), h - drawn - 4);
     }
 
     fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted: bool) -> Vec<Vec<u8>> {

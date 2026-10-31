@@ -943,54 +943,90 @@ fn every_notice_has_a_stable_id() {
     );
 }
 
-/// Whether a widget can have a notice to show: it raises one itself, it
-/// loads config (whose permissions core raises on), or it declares a
-/// recommended tool (whose absence core raises on).
-fn can_hold_a_notice(name: &str, src: &str) -> bool {
-    let recommended = std::fs::read_to_string(
-        root().join("widgets/src/widgets").join(name).join("dependencies.json"),
-    )
-    .ok()
-    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-    .and_then(|v| v.get("recommended").and_then(|r| r.as_object()).map(|r| !r.is_empty()))
-    .unwrap_or(false);
-    calls(src, "tc::notices::") || calls(src, "load_config(") || recommended
+/// The four calls a widget used to make to show its notices, any one of
+/// which it could leave out - and two widgets did. Core makes all four now.
+const NOTICE_WIRING: &[&str] = &[
+    "notices::start(",
+    "notices::run(",
+    "notices::hint(",
+    "notices::banner_rows(",
+];
+
+/// Which of [`NOTICE_WIRING`] `src` makes itself.
+fn wires_notices(src: &str) -> Vec<&'static str> {
+    NOTICE_WIRING
+        .iter()
+        .copied()
+        .filter(|token| calls(src, token))
+        .collect()
 }
 
 #[test]
-fn a_widget_that_raises_a_notice_shows_it() {
+fn wires_notices_reads_the_shape_it_has_to_catch() {
+    // The positive control: the exact lines every widget carried before
+    // core took the channel over, and that google-trends shipped without.
+    let old = "    tc::notices::start(\"clocks\");\n\
+               \x20   \"!\" => tc::notices::run(&mut keyboard),\n\
+               \x20   hints.extend(tc::notices::hint(w - 2));\n\
+               \x20   let banner = tc::notices::banner_rows(w, h);\n";
+    assert_eq!(wires_notices(old), NOTICE_WIRING.to_vec());
+    // Raising is the widget's to do, and is not wiring.
+    let raises = "    tc::notices::raise(tc::notices::Notice::warn(\"a\", \"b\"));\n\
+                  \x20   tc::notices::when(bad, || tc::notices::Notice::info(\"c\", \"d\"));\n";
+    assert!(wires_notices(raises).is_empty());
+    // A comment naming the old call is history, not a call.
+    assert!(wires_notices("    // tc::notices::start(\"x\") used to go here\n").is_empty());
+}
+
+#[test]
+fn a_widget_never_wires_notices_itself() {
     // A notice nobody can see is a warning dropped on purpose, which is the
-    // thing this channel replaced. Core raises on behalf of every widget
-    // that loads config or declares a recommended tool, so nearly every
-    // widget can hold one - and each must name itself, draw the banner and
-    // the counter, and open the screen on `!`.
-    let mut missing = Vec::new();
-    for (name, src) in widgets() {
-        if !can_hold_a_notice(&name, &src) {
-            continue;
-        }
-        for (token, what) in [
-            ("tc::notices::start(", "never calls tc::notices::start in main"),
-            ("tc::notices::hint(", "never puts tc::notices::hint in its footer"),
-            ("tc::notices::banner_rows(", "never draws tc::notices::banner_rows"),
-            ("tc::notices::run(", "never opens the notices screen"),
-        ] {
-            if !calls(&src, token) {
-                missing.push(format!("{name}: {what}"));
-            }
-        }
-        if !handled_keys(&src).contains("!") {
-            missing.push(format!("{name}: no match arm answers `!`"));
+    // thing this channel replaced. Each widget used to start the channel,
+    // answer `!`, put the counter in its footer and the banner above it -
+    // four places, and a widget missing any one held notices it never
+    // showed. google-trends merged without them, and `matrix` was handed
+    // a Core warning it had no way to draw. So core does all four, for
+    // every binary, and a widget that does any of them itself is wiring a
+    // second copy that can only disagree with the first.
+    let mut wrong = Vec::new();
+    let mut sources = widgets();
+    sources.insert("opscope (launcher)".to_string(), launcher_source());
+    for (name, src) in &sources {
+        for token in wires_notices(src) {
+            wrong.push(format!("{name}: calls {token}..) itself"));
         }
     }
+    // And the other half: core does it. Each is the one line a refactor
+    // could drop without any widget noticing.
+    let core = core_sources();
+    let lib = core.get("lib.rs").map(String::as_str).unwrap_or_default();
+    let notices = core.get("notices.rs").map(String::as_str).unwrap_or_default();
+    for (src, token, what) in [
+        (lib, "notices::start_for_this_binary()", "maybe_widget_help starts the channel"),
+        (lib, "notices::run(self)", "Keyboard::poll opens the screen on `!`"),
+        (lib, "notices::reserve(", "size() reserves the banner's rows"),
+        (lib, "notices::chrome(", "draw puts the counter and the banner on"),
+        (lib, "COUNTER_SPOT", "a click on the counter arrives as `!`"),
+        (notices, "STARTED.store(true", "start marks the channel running"),
+    ] {
+        if !calls(src, token) {
+            wrong.push(format!("core: no {token} - {what}"));
+        }
+    }
+    let help = lib.find("pub fn maybe_widget_help").map(|at| &lib[at..]).unwrap_or("");
+    let help = &help[..help.find("\n}\n").unwrap_or(help.len())];
+    if !help.contains("notices::start_for_this_binary()") {
+        wrong.push("core: maybe_widget_help does not start the channel".to_string());
+    }
     assert!(
-        missing.is_empty(),
-        "a widget that can hold a notice has to show it:\n  {}\n\
-         \n    tc::notices::start(\"name\");                 // in main\n\
-         \u{20}   \"!\" => tc::notices::run(&mut keyboard),     // beside \",\"\n\
-         \u{20}   hints.extend(tc::notices::hint(w - 2));     // beside [,] settings\n\
-         \u{20}   let banner = tc::notices::banner_rows(w, h); // above the footer\n",
-        missing.join("\n  ")
+        wrong.is_empty(),
+        "notices are core's to wire, for every binary:\n  {}\n\
+         A widget raises with tc::notices::raise / when / clear and does \
+         nothing else. Core starts the channel in maybe_widget_help, answers \
+         `!` in Keyboard::poll, stamps the counter on the top row and puts \
+         the banner under the frame through size() and draw(). A text field \
+         calls keyboard.typing() before poll so `!` stays a character.",
+        wrong.join("\n  ")
     );
 }
 
@@ -1037,7 +1073,7 @@ fn only_core_draws_the_notices_screen() {
     assert!(
         wrong.is_empty(),
         "notices belong to core, not to a widget:\n  {}\n\
-         Raise them through tc::notices and open tc::notices::run on `!`. A \
+         Raise them through tc::notices; core shows them and answers `!`. A \
          transient message of a widget's own - ports' kill confirmation - is \
          a toast, and is named one.",
         wrong.join("\n  ")
@@ -1664,12 +1700,6 @@ const NAMED: &[&str] = &["esc", "tab", "enter", "backspace", "pgup", "pgdn", "ho
 /// away every hint with a space in it.
 fn hinted_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    // The notices counter is built in core, so its `[!]` is in no string
-    // here - but a widget that puts it in its footer is hinting `!` all the
-    // same, and has to answer it and document it.
-    if calls(src, "notices::hint(") {
-        found.insert("!".to_string());
-    }
     for text in string_lines(src) {
         let chars: Vec<char> = text.chars().collect();
         // A footer separates its hints with `·` AND names at least one key
@@ -1743,6 +1773,9 @@ fn hinted_keys(src: &str) -> BTreeSet<String> {
 /// of this rule report 48 failures against widgets that were all correct.
 fn handled_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
+    // `Keyboard::poll` answers `!` for every widget before the widget sees
+    // a key, so every widget answers it without an arm of its own.
+    found.insert("!".to_string());
     for line in src.lines() {
         if line.trim_start().starts_with("//") {
             continue;
