@@ -18,6 +18,7 @@ Unlike every operational widget, this one is only visual.
 | Key | Action |
 |---|---|
 | `q` | quit |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 
 ## Configuration
 

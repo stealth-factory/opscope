@@ -16,11 +16,11 @@ now, s cycles the state filter (all / failed / production), / filters by text
 against the project, branch, commit subject and deployment id; comma opens settings
 outside text entry, q quits.
 
-Press ! to read this widget's notices - warnings that are not about a number
-on screen, such as a config file others can read or a recommended tool that is
-missing - and dismiss them for this session, for 7 days or for 30. A new
-notice shows above the footer for a minute, then as a [!] count in the footer
-for as long as it is still true.
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows under the footer for a minute, and a [!] count stays on the top row for
+as long as it is still true. Clicking the count opens the same screen.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it and the
 text reaches your local clipboard even over SSH. If your terminal or

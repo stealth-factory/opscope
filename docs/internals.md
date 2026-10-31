@@ -23,13 +23,13 @@ wheel, a footer that is drawn and never registered so nobody can click it,
 a widget with a cursor that ignores a click,
 a widget that opens `/proc` with no macOS path and no explanation, a notice
 id that is not a literal or a const or a Core-scope notice raised by a
-widget (`every_notice_has_a_stable_id`), a widget that can hold a notice and
-does not start the channel, draw its banner and counter, and answer `!` with
-the screen (`a_widget_that_raises_a_notice_shows_it`), and a widget with a
-notices type, module or function of its own
-(`only_core_draws_the_notices_screen`). A widget that puts
-`tc::notices::hint(` in its footer is read as hinting `!`, so the key and
-README checks cover that key like any other.
+widget (`every_notice_has_a_stable_id`), a widget or the launcher that
+starts the channel, draws the banner or counter, or opens the screen itself
+when core does all of that for every binary - and core that stops doing any
+of it (`a_widget_never_wires_notices_itself`), and a widget with a notices
+type, module or function of its own (`only_core_draws_the_notices_screen`).
+The key checks count `!` as answered by every widget, because
+`Keyboard::poll` answers it before the widget sees a key.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -78,24 +78,39 @@ sharing an id with a Core one is a second notice, not an overwrite: raising the 
 it in place, and a change to its title or detail — hashed with FNV-1a, so the
 number is the same in every build — banners it again and voids a dismissal.
 
-The widget draws two things and answers one key. `hint(room)` is the footer
-hint, `[!] 1 error, 2 warnings`, worst level first and coloured by it, or
-`None` when nothing is outstanding; it shortens to `[!] 3 notices` rather
-than overflowing a narrow footer, and `hint_key` reads its `[!]`, so it is
-clickable through `footer_at` with nothing more done. `banner_rows(w, h)` is
-up to two notices, newest first, for sixty seconds each - each one's title
-alone, wrapped by `error_rows()`, the detail left to the `!` screen. It takes
-at most a quarter of the pane's height `h`, since only the body scrolls and a
-taller banner would push the footer's hints below the bottom edge; a title
-that does not fit whole in what is left is not shown rather than cut, and
-the `[!]` counter still counts it. It is drawn above the footer and counted in it, not injected by
-`draw()`, which would move the footer out from under the placements
-`footer_at` registered. `run(keyboard)` is the screen, on `!`.
+Core shows notices for every binary, and a widget only raises them.
+`maybe_widget_help` - which every binary runs after `--help` and `--version`
+- calls `start_for_this_binary()`, which names the channel after the binary
+and looks at the config file's permissions once. Each frame `size()` calls
+`reserve(w, h, room)`, which decides two things from one reading of the
+registry and keeps them for `title` and `draw`:
 
-Core raises its own: `config-world-readable` (Core scope, from
-`load_config()`, and looked at again every five seconds from `hint` and
-`banner_rows`, so a `chmod 600` clears it and a file rewritten wider raises
-it without a restart), and one Info per recommended tool `dependencies_available()`
+- the **counter**, `[!] 1 error, 2 warnings`, worst level first and coloured
+  by it, stamped by `draw` on the top row after a space and before the
+  version. It shortens to `[!] 3 notices` and then `[!] 3` rather than
+  overflow, and the shortest always goes down: the version stands down
+  before it does, the way the version already stands down on a narrow pane,
+  because the counter is the one the reader can act on. `title` is built
+  short by the same width, so the rule keeps its `╸`. A click on its cells
+  arrives as `!`.
+- the **banner**: up to two notices, newest first, for sixty seconds each -
+  each one's title alone, wrapped by `error_rows()`, the detail left to the
+  `!` screen. At most a quarter of the pane, and nothing below ten rows; a
+  title that does not fit whole in what is left is not shown rather than
+  cut, and the counter still counts it. `size()` returns the pane less those
+  rows, the widget lays out in what it was handed, and `draw` puts the
+  banner on the rows below - only when the widget drew at the height
+  `size()` returned, so it is never laid over rows a widget thinks it owns.
+
+`Keyboard::poll` answers `!` with `run(keyboard)`, the screen, unless the
+widget called `typing()` before that poll because a text field has the
+keyboard. While the screen is up nothing is reserved or stamped, since it is
+the list those would repeat, and `!` there is the key that closes it.
+
+Core raises its own: `config-world-readable` (Core scope, at start and from
+`load_config()`, and looked at again every five seconds from `reserve`, so a
+`chmod 600` clears it and a file rewritten wider raises it without a
+restart), and one Info per recommended tool `dependencies_available()`
 finds missing, and two about its own file below.
 
 A dismissal is keyed `core/<id>` or `<widget>/<id>` with the hash it was
@@ -118,8 +133,8 @@ write is a read-modify-write under `tc::statefile::with_lock` - `flock` on
 merge; each write also drops what has expired. An entry taken against
 content this pane's notice no longer has is kept, since another pane may
 still show that content and have dismissed it; it hides nothing here and
-goes when it expires. `start()` reads the file and `hint()`
-and `banner_rows()` read it again at most once a minute, on the drawing
+goes when it expires. `start()` reads the file and `reserve()`
+reads it again at most once a minute, on the drawing
 thread: it is a few hundred bytes, and a thread for it would be one more
 poller to keep alive. `u` removes the entry from the file as well.
 
