@@ -4289,7 +4289,17 @@ mod tests {
         board.total_read = vec![Some(1000.0), Some(2000.0)];
         board.total_write = vec![Some(100.0), Some(200.0)];
         board.total_names = vec!["sda".into(), "sdb".into()];
+        board.rows[0].read = vec![Some(10.0), Some(40.0)];
+        board.rows[0].write = vec![Some(5.0), Some(20.0)];
         let p = palette();
+        // Read grows up from zero, write grows down, each on its own peak.
+        let traces = |drawn: &Drawn| -> Vec<Vec<Option<f64>>> {
+            drawn
+                .plots
+                .iter()
+                .map(|plot| plot.chart.traces[0].values.clone())
+                .collect()
+        };
         let mut frame = view(None, "");
         frame.board = Some(&board);
         frame.disk_cursor = "sda";
@@ -4297,10 +4307,19 @@ mod tests {
             frame.focus = focus;
             let drawn = draw_body(&frame, 100, &p, None);
             assert!(plain_has(&drawn, "total of sda, sdb"), "focus {focus}");
+            assert_eq!(
+                traces(&drawn),
+                vec![vec![Some(0.5), Some(1.0)], vec![Some(0.5), Some(0.0)]],
+                "focus {focus}"
+            );
         }
         frame.focus = 1;
         let drawn = draw_body(&frame, 100, &p, None);
         assert!(!plain_has(&drawn, "total of"));
+        assert_eq!(
+            traces(&drawn),
+            vec![vec![Some(0.25), Some(1.0)], vec![Some(0.75), Some(0.0)]]
+        );
         let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
         let chart_at = lines
             .iter()
