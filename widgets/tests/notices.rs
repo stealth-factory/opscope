@@ -29,6 +29,8 @@
 //! Neither touches the network: `vercel-deployments` has no token here,
 //! so it never asks Vercel for anything.
 
+mod support;
+
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -36,27 +38,6 @@ use std::time::{Duration, Instant};
 
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
-
-fn pty() -> (i32, i32) {
-    unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        assert!(master >= 0, "no pty");
-        assert_eq!(libc::grantpt(master), 0);
-        assert_eq!(libc::unlockpt(master), 0);
-        let name = libc::ptsname(master);
-        assert!(!name.is_null());
-        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
-        assert!(slave >= 0, "could not open the slave");
-        let size = libc::winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
-        libc::ioctl(slave, libc::TIOCSWINSZ, &size);
-        for fd in [master, slave] {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
-        let flags = libc::fcntl(master, libc::F_GETFL);
-        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        (master, slave)
-    }
-}
 
 /// A binary on its own pty, with a throwaway config readable by others and
 /// a state directory of its own, so no dismissal from a real pane hides
@@ -78,7 +59,7 @@ impl Pane {
         let file = config.join("config.json");
         std::fs::write(&file, "{}\n").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let (master, slave) = pty();
+        let (master, slave) = support::pty(COLS, ROWS);
         let io = |fd: i32| unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
         let child = Command::new(bin)
             .current_dir(&home)
