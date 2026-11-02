@@ -2240,17 +2240,30 @@ fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
 }
 
 /// Disks at the top of the stack, and the rows left out because one of
-/// those disks names them as a slave. Summing both would count the same
-/// bytes twice.
+/// those disks names them as a slave, or names a partition of them.
+/// Summing both would count the same bytes twice. A partition is not a
+/// row, so the whole disk that owns it is the one left out.
 fn total_membership(rows: &[DiskViewRow]) -> (Vec<usize>, Vec<String>) {
     let present: std::collections::BTreeSet<&str> =
         rows.iter().map(|row| row.disk.name.as_str()).collect();
-    let mut covered: Vec<String> = rows
-        .iter()
-        .flat_map(|row| row.disk.slaves.iter())
-        .filter(|name| present.contains(name.as_str()))
-        .cloned()
-        .collect();
+    let mut parent_of: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for row in rows {
+        for part in &row.disk.partitions {
+            parent_of.insert(part.name.as_str(), row.disk.name.as_str());
+        }
+    }
+    let mut covered: Vec<String> = Vec::new();
+    for row in rows {
+        for slave in &row.disk.slaves {
+            if present.contains(slave.as_str()) {
+                covered.push(slave.clone());
+            } else if let Some(parent) = parent_of.get(slave.as_str()) {
+                if present.contains(parent) && *parent != row.disk.name.as_str() {
+                    covered.push((*parent).to_string());
+                }
+            }
+        }
+    }
     covered.sort();
     covered.dedup();
     let members = rows
@@ -4088,6 +4101,62 @@ mod tests {
             total_label(&["dm-0".into(), "sdb".into()], &["sda".into()]),
             "total of dm-0, sdb · sda not added"
         );
+    }
+
+    #[test]
+    fn a_partition_slave_leaves_its_disk_out_of_the_total() {
+        let mut mapper = disk_row("dm-0", 0, 0, 0.0);
+        mapper.disk.slaves = vec!["sda2".into()];
+        mapper.disk.partitions.clear();
+        mapper.read = vec![Some(100.0)];
+        mapper.write = vec![Some(40.0)];
+        let mut sda = disk_row("sda", 0, 0, 0.0);
+        sda.disk.partitions = vec![
+            parse::PartMount {
+                name: "sda1".into(),
+                dev: "8:1".into(),
+                mounts: vec![],
+            },
+            parse::PartMount {
+                name: "sda2".into(),
+                dev: "8:2".into(),
+                mounts: vec![],
+            },
+        ];
+        sda.read = vec![Some(100.0)];
+        sda.write = vec![Some(40.0)];
+        let mut sdb = disk_row("sdb", 0, 0, 0.0);
+        sdb.read = vec![Some(50.0)];
+        sdb.write = vec![Some(10.0)];
+        let rows = vec![mapper, sda, sdb];
+        let (members, covered) = total_membership(&rows);
+        assert_eq!(covered, vec!["sda".to_string()]);
+        let mut names: Vec<_> = members
+            .iter()
+            .map(|&index| rows[index].disk.name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["dm-0", "sdb"]);
+        // 100 from dm-0 plus 50 from sdb. sda's 100 is the same bytes as dm-0.
+        assert_eq!(total_point(&rows, &members, false), Some(150.0));
+        assert_eq!(total_point(&rows, &members, true), Some(50.0));
+
+        let mut raid = disk_row("md0", 0, 0, 0.0);
+        raid.disk.slaves = vec!["sda2".into(), "sdb1".into()];
+        raid.disk.partitions.clear();
+        raid.read = vec![Some(80.0)];
+        raid.write = vec![Some(20.0)];
+        let pair = vec![raid, rows[1].clone(), rows[2].clone()];
+        let (members, covered) = total_membership(&pair);
+        assert_eq!(covered, vec!["sda".to_string(), "sdb".to_string()]);
+        assert_eq!(
+            members
+                .iter()
+                .map(|&index| pair[index].disk.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["md0"]
+        );
+        assert_eq!(total_point(&pair, &members, false), Some(80.0));
     }
 
     #[test]
