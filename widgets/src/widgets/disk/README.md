@@ -18,8 +18,8 @@ MOUNT   TYPE         SIZE   USED USABLE           %     1h Δ     7d Δ       FU
  DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: write · QUEUE is
  instantaneous
 DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT BUSY* QUEUE
-  sda                                    ssd        1T    12M   40M  1.2K   2ms   18%     1
-  sdb                                    ssd        1T   1.9M  1.0M  48.0   1ms    2%     0
+  sda                                    ssd        1T   1.5M   18M  1.2K   2ms   18%     1
+  sdb                                    ssd        1T   400K  1.0M  48.0   1ms    2%     0
  * BUSY = share of time with at least one request in flight (field 10); an NVMe reaches
  100% with headroom
  total of sda, sdb

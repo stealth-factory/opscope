@@ -15,8 +15,9 @@ filesystem table still runs. PRESSURE is Linux-only, from /proc/pressure/io.
 A kernel without PSI says so. A Mac does not draw that section.
 
 Under the disk table one chart draws read growing up and write growing
-down, each to its own peak. Until the disk section has focus it is the
-total of every disk; then it is the selected disk, named above it.
+down, each to its own peak; on macOS it is one trace of combined I/O.
+Until the disk section has focus it is the total of every disk; then it
+is the selected disk, named above it.
 
     disk [-n SECONDS]
 
