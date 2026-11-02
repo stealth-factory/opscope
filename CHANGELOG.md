@@ -3,6 +3,14 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.4.0] - 2026-11-02
+
+### Features
+
+- **agent-usage**: Name claude max and ultra and show when ultra has no 5-hour limit (OPS-242) (#540)
+- **core**: Own the notices channel for every binary (OPS-243) (#539)
+- **core**: Count widget and launcher starts (OPS-127) (#536)
+
 ## [2.3.0] - 2026-10-27
 
 ### CI
