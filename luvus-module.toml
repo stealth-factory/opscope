@@ -53,6 +53,13 @@ title = "clocks"
 placement = "split"
 command = ["./luvus/bin/opscope", "clocks"]
 
+# Which filesystems can still take a write, and which are running out of inodes.
+[[panes]]
+id = "disk"
+title = "disk"
+placement = "split"
+command = ["./luvus/bin/opscope", "disk"]
+
 # GitHub delivery metrics across every org and account you can see.
 [[panes]]
 id = "github"

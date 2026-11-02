@@ -15,7 +15,7 @@ luvus module install stealth-factory/opscope
 ## The way in is the launcher
 
 **Right-click any pane and choose *opscope*.** That opens the launcher: all
-seventeen widgets, each with its own one-line summary and a preview of what it
+eighteen widgets, each with its own one-line summary and a preview of what it
 looks like running, and `↵` starts the one under the cursor in that same pane.
 Browsing is the launcher's whole job and there is no reason to make anyone do
 it from a command line.
@@ -35,7 +35,7 @@ luvus module pane open opscope.widgets clocks --placement overlay
 Every widget has a pane of its own, so anything on the launcher's list is
 also a command. `--placement` takes `split`, `overlay` or `tab`; left out, the
 manifest's own `split` stands. `luvus module info opscope.widgets` lists all
-eighteen.
+nineteen.
 
 ## What it declares
 
@@ -142,4 +142,4 @@ A module is ordinary code that runs as you. Luvus shows every command a
 module declares before it installs one, and the whole of this module's is
 above: one `/bin/sh luvus/build.sh` at install time, one `/bin/sh
 luvus/open-menu.sh` behind the right-click row, and one `./luvus/bin/opscope`
-line for each of the seventeen widgets and the launcher menu.
+line for each of the eighteen widgets and the launcher menu.

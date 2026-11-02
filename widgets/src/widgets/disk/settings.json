@@ -1,0 +1,17 @@
+{
+  "_comment": "Filesystem space and inodes. Linux reads /proc/self/mountinfo and statvfs; macOS reads getmntinfo. Pseudo filesystems, bind mounts and read-only mounts are hidden because none of them can fill.",
+  "_schema": {
+    "refresh": { "minimum": 0.5 },
+    "hide_mounts": { "items": "string" },
+    "warn_percent": { "minimum": 1, "maximum": 100 },
+    "alert_percent": { "minimum": 1, "maximum": 100 }
+  },
+  "_refresh_comment": "Seconds between samples. Minimum 0.5. -n SECONDS on the command line overrides this for one run.",
+  "refresh": 2.0,
+  "_hide_mounts_comment": "Mount points to hide. An entry is an exact path, or a prefix of every mount under it when it ends in /. The entry / hides only the root mount; a prefix of / would hide every absolute path.",
+  "hide_mounts": [],
+  "_warn_percent_comment": "Percent used at which the bar starts to leave green. At and below this the bar stays quiet.",
+  "warn_percent": 80,
+  "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",
+  "alert_percent": 90
+}

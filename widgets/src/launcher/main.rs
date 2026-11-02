@@ -46,6 +46,7 @@ macro_rules! widget {
 const WIDGETS: &[Widget] = &[
     widget!("agent-usage"),
     widget!("clocks"),
+    widget!("disk"),
     widget!("github"),
     widget!("github-actions"),
     widget!("github-prs"),
