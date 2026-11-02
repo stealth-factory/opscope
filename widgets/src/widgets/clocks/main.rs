@@ -1356,66 +1356,6 @@ fn main() {
         }
         rows.push(String::new());
 
-        // The world clock takes whatever is left, and says which slice of
-        // the list it is showing rather than silently truncating. Order is
-        // west to east by this frame's offsets, not the order at load:
-        // a pane left up across DST has to keep being a map.
-        let ordered = cities_west_to_east(&cities, &now);
-        let room = h.saturating_sub(rows.len() + 3);
-        if room >= 2 && !ordered.is_empty() {
-            let shown = room.saturating_sub(1).min(ordered.len());
-            if scroll + shown > ordered.len() {
-                scroll = ordered.len().saturating_sub(shown);
-            }
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
-                    ),
-                ],
-                w - 1,
-            ));
-            // The name grows with the pane rather than being cut at 16. The
-            // glyph, the time, the day with a UTC+5:30 offset and a day shift
-            // are the fixed cells, and one more keeps a full-length name off
-            // the time.
-            let longest = ordered
-                .iter()
-                .map(|c| tc::display_width(&c.name) + 1)
-                .max()
-                .unwrap_or(0);
-            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
-            for city in ordered.iter().skip(scroll).take(shown) {
-                let there = now.with_timezone(&city.zone);
-                // Sun or moon by the local hour, which is the fastest way
-                // to read "is it a reasonable time to message them".
-                let (ink, glyph) = phase_of(&there, &p);
-                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
-                rows.push(tc::seg(
-                    &[
-                        (ink.as_str(), format!(" {} ", glyph)),
-                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
-                        (p.txt.as_str(), there.format("%H:%M").to_string()),
-                        (
-                            p.dim.as_str(),
-                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
-                        ),
-                        (
-                            p.dim.as_str(),
-                            match day_shift {
-                                0 => String::new(),
-                                d if d > 0 => format!("    +{}d", d),
-                                d => format!("    {}d", d),
-                            },
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-        }
-
         // Navigation first, as every other widget in the collection has it,
         // then the pomodoro's own controls, then the panel keys. Only the
         // pomodoro controls hide behind ?: hiding the way back would leave
@@ -1476,8 +1416,78 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+
+        // The world clock takes whatever is left, and says which slice of
+        // the list it is showing rather than silently truncating. Order is
+        // west to east by this frame's offsets, not the order at load:
+        // a pane left up across DST has to keep being a map.
+        let ordered = cities_west_to_east(&cities, &now);
+        // The footer as packed, not a guess at it: it wraps to more lines
+        // as the pane narrows, and every one it gains comes out of this.
+        let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
+        let room = free;
+        // This section is built from what is left rather than scrolled, so
+        // a notices banner taking those rows would take the section with
+        // it. Say what it needs - its heading and two cities - and the
+        // banner gives way; the counter still says the notices are there.
+        if !ordered.is_empty() {
+            tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + ordered.len().min(2));
+        }
+        if room >= 2 && !ordered.is_empty() {
+            let shown = room.saturating_sub(1).min(ordered.len());
+            if scroll + shown > ordered.len() {
+                scroll = ordered.len().saturating_sub(shown);
+            }
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
+                    (
+                        p.dim.as_str(),
+                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
+                    ),
+                ],
+                w - 1,
+            ));
+            // The name grows with the pane rather than being cut at 16. The
+            // glyph, the time, the day with a UTC+5:30 offset and a day shift
+            // are the fixed cells, and one more keeps a full-length name off
+            // the time.
+            let longest = ordered
+                .iter()
+                .map(|c| tc::display_width(&c.name) + 1)
+                .max()
+                .unwrap_or(0);
+            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
+            for city in ordered.iter().skip(scroll).take(shown) {
+                let there = now.with_timezone(&city.zone);
+                // Sun or moon by the local hour, which is the fastest way
+                // to read "is it a reasonable time to message them".
+                let (ink, glyph) = phase_of(&there, &p);
+                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
+                rows.push(tc::seg(
+                    &[
+                        (ink.as_str(), format!(" {} ", glyph)),
+                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
+                        (p.txt.as_str(), there.format("%H:%M").to_string()),
+                        (
+                            p.dim.as_str(),
+                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
+                        ),
+                        (
+                            p.dim.as_str(),
+                            match day_shift {
+                                0 => String::new(),
+                                d if d > 0 => format!("    +{}d", d),
+                                d => format!("    {}d", d),
+                            },
+                        ),
+                    ],
+                    w - 1,
+                ));
+            }
+        }
+
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         while rows.len() < h.saturating_sub(foot.len()) {
             rows.push(String::new());
         }
@@ -1487,12 +1497,13 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len();
+        let body_end = rows.len();
+        let foot_top = body_end;
         rows.extend(foot);
         if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
             tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
         } else {
-            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1))).collect();
             tc::draw_plots(&rows, w, h, &plots);
         }
         keyboard.footer_at(&packed, foot_top, 1);

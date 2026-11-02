@@ -3,6 +3,46 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.4.0] - 2026-11-02
+
+### Features
+
+- **agent-usage**: Name claude max and ultra and show when ultra has no 5-hour limit (OPS-242) (#540)
+- **core**: Own the notices channel for every binary (OPS-243) (#539)
+- **core**: Count widget and launcher starts (OPS-127) (#536)
+
+## [2.3.0] - 2026-10-27
+
+### CI
+
+- Publish main to npm as opscope@canary (#531)
+
+### Documentation
+
+- Explain GitHub Enterprise setup for the GitHub widgets (#532)
+
+### Features
+
+- **google-trends**: New widget showing Google's Trending Now feed (OPS-188) (#447)
+- **core**: Persist 7- and 30-day notice dismissals and share a state-file writer (OPS-212) (#517)
+- **google-trends**: Show regions as tabs (OPS-239) (#525)
+
+## [2.2.0] - 2026-10-26
+
+### Features
+
+- **github**: Route github, github-actions, and github-prs to an Enterprise Cloud host (#521)
+
+## [2.1.0] - 2026-10-26
+
+### Bug Fixes
+
+- **agent-usage**: Read Antigravity's Gemini weekly and 5h limits from `agy /usage` (OPS-198) (#514)
+
+### Features
+
+- **core**: A notices channel for warnings not tied to a row (OPS-195) (#460)
+
 ## [2.0.1] - 2026-10-26
 
 ### Bug Fixes

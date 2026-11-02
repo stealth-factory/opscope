@@ -1184,8 +1184,8 @@ fn copy_overlay(
             format!("press 1-{} to copy", pairs.len()),
         )]);
     }
+    hints.push(vec![(p.hint.as_str(), "← or esc to close".into())]);
     hints.extend([
-        vec![(p.hint.as_str(), "← or esc to close".into())],
         vec![(p.hint.as_str(), "[,] settings".into())],
         vec![(p.hint.as_str(), "[q]uit".into())],
     ]);
@@ -1259,7 +1259,7 @@ fn main() {
     };
 
     let p = palette();
-    let (tok, source) = token(&cfg);
+    let (tok, _) = token(&cfg);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
         if name.is_empty() { "VERCEL_TOKEN".to_string() } else { name }
@@ -1296,13 +1296,10 @@ fn main() {
             let mut out: Vec<serde_json::Value> = Vec::new();
             // Whether any scope answered this round, deployments or not.
             let mut any_loaded = false;
-            // A file others can read is worth saying out loud, since this
-            // is the widget that put a token in it.
-            let mut err = if source == "config" {
-                tc::config_token_warning().unwrap_or_default()
-            } else {
-                String::new()
-            };
+            // A config file others can read is no longer said here: core
+            // raises it as a notice in every pane, and glued onto this
+            // string it made a working board read as a failing one.
+            let mut err = String::new();
             // scopes_for always hands back at least the personal account, so
             // there is no empty case to guard here - a fallback that cannot
             // run reads as a case that can.
@@ -1429,6 +1426,10 @@ fn main() {
 
     loop {
         let tick = tc::animation_tick();
+        // The filter box takes `!` as a character, not the notices screen.
+        if typing && !overlay {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1687,9 +1688,11 @@ fn main() {
                     vec![(p.hint.as_str(), "[c]opy".into())],
                     vec![(p.hint.as_str(), "[r]efresh".into())],
                     vec![(p.hint.as_str(), "← or esc to close".into())],
+                ];
+                hints.extend([
                     vec![(p.hint.as_str(), "[,] settings".into())],
                     vec![(p.hint.as_str(), "[q]uit".into())],
-                ];
+                ]);
                 let base_foot = tc::pack_hints(&hints, w - 2, " · ");
                 if body.len() > h.saturating_sub(base_foot.len() + 1) {
                     let rest_len = body.len().saturating_sub(1);
@@ -1697,8 +1700,7 @@ fn main() {
                     hints.insert(0, vec![(p.hint.as_str(), widest)]);
                 }
                 let mut packed = tc::pack_hints_placed(&hints, w - 2, " · ");
-                let mut foot: Vec<String> =
-                    packed.lines.iter().map(|line| format!(" {}", line)).collect();
+                let mut foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
                 let room = h.saturating_sub(foot.len() + 1).max(1);
                 // The title stays; the rest scrolls under it. Scroll an
                 // overlay far enough without this and nothing on screen
@@ -2025,7 +2027,7 @@ fn main() {
             }
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
@@ -2039,10 +2041,14 @@ fn main() {
             )],
             vec![(p.dim.as_str(), "[/]filter".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        // The hints, as one block, so `room` below reserves them and the
+        // body never scrolls under them.
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let room = h.saturating_sub(footer.len());
         let head_len = 1.min(rows.len());

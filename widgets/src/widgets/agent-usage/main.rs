@@ -911,6 +911,14 @@ fn paced_bar_with_plot(
     parts
 }
 
+/// Plain text flowed to a width, splitting a word that is wider than the row.
+///
+/// Width is display cells, the same measure `seg` clips by. Counting
+/// characters keeps a fullwidth name on one line, and `seg` then cuts it.
+fn flow_cells(text: &str, budget: usize) -> Vec<String> {
+    tc::wrap_words(text, budget.max(1))
+}
+
 /// Plain text flowed to a width. Clipping a sentence loses its end.
 fn wrap_text(t: &str, budget: usize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -1700,20 +1708,62 @@ fn plan_rows(
     caveat: &str,
     p: &Palette,
 ) -> Vec<String> {
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── SUBSCRIPTION ── ".into()),
-            (
-                p.txt.as_str(),
-                if headline.is_empty() { "unknown".into() } else { headline.to_string() },
-            ),
-            (
-                p.dim.as_str(),
-                if note.is_empty() { String::new() } else { format!("   {}", note) },
-            ),
-        ],
-        w - 1,
-    )];
+    let name = if headline.is_empty() { "unknown".to_string() } else { headline.to_string() };
+    let label = " ── SUBSCRIPTION ── ";
+    let note_bit = if note.is_empty() { String::new() } else { format!("   {note}") };
+    let room = w.saturating_sub(1).max(1);
+    // The name is the point of the row. A pane too narrow for it beside the
+    // label used to clip the name (`Ultra` became `Ult`), which is a
+    // different plan. The label stays on the first line and the name moves
+    // under it, whole. A name wider than that line is split across rows:
+    // one word longer than the pane is still the whole id, and clipping it
+    // is how `enterprise-australia-2026` lost its year.
+    let mut rows = Vec::new();
+    let together = format!("{label}{name}{note_bit}");
+    // Cells, not characters. A fullwidth letter is one character and two
+    // cells, and a count that ignores that keeps the name on a line seg
+    // then cuts.
+    if tc::display_width(&together) <= room {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.txt.as_str(), name),
+                (p.dim.as_str(), note_bit),
+            ],
+            room,
+        ));
+    } else if tc::display_width(label) + tc::display_width(&name) <= room {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.txt.as_str(), name.clone()),
+            ],
+            room,
+        ));
+        if !note_bit.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {note}"))], room));
+        }
+    } else {
+        rows.push(tc::seg(&[(p.lbl.as_str(), label.into())], room));
+        let named = format!(" {name}{note_bit}");
+        if tc::display_width(&named) <= room {
+            rows.push(tc::seg(
+                &[
+                    (p.txt.as_str(), format!(" {name}")),
+                    (p.dim.as_str(), note_bit),
+                ],
+                room,
+            ));
+        } else {
+            let budget = room.saturating_sub(1).max(1);
+            for part in flow_cells(&name, budget) {
+                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {part}"))], room));
+            }
+            if !note.is_empty() {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {note}"))], room));
+            }
+        }
+    }
     if !caveat.is_empty() {
         for line in wrap_text(caveat, w.saturating_sub(4).max(20)) {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
@@ -2817,9 +2867,11 @@ fn main() {
             vec![(p.accent.as_str(), "←→".into()), (p.dim.as_str(), " agent".into())],
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         // The footer is packed once, with the scroll hint always counted, so
         // the body's height does not change when scrolling becomes possible.
         let reserved = tc::pack_hints(&hints, w - 2, "  ").len();

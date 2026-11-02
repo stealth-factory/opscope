@@ -10,7 +10,7 @@
 id = "opscope.widgets"
 name = "opscope"
 description = "Terminal widgets that look like sci-fi movie panels and show only real data."
-version = "2.0.1"
+version = "2.4.0"
 min_luvus_version = "0.8.3"
 platforms = ["macos", "linux"]
 
@@ -53,6 +53,13 @@ title = "clocks"
 placement = "split"
 command = ["./luvus/bin/opscope", "clocks"]
 
+# Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
+[[panes]]
+id = "disk"
+title = "disk"
+placement = "split"
+command = ["./luvus/bin/opscope", "disk"]
+
 # GitHub delivery metrics across every org and account you can see.
 [[panes]]
 id = "github"
@@ -80,6 +87,13 @@ id = "google-analytics"
 title = "google-analytics"
 placement = "split"
 command = ["./luvus/bin/opscope", "google-analytics"]
+
+# What a region is searching for right now, from Google's own Trending Now feed.
+[[panes]]
+id = "google-trends"
+title = "google-trends"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-trends"]
 
 # Everything running in Herdr, across every workspace.
 [[panes]]

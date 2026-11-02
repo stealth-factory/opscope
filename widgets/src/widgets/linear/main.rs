@@ -575,7 +575,6 @@ fn team_wanted(keep: &[String], exclude: &[String], key: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
-    source: &str,
     days: i64,
     keep: &[String],
     exclude: &[String],
@@ -814,11 +813,9 @@ fn one_pass(
         guard.truncated = capped || cap2 || cap3 || cap4 || cap_teams;
         guard.cycles_capped = cycles_capped;
         guard.fetched = tc::now();
-        guard.err = if source == "config" {
-            tc::config_token_warning().unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // A config file others can read is a notice now, raised by core
+        // from load_config, rather than an error on a pass that worked.
+        guard.err = String::new();
     }
     Ok(())
 }
@@ -1914,7 +1911,7 @@ fn main() {
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let activity = tc::Refresh::default();
 
-    let (tok, source) = token(&cfg);
+    let (tok, _source) = token(&cfg);
     // The poller takes ownership of the key; the project screen fetches on
     // its own thread and needs one too.
     let ui_token = tok.clone();
@@ -1940,7 +1937,6 @@ fn main() {
             let want = poller_days.lock().map(|g| *g).unwrap_or(14);
             if let Err(said) = one_pass(
                 &tok,
-                source,
                 want,
                 &keep,
                 &exclude,
@@ -2326,13 +2322,11 @@ fn main() {
         if s.teams.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
             drop(s);
-            let hints = vec![vec![(p.dim.as_str(), "[,] settings".into())], vec![(
-                p.dim.as_str(),
-                "[q]uit".into(),
-            )]];
+            let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
+            hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-            let foot: Vec<String> =
-                packed.lines.iter().map(|line| format!(" {}", line)).collect();
+            let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
@@ -3158,8 +3152,7 @@ fn main() {
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-                let foot: Vec<String> =
-                    packed.lines.iter().map(|l| format!(" {}", l)).collect();
+                let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
                 // The title is pinned here as it is on the board. A detail
@@ -3243,8 +3236,7 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // The board is longer than most panes are tall, and every section
         // is now drawn whole - so the frame is a window onto it. With a
         // section focused the window chases its cursor; with none, the

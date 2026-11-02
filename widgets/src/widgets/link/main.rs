@@ -704,7 +704,7 @@ fn main() {
             // wrap differently from the first and leave the body sized
             // against a footer that is no longer there.
             let detail_hints = |place: String| -> Vec<Vec<(&str, String)>> {
-                vec![
+                let mut hints = vec![
                     vec![
                         (p.accent.as_str(), "←".into()),
                         (p.dim.as_str(), "/[esc] back".into()),
@@ -719,9 +719,10 @@ fn main() {
                         (p.dim.as_str(), format!(" {}", window_label(window))),
                     ],
                     vec![(p.dim.as_str(), "[r]efresh".into())],
-                    vec![(p.dim.as_str(), "[q]uit".into())],
-                    vec![(p.dim.as_str(), place)],
-                ]
+                ];
+                hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+                hints.push(vec![(p.dim.as_str(), place)]);
+                hints
             };
             // Returns the placement alongside the lines, because the footer
             // is packed twice here: once to measure how many rows it will
@@ -880,7 +881,7 @@ fn main() {
             ));
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
@@ -898,9 +899,11 @@ fn main() {
                 format!("[o]{} idle", if hide_idle { "show" } else { "hide" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
+        ];
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        ]);
         drop(guard);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();

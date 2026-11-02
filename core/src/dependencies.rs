@@ -56,6 +56,7 @@ pub enum Tool {
     Ss,
     Tailscale,
     Who,
+    Iostat,
 }
 
 impl Tool {
@@ -77,6 +78,7 @@ impl Tool {
             "ss" => Some(Self::Ss),
             "tailscale" => Some(Self::Tailscale),
             "who" => Some(Self::Who),
+            "iostat" => Some(Self::Iostat),
             _ => None,
         }
     }
@@ -99,6 +101,32 @@ impl Tool {
             Self::Ss => "ss",
             Self::Tailscale => "tailscale",
             Self::Who => "who",
+            Self::Iostat => "iostat",
+        }
+    }
+
+    /// The id of the notice raised when this tool is recommended and
+    /// missing. A literal per tool, because a notice id is stable and
+    /// `check.rs` holds every id to being a literal or a const.
+    pub const fn recommended_notice_id(self) -> &'static str {
+        match self {
+            Self::Cloudflared => "recommended-cloudflared",
+            Self::Curl => "recommended-curl",
+            Self::Getent => "recommended-getent",
+            Self::Herdr => "recommended-herdr",
+            Self::Ifconfig => "recommended-ifconfig",
+            Self::Ip => "recommended-ip",
+            Self::Lsof => "recommended-lsof",
+            Self::Luvus => "recommended-luvus",
+            Self::Netstat => "recommended-netstat",
+            Self::Nettop => "recommended-nettop",
+            Self::Ping => "recommended-ping",
+            Self::Ps => "recommended-ps",
+            Self::Script => "recommended-script",
+            Self::Ss => "recommended-ss",
+            Self::Tailscale => "recommended-tailscale",
+            Self::Who => "recommended-who",
+            Self::Iostat => "recommended-iostat",
         }
     }
 
@@ -455,6 +483,22 @@ fn parse_yyyymmdd(digits: &str) -> Option<Version> {
     Some(Version::new(year, month, day))
 }
 
+/// The recommended tools this host is missing, with why each was wanted.
+pub fn unsatisfied_recommended(
+    dependencies: &Dependencies,
+    platform: Platform,
+) -> Vec<(Dependency, DependencyStatus)> {
+    dependencies
+        .recommended
+        .iter()
+        .filter(|dependency| dependency.applies_to(platform))
+        .filter_map(|dependency| {
+            let status = dependency_status(dependency);
+            (!status.satisfies()).then(|| (dependency.clone(), status))
+        })
+        .collect()
+}
+
 pub fn unsatisfied_required(
     dependencies: &Dependencies,
     platform: Platform,
@@ -489,6 +533,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Fedora => match tool {
@@ -501,6 +546,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps-ng"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Arch => match tool {
@@ -513,6 +559,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps-ng"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Alpine => match tool {
@@ -525,6 +572,7 @@ fn package(tool: Tool, host: &Host) -> Option<&'static str> {
             Tool::Ps => Some("procps"),
             Tool::Script => Some("util-linux"),
             Tool::Who => Some("coreutils"),
+            Tool::Iostat => Some("sysstat"),
             _ => None,
         },
         LinuxFamily::Unknown => None,
@@ -936,5 +984,31 @@ mod tests {
         assert!(required.contains("required reason"));
         assert!(!required.contains("recommended reason"));
         assert!(recommended.contains("recommended reason"));
+    }
+
+    #[test]
+    fn iostat_is_recommended_and_packaged_on_every_linux_family() {
+        assert_eq!(Tool::parse("iostat"), Some(Tool::Iostat));
+        assert_eq!(Tool::Iostat.command(), "iostat");
+        assert_eq!(Tool::Iostat.recommended_notice_id(), "recommended-iostat");
+        for family in [
+            LinuxFamily::Debian,
+            LinuxFamily::Fedora,
+            LinuxFamily::Arch,
+            LinuxFamily::Alpine,
+        ] {
+            let host = Host {
+                platform: Platform::Linux,
+                linux: family,
+                name: String::new(),
+            };
+            assert_eq!(package(Tool::Iostat, &host), Some("sysstat"), "{family:?}");
+        }
+        let mac = Host {
+            platform: Platform::Macos,
+            linux: LinuxFamily::Unknown,
+            name: String::new(),
+        };
+        assert_eq!(package(Tool::Iostat, &mac), None);
     }
 }

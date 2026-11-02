@@ -7,6 +7,21 @@ executable skill and not permission to change files.
 
 None. The launcher declares no settings and shows no settings action.
 
+Starts of this menu and of each widget are counted by one shared library.
+The first launch asks. Accepting or declining writes `analytics.enabled`
+in config.json, and that choice can be edited later. The time of the choice
+is stored in the state directory, not in config.json. A release build sends to
+the Vercel Analytics and Google Analytics it was built with, from the
+`OPSCOPE_VERCEL_URL`, `OPSCOPE_GA_MEASUREMENT_ID` and `OPSCOPE_GA_API_SECRET`
+repository secrets; a build from source has none and sends nowhere. The
+same `analytics` section can name other destinations, and an empty value
+means the built-in one. An event carries the widget
+or launcher name and that a start happened, and the first choice also says
+opted in or opted out. Nothing in an event is a hostname, an account, the
+contents of config, or an identity. On the splash, Enter accepts, `d`
+declines, and `c` copies the link to `core/src/analytics.rs`, the one file
+that sends; the link itself opens in a terminal that supports OSC 8.
+
 It used to own the one shared key, `terminal.mouse`, which decided whether
 widgets asked the terminal for mouse reports. Reporting is unconditional
 now: the key was on by default and only ever turned off by mistake, so it

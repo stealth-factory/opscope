@@ -24,7 +24,7 @@ The agents this widget reads:
  Checked 16s ago   · = detected
  [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
 
- ── QUOTA ── live · account-wide, not this machine   max
+ ── QUOTA ── live · account-wide, not this machine   Ultra
  session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
  overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
  Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
@@ -62,7 +62,7 @@ The agents this widget reads:
  Sun    ·     ░░    ▒▒    ░░    ·
   less ░░▒▒▓▓██ more
 
- ── SUBSCRIPTION ── max
+ ── SUBSCRIPTION ── Ultra
   member since     8 Mar 2024 · 2.4y ago
   status           active
   rate limit tier  default_claude_max_20x
@@ -675,26 +675,56 @@ So the quota survives the app being closed, for about an hour after it last
 ran — the credential Antigravity leaves behind lasts that long, and this widget
 deliberately does not renew it on Antigravity's behalf.
 
-**Three sources, cheapest first**, each of them optional:
+**Four sources**, each of them optional:
 
 | order | source | works when |
 |---|---|---|
-| 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open |
-| 2 | Google | within an hour of the last run |
-| 3 | `agy`, started by the widget (`antigravity_start`) | whenever the CLI is signed in |
+| 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open and answers outside readers |
+| 2 | `agy -p /usage`, run by the widget (`antigravity_start`) | the CLI is installed, signed in and 1.1.11 or later |
+| 3 | Google | within an hour of the last run |
+| 4 | `agy`, started under a pty by the widget (`antigravity_start`) | only an `agy` older than 1.1.11 |
 
-Being last is not being disfavoured — it is being expensive. The third is the
-only one that always works, and the only one that runs another program.
+The second costs a process and a few seconds where Google costs one request,
+and is asked first anyway: it is the only source left with the **Gemini
+group**. Google's summary has only ever carried the Claude and GPT-OSS group.
 
 Nothing that runs for the widget outlives the fetch, and **an `agy` you started
 yourself is never shut down by this** — it would have answered as source 1
-long before source 3 was reached.
+long before anything was started.
 
-**`agy` builds from October 2026 close sources 1 and 3.** Their language server
+**`agy` builds from October 2026 close source 1.** Their language server
 refuses every outside caller with `missing CSRF token`, and hands the token
 only to processes `agy` starts itself — it is in no file, log or environment
-the widget can read. The tab says so rather than reading like an app that is
-shut, and falls back to Google:
+the widget can read, and the widget does not go looking. The pty start (4)
+reads the same server, so it is closed too, and kept only for older builds.
+
+What still works is `agy`'s own `/usage` command in print mode — the one
+CodexBar reads. It answers from the CLI's session without starting a turn
+(zero tokens) and returns both groups, each with its weekly and five-hour
+window:
+
+```
+ ── QUOTA ── live · account-wide, from `agy`, started for this reading
+  Gemini Models
+    Models within this group: Gemini Flash, Gemini Pro
+   5h     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 4h 59m
+   weekly ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 6d 23h
+  Claude and GPT models
+    Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+   5h     ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 4h 59m
+   weekly ┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%  resets in 6d 23h
+```
+
+It runs in a private empty directory with `open` and `xdg-open` shadowed by
+stubs that fail, so a background poll can never pop a sign-in page; in its own
+process group, killed whole afterwards, so the language server it boots goes
+with it; and with auto-update off. Releases before 1.1.11 could send an
+unknown slash command on to a model as a prompt, which would spend the quota
+being read, so those are never asked — the tab says to update instead.
+
+When `/usage` cannot be read and Google's summary is what is on screen, the
+tab says the app's server refused rather than reading like an app that is
+shut:
 
 ```
  ── QUOTA ── live · account-wide, from Google - the app's server refused
@@ -703,11 +733,9 @@ shut, and falls back to Google:
   summary instead. Google publishes no grouped Gemini limit.
 ```
 
-Google's summary has only ever carried the Claude and GPT-OSS group; the
-grouped Gemini limit came from the local server alone. What Google does
-publish for Gemini is **each model's own allowance**, so when the summary has
-no Gemini group the tab draws those instead, under a heading that says what
-they are:
+Under the groups, the tab also draws **each Gemini model's own allowance**,
+which Google publishes per model, so it says which model is spending the
+group's limit:
 
 ```
   Gemini, per model
@@ -717,9 +745,12 @@ they are:
 ```
 
 They are not added up or averaged into a group figure, because Google states
-none. `[+]` gets one lane from them, `gemini busiest` — the model with the
-least left — rather than a dozen. If the per-model call fails, the reason is
-drawn where the rows would be.
+none. They stay on the tab: `[+]` shows the four group lanes `agy` itself
+draws. Only when no Gemini group came back does `[+]` take one lane from them,
+`gemini busiest` — the model with the least left — since they are then the
+Gemini quota there is. In that case, if the per-model call fails the reason
+is drawn where the rows would be; with a group, a failure is left unsaid,
+since a warning under four good bars reads as though the bars were wrong.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
@@ -1215,6 +1246,39 @@ unreachable it falls back to what the local credential already says, which
 needs no network at all, and labels itself `from credentials` so it is never
 mistaken for the fuller reading.
 
+### Claude plan names (30 Oct 2026)
+
+Anthropic renamed Max 5x ($100/mo) to **Max** and Max 20x ($200/mo) to
+**Ultra**, and removed the five-hour session limit on Ultra for verified
+accounts. Pro is unchanged. The weekly limits are unchanged: Ultra is still
+10× Pro for the week, and the old "20x" was the five-hour window. Checked
+again on 31 Oct 2026: Claude Code 2.1.314 still sends the old ids, `max`
+with `default_claude_max_20x` or `default_claude_max_5x`. There is no new
+plan id yet. The headline uses the name, and the rate-limit tier row keeps
+the id, so the source stays visible. An id this table does not know is
+shown as it arrived.
+
+When an Ultra reading has no session limit — the `limits[]` entry is
+missing, or its `percent` is null, and `five_hour.utilization` is not a
+number either — the five-hour row says `5h  no 5-hour limit (Ultra)` and
+draws no bar. A session limit that is still present is drawn as before.
+On Pro or Max a missing session limit stays a missing reading because
+those plans still have the window. The `[+]` overview does not turn the
+absence into a 0% bar or a "not reported" line. A live Ultra reading is
+not a warning. A refresh that failed and kept that reading still names
+the refusal and how old the saved reading is, and that line is a warning.
+
+The monthly Claude Platform credit is not in the usage reply or the
+profile this widget reads, so it is not shown. A figure taken from the
+plan name would not be a reading.
+
+The rename was announced by the Claude account on X and on the pricing
+page. As of 30 Oct 2026 there was no anthropic.com news post. Reports of
+the same change: [ShiftDelete](https://en.shiftdelete.net/claude-ultra-plan/),
+[Windows Report](https://windowsreport.com/anthropic-renames-claude-max-5x-and-20x-plans-removes-ultras-5-hour-limit/),
+[explainx](https://explainx.ai/blog/claude-ultra-plan-no-5-hour-limit-max-rename-weekly-limits-api-credits-2026),
+[FourWeekMBA](https://fourweekmba.com/ai-claude-ultra-drops-5-hour-limit-for-verified-users-at-200/).
+
 ## Empty tabs say two things and stop
 
 An agent with no local data gets exactly two lines: what is missing, and the
@@ -1426,7 +1490,7 @@ Four settings, all on by default except the interval:
 
 | key | default | what it does |
 |---|---|---|
-| `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
+| `antigravity_start` | `true` | may the widget run the `agy` CLI to read the quota, when no running app answers. `agy -p /usage` on 1.1.11 or later - a command, not a prompt, so no tokens - in a private directory, its process group killed when the reading is taken; older builds are started under a pty instead. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
@@ -1917,6 +1981,7 @@ refresh makes a tab a row longer.
 | `r` | re-read the files now, and ask each agent's endpoint again for any quota over 30s old (one that refused keeps its backoff) |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
 ## Cost
@@ -1962,9 +2027,10 @@ through before there is anything to draw. The local logs no longer hold it
 up: the first pass reads its budgeted slice of them, and the rest fill in over
 the passes that follow, labelled as partial until they are done.
 
-## More than one Claude Max
+## More than one Claude account
 
-A second Max seat is a second Claude Code config directory. This widget
+A second seat — Max, Ultra, or another plan — is a second Claude Code
+config directory. This widget
 does not invent that layout, does not read `$CLAUDE_CONFIG_DIR`, and does
 not scan `~/.claude-*`. Name the directories:
 

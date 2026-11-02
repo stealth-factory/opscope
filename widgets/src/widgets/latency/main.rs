@@ -1386,12 +1386,13 @@ fn main() {
         hints.extend([
             vec![(p.dim.as_str(), "[g]roup".into())],
             vec![(p.dim.as_str(), "[c]olumns".into())],
+        ]);
+        hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let foot: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let body_h = h.saturating_sub(foot.len());
 
         // The log is always drawn and the chart takes what is left, down to

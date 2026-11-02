@@ -456,15 +456,6 @@ fn account_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     plan_rows(tier, &pairs, w, "", None, "", p)
 }
 
-// The token is a full sign-in, so a config.json others can read is worth saying
-// on every reading, not only on the ones that failed.
-fn token_warning(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    tc::config_token_warning()
-        .filter(|_| d.source == "config")
-        .map(|warn| note(&warn, &p.warn, w))
-        .unwrap_or_default()
-}
-
 /// A sentence under the bars, wrapped to the pane rather than cut by it.
 fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
     wrap_text(text, w.saturating_sub(4).max(20))
@@ -476,8 +467,7 @@ fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
 pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     match d.allowance.as_ref() {
         Some(a) if !a.not_applicable() => {
-            let mut rows = allowance_rows_with_plots(d, a, w, p, plots);
-            rows.extend(token_warning(d, w, p));
+            let rows = allowance_rows_with_plots(d, a, w, p, plots);
             add_section(rows, account_rows(d, w, p))
         }
         _ => {
@@ -493,8 +483,7 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
             } else {
                 why_no_lane(d).trim_start_matches("no quota · ").to_string()
             };
-            let mut rows = no_local(&what, "", w, p);
-            rows.extend(token_warning(d, w, p));
+            let rows = no_local(&what, "", w, p);
             add_section(rows, if d.space.is_some() { account_rows(d, w, p) } else { Vec::new() })
         }
     }

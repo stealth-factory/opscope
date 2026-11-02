@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Every trend comes from Google's Trending Now feed over HTTPS."
+    }
+  },
+  "recommended": {}
+}

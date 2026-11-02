@@ -1859,6 +1859,8 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
+                    // The notices are the widget's, not the list's: a
+                    // warning raised while a process is open is read here.
                     "r" | "R" => {
                         if let Ok(mut guard) = state.lock() {
                             guard.totals.clear();
@@ -2100,7 +2102,7 @@ fn main() {
                 Some(_) => files.get(at[2]).map(|f| f.path.clone()).unwrap_or_default(),
                 None => String::new(),
             };
-            let hints: Vec<Vec<(&str, String)>> = vec![
+            let mut hints: Vec<Vec<(&str, String)>> = vec![
                 vec![
                     (p.accent.as_str(), "↑↓".into()),
                     (
@@ -2121,8 +2123,8 @@ fn main() {
                     (p.accent.as_str(), "←".into()),
                     (p.dim.as_str(), "/esc back".into()),
                 ],
-                vec![(p.dim.as_str(), "[q]uit".into())],
             ];
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let mut foot: Vec<String> =
                 packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -2353,6 +2355,35 @@ fn main() {
         }
         out.push(String::new());
 
+        // Packed before the chart and the table are sized. These hints wrap
+        // onto a third row on a narrow pane. Reserving a fixed
+        // heading-plus-two instead made the frame one row taller than the
+        // pane, and `draw_plots` dropped the last of it — `[q]uit`.
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " details".into()),
+            ],
+            vec![(
+                if sort_live { &p.dim } else { &p.accent },
+                "[1] total".into(),
+            )],
+            vec![(
+                if sort_live { &p.accent } else { &p.dim },
+                "[2] live".into(),
+            )],
+            vec![(
+                p.dim.as_str(),
+                format!("[o]{} others", if mine { "show" } else { "hide" }),
+            )],
+            vec![(p.dim.as_str(), "[r]ezero".into())],
+        ];
+        hints.extend([
+            vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ]);
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The chart takes a share of the pane and the list takes the rest,
         // but the list is the point: below a certain height there is no
         // chart at all rather than two rows of neither. Wrapped borders
@@ -2360,7 +2391,7 @@ fn main() {
         // when even a two-row plot would leave the list fewer than five
         // rows the chart stands down — this screen does not scroll, so a
         // chart that overruns its budget pushes the list off the pane.
-        let spare = h.saturating_sub(out.len() + 4);
+        let spare = chart_spare(h, out.len(), packed.lines.len());
         let series: Vec<(f64, f64)> = guard
             .series
             .iter()
@@ -2403,7 +2434,7 @@ fn main() {
             out.push(String::new());
         }
 
-        let room = h.saturating_sub(out.len() + 3).max(1);
+        let room = process_room(h, out.len(), packed.lines.len());
         let show = if limit > 0 { limit.min(room) } else { room };
         // The window follows the cursor, as it does in the detail screen and
         // in github's account list. It did not before: the table always drew
@@ -2464,30 +2495,7 @@ fn main() {
             out.extend(table(&rows, w, first, show, selected, &p));
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " details".into()),
-            ],
-            vec![(
-                if sort_live { &p.dim } else { &p.accent },
-                "[1] total".into(),
-            )],
-            vec![(
-                if sort_live { &p.accent } else { &p.dim },
-                "[2] live".into(),
-            )],
-            vec![(
-                p.dim.as_str(),
-                format!("[o]{} others", if mine { "show" } else { "hide" }),
-            )],
-            vec![(p.dim.as_str(), "[r]ezero".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
         drop(guard);
-        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // Nothing is pinned on this screen - the whole frame is built to
         // the pane and the table windows itself - so the head is zero and
@@ -2741,6 +2749,24 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
 }
 
 /// The process table, dropping columns rather than clipping them.
+/// Process rows that fit under `drawn` header rows.
+///
+/// One row is the table heading and `footer` is the packed hint rows. At
+/// least one process row is kept, so a short pane still names a process
+/// rather than showing a heading over nothing.
+fn process_room(h: usize, drawn: usize, footer: usize) -> usize {
+    h.saturating_sub(drawn + footer + 1).max(1)
+}
+
+/// Rows left for the chart and the table together, before either is drawn.
+///
+/// Two past [`process_room`]: the table heading, and the blank line a chart
+/// leaves under itself. No `.max(1)` — a pane with nothing left stands the
+/// chart down rather than drawing it into the heading.
+fn chart_spare(h: usize, drawn: usize, footer: usize) -> usize {
+    h.saturating_sub(drawn + footer + 2)
+}
+
 /// Where the process table starts so the cursor is on it.
 ///
 /// Centred rather than nudged: the list is re-sorted by rate every couple of
@@ -2869,6 +2895,26 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_reserves_the_packed_footer_not_a_fixed_three() {
+        let h = 24;
+        let drawn = 10;
+        // Two hint rows was the old constant (`+ 3` = heading + those two).
+        // The hints wrap onto a third on a narrow pane. Reserving three then
+        // makes the frame one row taller than the pane, and draw drops the
+        // last footer row.
+        let footer = 3;
+        let room = process_room(h, drawn, footer);
+        assert_eq!(drawn + 1 + room + footer, h);
+        let old = h.saturating_sub(drawn + 3).max(1);
+        assert_eq!(drawn + 1 + old + footer, h + 1);
+        // The chart keeps the same reservation plus the blank under it.
+        assert_eq!(chart_spare(h, drawn, footer), process_room(h, drawn, footer) - 1);
+        // A two-row footer is the case the fixed `3` already covered.
+        assert_eq!(process_room(h, drawn, 2), h - drawn - 3);
+        assert_eq!(chart_spare(h, drawn, 2), h - drawn - 4);
+    }
 
     fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted: bool) -> Vec<Vec<u8>> {
         let values: Vec<_> = values.iter().rev().take(cols * 2).rev().map(|v| {

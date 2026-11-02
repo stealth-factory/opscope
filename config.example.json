@@ -1,5 +1,5 @@
 {
-  "_comment": "Generated from each widget's settings.json by widgets/tests/check.rs - rewrite it with `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the widget's default.",
+  "_comment": "Generated from each widget's settings.json and core/analytics.settings.json by widgets/tests/check.rs - rewrite it with `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps that section's default.",
   "agent_usage": {
     "_comment": "Reads local agent state, plus remaining quota from each agent's own host with that agent's own credential. Grok's quota call is on by default and may start the Grok CLI to refresh its token; turn grok_ping off to keep those off. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
     "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named — it was simply spelt as an empty list, which nothing on screen could name. While it is on, an agent's tab stays hidden until detection says that agent is present, and agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order, including while a read is still in flight. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
@@ -18,7 +18,7 @@
     "plan_cost": {},
     "_antigravity_remote_comment": "Antigravity publishes its quota two ways: a language server that runs inside the app, and Google, which serves the same summary on the endpoint the tier already comes from. The local one is preferred and this only decides whether the remote one may be asked when the app is shut. On by default — it is the same host and the same credential the tier request already uses. Turn it off and the quota is absent whenever Antigravity is closed; the tab then says so, and names this key.",
     "antigravity_remote": true,
-    "_antigravity_start_comment": "Whether the widget may start the `agy` CLI to read the quota it serves, when nothing else has one. On by default. It is your own CLI, already installed and signed in; it is started under a pseudo-terminal, killed by pid as soon as the reading is taken, and reaped, so nothing outlives the fetch; and a CLI you started yourself is found by the ordinary local probe long before this runs, so this can never shut one of yours down. Off means the quota lasts an hour past the last time Antigravity ran, which is the token's life. grok_ping is the other setting that may start a CLI.",
+    "_antigravity_start_comment": "Whether the widget may run the `agy` CLI to read the quota, when no running app answers. On by default. It is your own CLI, already installed and signed in. On 1.1.11 or later it runs `agy -p /usage`, which is a command and not a prompt, so it spends no tokens, and it is the only source left with the Gemini group: Google's summary has only the Claude and GPT-OSS one. It runs in a private empty directory with the browser openers stubbed out, so it can never pop a sign-in page, and its whole process group is killed as soon as the reading is taken. Older builds are started under a pseudo-terminal instead and killed by pid. A CLI you started yourself is found by the ordinary local probe long before this runs, so this can never shut one of yours down. Off means the quota comes from Google alone, without the Gemini group, and lasts an hour past the last time Antigravity ran, which is the token's life. grok_ping is the other setting that may start a CLI.",
     "antigravity_start": true,
     "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token — without it the asking works until the token lapses and then silently stops. On by default: the request goes to the endpoint the Grok CLI itself bills through, with that CLI's own token, and the alternative is a figure that moves only when you use Grok on this machine and is marked cached. Turn it off to keep the widget from talking to x.ai or starting the CLI; the tab then says so and names this key.",
     "grok_ping": true,
@@ -50,6 +50,17 @@
     "claude_config_dirs": [
       "~/.claude"
     ]
+  },
+  "analytics": {
+    "_comment": "Counts of which binaries are started, so the project can be supported and so we can see which widgets are used. The same event goes to the Vercel Analytics and Google Analytics this build was released with. Empty settings below mean those built-in destinations; set one to send somewhere else instead. A build from source has none built in. Collect URLs must be https. An event carries the widget or launcher name and that a start happened. The first choice also says opted in or opted out, and the time of that choice. Nothing in an event is a hostname, an account, the contents of this file, or an identity. `enabled` is not listed here on purpose: with it absent, the next interactive launch asks once and writes true (accept) or false (decline) itself, so a copy of this example never turns counting on without that question. Edit `enabled` afterwards to change the choice; it is not asked again.",
+    "_vercel_url_comment": "Collect URL for Vercel Web Analytics, scheme and host included; https only, anything else skips Vercel. Empty uses the one this build was released with; a build from source has none, and then Vercel is skipped. The path is that project's insights event route. The id below is sent with the event when it is set; it is not a token.",
+    "vercel_url": "",
+    "_vercel_analytics_id_comment": "Vercel Web Analytics id, sent with each event when set. Empty still sends when vercel_url is set, which is enough when the URL itself identifies the project. Not a token.",
+    "vercel_analytics_id": "",
+    "_ga_measurement_id_comment": "GA4 measurement id. Empty uses the one this build was released with; a build from source has none, and then Google Analytics is skipped unless this and the secret below are set.",
+    "ga_measurement_id": "",
+    "_ga_api_secret_comment": "GA4 Measurement Protocol api secret. Empty uses the one this build was released with. Keep this file chmod 600.",
+    "ga_api_secret": ""
   },
   "clocks": {
     "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
@@ -112,12 +123,31 @@
       252
     ]
   },
+  "disk": {
+    "_comment": "Filesystem space and inodes. Linux reads /proc/self/mountinfo and statvfs; macOS reads getmntinfo. Pseudo filesystems, bind mounts and read-only mounts are hidden because none of them can fill.",
+    "_refresh_comment": "Seconds between samples. Minimum 0.5. -n SECONDS on the command line overrides this for one run.",
+    "refresh": 2.0,
+    "_hide_mounts_comment": "Mount points to hide. An entry is an exact path, or a prefix of every mount under it when it ends in /. The entry / hides only the root mount; a prefix of / would hide every absolute path.",
+    "hide_mounts": [],
+    "_hide_devices_comment": "Whole-disk names to hide, matched exactly. An idle disk with no reads and no writes since boot is already hidden until v is pressed; this list hides a disk whether or not it is idle.",
+    "hide_devices": [],
+    "_warn_percent_comment": "Percent used at which the bar starts to leave green. At and below this the bar stays quiet.",
+    "warn_percent": 80,
+    "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",
+    "alert_percent": 90,
+    "_window_days_comment": "How many days of this widget's own samples the FULL IN column and the filesystem trace start from. 7, 14 or 30. w on the pane cycles the same three for this session and does not write the choice back.",
+    "window_days": 7
+  },
   "github": {
     "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
     "_token_comment": "Classic GitHub token; leave empty to read the named environment variable.",
     "token": "",
     "_token_env_comment": "Environment variable that holds the GitHub token.",
     "token_env": "GITHUB_TOKEN",
+    "_enterprise_hostname_comment": "Web hostname of a GitHub Enterprise Cloud tenant (for example acme.ghe.com). A *.ghe.com host is called at api.<host>. Empty reads the variable enterprise_hostname_env names, if any; otherwise github.com.",
+    "enterprise_hostname": "",
+    "_enterprise_hostname_env_comment": "Name of an environment variable to read when enterprise_hostname is empty, for example GITHUB_ENTERPRISE_HOSTNAME. Empty reads none. This is a variable name, never a hostname.",
+    "enterprise_hostname_env": "",
     "_accounts_comment": "GitHub users or organizations to include; empty discovers the viewer and their organizations.",
     "accounts": [],
     "_window_days_comment": "Days included in delivery charts and summaries.",
@@ -131,6 +161,10 @@
     "token": "",
     "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
     "token_env": "GITHUB_TOKEN",
+    "_enterprise_hostname_comment": "Web hostname of a GitHub Enterprise Cloud tenant (for example acme.ghe.com). A *.ghe.com host is called at api.<host>. Empty reads the variable enterprise_hostname_env names, if any; otherwise github.com.",
+    "enterprise_hostname": "",
+    "_enterprise_hostname_env_comment": "Name of an environment variable to read when enterprise_hostname is empty, for example GITHUB_ENTERPRISE_HOSTNAME. Empty reads none. This is a variable name, never a hostname.",
+    "enterprise_hostname_env": "",
     "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
     "accounts": [],
     "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",
@@ -150,6 +184,10 @@
     "token": "",
     "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
     "token_env": "GITHUB_TOKEN",
+    "_enterprise_hostname_comment": "Web hostname of a GitHub Enterprise Cloud tenant (for example acme.ghe.com). A *.ghe.com host is called at api.<host>. Empty reads the variable enterprise_hostname_env names, if any; otherwise github.com.",
+    "enterprise_hostname": "",
+    "_enterprise_hostname_env_comment": "Name of an environment variable to read when enterprise_hostname is empty, for example GITHUB_ENTERPRISE_HOSTNAME. Empty reads none. This is a variable name, never a hostname.",
+    "enterprise_hostname_env": "",
     "_sources_comment": "Named GitHub search queries pooled and de-duplicated into the follow-up queue.",
     "sources": {
       "orgs": "is:open is:pr @mine",
@@ -181,6 +219,15 @@
     "baseline_weeks": 4,
     "_key_events_comment": "Event names to treat as key events, counted by event count. Empty uses every event GA flags as a key event.",
     "key_events": []
+  },
+  "google_trends": {
+    "_comment": "Google's Trending Now feed for one or more regions, read from trends.google.com/trending/rss with no account or key. Traffic is Google's bucket, shown as written; SEEN and LEFT THE FEED are this widget's own counts across fetches.",
+    "_geos_comment": "Region codes to show, as Google's feed takes them in ?geo= - two-letter country codes such as \"US\", \"GB\", \"JP\". The first is shown at start; ←/→ steps through the rest. A code Google does not know is shown as rejected rather than dropped.",
+    "geos": [
+      "US"
+    ],
+    "_refresh_comment": "Seconds between fetches of each region's feed; minimum 60. Google refreshes the feed every few minutes, so faster polling shows nothing new.",
+    "refresh": 300
   },
   "herdr_panes": {
     "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
