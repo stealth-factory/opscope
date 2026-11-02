@@ -24,32 +24,11 @@
 //! because it asks nothing of the network or the disk, and the hang-up is
 //! noticed in core, where every widget's input comes from.
 
+mod support;
+
 use std::os::fd::FromRawFd;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-fn pty() -> (i32, i32) {
-    unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        assert!(master >= 0, "no pty");
-        assert_eq!(libc::grantpt(master), 0);
-        assert_eq!(libc::unlockpt(master), 0);
-        let name = libc::ptsname(master);
-        assert!(!name.is_null());
-        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
-        assert!(slave >= 0, "could not open the slave");
-        let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-        libc::ioctl(slave, libc::TIOCSWINSZ, &size);
-        // Not inherited: a widget holding its own copy of the master would
-        // keep the terminal open after this test closed it.
-        for fd in [master, slave] {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
-        let flags = libc::fcntl(master, libc::F_GETFL);
-        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        (master, slave)
-    }
-}
 
 /// Read whatever the widget has drawn, so it never blocks on a full pty.
 fn drain(master: i32, for_how_long: Duration) {
@@ -65,7 +44,7 @@ fn drain(master: i32, for_how_long: Duration) {
 
 #[test]
 fn a_widget_exits_within_a_second_of_its_terminal_closing() {
-    let (master, slave) = pty();
+    let (master, slave) = support::pty(80, 24);
     let home = std::env::temp_dir().join(format!("opscope-hangup-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     let io = |fd: i32| unsafe { Stdio::from_raw_fd(libc::dup(fd)) };

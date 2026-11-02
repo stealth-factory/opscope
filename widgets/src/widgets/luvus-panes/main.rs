@@ -983,7 +983,6 @@ fn checkout_line<'a>(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("luvus-panes");
     if !tc::dependencies_available(
         "luvus-panes",
         include_str!("dependencies.json"),
@@ -1121,10 +1120,6 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1612,19 +1607,10 @@ fn main() {
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
-        hints.extend(tc::notices::hint(w.saturating_sub(2)));
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
-        // The notices banner sits directly above the hints and counts as
-        // footer, so every budget below that reads `footer.len()` keeps
-        // room for it.
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // ---- the body, built at whatever height it needs ----
         let mut body: Vec<String> = Vec::new();
@@ -2665,7 +2651,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len() + banner.len();
+        let foot_top = rows.len();
         rows.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|mut p| {
             p.y += head_len;

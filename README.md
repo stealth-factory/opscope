@@ -392,9 +392,10 @@ the screen**, so nothing needs restarting.
 Press `!` in any widget to read its notices, as `,` opens settings. A notice
 is a warning that is not about a number on screen — `config.json` readable
 by other users, an old section name still being read, a recommended tool
-that is not installed. A new one shows above the footer for a minute, then
-as a coloured `[!] 1 warning` in the footer for as long as it is still
-true. The screen shows each in full with what to do about it, and dismisses
+that is not installed. A new one shows along the bottom of the pane, under
+the footer, for a minute, and a coloured `[!] 1 warning` sits on the top row,
+before the version, for as long as it is still true; clicking it opens the
+screen too. While you are typing into a filter, `!` is just a character. The screen shows each in full with what to do about it, and dismisses
 one for this session, for 7 days or for 30, or all of them for this session;
 an error is only ever dismissed for the session. A dismissal for days is kept
 in `notices.json` in opscope's state directory (`$XDG_STATE_HOME/opscope`, or
