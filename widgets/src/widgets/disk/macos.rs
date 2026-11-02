@@ -16,9 +16,22 @@
 //! `visible_mounts` uses to drop duplicates on this host.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
-use super::parse::{self, Mount, Space};
+use super::parse::{self, IoSnapshot, LiveDisk, Mount, Space};
+
+struct IostatState {
+    track: parse::IostatTrack,
+    missing: bool,
+    err: String,
+}
+
+static IOSTAT: OnceLock<Mutex<IostatState>> = OnceLock::new();
+static IOSTAT_STARTED: OnceLock<()> = OnceLock::new();
 
 static SPACES: Mutex<Option<HashMap<String, Space>>> = Mutex::new(None);
 
@@ -85,6 +98,170 @@ fn space_from_statfs(stat: &libc::statfs) -> Space {
         stat.f_ffree,
         stat.f_bsize as u64,
     )
+}
+
+/// One long-running `iostat -d -K -w`. The first data line is the average
+/// since boot and is kept only to decide which disks have never moved;
+/// every later line is one interval. Stdout is read a line at a time.
+/// A child that exits is started again. A missing binary is not: the
+/// widget still runs, and the pane says so.
+pub fn sample_io(_mounts: &[Mount], every: f64) -> Result<IoSnapshot, String> {
+    let state = IOSTAT.get_or_init(|| {
+        Mutex::new(IostatState {
+            track: parse::IostatTrack::default(),
+            missing: false,
+            err: String::new(),
+        })
+    });
+    IOSTAT_STARTED.get_or_init(|| {
+        thread::spawn(move || run_iostat(every));
+    });
+    let guard = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.missing {
+        return Ok(IoSnapshot {
+            missing: "needs iostat (recommended) — device I/O is not shown".into(),
+            combined: true,
+            ..IoSnapshot::default()
+        });
+    }
+    let mut disks = Vec::with_capacity(guard.track.names.len());
+    for (index, name) in guard.track.names.iter().enumerate() {
+        let mac = guard.track.latest.get(index).copied();
+        let idle = parse::iostat_disk_idle(&guard.track, index);
+        disks.push(LiveDisk {
+            name: name.clone(),
+            kind: String::new(),
+            size: 0,
+            model: String::new(),
+            dev: String::new(),
+            stat: None,
+            mac,
+            idle,
+            partitions: Vec::new(),
+            mounts: Vec::new(),
+            slaves: Vec::new(),
+        });
+    }
+    Ok(IoSnapshot {
+        disks,
+        combined: true,
+        err: guard.err.clone(),
+        ..IoSnapshot::default()
+    })
+}
+
+fn run_iostat(every: f64) {
+    let wait = every.round().max(1.0) as u64;
+    let wait = wait.to_string();
+    loop {
+        let mut child = match Command::new("iostat")
+            .args(["-d", "-K", "-w", &wait])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(state) = IOSTAT.get() {
+                    if let Ok(mut guard) = state.lock() {
+                        guard.missing = true;
+                        guard.err.clear();
+                    }
+                }
+                return;
+            }
+            Err(err) => {
+                note_iostat_error(format!("iostat stopped: {err}"));
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+        };
+        let stderr = child.stderr.take();
+        let stderr_text = std::sync::Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = stderr {
+            let slot = std::sync::Arc::clone(&stderr_text);
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if let Ok(mut guard) = slot.lock() {
+                        if !guard.is_empty() {
+                            guard.push('\n');
+                        }
+                        guard.push_str(&line);
+                    }
+                }
+            });
+        }
+        let Some(stdout) = child.stdout.take() else {
+            note_iostat_error("iostat stopped: no stdout".into());
+            let _ = child.wait();
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        let mut names = Vec::new();
+        let mut skipped_boot = false;
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let header = parse::parse_iostat_header(&line);
+            if !header.is_empty() {
+                names = header;
+                continue;
+            }
+            if names.is_empty() {
+                continue;
+            }
+            let samples = parse::parse_iostat_line(&line, names.len());
+            if samples.len() != names.len() {
+                continue;
+            }
+            if !skipped_boot {
+                publish_iostat(&names, None, Some(samples));
+                skipped_boot = true;
+                continue;
+            }
+            publish_iostat(&names, Some(samples), None);
+        }
+        let _ = child.wait();
+        let why = stderr_text
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let why = if why.is_empty() {
+            "exited".to_string()
+        } else {
+            why
+        };
+        note_iostat_error(format!("iostat stopped: {why}"));
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn publish_iostat(
+    names: &[String],
+    latest: Option<Vec<parse::IostatSample>>,
+    boot: Option<Vec<parse::IostatSample>>,
+) {
+    let Some(state) = IOSTAT.get() else {
+        return;
+    };
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    parse::publish_iostat_track(&mut guard.track, names, latest, boot);
+    guard.err.clear();
+}
+
+fn note_iostat_error(err: String) {
+    let Some(state) = IOSTAT.get() else {
+        return;
+    };
+    if let Ok(mut guard) = state.lock() {
+        guard.err = err;
+    }
 }
 
 fn c_bytes(buf: &[libc::c_char]) -> Vec<u8> {
