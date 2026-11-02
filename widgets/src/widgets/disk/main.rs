@@ -2394,7 +2394,6 @@ fn paint_disks(
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
         }
     }
-    push_total(board, width, p, rows, plots);
     let indexes = ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices);
     if indexes.is_empty() {
         if let Some(line) = tc::filtered_to_nothing(lives.len(), &labels) {
@@ -2420,23 +2419,7 @@ fn paint_disks(
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
         }
     }
-    if let Some(row) = indexes
-        .iter()
-        .copied()
-        .find(|&index| board.rows[index].disk.name == view.disk_cursor)
-        .map(|index| &board.rows[index])
-    {
-        push_chart(
-            &row.read,
-            &row.write,
-            4,
-            board.combined,
-            width,
-            p,
-            rows,
-            plots,
-        );
-    }
+    push_io_chart(view, board, &indexes, width, p, rows, plots);
     indexes.len()
 }
 
@@ -2866,15 +2849,43 @@ fn paint_pressure(
     }
 }
 
-fn push_total(
+/// One chart under the disk table. A disk the cursor is on (the disk
+/// section has focus) charts that disk; otherwise the chart is the total
+/// of every disk, so the section never shows one disk's line as if it
+/// were the machine's.
+fn push_io_chart(
+    view: &View,
     board: &DiskBoard,
+    indexes: &[usize],
     width: usize,
     p: &Palette,
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    // One disk with nothing under it is already the chart below the table.
-    if board.total_names.len() <= 1 && board.total_covered.is_empty() {
+    let selected = (view.focus == 1)
+        .then(|| {
+            indexes
+                .iter()
+                .copied()
+                .find(|&index| board.rows[index].disk.name == view.disk_cursor)
+        })
+        .flatten()
+        .map(|index| &board.rows[index]);
+    if let Some(row) = selected {
+        push_wrapped(&row.disk.name, width, p, rows);
+        push_chart(
+            &row.read,
+            &row.write,
+            4,
+            board.combined,
+            width,
+            p,
+            rows,
+            plots,
+        );
+        return;
+    }
+    if board.total_names.is_empty() {
         return;
     }
     push_wrapped(
@@ -4209,7 +4220,9 @@ mod tests {
     }
 
     #[test]
-    fn the_total_chart_sits_above_the_disk_table() {
+    fn one_chart_sits_below_the_disk_table() {
+        // The total and the cursor's disk used to be two charts, and with
+        // one busy disk they drew the same line twice.
         let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
         board.total_read = vec![Some(1000.0), Some(2000.0)];
         board.total_write = vec![Some(100.0), Some(200.0)];
@@ -4218,30 +4231,60 @@ mod tests {
         let mut frame = view(None, "");
         frame.board = Some(&board);
         frame.disk_cursor = "sda";
-        frame.focus = 1;
-        for width in [28usize, 80] {
-            let drawn = draw_body(&frame, width, &p, None);
-            for line in &drawn.rows {
-                assert!(
-                    tc::display_width(line) <= width,
-                    "width {width} drew {} cells",
-                    tc::display_width(line)
-                );
+        for focus in [0usize, 1] {
+            frame.focus = focus;
+            for width in [28usize, 80] {
+                let drawn = draw_body(&frame, width, &p, None);
+                for line in &drawn.rows {
+                    assert!(
+                        tc::display_width(line) <= width,
+                        "width {width} drew {} cells",
+                        tc::display_width(line)
+                    );
+                }
+                let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+                let header_at = lines
+                    .iter()
+                    .position(|line| line.contains("READ"))
+                    .unwrap_or_else(|| panic!("{width} missing the disk header"));
+                let charts: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("read") && line.contains("peak"))
+                    .map(|(at, _)| at)
+                    .collect();
+                assert_eq!(charts.len(), 1, "focus {focus} width {width}: {lines:?}");
+                assert!(charts[0] > header_at, "focus {focus} width {width}");
             }
-            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
-            let total_at = lines
-                .iter()
-                .position(|line| line.contains("total of sda, sdb"))
-                .unwrap_or_else(|| panic!("{width} missing the total: {lines:?}"));
-            let header_at = lines
-                .iter()
-                .position(|line| line.contains("READ"))
-                .unwrap_or_else(|| panic!("{width} missing the disk header"));
-            assert!(total_at < header_at, "{width}");
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert_eq!(drawn.plots.len(), 2, "focus {focus}");
         }
+    }
+
+    #[test]
+    fn the_chart_is_the_total_until_the_disk_section_has_focus() {
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
+        board.total_read = vec![Some(1000.0), Some(2000.0)];
+        board.total_write = vec![Some(100.0), Some(200.0)];
+        board.total_names = vec!["sda".into(), "sdb".into()];
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        for focus in [0usize, 2] {
+            frame.focus = focus;
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert!(plain_has(&drawn, "total of sda, sdb"), "focus {focus}");
+        }
+        frame.focus = 1;
         let drawn = draw_body(&frame, 100, &p, None);
-        assert_eq!(drawn.plots.len(), 4);
-        assert!(drawn.plots.iter().all(|plot| plot.height == 2));
+        assert!(!plain_has(&drawn, "total of"));
+        let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+        let chart_at = lines
+            .iter()
+            .position(|line| line.contains("read") && line.contains("peak"))
+            .unwrap();
+        assert_eq!(lines[chart_at - 1].trim(), "sda");
     }
 
     #[test]
