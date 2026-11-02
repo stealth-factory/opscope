@@ -92,6 +92,17 @@ pub fn write_atomic_if(path: &Path, contents: &str, expected: &str) -> Result<()
 /// non-blocking: `EINTR` retries, and `WouldBlock` sleeps 10ms for up to
 /// 50 attempts, then the error is returned.
 pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
+    with_lock_waiting(path, 50, f)
+}
+
+/// [`with_lock`] with an explicit number of 10ms waits. The lock test asks
+/// for more than 50: `flock` is not fair, and `sync_all` inside the critical
+/// section can hold the lock longer than half a second on a loaded disk.
+fn with_lock_waiting<T>(
+    path: &Path,
+    attempts: u32,
+    f: impl FnOnce() -> T,
+) -> Result<T, String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -112,7 +123,7 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&lock)
         .map_err(|e| format!("{}: {e}", lock.display()))?;
-    let mut waits = 0;
+    let mut waits = 0u32;
     loop {
         // SAFETY: a valid descriptor owned by `file` for this whole call.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -122,7 +133,7 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, String> {
         let err = std::io::Error::last_os_error();
         match err.kind() {
             std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock if waits < 50 => {
+            std::io::ErrorKind::WouldBlock if waits < attempts => {
                 waits += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -369,7 +380,9 @@ pub(crate) mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for _ in 0..25 {
-                        with_lock(&path, || {
+                        // More than the half-second a pane waits. A fair
+                        // schedule is not guaranteed, and each write syncs.
+                        with_lock_waiting(&path, 300, || {
                             let n: u64 = std::fs::read_to_string(&path)
                                 .unwrap()
                                 .trim()
