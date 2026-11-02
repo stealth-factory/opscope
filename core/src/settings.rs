@@ -611,7 +611,7 @@ fn infer_indent(s: &str, obj_open: usize, entries: &[Entry]) -> String {
 /// serde_json in this workspace has no preserve_order, so a parse-and-dump
 /// would sort every object and hoist `_comment` above the section it
 /// documents. This edits the raw text instead.
-fn set_json_path(text: &str, path: &[&str], value: &Value) -> Result<String, String> {
+pub(crate) fn set_json_path(text: &str, path: &[&str], value: &Value) -> Result<String, String> {
     if path.is_empty() {
         return Err("empty path".into());
     }

@@ -20,6 +20,7 @@
 //! a time, and while both versions ran they had to agree on screen, so
 //! where a choice existed this kept the earlier behaviour.
 
+mod analytics;
 mod dependencies;
 pub mod google;
 pub mod notices;
@@ -3217,17 +3218,41 @@ pub fn post_answer(
     body: &str,
     seconds: u64,
 ) -> Result<(u16, String, Vec<(String, String)>), String> {
-    use std::io::Write;
+    post_answer_with(url, headers, body, seconds, "")
+}
+
+/// The configuration `post_answer_with` hands curl on stdin. `extra` is
+/// whole option lines, each ending in a newline, added after the rest.
+///
+/// Read after the user's own `.curlrc`, so a line here overrides one
+/// there: that is how a caller pins something a `.curlrc` could
+/// otherwise change for it, such as following a redirect.
+pub(crate) fn post_config(url: &str, headers: &[(&str, &str)], body: &str, seconds: u64, extra: &str) -> String {
     let mut config = format!(
         "--silent\n--show-error\n--request POST\n--dump-header -\n\
-         --max-time {}\n--url {}\n--data {}\n",
+         --max-time {}\n--url {}\n--data {}\n{}",
         seconds,
         quoted(url),
-        quoted(body)
+        quoted(body),
+        extra
     );
     for (name, value) in headers {
         config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
     }
+    config
+}
+
+/// `post_answer` with curl option lines of the caller's own added; see
+/// `post_config`.
+pub(crate) fn post_answer_with(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+    extra: &str,
+) -> Result<(u16, String, Vec<(String, String)>), String> {
+    use std::io::Write;
+    let config = post_config(url, headers, body, seconds, extra);
     let mut child = std::process::Command::new("curl")
         .arg("--config")
         .arg("-")
@@ -5775,6 +5800,10 @@ pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
         std::process::exit(0);
     }
     maybe_help(doc);
+    // After help and version have already exited. A `--help` process is not
+    // a start, and neither is `--configure-help`. Every binary calls this,
+    // so the launcher and the widgets share one place that asks and counts.
+    analytics::on_launch(&binary_name());
     // Every binary passes through here, after the arguments that print and
     // leave and before it draws anything, so this is where core opens the
     // notices channel for it. No widget does: see `notices::start`.

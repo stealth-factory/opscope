@@ -176,9 +176,26 @@ jobs:
         # x86_64-specific behaviour, and there is none in this tree that
         # the arm64 build would not also show.
         if: ${{ !matrix.cross }}
+        env:
+          # Where a release counts starts (OPS-127). Repository secrets, so
+          # the project's analytics never appear in the source; a build
+          # without them reports nowhere. The same three go to the test
+          # step so it compiles the same binary rather than a second one.
+          OPSCOPE_VERCEL_URL: ${{ secrets.OPSCOPE_VERCEL_URL }}
+          OPSCOPE_GA_MEASUREMENT_ID: ${{ secrets.OPSCOPE_GA_MEASUREMENT_ID }}
+          OPSCOPE_GA_API_SECRET: ${{ secrets.OPSCOPE_GA_API_SECRET }}
         run: cargo test --release --target ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Build
+        env:
+          # Where a release counts starts (OPS-127). Repository secrets, so
+          # the project's analytics never appear in the source; a build
+          # without them reports nowhere. The same three go to the test
+          # step so it compiles the same binary rather than a second one.
+          OPSCOPE_VERCEL_URL: ${{ secrets.OPSCOPE_VERCEL_URL }}
+          OPSCOPE_GA_MEASUREMENT_ID: ${{ secrets.OPSCOPE_GA_MEASUREMENT_ID }}
+          OPSCOPE_GA_API_SECRET: ${{ secrets.OPSCOPE_GA_API_SECRET }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Nothing dynamic beyond the C runtime
         shell: bash

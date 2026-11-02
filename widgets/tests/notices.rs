@@ -59,9 +59,13 @@ impl Pane {
         let _ = std::fs::remove_dir_all(&home);
         let config = home.join("config/opscope");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::create_dir_all(home.join("state")).unwrap();
+        std::fs::create_dir_all(home.join("state/opscope")).unwrap();
         let file = config.join("config.json");
-        std::fs::write(&file, "{}\n").unwrap();
+        // Analytics answered "no" and its one opt-out event already recorded
+        // as sent, so the consent splash does not cover the pane and no
+        // event leaves a test run, even one built with the release secrets.
+        std::fs::write(&file, "{\"analytics\":{\"enabled\":false}}\n").unwrap();
+        std::fs::write(home.join("state/opscope/usage.json"), "{\"decided_at\":1}\n").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let (master, slave) = support::pty(COLS, rows);
         let io = |fd: i32| unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
