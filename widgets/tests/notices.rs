@@ -231,10 +231,13 @@ fn a_counter_click_opens_the_screen_from_a_filter() {
 
 /// clocks builds its world clock from the rows the clock above leaves, so
 /// a banner taking them would take the section. With a notice outstanding
-/// on an 80 x 22 pane, the banner gives way and the world clock is drawn.
+/// on an 80 x 23 pane, the banner gives way and the world clock is drawn.
+/// 23 is the tight height once the weather row sits under the date: 22
+/// fitted the clock, the countdowns and one city, and the weather line
+/// took the row that city had.
 #[test]
 fn the_world_clock_survives_a_pending_banner() {
-    let pane = Pane::start_sized(env!("CARGO_BIN_EXE_clocks"), "clocks", 22);
+    let pane = Pane::start_sized(env!("CARGO_BIN_EXE_clocks"), "clocks", 23);
     let seen = pane.read_until("WORLD CLOCK", Duration::from_secs(4));
     let seen = seen + &pane.read(Duration::from_millis(300));
     assert!(seen.contains(COUNTER), "no notice outstanding, so this tests nothing");

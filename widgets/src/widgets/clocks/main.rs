@@ -17,14 +17,18 @@
 //! Clocks: this server's, everyone else's, and the ones counting down.
 //!
 //! A port of clocks.py: the big clock, the countdown bars, the pomodoro,
-//! and a world clock. The one widget here that needs a timezone database,
-//! which is why the core carries one.
+//! and a world clock. Current weather for one configured place is fetched
+//! from Open-Meteo; the clock keeps drawing when that request fails.
+//! The timezone database is why the core carries one.
 
 use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveTime, Offset, TimeZone, Timelike};
 use chrono_tz::Tz;
 use opscope_core as tc;
+
+mod parse;
+mod weather;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "clocks",
@@ -1171,6 +1175,69 @@ struct City {
     zone: Tz,
 }
 
+/// The weather row under the date. Only a ready reading carries a
+/// temperature; the other arms say why there isn't one.
+fn draw_weather(view: &weather::View, width: usize, p: &Palette) -> Vec<String> {
+    let room = width.saturating_sub(1);
+    match view {
+        weather::View::Unset => note_rows("weather: set latitude and longitude", room, &p.dim),
+        weather::View::Waiting => note_rows("weather: requesting", room, &p.dim),
+        weather::View::Failed(why) => note_rows(why, room, &p.txt),
+        weather::View::Ready(reading) => vec![ready_weather(reading, room, p)],
+    }
+}
+
+fn ready_weather(reading: &weather::Reading, room: usize, p: &Palette) -> String {
+    let glyph = parse::condition_glyph(reading.code);
+    let mut parts = Vec::new();
+    if reading.label.is_empty() {
+        parts.push((p.accent.as_str(), format!(" {glyph}")));
+    } else {
+        parts.push((p.txt.as_str(), format!(" {}", reading.label)));
+        parts.push((p.accent.as_str(), format!(" {glyph}")));
+    }
+    parts.push((
+        p.txt.as_str(),
+        format!("  {}", parse::format_celsius(reading.celsius)),
+    ));
+    parts.push((
+        p.dim.as_str(),
+        format!("  {}", parse::condition_name(reading.code)),
+    ));
+    if !reading.observed.is_empty() {
+        parts.push((
+            p.dim.as_str(),
+            format!(" · observed {}", reading.observed),
+        ));
+    }
+    tc::seg(&parts, room)
+}
+
+/// Wrap a note on spaces so a long refusal stays inside the pane. A single
+/// word wider than the pane is clipped by `seg`, which is what keeps a
+/// wrapped terminal row from scrolling the pinned title away.
+fn note_rows(text: &str, room: usize, ink: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current = word.to_string();
+            continue;
+        }
+        let joined = format!("{current} {word}");
+        if tc::display_width(&joined) + 1 <= room.max(1) {
+            current = joined;
+        } else {
+            rows.push(tc::seg(&[(ink, format!(" {current}"))], room));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        rows.push(tc::seg(&[(ink, format!(" {current}"))], room));
+    }
+    rows
+}
+
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     if !tc::dependencies_available("clocks", include_str!("dependencies.json"), Some(SETTINGS)) {
@@ -1199,6 +1266,7 @@ fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let mut flash_started: Option<f64> = None;
+    let weather = weather::Feed::start(&cfg);
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut scroll = 0usize;
@@ -1213,6 +1281,9 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    // The next scheduled read may be a quarter of an hour
+                    // away. A place just saved should be asked for now.
+                    weather.wake();
                     continue;
                 }
                 "q" | "Q" => {
@@ -1255,7 +1326,7 @@ fn main() {
         let (w, h) = tc::size();
         let now = Local::now();
         let mut plots = Vec::new();
-        let mut rows = vec![tc::title("clocks", w, &p.head)];
+        let mut rows = vec![tc::title_busy("clocks", w, &p.head, weather.refresh_tick())];
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ──".into())], w - 1));
 
         // Two colours down the block digits, not one: the top three rows
@@ -1276,6 +1347,7 @@ fn main() {
             ],
             w - 1,
         ));
+        rows.extend(draw_weather(&weather.view(), w, &p));
         rows.push(String::new());
 
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
@@ -2784,5 +2856,74 @@ mod tests {
             !claim_event(deadline, 0, "herdr"),
             "a second load of the same stale file swept a fresh claim"
         );
+    }
+
+    #[test]
+    fn weather_without_a_reading_names_no_temperature() {
+        let p = palette();
+        for view in [
+            weather::View::Unset,
+            weather::View::Waiting,
+            weather::View::Failed("weather unavailable: could not resolve host".into()),
+        ] {
+            let rows = draw_weather(&view, 80, &p);
+            let text = rows.join("\n");
+            assert!(!text.contains('°'), "{text}");
+            assert!(!text.contains("0.0"), "{text}");
+            for row in &rows {
+                assert!(tc::display_width(row) <= 79, "{row}");
+            }
+        }
+        let failed = draw_weather(
+            &weather::View::Failed("weather unavailable: could not resolve host".into()),
+            80,
+            &p,
+        );
+        assert!(failed.join("\n").contains("could not resolve host"));
+    }
+
+    #[test]
+    fn a_ready_weather_row_shows_the_fetched_temperature() {
+        let p = palette();
+        let row = draw_weather(
+            &weather::View::Ready(weather::Reading {
+                label: "Bank".into(),
+                celsius: 0.0,
+                code: 0,
+                observed: "09:00".into(),
+            }),
+            80,
+            &p,
+        );
+        let text = row.join("\n");
+        assert!(text.contains("Bank"), "{text}");
+        assert!(text.contains("0.0°C"), "{text}");
+        assert!(text.contains("clear"), "{text}");
+        assert!(text.contains("observed 09:00"), "{text}");
+        assert!(tc::display_width(&text) <= 79, "{text}");
+        let wide = draw_weather(
+            &weather::View::Ready(weather::Reading {
+                label: "a".repeat(80),
+                celsius: 12.0,
+                code: 2,
+                observed: "21:45".into(),
+            }),
+            30,
+            &p,
+        );
+        assert_eq!(wide.len(), 1);
+        assert!(tc::display_width(&wide[0]) <= 29, "{}", wide[0]);
+    }
+
+    #[test]
+    fn a_long_weather_refusal_wraps_inside_the_pane() {
+        let p = palette();
+        let why = "weather unavailable: ".to_string() + &"very ".repeat(30) + "long";
+        let rows = draw_weather(&weather::View::Failed(why), 24, &p);
+        assert!(rows.len() > 1, "a narrow pane wraps the reason");
+        for row in &rows {
+            assert!(tc::display_width(row) <= 23, "{row}");
+        }
+        assert!(!rows.join("\n").contains('°'));
     }
 }

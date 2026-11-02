@@ -1,8 +1,9 @@
 Clocks: this server's, everyone else's, and the ones counting down.
 
 A big clock in the machine's own timezone, countdown bars for the next hour,
-office hours and the end of day, an optional pomodoro, and a world clock
-covering the hubs you care about.
+office hours and the end of day, an optional pomodoro, a world clock
+covering the hubs you care about, and the current weather for one place
+once a latitude and longitude are set.
 
 The pomodoro is off until you press p. It runs the standard 25/5 with a longer
 break every fourth session, all configurable, and persists across restarts so
@@ -36,10 +37,18 @@ The completed tally is per day: it resets when the date changes, including
 while the panel is running. Preferences - focus length, whether the timer is
 shown - are not tied to the day and persist.
 
-Big digits show this server's system-timezone clock. Below it, each hub
-is shown in its own timezone, west to east by current offset — name as
-tie-break, config order ignored — coloured by whether people there are
-plausibly at work.
+Big digits show this server's system-timezone clock. Under the date, current
+weather for weather_latitude and weather_longitude: a temperature in °C and
+a condition glyph, from Open-Meteo, with no key. The clock keeps drawing
+when that request fails, and the row says why the weather is missing. A
+temperature is shown only after a response that carried one. Nothing is
+drawn in its place, and a failed request clears the previous reading rather
+than leaving it up as if it were still current. The sun and moon on a world
+clock row are day and night there, not that city's weather.
+
+Below the countdowns, each hub is shown in its own timezone, west to east
+by current offset — name as tie-break, config order ignored — coloured by
+whether people there are plausibly at work.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same - which is what up and down do here too.

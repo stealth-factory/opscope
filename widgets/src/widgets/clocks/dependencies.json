@@ -1,6 +1,10 @@
 {
   "required": {},
   "recommended": {
+    "curl": {
+      "version": "*",
+      "why": "Current weather is fetched from Open-Meteo. Without curl the clock still runs and the weather row says why it cannot."
+    },
     "herdr": {
       "version": "*",
       "why": "Herdr can show a desktop notification when a timer finishes."

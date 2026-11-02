@@ -30,7 +30,7 @@ navigation, not itself a widget.
 | [`disk`](../widgets/src/widgets/disk/README.md) | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling. |
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
 | [`google-trends`](../widgets/src/widgets/google-trends/README.md) | What a region is searching for right now — Google's own Trending Now feed, shown as Google states it, with what changed since the last look. |
-| [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, and everyone else's clock — the four things you need to know about time while working across timezones. |
+| [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, everyone else's clock, and the current weather for one configured place. |
 | [`matrix`](../widgets/src/widgets/matrix/README.md) | Digital rain. It computes nothing and reports no data on purpose. |
 | [`months`](../widgets/src/widgets/months/README.md) | A month grid you can page through, with today in context — every square computed from the machine clock and the timezone database rather than fetched from anywhere. |
 

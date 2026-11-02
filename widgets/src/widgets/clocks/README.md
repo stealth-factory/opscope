@@ -2,9 +2,8 @@
 
 [← all widgets](../../../../docs/README.md)
 
-This server's clock, the clocks counting down, a pomodoro, and everyone else's
-clock — the four things you need to know about time while working across
-timezones.
+This server's clock, the clocks counting down, a pomodoro, everyone else's
+clock, and the current weather for one configured place.
 
 ```
 ╺━ CLOCKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -14,6 +13,7 @@ timezones.
    ███ ███     ███ ███     ███ ███
 
  2026-08-13  THURSDAY   UTC+8
+ ☀  22.0°C  clear · observed 14:11
 
  ── COUNTDOWN ──
  Pomodoro · FOCUS       00:23:32   3 done
@@ -39,6 +39,27 @@ probe, the time is drawn at the largest scale from 2× to 4× that fits the
 pane. Anywhere else, and when that block would not fit, it stays five rows
 of block digits. Set `TZ` in the source to pin it to a fixed
 offset instead of following the system.
+
+**Weather** — under the date, current conditions for one place: a condition glyph, the
+temperature in °C, the condition in words, and the observation time from
+the response. The source is [Open-Meteo](https://open-meteo.com/), which
+needs no key. `weather_latitude` and `weather_longitude` are the request.
+Null, or a missing key, leaves the row as an instruction to set them and
+sends nothing. Zero is a real coordinate once it is written down, so it is
+not used as the stand-in for "unset". `weather_label` is optional text
+beside the glyph; it is not looked up and it does not choose the place.
+
+The number on screen is the latest response that carried a temperature.
+A request that fails clears that number, and the row says why — the clock,
+the countdowns, and the world clock keep drawing. Nothing is substituted
+for a reading that was not fetched. There is no forecast, no history, and
+no chart. The sun and moon on a world-clock row are day and night in that
+zone, not the weather there.
+
+A successful observation is refreshed about every fifteen minutes. A failure
+is tried again about once a minute. `curl` does the request. Without it the
+clock still runs and the weather row names the miss. The title spinner
+turns only while a request is in flight.
 
 **Countdown** — three bars that are always running:
 
@@ -128,6 +149,9 @@ shown — are not tied to the day and survive.
 ```json
 "clocks": {
   "cities": [["San Francisco", "America/Los_Angeles"], ["Tokyo", "Asia/Tokyo"]],
+  "weather_latitude": null,
+  "weather_longitude": null,
+  "weather_label": "",
   "work_start_hour": 9,
   "work_end_hour": 18,
   "pomodoro_enabled": false,
@@ -147,6 +171,10 @@ shown — are not tied to the day and survive.
 
 `cities` is unordered. Rows are west to east by current UTC offset, with the
 name as tie-break, so arranging them in `config.json` does nothing.
+
+`weather_latitude` and `weather_longitude` are degrees. Leave both null to
+keep weather off. Set both, and only both, to fetch. A label does not
+geocode.
 
 The flash colour's text contrast is derived from its luminance, so a dark
 choice stays readable rather than turning the panel into a block.
