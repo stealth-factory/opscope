@@ -517,6 +517,14 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Curl options for every analytics send: https and nothing else, for the
+/// request and for any redirect it is sent on. `origin_of` refuses an http
+/// destination, but a `.curlrc` with `location` set follows redirects for
+/// every curl run here, and a collector answering with a redirect to http
+/// would carry the event in the clear. These lines are read after the
+/// `.curlrc`, so they hold whatever it says. Other requests are untouched.
+const HTTPS_ONLY: &str = "--proto =https\n--proto-redir =https\n";
+
 fn send_all(deliveries: Vec<Delivery>) {
     if deliveries.is_empty() {
         return;
@@ -533,7 +541,7 @@ fn send_all(deliveries: Vec<Delivery>) {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
                 .collect();
-            let _ = crate::post_answer(&delivery.url, &headers, &delivery.body, 5);
+            let _ = crate::post_answer_with(&delivery.url, &headers, &delivery.body, 5, HTTPS_ONLY);
         }
     });
 }
@@ -599,13 +607,31 @@ fn clamped_scroll(scroll: usize, len: usize, room: usize) -> usize {
     scroll.min(len.saturating_sub(room))
 }
 
+/// The keys that move the view. Neither screen has a selection, so the
+/// arrows and paging keys have nothing else to move and scroll too.
+fn is_scroll_key(key: &str) -> bool {
+    matches!(
+        key,
+        "ctrl-y" | "wheel-up" | "up" | "pgup" | "ctrl-e" | "wheel-down" | "down" | "pgdn"
+    )
+}
+
 fn scrolled(scroll: usize, key: &str, len: usize, room: usize) -> usize {
+    let page = room.saturating_sub(1).max(1);
     let next = match key {
-        "ctrl-y" | "wheel-up" => scroll.saturating_sub(1),
-        "ctrl-e" | "wheel-down" => scroll.saturating_add(1),
+        "ctrl-y" | "wheel-up" | "up" => scroll.saturating_sub(1),
+        "ctrl-e" | "wheel-down" | "down" => scroll.saturating_add(1),
+        "pgup" => scroll.saturating_sub(page),
+        "pgdn" => scroll.saturating_add(page),
         _ => scroll,
     };
     clamped_scroll(next, len, room)
+}
+
+/// The scroll hint, offered only when there is something below or above
+/// the window, so a pane that shows everything does not suggest otherwise.
+fn scroll_hint(p: &Palette) -> Vec<(&str, String)> {
+    vec![(p.accent.as_str(), "\u{2191}\u{2193}".to_string()), (p.dim.as_str(), " scroll".to_string())]
 }
 
 /// Where the code that sends every event lives. The splash links it and
@@ -801,15 +827,19 @@ fn splash_rows(name: &str, w: usize, note: Option<&Note>) -> Vec<String> {
 /// The footer: accept first and tinted, because Enter is what the screen
 /// recommends; decline beside it in full body contrast, because a choice
 /// that is hard to read is not a choice.
-fn hints(p: &Palette) -> Vec<Vec<(&str, String)>> {
-    vec![
+fn hints(p: &Palette, overflows: bool) -> Vec<Vec<(&str, String)>> {
+    let mut hints = vec![
         vec![
             (p.accept.as_str(), " [\u{21b5}] accept ".to_string()),
             (crate::RST, String::new()),
         ],
         vec![(p.text.as_str(), "[d]ecline".to_string())],
         vec![(p.dim.as_str(), "[c]opy link".to_string())],
-    ]
+    ];
+    if overflows {
+        hints.push(scroll_hint(p));
+    }
+    hints
 }
 
 /// One frame of the splash: the title pinned, a window onto the body, and
@@ -826,14 +856,22 @@ struct Frame {
 fn frame(name: &str, w: usize, h: usize, scroll: usize, note: Option<&Note>) -> Frame {
     let p = Palette::new();
     let body = splash_rows(name, w, note);
-    let packed = crate::pack_hints_placed(&hints(&p), w.saturating_sub(2), "  ");
+    // Packed once to learn whether the body fits, and again with the
+    // scroll hint when it does not. The hint can only take rows from the
+    // window, so a body that overflowed without it still does.
+    let pack = |overflows| crate::pack_hints_placed(&hints(&p, overflows), w.saturating_sub(2), "  ");
+    let window_under = |packed: &crate::Footer| h.saturating_sub(packed.lines.len()).saturating_sub(1).max(1);
+    let mut packed = pack(false);
+    if body.len() > window_under(&packed) {
+        packed = pack(true);
+    }
     let foot: Vec<String> = packed
         .lines
         .iter()
         .map(|line| format!(" {line}{}", crate::RST))
         .collect();
     let room = h.saturating_sub(foot.len());
-    let window = room.saturating_sub(1).max(1);
+    let window = window_under(&packed);
     let scroll = clamped_scroll(scroll, body.len(), window);
     let mut rows = vec![crate::title("help improve opscope", w, &p.accent)];
     rows.extend(body.iter().skip(scroll).take(window).cloned());
@@ -915,6 +953,10 @@ fn ask<T>(name: &str, save: impl FnOnce(bool) -> (T, Option<String>)) -> Option<
         return None;
     }
     crate::setup();
+    // Before the Keyboard, not after: it asks the terminal what it can do,
+    // and the reply arrives on this same input, so a flush after it would
+    // throw the answer away with the typing.
+    discard_typed_ahead(0);
     let mut keyboard = crate::Keyboard::new();
     let answer = ask_loop(&mut keyboard, name);
     let (after, error) = save(answer);
@@ -926,29 +968,86 @@ fn ask<T>(name: &str, save: impl FnOnce(bool) -> (T, Option<String>)) -> Option<
     Some(after)
 }
 
+/// Drop whatever was typed before the splash took the terminal, so only a
+/// key pressed while the question is on screen can answer it. A launcher
+/// handing over to a widget, or keys pressed while the binary was still
+/// loading, would otherwise land as the first answer, unread.
+fn discard_typed_ahead(fd: i32) {
+    unsafe {
+        libc::tcflush(fd, libc::TCIFLUSH);
+    }
+}
+
+/// One frame of the save-error screen: the title pinned, a window onto
+/// the reason, and the way on pinned under it whatever the height, like
+/// the splash, so a short pane scrolls rather than losing the fix.
+struct Unsaved {
+    rows: Vec<String>,
+    window: usize,
+    body_len: usize,
+}
+
+fn unsaved_frame(error: &str, w: usize, h: usize, scroll: usize) -> Unsaved {
+    let p = Palette::new();
+    let body: Vec<String> = unsaved_lines(error)
+        .iter()
+        .flat_map(|l| wrap_paragraph(l, w.saturating_sub(2)))
+        .map(|line| crate::seg(&[(p.warn.as_str(), format!(" {line}"))], w))
+        .collect();
+    // Each word its own hint, so a narrow pane wraps the sentence rather
+    // than cutting it; the scroll hint only when there is more to see.
+    let pack = |overflows: bool| {
+        let mut hints = Vec::new();
+        if overflows {
+            hints.push(scroll_hint(&p));
+        }
+        let continues = if overflows { "any other key continues" } else { "any key continues" };
+        for word in continues.split(' ') {
+            hints.push(vec![(p.dim.as_str(), word.to_string())]);
+        }
+        crate::pack_hints(&hints, w.saturating_sub(2), " ")
+    };
+    let window_under = |foot: &[String]| h.saturating_sub(foot.len()).saturating_sub(1).max(1);
+    let mut foot = pack(false);
+    if body.len() > window_under(&foot) {
+        foot = pack(true);
+    }
+    let window = window_under(&foot);
+    let scroll = clamped_scroll(scroll, body.len(), window);
+    let room = h.saturating_sub(foot.len());
+    let mut rows = vec![crate::title("help improve opscope", w, &p.accent)];
+    rows.extend(body.iter().skip(scroll).take(window).cloned());
+    while rows.len() < room {
+        rows.push(String::new());
+    }
+    rows.extend(foot.iter().map(|line| format!(" {line}{}", crate::RST)));
+    rows.truncate(h);
+    Unsaved {
+        rows,
+        window,
+        body_len: body.len(),
+    }
+}
+
 /// The splash's last screen when the choice could not be written: why, and
-/// that the question comes back. Waits for any key, so it is read.
+/// that the question comes back. Waits for a key, so it is read. The wheel
+/// only moves the view, and so do the scroll keys while there is anything
+/// to scroll to.
 fn show_unsaved(keyboard: &mut crate::Keyboard, error: &str) {
-    let lines = unsaved_lines(error);
+    let mut scroll = 0usize;
     loop {
         let (w, h) = crate::size();
-        let accent = crate::rgb(150, 210, 255);
-        let warn = crate::rgb(255, 200, 120);
-        let dim = crate::rgb(127, 147, 172);
-        let mut frame = vec![crate::title("help improve opscope", w, &accent)];
-        for line in lines.iter().flat_map(|l| wrap_paragraph(l, w.saturating_sub(2))) {
-            frame.push(crate::seg(&[(warn.as_str(), format!(" {line}"))], w));
-        }
-        frame.push(String::new());
-        frame.push(crate::seg(&[(dim.as_str(), " any key continues".to_string())], w));
-        while frame.len() < h {
-            frame.push(String::new());
-        }
-        frame.truncate(h);
-        crate::draw(&frame, w, h);
+        let f = unsaved_frame(error, w, h, scroll);
+        scroll = clamped_scroll(scroll, f.body_len, f.window);
+        crate::draw(&f.rows, w, h);
         keyboard.wait(std::time::Duration::from_millis(200));
-        if !keyboard.poll().is_empty() {
-            return;
+        let overflows = f.body_len > f.window;
+        for key in keyboard.poll() {
+            if key.starts_with("wheel-") || (overflows && is_scroll_key(&key)) {
+                scroll = scrolled(scroll, &key, f.body_len, f.window);
+            } else {
+                return;
+            }
         }
     }
 }
@@ -1537,6 +1636,116 @@ mod tests {
         assert_eq!(scrolled(20, "wheel-down", 10, 4), 6);
         assert_eq!(scrolled(1, "a", 10, 4), 1);
         assert_eq!(scrolled(1, "d", 10, 4), 1);
+    }
+
+    #[test]
+    fn the_arrows_and_paging_keys_scroll_the_splash_too() {
+        assert_eq!(scrolled(3, "up", 10, 4), 2);
+        assert_eq!(scrolled(3, "down", 10, 4), 4);
+        assert_eq!(scrolled(0, "pgdn", 10, 4), 3);
+        assert_eq!(scrolled(5, "pgup", 10, 4), 2);
+        assert_eq!(scrolled(5, "pgdn", 10, 4), 6);
+        // Offered only when there is somewhere to scroll to.
+        let foot = |w: usize, h: usize| {
+            let f = frame("clocks", w, h, 0, None);
+            f.rows[f.foot_top..].iter().map(|r| crate::source_text(r)).collect::<String>()
+        };
+        assert!(foot(40, 12).contains("\u{2191}\u{2193} scroll"), "{}", foot(40, 12));
+        assert!(!foot(200, 60).contains("scroll"), "{}", foot(200, 60));
+    }
+
+    #[test]
+    fn the_save_error_scrolls_and_keeps_the_way_on_pinned() {
+        let error = unsaved_reason(
+            Path::new("/home/someone/.config/opscope/config.json"),
+            "/home/someone/.config/opscope/.config.json.tmp: Permission denied (os error 13)",
+        );
+        for w in [20usize, 24, 30, 40, 60, 80, 120] {
+            for h in 6..=30 {
+                let first = unsaved_frame(&error, w, h, 0);
+                let mut body: Vec<Option<String>> = vec![None; first.body_len];
+                for scroll in 0..=first.body_len {
+                    let f = unsaved_frame(&error, w, h, scroll);
+                    assert_eq!(f.rows.len(), h, "{w}x{h}");
+                    for row in &f.rows {
+                        assert!(crate::display_width(row) <= w, "{w}x{h}: {row:?}");
+                    }
+                    // The title row is pinned at every scroll.
+                    assert_eq!(crate::source_text(&f.rows[0]), crate::source_text(&first.rows[0]));
+                    assert!(crate::source_text(&f.rows[0]).starts_with("\u{257a}"), "{w}x{h}");
+                    // The way on is the last thing on screen at every scroll.
+                    let tail: String = f.rows[1 + f.window.min(f.body_len)..]
+                        .iter()
+                        .map(|r| crate::source_text(r))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert!(tail.contains("continues"), "{w}x{h}+{scroll}: {tail:?}");
+                    assert_eq!(tail.contains("scroll"), f.body_len > f.window, "{w}x{h}: {tail:?}");
+                    let at = clamped_scroll(scroll, f.body_len, f.window);
+                    for i in 0..f.window.min(f.body_len) {
+                        body[at + i] = Some(crate::source_text(&f.rows[1 + i]).trim().to_string());
+                    }
+                }
+                // Every row of the reason is reachable, in order.
+                assert!(body.iter().all(|r| r.is_some()), "{w}x{h}: a row was never shown");
+                let joined = body.into_iter().flatten().collect::<Vec<_>>().join(" ");
+                for phrase in ["could not be saved", "Permission denied", "Nothing was sent", "analytics.enabled", "asked again"] {
+                    assert!(joined.contains(phrase), "{w}x{h}: {phrase} missing from {joined:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_analytics_send_is_https_only_redirects_included() {
+        let headers = [("Content-Type", "application/json")];
+        let sent = crate::post_config("https://collect.example/event", &headers, "{}", 5, HTTPS_ONLY);
+        let lines: Vec<&str> = sent.lines().collect();
+        assert!(lines.contains(&"--proto =https"), "{sent}");
+        assert!(lines.contains(&"--proto-redir =https"), "{sent}");
+        // Every other POST is built exactly as before.
+        let other = crate::post_config("https://collect.example/event", &headers, "{}", 5, "");
+        assert!(!other.contains("--proto"), "{other}");
+        assert_eq!(sent.replace(HTTPS_ONLY, ""), other);
+    }
+
+    #[test]
+    fn keys_typed_before_the_splash_are_dropped() {
+        // A pseudo-terminal stands in for the pane: bytes written to the
+        // master side are what the user typed, waiting on the slave side.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0, "no pty");
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_owned();
+            let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "no pty slave");
+            // Non-canonical, as the Keyboard runs it, so a byte is readable
+            // without a newline after it.
+            let mut ios: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave, &mut ios), 0);
+            ios.c_lflag &= !(libc::ICANON | libc::ECHO);
+            assert_eq!(libc::tcsetattr(slave, libc::TCSANOW, &ios), 0);
+            let readable = |ms: i32| {
+                let mut fds = libc::pollfd { fd: slave, events: libc::POLLIN, revents: 0 };
+                libc::poll(&mut fds, 1, ms) == 1 && fds.revents & libc::POLLIN != 0
+            };
+            assert_eq!(libc::write(master, b"d".as_ptr().cast(), 1), 1);
+            // The byte has arrived, so what follows is the flush and not
+            // a byte still in flight.
+            assert!(readable(2000), "the typed key never arrived");
+            discard_typed_ahead(slave);
+            assert!(!readable(100), "a key typed before the splash is still waiting");
+            // And a key pressed afterwards still reaches it.
+            assert_eq!(libc::write(master, b"a".as_ptr().cast(), 1), 1);
+            assert!(readable(2000), "a key pressed after the flush was lost");
+            let mut got = [0u8; 4];
+            assert_eq!(libc::read(slave, got.as_mut_ptr().cast(), 4), 1);
+            assert_eq!(got[0], b'a');
+            libc::close(slave);
+            libc::close(master);
+        }
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
