@@ -1185,19 +1185,12 @@ fn copy_overlay(
         )]);
     }
     hints.push(vec![(p.hint.as_str(), "← or esc to close".into())]);
-    hints.extend(tc::notices::hint(w - 2));
     hints.extend([
         vec![(p.hint.as_str(), "[,] settings".into())],
         vec![(p.hint.as_str(), "[q]uit".into())],
     ]);
     let packed = tc::pack_hints_placed(&hints, w - 2, " · ");
-    // The notices banner, then the hints, as one block the padding reserves.
-    let banner = tc::notices::banner_rows(w, h);
-    let foot: Vec<String> = banner
-        .iter()
-        .cloned()
-        .chain(packed.lines.iter().map(|line| format!(" {}", line)))
-        .collect();
+    let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
     rows.truncate(h.saturating_sub(foot.len() + 1));
     while rows.len() < h.saturating_sub(foot.len() + 1) {
         rows.push(String::new());
@@ -1207,7 +1200,7 @@ fn copy_overlay(
     // travels back with the rows rather than being guessed at either end.
     // The note line goes on underneath, which is why this is taken before
     // the extend rather than from the end of the frame.
-    let foot_top = rows.len() + banner.len();
+    let foot_top = rows.len();
     rows.extend(foot);
     rows.push(if note.is_empty() {
         String::new()
@@ -1219,7 +1212,6 @@ fn copy_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("vercel-deployments");
     if !tc::dependencies_available(
         "vercel-deployments",
         include_str!("dependencies.json"),
@@ -1434,6 +1426,10 @@ fn main() {
 
     loop {
         let tick = tc::animation_tick();
+        // The filter box takes `!` as a character, not the notices screen.
+        if typing && !overlay {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1468,10 +1464,6 @@ fn main() {
                 match key.as_str() {
                     "," => {
                         tc::run_settings(&mut keyboard, SETTINGS);
-                        continue;
-                    }
-                    "!" => {
-                        tc::notices::run(&mut keyboard);
                         continue;
                     }
                     // Left and esc come out. q quits outright, which is
@@ -1542,10 +1534,6 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "q" | "Q" => {
@@ -1701,26 +1689,18 @@ fn main() {
                     vec![(p.hint.as_str(), "[r]efresh".into())],
                     vec![(p.hint.as_str(), "← or esc to close".into())],
                 ];
-                hints.extend(tc::notices::hint(w - 2));
                 hints.extend([
                     vec![(p.hint.as_str(), "[,] settings".into())],
                     vec![(p.hint.as_str(), "[q]uit".into())],
                 ]);
-                // The notices banner sits above the hints and is counted
-                // in the footer, so the detail never scrolls under it.
-                let banner = tc::notices::banner_rows(w, h);
                 let base_foot = tc::pack_hints(&hints, w - 2, " · ");
-                if body.len() > h.saturating_sub(base_foot.len() + banner.len() + 1) {
+                if body.len() > h.saturating_sub(base_foot.len() + 1) {
                     let rest_len = body.len().saturating_sub(1);
                     let widest = format!("↑↓ scroll {0}-{0} of {0}", rest_len);
                     hints.insert(0, vec![(p.hint.as_str(), widest)]);
                 }
                 let mut packed = tc::pack_hints_placed(&hints, w - 2, " · ");
-                let mut foot: Vec<String> = banner
-                    .iter()
-                    .cloned()
-                    .chain(packed.lines.iter().map(|line| format!(" {}", line)))
-                    .collect();
+                let mut foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
                 let room = h.saturating_sub(foot.len() + 1).max(1);
                 // The title stays; the rest scrolls under it. Scroll an
                 // overlay far enough without this and nothing on screen
@@ -1744,18 +1724,14 @@ fn main() {
                     );
                     hints[0][0].1 = position;
                     packed = tc::pack_hints_placed(&hints, w - 2, " · ");
-                    foot = banner
-                        .iter()
-                        .cloned()
-                        .chain(packed.lines.iter().map(|line| format!(" {}", line)))
-                        .collect();
+                    foot = packed.lines.iter().map(|line| format!(" {}", line)).collect();
                 }
                 let mut out: Vec<String> = head.to_vec();
                 out.extend_from_slice(&rest[oscroll..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }
-                let foot_top = out.len() + banner.len();
+                let foot_top = out.len();
                 out.extend(foot);
                 out.push(if note.0.is_empty() {
                     String::new()
@@ -2066,20 +2042,14 @@ fn main() {
             vec![(p.dim.as_str(), "[/]filter".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
-        hints.extend(tc::notices::hint(w - 2));
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        // The notices banner, then the hints: one block, so `room` below
-        // reserves both and the body never scrolls under the banner.
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        // The hints, as one block, so `room` below reserves them and the
+        // body never scrolls under them.
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let room = h.saturating_sub(footer.len());
         let head_len = 1.min(rows.len());
         let room_below = room.saturating_sub(head_len);
@@ -2106,7 +2076,7 @@ fn main() {
             scroll,
             room_below,
         );
-        let foot_top = frame.len() + banner.len();
+        let foot_top = frame.len();
         frame.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);

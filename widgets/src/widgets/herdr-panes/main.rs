@@ -876,7 +876,6 @@ fn homely(path: &str) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("herdr-panes");
     if !tc::dependencies_available(
         "herdr-panes",
         include_str!("dependencies.json"),
@@ -993,10 +992,6 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1277,19 +1272,10 @@ fn main() {
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
-        hints.extend(tc::notices::hint(w - 2));
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        // The notices banner sits directly above the hints and counts as
-        // footer, so every budget below that reads `footer.len()` keeps
-        // room for it.
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // One window over the three lists read as one, which is the order
         // `rows_now` is in and the order the keys walk. The cursor used to
@@ -1774,7 +1760,7 @@ fn main() {
         // under the pointer.
         placed = rows_at;
         let body_end = rows.len();
-        let foot_top = body_end + banner.len();
+        let foot_top = body_end;
         rows.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(2))).collect();
         tc::draw_plots(&rows, w, h, &plots);

@@ -2089,15 +2089,6 @@ fn start_work(kind: &str, row: Row) -> Working {
     }
 }
 
-/// The notices counter, in the owned shape this widget's hints take.
-fn counter_hint(w: usize) -> Option<Vec<(String, String)>> {
-    tc::notices::hint(w - 2).map(|hint| {
-        hint.into_iter()
-            .map(|(c, t)| (c.to_string(), t))
-            .collect::<Vec<_>>()
-    })
-}
-
 /// The bottom of either screen.
 ///
 /// One of five things, in the order they matter: a question that must be
@@ -2217,7 +2208,6 @@ impl Store {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("ports");
     if !tc::dependencies_available("ports", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -2501,9 +2491,6 @@ fn main() {
                     }
                     // The notices are the widget's, not the list's: a
                     // warning raised while a port is open is read from here.
-                    "!" => {
-                        tc::notices::run(&mut keyboard);
-                    }
                     // The arrows pick an address, which is what the footer
                     // beside them says. The wheel scrolls the screen they
                     // are on - two different things, and conflating them
@@ -2586,10 +2573,6 @@ fn main() {
                 }
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "!" => {
-                    tc::notices::run(&mut keyboard);
                     continue;
                 }
                 "up" => {
@@ -2730,9 +2713,7 @@ fn main() {
                         (ok.dim.clone(), "/esc back".into()),
                     ],
                 ];
-                hints.extend(counter_hint(w));
                 hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
-                rows.extend(tc::notices::banner_rows(w, h));
                 rows.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
                 tc::draw(&rows, w, h);
                 keyboard.wait(Duration::from_millis(100));
@@ -2793,12 +2774,8 @@ fn main() {
                     (ok.dim.clone(), "/esc back".into()),
                 ],
             ];
-            hints.extend(counter_hint(w));
             hints.push(vec![(ok.dim.clone(), "[q]uit".into())]);
-            // The banner sits above the footer on this screen as on the
-            // list, and counts in the rows the footer takes.
-            let mut foot = tc::notices::banner_rows(w, h);
-            foot.extend(footer(&confirm, &watch, &working, &notice, w, &hints, &ok));
+            let foot = footer(&confirm, &watch, &working, &notice, w, &hints, &ok);
             let room = h.saturating_sub(foot.len() + 1);
             // A window onto the body rather than a cut of it. The title is
             // pinned above it: on a detail screen it is the only row that
@@ -3000,10 +2977,9 @@ fn main() {
             w - 1,
         ));
 
-        // The notices banner sits above the footer and is part of it, so
-        // the list is sized with it already taken. The hints are packed
-        // first too: a fixed three was the height before the notice
-        // counter wrapped another row and pushed the last hint off the pane.
+        // The hints are packed first, so the list is sized with them already
+        // taken: a fixed three was the height before a wrapped hint row
+        // pushed the last hint off the pane.
         let mut hints: Vec<Vec<(String, String)>> = vec![
             vec![
                 (ok.accent.clone(), "↑↓".into()),
@@ -3020,21 +2996,12 @@ fn main() {
             )],
             vec![(ok.dim.clone(), "[r]efresh".into())],
         ];
-        hints.extend(counter_hint(w));
         hints.extend([
             vec![(ok.dim.clone(), "[,] settings".into())],
             vec![(ok.dim.clone(), "[q]uit".into())],
         ]);
-        let mut banner = tc::notices::banner_rows(w, h);
         let hint_rows = footer(&confirm, &watch, &working, &notice, w, &hints, &ok);
-        // One port row and the packed hints have to stay. The banner is
-        // pinned and this list does not scroll, so a banner that leaves
-        // no room for both takes the footer off the pane. The [!] counter
-        // still counts the notices.
-        if banner_kept(h, rows.len(), hint_rows.len(), banner.len()) == 0 {
-            banner.clear();
-        }
-        let visible = list_rows(h, rows.len(), hint_rows.len(), banner.len());
+        let visible = list_rows(h, rows.len(), hint_rows.len());
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -3217,8 +3184,7 @@ fn main() {
             rows.push(tc::seg(&line, w - 1));
         }
 
-        let mut foot = banner;
-        foot.extend(hint_rows);
+        let foot = hint_rows;
         while rows.len() < h.saturating_sub(foot.len() + 1) {
             rows.push(String::new());
         }
@@ -3278,20 +3244,10 @@ fn bind_note(row: &Row, p: &Palette) -> (String, String) {
 }
 
 /// Listening-port rows that fit under `drawn` rows once `footer` hint rows
-/// and `banner` notice rows are reserved. Zero when the heading and the
-/// footer already fill the pane, so the footer stays on screen.
-fn list_rows(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
-    h.saturating_sub(drawn + footer + banner)
-}
-
-/// Banner rows to keep. Zero when keeping them would leave no room for one
-/// port row and the packed hints.
-fn banner_kept(h: usize, drawn: usize, footer: usize, banner: usize) -> usize {
-    if drawn.saturating_add(footer).saturating_add(banner).saturating_add(1) > h {
-        0
-    } else {
-        banner
-    }
+/// are reserved. Zero when the heading and the footer already fill the
+/// pane, so the footer stays on screen.
+fn list_rows(h: usize, drawn: usize, footer: usize) -> usize {
+    h.saturating_sub(drawn + footer)
 }
 
 #[cfg(test)]
@@ -3302,34 +3258,15 @@ mod tests {
     fn the_list_reserves_the_packed_footer_not_a_fixed_three() {
         let h = 30;
         let drawn = 8;
-        let banner = 0;
-        // Two hint rows plus the notice counter wraps a fourth on a narrow
-        // pane. Reserving three then makes the frame one row too tall.
+        // Hints that wrap onto a fourth row on a narrow pane. Reserving
+        // three then makes the frame one row too tall.
         let footer = 4;
-        let visible = list_rows(h, drawn, footer, banner);
-        assert_eq!(drawn + visible + footer + banner, h);
-        let old = std::cmp::max(1, h.saturating_sub(drawn + 3 + banner));
-        assert_eq!(drawn + old + footer + banner, h + 1);
+        let visible = list_rows(h, drawn, footer);
+        assert_eq!(drawn + visible + footer, h);
+        let old = std::cmp::max(1, h.saturating_sub(drawn + 3));
+        assert_eq!(drawn + old + footer, h + 1);
         // The height the fixed three already described does not move.
-        assert_eq!(list_rows(h, drawn, 3, 2), h - drawn - 5);
-    }
-
-    #[test]
-    fn the_banner_stands_down_before_it_hides_the_footer() {
-        // 4 rows of body, 3 of hints, a 2-row banner, on a 9-row pane.
-        // Forcing one port row on top of the banner made 10 rows, and the
-        // last footer row was not drawn.
-        let h = 9;
-        let drawn = 4;
-        let footer = 3;
-        let banner = 2;
-        let kept = banner_kept(h, drawn, footer, banner);
-        assert_eq!(kept, 0);
-        let visible = list_rows(h, drawn, footer, kept);
-        assert!(visible >= 1);
-        assert!(drawn + visible + footer + kept <= h);
-        // The banner stays when one port row still fits beside it.
-        assert_eq!(banner_kept(30, 8, 3, 2), 2);
+        assert_eq!(list_rows(h, drawn, 3), h - drawn - 3);
     }
 
     fn wait_for_snapshot<T: Send + 'static>(snapshot: &mut AsyncSnapshot<T>) {

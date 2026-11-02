@@ -1657,7 +1657,6 @@ fn info_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("github-actions");
     if !tc::dependencies_available(
         "github-actions",
         include_str!("dependencies.json"),
@@ -1809,6 +1808,10 @@ fn main() {
 
     loop {
         let tick = tc::animation_tick();
+        // The filter box takes `!` as a character, not the notices screen.
+        if typing && !overlay {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1838,10 +1841,6 @@ fn main() {
             }
             if key == "," {
                 tc::run_settings(&mut keyboard, SETTINGS);
-                continue;
-            }
-            if key == "!" {
-                tc::notices::run(&mut keyboard);
                 continue;
             }
             if overlay {
@@ -2083,19 +2082,7 @@ fn main() {
                 refresh_activity.tick(tick),
                 &p,
             );
-            // The banner sits above this screen's one-line footer, counted
-            // in what the footer takes so the run's text never scrolls
-            // under it.
-            let banner = tc::notices::banner_rows(w, h);
-            // And the [!] counter on a line of its own under the prose
-            // footer, so a notice that outlives its banner is still counted
-            // while a run is open.
-            let counter: Option<String> = tc::notices::hint(w - 2).map(|hint| {
-                let parts: Vec<(&str, String)> =
-                    hint.into_iter().map(|(c, t)| (c, format!(" {t}"))).collect();
-                tc::seg(&parts, w - 1)
-            });
-            let foot = 2 + banner.len() + usize::from(counter.is_some());
+            let foot = 2;
             let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
             // saying which run it is describing.
@@ -2109,7 +2096,6 @@ fn main() {
             while out.len() < room {
                 out.push(String::new());
             }
-            out.extend(banner);
             out.push(tc::seg(
                 &[(
                     p.hint.as_str(),
@@ -2126,7 +2112,6 @@ fn main() {
                 )],
                 w - 1,
             ));
-            out.extend(counter);
             // This overlay writes its footer as one line of prose rather
             // than packing hints, so there are no placements to register -
             // and leaving the screen underneath registered would answer a
@@ -2355,25 +2340,15 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         if !typing {
-            if let Some(notices) = tc::notices::hint(w - 2) {
-                hints.insert(hints.len() - 1, notices);
-            }
             hints.insert(hints.len() - 1, vec![(
                 p.dim.as_str(),
                 "[,] settings".into(),
             )]);
         }
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        // The notices banner, then the hints: one block, built before the
-        // list so the list is sized with it already taken. Sized after,
-        // a banner arriving cut the last run off the bottom while `scroll`
-        // had no range left to bring it back.
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        // The hints, built before the list so the list is sized with them
+        // already taken.
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
@@ -2553,7 +2528,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = rows.len() + banner.len();
+        let foot_top = rows.len();
         let body_end = rows.len();
         rows.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1))).collect();
@@ -2567,9 +2542,9 @@ fn main() {
 /// Whether another run row still fits above a footer of `footer` rows.
 ///
 /// Both lines of a run use this. The second used to stop at `h - 1`, which
-/// is the footer only when the footer is one row. A taller one — the
-/// banner — let the second line land on the row `truncate` then cut, and
-/// the placement survived, so a click on the banner selected that run.
+/// is the footer only when the footer is one row. A taller one let the
+/// second line land on the row `truncate` then cut, and the placement
+/// survived, so a click on the footer selected that run.
 fn row_fits_above_footer(rows: usize, h: usize, footer: usize) -> bool {
     rows < h.saturating_sub(footer)
 }
@@ -2583,7 +2558,7 @@ mod tests {
         // A one-row footer: the old `h - 1` bound and this one agree.
         assert!(row_fits_above_footer(10, 12, 1));
         assert!(!row_fits_above_footer(11, 12, 1));
-        // A banner makes the footer taller than one row. Index `h - footer`
+        // A wrapped footer is taller than one row. Index `h - footer`
         // is the first footer row. The old bound still called that a fit.
         let h = 20;
         let footer = 4;

@@ -1882,7 +1882,6 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    tc::notices::start("github-prs");
     if !tc::dependencies_available(
         "github-prs",
         include_str!("dependencies.json"),
@@ -2154,6 +2153,10 @@ fn main() {
             })
             .collect();
 
+        // The filter box takes `!` as a character, not the notices screen.
+        if typing {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -2185,10 +2188,6 @@ fn main() {
             }
             if key == "," {
                 tc::run_settings(&mut keyboard, SETTINGS);
-                continue;
-            }
-            if key == "!" {
-                tc::notices::run(&mut keyboard);
                 continue;
             }
             match key.as_str() {
@@ -2463,7 +2462,6 @@ fn main() {
                 (p.dim.as_str(), "/[esc] back".into()),
             ]);
             hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
-            hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints
@@ -2539,7 +2537,6 @@ fn main() {
                 vec![(p.dim.as_str(), "[c]opy url".into())],
                 vec![(p.dim.as_str(), "[r]efresh".into())],
             ];
-            hints.extend(tc::notices::hint(w - 2));
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints
@@ -2554,12 +2551,7 @@ fn main() {
             hints
         };
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let banner = tc::notices::banner_rows(w, h);
-        let footer: Vec<String> = banner
-            .iter()
-            .cloned()
-            .chain(packed.lines.iter().map(|l| format!(" {}", l)))
-            .collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: scrolled away, either screen stops saying what it is
         // describing. Both screens work this way - the list's body is the
@@ -2603,7 +2595,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
-        let foot_top = frame.len() + banner.len();
+        let foot_top = frame.len();
         frame.extend(footer);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(off, head.len(), room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);

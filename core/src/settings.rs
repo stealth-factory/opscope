@@ -4196,6 +4196,16 @@ fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> 
     ]
 }
 
+/// Whether `mode` has a text field taking keys: the value editor, or the
+/// picker's search box while the box rather than the list has focus.
+fn typing_in(mode: &Mode) -> bool {
+    match mode {
+        Mode::List => false,
+        Mode::Edit { .. } => true,
+        Mode::Pick { on_list, .. } => !on_list,
+    }
+}
+
 /// Take over the current terminal until the user returns to the widget.
 ///
 /// The caller keeps ownership of the already-active keyboard so entering
@@ -4218,6 +4228,11 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
     let mut click = Clickable::default();
 
     loop {
+        // A value being typed, or a search box with the focus, takes `!` as
+        // a character: a token or a filter can hold one.
+        if typing_in(&app.mode) {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which opens the editor on the
