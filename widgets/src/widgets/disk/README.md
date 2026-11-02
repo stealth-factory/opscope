@@ -100,8 +100,11 @@ poller that stops says `stopped:` and why.
 
 Columns leave as the pane narrows: the one-hour rate, then inodes, then
 type, then size. The window rate and FULL IN stay. A row that still does
-not fit wraps whole cells onto the next line. The mount point wraps onto
-the next row rather than being cut. A pane that is too short to hold the
+not fit wraps whole cells onto the next line. When the longest mount
+point cannot sit whole beside its figures, every mount point gets a line
+of its own and its figures go under it, indented, with the full width to
+choose columns from. A mount point longer than the pane wraps rather than
+being cut, and so does an error. A pane that is too short to hold the
 table scrolls; the title stays put.
 
 ## What this widget kept
@@ -133,22 +136,20 @@ sample says `measuring`. A counter that went backwards is a gap, drawn as
 A disk with no reads and no writes since boot is hidden until `v`. The
 count is on the filter line (`7 idle hidden`). `hide_devices` matches a
 whole-disk name exactly, and that disk stays hidden when `v` shows idle
-disks. Its count is the next category on the same line. On Linux the
-selected disk keeps a 60-sample read-up, write-down chart in the same
-frame as netwatch. The top edge names the read peak and the current read;
+disks. Its count is the next category on the same line. Below the table
+is one 60-sample read-up, write-down chart in the same frame as netwatch.
+On Linux it is the sum of every disk until the disk section has focus;
+then it is the disk under the cursor, named on the line above it. The top edge names the read peak and the current read;
 the bottom edge names the write peak and the current write; the zero line
 sits between them. Text mode
 draws the line in Braille; a Kitty terminal draws the same line in pixels
 under the frame. Each half has its own scale, and an idle stretch stays
 blank inside the frame. On macOS the chart is one trace of combined I/O.
 
-Above that table, when more than one disk is in the total, the same frame
-shows their sum. A disk named as another's slave is left out, and so is
-a disk whose partition is that slave, and the line says so, because adding
-both would count the same bytes twice. A disk
-hidden by name stays in the sum. One disk with nothing under it draws no
-second chart. A sample where any included disk has no rate is a gap, not
-a partial sum.
+The sum leaves out a disk named as another's slave, and a disk whose
+partition is that slave, and its line says so, because adding both would
+count the same bytes twice. A disk hidden by name stays in the sum. A
+sample where any included disk has no rate is a gap, not a partial sum.
 
 On macOS the same section is `iostat`: read and write are one number, and
 the heading says await, busy and queue need IOKit. The write sort is that
