@@ -100,8 +100,11 @@ poller that stops says `stopped:` and why.
 
 Columns leave as the pane narrows: the one-hour rate, then inodes, then
 type, then size. The window rate and FULL IN stay. A row that still does
-not fit wraps whole cells onto the next line. The mount point wraps onto
-the next row rather than being cut. A pane that is too short to hold the
+not fit wraps whole cells onto the next line. When the longest mount
+point cannot sit whole beside its figures, every mount point gets a line
+of its own and its figures go under it, indented, with the full width to
+choose columns from. A mount point longer than the pane wraps rather than
+being cut, and so does an error. A pane that is too short to hold the
 table scrolls; the title stays put.
 
 ## What this widget kept
