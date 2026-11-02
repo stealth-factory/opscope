@@ -2765,52 +2765,182 @@ fn push_chart(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    let peak = peak_of(&row.read, &row.write).max(1.0);
-    let caption = chart_caption(&row.read, &row.write, combined);
-    for line in wrap(&caption, width.saturating_sub(1)) {
-        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
+    if chart_caption(&row.read, &row.write, combined) == "no rate yet" {
+        rows.push(tc::seg(&[(p.dim.as_str(), " no rate yet".into())], width));
+        return;
     }
-    let y = rows.len();
+    // Same framed line chart as netwatch: Braille in text mode, Kitty pixels
+    // under the frame. Read grows up from the zero line, write grows down,
+    // and each half keeps its own peak so the quieter one still shows.
     let plot_w = width.saturating_sub(2).max(1);
-    for _ in 0..tall {
-        rows.push(tc::seg(&[(p.dim.as_str(), " ".into())], width));
+    let up = if combined {
+        tall.max(2)
+    } else {
+        (tall / 2).max(2)
+    };
+    let down = if combined {
+        0
+    } else {
+        (tall - tall / 2).max(2)
+    };
+    let read_peak = peak_of(&row.read, &[]).max(1.0);
+    let write_peak = peak_of(&[], &row.write).max(1.0);
+    let top = if combined {
+        format!(
+            "peak {}/s  now {} combined",
+            human(read_peak.round() as u64),
+            rate_now(&row.read)
+        )
+    } else {
+        format!(
+            "read  peak {}/s  now {}",
+            human(read_peak.round() as u64),
+            rate_now(&row.read)
+        )
+    };
+    push_border(rows, &top, width, &p.accent, &p.dim, false);
+    let y = rows.len();
+    for _ in 0..up {
+        rows.push(chart_gutter(width, p));
     }
-    let mut traces = vec![tc::Trace {
-        values: row
-            .read
-            .iter()
-            .map(|value| chart_frac(*value, peak, false))
-            .collect(),
-        positions: None,
-        colour: p.accent.clone(),
-        baseline: Some(0.0),
-    }];
+    push_trace(
+        plots,
+        &row.read,
+        read_peak,
+        false,
+        p.accent.clone(),
+        1,
+        y,
+        plot_w,
+        up,
+    );
     if !combined {
-        traces.push(tc::Trace {
-            values: row
-                .write
-                .iter()
-                .map(|value| chart_frac(*value, peak, true))
-                .collect(),
-            positions: None,
-            colour: p.down.clone(),
-            baseline: Some(1.0),
-        });
-    }
-    plots.push(
-        tc::Plot::new(
+        rows.push(chart_rule("├", "┤", "0", width, p));
+        let y = rows.len();
+        for _ in 0..down {
+            rows.push(chart_gutter(width, p));
+        }
+        push_trace(
+            plots,
+            &row.write,
+            write_peak,
+            true,
+            p.down.clone(),
             1,
             y,
             plot_w,
-            tall,
+            down,
+        );
+    }
+    let bottom = if combined {
+        String::new()
+    } else {
+        format!(
+            "write  peak {}/s  now {}",
+            human(write_peak.round() as u64),
+            rate_now(&row.write)
+        )
+    };
+    push_border(rows, &bottom, width, &p.down, &p.dim, true);
+}
+
+fn push_trace(
+    plots: &mut Vec<tc::Plot>,
+    series: &[Option<f64>],
+    peak: f64,
+    invert: bool,
+    colour: String,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) {
+    let values: Vec<Option<f64>> = series
+        .iter()
+        .map(|value| chart_frac(*value, peak, invert))
+        .collect();
+    let slots = values.len().max(1);
+    plots.push(
+        tc::Plot::new(
+            x,
+            y,
+            width,
+            height,
             tc::LineChart {
-                traces,
-                slots: SERIES_CAP,
+                traces: vec![tc::Trace {
+                    values,
+                    positions: None,
+                    colour,
+                    baseline: Some(if invert { 1.0 } else { 0.0 }),
+                }],
+                slots,
                 focus: Some(0),
             },
         )
-        .under_text(),
+        .under_text()
+        .on_axis(0.0, peak),
     );
+}
+
+fn chart_gutter(width: usize, p: &Palette) -> String {
+    let inner = width.saturating_sub(2);
+    tc::seg(
+        &[(p.dim.as_str(), format!("│{}│", " ".repeat(inner)))],
+        width,
+    )
+}
+
+fn chart_rule(left: &str, right: &str, label: &str, width: usize, p: &Palette) -> String {
+    let gap =
+        width.saturating_sub(left.chars().count() + right.chars().count() + label.chars().count());
+    tc::seg(
+        &[(
+            p.dim.as_str(),
+            format!("{left}{label}{}{right}", "─".repeat(gap)),
+        )],
+        width,
+    )
+}
+
+/// A chart edge. The label takes the ink of its series and wraps onto more
+/// rules when the pane is narrower than the words, without cutting one.
+fn push_border(
+    rows: &mut Vec<String>,
+    label: &str,
+    width: usize,
+    ink: &str,
+    grid: &str,
+    lower: bool,
+) {
+    let inner = width.saturating_sub(2).max(1);
+    let lines = if label.is_empty() {
+        vec![String::new()]
+    } else {
+        wrap(label, inner)
+    };
+    let last = lines.len().saturating_sub(1);
+    for (i, line) in lines.iter().enumerate() {
+        let (left, right) = if lower {
+            if i == last {
+                ("└", "┘")
+            } else {
+                ("│", "│")
+            }
+        } else if i == 0 {
+            ("┌", "┐")
+        } else {
+            ("│", "│")
+        };
+        let pad = inner.saturating_sub(line.chars().count());
+        rows.push(tc::seg(
+            &[
+                (grid, left.into()),
+                (ink, line.clone()),
+                (grid, format!("{}{right}", "─".repeat(pad))),
+            ],
+            width,
+        ));
+    }
 }
 
 /// The latest sample is `now`. A gap there stays a dash; an older rate is
@@ -3666,7 +3796,15 @@ mod tests {
                 .map(|line| plain(line))
                 .collect::<Vec<_>>()
                 .join("\n");
-            for phrase in ["whole disks only", "/proc/diskstats", "512-byte", "sectors"] {
+            for phrase in [
+                "whole disks only",
+                "/proc/diskstats",
+                "512-byte",
+                "sectors",
+                "peak",
+                "┌",
+                "├0",
+            ] {
                 assert!(plain.contains(phrase), "{width} missing {phrase}");
             }
             assert!(!plain.contains("sda1"), "partition rendered at {width}");
@@ -3685,11 +3823,13 @@ mod tests {
         }
         assert!(draw_body(&frame, 80, &p, None).rows.len() > 10);
         let drawn = draw_body(&frame, 100, &p, None);
-        assert_eq!(drawn.plots.len(), 1);
-        assert_eq!(drawn.plots[0].height, 4);
-        assert_eq!(drawn.plots[0].chart.traces.len(), 2);
+        assert_eq!(drawn.plots.len(), 2);
+        assert_eq!(drawn.plots[0].height, 2);
+        assert_eq!(drawn.plots[1].height, 2);
         assert_eq!(drawn.plots[0].chart.traces[0].baseline, Some(0.0));
-        assert_eq!(drawn.plots[0].chart.traces[1].baseline, Some(1.0));
+        assert_eq!(drawn.plots[1].chart.traces[0].baseline, Some(1.0));
+        assert!(plain_has(&drawn, "┌"));
+        assert!(plain_has(&drawn, "├0"));
         assert!(drawn.plots[0]
             .clone()
             .in_viewport(0, drawn.head, 40)
