@@ -1,7 +1,7 @@
 {
   "_comment": "GA4 properties through a Google service-account key: realtime against a baseline this widget records itself, today against the same weekday, key events, organic landing pages and movers. Setup on Google's side is docs/google-setup.md. Keep the key file and config.json chmod 600.",
   "_schema": {
-    "token": { "secret": true },
+    "credentials": { "secret": true },
     "properties": { "items": "string" },
     "key_events": { "items": "string" },
     "realtime_refresh": { "choices": [15, 30, 60] },
@@ -9,12 +9,10 @@
     "window_days": { "minimum": 1, "maximum": 90 },
     "baseline_weeks": { "minimum": 1, "maximum": 12 }
   },
-  "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded). The widget signs in with it and re-mints its hour-long token on its own, indefinitely. The key stays in its own file and never goes in config.json; the screen warns when the file is readable by anyone but you.",
+  "_credentials_comment": "The service-account JSON key itself, the whole file pasted here. Get it from the Google Cloud console (console.cloud.google.com). Under APIs & Services → Library, enable the Google Analytics Data API and the Google Analytics Admin API. Under IAM & Admin → Service accounts, create a service account with no project role, open it, and choose Keys → Add key → Create new key → JSON. Paste that downloaded file here. In Google Analytics, Admin → Property access management → Add users, enter the key's client_email, and choose Viewer for each property. The widget re-mints its hour-long token from the key indefinitely. Empty uses credentials_file; when both are set, this wins. Stored in config.json, which should be chmod 600, and never shown again after it is written. Full steps: docs/google-setup.md.",
+  "credentials": "",
+  "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), used when credentials is empty. The file is the JSON downloaded from the Google Cloud console: IAM & Admin → Service accounts → the account → Keys → Add key → Create new key → JSON. Enable the Analytics Data and Admin APIs first, and in Google Analytics add the key's client_email as Viewer under Property access management. The screen warns when that file is readable by anyone but you. Full steps: docs/google-setup.md.",
   "credentials_file": "",
-  "_token_comment": "A pre-minted access token, for an hour of testing without a key (for example from gcloud auth print-access-token). Google tokens last 1h and this widget cannot renew one; credentials_file wins when both are set.",
-  "token": "",
-  "_token_env_comment": "Environment variable holding a pre-minted access token, read when token is empty.",
-  "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN",
   "_properties_comment": "Numeric GA4 property ids - the number after p in GA's admin URLs. Empty lists every property the service account can see (Admin API account summaries).",
   "properties": [],
   "_realtime_refresh_comment": "Seconds between realtime readings: 15, 30 or 60; anything else means 15. The l key cycles them while running. It backs off to 60 s after 5 minutes at 0 active users and slows to 120 s under 10% of quota left, and the title says which.",

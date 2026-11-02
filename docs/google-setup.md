@@ -78,55 +78,21 @@ Access can take a few minutes to reach the APIs after it is granted.
 
 ## 5. Point the widget at the key
 
-Each widget's section takes the path, and only the path - the key itself
-never goes in `config.json`:
+Each widget's section takes the key one of two ways. `credentials` is the
+JSON itself, pasted into the settings screen. `credentials_file` is a path
+to the same file, used when `credentials` is empty. When both are set, the
+pasted JSON is the one that signs in. Either way the key stays out of this
+repository: settings writes `config.json`, which is gitignored, and a key
+file should stay `chmod 600`.
 
 ```json
 "google_analytics": {
+  "credentials": "",
   "credentials_file": "~/.config/opscope/google-key.json"
 }
 ```
 
 Each widget's own `CONFIGURE.md` names its section and its other settings.
-
-## For an hour of testing: a pasted token
-
-Without a key, a token minted elsewhere works until it expires. It has to
-carry the widget's scope - `analytics.readonly` for `google-analytics`,
-`webmasters.readonly` for `google-search-console` - and a plain
-`gcloud auth print-access-token` for your own account cannot ask for
-either: for a user account gcloud only accepts a fixed list of scopes. The
-scope has to be granted at login first, through Application Default
-Credentials:
-
-```sh
-gcloud auth application-default login --scopes=\
-https://www.googleapis.com/auth/cloud-platform,\
-https://www.googleapis.com/auth/analytics.readonly,\
-https://www.googleapis.com/auth/webmasters.readonly
-export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth application-default print-access-token)"
-```
-
-Google can refuse those scopes for gcloud's own sign-in client on some
-accounts; if it does, the service-account key above is the way in. Someone
-holding *Service Account Token Creator* on the service account can instead
-mint a token as it, which carries exactly the access the account was given:
-
-```sh
-export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth print-access-token \
-  --impersonate-service-account=<service-account-email> \
-  --scopes=https://www.googleapis.com/auth/analytics.readonly,\
-https://www.googleapis.com/auth/webmasters.readonly)"
-```
-
-Both scopes are asked for there so one token serves either widget; drop
-the one you do not need.
-
-The widget reads the variable named by `token_env` (that one by default), or
-`token` in its config section. It cannot renew it, so the screen says
-`token from $GOOGLE_OAUTH_ACCESS_TOKEN · Google tokens last 1h`, and an
-expired one is reported as a refused token rather than as a quiet site. A
-`credentials_file` that is set wins over both.
 
 ## What Google's refusals look like on screen
 
@@ -144,10 +110,9 @@ expired one is reported as a refused token rather than as a quiet site. A
   allow the `analytics.readonly` or `webmasters.readonly` scopes, a refresh
   token expires after seven days while the consent screen is in "Testing",
   and it puts a client secret in config.
-- **`gcloud auth print-access-token`.** Its own sign-in cannot ask for
-  these scopes without a scoped `application-default` login first, its
-  tokens still last an hour, and it is a 300 MB tool on every machine that
-  runs a pane. Fine for an hour of testing, as above; not for a wall.
+- **`gcloud auth print-access-token`.** Its tokens last an hour and this
+  widget does not accept one. It is also a 300 MB tool on every machine
+  that runs a pane.
 - **A JWT crate.** `jsonwebtoken` brings `aws-lc-rs`, which needs a C
   compiler, and `ring` needs `cc`. The JWT is forty lines over `rsa` and
   `sha2`, both pure Rust, so `ldd` on a release binary still shows only libc,

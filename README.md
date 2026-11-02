@@ -455,8 +455,7 @@ PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
 `linear` a personal API key from Settings → Security & access,
 `github-prs` and `github-actions` each hold their own GitHub token rather
 than borrowing one, and `google-analytics` a service-account key
-([docs/google-setup.md](docs/google-setup.md)) or a pasted token for an hour
-of testing. Every other widget needs no configuration to start.
+([docs/google-setup.md](docs/google-setup.md)). Every other widget needs no configuration to start.
 
 All three GitHub widgets also reach **GitHub Enterprise**: set
 `enterprise_hostname` in each one's section (for example `acme.ghe.com`), or

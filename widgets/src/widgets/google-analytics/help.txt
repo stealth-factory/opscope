@@ -9,11 +9,11 @@ visitors to, and the pages and channels that moved.
 
     google-analytics
 
-Signs in with a Google service-account key (credentials_file), which mints
-its own hour-long token indefinitely, or with a pasted token for an hour of
-testing (token, or $GOOGLE_OAUTH_ACCESS_TOKEN), which the screen says will
-expire. Setup on Google's side - one Cloud project, three APIs, the service
-account as Viewer on each property - is docs/google-setup.md.
+Signs in with a Google service-account key, pasted into credentials or
+named by path in credentials_file. The key mints an hour-long token and
+replaces it before that hour runs out. Setup on Google's side - one Cloud
+project, the Analytics APIs, the service account as Viewer on each property
+- is docs/google-setup.md.
 
 Realtime is read every 15 s by default, backing off to 60 s after five
 minutes with nobody on the site and slowing to 120 s when under a tenth of

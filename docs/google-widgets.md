@@ -19,26 +19,25 @@ The rest of the path (owned folder, launcher, settings, tests, hand-off) is
 
 | need | call |
 |---|---|
-| the credential config names | `google::credential(&credentials_file, &token, &token_env)` → `Option<Credential>` |
-| nothing configured | `google::missing_credential(SECTION, &token_env)` → the one row to show |
+| the credential config names | `google::credential(&credentials, &credentials_file)` → `Result<Option<Credential>, String>` |
+| nothing configured | `google::missing_credential(SECTION)` → the one row to show |
 | a bearer token | `cred.bearer(&[google::SCOPE_…])` → `Result<Token, String>` |
-| whom to grant access to | `cred.client_email()` → `Option<String>` (none for a pasted token) |
-| what to warn about | `cred.warning()` → a key file others can read, or a pasted token's one-hour life |
+| whom to grant access to | `cred.client_email()` → `Option<String>` (`None` when the key file cannot be read) |
+| what to warn about | `cred.warning()` → a key file others can read |
 | why a request was refused | `google::parse_refusal(status, &body).wording(&grant)` |
 
-`credential` takes the three settings in this order: the key file at
-`credentials_file`, then `token` pasted into config, then the variable
-`token_env` names (`GOOGLE_OAUTH_ACCESS_TOKEN` when blank). The key file
-wins because it is the one that keeps working; a pasted token is for an
-hour of testing.
+`credential` takes the JSON key in `credentials`, then the path in
+`credentials_file`. A non-empty JSON string wins, and a string that is not
+a service-account key is the error returned rather than a fall-through to
+the file. A pasted access token lasts an hour and Google will not renew
+it, so the helper does not read one.
 
 `bearer` mints from the key file on first use and serves the cached token
 until five minutes before it expires, per process and per (account,
-scopes), so calling it before every request costs nothing. A pasted token
-is returned as it is. Its error is already a sentence - an unreadable key
-file names the path, a refused sign-in carries Google's `invalid_grant`
-description and a clock hint when it is about `iat`/`exp` - so show it as
-it comes.
+scopes), so calling it before every request costs nothing. Its error is
+already a sentence - an unreadable key file names the path, a refused
+sign-in carries Google's `invalid_grant` description and a clock hint when
+it is about `iat`/`exp` - so show it as it comes.
 
 `wording(grant)` is the shared line for a refused request: API not
 enabled (naming the service), 403 with *your* remedy, 401, 429 with the
@@ -64,39 +63,32 @@ comment saying which widget asks for it, not as a string in the widget.
 
 ## Settings to declare
 
-Declare the three sign-in fields in the widget's `settings.json`, with
-`token` marked secret. `token_env` ends in `_env`, so it stays visible; it
-holds a variable's name, not a value.
+Declare `credentials` and `credentials_file` in the widget's `settings.json`.
+`credentials` is the JSON key and is marked secret, so the screen masks it
+and never copies a stored key back into the editor. `credentials_file` is
+only a path.
 
 ```json
 {
   "_schema": {
-    "token": { "secret": true }
+    "credentials": { "secret": true }
   },
-  "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), the same file every Google widget uses. Keep it chmod 600 and outside any repository. Wins over token and token_env.",
-  "credentials_file": "",
-  "_token_comment": "A pre-minted access token, for an hour of testing; Google tokens last one hour and this one is not renewed. Leave empty to read token_env.",
-  "token": "",
-  "_token_env_comment": "Environment variable holding a pre-minted access token, read when token is empty.",
-  "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN"
+  "_credentials_comment": "The service-account JSON key itself. Empty uses credentials_file. When both are set, this wins.",
+  "credentials": "",
+  "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), used when credentials is empty. Keep it chmod 600 and outside any repository.",
+  "credentials_file": ""
 }
 ```
 
-Read them in the widget with `cfg_str`, literally - the repository checks
+Read both in the widget with `cfg_str`, literally - the repository checks
 read the widget's own source to find which keys it uses and whether their
 defaults match `settings.json`, so the reads cannot move into core:
 
 ```rust
-const TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
-
+let credentials = tc::cfg_str(&cfg, "credentials", "");
 let credentials_file = tc::cfg_str(&cfg, "credentials_file", "");
-let token = tc::cfg_str(&cfg, "token", "");
-let token_env = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
 ```
 
-`TOKEN_ENV` is spelled out as a literal because
-`a_declared_token_env_matches_the_code` reads it from `main.rs`; keep a test
-holding it to `google::DEFAULT_TOKEN_ENV` so the two cannot drift.
 Regenerate `config.example.json` afterwards
 (`UPDATE_CONFIG_EXAMPLE=1 cargo test`).
 
@@ -104,23 +96,17 @@ Regenerate `config.example.json` afterwards
 
 Do not write your own line for "nothing configured". `missing_credential`
 gives every Google widget the same one, naming the section's
-`credentials_file` and `token` and the variable actually read, and ending
-in ``press `,` to set it here``:
+`credentials` and `credentials_file` and ending in ``press `,` to set it here``:
 
 ```text
-no credential: set google_analytics.credentials_file to a service-account
-key file (docs/google-setup.md), or paste a token in google_analytics.token
-or $GOOGLE_OAUTH_ACCESS_TOKEN — press `,` to set it here
+no credential: set google_analytics.credentials to the service-account
+JSON, or google_analytics.credentials_file to the key's path
+(docs/google-setup.md) — press `,` to set it here
 ```
 
-Show `cred.warning()` beside the data whenever it says something. For a
-key file it is `<path> is readable by others; chmod 600 it` - the key signs
-in as the account indefinitely, so it is held to the same rule as
-`config.json`. For a pasted token it is
-`token from $GOOGLE_OAUTH_ACCESS_TOKEN · Google tokens last 1h`, so an
-expired token is read as a refused token, not as a quiet site.
-`tc::config_token_warning()` still applies on top, since `token` can sit
-in `config.json`.
+Show `cred.warning()` beside the data whenever it says something. It is
+`<path> is readable by others; chmod 600 it` - the key signs in as the
+account indefinitely, so it is held to the same rule as `config.json`.
 
 ## A minimal widget
 
@@ -129,17 +115,15 @@ use opscope_core as tc;
 use opscope_core::google;
 
 const SECTION: &str = "google_example";
-const TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
 
 /// Sign in, or the one row that says why not.
 fn bearer(cfg: &serde_json::Value) -> Result<(google::Credential, String), String> {
-    let token_env = tc::cfg_str(cfg, "token_env", TOKEN_ENV);
     let Some(cred) = google::credential(
+        &tc::cfg_str(cfg, "credentials", ""),
         &tc::cfg_str(cfg, "credentials_file", ""),
-        &tc::cfg_str(cfg, "token", ""),
-        &token_env,
-    ) else {
-        return Err(google::missing_credential(SECTION, &token_env));
+    )?
+    else {
+        return Err(google::missing_credential(SECTION));
     };
     let token = cred.bearer(&[google::SCOPE_ANALYTICS_READONLY])?;
     Ok((cred, token.value))
@@ -159,7 +143,7 @@ fn report(cred: &google::Credential, bearer: &str, url: &str, body: &str) -> Res
     }
     let grant = match cred.client_email() {
         Some(email) => format!("add {} as Viewer on the property", email),
-        None => "give the token's account Viewer on the property".into(),
+        None => "add the service account as Viewer on the property".into(),
     };
     Err(google::parse_refusal(status, &text).wording(&grant))
 }
@@ -167,8 +151,8 @@ fn report(cred: &google::Credential, bearer: &str, url: &str, body: &str) -> Res
 
 The two widgets stacked on this helper are fuller worked examples once
 they land (OPS-186 and OPS-187): `google-analytics` keeps it in `api.rs`
-(one `bearer` call per request, a 401 on a pasted token carrying the
-one-hour note), and `google-search-console` in `main.rs`'s `signed_in()`.
+(one `bearer` call per request), and `google-search-console` in `main.rs`'s
+`signed_in()`.
 
 ## Testing
 
@@ -184,8 +168,8 @@ throwaway key from a live one.
 - **The network is handed in.** `access_token_with(key, scopes, now,
   exchange)` takes the clock and the HTTP exchange as arguments, so the
   cache and re-mint timing are tested without a network or a wait.
-  `credential_from` takes the environment the same way. Use a distinct
-  `client_email` per test, since the token cache is process-wide.
+  Use a distinct `client_email` per test, since the token cache is
+  process-wide.
 - **Refusals are tested from Google's bodies.** Paste the error JSON
   Google returns (with the project number and any address replaced by
   `example` values) into a test and assert the line `wording` produces.

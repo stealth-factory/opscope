@@ -133,7 +133,11 @@ impl Prop {
         if !self.time_zone.is_empty() {
             return &self.time_zone;
         }
-        self.processed.as_ref().map(|p| p.hourly.meta.time_zone.as_str()).filter(|s| !s.is_empty()).unwrap_or("")
+        self.processed
+            .as_ref()
+            .map(|p| p.hourly.meta.time_zone.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
     }
 
     /// Keep a timezone a report carried when Admin has not supplied one.
@@ -151,7 +155,8 @@ impl Prop {
         if self.premium.is_some() {
             return;
         }
-        let proved = self.quota_rt.as_ref().is_some_and(Quota::proves_premium) || self.quota_core.as_ref().is_some_and(Quota::proves_premium);
+        let proved = self.quota_rt.as_ref().is_some_and(Quota::proves_premium)
+            || self.quota_core.as_ref().is_some_and(Quota::proves_premium);
         if proved {
             self.premium = Some(true);
         }
@@ -208,7 +213,11 @@ fn locked<R>(path: &str, f: impl FnOnce() -> std::io::Result<R>) -> std::io::Res
     if let Some(dir) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(format!("{}.lock", path))?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{}.lock", path))?;
     lock.lock()?;
     let out = f();
     let _ = lock.unlock();
@@ -238,7 +247,10 @@ fn prune_file(path: &str, now: f64, weeks: usize) -> std::io::Result<Vec<Sample>
 fn load_samples(path: &str, weeks: usize) -> (Vec<Sample>, String) {
     match prune_file(path, tc::now(), weeks) {
         Ok(s) => (s, String::new()),
-        Err(e) => (Vec::new(), format!("could not read or prune the sample file {}: {}", path, e)),
+        Err(e) => (
+            Vec::new(),
+            format!("could not read or prune the sample file {}: {}", path, e),
+        ),
     }
 }
 
@@ -257,14 +269,19 @@ fn rewrite_samples(path: &str, samples: &[Sample]) -> std::io::Result<()> {
 
 fn append_sample(path: &str, s: &Sample) -> std::io::Result<()> {
     locked(path, || {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         writeln!(f, "{}", parse::format_sample(s))
     })
 }
 
 fn save(shared: &Arc<Mutex<Shared>>, i: usize, path: &str, s: &Sample) {
     if let Err(e) = append_sample(path, s) {
-        with(shared, i, |p| p.sample_err = format!("could not write the sample file {}: {}", path, e));
+        with(shared, i, |p| {
+            p.sample_err = format!("could not write the sample file {}: {}", path, e)
+        });
     }
 }
 
@@ -279,7 +296,11 @@ pub fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
         payload
             .downcast_ref::<String>()
             .cloned()
-            .or_else(|| payload.downcast_ref::<&'static str>().map(|m| m.to_string()))
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&'static str>()
+                    .map(|m| m.to_string())
+            })
             .unwrap_or_else(|| "non-string panic payload".into())
     })
 }
@@ -295,7 +316,13 @@ pub fn spawn_property(
     cfg: Cfg,
     activity: tc::Refresh,
 ) {
-    let (s2, c2, g2, cfg2, a2) = (Arc::clone(&shared), cred.clone(), grant.clone(), cfg.clone(), activity.clone());
+    let (s2, c2, g2, cfg2, a2) = (
+        Arc::clone(&shared),
+        cred.clone(),
+        grant.clone(),
+        cfg.clone(),
+        activity.clone(),
+    );
     std::thread::spawn(move || {
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_live(&shared, i, &cred, &grant, &cfg, &activity)
@@ -318,7 +345,11 @@ fn record_death(shared: &Arc<Mutex<Shared>>, i: usize, which: &str, run: std::th
     if let Ok(mut g) = shared.lock() {
         if let Some(p) = g.props.get_mut(i) {
             let line = format!("{} poller stopped: {}", which, why);
-            p.died = if p.died.is_empty() { line } else { format!("{} · {}", p.died, line) };
+            p.died = if p.died.is_empty() {
+                line
+            } else {
+                format!("{} · {}", p.died, line)
+            };
         }
     }
 }
@@ -332,7 +363,9 @@ fn run_live(
     cfg: &Cfg,
     activity: &tc::Refresh,
 ) {
-    let Some(id) = with(shared, i, |p| p.id.clone()) else { return };
+    let Some(id) = with(shared, i, |p| p.id.clone()) else {
+        return;
+    };
     let path = sample_path(&id);
     let (samples, sample_err) = load_samples(&path, cfg.baseline_weeks);
     with(shared, i, |p| {
@@ -409,7 +442,12 @@ fn run_live(
                         } else if p.idle_since.is_none() {
                             p.idle_since = Some(at);
                         }
-                        let s = Sample { t: at, active: Some(rt.active), views: Some(rt.views), events: None };
+                        let s = Sample {
+                            t: at,
+                            active: Some(rt.active),
+                            views: Some(rt.views),
+                            events: None,
+                        };
                         p.samples.push(s.clone());
                         sample = Some(s);
                         if quota.is_some() {
@@ -428,7 +466,11 @@ fn run_live(
                 }
                 p.learn_tier();
                 let idle_for = p.idle_since.map_or(0.0, |s| at - s);
-                let left = p.quota_rt.as_ref().and_then(|q| q.tightest(p.premium)).map(|t| t.1);
+                let left = p
+                    .quota_rt
+                    .as_ref()
+                    .and_then(|q| q.tightest(p.premium))
+                    .map(|t| t.1);
                 let (secs, why) = model::realtime_interval(chosen, idle_for, left);
                 p.interval = secs;
                 p.interval_why = why;
@@ -466,7 +508,12 @@ fn run_live(
                             if configured { &cfg.key_events } else { &[] },
                             p.key_names.as_deref(),
                         );
-                        let s = Sample { t: at, active: None, views: None, events: Some(events) };
+                        let s = Sample {
+                            t: at,
+                            active: None,
+                            views: None,
+                            events: Some(events),
+                        };
                         p.samples.push(s.clone());
                         sample = Some(s);
                         p.breakdown = Some(b);
@@ -502,7 +549,11 @@ fn run_live(
 /// alone; otherwise the read is due now, so the interval just chosen is
 /// the one that spaces the reading after it.
 fn pull_realtime(next_rt: f64, paused_until: f64, now: f64) -> f64 {
-    if paused_until <= now { now } else { next_rt }
+    if paused_until <= now {
+        now
+    } else {
+        next_rt
+    }
 }
 
 /// The processed reports, on their own clock.
@@ -514,7 +565,9 @@ fn run_reports(
     cfg: &Cfg,
     activity: &tc::Refresh,
 ) {
-    let Some(id) = with(shared, i, |p| p.id.clone()) else { return };
+    let Some(id) = with(shared, i, |p| p.id.clone()) else {
+        return;
+    };
     let mut next_core = 0.0f64;
     let mut core_paused = 0.0f64;
     let mut seen_force = 0u64;
@@ -536,8 +589,17 @@ fn run_reports(
         }
         if next_core <= now && core_paused <= now {
             let work = activity.start();
-            let (tz, previous) = with(shared, i, |p| (p.time_zone.clone(), p.processed.clone())).unwrap_or_default();
-            let got = processed(cred, &id, grant, window, &cfg.key_events, &tz, previous.as_ref());
+            let (tz, previous) =
+                with(shared, i, |p| (p.time_zone.clone(), p.processed.clone())).unwrap_or_default();
+            let got = processed(
+                cred,
+                &id,
+                grant,
+                window,
+                &cfg.key_events,
+                &tz,
+                previous.as_ref(),
+            );
             let at = tc::now();
             with(shared, i, |p| {
                 match got {
@@ -557,7 +619,10 @@ fn run_reports(
                                 core_paused = at + 300.0;
                             }
                             Some(f) => {
-                                p.core_err = format!("page and channel totals, organic landing pages: {}", f.text)
+                                p.core_err = format!(
+                                    "page and channel totals, organic landing pages: {}",
+                                    f.text
+                                )
                             }
                         }
                     }
@@ -581,14 +646,25 @@ fn run_reports(
     }
 }
 
-fn admin(cred: &Credential, id: &str, grant: &str) -> Result<(parse::PropertyInfo, Vec<String>), Fail> {
-    let info = api::property(cred, id, grant)
-        .and_then(|t| parse::parse_property(&t).map_err(|e| Fail { text: e, quota: false }))?;
+fn admin(
+    cred: &Credential,
+    id: &str,
+    grant: &str,
+) -> Result<(parse::PropertyInfo, Vec<String>), Fail> {
+    let info = api::property(cred, id, grant).and_then(|t| {
+        parse::parse_property(&t).map_err(|e| Fail {
+            text: e,
+            quota: false,
+        })
+    })?;
     let mut names = Vec::new();
     let mut page: Option<String> = None;
     for _ in 0..20 {
         let text = api::key_event_list(cred, id, page.as_deref(), grant)?;
-        let (found, next) = parse::parse_key_event_list(&text).map_err(|e| Fail { text: e, quota: false })?;
+        let (found, next) = parse::parse_key_event_list(&text).map_err(|e| Fail {
+            text: e,
+            quota: false,
+        })?;
         names.extend(found);
         match next {
             Some(n) => page = Some(n),
@@ -599,12 +675,27 @@ fn admin(cred: &Credential, id: &str, grant: &str) -> Result<(parse::PropertyInf
 }
 
 fn bad(e: String) -> Fail {
-    Fail { text: e, quota: false }
+    Fail {
+        text: e,
+        quota: false,
+    }
 }
 
 fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quota>), Fail> {
-    let totals = parse::parse_report(&api::realtime(cred, id, &api::realtime_totals_body(), grant)?).map_err(bad)?;
-    let minutes = parse::parse_report(&api::realtime(cred, id, &api::realtime_minutes_body(), grant)?).map_err(bad)?;
+    let totals = parse::parse_report(&api::realtime(
+        cred,
+        id,
+        &api::realtime_totals_body(),
+        grant,
+    )?)
+    .map_err(bad)?;
+    let minutes = parse::parse_report(&api::realtime(
+        cred,
+        id,
+        &api::realtime_minutes_body(),
+        grant,
+    )?)
+    .map_err(bad)?;
     let (active, views, key) = model::realtime_totals(&totals);
     Ok((
         Rt {
@@ -618,16 +709,41 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
     ))
 }
 
-fn breakdown(cred: &Credential, id: &str, grant: &str, configured: &[String]) -> Result<(Breakdown, Option<Quota>), Fail> {
+fn breakdown(
+    cred: &Credential,
+    id: &str,
+    grant: &str,
+    configured: &[String],
+) -> Result<(Breakdown, Option<Quota>), Fail> {
     let one = |body: serde_json::Value| -> Result<Report, Fail> {
         parse::parse_report(&api::realtime(cred, id, &body, grant)?).map_err(bad)
     };
-    let pages = one(api::realtime_breakdown_body("unifiedScreenName", &["activeUsers"], 10))?;
-    let devices = one(api::realtime_breakdown_body("deviceCategory", &["activeUsers"], 10))?;
-    let countries = one(api::realtime_breakdown_body("country", &["activeUsers"], 10))?;
+    let pages = one(api::realtime_breakdown_body(
+        "unifiedScreenName",
+        &["activeUsers"],
+        10,
+    ))?;
+    let devices = one(api::realtime_breakdown_body(
+        "deviceCategory",
+        &["activeUsers"],
+        10,
+    ))?;
+    let countries = one(api::realtime_breakdown_body(
+        "country",
+        &["activeUsers"],
+        10,
+    ))?;
     let events = one(api::realtime_events_body(configured))?;
     let quota = events.quota.clone();
-    Ok((Breakdown { pages, devices, countries, events }, quota))
+    Ok((
+        Breakdown {
+            pages,
+            devices,
+            countries,
+            events,
+        },
+        quota,
+    ))
 }
 
 /// The processed reports: two batches. If the second alone fails, the
@@ -643,10 +759,18 @@ fn processed(
     previous: Option<&Processed>,
 ) -> Result<(Processed, Option<Quota>, Option<Fail>), Fail> {
     let started = tc::now();
-    let mut reports = parse::parse_batch(&api::batch(cred, id, &api::processed_body(window, configured), grant)?)
-        .map_err(bad)?;
+    let mut reports = parse::parse_batch(&api::batch(
+        cred,
+        id,
+        &api::processed_body(window, configured),
+        grant,
+    )?)
+    .map_err(bad)?;
     if reports.len() < 5 {
-        return Err(bad(format!("GA answered {} of the 5 reports asked for", reports.len())));
+        return Err(bad(format!(
+            "GA answered {} of the 5 reports asked for",
+            reports.len()
+        )));
     }
     let mut quota = reports.iter().rev().find_map(|r| r.quota.clone());
     let source_movers = reports.remove(4);
@@ -656,7 +780,11 @@ fn processed(
     let hourly = reports.remove(0);
     // GA reads `today` in the property's timezone, which every report
     // carries; the Admin API's is the fallback.
-    let tz = model::tz_of(if hourly.meta.time_zone.is_empty() { tz_name } else { &hourly.meta.time_zone });
+    let tz = model::tz_of(if hourly.meta.time_zone.is_empty() {
+        tz_name
+    } else {
+        &hourly.meta.time_zone
+    });
     let (date, _, _) = model::local_now(started, tz);
     let mut out = Processed {
         hourly,
@@ -674,7 +802,10 @@ fn processed(
     let second = api::batch(cred, id, &api::window_body(window), grant).and_then(|t| {
         let r = parse::parse_batch(&t).map_err(bad)?;
         if r.len() < 3 {
-            return Err(bad(format!("GA answered {} of the 3 window reports asked for", r.len())));
+            return Err(bad(format!(
+                "GA answered {} of the 3 window reports asked for",
+                r.len()
+            )));
         }
         Ok(r)
     });
@@ -715,7 +846,10 @@ pub fn discover(cred: &Credential, grant: &str) -> Result<Vec<parse::PropertySum
             None => return Ok(out),
         }
     }
-    Err(bad(format!("the property list ran past 50 pages; {} read so far - list ids in properties instead", out.len())))
+    Err(bad(format!(
+        "the property list ran past 50 pages; {} read so far - list ids in properties instead",
+        out.len()
+    )))
 }
 
 /// Fetch a detail in the background into `shared.details[key]`.
@@ -745,10 +879,19 @@ pub fn spawn_detail(
         }));
         let reports = match got {
             Ok(r) => r,
-            Err(payload) => Err(format!("the detail request stopped: {}", panic_reason(payload.as_ref()))),
+            Err(payload) => Err(format!(
+                "the detail request stopped: {}",
+                panic_reason(payload.as_ref())
+            )),
         };
         if let Ok(mut g) = shared.lock() {
-            g.details.insert(key, Detail { reports, at: tc::now() });
+            g.details.insert(
+                key,
+                Detail {
+                    reports,
+                    at: tc::now(),
+                },
+            );
         }
         drop(work);
     });
@@ -771,7 +914,10 @@ mod tests {
         let mut p = Prop::default();
         let mut hourly = Report::default();
         hourly.meta.time_zone = "America/New_York".into();
-        p.processed = Some(Processed { hourly, ..Processed::default() });
+        p.processed = Some(Processed {
+            hourly,
+            ..Processed::default()
+        });
         assert_eq!(p.zone_name(), "America/New_York");
         p.note_zone("America/New_York");
         p.note_zone("Europe/Berlin");
@@ -784,18 +930,41 @@ mod tests {
     #[test]
     fn an_inferred_360_tier_sticks_and_admin_is_not_overwritten() {
         let mut p = Prop::default();
-        p.quota_rt = Some(Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 1.0, remaining: 30_000.0 })] });
+        p.quota_rt = Some(Quota {
+            buckets: vec![(
+                "tokensPerHour".into(),
+                Bucket {
+                    consumed: 1.0,
+                    remaining: 30_000.0,
+                },
+            )],
+        });
         p.learn_tier();
-        assert_eq!(p.premium, None, "under the standard limit the tier is still unknown");
+        assert_eq!(
+            p.premium, None,
+            "under the standard limit the tier is still unknown"
+        );
         p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 50_000.0;
         p.learn_tier();
         assert_eq!(p.premium, Some(true));
         p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 30_000.0;
-        let level = p.quota_rt.as_ref().unwrap().level("tokensPerHour", p.premium).unwrap();
-        assert_eq!(level.limit, 400_000.0, "a later smaller balance stays on the 360 size");
+        let level = p
+            .quota_rt
+            .as_ref()
+            .unwrap()
+            .level("tokensPerHour", p.premium)
+            .unwrap();
+        assert_eq!(
+            level.limit, 400_000.0,
+            "a later smaller balance stays on the 360 size"
+        );
         p.premium = Some(false);
         p.quota_rt.as_mut().unwrap().buckets[0].1.remaining = 50_000.0;
         p.learn_tier();
-        assert_eq!(p.premium, Some(false), "admin's answer stands once it has arrived");
+        assert_eq!(
+            p.premium,
+            Some(false),
+            "admin's answer stands once it has arrived"
+        );
     }
 }

@@ -57,9 +57,7 @@ atomic writer.
 `core/src/google.rs` is the Google sign-in every Google widget shares: a
 service-account key signs an RS256 JWT locally (`rsa` and `sha2`, both pure
 Rust), Google trades it for an hour-long token, and the token is cached per
-process and re-minted five minutes before it runs out. A pasted token in
-`token` / `token_env` is the testing fallback, and says on screen that it
-lasts an hour. `Refusal` reads Google's error body into one wording for an
+process and re-minted five minutes before it runs out. `Refusal` reads Google's error body into one wording for an
 API that is not enabled, a 403 on the resource, a 401, and a 429 that names
 its quota bucket. It goes through `post_answer()`, the sibling of
 `get_answer()` that hands back a refusal's whole body rather than the

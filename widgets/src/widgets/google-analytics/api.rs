@@ -48,25 +48,23 @@ impl Fail {
 pub fn grant(email: Option<&str>) -> String {
     match email {
         Some(e) => format!("add {} as Viewer under Property access management", e),
-        None => "give the token's account Viewer under Property access management".into(),
+        None => "add the service account as Viewer under Property access management".into(),
     }
 }
 
 fn bearer(cred: &Credential) -> Result<String, Fail> {
-    cred.bearer(&[SCOPE_ANALYTICS_READONLY]).map(|t| t.value).map_err(Fail::plain)
+    cred.bearer(&[SCOPE_ANALYTICS_READONLY])
+        .map(|t| t.value)
+        .map_err(Fail::plain)
 }
 
-/// A refusal in the shared wording, with the pasted-token reminder on a
-/// 401 so an expired token is not read as a property gone quiet.
-fn refusal(cred: &Credential, status: u16, body: &str, grant: &str) -> Fail {
+/// A refusal in the shared wording.
+fn refusal(status: u16, body: &str, grant: &str) -> Fail {
     let r = parse_refusal(status, body);
-    let mut text = r.wording(grant);
-    if matches!(r, Refusal::Unauthenticated { .. }) {
-        if let Some(note) = cred.warning().filter(|_| matches!(cred, Credential::Token { .. })) {
-            text = format!("{} · {}", text, note);
-        }
+    Fail {
+        text: r.wording(grant),
+        quota: matches!(r, Refusal::Quota { .. }),
     }
-    Fail { text, quota: matches!(r, Refusal::Quota { .. }) }
 }
 
 fn post(cred: &Credential, url: &str, body: &Value, grant: &str) -> Result<String, Fail> {
@@ -74,7 +72,10 @@ fn post(cred: &Credential, url: &str, body: &Value, grant: &str) -> Result<Strin
     let auth = format!("Bearer {}", token);
     let (status, text, _) = tc::post_answer(
         url,
-        &[("Authorization", auth.as_str()), ("Content-Type", "application/json")],
+        &[
+            ("Authorization", auth.as_str()),
+            ("Content-Type", "application/json"),
+        ],
         &body.to_string(),
         30,
     )
@@ -82,7 +83,7 @@ fn post(cred: &Credential, url: &str, body: &Value, grant: &str) -> Result<Strin
     if (200..300).contains(&status) {
         Ok(text)
     } else {
-        Err(refusal(cred, status, &text, grant))
+        Err(refusal(status, &text, grant))
     }
 }
 
@@ -94,23 +95,42 @@ fn get(cred: &Credential, url: &str, grant: &str) -> Result<String, Fail> {
     if (200..300).contains(&status) {
         Ok(text)
     } else {
-        Err(refusal(cred, status, &text, grant))
+        Err(refusal(status, &text, grant))
     }
 }
 
 pub fn realtime(cred: &Credential, id: &str, body: &Value, grant: &str) -> Result<String, Fail> {
-    post(cred, &format!("{}/properties/{}:runRealtimeReport", DATA, id), body, grant)
+    post(
+        cred,
+        &format!("{}/properties/{}:runRealtimeReport", DATA, id),
+        body,
+        grant,
+    )
 }
 
 pub fn batch(cred: &Credential, id: &str, body: &Value, grant: &str) -> Result<String, Fail> {
-    post(cred, &format!("{}/properties/{}:batchRunReports", DATA, id), body, grant)
+    post(
+        cred,
+        &format!("{}/properties/{}:batchRunReports", DATA, id),
+        body,
+        grant,
+    )
 }
 
 pub fn report(cred: &Credential, id: &str, body: &Value, grant: &str) -> Result<String, Fail> {
-    post(cred, &format!("{}/properties/{}:runReport", DATA, id), body, grant)
+    post(
+        cred,
+        &format!("{}/properties/{}:runReport", DATA, id),
+        body,
+        grant,
+    )
 }
 
-pub fn account_summaries(cred: &Credential, page: Option<&str>, grant: &str) -> Result<String, Fail> {
+pub fn account_summaries(
+    cred: &Credential,
+    page: Option<&str>,
+    grant: &str,
+) -> Result<String, Fail> {
     let mut url = format!("{}/accountSummaries?pageSize=200", ADMIN);
     if let Some(p) = page {
         url.push_str(&format!("&pageToken={}", p));
@@ -122,7 +142,12 @@ pub fn property(cred: &Credential, id: &str, grant: &str) -> Result<String, Fail
     get(cred, &format!("{}/properties/{}", ADMIN, id), grant)
 }
 
-pub fn key_event_list(cred: &Credential, id: &str, page: Option<&str>, grant: &str) -> Result<String, Fail> {
+pub fn key_event_list(
+    cred: &Credential,
+    id: &str,
+    page: Option<&str>,
+    grant: &str,
+) -> Result<String, Fail> {
     let mut url = format!("{}/properties/{}/keyEvents?pageSize=200", ADMIN, id);
     if let Some(p) = page {
         url.push_str(&format!("&pageToken={}", p));
@@ -186,7 +211,11 @@ fn range(start: &str, end: &str, name: &str) -> Value {
 pub fn windows(days: usize) -> Value {
     json!([
         range(&format!("{}daysAgo", days), "yesterday", "cur"),
-        range(&format!("{}daysAgo", days * 2), &format!("{}daysAgo", days + 1), "prev"),
+        range(
+            &format!("{}daysAgo", days * 2),
+            &format!("{}daysAgo", days + 1),
+            "prev"
+        ),
     ])
 }
 
@@ -434,7 +463,10 @@ pub fn event_detail_body(name: &str, metric: &str) -> Value {
 
 /// The property's realtime page in GA's own UI, for the copy key.
 pub fn ga_url(id: &str) -> String {
-    format!("https://analytics.google.com/analytics/web/#/p{}/realtime/overview", id)
+    format!(
+        "https://analytics.google.com/analytics/web/#/p{}/realtime/overview",
+        id
+    )
 }
 
 #[cfg(test)]
@@ -474,23 +506,45 @@ mod tests {
         let b = processed_body(7, &[]);
         let r = b["requests"].as_array().unwrap();
         assert_eq!(r.len(), 5);
-        assert_eq!(r[0]["dateRanges"].as_array().unwrap().len(), 4, "four ranges is the API's maximum");
+        assert_eq!(
+            r[0]["dateRanges"].as_array().unwrap().len(),
+            4,
+            "four ranges is the API's maximum"
+        );
         assert_eq!(r[0]["dateRanges"][3]["startDate"], "21daysAgo");
-        assert!(r[2].get("metricFilter").is_some(), "flagged key events by default");
+        assert!(
+            r[2].get("metricFilter").is_some(),
+            "flagged key events by default"
+        );
         let named = processed_body(7, &["purchase".into()]);
-        assert_eq!(named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
-        assert_eq!(named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"], true);
+        assert_eq!(
+            named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["values"][0],
+            "purchase"
+        );
+        assert_eq!(
+            named["requests"][2]["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"],
+            true
+        );
         assert!(named["requests"][2].get("metricFilter").is_none());
         let p = page_detail_body("/x", &[]);
         assert_eq!(p["requests"].as_array().unwrap().len(), 5);
         assert_eq!(p["requests"][4]["metrics"][0]["name"], "keyEvents");
         let named = page_detail_body("/x", &["purchase".into()]);
         let ev = &named["requests"][4];
-        assert_eq!(ev["metrics"][0]["name"], "eventCount", "a configured list is counted the way the main view counts it");
+        assert_eq!(
+            ev["metrics"][0]["name"], "eventCount",
+            "a configured list is counted the way the main view counts it"
+        );
         let many: Vec<String> = (0..15).map(|i| format!("event_{}", i)).collect();
-        assert_eq!(page_detail_body("/x", &many)["requests"][4]["limit"], 15, "every configured event, not the top ten");
+        assert_eq!(
+            page_detail_body("/x", &many)["requests"][4]["limit"],
+            15,
+            "every configured event, not the top ten"
+        );
         assert_eq!(p["requests"][4]["limit"], FLAGGED_EVENT_LIMIT);
-        let both = ev["dimensionFilter"]["andGroup"]["expressions"].as_array().unwrap();
+        let both = ev["dimensionFilter"]["andGroup"]["expressions"]
+            .as_array()
+            .unwrap();
         assert_eq!(both[0]["filter"]["fieldName"], "pagePath");
         assert_eq!(both[1]["filter"]["inListFilter"]["values"][0], "purchase");
         assert_eq!(both[1]["filter"]["inListFilter"]["caseSensitive"], true);
@@ -503,8 +557,16 @@ mod tests {
         let b = window_body(7);
         let r = b["requests"].as_array().unwrap();
         assert_eq!(r.len(), 3);
-        for req in r.iter().chain(processed_body(7, &[])["requests"].as_array().unwrap()[4..].iter()) {
-            let names: Vec<&str> = req["dimensions"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+        for req in r
+            .iter()
+            .chain(processed_body(7, &[])["requests"].as_array().unwrap()[4..].iter())
+        {
+            let names: Vec<&str> = req["dimensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["name"].as_str().unwrap())
+                .collect();
             assert!(!names.contains(&"date"), "{:?}", names);
         }
         assert_eq!(r[0]["dimensions"][0]["name"], "pagePath");
@@ -518,15 +580,32 @@ mod tests {
         // fold in the other.
         let p = page_detail_body("/Shop", &[]);
         for r in p["requests"].as_array().unwrap() {
-            assert_eq!(r["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true, "{}", r);
+            assert_eq!(
+                r["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true,
+                "{}",
+                r
+            );
         }
         let named = page_detail_body("/Shop", &["purchase".into()]);
-        assert_eq!(named["requests"][4]["dimensionFilter"]["andGroup"]["expressions"][0]["filter"]["stringFilter"]["caseSensitive"], true);
+        assert_eq!(
+            named["requests"][4]["dimensionFilter"]["andGroup"]["expressions"][0]["filter"]
+                ["stringFilter"]["caseSensitive"],
+            true
+        );
         let t = page_totals_body("/Shop");
-        assert_eq!(t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true);
-        assert_eq!(t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["value"], "/Shop");
+        assert_eq!(
+            t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"],
+            true
+        );
+        assert_eq!(
+            t["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["value"],
+            "/Shop"
+        );
         let e = event_detail_body("Purchase", "keyEvents");
-        assert_eq!(e["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"], true);
+        assert_eq!(
+            e["requests"][0]["dimensionFilter"]["filter"]["stringFilter"]["caseSensitive"],
+            true
+        );
     }
 
     #[test]
@@ -534,16 +613,28 @@ mod tests {
         let flagged = realtime_events_body(&[]);
         assert_eq!(flagged["metricFilter"]["filter"]["fieldName"], "keyEvents");
         let named = realtime_events_body(&["purchase".into()]);
-        assert_eq!(named["dimensionFilter"]["filter"]["inListFilter"]["values"][0], "purchase");
-        assert_eq!(named["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"], true);
+        assert_eq!(
+            named["dimensionFilter"]["filter"]["inListFilter"]["values"][0],
+            "purchase"
+        );
+        assert_eq!(
+            named["dimensionFilter"]["filter"]["inListFilter"]["caseSensitive"],
+            true
+        );
         assert!(named.get("metricFilter").is_none());
     }
 
     #[test]
     fn the_windows_are_equal_and_end_yesterday() {
         let w = windows(7);
-        assert_eq!(w[0], json!({"startDate":"7daysAgo","endDate":"yesterday","name":"cur"}));
-        assert_eq!(w[1], json!({"startDate":"14daysAgo","endDate":"8daysAgo","name":"prev"}));
+        assert_eq!(
+            w[0],
+            json!({"startDate":"7daysAgo","endDate":"yesterday","name":"cur"})
+        );
+        assert_eq!(
+            w[1],
+            json!({"startDate":"14daysAgo","endDate":"8daysAgo","name":"prev"})
+        );
         let w = windows(28);
         assert_eq!(w[1]["startDate"], "56daysAgo");
         assert_eq!(w[1]["endDate"], "29daysAgo");
@@ -553,8 +644,14 @@ mod tests {
     fn organic_is_filtered_to_google_search() {
         let o = organic_body(7);
         assert_eq!(o["dimensions"][0]["name"], "landingPage");
-        assert_eq!(o["dimensionFilter"]["filter"]["fieldName"], "sessionDefaultChannelGroup");
-        assert_eq!(o["dimensionFilter"]["filter"]["stringFilter"]["value"], "Organic Search");
+        assert_eq!(
+            o["dimensionFilter"]["filter"]["fieldName"],
+            "sessionDefaultChannelGroup"
+        );
+        assert_eq!(
+            o["dimensionFilter"]["filter"]["stringFilter"]["value"],
+            "Organic Search"
+        );
     }
 
     #[test]
@@ -564,6 +661,9 @@ mod tests {
             "add reader@example-project.iam.gserviceaccount.com as Viewer under Property access management"
         );
         assert!(grant(None).contains("Viewer"));
-        assert_eq!(ga_url("123"), "https://analytics.google.com/analytics/web/#/p123/realtime/overview");
+        assert_eq!(
+            ga_url("123"),
+            "https://analytics.google.com/analytics/web/#/p123/realtime/overview"
+        );
     }
 }

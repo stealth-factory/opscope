@@ -61,7 +61,7 @@ breakdowns and the reports are, the
 realtime interval in force and why it is not the one chosen, and the
 property's quota (`propertyQuota`) for whichever of the realtime and core
 quotas is nearer its limit, by hour and by day. A poller that stopped, a key
-file others can read, a pasted token that will expire, and every refusal from
+file others can read, and every refusal from
 Google are rows here, in Google's own words.
 
 **Right now** - GA realtime, the last 30 minutes. Active users against the
@@ -225,9 +225,8 @@ banner.
 
 ```json
 "google_analytics": {
+  "credentials": "",
   "credentials_file": "~/.config/opscope/google-key.json",
-  "token": "",
-  "token_env": "GOOGLE_OAUTH_ACCESS_TOKEN",
   "properties": ["123"],
   "realtime_refresh": 15,
   "refresh": 300,
@@ -239,8 +238,8 @@ banner.
 
 | key | default | |
 |---|---|---|
-| `credentials_file` | `""` | path to the service-account key; the screen warns if it is not `chmod 600` |
-| `token` / `token_env` | `""` / `GOOGLE_OAUTH_ACCESS_TOKEN` | a pre-minted one-hour token, for testing (secret) |
+| `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set |
+| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; the screen warns if it is not `chmod 600` |
 | `properties` | `[]` | numeric GA4 property ids; empty lists every property the account can see |
 | `realtime_refresh` | `15` | 15, 30 or 60 seconds; anything else means 15 |
 | `refresh` | `300` | seconds between processed reports, at least 60 |

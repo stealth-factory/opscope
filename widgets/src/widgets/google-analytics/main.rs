@@ -46,9 +46,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-/// The variable a pasted access token is read from by default.
-const TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
-
 /// Property ids from config: numbers or strings, with or without the
 /// `properties/` prefix. Anything else is named rather than dropped.
 fn property_ids(raw: &[serde_json::Value]) -> (Vec<String>, Vec<String>) {
@@ -96,7 +93,12 @@ fn start_plan(has_credential: bool, valid_ids: usize, configured: usize) -> Star
 }
 
 fn new_prop(id: &str, name: &str, interval: u64) -> Prop {
-    Prop { id: id.to_string(), name: name.to_string(), interval, ..Prop::default() }
+    Prop {
+        id: id.to_string(),
+        name: name.to_string(),
+        interval,
+        ..Prop::default()
+    }
 }
 
 /// The key a detail is held under.
@@ -132,28 +134,46 @@ fn configured_events(names: impl IntoIterator<Item = String>) -> Vec<String> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    if !tc::dependencies_available("google-analytics", include_str!("dependencies.json"), Some(SETTINGS)) {
+    if !tc::dependencies_available(
+        "google-analytics",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
         return;
     }
     tc::record_panics();
     let cfg = tc::load_config("google_analytics");
+    let credentials = tc::cfg_str(&cfg, "credentials", "");
     let credentials_file = tc::cfg_str(&cfg, "credentials_file", "");
-    let token = tc::cfg_str(&cfg, "token", "");
-    let token_env = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
-    let raw_properties = cfg.get("properties").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let raw_properties = cfg
+        .get("properties")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let (ids, bad_ids) = property_ids(&raw_properties);
     let chosen = model::realtime_choice(tc::cfg_f64(&cfg, "realtime_refresh", 15.0));
     let refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 300.0), 300.0).max(60.0);
     let window = tc::cfg_usize(&cfg, "window_days", 7).clamp(1, 90);
     let weeks = tc::cfg_usize(&cfg, "baseline_weeks", 4).clamp(1, 12);
     let configured = configured_events(tc::cfg_strings(&cfg, "key_events", &[]));
-    let poll_cfg = Cfg { refresh, baseline_weeks: weeks, key_events: configured.clone() };
+    let poll_cfg = Cfg {
+        refresh,
+        baseline_weeks: weeks,
+        key_events: configured.clone(),
+    };
 
-    let cred = google::credential(&credentials_file, &token, &token_env);
+    let (cred, cred_err) = match google::credential(&credentials, &credentials_file) {
+        Ok(cred) => (cred, None),
+        Err(err) => (None, Some(err)),
+    };
     let email = cred.as_ref().and_then(Credential::client_email);
     let grant = api::grant(email.as_deref());
     let activity = tc::Refresh::default();
-    let shared = Arc::new(Mutex::new(Shared { chosen, window, ..Shared::default() }));
+    let shared = Arc::new(Mutex::new(Shared {
+        chosen,
+        window,
+        ..Shared::default()
+    }));
     if let Ok(mut g) = shared.lock() {
         if !bad_ids.is_empty() {
             g.discovery_err = format!(
@@ -163,10 +183,15 @@ fn main() {
         }
     }
 
-    match (&cred, start_plan(cred.is_some(), ids.len(), raw_properties.len())) {
+    match (
+        &cred,
+        start_plan(cred.is_some(), ids.len(), raw_properties.len()),
+    ) {
         (None, _) => {
             if let Ok(mut g) = shared.lock() {
-                g.discovery_err = google::missing_credential(SETTINGS.section, &token_env);
+                g.discovery_err = cred_err
+                    .clone()
+                    .unwrap_or_else(|| google::missing_credential(SETTINGS.section));
             }
         }
         // Every configured entry failed `property_ids`. `discovery_err`
@@ -188,9 +213,16 @@ fn main() {
             }
         }
         (Some(cred), Start::Discover) => {
-            let (shared, cred, grant, poll_cfg, activity) =
-                (Arc::clone(&shared), cred.clone(), grant.clone(), poll_cfg.clone(), activity.clone());
-            let who = email.clone().unwrap_or_else(|| "this token's account".into());
+            let (shared, cred, grant, poll_cfg, activity) = (
+                Arc::clone(&shared),
+                cred.clone(),
+                grant.clone(),
+                poll_cfg.clone(),
+                activity.clone(),
+            );
+            let who = email
+                .clone()
+                .unwrap_or_else(|| "this token's account".into());
             std::thread::spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
                     if let Ok(mut g) = shared.lock() {
@@ -215,7 +247,10 @@ fn main() {
                             let n = list.len();
                             if let Ok(mut g) = shared.lock() {
                                 let chosen = g.chosen;
-                                g.props = list.iter().map(|p| new_prop(&p.id, &p.name, chosen)).collect();
+                                g.props = list
+                                    .iter()
+                                    .map(|p| new_prop(&p.id, &p.name, chosen))
+                                    .collect();
                                 g.discovery.clear();
                                 g.discovery_err.clear();
                             }
@@ -244,7 +279,10 @@ fn main() {
                 if let Err(payload) = run {
                     if let Ok(mut g) = shared.lock() {
                         g.discovery.clear();
-                        g.discovery_err = format!("property discovery stopped: {}", poll::panic_reason(payload.as_ref()));
+                        g.discovery_err = format!(
+                            "property discovery stopped: {}",
+                            poll::panic_reason(payload.as_ref())
+                        );
                     }
                 }
             });
@@ -290,7 +328,9 @@ fn main() {
         }
         let mut keys = keyboard.poll();
         if detail.is_none() {
-            if let Some(at) = tc::rows_clicked(&mut keys, Some(view.selected), head, scroll, &placed, None) {
+            if let Some(at) =
+                tc::rows_clicked(&mut keys, Some(view.selected), head, scroll, &placed, None)
+            {
                 view.selected = at;
                 moved = true;
             }
@@ -485,34 +525,76 @@ fn main() {
             if let Some(k) = key.as_ref().filter(|k| !asked.contains(*k)) {
                 let body = match &open {
                     Item::Page(path) => Some(api::page_detail_bodies(path, &configured)),
-                    Item::Organic(path) => Some(api::page_detail_bodies(&landing_path(path), &configured)),
-                    Item::Event(name) => {
-                        Some(vec![api::event_detail_body(name, if configured.is_empty() { "keyEvents" } else { "eventCount" })])
+                    Item::Organic(path) => {
+                        Some(api::page_detail_bodies(&landing_path(path), &configured))
                     }
+                    Item::Event(name) => Some(vec![api::event_detail_body(
+                        name,
+                        if configured.is_empty() {
+                            "keyEvents"
+                        } else {
+                            "eventCount"
+                        },
+                    )]),
                     _ => None,
                 };
                 if let (Some(body), Some(cred)) = (body, cred.clone()) {
                     asked.insert(k.clone());
-                    poll::spawn_detail(Arc::clone(&shared), k.clone(), cred, grant.clone(), prop.id.clone(), body, activity.clone());
+                    poll::spawn_detail(
+                        Arc::clone(&shared),
+                        k.clone(),
+                        cred,
+                        grant.clone(),
+                        prop.id.clone(),
+                        body,
+                        activity.clone(),
+                    );
                 }
             }
-            let held = key.as_ref().and_then(|k| shared.lock().ok().and_then(|g| g.details.get(k).cloned()));
+            let held = key
+                .as_ref()
+                .and_then(|k| shared.lock().ok().and_then(|g| g.details.get(k).cloned()));
             let reports = held.as_ref().map(|d| d.reports.clone());
             // The property's date when the detail was read: what its
             // `today` and `yesterday` meant, for laying out its days.
-            let asked_on = model::local_now(held.as_ref().map_or(view.now, |d| d.at), model::tz_of(prop.zone_name())).0;
+            let asked_on = model::local_now(
+                held.as_ref().map_or(view.now, |d| d.at),
+                model::tz_of(prop.zone_name()),
+            )
+            .0;
             let lines = match &open {
                 Item::Property(_) => draw::property_detail(&prop, &view, w),
-                Item::Page(path) => draw::page_detail(path, reports.as_ref(), !configured.is_empty(), asked_on, w),
+                Item::Page(path) => {
+                    draw::page_detail(path, reports.as_ref(), !configured.is_empty(), asked_on, w)
+                }
                 Item::Organic(path) => {
-                    let mut l = draw::page_detail(&landing_path(path), reports.as_ref(), !configured.is_empty(), asked_on, w);
-                    l.insert(1, vec![(p.hint.clone(), format!(" landing page {} as Google Search visitors arrived on it", path))]);
+                    let mut l = draw::page_detail(
+                        &landing_path(path),
+                        reports.as_ref(),
+                        !configured.is_empty(),
+                        asked_on,
+                        w,
+                    );
+                    l.insert(
+                        1,
+                        vec![(
+                            p.hint.clone(),
+                            format!(
+                                " landing page {} as Google Search visitors arrived on it",
+                                path
+                            ),
+                        )],
+                    );
                     l
                 }
                 Item::Event(name) => draw::event_detail(
                     name,
                     reports.as_ref(),
-                    if configured.is_empty() { "keyEvents" } else { "eventCount" },
+                    if configured.is_empty() {
+                        "keyEvents"
+                    } else {
+                        "eventCount"
+                    },
                     asked_on,
                     w,
                 ),
@@ -536,7 +618,8 @@ fn main() {
             dscroll = dscroll.min(furthest);
             let mut rows = vec![title];
             for line in lines.iter().skip(dscroll).take(room) {
-                let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                let refs: Vec<(&str, String)> =
+                    line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w.saturating_sub(1)));
             }
             while rows.len() < room + 1 {
@@ -559,7 +642,8 @@ fn main() {
         }
         let mut rows = vec![title];
         for line in &frame.lines {
-            let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            let refs: Vec<(&str, String)> =
+                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w.saturating_sub(1)));
         }
         let next_metric = draw::METRICS[(view.metric + 1) % draw::METRICS.len()].1;
@@ -575,10 +659,19 @@ fn main() {
         hints.extend([
             vec![(p.hint.as_str(), "↵ detail".to_string())],
             vec![(p.hint.as_str(), format!("[m]etric {}", next_metric))],
-            vec![(p.hint.as_str(), format!("[w]indow {}d", tc::cycle(model::WINDOW_CHOICES, window_now)))],
-            vec![(p.hint.as_str(), format!("[s]ort {}", view.sort.next().word()))],
+            vec![(
+                p.hint.as_str(),
+                format!("[w]indow {}d", tc::cycle(model::WINDOW_CHOICES, window_now)),
+            )],
+            vec![(
+                p.hint.as_str(),
+                format!("[s]ort {}", view.sort.next().word()),
+            )],
             vec![(p.hint.as_str(), "[/]filter".to_string())],
-            vec![(p.hint.as_str(), format!("[l]ive {}s", tc::cycle(model::LIVE_CHOICES, chosen_now)))],
+            vec![(
+                p.hint.as_str(),
+                format!("[l]ive {}s", tc::cycle(model::LIVE_CHOICES, chosen_now)),
+            )],
             vec![(p.hint.as_str(), "[c]opy URL".to_string())],
             vec![(p.hint.as_str(), "[r]efresh".to_string())],
             vec![(p.hint.as_str(), "[,] settings".to_string())],
@@ -588,7 +681,13 @@ fn main() {
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let room = h.saturating_sub(foot.len()).max(2);
         let below = room - 1;
-        visible = frame.placed.iter().map(|(_, i)| *i).collect::<std::collections::BTreeSet<_>>().len().min(below.max(1));
+        visible = frame
+            .placed
+            .iter()
+            .map(|(_, i)| *i)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            .min(below.max(1));
         let body_len = rows.len() - 1;
         if moved {
             if let Some(at) = frame.cursor {
@@ -629,7 +728,8 @@ mod tests {
     #[test]
     fn property_ids_take_numbers_and_name_the_rest() {
         let raw: Vec<serde_json::Value> =
-            serde_json::from_str(r#"[123, "456", "properties/789", "a789p123", "", "456"]"#).unwrap();
+            serde_json::from_str(r#"[123, "456", "properties/789", "a789p123", "", "456"]"#)
+                .unwrap();
         let (ids, bad) = property_ids(&raw);
         assert_eq!(ids, vec!["123", "456", "789"]);
         assert_eq!(bad, vec!["a789p123", ""]);
@@ -653,20 +753,19 @@ mod tests {
     fn a_landing_page_opens_as_its_path() {
         assert_eq!(landing_path("/blog/launch?utm_source=x"), "/blog/launch");
         assert_eq!(landing_path("/pricing"), "/pricing");
-        assert_eq!(detail_key("123", &Item::Organic("/a?b=c".into())), Some("page:123:/a".into()));
+        assert_eq!(
+            detail_key("123", &Item::Organic("/a?b=c".into())),
+            Some("page:123:/a".into())
+        );
         assert_eq!(detail_key("123", &Item::Channel("Direct".into())), None);
     }
 
     #[test]
-    fn the_token_variable_is_the_one_google_tooling_uses() {
-        assert_eq!(TOKEN_ENV, google::DEFAULT_TOKEN_ENV);
-    }
-
-    #[test]
     fn no_credential_is_worded_by_core_for_this_section() {
-        let row = google::missing_credential(SETTINGS.section, "");
-        assert!(row.starts_with("no credential: set google_analytics.credentials_file "), "{row}");
-        assert!(row.contains("google_analytics.token or $GOOGLE_OAUTH_ACCESS_TOKEN"), "{row}");
+        let row = google::missing_credential(SETTINGS.section);
+        assert!(row.contains("google_analytics.credentials "), "{row}");
+        assert!(row.contains("google_analytics.credentials_file "), "{row}");
+        assert!(!row.contains("token"), "{row}");
         assert!(row.ends_with(tc::SET_IN_SETTINGS), "{row}");
     }
 }

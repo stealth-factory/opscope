@@ -10,7 +10,7 @@ Google's Analytics Data API (`runRealtimeReport`, `batchRunReports`, `runReport`
 
 The owned section is `google_analytics`.
 
-Declared fields: `credentials_file`, `token`, `token_env`, `properties`, `realtime_refresh`, `refresh`, `window_days`, `baseline_weeks`, `key_events`
+Declared fields: `credentials`, `credentials_file`, `properties`, `realtime_refresh`, `refresh`, `window_days`, `baseline_weeks`, `key_events`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
@@ -23,15 +23,11 @@ These steps are the user's to take in Google's consoles. Do not attempt them on 
 ## Safe configuration process
 
 1. Check that `curl` exists.
-2. Ask the user for the path to their service-account key. Check that the file exists and its mode is `600` without printing its contents - the key is a credential that signs in indefinitely. Never read, copy, paste or summarise the key's `private_key`.
+2. Ask whether the service-account key should be pasted into `credentials` or kept in its own file and named by `credentials_file`. A pasted key wins when both are set. Check a file's mode is `600` without printing its contents. Never read, copy, paste or summarise the key's `private_key`.
 3. Ask which GA4 properties to show. A property id is the number after `p` in GA's admin URLs (`…/a<account>p<property>/…`); only that number goes in `properties`. Leave `properties` empty to show every property the service account can see. Never invent an id.
 4. Ask whether only some events should count as key events; by default every event GA flags as a key event is used.
 5. Change only this widget's declared section, through the settings screen. Keep secrets and property ids out of chat logs, shell history, source files, commits and screenshots - this repository is public.
 6. Leave the settings screen; the widget reloads itself. Then verify that the header shows a realtime reading and a quota line, or that a row names exactly what Google refused.
-
-## Testing without a key
-
-`token` (or the variable named by `token_env`, `GOOGLE_OAUTH_ACCESS_TOKEN` by default) takes a pre-minted access token with the `analytics.readonly` scope. It lasts one hour and cannot be renewed by the widget; the screen says where it came from and that it expires. `credentials_file` wins when both are set.
 
 ## Boundaries
 

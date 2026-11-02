@@ -41,7 +41,11 @@ pub fn median(mut v: Vec<f64>) -> Option<f64> {
     }
     v.sort_by(f64::total_cmp);
     let n = v.len();
-    Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    })
 }
 
 /// Percentage change from `before` to `now`, or `None` when `before` is
@@ -140,7 +144,12 @@ pub enum Baseline {
     Uncovered { label: String },
     /// The median of `found` weeks out of the `of` asked for. `since` is
     /// set while the history is shorter than `of` weeks.
-    Ready { median: f64, found: usize, of: usize, since: Option<f64> },
+    Ready {
+        median: f64,
+        found: usize,
+        of: usize,
+        since: Option<f64>,
+    },
 }
 
 /// How close a past sample has to be to the same minute of the week.
@@ -155,7 +164,11 @@ pub fn weeks_back(now: f64, k: i64, tz: Tz) -> f64 {
         return now - k as f64 * 604_800.0;
     };
     let naive = at.naive_local() - chrono::Duration::weeks(k);
-    match tz.from_local_datetime(&naive).earliest().or_else(|| tz.from_local_datetime(&naive).latest()) {
+    match tz
+        .from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| tz.from_local_datetime(&naive).latest())
+    {
         Some(t) => t.timestamp() as f64 + now.fract(),
         // A local time that does not exist (inside a spring-forward gap)
         // falls back to plain arithmetic, an hour off for that minute only.
@@ -198,7 +211,9 @@ pub fn baseline(
     if first > weeks_back(now, 1, tz) + BASELINE_SLACK {
         return Baseline::Collecting { since: first };
     }
-    let found: Vec<f64> = (1..=weeks as i64).filter_map(|k| nearest(samples, weeks_back(now, k, tz), pick)).collect();
+    let found: Vec<f64> = (1..=weeks as i64)
+        .filter_map(|k| nearest(samples, weeks_back(now, k, tz), pick))
+        .collect();
     if found.is_empty() {
         let label = tz
             .timestamp_opt(now.floor() as i64, 0)
@@ -221,7 +236,13 @@ pub fn baseline(
 /// event was configured or flagged. A covered event with none is listed
 /// at `0` (see `covered_events`), so a missing name is never a zero.
 pub fn event_reading(s: &Sample, name: &str) -> Option<f64> {
-    let found: Vec<f64> = s.events.as_ref()?.iter().filter(|(n, _)| n == name).map(|e| e.1).collect();
+    let found: Vec<f64> = s
+        .events
+        .as_ref()?
+        .iter()
+        .filter(|(n, _)| n == name)
+        .map(|e| e.1)
+        .collect();
     (!found.is_empty()).then(|| found.iter().sum())
 }
 
@@ -229,7 +250,11 @@ pub fn event_reading(s: &Sample, name: &str) -> Option<f64> {
 /// when it had none. With a configured list that is the list; otherwise
 /// the events GA flags, from the Admin API's list when it has answered -
 /// before then only the events seen are known to have been covered.
-pub fn covered_events(report: &Report, configured: &[String], flagged: Option<&[String]>) -> Vec<(String, f64)> {
+pub fn covered_events(
+    report: &Report,
+    configured: &[String],
+    flagged: Option<&[String]>,
+) -> Vec<(String, f64)> {
     let mut out = realtime_key_events(report, configured);
     if configured.is_empty() {
         for name in flagged.unwrap_or(&[]) {
@@ -278,7 +303,9 @@ pub fn hourly(report: &Report, metric: &str) -> Hourly {
     let mut last: Option<usize> = None;
     let mut weeks: Vec<Option<Vec<f64>>> = vec![None; 3];
     for row in &report.rows {
-        let Some(h) = hour_of(report.d(row, "hour")) else { continue };
+        let Some(h) = hour_of(report.d(row, "hour")) else {
+            continue;
+        };
         let v = report.m(row, metric);
         match report.d(row, "dateRange") {
             "today" => {
@@ -287,7 +314,11 @@ pub fn hourly(report: &Report, metric: &str) -> Hourly {
                 last = Some(last.map_or(h, |l| l.max(h)));
             }
             name => {
-                if let Some(i) = HOURLY_RANGES.iter().position(|r| *r == name).filter(|i| *i > 0) {
+                if let Some(i) = HOURLY_RANGES
+                    .iter()
+                    .position(|r| *r == name)
+                    .filter(|i| *i > 0)
+                {
                     weeks[i - 1].get_or_insert_with(|| vec![0.0; 24])[h] += v;
                 }
             }
@@ -319,12 +350,26 @@ pub struct Versus {
 
 pub fn versus(h: &Hourly) -> Option<Versus> {
     let upto = h.last?;
-    let today = h.today.iter().take(upto + 1).map(|v| v.unwrap_or(0.0)).sum();
-    let past: Vec<f64> = h.weeks.iter().flatten().map(|w| cumulative(w, upto)).collect();
+    let today = h
+        .today
+        .iter()
+        .take(upto + 1)
+        .map(|v| v.unwrap_or(0.0))
+        .sum();
+    let past: Vec<f64> = h
+        .weeks
+        .iter()
+        .flatten()
+        .map(|w| cumulative(w, upto))
+        .collect();
     Some(Versus {
         upto,
         today,
-        last: h.weeks.first().and_then(|w| w.as_ref()).map(|w| cumulative(w, upto)),
+        last: h
+            .weeks
+            .first()
+            .and_then(|w| w.as_ref())
+            .map(|w| cumulative(w, upto)),
         median: median(past.clone()).map(|m| (m, past.len())),
     })
 }
@@ -342,7 +387,9 @@ pub struct Split {
 pub fn split_to_hour(report: &Report, dim: &str, metric: &str, upto: usize) -> Vec<Split> {
     let mut found: Vec<Split> = Vec::new();
     for row in &report.rows {
-        let Some(h) = hour_of(report.d(row, "hour")) else { continue };
+        let Some(h) = hour_of(report.d(row, "hour")) else {
+            continue;
+        };
         if h > upto {
             continue;
         }
@@ -351,7 +398,11 @@ pub fn split_to_hour(report: &Report, dim: &str, metric: &str, upto: usize) -> V
         let at = match found.iter().position(|s| s.name == name) {
             Some(at) => at,
             None => {
-                found.push(Split { name, today: 0.0, last: 0.0 });
+                found.push(Split {
+                    name,
+                    today: 0.0,
+                    last: 0.0,
+                });
                 found.len() - 1
             }
         };
@@ -361,7 +412,12 @@ pub fn split_to_hour(report: &Report, dim: &str, metric: &str, upto: usize) -> V
             _ => {}
         }
     }
-    found.sort_by(|a, b| b.today.total_cmp(&a.today).then(b.last.total_cmp(&a.last)).then(a.name.cmp(&b.name)));
+    found.sort_by(|a, b| {
+        b.today
+            .total_cmp(&a.today)
+            .then(b.last.total_cmp(&a.last))
+            .then(a.name.cmp(&b.name))
+    });
     found
 }
 
@@ -392,7 +448,12 @@ pub fn key_events(
 ) -> Vec<KeyEventLine> {
     let mut out: Vec<KeyEventLine> = names
         .iter()
-        .map(|n| KeyEventLine { name: n.clone(), today: 0.0, last: 0.0, days: vec![0.0; 7] })
+        .map(|n| KeyEventLine {
+            name: n.clone(),
+            today: 0.0,
+            last: 0.0,
+            days: vec![0.0; 7],
+        })
         .collect();
     let last_week = today - chrono::Duration::days(7);
     for row in &report.rows {
@@ -400,13 +461,22 @@ pub fn key_events(
         if name.is_empty() {
             continue;
         }
-        let Ok(date) = NaiveDate::parse_from_str(report.d(row, "date"), "%Y%m%d") else { continue };
-        let Some(h) = hour_of(report.d(row, "hour")) else { continue };
+        let Ok(date) = NaiveDate::parse_from_str(report.d(row, "date"), "%Y%m%d") else {
+            continue;
+        };
+        let Some(h) = hour_of(report.d(row, "hour")) else {
+            continue;
+        };
         let v = report.m(row, metric);
         let at = match out.iter().position(|l| l.name == name) {
             Some(at) => at,
             None => {
-                out.push(KeyEventLine { name: name.to_string(), today: 0.0, last: 0.0, days: vec![0.0; 7] });
+                out.push(KeyEventLine {
+                    name: name.to_string(),
+                    today: 0.0,
+                    last: 0.0,
+                    days: vec![0.0; 7],
+                });
                 out.len() - 1
             }
         };
@@ -440,13 +510,22 @@ pub struct Mover {
 
 /// Read a two-window report (`dateRange` `cur` and `prev`), grouping rows
 /// by `key`. `metrics` names the values kept, in order.
-pub fn movers(report: &Report, key: &dyn Fn(&Report, &Row) -> String, metrics: &[&str]) -> Vec<Mover> {
+pub fn movers(
+    report: &Report,
+    key: &dyn Fn(&Report, &Row) -> String,
+    metrics: &[&str],
+) -> Vec<Mover> {
     let mut out: Vec<Mover> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for row in &report.rows {
         let name = key(report, row);
         let at = *index.entry(name.clone()).or_insert_with(|| {
-            out.push(Mover { name, cur: vec![0.0; metrics.len()], prev: vec![0.0; metrics.len()], daily: Vec::new() });
+            out.push(Mover {
+                name,
+                cur: vec![0.0; metrics.len()],
+                prev: vec![0.0; metrics.len()],
+                daily: Vec::new(),
+            });
             out.len() - 1
         });
         let vals: Vec<f64> = metrics.iter().map(|m| report.m(row, m)).collect();
@@ -493,7 +572,9 @@ pub fn attach_daily(totals: &mut [Mover], by_day: &[Mover]) {
 pub fn day_grid(days: &[(String, f64)], end: NaiveDate, n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for (d, v) in days {
-        let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") else { continue };
+        let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") else {
+            continue;
+        };
         let back = (end - date).num_days();
         if back >= 0 && (back as usize) < n {
             out[n - 1 - back as usize] += v;
@@ -533,8 +614,15 @@ impl Sort {
 
 /// Order `v` by metric `m` and drop names with nothing in either window.
 pub fn sort_movers(v: &mut Vec<Mover>, m: usize, sort: Sort) {
-    v.retain(|x| x.cur.get(m).copied().unwrap_or(0.0) > 0.0 || x.prev.get(m).copied().unwrap_or(0.0) > 0.0);
-    let get = |x: &Mover| (x.cur.get(m).copied().unwrap_or(0.0), x.prev.get(m).copied().unwrap_or(0.0));
+    v.retain(|x| {
+        x.cur.get(m).copied().unwrap_or(0.0) > 0.0 || x.prev.get(m).copied().unwrap_or(0.0) > 0.0
+    });
+    let get = |x: &Mover| {
+        (
+            x.cur.get(m).copied().unwrap_or(0.0),
+            x.prev.get(m).copied().unwrap_or(0.0),
+        )
+    };
     v.sort_by(|a, b| {
         let (ac, ap) = get(a);
         let (bc, bp) = get(b);
@@ -633,8 +721,16 @@ pub fn realtime_key_events(report: &Report, names: &[String]) -> Vec<(String, f6
 /// The property's local date and hour now.
 pub fn local_now(now: f64, tz: Tz) -> (NaiveDate, usize, String) {
     match tz.timestamp_opt(now.floor() as i64, 0).single() {
-        Some(t) => (t.date_naive(), chrono::Timelike::hour(&t) as usize, t.format("%a").to_string()),
-        None => (NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_default(), 0, String::new()),
+        Some(t) => (
+            t.date_naive(),
+            chrono::Timelike::hour(&t) as usize,
+            t.format("%a").to_string(),
+        ),
+        None => (
+            NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_default(),
+            0,
+            String::new(),
+        ),
     }
 }
 
@@ -649,7 +745,12 @@ mod tests {
     use crate::parse::{parse_batch, parse_report, Sample};
 
     fn sample(t: f64, active: f64) -> Sample {
-        Sample { t, active: Some(active), views: Some(active * 2.0), events: Some(vec![("purchase".into(), active / 10.0)]) }
+        Sample {
+            t,
+            active: Some(active),
+            views: Some(active * 2.0),
+            events: Some(vec![("purchase".into(), active / 10.0)]),
+        }
     }
 
     fn active(s: &Sample) -> Option<f64> {
@@ -669,7 +770,15 @@ mod tests {
             sample(NOW - WEEK + 299.0, 52.0),
         ];
         let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
-        assert_eq!(b, Baseline::Ready { median: 49.0, found: 4, of: 4, since: None });
+        assert_eq!(
+            b,
+            Baseline::Ready {
+                median: 49.0,
+                found: 4,
+                of: 4,
+                since: None
+            }
+        );
     }
 
     #[test]
@@ -683,29 +792,62 @@ mod tests {
             sample(NOW - WEEK - 10.0, 50.0),
         ];
         let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
-        assert_eq!(b, Baseline::Ready { median: 40.0, found: 2, of: 4, since: None });
+        assert_eq!(
+            b,
+            Baseline::Ready {
+                median: 40.0,
+                found: 2,
+                of: 4,
+                since: None
+            }
+        );
     }
 
     #[test]
     fn no_week_covering_this_minute_says_so() {
-        let samples = vec![sample(NOW - 2.0 * WEEK - 7200.0, 10.0), sample(NOW - WEEK + 3600.0, 10.0)];
+        let samples = vec![
+            sample(NOW - 2.0 * WEEK - 7200.0, 10.0),
+            sample(NOW - WEEK + 3600.0, 10.0),
+        ];
         let b = baseline(&samples, NOW, 4, chrono_tz::UTC, &active);
-        assert_eq!(b, Baseline::Uncovered { label: "Tue 14:35".into() });
+        assert_eq!(
+            b,
+            Baseline::Uncovered {
+                label: "Tue 14:35".into()
+            }
+        );
     }
 
     #[test]
     fn under_a_week_of_samples_is_still_collecting() {
         let since = NOW - 3.0 * 86_400.0;
-        let b = baseline(&[sample(since, 10.0), sample(NOW - 60.0, 12.0)], NOW, 4, chrono_tz::UTC, &active);
+        let b = baseline(
+            &[sample(since, 10.0), sample(NOW - 60.0, 12.0)],
+            NOW,
+            4,
+            chrono_tz::UTC,
+            &active,
+        );
         assert_eq!(b, Baseline::Collecting { since });
-        assert_eq!(baseline(&[], NOW, 4, chrono_tz::UTC, &active), Baseline::Collecting { since: NOW });
+        assert_eq!(
+            baseline(&[], NOW, 4, chrono_tz::UTC, &active),
+            Baseline::Collecting { since: NOW }
+        );
     }
 
     #[test]
     fn a_short_history_says_since_when() {
         let first = NOW - WEEK - 60.0;
         let b = baseline(&[sample(first, 20.0)], NOW, 4, chrono_tz::UTC, &active);
-        assert_eq!(b, Baseline::Ready { median: 20.0, found: 1, of: 4, since: Some(first) });
+        assert_eq!(
+            b,
+            Baseline::Ready {
+                median: 20.0,
+                found: 1,
+                of: 4,
+                since: Some(first)
+            }
+        );
     }
 
     #[test]
@@ -713,8 +855,14 @@ mod tests {
         // 2026-11-03 14:35 in New York is after the clocks went back on
         // 2026-11-01, so a week earlier is 25 hours further than 7 * 24.
         let tz: Tz = "America/New_York".parse().unwrap();
-        let now = tz.with_ymd_and_hms(2026, 11, 3, 14, 35, 0).unwrap().timestamp() as f64;
-        let then = tz.with_ymd_and_hms(2026, 10, 27, 14, 35, 0).unwrap().timestamp() as f64;
+        let now = tz
+            .with_ymd_and_hms(2026, 11, 3, 14, 35, 0)
+            .unwrap()
+            .timestamp() as f64;
+        let then = tz
+            .with_ymd_and_hms(2026, 10, 27, 14, 35, 0)
+            .unwrap()
+            .timestamp() as f64;
         assert_eq!(weeks_back(now, 1, tz), then);
         assert_eq!(now - then, WEEK + 3600.0);
     }
@@ -723,11 +871,23 @@ mod tests {
     fn key_event_baselines_read_zero_for_a_week_without_that_event() {
         let mut quiet = sample(NOW - WEEK, 10.0);
         quiet.events = Some(vec![("purchase".into(), 0.0)]);
-        let b = baseline(&[quiet.clone()], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
-        assert_eq!(b, Baseline::Ready { median: 0.0, found: 1, of: 1, since: None });
+        let b = baseline(&[quiet.clone()], NOW, 1, chrono_tz::UTC, &|s| {
+            event_reading(s, "purchase")
+        });
+        assert_eq!(
+            b,
+            Baseline::Ready {
+                median: 0.0,
+                found: 1,
+                of: 1,
+                since: None
+            }
+        );
         // A sample from before `purchase` was asked for did not cover it.
         quiet.events = Some(vec![("sign_up".into(), 2.0)]);
-        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase"));
+        let b = baseline(&[quiet], NOW, 1, chrono_tz::UTC, &|s| {
+            event_reading(s, "purchase")
+        });
         assert_eq!(b, Baseline::Collecting { since: NOW });
     }
 
@@ -740,32 +900,69 @@ mod tests {
             covered_events(&events, &[], Some(&flagged)),
             vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 0.0)]
         );
-        assert_eq!(covered_events(&events, &[], None), vec![("purchase".to_string(), 3.0)]);
-        assert_eq!(covered_events(&events, &["refund".into()], Some(&flagged)), vec![("refund".to_string(), 0.0)]);
+        assert_eq!(
+            covered_events(&events, &[], None),
+            vec![("purchase".to_string(), 3.0)]
+        );
+        assert_eq!(
+            covered_events(&events, &["refund".into()], Some(&flagged)),
+            vec![("refund".to_string(), 0.0)]
+        );
     }
 
     #[test]
     fn an_unread_figure_is_skipped_not_counted_as_zero() {
         // Last week the totals were read at the minute, the events 40 s
         // later; a totals-only sample says nothing about events.
-        let totals = Sample { t: NOW - WEEK, active: Some(30.0), views: Some(60.0), events: None };
-        let events = Sample { t: NOW - WEEK + 40.0, active: None, views: None, events: Some(vec![("purchase".into(), 4.0)]) };
+        let totals = Sample {
+            t: NOW - WEEK,
+            active: Some(30.0),
+            views: Some(60.0),
+            events: None,
+        };
+        let events = Sample {
+            t: NOW - WEEK + 40.0,
+            active: None,
+            views: None,
+            events: Some(vec![("purchase".into(), 4.0)]),
+        };
         let both = [totals.clone(), events];
         assert_eq!(
-            baseline(&both, NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase")),
-            Baseline::Ready { median: 4.0, found: 1, of: 1, since: None }
+            baseline(&both, NOW, 1, chrono_tz::UTC, &|s| event_reading(
+                s, "purchase"
+            )),
+            Baseline::Ready {
+                median: 4.0,
+                found: 1,
+                of: 1,
+                since: None
+            }
         );
-        assert_eq!(baseline(&both, NOW, 1, chrono_tz::UTC, &active), Baseline::Ready { median: 30.0, found: 1, of: 1, since: None });
+        assert_eq!(
+            baseline(&both, NOW, 1, chrono_tz::UTC, &active),
+            Baseline::Ready {
+                median: 30.0,
+                found: 1,
+                of: 1,
+                since: None
+            }
+        );
         // Events never read: still collecting, not a baseline of zero.
         assert_eq!(
-            baseline(&[totals], NOW, 1, chrono_tz::UTC, &|s| event_reading(s, "purchase")),
+            baseline(&[totals], NOW, 1, chrono_tz::UTC, &|s| event_reading(
+                s, "purchase"
+            )),
             Baseline::Collecting { since: NOW }
         );
     }
 
     #[test]
     fn pruning_keeps_one_week_past_the_baseline() {
-        let mut v = vec![sample(NOW - 6.0 * WEEK, 1.0), sample(NOW - 5.0 * WEEK + 1.0, 1.0), sample(NOW, 1.0)];
+        let mut v = vec![
+            sample(NOW - 6.0 * WEEK, 1.0),
+            sample(NOW - 5.0 * WEEK + 1.0, 1.0),
+            sample(NOW, 1.0),
+        ];
         prune(&mut v, NOW, 4);
         assert_eq!(v.len(), 2);
     }
@@ -773,7 +970,8 @@ mod tests {
     fn hourly_fixture() -> Report {
         // Today processed to 02:00 with a genuine zero at 01:00; last week
         // complete; two weeks ago only hour 0; three weeks ago absent.
-        parse_report(r#"{"dimensionHeaders":[{"name":"hour"},{"name":"dateRange"}],
+        parse_report(
+            r#"{"dimensionHeaders":[{"name":"hour"},{"name":"dateRange"}],
           "metricHeaders":[{"name":"sessions"}],
           "rows":[
             {"dimensionValues":[{"value":"00"},{"value":"today"}],"metricValues":[{"value":"10"}]},
@@ -783,7 +981,8 @@ mod tests {
             {"dimensionValues":[{"value":"02"},{"value":"w1"}],"metricValues":[{"value":"20"}]},
             {"dimensionValues":[{"value":"03"},{"value":"w1"}],"metricValues":[{"value":"99"}]},
             {"dimensionValues":[{"value":"00"},{"value":"w2"}],"metricValues":[{"value":"16"}]}
-          ]}"#)
+          ]}"#,
+        )
         .unwrap()
     }
 
@@ -792,11 +991,21 @@ mod tests {
         let h = hourly(&hourly_fixture(), "sessions");
         assert_eq!(h.last, Some(2));
         assert_eq!(h.today[0], Some(10.0));
-        assert_eq!(h.today[1], Some(0.0), "an hour before the last processed one is a real zero");
+        assert_eq!(
+            h.today[1],
+            Some(0.0),
+            "an hour before the last processed one is a real zero"
+        );
         assert_eq!(h.today[2], Some(30.0));
-        assert!(h.today[3..].iter().all(Option::is_none), "every hour after it is unprocessed, not zero");
+        assert!(
+            h.today[3..].iter().all(Option::is_none),
+            "every hour after it is unprocessed, not zero"
+        );
         assert!(h.weeks[0].is_some() && h.weeks[1].is_some());
-        assert!(h.weeks[2].is_none(), "a week GA returned nothing for is absent");
+        assert!(
+            h.weeks[2].is_none(),
+            "a week GA returned nothing for is absent"
+        );
     }
 
     #[test]
@@ -817,7 +1026,10 @@ mod tests {
         assert_eq!(v.last, Some(32.0), "last week's 03:00 is left out");
         // w1 to 02:00 is 32, w2 is 16: the median of two weeks.
         assert_eq!(v.median, Some((24.0, 2)));
-        assert_eq!(pct(v.today, v.last.unwrap()).map(pct_label).as_deref(), Some("+25%"));
+        assert_eq!(
+            pct(v.today, v.last.unwrap()).map(pct_label).as_deref(),
+            Some("+25%")
+        );
     }
 
     #[test]
@@ -832,12 +1044,47 @@ mod tests {
             {"dimensionValues":[{"value":"Organic Search"},{"value":"bing / organic"},{"value":"02"},{"value":"w1"}],"metricValues":[{"value":"2"}]}
           ]}"#).unwrap();
         let sources = split_to_hour(&r, "sessionSourceMedium", "sessions", 2);
-        assert_eq!(sources[0], Split { name: "(direct) / (none)".into(), today: 7.0, last: 0.0 });
-        assert_eq!(sources[1], Split { name: "google / organic".into(), today: 5.0, last: 4.0 });
-        assert_eq!(sources[2], Split { name: "bing / organic".into(), today: 0.0, last: 2.0 });
+        assert_eq!(
+            sources[0],
+            Split {
+                name: "(direct) / (none)".into(),
+                today: 7.0,
+                last: 0.0
+            }
+        );
+        assert_eq!(
+            sources[1],
+            Split {
+                name: "google / organic".into(),
+                today: 5.0,
+                last: 4.0
+            }
+        );
+        assert_eq!(
+            sources[2],
+            Split {
+                name: "bing / organic".into(),
+                today: 0.0,
+                last: 2.0
+            }
+        );
         let channels = split_to_hour(&r, "sessionDefaultChannelGroup", "sessions", 2);
-        assert_eq!(channels[0], Split { name: "Direct".into(), today: 7.0, last: 0.0 });
-        assert_eq!(channels[1], Split { name: "Organic Search".into(), today: 5.0, last: 6.0 });
+        assert_eq!(
+            channels[0],
+            Split {
+                name: "Direct".into(),
+                today: 7.0,
+                last: 0.0
+            }
+        );
+        assert_eq!(
+            channels[1],
+            Split {
+                name: "Organic Search".into(),
+                today: 5.0,
+                last: 6.0
+            }
+        );
     }
 
     #[test]
@@ -852,11 +1099,25 @@ mod tests {
             {"dimensionValues":[{"value":"20261019"},{"value":"12"},{"value":"purchase"}],"metricValues":[{"value":"6"}]},
             {"dimensionValues":[{"value":"20261013"},{"value":"10"},{"value":"sign_up"}],"metricValues":[{"value":"31"}]}
           ]}"#).unwrap();
-        let lines = key_events(&r, &["purchase".into(), "sign_up".into(), "refund".into()], today, Some(10), "keyEvents");
+        let lines = key_events(
+            &r,
+            &["purchase".into(), "sign_up".into(), "refund".into()],
+            today,
+            Some(10),
+            "keyEvents",
+        );
         assert_eq!(lines[0].name, "purchase");
-        assert_eq!((lines[0].today, lines[0].last), (3.0, 4.0), "last week's 15:00 is past today's last hour");
+        assert_eq!(
+            (lines[0].today, lines[0].last),
+            (3.0, 4.0),
+            "last week's 15:00 is past today's last hour"
+        );
         assert_eq!(lines[0].days, vec![0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 3.0]);
-        assert_eq!((lines[1].today, lines[1].last), (0.0, 31.0), "0 today, 31 last week - not a missing row");
+        assert_eq!(
+            (lines[1].today, lines[1].last),
+            (0.0, 31.0),
+            "0 today, 31 last week - not a missing row"
+        );
         assert_eq!(lines[2].name, "refund");
         assert_eq!((lines[2].today, lines[2].last), (0.0, 0.0));
         let unprocessed = key_events(&r, &["purchase".into()], today, None, "keyEvents");
@@ -879,10 +1140,17 @@ mod tests {
 
     #[test]
     fn movers_sum_each_window_and_name_new_and_gone() {
-        let mut v = movers(&movers_fixture(), &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+        let mut v = movers(
+            &movers_fixture(),
+            &|r, row| r.d(row, "pagePath").to_string(),
+            &["screenPageViews", "totalUsers", "sessions"],
+        );
         sort_movers(&mut v, 0, Sort::Change);
         let names: Vec<&str> = v.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, vec!["/pricing", "/blog/launch", "/docs/getting-started", "/old"]);
+        assert_eq!(
+            names,
+            vec!["/pricing", "/blog/launch", "/docs/getting-started", "/old"]
+        );
         assert_eq!(v[0].cur[0], 9120.0);
         assert_eq!(v[0].daily.len(), 3);
         assert_eq!(v[0].daily[0].0, "20261010", "days sorted oldest first");
@@ -894,7 +1162,11 @@ mod tests {
         assert_eq!(v[0].name, "/pricing");
         assert_eq!(v[3].name, "/old");
         sort_movers(&mut v, 0, Sort::Percent);
-        assert!(v[0].name == "/blog/launch", "new outranks any percentage: {:?}", v[0].name);
+        assert!(
+            v[0].name == "/blog/launch",
+            "new outranks any percentage: {:?}",
+            v[0].name
+        );
         // By users, the docs page is now the largest mover.
         sort_movers(&mut v, 1, Sort::Size);
         assert_eq!(v[0].name, "/docs/getting-started");
@@ -903,21 +1175,41 @@ mod tests {
     #[test]
     fn window_users_come_from_the_window_not_the_sum_of_days() {
         // One visitor on two days: two daily users, one window user.
-        let by_day = movers(&movers_fixture(), &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+        let by_day = movers(
+            &movers_fixture(),
+            &|r, row| r.d(row, "pagePath").to_string(),
+            &["screenPageViews", "totalUsers", "sessions"],
+        );
         let totals_report = parse_report(r#"{"dimensionHeaders":[{"name":"pagePath"},{"name":"dateRange"}],
           "metricHeaders":[{"name":"screenPageViews"},{"name":"totalUsers"},{"name":"sessions"}],
           "rows":[{"dimensionValues":[{"value":"/pricing"},{"value":"cur"}],"metricValues":[{"value":"9120"},{"value":"10"},{"value":"6"}]}]}"#).unwrap();
-        let mut totals = movers(&totals_report, &|r, row| r.d(row, "pagePath").to_string(), &["screenPageViews", "totalUsers", "sessions"]);
+        let mut totals = movers(
+            &totals_report,
+            &|r, row| r.d(row, "pagePath").to_string(),
+            &["screenPageViews", "totalUsers", "sessions"],
+        );
         attach_daily(&mut totals, &by_day);
-        assert_eq!(by_day.iter().find(|m| m.name == "/pricing").unwrap().cur[1], 11.0, "the daily sum overcounts");
+        assert_eq!(
+            by_day.iter().find(|m| m.name == "/pricing").unwrap().cur[1],
+            11.0,
+            "the daily sum overcounts"
+        );
         assert_eq!(totals[0].cur[1], 10.0);
-        assert_eq!(totals[0].daily.len(), 3, "the days come along for the chart");
+        assert_eq!(
+            totals[0].daily.len(),
+            3,
+            "the days come along for the chart"
+        );
     }
 
     #[test]
     fn a_day_ga_left_out_is_drawn_as_zero_in_its_place() {
         let end = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-        let days = vec![("20261019".to_string(), 5.0), ("20261016".to_string(), 3.0), ("20260901".to_string(), 99.0)];
+        let days = vec![
+            ("20261019".to_string(), 5.0),
+            ("20261016".to_string(), 3.0),
+            ("20260901".to_string(), 99.0),
+        ];
         assert_eq!(day_grid(&days, end, 5), vec![0.0, 3.0, 0.0, 0.0, 5.0]);
         assert_eq!(day_grid(&[], end, 3), vec![0.0; 3]);
     }
@@ -928,7 +1220,11 @@ mod tests {
           "rows":[{"metricValues":[{"value":"71"},{"value":"540"},{"value":"4"}]}]}"#).unwrap();
         assert_eq!(realtime_totals(&totals), (71.0, 540.0, 4.0));
         let empty = parse_report(r#"{"metricHeaders":[{"name":"activeUsers"}]}"#).unwrap();
-        assert_eq!(realtime_totals(&empty), (0.0, 0.0, 0.0), "an empty realtime window is nobody there");
+        assert_eq!(
+            realtime_totals(&empty),
+            (0.0, 0.0, 0.0),
+            "an empty realtime window is nobody there"
+        );
         let minutes = parse_report(r#"{"dimensionHeaders":[{"name":"minutesAgo"}],"metricHeaders":[{"name":"activeUsers"}],
           "rows":[{"dimensionValues":[{"value":"00"}],"metricValues":[{"value":"5"}]},{"dimensionValues":[{"value":"29"}],"metricValues":[{"value":"2"}]},{"dimensionValues":[{"value":"45"}],"metricValues":[{"value":"9"}]}]}"#).unwrap();
         let series = per_minute(&minutes, "activeUsers");
@@ -938,12 +1234,21 @@ mod tests {
           "rows":[{"dimensionValues":[{"value":"page_view"}],"metricValues":[{"value":"500"},{"value":"0"}]},
                   {"dimensionValues":[{"value":"purchase"}],"metricValues":[{"value":"3"},{"value":"3"}]},
                   {"dimensionValues":[{"value":"sign_up"}],"metricValues":[{"value":"1"},{"value":"1"}]}]}"#).unwrap();
-        assert_eq!(realtime_key_events(&events, &[]), vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 1.0)]);
+        assert_eq!(
+            realtime_key_events(&events, &[]),
+            vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 1.0)]
+        );
         assert_eq!(
             realtime_key_events(&events, &["page_view".into(), "refund".into()]),
-            vec![("page_view".to_string(), 500.0), ("refund".to_string(), 0.0)]
+            vec![
+                ("page_view".to_string(), 500.0),
+                ("refund".to_string(), 0.0)
+            ]
         );
-        assert_eq!(top(&events, "eventName", "eventCount", 1), vec![("page_view".to_string(), 500.0)]);
+        assert_eq!(
+            top(&events, "eventName", "eventCount", 1),
+            vec![("page_view".to_string(), 500.0)]
+        );
     }
 
     #[test]
@@ -951,12 +1256,22 @@ mod tests {
         assert_eq!(realtime_interval(15, 0.0, Some(0.5)), (15, String::new()));
         assert_eq!(realtime_interval(15, 299.0, None), (15, String::new()));
         assert_eq!(realtime_interval(15, 300.0, None).0, 60);
-        assert!(realtime_interval(30, 900.0, None).1.contains("0 active for 5m+"));
-        assert_eq!(realtime_interval(60, 900.0, None), (60, String::new()), "already at 60, nothing to say");
+        assert!(realtime_interval(30, 900.0, None)
+            .1
+            .contains("0 active for 5m+"));
+        assert_eq!(
+            realtime_interval(60, 900.0, None),
+            (60, String::new()),
+            "already at 60, nothing to say"
+        );
         let (secs, why) = realtime_interval(15, 0.0, Some(0.09));
         assert_eq!(secs, 120);
         assert!(why.contains("under 10% of quota"));
-        assert_eq!(realtime_interval(15, 900.0, Some(0.05)).0, 120, "quota wins over idle");
+        assert_eq!(
+            realtime_interval(15, 900.0, Some(0.05)).0,
+            120,
+            "quota wins over idle"
+        );
     }
 
     #[test]

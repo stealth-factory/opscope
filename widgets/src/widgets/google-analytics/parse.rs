@@ -98,7 +98,10 @@ pub struct Quota {
 
 impl Quota {
     pub fn get(&self, name: &str) -> Option<Bucket> {
-        self.buckets.iter().find(|(n, _)| n == name).map(|(_, b)| *b)
+        self.buckets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| *b)
     }
 
     /// Token bucket `name` against its documented limit.
@@ -120,7 +123,12 @@ impl Quota {
         } else {
             return None;
         };
-        Some(Level { limit, left: b.remaining, used: (limit - b.remaining).max(0.0), last: b.consumed })
+        Some(Level {
+            limit,
+            left: b.remaining,
+            used: (limit - b.remaining).max(0.0),
+            last: b.consumed,
+        })
     }
 
     /// The token bucket with the least left, as `(name, fraction left)`.
@@ -132,14 +140,19 @@ impl Quota {
     pub fn tightest(&self, premium: Option<bool>) -> Option<(String, f64)> {
         self.buckets
             .iter()
-            .filter_map(|(n, _)| self.level(n, premium).map(|l| (n.clone(), l.fraction_left())))
+            .filter_map(|(n, _)| {
+                self.level(n, premium)
+                    .map(|l| (n.clone(), l.fraction_left()))
+            })
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// True when a token bucket still holds more than a standard property
     /// is allowed, which only Analytics 360 can.
     pub fn proves_premium(&self) -> bool {
-        self.buckets.iter().any(|(n, b)| documented_limit(n, false).is_some_and(|lim| b.remaining > lim))
+        self.buckets
+            .iter()
+            .any(|(n, b)| documented_limit(n, false).is_some_and(|lim| b.remaining > lim))
     }
 }
 
@@ -190,7 +203,10 @@ impl Report {
 
     /// Metric `name` of `row`, or 0 when the report has no such metric.
     pub fn m(&self, row: &Row, name: &str) -> f64 {
-        self.met(name).and_then(|at| row.mets.get(at)).copied().unwrap_or(0.0)
+        self.met(name)
+            .and_then(|at| row.mets.get(at))
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 
@@ -199,7 +215,12 @@ fn names(v: &Value, key: &str) -> Vec<String> {
         .and_then(|h| h.as_array())
         .map(|h| {
             h.iter()
-                .map(|x| x.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string())
+                .map(|x| {
+                    x.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -210,7 +231,12 @@ fn values(v: &Value, key: &str) -> Vec<String> {
         .and_then(|h| h.as_array())
         .map(|h| {
             h.iter()
-                .map(|x| x.get("value").and_then(|n| n.as_str()).unwrap_or("").to_string())
+                .map(|x| {
+                    x.get("value")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -234,7 +260,10 @@ fn quota_from(v: &Value) -> Option<Quota> {
         }
         buckets.push((
             name.clone(),
-            Bucket { consumed: number(b.get("consumed")), remaining: number(b.get("remaining")) },
+            Bucket {
+                consumed: number(b.get("consumed")),
+                remaining: number(b.get("remaining")),
+            },
         ));
     }
     Some(Quota { buckets })
@@ -260,13 +289,22 @@ fn report_from(v: &Value) -> Report {
         .unwrap_or_default();
     let meta = v.get("metadata").cloned().unwrap_or(Value::Null);
     let flag = |k: &str| meta.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
-    let text = |k: &str| meta.get(k).and_then(|b| b.as_str()).unwrap_or("").to_string();
+    let text = |k: &str| {
+        meta.get(k)
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let sampled = meta
         .get("samplingMetadatas")
         .and_then(|s| s.as_array())
         .is_some_and(|s| !s.is_empty());
     Report {
-        row_count: v.get("rowCount").and_then(|c| c.as_u64()).map(|c| c as usize).unwrap_or(rows.len()),
+        row_count: v
+            .get("rowCount")
+            .and_then(|c| c.as_u64())
+            .map(|c| c as usize)
+            .unwrap_or(rows.len()),
         dims,
         mets,
         rows,
@@ -283,7 +321,8 @@ fn report_from(v: &Value) -> Report {
 }
 
 fn json(text: &str, what: &str) -> Result<Value, String> {
-    let v: Value = serde_json::from_str(text).map_err(|e| format!("{} is not JSON ({})", what, e))?;
+    let v: Value =
+        serde_json::from_str(text).map_err(|e| format!("{} is not JSON ({})", what, e))?;
     if !v.is_object() {
         return Err(format!("{} is not a JSON object", what));
     }
@@ -314,20 +353,42 @@ pub struct PropertySummary {
 }
 
 /// One page of Admin `accountSummaries`, and the token for the next.
-pub fn parse_account_summaries(text: &str) -> Result<(Vec<PropertySummary>, Option<String>), String> {
+pub fn parse_account_summaries(
+    text: &str,
+) -> Result<(Vec<PropertySummary>, Option<String>), String> {
     let v = json(text, "GA's account list")?;
     let mut out = Vec::new();
-    for account in v.get("accountSummaries").and_then(|a| a.as_array()).into_iter().flatten() {
-        let account_name = account.get("displayName").and_then(|n| n.as_str()).unwrap_or("");
-        for p in account.get("propertySummaries").and_then(|p| p.as_array()).into_iter().flatten() {
+    for account in v
+        .get("accountSummaries")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let account_name = account
+            .get("displayName")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        for p in account
+            .get("propertySummaries")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+        {
             let resource = p.get("property").and_then(|n| n.as_str()).unwrap_or("");
-            let id = resource.strip_prefix("properties/").unwrap_or("").to_string();
+            let id = resource
+                .strip_prefix("properties/")
+                .unwrap_or("")
+                .to_string();
             if id.is_empty() {
                 continue;
             }
             out.push(PropertySummary {
                 id,
-                name: p.get("displayName").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                name: p
+                    .get("displayName")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 account: account_name.to_string(),
             });
         }
@@ -419,11 +480,14 @@ pub fn parse_samples(text: &str) -> Vec<Sample> {
     let mut out = Vec::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
-        let (Some(t), Some(active), Some(views)) = (parts.next(), parts.next(), parts.next()) else {
+        let (Some(t), Some(active), Some(views)) = (parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
         let Ok(t) = t.parse::<f64>() else { continue };
-        let (Some(active), Some(views)) = (reading(active), reading(views)) else { continue };
+        let (Some(active), Some(views)) = (reading(active), reading(views)) else {
+            continue;
+        };
         if !t.is_finite() {
             continue;
         }
@@ -443,7 +507,12 @@ pub fn parse_samples(text: &str) -> Vec<Sample> {
         if active.is_none() && views.is_none() && events.is_none() {
             continue;
         }
-        out.push(Sample { t, active, views, events });
+        out.push(Sample {
+            t,
+            active,
+            views,
+            events,
+        });
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
     out
@@ -460,7 +529,13 @@ pub fn format_sample(s: &Sample) -> String {
         for (name, count) in events {
             let clean: String = name
                 .chars()
-                .map(|c| if c.is_whitespace() || c == '=' { '_' } else { c })
+                .map(|c| {
+                    if c.is_whitespace() || c == '=' {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
                 .collect();
             line.push_str(&format!(" {}={}", clean, count));
         }
@@ -501,22 +576,58 @@ mod tests {
         assert_eq!(r.m(&r.rows[0], "screenPageViews"), 12.0);
         assert_eq!(r.m(&r.rows[0], "noSuchMetric"), 0.0);
         let q = r.quota.unwrap();
-        assert_eq!(q.get("tokensPerHour"), Some(Bucket { consumed: 30.0, remaining: 13970.0 }));
-        assert_eq!(q.get("concurrentRequests"), Some(Bucket { consumed: 0.0, remaining: 10.0 }));
+        assert_eq!(
+            q.get("tokensPerHour"),
+            Some(Bucket {
+                consumed: 30.0,
+                remaining: 13970.0
+            })
+        );
+        assert_eq!(
+            q.get("concurrentRequests"),
+            Some(Bucket {
+                consumed: 0.0,
+                remaining: 10.0
+            })
+        );
         // 13,970 left of the property's hourly 40,000 is the tightest;
         // the same balance is nearly all of the per-project 14,000.
-        assert_eq!(q.tightest(Some(false)).map(|t| t.0).as_deref(), Some("tokensPerHour"));
+        assert_eq!(
+            q.tightest(Some(false)).map(|t| t.0).as_deref(),
+            Some("tokensPerHour")
+        );
         let l = q.level("tokensPerProjectPerHour", Some(false)).unwrap();
-        assert_eq!((l.limit, l.left, l.used, l.last), (14_000.0, 13_970.0, 30.0, 30.0));
+        assert_eq!(
+            (l.limit, l.left, l.used, l.last),
+            (14_000.0, 13_970.0, 30.0, 30.0)
+        );
     }
 
     #[test]
     fn the_tightest_bucket_ignores_concurrency() {
         let q = Quota {
             buckets: vec![
-                ("concurrentRequests".into(), Bucket { consumed: 1.0, remaining: 0.0 }),
-                ("tokensPerDay".into(), Bucket { consumed: 10.0, remaining: 10_000.0 }),
-                ("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 39_000.0 }),
+                (
+                    "concurrentRequests".into(),
+                    Bucket {
+                        consumed: 1.0,
+                        remaining: 0.0,
+                    },
+                ),
+                (
+                    "tokensPerDay".into(),
+                    Bucket {
+                        consumed: 10.0,
+                        remaining: 10_000.0,
+                    },
+                ),
+                (
+                    "tokensPerHour".into(),
+                    Bucket {
+                        consumed: 10.0,
+                        remaining: 39_000.0,
+                    },
+                ),
             ],
         };
         assert_eq!(q.tightest(Some(false)), Some(("tokensPerDay".into(), 0.05)));
@@ -527,14 +638,36 @@ mod tests {
     fn consumed_is_one_request_not_the_bucket() {
         // A 10-token request with 100 left is a bucket all but empty, not
         // one that is 91% full.
-        let q = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 100.0 })] };
+        let q = Quota {
+            buckets: vec![(
+                "tokensPerHour".into(),
+                Bucket {
+                    consumed: 10.0,
+                    remaining: 100.0,
+                },
+            )],
+        };
         let l = q.level("tokensPerHour", Some(false)).unwrap();
         assert_eq!((l.limit, l.used, l.last), (40_000.0, 39_900.0, 10.0));
         assert!(q.tightest(Some(false)).unwrap().1 < 0.01);
         // 360 is ten times the size, said or inferred from the balance.
-        assert_eq!(q.level("tokensPerHour", Some(true)).unwrap().limit, 400_000.0);
-        let big = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 390_000.0 })] };
-        assert_eq!(big.level("tokensPerHour", Some(false)).unwrap().limit, 400_000.0);
+        assert_eq!(
+            q.level("tokensPerHour", Some(true)).unwrap().limit,
+            400_000.0
+        );
+        let big = Quota {
+            buckets: vec![(
+                "tokensPerHour".into(),
+                Bucket {
+                    consumed: 10.0,
+                    remaining: 390_000.0,
+                },
+            )],
+        };
+        assert_eq!(
+            big.level("tokensPerHour", Some(false)).unwrap().limit,
+            400_000.0
+        );
         assert!(big.proves_premium());
         assert_eq!(q.level("concurrentRequests", Some(false)), None);
     }
@@ -543,16 +676,35 @@ mod tests {
     fn an_unknown_tier_withholds_a_balance_under_the_standard_limit() {
         // 30k left is 75% of the standard hourly 40k and 7.5% of 360's
         // 400k. Until the service level is known, neither figure is shown.
-        let q = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 30_000.0 })] };
+        let q = Quota {
+            buckets: vec![(
+                "tokensPerHour".into(),
+                Bucket {
+                    consumed: 10.0,
+                    remaining: 30_000.0,
+                },
+            )],
+        };
         assert_eq!(q.level("tokensPerHour", None), None);
         assert_eq!(q.tightest(None), None);
         assert!(!q.proves_premium());
         let known = q.level("tokensPerHour", Some(true)).unwrap();
         assert_eq!(known.limit, 400_000.0);
         assert!((known.fraction_left() - 0.075).abs() < 1e-9);
-        assert_eq!(q.level("tokensPerHour", Some(false)).unwrap().limit, 40_000.0);
+        assert_eq!(
+            q.level("tokensPerHour", Some(false)).unwrap().limit,
+            40_000.0
+        );
         // A balance above the standard limit can only be 360.
-        let big = Quota { buckets: vec![("tokensPerHour".into(), Bucket { consumed: 10.0, remaining: 50_000.0 })] };
+        let big = Quota {
+            buckets: vec![(
+                "tokensPerHour".into(),
+                Bucket {
+                    consumed: 10.0,
+                    remaining: 50_000.0,
+                },
+            )],
+        };
         assert_eq!(big.level("tokensPerHour", None).unwrap().limit, 400_000.0);
     }
 
@@ -580,7 +732,10 @@ mod tests {
         let r = parse_report(r#"{"dimensionHeaders":[{"name":"hour"}],"metricHeaders":[{"name":"sessions"}],"metadata":{"emptyReason":"No data for the requested date ranges."}}"#).unwrap();
         assert!(r.rows.is_empty());
         assert_eq!(r.row_count, 0);
-        assert_eq!(r.meta.empty_reason, "No data for the requested date ranges.");
+        assert_eq!(
+            r.meta.empty_reason,
+            "No data for the requested date ranges."
+        );
     }
 
     #[test]
@@ -592,7 +747,13 @@ mod tests {
         let b = parse_batch(text).unwrap();
         assert_eq!(b.len(), 2);
         assert_eq!(b[0].dims, vec!["hour"]);
-        assert_eq!(b[1].quota.as_ref().and_then(|q| q.get("tokensPerHour")).map(|b| b.consumed), Some(5.0));
+        assert_eq!(
+            b[1].quota
+                .as_ref()
+                .and_then(|q| q.get("tokensPerHour"))
+                .map(|b| b.consumed),
+            Some(5.0)
+        );
         assert!(parse_batch("[]").is_err());
         assert!(parse_batch("<html>").unwrap_err().contains("not JSON"));
     }
@@ -607,7 +768,14 @@ mod tests {
         ],"nextPageToken":"page-2"}"#;
         let (props, next) = parse_account_summaries(text).unwrap();
         assert_eq!(props.len(), 2);
-        assert_eq!(props[0], PropertySummary { id: "123".into(), name: "Example Site".into(), account: "Example Co".into() });
+        assert_eq!(
+            props[0],
+            PropertySummary {
+                id: "123".into(),
+                name: "Example Site".into(),
+                account: "Example Co".into()
+            }
+        );
         assert_eq!(props[1].id, "456");
         assert_eq!(next.as_deref(), Some("page-2"));
         let (none, last) = parse_account_summaries("{}").unwrap();
@@ -617,27 +785,55 @@ mod tests {
     #[test]
     fn a_property_and_its_key_events_read() {
         let p = parse_property(r#"{"name":"properties/123","displayName":"Example Site","timeZone":"Europe/Berlin","currencyCode":"EUR"}"#).unwrap();
-        assert_eq!(p, PropertyInfo { name: "Example Site".into(), time_zone: "Europe/Berlin".into(), currency: "EUR".into(), premium: false });
-        assert!(parse_property(r#"{"serviceLevel":"GOOGLE_ANALYTICS_360"}"#).unwrap().premium);
+        assert_eq!(
+            p,
+            PropertyInfo {
+                name: "Example Site".into(),
+                time_zone: "Europe/Berlin".into(),
+                currency: "EUR".into(),
+                premium: false
+            }
+        );
+        assert!(
+            parse_property(r#"{"serviceLevel":"GOOGLE_ANALYTICS_360"}"#)
+                .unwrap()
+                .premium
+        );
         let (names, next) = parse_key_event_list(r#"{"keyEvents":[{"name":"properties/123/keyEvents/1","eventName":"purchase","createTime":"2026-01-01T00:00:00Z"},{"eventName":"sign_up"}]}"#).unwrap();
         assert_eq!(names, vec!["purchase", "sign_up"]);
         assert!(next.is_none());
         let (none, _) = parse_key_event_list("{}").unwrap();
-        assert!(none.is_empty(), "a property with no key events lists none rather than failing");
+        assert!(
+            none.is_empty(),
+            "a property with no key events lists none rather than failing"
+        );
     }
 
     #[test]
     fn samples_round_trip_and_skip_a_torn_line() {
-        let totals = Sample { t: 1_790_000_000.0, active: Some(71.0), views: Some(540.0), events: None };
+        let totals = Sample {
+            t: 1_790_000_000.0,
+            active: Some(71.0),
+            views: Some(540.0),
+            events: None,
+        };
         let events = Sample {
             t: 1_790_000_030.0,
             active: None,
             views: None,
             events: Some(vec![("purchase".into(), 3.0), ("sign up".into(), 1.0)]),
         };
-        let none = Sample { t: 1_790_000_090.0, active: None, views: None, events: Some(vec![]) };
+        let none = Sample {
+            t: 1_790_000_090.0,
+            active: None,
+            views: None,
+            events: Some(vec![]),
+        };
         assert_eq!(format_sample(&totals), "1790000000 71 540");
-        assert_eq!(format_sample(&events), "1790000030 - - | purchase=3 sign_up=1");
+        assert_eq!(
+            format_sample(&events),
+            "1790000030 - - | purchase=3 sign_up=1"
+        );
         assert_eq!(format_sample(&none), "1790000090 - - |");
         let text = format!(
             "{}\n{}\n{}\n1789999940 60 500\ngarbage\n1790000060 7\n1790000070 - - | purchase=3 sign_u",
@@ -649,9 +845,19 @@ mod tests {
         assert_eq!(back.len(), 4, "the torn lines and the garbage are skipped");
         assert_eq!(back[0].t, 1_789_999_940.0, "sorted by time");
         assert_eq!(back[1], totals);
-        assert_eq!(back[2].events, Some(vec![("purchase".to_string(), 3.0), ("sign_up".to_string(), 1.0)]));
+        assert_eq!(
+            back[2].events,
+            Some(vec![
+                ("purchase".to_string(), 3.0),
+                ("sign_up".to_string(), 1.0)
+            ])
+        );
         assert_eq!(back[2].active, None, "an events sample read no totals");
-        assert_eq!(back[3].events, Some(vec![]), "a read that found no key events is not an unread one");
+        assert_eq!(
+            back[3].events,
+            Some(vec![]),
+            "a read that found no key events is not an unread one"
+        );
         assert!(parse_samples("").is_empty());
         assert!(parse_samples("NaN 1 2\n1 inf 2\n5 - -").is_empty());
     }
