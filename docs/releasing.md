@@ -229,6 +229,25 @@ What it cannot do is *run* the result, so that leg builds and packages but
 does not execute its tests — the same sources are tested on the native arm64
 leg in the same run.
 
+## Analytics secrets
+
+`release.yml` compiles the start counts' destinations into the binaries from
+three repository secrets (OPS-127), passed to both the test and the build
+step so they compile one binary rather than two:
+
+| Secret | What it is |
+| --- | --- |
+| `OPSCOPE_VERCEL_URL` | opscope-www's Web Analytics event route, `https://<domain>/_vercel/insights/event` |
+| `OPSCOPE_GA_MEASUREMENT_ID` | the GA4 measurement id, `G-…` |
+| `OPSCOPE_GA_API_SECRET` | a Measurement Protocol api secret for that stream |
+
+None is in the source. An unset secret leaves that destination out of the
+release, which still ships and still asks; a release with none of them
+counts nothing. They are readable in a shipped binary with `strings`, which
+is true of any value a client sends, so the GA secret is one that can be
+rotated: create a new one in GA, update the repository secret, and the next
+release carries it.
+
 ## Canary
 
 Every push to main also runs `release.yml`, and that run is not a release.

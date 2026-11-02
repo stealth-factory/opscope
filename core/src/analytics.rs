@@ -31,6 +31,42 @@ const STATE_FILE: &str = "usage.json";
 /// plain HTTP, and the api secret travels in its query string.
 const GA_COLLECT: &str = "https://www.google-analytics.com/mp/collect";
 
+/// Where events go when config.json names no destination of its own.
+///
+/// All three are compiled in by the release workflow from repository
+/// secrets, so nothing about the project's analytics is in this public tree
+/// and a build without them - from source, or from a fork - reports nowhere
+/// unless config.json names a destination.
+#[derive(Clone, Copy)]
+struct Builtins {
+    vercel_url: &'static str,
+    ga_measurement_id: &'static str,
+    ga_api_secret: &'static str,
+}
+
+const BUILTINS: Builtins = Builtins {
+    vercel_url: match option_env!("OPSCOPE_VERCEL_URL") {
+        Some(url) => url,
+        None => "",
+    },
+    ga_measurement_id: match option_env!("OPSCOPE_GA_MEASUREMENT_ID") {
+        Some(id) => id,
+        None => "",
+    },
+    ga_api_secret: match option_env!("OPSCOPE_GA_API_SECRET") {
+        Some(secret) => secret,
+        None => "",
+    },
+};
+
+/// A setting from config.json, or the built-in one when it is empty or
+/// absent. Empty means "the default", so a config.json copied from the
+/// example, where every value is empty, still counts to the project.
+fn setting_or(cfg: &Value, key: &str, builtin: &str) -> String {
+    let value = crate::cfg_str(cfg, key, "");
+    if value.is_empty() { builtin.to_string() } else { value }
+}
+
 /// What this launch should do, before any file is written.
 ///
 /// `On` sends a start and does not touch the timestamp: the choice was
@@ -93,6 +129,101 @@ struct Fact {
     name: String,
     opted: Option<&'static str>,
     decided_at: Option<u64>,
+    host: Host,
+}
+
+/// What kind of machine sent a start: coarse values many machines share,
+/// so they say which platforms to support without saying which machine.
+/// No hostname, user, path or kernel build string.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Host {
+    os: &'static str,
+    arch: &'static str,
+    /// `24.04` on Ubuntu, `15.1` on macOS; empty when it could not be read.
+    os_version: String,
+    /// The Linux distribution's id, `ubuntu` or `fedora`; empty elsewhere.
+    distro: String,
+    /// How this binary was installed: npx, npm, homebrew, apt or source.
+    channel: &'static str,
+    version: &'static str,
+}
+
+impl Host {
+    fn here() -> Self {
+        let exe = std::env::current_exe().ok();
+        let exe = exe.as_deref().and_then(|p| p.to_str()).unwrap_or("");
+        let (distro, os_version) = os_release();
+        Host {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            os_version,
+            distro,
+            channel: parse_install_channel(exe),
+            version: crate::version_number(),
+        }
+    }
+}
+
+/// The distribution and its version, from the file each platform keeps.
+fn os_release() -> (String, String) {
+    if cfg!(target_os = "macos") {
+        let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+            .unwrap_or_default();
+        return (String::new(), parse_macos_version(&plist));
+    }
+    let text = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .unwrap_or_default();
+    parse_os_release(&text)
+}
+
+/// `ID` and `VERSION_ID` from an os-release file, unquoted, lowercased id.
+pub fn parse_os_release(text: &str) -> (String, String) {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .map(|value| value.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .unwrap_or_default()
+    };
+    (field("ID").to_lowercase(), field("VERSION_ID"))
+}
+
+/// `ProductVersion` from macOS's SystemVersion.plist, as major.minor.
+pub fn parse_macos_version(plist: &str) -> String {
+    let Some(at) = plist.find("<key>ProductVersion</key>") else {
+        return String::new();
+    };
+    let rest = &plist[at..];
+    let value = rest
+        .split("<string>")
+        .nth(1)
+        .and_then(|s| s.split("</string>").next())
+        .unwrap_or("");
+    value.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
+/// How the running binary was installed, read from where it lives.
+///
+/// The npm package, the Homebrew formula and the Debian package ship the
+/// same release binaries, so this cannot be compiled in: the path is what
+/// differs. npx runs from npm's cache; a global npm install from a
+/// node_modules; Homebrew from its Cellar; apt from /usr/bin. Anything else
+/// built from source reads as `source`.
+pub fn parse_install_channel(exe: &str) -> &'static str {
+    let p = exe.replace('\\', "/");
+    if p.contains("/_npx/") {
+        "npx"
+    } else if p.contains("/node_modules/") {
+        "npm"
+    } else if p.contains("/Cellar/") || p.contains("/homebrew/") || p.contains("/linuxbrew/") {
+        "homebrew"
+    } else if p.starts_with("/usr/bin/") || p.starts_with("/usr/lib/opscope/") {
+        "apt"
+    } else if p.contains("/target/") || p.contains("/.cargo/bin/") {
+        "source"
+    } else {
+        "unknown"
+    }
 }
 
 impl Fact {
@@ -101,6 +232,7 @@ impl Fact {
             name: name.to_string(),
             opted: None,
             decided_at: None,
+            host: Host::here(),
         }
     }
 
@@ -109,6 +241,7 @@ impl Fact {
             name: name.to_string(),
             opted: Some(if on { "in" } else { "out" }),
             decided_at: Some(at),
+            host: Host::here(),
         }
     }
 }
@@ -120,6 +253,20 @@ fn properties(fact: &Fact) -> Value {
     let mut map = serde_json::Map::new();
     map.insert("name".into(), Value::String(fact.name.clone()));
     map.insert("start".into(), json!(1));
+    let host = &fact.host;
+    for (key, value) in [
+        ("os", host.os),
+        ("arch", host.arch),
+        ("os_version", host.os_version.as_str()),
+        ("distro", host.distro.as_str()),
+        ("channel", host.channel),
+        ("version", host.version),
+    ] {
+        // An empty value is left out rather than sent as "".
+        if !value.is_empty() {
+            map.insert(key.into(), Value::String(value.to_string()));
+        }
+    }
     if let Some(opted) = fact.opted {
         map.insert("opted".into(), Value::String(opted.to_string()));
     }
@@ -229,10 +376,16 @@ struct Delivery {
 /// required, because the URL can already name the project. Google Analytics
 /// needs the URL, the measurement id and the api secret together; any empty
 /// one skips it. The secret is a query parameter, never a property.
-fn deliveries(cfg: &Value, fact: &Fact, client_id: &str, now_ms: u64) -> Vec<Delivery> {
+fn deliveries(
+    cfg: &Value,
+    builtins: Builtins,
+    fact: &Fact,
+    client_id: &str,
+    now_ms: u64,
+) -> Vec<Delivery> {
     let props = properties(fact);
     let mut out = Vec::new();
-    let vercel_url = crate::cfg_str(cfg, "vercel_url", "");
+    let vercel_url = setting_or(cfg, "vercel_url", builtins.vercel_url);
     let vercel_id = crate::cfg_str(cfg, "vercel_analytics_id", "");
     if let Some(origin) = origin_of(&vercel_url) {
         if let Ok(body) = serde_json::to_string(&vercel_body(&props, &origin, now_ms, &vercel_id)) {
@@ -243,8 +396,8 @@ fn deliveries(cfg: &Value, fact: &Fact, client_id: &str, now_ms: u64) -> Vec<Del
             });
         }
     }
-    let measurement_id = crate::cfg_str(cfg, "ga_measurement_id", "");
-    let api_secret = crate::cfg_str(cfg, "ga_api_secret", "");
+    let measurement_id = setting_or(cfg, "ga_measurement_id", builtins.ga_measurement_id);
+    let api_secret = setting_or(cfg, "ga_api_secret", builtins.ga_api_secret);
     if !measurement_id.is_empty() && !api_secret.is_empty() {
         let url = append_query(
             GA_COLLECT,
@@ -439,7 +592,7 @@ pub(crate) fn on_launch(binary: &str) {
     };
     // Read again so a URL written while the splash was up is the one used.
     let cfg = crate::load_config("analytics");
-    send_all(deliveries(&cfg, &fact, &fresh_client_id(), now_millis()));
+    send_all(deliveries(&cfg, BUILTINS, &fact, &fresh_client_id(), now_millis()));
 }
 
 fn clamped_scroll(scroll: usize, len: usize, room: usize) -> usize {
@@ -507,7 +660,11 @@ enum Block {
 /// The copy, in order. `name` is this binary, so the event shown is the one
 /// this launch would send and not an example.
 fn blocks(name: &str) -> Vec<Block> {
-    let event = serde_json::to_string(&properties(&Fact::start(name))).unwrap_or_default();
+    // A space after each field's comma, so a narrow pane wraps between
+    // fields rather than through one. No value here can hold a comma.
+    let event = serde_json::to_string(&properties(&Fact::start(name)))
+        .unwrap_or_default()
+        .replace(",\"", ", \"");
     vec![
         // A blank row above and below the headline, so it reads as the
         // screen's heading rather than the first line of the paragraph.
@@ -518,11 +675,14 @@ fn blocks(name: &str) -> Vec<Block> {
             "Widget launches are tracked anonymously so the project can be supported and so we can see which widgets are used. The widgets you open are the ones that get the attention.",
         ),
         Block::Blank,
-        Block::Row("sent", "the widget or launcher name and that a start happened".into()),
+        Block::Row(
+            "sent",
+            "the widget or launcher name and that a start happened, with the platform: the OS, its version and distro, the CPU type, how opscope was installed (npx, npm, Homebrew, apt or source) and the opscope version".into(),
+        ),
         Block::Row("event", event),
         Block::Row(
             "once",
-            "this choice, opted in or opted out, as \"opted\" and \"decided_at\", the time of the choice".into(),
+            "this choice, opted in or opted out, as \"opted\" and \"decided_at\", the time of the choice, with the same platform fields as a start".into(),
         ),
         Block::Row(
             "never",
@@ -530,11 +690,11 @@ fn blocks(name: &str) -> Vec<Block> {
         ),
         Block::Row(
             "also",
-            "the opscope version (Vercel), a throwaway id for that one send (Google), and the analytics id if config.json sets one".into(),
+            "a throwaway id for that one send (Google), and the analytics id if config.json sets one".into(),
         ),
         Block::Row(
             "where",
-            "Vercel Analytics and Google Analytics, https only; one not set in config.json is skipped".into(),
+            "the Vercel Analytics and Google Analytics this build was released with, https only; config.json can point either elsewhere, and a build from source has none".into(),
         ),
         Block::Row(
             "stored",
@@ -846,6 +1006,48 @@ fn ask_loop(keyboard: &mut crate::Keyboard, name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// No built-in destination, so a test sees exactly what its config says.
+    const NONE: Builtins = Builtins {
+        vercel_url: "",
+        ga_measurement_id: "",
+        ga_api_secret: "",
+    };
+
+    #[test]
+    fn an_empty_or_absent_setting_falls_back_to_the_built_in_destination() {
+        let fact = Fact::start("latency");
+        let built = Builtins {
+            vercel_url: "https://www.example/_vercel/insights/event",
+            ga_measurement_id: "mid-built",
+            ga_api_secret: "secret-built",
+        };
+        // Absent and empty (what a copied example holds) both use the
+        // built-ins, so every install counts to the project by default.
+        for cfg in [json!({}), json!({"vercel_url": "", "ga_measurement_id": "", "ga_api_secret": ""})] {
+            let sent = deliveries(&cfg, built, &fact, "1.2", 1);
+            assert_eq!(sent.len(), 2, "{cfg}");
+            assert_eq!(sent[0].url, built.vercel_url);
+            assert!(sent[1].url.contains("measurement_id=mid-built"));
+        }
+        // A value in config.json wins.
+        let own = json!({"vercel_url": "https://mine.example/_vercel/insights/event"});
+        let sent = deliveries(&own, built, &fact, "1.2", 1);
+        assert_eq!(sent[0].url, "https://mine.example/_vercel/insights/event");
+        // A build without the Google secrets still counts to Vercel.
+        let no_ga = Builtins { ga_measurement_id: "", ga_api_secret: "", ..built };
+        assert_eq!(deliveries(&json!({}), no_ga, &fact, "1.2", 1).len(), 1);
+    }
+
+    #[test]
+    fn a_built_in_vercel_destination_is_https_when_there_is_one() {
+        // Empty in a build from source; a release build's must be usable.
+        assert!(
+            BUILTINS.vercel_url.is_empty() || origin_of(BUILTINS.vercel_url).is_some(),
+            "{}",
+            BUILTINS.vercel_url
+        );
+    }
+
     #[test]
     fn a_failed_save_names_config_json_not_the_temporary_file() {
         let reason = unsaved_reason(
@@ -857,6 +1059,64 @@ mod tests {
             "/home/someone/.config/opscope/config.json could not be written (Permission denied (os error 13))"
         );
         assert!(!reason.contains(".tmp-"));
+    }
+
+    #[test]
+    fn os_release_gives_the_distribution_and_its_version() {
+        let ubuntu = "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nID=ubuntu\nID_LIKE=debian\n";
+        assert_eq!(parse_os_release(ubuntu), ("ubuntu".into(), "24.04".into()));
+        let fedora = "ID=fedora\nVERSION_ID=41\n";
+        assert_eq!(parse_os_release(fedora), ("fedora".into(), "41".into()));
+        // ID_LIKE must not be read as ID.
+        assert_eq!(parse_os_release("ID_LIKE=debian\n").0, "");
+        assert_eq!(parse_os_release(""), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn the_macos_version_is_major_and_minor() {
+        let plist = "<dict>\n<key>ProductName</key>\n<string>macOS</string>\n<key>ProductVersion</key>\n<string>15.1.1</string>\n</dict>";
+        assert_eq!(parse_macos_version(plist), "15.1");
+        assert_eq!(parse_macos_version("<dict></dict>"), "");
+    }
+
+    #[test]
+    fn the_install_channel_comes_from_where_the_binary_lives() {
+        for (path, channel) in [
+            ("/home/u/.npm/_npx/abc/node_modules/opscope-linux-x64/bin/clocks", "npx"),
+            ("/usr/local/lib/node_modules/opscope/node_modules/opscope-darwin-arm64/bin/clocks", "npm"),
+            ("/opt/homebrew/Cellar/opscope/2.3.0/libexec/clocks", "homebrew"),
+            ("/home/linuxbrew/.linuxbrew/Cellar/opscope/2.3.0/bin/clocks", "homebrew"),
+            ("/usr/bin/clocks", "apt"),
+            ("/home/u/src/opscope/target/release/clocks", "source"),
+            ("/home/u/.cargo/bin/clocks", "source"),
+            ("/somewhere/else/clocks", "unknown"),
+        ] {
+            assert_eq!(parse_install_channel(path), channel, "{path}");
+        }
+    }
+
+    #[test]
+    fn an_event_carries_the_platform_and_never_an_empty_field() {
+        let mut fact = Fact::start("clocks");
+        fact.host = Host {
+            os: "linux",
+            arch: "x86_64",
+            os_version: "24.04".into(),
+            distro: "ubuntu".into(),
+            channel: "npx",
+            version: "2.3.0",
+        };
+        let props = properties(&fact);
+        for (key, value) in [("os", "linux"), ("arch", "x86_64"), ("os_version", "24.04"), ("distro", "ubuntu"), ("channel", "npx"), ("version", "2.3.0")] {
+            assert_eq!(props[key], value, "{key}");
+        }
+        fact.host.distro.clear();
+        assert!(properties(&fact).get("distro").is_none(), "an unknown is left out, not sent empty");
+        // Nothing that names the machine.
+        let text = props.to_string();
+        for banned in ["host", "user", "/home", "/Users"] {
+            assert!(!text.contains(banned), "{banned} in {text}");
+        }
     }
 
     #[test]
@@ -882,8 +1142,21 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["name", "start"]);
+        // An allow-list: a field nobody named here, and that the splash
+        // does not describe, fails this test before it can be sent.
+        for key in &keys {
+            assert!(ALLOWED.contains(key), "{key} is sent and not on the list");
+        }
+        for always in ["name", "start", "os", "arch", "channel", "version"] {
+            assert!(keys.contains(&always), "{always} missing from {keys:?}");
+        }
     }
+
+    /// Every field an event may carry.
+    const ALLOWED: &[&str] = &[
+        "name", "start", "opted", "decided_at",
+        "os", "arch", "os_version", "distro", "channel", "version",
+    ];
 
     #[test]
     fn the_choice_is_one_event_and_it_includes_the_time() {
@@ -895,7 +1168,14 @@ mod tests {
         let declined = properties(&Fact::choice("ports", false, 42));
         assert_eq!(declined["opted"], "out");
         assert_eq!(declined["decided_at"], 42);
-        assert_eq!(declined.as_object().unwrap().len(), 4);
+        assert!(declined.as_object().unwrap().keys().all(|k| ALLOWED.contains(&k.as_str())));
+        // The one choice event carries the same platform fields as a start,
+        // so opt-ins and opt-outs can be split by OS, version and channel.
+        for event in [&props, &declined] {
+            for key in ["os", "arch", "channel", "version"] {
+                assert!(event.get(key).is_some(), "{key} missing from the choice event {event}");
+            }
+        }
     }
 
     #[test]
@@ -936,11 +1216,11 @@ mod tests {
         let fact = Fact::start("latency");
         for url in ["http://collect.example/event", "ftp://collect.example/event"] {
             let cfg = json!({ "vercel_url": url, "vercel_analytics_id": "id-test" });
-            assert!(deliveries(&cfg, &fact, "1.2", 1).is_empty(), "{url} was sent to");
+            assert!(deliveries(&cfg, NONE, &fact, "1.2", 1).is_empty(), "{url} was sent to");
         }
         // Google's endpoint is built in, and HTTPS.
         let ga = json!({ "ga_measurement_id": "mid-test", "ga_api_secret": "s" });
-        let sent = deliveries(&ga, &fact, "1.2", 1);
+        let sent = deliveries(&ga, NONE, &fact, "1.2", 1);
         assert_eq!(sent.len(), 1);
         assert!(sent[0].url.starts_with("https://www.google-analytics.com/mp/collect?"));
     }
@@ -954,7 +1234,7 @@ mod tests {
             "ga_measurement_id": "mid-test",
             "ga_api_secret": "secret/test"
         });
-        let sent = deliveries(&both, &fact, "10.20", 99);
+        let sent = deliveries(&both, NONE, &fact, "10.20", 99);
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].url, "https://collect.example/event");
         let vercel: Value = serde_json::from_str(&sent[0].body).unwrap();
@@ -978,7 +1258,7 @@ mod tests {
         assert!(!sent[1].body.contains("secret"));
 
         let vercel_only = json!({"vercel_url": "https://collect.example/event"});
-        let one = deliveries(&vercel_only, &fact, "1.2", 1);
+        let one = deliveries(&vercel_only, NONE, &fact, "1.2", 1);
         assert_eq!(one.len(), 1);
         assert!(serde_json::from_str::<Value>(&one[0].body)
             .unwrap()
@@ -988,10 +1268,11 @@ mod tests {
         let ga_half = json!({
             "ga_measurement_id": "mid-test"
         });
-        assert!(deliveries(&ga_half, &fact, "1.2", 1).is_empty());
-        assert!(deliveries(&json!({}), &fact, "1.2", 1).is_empty());
+        assert!(deliveries(&ga_half, NONE, &fact, "1.2", 1).is_empty());
+        assert!(deliveries(&json!({}), NONE, &fact, "1.2", 1).is_empty());
         assert!(deliveries(
             &json!({"vercel_url": "collect.example/event", "vercel_analytics_id": "id-test"}),
+            NONE,
             &fact,
             "1.2",
             1
@@ -1085,12 +1366,13 @@ mod tests {
         // from the code: the row says exactly what a later start carries.
         let joined = splash_text("ports", 400);
         let shown = serde_json::to_string(&properties(&Fact::start("ports"))).unwrap();
-        assert_eq!(shown, "{\"name\":\"ports\",\"start\":1}");
-        assert!(joined.contains(&shown), "{joined}");
+        let parsed: Value = serde_json::from_str(&shown).unwrap();
+        assert_eq!((parsed["name"].as_str(), parsed["start"].as_i64()), (Some("ports"), Some(1)), "{shown}");
+        assert!(joined.contains(&shown.replace(",\"", ", \"")), "{joined}");
         // And the choice event's two extra fields are named by their keys.
         assert!(joined.contains("\"opted\"") && joined.contains("\"decided_at\""));
         let launcher = splash_text("launcher", 400);
-        assert!(launcher.contains("{\"name\":\"launcher\",\"start\":1}"));
+        assert!(launcher.contains("\"name\":\"launcher\""), "{launcher}");
     }
 
     #[test]
