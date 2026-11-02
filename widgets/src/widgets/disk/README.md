@@ -135,8 +135,9 @@ count is on the filter line (`7 idle hidden`). `hide_devices` matches a
 whole-disk name exactly, and that disk stays hidden when `v` shows idle
 disks. Its count is the next category on the same line. On Linux the
 selected disk keeps a 60-sample read-up, write-down chart in the same
-frame as netwatch. The top edge names the read peak and the current read,
-the bottom edge the write, and the zero line sits between them. Text mode
+frame as netwatch. The top edge names the read peak and the current read;
+the bottom edge names the write peak and the current write; the zero line
+sits between them. Text mode
 draws the line in Braille; a Kitty terminal draws the same line in pixels
 under the frame. Each half has its own scale, and an idle stretch stays
 blank inside the frame. On macOS the chart is one trace of combined I/O.
