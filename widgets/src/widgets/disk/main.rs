@@ -2403,6 +2403,9 @@ fn paint_disks(
         } else if view.disk_err.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " no disks".into())], width));
         }
+        // A disk hidden by name stays in the sum, so hiding every row
+        // still leaves the machine's chart.
+        push_io_chart(view, board, &indexes, width, p, rows, plots);
         return 0;
     }
     rows.push(disk_header(board.combined, &cols, width, p));
@@ -4259,6 +4262,25 @@ mod tests {
             let drawn = draw_body(&frame, 100, &p, None);
             assert_eq!(drawn.plots.len(), 2, "focus {focus}");
         }
+    }
+
+    #[test]
+    fn hiding_every_disk_row_keeps_the_total_chart() {
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
+        board.total_read = vec![Some(1000.0), Some(2000.0)];
+        board.total_write = vec![Some(100.0), Some(200.0)];
+        board.total_names = vec!["sda".into(), "sdb".into()];
+        let hidden = vec!["sda".to_string(), "sdb".to_string()];
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        frame.hide_devices = &hidden;
+        frame.focus = 1;
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(!plain_has(&drawn, "READ"));
+        assert!(plain_has(&drawn, "total of sda, sdb"));
+        assert_eq!(drawn.plots.len(), 2);
     }
 
     #[test]
