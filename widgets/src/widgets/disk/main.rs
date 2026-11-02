@@ -365,6 +365,12 @@ struct DiskBoard {
     host_devices: bool,
     combined: bool,
     missing: String,
+    /// Read and write of the disks that no other row names as a slave.
+    /// Recorded once per sample, so a disk leaving later does not rewrite it.
+    total_read: Vec<Option<f64>>,
+    total_write: Vec<Option<f64>>,
+    total_names: Vec<String>,
+    total_covered: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -873,6 +879,8 @@ struct RateMemory {
     prev: HashMap<String, parse::DiskStat>,
     at: Option<Instant>,
     series: HashMap<String, (Vec<Option<f64>>, Vec<Option<f64>>)>,
+    total_read: Vec<Option<f64>>,
+    total_write: Vec<Option<f64>>,
 }
 
 impl Default for RateMemory {
@@ -881,6 +889,8 @@ impl Default for RateMemory {
             prev: HashMap::new(),
             at: None,
             series: HashMap::new(),
+            total_read: Vec::new(),
+            total_write: Vec::new(),
         }
     }
 }
@@ -2202,6 +2212,27 @@ fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
     memory.series.retain(|name, _| live.contains(name));
     memory.prev.retain(|name, _| live.contains(name));
     memory.at = Some(now);
+    let (members, covered) = total_membership(&rows);
+    let (total_names, total_covered) = if members.is_empty() {
+        memory.total_read.clear();
+        memory.total_write.clear();
+        (Vec::new(), Vec::new())
+    } else {
+        let read_point = total_point(&rows, &members, false);
+        let write_point = if snap.combined {
+            None
+        } else {
+            total_point(&rows, &members, true)
+        };
+        push_sample(&mut memory.total_read, read_point);
+        push_sample(&mut memory.total_write, write_point);
+        let mut names: Vec<String> = members
+            .iter()
+            .map(|&index| rows[index].disk.name.clone())
+            .collect();
+        names.sort();
+        (names, covered)
+    };
     DiskBoard {
         rows,
         show_pressure: snap.show_pressure,
@@ -2211,6 +2242,63 @@ fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
         host_devices: snap.host_devices,
         combined: snap.combined,
         missing: snap.missing.clone(),
+        total_read: memory.total_read.clone(),
+        total_write: memory.total_write.clone(),
+        total_names,
+        total_covered,
+    }
+}
+
+/// Disks at the top of the stack, and the rows left out because one of
+/// those disks names them as a slave. Summing both would count the same
+/// bytes twice.
+fn total_membership(rows: &[DiskViewRow]) -> (Vec<usize>, Vec<String>) {
+    let present: std::collections::BTreeSet<&str> =
+        rows.iter().map(|row| row.disk.name.as_str()).collect();
+    let mut covered: Vec<String> = rows
+        .iter()
+        .flat_map(|row| row.disk.slaves.iter())
+        .filter(|name| present.contains(name.as_str()))
+        .cloned()
+        .collect();
+    covered.sort();
+    covered.dedup();
+    let members = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !covered.iter().any(|name| name == &row.disk.name))
+        .map(|(index, _)| index)
+        .collect();
+    (members, covered)
+}
+
+/// The latest sample, summed. One missing rate makes the whole sample a
+/// gap: a partial sum would read as the machine.
+fn total_point(rows: &[DiskViewRow], members: &[usize], write: bool) -> Option<f64> {
+    if members.is_empty() {
+        return None;
+    }
+    let mut sum = 0.0;
+    for &index in members {
+        let series = if write {
+            &rows[index].write
+        } else {
+            &rows[index].read
+        };
+        match series.last().copied().flatten() {
+            Some(value) if value.is_finite() => sum += value,
+            _ => return None,
+        }
+    }
+    Some(sum)
+}
+
+fn total_label(names: &[String], covered: &[String]) -> String {
+    let names = names.join(", ");
+    if covered.is_empty() {
+        format!("total of {names}")
+    } else {
+        format!("total of {names} · {} not added", covered.join(", "))
     }
 }
 
@@ -2303,6 +2391,7 @@ fn paint_disks(
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
         }
     }
+    push_total(board, width, p, rows, plots);
     let indexes = ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices);
     if indexes.is_empty() {
         if let Some(line) = tc::filtered_to_nothing(lives.len(), &labels) {
@@ -2334,7 +2423,16 @@ fn paint_disks(
         .find(|&index| board.rows[index].disk.name == view.disk_cursor)
         .map(|index| &board.rows[index])
     {
-        push_chart(row, 4, board.combined, width, p, rows, plots);
+        push_chart(
+            &row.read,
+            &row.write,
+            4,
+            board.combined,
+            width,
+            p,
+            rows,
+            plots,
+        );
     }
     indexes.len()
 }
@@ -2710,7 +2808,16 @@ fn paint_disk_detail(
             rows.push(tc::seg(&[(p.txt.as_str(), format!(" {wrapped}"))], width));
         }
     }
-    push_chart(row, 8, board.combined, width, p, rows, plots);
+    push_chart(
+        &row.read,
+        &row.write,
+        8,
+        board.combined,
+        width,
+        p,
+        rows,
+        plots,
+    );
 }
 
 fn paint_pressure(
@@ -2756,8 +2863,38 @@ fn paint_pressure(
     }
 }
 
+fn push_total(
+    board: &DiskBoard,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    // One disk with nothing under it is already the chart below the table.
+    if board.total_names.len() <= 1 && board.total_covered.is_empty() {
+        return;
+    }
+    push_wrapped(
+        &total_label(&board.total_names, &board.total_covered),
+        width,
+        p,
+        rows,
+    );
+    push_chart(
+        &board.total_read,
+        &board.total_write,
+        4,
+        board.combined,
+        width,
+        p,
+        rows,
+        plots,
+    );
+}
+
 fn push_chart(
-    row: &DiskViewRow,
+    read: &[Option<f64>],
+    write: &[Option<f64>],
     tall: usize,
     combined: bool,
     width: usize,
@@ -2765,7 +2902,7 @@ fn push_chart(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    if chart_caption(&row.read, &row.write, combined) == "no rate yet" {
+    if chart_caption(read, write, combined) == "no rate yet" {
         rows.push(tc::seg(&[(p.dim.as_str(), " no rate yet".into())], width));
         return;
     }
@@ -2783,19 +2920,19 @@ fn push_chart(
     } else {
         (tall - tall / 2).max(2)
     };
-    let read_peak = peak_of(&row.read, &[]).max(1.0);
-    let write_peak = peak_of(&[], &row.write).max(1.0);
+    let read_peak = peak_of(read, &[]).max(1.0);
+    let write_peak = peak_of(&[], write).max(1.0);
     let top = if combined {
         format!(
             "peak {}/s  now {} combined",
             human(read_peak.round() as u64),
-            rate_now(&row.read)
+            rate_now(read)
         )
     } else {
         format!(
             "read  peak {}/s  now {}",
             human(read_peak.round() as u64),
-            rate_now(&row.read)
+            rate_now(read)
         )
     };
     push_border(rows, &top, width, &p.accent, &p.dim, false);
@@ -2805,7 +2942,7 @@ fn push_chart(
     }
     push_trace(
         plots,
-        &row.read,
+        read,
         read_peak,
         false,
         p.accent.clone(),
@@ -2822,7 +2959,7 @@ fn push_chart(
         }
         push_trace(
             plots,
-            &row.write,
+            write,
             write_peak,
             true,
             p.down.clone(),
@@ -2838,7 +2975,7 @@ fn push_chart(
         format!(
             "write  peak {}/s  now {}",
             human(write_peak.round() as u64),
-            rate_now(&row.write)
+            rate_now(write)
         )
     };
     push_border(rows, &bottom, width, &p.down, &p.dim, true);
@@ -3711,6 +3848,10 @@ mod tests {
             host_devices: false,
             combined: false,
             missing: String::new(),
+            total_read: Vec::new(),
+            total_write: Vec::new(),
+            total_names: Vec::new(),
+            total_covered: Vec::new(),
         }
     }
 
@@ -3926,6 +4067,126 @@ mod tests {
         let zero = chart_caption(&[Some(0.0)], &[], true);
         assert!(zero.contains("now 0B/s"), "{zero}");
         assert!(!zero.contains("1B"), "{zero}");
+    }
+
+    #[test]
+    fn the_total_leaves_a_slave_out_and_a_gap_is_not_a_partial() {
+        let mut mapper = disk_row("dm-0", 0, 0, 0.0);
+        mapper.disk.slaves = vec!["sda".into()];
+        mapper.read = vec![Some(100.0)];
+        mapper.write = vec![Some(40.0)];
+        let mut sda = disk_row("sda", 0, 0, 0.0);
+        sda.read = vec![Some(100.0)];
+        sda.write = vec![Some(40.0)];
+        let mut sdb = disk_row("sdb", 0, 0, 0.0);
+        sdb.read = vec![Some(50.0)];
+        sdb.write = vec![Some(10.0)];
+        let rows = vec![mapper, sda, sdb];
+        let (members, covered) = total_membership(&rows);
+        assert_eq!(covered, vec!["sda".to_string()]);
+        let mut names: Vec<_> = members
+            .iter()
+            .map(|&index| rows[index].disk.name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["dm-0", "sdb"]);
+        assert_eq!(total_point(&rows, &members, false), Some(150.0));
+        assert_eq!(total_point(&rows, &members, true), Some(50.0));
+        let mut gapped = rows.clone();
+        gapped[0].read.push(None);
+        gapped[0].write.push(None);
+        gapped[2].read.push(Some(50.0));
+        gapped[2].write.push(Some(10.0));
+        assert_eq!(total_point(&gapped, &members, false), None);
+        assert_eq!(
+            total_label(&["dm-0".into(), "sdb".into()], &["sda".into()]),
+            "total of dm-0, sdb · sda not added"
+        );
+    }
+
+    #[test]
+    fn the_total_keeps_an_earlier_sum_when_a_disk_leaves() {
+        let mut memory = RateMemory::default();
+        let mut sda = disk_row("sda", 10, 4, 0.0).disk;
+        let mut sdb = disk_row("sdb", 10, 4, 0.0).disk;
+        let first = parse::IoSnapshot {
+            disks: vec![sda.clone(), sdb.clone()],
+            ..parse::IoSnapshot::default()
+        };
+        let board = board_from(&first, &mut memory);
+        assert_eq!(board.total_read, vec![None]);
+        assert_eq!(
+            board.total_names,
+            vec!["sda".to_string(), "sdb".to_string()]
+        );
+        memory.at = Some(Instant::now() - Duration::from_secs(1));
+        if let Some(stat) = sda.stat.as_mut() {
+            stat.sectors_read += 2;
+        }
+        if let Some(stat) = sdb.stat.as_mut() {
+            stat.sectors_read += 4;
+        }
+        let second = parse::IoSnapshot {
+            disks: vec![sda.clone(), sdb],
+            ..parse::IoSnapshot::default()
+        };
+        let board = board_from(&second, &mut memory);
+        let sda_rate = board.rows[0].read.last().copied().flatten().unwrap();
+        let sdb_rate = board.rows[1].read.last().copied().flatten().unwrap();
+        let summed = board.total_read.last().copied().flatten().unwrap();
+        assert_eq!(summed, sda_rate + sdb_rate);
+        assert!(sda_rate > 0.0 && sdb_rate > 0.0 && sdb_rate > sda_rate);
+        memory.at = Some(Instant::now() - Duration::from_secs(1));
+        if let Some(stat) = sda.stat.as_mut() {
+            stat.sectors_read += 2;
+        }
+        let third = parse::IoSnapshot {
+            disks: vec![sda],
+            ..parse::IoSnapshot::default()
+        };
+        let board = board_from(&third, &mut memory);
+        assert_eq!(board.total_read[1], Some(summed));
+        assert_eq!(
+            board.total_read[2],
+            board.rows[0].read.last().copied().flatten()
+        );
+        assert_eq!(board.total_names, vec!["sda".to_string()]);
+    }
+
+    #[test]
+    fn the_total_chart_sits_above_the_disk_table() {
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
+        board.total_read = vec![Some(1000.0), Some(2000.0)];
+        board.total_write = vec![Some(100.0), Some(200.0)];
+        board.total_names = vec!["sda".into(), "sdb".into()];
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        frame.focus = 1;
+        for width in [28usize, 80] {
+            let drawn = draw_body(&frame, width, &p, None);
+            for line in &drawn.rows {
+                assert!(
+                    tc::display_width(line) <= width,
+                    "width {width} drew {} cells",
+                    tc::display_width(line)
+                );
+            }
+            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+            let total_at = lines
+                .iter()
+                .position(|line| line.contains("total of sda, sdb"))
+                .unwrap_or_else(|| panic!("{width} missing the total: {lines:?}"));
+            let header_at = lines
+                .iter()
+                .position(|line| line.contains("READ"))
+                .unwrap_or_else(|| panic!("{width} missing the disk header"));
+            assert!(total_at < header_at, "{width}");
+        }
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert_eq!(drawn.plots.len(), 4);
+        assert!(drawn.plots.iter().all(|plot| plot.height == 2));
     }
 
     #[test]

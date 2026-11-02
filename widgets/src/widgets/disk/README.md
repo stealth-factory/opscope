@@ -128,6 +128,13 @@ draws the line in Braille; a Kitty terminal draws the same line in pixels
 under the frame. Each half has its own scale, and an idle stretch stays
 blank inside the frame. On macOS the chart is one trace of combined I/O.
 
+Above that table, when more than one disk is in the total, the same frame
+shows their sum. A disk named as another's slave is left out and the line
+says so, because adding both would count the same bytes twice. A disk
+hidden by name stays in the sum. One disk with nothing under it draws no
+second chart. A sample where any included disk has no rate is a gap, not
+a partial sum.
+
 On macOS the same section is `iostat`: read and write are one number, and
 the heading says await, busy and queue need IOKit. The write sort is that
 combined MB/s and the read sort is tps. PRESSURE is not drawn on macOS.
