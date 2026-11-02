@@ -7,18 +7,34 @@ Which filesystems can still take a write, which disks are doing I/O, and, on Lin
 Linux example:
 
 ```
-╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  sampled 2s ago · every 2s
- 4 of 12 shown · pseudo, bind, read-only hidden
+ 2 of 10 shown · pseudo, bind, read-only hidden
  FILESYSTEMS  usable = f_bavail (root reserve excluded) · sorted: mount
- MOUNT   TYPE   SIZE   USED  USABLE        %   1h Δ     7d Δ      FULL IN  INODES
- ▸ /     ext4   100G    80G     15G  ████  84%  +1.2G/h  +8.0G/d  ~1d 17h ↑     12%
-   /home xfs    200G    40G    160G  ██    20%       —        —   not filling     4%
- DISKS  whole disks only · /proc/diskstats · 512-byte sectors
- DISK     TYPE    SIZE   READ  WRITE  IOPS  AWAIT  BUSY*  QUEUE
- ▸ sda    ssd     1.0T   12M   40M    1.2K   2ms    18%      1
+MOUNT   TYPE         SIZE   USED USABLE           %     1h Δ     7d Δ       FULL IN INODES
+▸ /     ext4          100G   80G    15G █████░  84%  +1.2G/h  +8.0G/d     ~1d 17h ↑    12%
+  /home xfs           200G   40G   160G █░░░░░  20%        —        —   not filling     4%
+ FULL IN at the rate since Mon 09:12 (5d of 7d) · ↑↓ = 1h rate sooner/later
+ DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: write · QUEUE is
+ instantaneous
+DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT BUSY* QUEUE
+  sda                                    ssd        1T   1.5M   18M  1.2K   2ms   18%     1
+  sdb                                    ssd        1T   400K  1.0M  48.0   1ms    2%     0
+ * BUSY = share of time with at least one request in flight (field 10); an NVMe reaches
+ 100% with headroom
+ total of sda, sdb
+┌read  peak 3.3M/s  now 1.9M/s───────────────────────────────────────────────────────────┐
+│⣀⠤⠤⠤⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠢⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀│
+│                                                                                        │
+├0───────────────────────────────────────────────────────────────────────────────────────┤
+│                       ⣀⣀⣀⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⢄⣀⣀⡀                                 │
+│⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠒⠒⠒⠒⠊⠉⠉                               ⠈⠉⠉⠑⠒⠒⠒⠒⠤⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠒⠒⠒⠒⠊⠉⠉│
+└write  peak 36M/s  now 19M/s────────────────────────────────────────────────────────────┘
+ /proc/pressure/io · stall time, not busy time
+ some 23.1% avg10 · 18.4% avg60 · 9.7% avg300   full 7.2% · 5.1% · 2.0%
 
- ↑↓ select  [↵] detail  [s] sort by fills soonest  [w] 14d  tab section  [v] show idle disks  [p] pause
+ ↑↓ select  [↵] detail  [s] sort by fills soonest  tab section  [v] show idle disks
+ [w] 14d  [p] pause  [,] settings  [q]uit
 ```
 
 `↑↓` move the selection, including from one section into the next. `tab`

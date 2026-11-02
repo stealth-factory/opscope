@@ -101,19 +101,21 @@ struct Columns {
     bar: usize,
 }
 
+/// Which of 1h Δ, inodes, type and size a row carries, widest first.
+const COLUMN_SETS: [(bool, bool, bool, bool); 5] = [
+    (true, true, true, true),
+    (false, true, true, true),
+    (false, false, true, true),
+    (false, false, false, true),
+    (false, false, false, false),
+];
+
 fn columns_for(width: usize) -> Columns {
     // Drop order as the pane shrinks: 1h Δ, then inodes, then type, then
     // size. The window Δ and FULL IN stay; they are why the section exists.
     // The sets are that order reversed, so the first one that fits is the
     // widest the pane can hold.
-    let sets = [
-        (true, true, true, true),
-        (false, true, true, true),
-        (false, false, true, true),
-        (false, false, false, true),
-        (false, false, false, false),
-    ];
-    for &(hour, inodes, typ, size) in &sets {
+    for &(hour, inodes, typ, size) in &COLUMN_SETS {
         for bar in (BAR_MIN..=BAR_MAX).rev() {
             let need = column_need(hour, inodes, typ, size, bar);
             if need <= width {
@@ -140,16 +142,33 @@ fn columns_for(width: usize) -> Columns {
     }
 }
 
-/// Mount points beside their figures when the widest one fits whole and
-/// the figures fit on the same line; otherwise each mount point gets a
-/// line and its figures go under it, where they have the full width.
+/// Mount points beside their figures when the widest one fits whole there
+/// at the cost of no more than one column the stacked layout would keep;
+/// otherwise each mount point gets a line and its figures go under it,
+/// where they have the full width. The bar narrows first to make room.
 fn layout_for(width: usize, longest: usize) -> Columns {
-    let side = columns_for(width);
-    let fits = column_need(side.hour, side.inodes, side.typ, side.size, side.bar) <= width;
-    if fits && side.mount >= longest + 2 {
-        return side;
-    }
     let mut stacked = columns_for((width + MOUNT_MIN).saturating_sub(STACK_INDENT));
+    let mount = (longest + 2).max(MOUNT_MIN);
+    let from = COLUMN_SETS
+        .iter()
+        .position(|&set| set == (stacked.hour, stacked.inodes, stacked.typ, stacked.size))
+        .unwrap_or(COLUMN_SETS.len() - 1);
+    for &(hour, inodes, typ, size) in COLUMN_SETS.iter().skip(from).take(2) {
+        for bar in (BAR_MIN..=BAR_MAX).rev() {
+            let need = column_need(hour, inodes, typ, size, bar) - MOUNT_MIN + mount;
+            if need <= width {
+                return Columns {
+                    mount: mount + width - need,
+                    stacked: false,
+                    typ,
+                    size,
+                    inodes,
+                    hour,
+                    bar,
+                };
+            }
+        }
+    }
     stacked.mount = 0;
     stacked.stacked = true;
     stacked
