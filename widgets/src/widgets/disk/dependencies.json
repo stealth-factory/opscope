@@ -1,4 +1,10 @@
 {
   "required": {},
-  "recommended": {}
+  "recommended": {
+    "iostat": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Per-disk throughput on macOS comes from iostat; without it only filesystems are shown."
+    }
+  }
 }
