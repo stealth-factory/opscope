@@ -51,7 +51,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -869,8 +869,13 @@ pub const BANNER_MIN_PANE: usize = 10;
 /// the `!` screen, and a notice whose title does not fit whole in what the
 /// budget leaves is not shown rather than cut. The counter still counts
 /// it, so leaving it out hides nothing.
+#[cfg(test)]
 fn banner_of(r: &Registry, now: f64, w: usize, h: usize) -> Vec<String> {
-    let budget = banner_budget(h);
+    banner_within(r, now, w, banner_budget(h))
+}
+
+/// [`banner_of`] in at most `budget` rows.
+fn banner_within(r: &Registry, now: f64, w: usize, budget: usize) -> Vec<String> {
     let mut rows = Vec::new();
     // Newest first, and whole notices only: once the newest that is left
     // does not fit, an older one is not shown in its place, so what the
@@ -932,22 +937,49 @@ pub(crate) fn reserve(w: usize, h: usize, counter_room: usize) -> usize {
     }
     let now = crate::now();
     recheck_config_permissions(now);
+    // Spent here, so a widget that stops saying it - or the settings screen
+    // drawn in its place - gives the banner its rows back next frame.
+    let need = NEEDED.swap(0, Ordering::Relaxed);
     let chrome = with(|r| {
         r.reload_if_stale(now);
-        chrome_of(r, now, w, h, counter_room)
+        chrome_needing(r, now, w, h, counter_room, need)
     });
     let taken = chrome.banner.len();
     *CHROME.lock().unwrap_or_else(|e| e.into_inner()) = Some(chrome);
     taken
 }
 
+#[cfg(test)]
 fn chrome_of(r: &Registry, now: f64, w: usize, h: usize, counter_room: usize) -> Chrome {
+    chrome_needing(r, now, w, h, counter_room, 0)
+}
+
+/// [`chrome_of`] for a widget that said its content needs `need` rows: the
+/// banner takes only what is left above that, and none at all when nothing
+/// is. The counter is unchanged, so a banner that gives way hides nothing.
+fn chrome_needing(r: &Registry, now: f64, w: usize, h: usize, counter_room: usize, need: usize) -> Chrome {
     Chrome {
         w,
         h,
         counter: hint_of(r, now, counter_room).and_then(|mut hint| hint.pop()),
-        banner: banner_of(r, now, w, h),
+        banner: banner_within(r, now, w, banner_room(h, need)),
     }
+}
+
+/// The rows the banner may take on a pane `h` tall from a widget whose
+/// content needs `need` of them; `need` of zero is a widget that said
+/// nothing, whose body scrolls.
+fn banner_room(h: usize, need: usize) -> usize {
+    banner_budget(h).min(h.saturating_sub(need))
+}
+
+/// What the widget said its last frame needs, through [`crate::needs_rows`],
+/// for the next [`reserve`] to spend.
+static NEEDED: AtomicUsize = AtomicUsize::new(0);
+
+/// Say the frame being laid out needs a pane `rows` tall to show all it has.
+pub(crate) fn needs_rows(rows: usize) {
+    NEEDED.store(rows, Ordering::Relaxed);
 }
 
 /// What [`reserve`] decided for a pane `w` wide, if it was this width.
@@ -1764,6 +1796,25 @@ mod tests {
         assert_eq!(r.outstanding(101.0).len(), 1, "a changed problem shows again");
         assert_eq!(r.banner(101.0).len(), 1, "and banners again");
         assert_eq!(r.live[0].first, 0.0, "first seen does not move");
+    }
+
+    /// A widget that said how tall its content is gets a banner only in
+    /// the rows above that, and none when there are none; one that said
+    /// nothing gets the quarter every scrolling body gets.
+    #[test]
+    fn the_banner_gives_way_to_rows_a_widget_needs() {
+        assert_eq!(banner_room(22, 0), 5);
+        assert_eq!(banner_room(22, 20), 2);
+        assert_eq!(banner_room(22, 22), 0);
+        assert_eq!(banner_room(22, 30), 0, "content taller than the pane");
+        assert_eq!(banner_room(8, 0), 0, "a short pane still gives none");
+        let mut r = reg();
+        r.raise(Notice::warn("a", "config.json is readable by others; chmod 600 it"), 0.0);
+        let roomy = chrome_needing(&r, 1.0, 80, 22, 40, 0);
+        assert_eq!(roomy.banner.len(), 1);
+        let tight = chrome_needing(&r, 1.0, 80, 22, 40, 22);
+        assert!(tight.banner.is_empty(), "the banner took a row the widget needs");
+        assert!(tight.counter.is_some(), "and the counter still says it is there");
     }
 
     #[test]

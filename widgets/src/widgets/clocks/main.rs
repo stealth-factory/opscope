@@ -1426,6 +1426,13 @@ fn main() {
         // as the pane narrows, and every one it gains comes out of this.
         let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
         let room = free;
+        // This section is built from what is left rather than scrolled, so
+        // a notices banner taking those rows would take the section with
+        // it. Say what it needs - its heading and two cities - and the
+        // banner gives way; the counter still says the notices are there.
+        if !ordered.is_empty() {
+            tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + ordered.len().min(2));
+        }
         if room >= 2 && !ordered.is_empty() {
             let shown = room.saturating_sub(1).min(ordered.len());
             if scroll + shown > ordered.len() {

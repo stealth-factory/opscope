@@ -671,8 +671,10 @@ to `[!] 3 notices` and then `[!] 3` rather than overflow, and the shortest
 always goes down: on a pane too narrow for both, the version stands down
 first, the way it already does below about twenty-two columns, because the
 counter is the one of the two a reader can act on. It is in the worst
-level's colour, and a click on its cells arrives as `!`, so it is clickable
-in every widget without one of them registering it. A full-screen
+level's colour, and a click on its cells opens the notices screen as `!`
+does, so it is clickable in every widget without one of them registering
+it - and, unlike a typed `!`, from inside a text field too, because a click
+is never typing. A full-screen
 animation keeps it too: `matrix` has no title, and its top row of rain is
 cut for the counter exactly as for the version.
 
@@ -696,6 +698,10 @@ footer, which is where widgets used to put it:
   shorter pane and does what it already does at every height. The budget
   and the floor mean the banner stands down before content does: below ten
   rows it is not drawn, and the counter still says the notice is there.
+  A widget that builds a section from the rows left over rather than
+  scrolling it - `clocks`' world clock - calls `tc::needs_rows(n)` after
+  `size()` with the height its content needs, and the banner takes only
+  the rows above that. It is spent by the next `size()`, like `typing`.
 - **Nothing is truncated.** Each notice is its title alone, wrapped whole by
   `error_rows()`; one that does not fit whole in the budget is left to the
   counter rather than cut.
@@ -719,6 +725,13 @@ the widget's next frame paints over the screen when it closes. A text field
 poll hands `!` back as a character. The flag is spent by the poll that reads
 it, so a widget that closes its field without saying so cannot leave `!`
 dead for the session.
+
+Whether a `!` is text depends on the keys before it, and one read can hold
+`/a!b`: the `/` opens the filter that makes the `!` a character. So `poll`
+hands keys back only up to the next `!` or counter click and holds the rest
+for the next poll, by which time the widget has acted on the `/` and said
+`typing()`. Held keys make `wait` return at once, so the delay is one pass
+of the loop.
 
 Measured with the OPS-201 harness at 57x40 for 60 s after 6 s warm-up, the
 counter and the banner change nothing a frame sends once they are on

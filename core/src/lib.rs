@@ -796,6 +796,23 @@ pub fn size() -> (usize, usize) {
     (w, h - taken)
 }
 
+/// Say this frame needs a pane `rows` tall to show everything it has, so
+/// the notices banner never takes one of those rows.
+///
+/// Most widgets never call it: their body scrolls, so a pane a banner
+/// shortens loses nothing it cannot scroll back. A widget that sizes a
+/// section to the rows it was given, and leaves the section out when they
+/// run short, says how tall it needs to be instead, and the banner gives
+/// way - the `[!]` counter still says the notices are there. `clocks`
+/// lays its world clock out of what the clock above it left over.
+///
+/// Call it once a frame after `size()`, with the height of everything
+/// laid out that must stay on screen. Spent by the next `size()`, like
+/// `typing`, so a widget that stops saying it cannot hold the banner off.
+pub fn needs_rows(rows: usize) {
+    notices::needs_rows(rows);
+}
+
 /// The terminal's size, or a sane pair if it will not say.
 fn pane_size() -> (usize, usize) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -1220,9 +1237,9 @@ fn version_room(w: usize) -> usize {
 }
 
 /// Where the notices counter was put on the top row by the last frame:
-/// its first column and its width. A click there arrives as `!`, the key
-/// it names, so the counter is clickable in every widget without any of
-/// them registering it.
+/// its first column and its width. A click there opens the notices screen,
+/// as `!` does, so the counter is clickable in every widget without any of
+/// them registering it - and from a text field, where `!` is a character.
 static COUNTER_SPOT: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
 
 /// The space before the counter, which keeps it off the title's `╸`.
@@ -4413,6 +4430,10 @@ pub struct Keyboard {
     /// Set by `typing` and spent by the next `poll`: a text field is open,
     /// so `!` is a character for it rather than the notices screen.
     typing: bool,
+    /// Keys decoded but not yet handed back, because a `!` or a counter
+    /// click among them cannot be read until the widget has acted on the
+    /// keys before it - see `poll`.
+    held: Vec<String>,
 }
 
 impl Keyboard {
@@ -4449,6 +4470,7 @@ impl Keyboard {
             buf: Vec::new(),
             hints: Vec::new(),
             typing: false,
+            held: Vec::new(),
         }
     }
 
@@ -4508,6 +4530,7 @@ impl Keyboard {
         self.pending.clear();
         self.lone_esc = false;
         self.string_since = None;
+        self.held.clear();
         // Whatever was on screen while the child had the terminal was the
         // child's, so no placement of ours describes it. Dropped for the
         // same reason the buffered input above is.
@@ -4569,11 +4592,14 @@ impl Keyboard {
         let Some((x, y)) = click_at(&key) else {
             return key;
         };
-        // The notices counter core stamped on the top row names `!`.
+        // The notices counter core stamped on the top row. Not `!`: a typed
+        // `!` is a character while a text field is open, and a click on
+        // the counter is never typing, so it stays its own key until
+        // `poll` has opened the screen with it.
         if y == 0 {
             if let Some((col, width)) = *COUNTER_SPOT.lock().unwrap_or_else(|e| e.into_inner()) {
                 if x >= col && x < col + width {
-                    return "!".to_string();
+                    return COUNTER_CLICK.to_string();
                 }
             }
         }
@@ -4588,6 +4614,10 @@ impl Keyboard {
     /// Wait between frames, waking immediately when terminal input arrives.
     /// Does not consume input; poll() still owns decoding and protocol replies.
     pub fn wait(&self, timeout: Duration) {
+        // Keys `poll` held back are already here: the next frame is theirs.
+        if !self.held.is_empty() {
+            return;
+        }
         if self.saved.is_none() {
             std::thread::sleep(timeout);
             return;
@@ -4631,17 +4661,24 @@ impl Keyboard {
     ///
     /// `!` is answered here, for every widget: it opens the notices screen
     /// and comes back when the reader backs out, and the widget's next
-    /// frame paints over it. Keys that arrived before it in the same read
-    /// are handed back as usual; those after it went to the screen's
-    /// moment and are dropped. Not while a text field is open - see
-    /// `typing`.
+    /// frame paints over it. Not while a text field is open - see
+    /// `typing` - and a click on the `[!]` counter opens it even then.
+    ///
+    /// Whether a `!` is text depends on every key before it, and a paste or
+    /// a fast typist puts `/a!b` in one read: the `/` opens the filter that
+    /// makes the `!` a character. So a read is handed back only up to the
+    /// next `!` or counter click, and the rest is held for the next poll,
+    /// by which time the widget has acted on what came before and said
+    /// `typing()` again if a field is now open. Keys after the one that
+    /// opens the screen are the screen's, in order.
     ///
     /// Never returns once the terminal has gone away: see `leave_after_hangup`.
     pub fn poll(&mut self) -> Vec<String> {
         let typing = std::mem::take(&mut self.typing);
-        let mut keys = self.poll_keys();
-        if let Some(at) = bang_at(&keys, typing, notices::answers_bang()) {
-            keys.truncate(at);
+        let fresh = self.poll_keys();
+        self.held.extend(fresh);
+        let (keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
+        if opens {
             notices::run(self);
         }
         keys
@@ -4683,14 +4720,35 @@ impl Keyboard {
     }
 }
 
-/// Where in `keys` the notices screen opens: the first `!`, unless a text
-/// field has the keyboard or the channel cannot answer it - not started, or
-/// its screen already up, where `!` is the key that closes it.
-fn bang_at(keys: &[String], typing: bool, answers: bool) -> Option<usize> {
-    if typing || !answers {
-        return None;
+/// What a click on the notices counter arrives as inside `Keyboard`, until
+/// `poll` has opened the screen with it. Not a key any widget answers, and
+/// not `click:x,y`, so a widget handed one does nothing with it.
+const COUNTER_CLICK: &str = "click:notices";
+
+/// One poll's share of the keys waiting in `held`, and whether it opens
+/// the notices screen.
+///
+/// A key at the front that opens the screen is taken alone: a `!` while no
+/// text field has the keyboard, or a click on the counter whatever does.
+/// Neither opens anything when the channel cannot answer - not started, or
+/// its screen already up, where `!` is the key that closes it. Otherwise
+/// everything up to the next `!` or counter click is handed back, and what
+/// is left waits until the widget has acted on it.
+fn next_turn(held: &mut Vec<String>, typing: bool, answers: bool) -> (Vec<String>, bool) {
+    let decides = |k: &String| k == "!" || k == COUNTER_CLICK;
+    if let Some(first) = held.first() {
+        if answers && (first == COUNTER_CLICK || (first == "!" && !typing)) {
+            held.remove(0);
+            return (Vec::new(), true);
+        }
     }
-    keys.iter().position(|k| k == "!")
+    let cut = held
+        .iter()
+        .skip(1)
+        .position(decides)
+        .map(|at| at + 1)
+        .unwrap_or(held.len());
+    (held.drain(..cut).collect(), false)
 }
 
 impl Keyboard {
@@ -5764,7 +5822,7 @@ pub(crate) fn binary_name() -> String {
 
 #[cfg(test)]
 mod bang_tests {
-    use super::bang_at;
+    use super::{next_turn, COUNTER_CLICK};
 
     fn keys(k: &[&str]) -> Vec<String> {
         k.iter().map(|s| s.to_string()).collect()
@@ -5772,15 +5830,49 @@ mod bang_tests {
 
     #[test]
     fn bang_opens_the_screen_unless_a_text_field_has_the_keyboard() {
-        let typed = keys(&["a", "!", "b"]);
-        assert_eq!(bang_at(&typed, false, true), Some(1), "keys before it are handed back");
+        let mut held = keys(&["a", "!", "b"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["a"]), false), "keys before it are handed back");
+        assert_eq!(next_turn(&mut held, false, true), (keys(&[]), true), "then it opens the screen");
+        assert_eq!(held, keys(&["b"]), "and what follows is the screen's");
         // A filter box, a `/` search or a line editor said `typing()`: the
         // `!` is a character in it, handed back where it was typed.
-        assert_eq!(bang_at(&typed, true, true), None);
+        let mut held = keys(&["!", "b"]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "b"]), false));
         // On the notices screen itself `!` closes it, so it is not reopened;
         // and before core has started the channel there is nothing to open.
-        assert_eq!(bang_at(&typed, false, false), None);
-        assert_eq!(bang_at(&keys(&["q", "j"]), false, true), None);
+        let mut held = keys(&["!", "b"]);
+        assert_eq!(next_turn(&mut held, false, false), (keys(&["!", "b"]), false));
+        let mut held = keys(&["q", "j"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["q", "j"]), false));
+    }
+
+    /// `/a!b` in one read, with the filter closed when it arrived. The `/`
+    /// is handed back alone with what follows it up to the `!`, so the
+    /// widget opens its filter and says `typing()` before the `!` is read.
+    #[test]
+    fn a_bang_waits_for_the_keys_before_it() {
+        let mut held = keys(&["/", "a", "!", "b"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["/", "a"]), false));
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "b"]), false));
+        assert!(held.is_empty());
+        // And a field closed in the same read gives the next `!` back to core.
+        let mut held = keys(&["!", "x", "esc", "!"]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "x", "esc"]), false));
+        assert_eq!(next_turn(&mut held, false, true), (keys(&[]), true));
+    }
+
+    #[test]
+    fn a_counter_click_opens_the_screen_even_from_a_text_field() {
+        let mut held = keys(&[COUNTER_CLICK]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&[]), true));
+        // Keys typed before it still reach the field first.
+        let mut held = keys(&["a", COUNTER_CLICK]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["a"]), false));
+        assert_eq!(next_turn(&mut held, true, true), (keys(&[]), true));
+        // Never a `!` in the field when the screen cannot open.
+        let mut held = keys(&[COUNTER_CLICK]);
+        let (out, opens) = next_turn(&mut held, true, false);
+        assert!(!opens && !out.iter().any(|k| k == "!"));
     }
 }
 

@@ -92,7 +92,7 @@ registry and keeps them for `title` and `draw`:
   before it does, the way the version already stands down on a narrow pane,
   because the counter is the one the reader can act on. `title` is built
   short by the same width, so the rule keeps its `╸`. A click on its cells
-  arrives as `!`.
+  opens the screen, from a text field too.
 - the **banner**: up to two notices, newest first, for sixty seconds each -
   each one's title alone, wrapped by `error_rows()`, the detail left to the
   `!` screen. At most a quarter of the pane, and nothing below ten rows; a
@@ -101,10 +101,15 @@ registry and keeps them for `title` and `draw`:
   rows, the widget lays out in what it was handed, and `draw` puts the
   banner on the rows below - only when the widget drew at the height
   `size()` returned, so it is never laid over rows a widget thinks it owns.
+  A widget whose section is built from leftover rows rather than scrolled
+  says how tall its content is with `tc::needs_rows(n)`, and the banner
+  takes only the rows above that.
 
 `Keyboard::poll` answers `!` with `run(keyboard)`, the screen, unless the
 widget called `typing()` before that poll because a text field has the
-keyboard. While the screen is up nothing is reserved or stamped, since it is
+keyboard. It decides key by key: a read is handed back only up to the next
+`!` or counter click and the rest held for the next poll, so a `/` in the
+same read has opened the filter before the `!` after it is read. While the screen is up nothing is reserved or stamped, since it is
 the list those would repeat, and `!` there is the key that closes it.
 
 Core raises its own: `config-world-readable` (Core scope, at start and from

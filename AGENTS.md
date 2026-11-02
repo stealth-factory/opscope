@@ -184,7 +184,11 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   many rows shorter, so it lays out as on any shorter pane and nothing it
   registered with `footer_at` moves. A widget with a text field (a filter
   box, a `/` search, a line editor) calls `keyboard.typing()` before `poll`
-  on every pass the field is open, so `!` is a character there. A dead poller keeps its body
+  on every pass the field is open, so `!` is a character there; `poll`
+  reads each `!` only after the keys before it have been handed back, and
+  a click on the counter opens the screen even from a field. A widget that
+  builds a section from leftover rows rather than scrolling it says how
+  tall its content is with `tc::needs_rows(n)`, and the banner gives way. A dead poller keeps its body
   row and raises no notice. On that screen a notice is dismissed for this
   session, for 7 days or for 30; the two for days go to one `notices.json`
   under `tc::state_dir()` that every widget reads again each minute, so a

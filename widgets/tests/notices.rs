@@ -50,6 +50,10 @@ struct Pane {
 
 impl Pane {
     fn start(bin: &str, tag: &str) -> Pane {
+        Pane::start_sized(bin, tag, ROWS)
+    }
+
+    fn start_sized(bin: &str, tag: &str, rows: u16) -> Pane {
         use std::os::unix::fs::PermissionsExt;
         let home = std::env::temp_dir().join(format!("opscope-notices-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -59,7 +63,7 @@ impl Pane {
         let file = config.join("config.json");
         std::fs::write(&file, "{}\n").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let (master, slave) = support::pty(COLS, ROWS);
+        let (master, slave) = support::pty(COLS, rows);
         let io = |fd: i32| unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
         let child = Command::new(bin)
             .current_dir(&home)
@@ -185,4 +189,50 @@ fn bang_typed_into_a_filter_is_text() {
     pane.type_keys("!");
     let opened = pane.read_until("VERCEL-DEPLOYMENTS NOTICES", Duration::from_secs(3));
     assert!(opened.contains("VERCEL-DEPLOYMENTS NOTICES"), "`!` after the filter closed did nothing");
+}
+
+/// `/a!b` in one write, as a paste or a fast typist sends it. The `!`
+/// follows the `/` that opens the filter, so it is text even though the
+/// filter was closed when the read began.
+#[test]
+fn bang_in_the_same_read_as_the_filter_opener_is_text() {
+    let pane = Pane::start(env!("CARGO_BIN_EXE_vercel-deployments"), "batched");
+    pane.read_until(BANNER, Duration::from_secs(5));
+    pane.type_keys("/a!b");
+    let typed = pane.read_until("/a!b", Duration::from_secs(3));
+    let typed = typed + &pane.read(Duration::from_millis(300));
+    assert!(typed.contains("/a!b"), "the filter did not take `a!b` from one read");
+    assert!(!typed.contains("NOTICES"), "a `!` after the filter opener opened the notices screen");
+}
+
+/// A click on the counter is never typing: it opens the screen from an
+/// open filter and leaves the filter's text as it was.
+#[test]
+fn a_counter_click_opens_the_screen_from_a_filter() {
+    let pane = Pane::start(env!("CARGO_BIN_EXE_vercel-deployments"), "click-filter");
+    pane.read_until(BANNER, Duration::from_secs(5));
+    pane.type_keys("/");
+    pane.read(Duration::from_millis(300));
+    pane.type_keys("a");
+    pane.read_until("/a", Duration::from_secs(3));
+    let col = counter_column();
+    pane.type_keys(&format!("\x1b[<0;{col};1M\x1b[<0;{col};1m"));
+    let opened = pane.read_until("VERCEL-DEPLOYMENTS NOTICES", Duration::from_secs(3));
+    assert!(opened.contains("VERCEL-DEPLOYMENTS NOTICES"), "a click on the counter did not open the screen");
+    assert!(!opened.contains("/a!"), "the click went into the filter as `!`");
+    pane.type_keys("\x1b");
+    let back = pane.read(Duration::from_millis(500));
+    assert!(!back.contains("/a!"), "the filter came back with a `!` in it");
+}
+
+/// clocks builds its world clock from the rows the clock above leaves, so
+/// a banner taking them would take the section. With a notice outstanding
+/// on an 80 x 22 pane, the banner gives way and the world clock is drawn.
+#[test]
+fn the_world_clock_survives_a_pending_banner() {
+    let pane = Pane::start_sized(env!("CARGO_BIN_EXE_clocks"), "clocks", 22);
+    let seen = pane.read_until("WORLD CLOCK", Duration::from_secs(4));
+    let seen = seen + &pane.read(Duration::from_millis(300));
+    assert!(seen.contains(COUNTER), "no notice outstanding, so this tests nothing");
+    assert!(seen.contains("WORLD CLOCK"), "the banner took the world clock's rows");
 }

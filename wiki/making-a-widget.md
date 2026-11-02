@@ -433,6 +433,13 @@ if typing {
 let mut keys = keyboard.poll();
 ```
 
+`poll` reads a `!` only once you have acted on every key before it, so
+`/a!b` arriving in one read still lands `a!b` in the filter.
+
+If a section is built from the rows left over rather than scrolled, say how
+tall the frame's content is with `tc::needs_rows(n)` after `size()`, and the
+banner gives way rather than take those rows. A scrolling body needs nothing.
+
 Core raises two kinds for you: `config.json` readable by others, at start
 and from `load_config()`, and each missing *recommended* tool, from
 `dependencies_available()`. `a_widget_never_wires_notices_itself` fails a

@@ -1006,7 +1006,7 @@ fn a_widget_never_wires_notices_itself() {
         (lib, "notices::run(self)", "Keyboard::poll opens the screen on `!`"),
         (lib, "notices::reserve(", "size() reserves the banner's rows"),
         (lib, "notices::chrome(", "draw puts the counter and the banner on"),
-        (lib, "COUNTER_SPOT", "a click on the counter arrives as `!`"),
+        (lib, "COUNTER_SPOT", "a click on the counter opens the screen"),
         (notices, "STARTED.store(true", "start marks the channel running"),
     ] {
         if !calls(src, token) {
