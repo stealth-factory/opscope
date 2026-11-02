@@ -254,7 +254,7 @@ fn table_row(
     } else {
         name_w
     };
-    let pieces = tc::wrap_words(name, name_w.max(1));
+    let pieces = wrap_name(name, name_w.max(1));
     let mut out = Vec::new();
     let fill = |line: &mut Line| {
         if here {
@@ -286,6 +286,52 @@ fn table_row(
         }
         fill(&mut line);
         out.push(line);
+    }
+    out
+}
+
+/// A name broken into lines no wider than `w`, at a space or just after a
+/// path or query separator that falls inside the line, so
+/// `/blog/launch?utm_source=x` breaks after `?` rather than mid-word. A
+/// stretch with no break point in `w` is cut where it reaches the edge.
+fn wrap_name(name: &str, w: usize) -> Vec<String> {
+    let w = w.max(1);
+    let mut segs: Vec<String> = Vec::new();
+    let mut seg = String::new();
+    for ch in name.chars() {
+        seg.push(ch);
+        if matches!(ch, ' ' | '/' | '-' | '_' | '?' | '&' | '=' | '.' | ',' | '#') {
+            segs.push(std::mem::take(&mut seg));
+        }
+    }
+    if !seg.is_empty() {
+        segs.push(seg);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for seg in segs {
+        let joined = format!("{}{}", line, seg.trim_end());
+        if tc::display_width(&joined) <= w {
+            line.push_str(&seg);
+            continue;
+        }
+        if !line.trim().is_empty() {
+            out.push(line.trim_end().to_string());
+        }
+        line = String::new();
+        for ch in seg.chars() {
+            let mut next = line.clone();
+            next.push(ch);
+            if tc::display_width(next.trim_end()) > w {
+                out.push(line.trim_end().to_string());
+                line = ch.to_string();
+            } else {
+                line = next;
+            }
+        }
+    }
+    if !line.trim().is_empty() || out.is_empty() {
+        out.push(line.trim_end().to_string());
     }
     out
 }
@@ -731,7 +777,7 @@ fn column(title: &str, rows: &[(String, f64)], width: usize, p: &Palette) -> Vec
         } else {
             name.as_str()
         };
-        for (i, piece) in tc::wrap_words(name, name_w).iter().enumerate() {
+        for (i, piece) in wrap_name(name, name_w).iter().enumerate() {
             let mut line = vec![part(&p.txt, left(piece, name_w))];
             if i == 0 {
                 line.push(part(&p.txt, right(&model::thousands(*n), num_w + 1)));
@@ -774,9 +820,29 @@ fn breakdowns(f: &mut Frame, b: &crate::poll::Breakdown, budget: usize, p: &Pale
             f.lines.push(line);
         }
     } else {
-        for (t, r) in &lists {
-            for mut line in column(t, r, budget.saturating_sub(1), p) {
+        // Page titles are long and keep the whole width. Devices and
+        // countries are short, so they share a row once each column holds
+        // a country name beside its count.
+        let full = budget.saturating_sub(1);
+        let half = full.saturating_sub(2) / 2;
+        let paired = half >= 18;
+        let stacked = if paired { &lists[..1] } else { &lists[..] };
+        for (t, r) in stacked {
+            for mut line in column(t, r, full, p) {
                 line.insert(0, part("", " "));
+                f.lines.push(line);
+            }
+        }
+        if paired {
+            let cols: Vec<Vec<Line>> = lists[1..].iter().map(|(t, r)| column(t, r, half, p)).collect();
+            let n = cols.iter().map(Vec::len).max().unwrap_or(0);
+            for i in 0..n {
+                let first = cols[0].get(i).cloned().unwrap_or_default();
+                let w = width_of(&first);
+                let mut line: Line = vec![part("", " ")];
+                line.extend(first);
+                line.push(part("", " ".repeat(half.saturating_sub(w) + 2)));
+                line.extend(cols[1].get(i).cloned().unwrap_or_default());
                 f.lines.push(line);
             }
         }
@@ -1133,7 +1199,7 @@ fn mover_rows(
     limit: usize,
     counts: &mut (usize, usize),
 ) {
-    let prior = budget >= 70;
+    let prior = mover_prior(budget, spark);
     let (cw, pw, dw, sw) = (9usize, 9usize, 9usize, 16usize);
     let mut fixed = cw + dw;
     if prior {
@@ -1207,8 +1273,19 @@ fn mover_rows(
     }
 }
 
+/// The narrowest a mover's name column is let go to make room for PRIOR.
+const MOVER_NAME_MIN: usize = 24;
+
+/// Whether the movers show PRIOR: whenever the name column keeps
+/// `MOVER_NAME_MIN` beside it, rather than from a fixed pane width that
+/// ignores what the other columns take.
+fn mover_prior(budget: usize, spark: bool) -> bool {
+    let fixed = 9 + 9 + if spark { 16 } else { 0 };
+    budget >= 1 + MOVER_NAME_MIN + fixed + 9
+}
+
 fn mover_head(p: &Palette, budget: usize, first: &str, window: usize, spark: bool) -> Vec<Line> {
-    let prior = budget >= 70;
+    let prior = mover_prior(budget, spark);
     let (cw, pw, dw) = (9usize, 9usize, 9usize);
     let mut fixed = cw + dw;
     if prior {
@@ -2738,7 +2815,9 @@ mod tests {
         let narrow = text(&body(&s, &view(), 60).lines);
         let mid = text(&body(&s, &view(), 100).lines);
         let wide = text(&body(&s, &view(), 140).lines);
-        assert!(!narrow.contains("PRIOR"), "movers drop PRIOR under 70");
+        let tight = text(&body(&s, &view(), 36).lines);
+        assert!(!tight.contains("PRIOR"), "movers drop PRIOR before the name column");
+        assert!(narrow.contains("PRIOR"), "PRIOR stays while the name keeps its room");
         assert!(mid.contains("PRIOR"));
         assert!(!mid.contains("LAST 14 DAYS"));
         assert!(
@@ -2752,6 +2831,26 @@ mod tests {
         assert!(!narrow
             .lines()
             .any(|l| l.contains("PAGE (title)") && l.contains("DEVICE")));
+        // Between the two, pages keep the width and the short lists pair up.
+        assert!(narrow.lines().any(|l| l.contains("DEVICE") && l.contains("COUNTRY")));
+        assert!(!tight.lines().any(|l| l.contains("DEVICE") && l.contains("COUNTRY")));
+    }
+
+    #[test]
+    fn a_long_path_breaks_at_its_separators() {
+        assert_eq!(
+            wrap_name("/blog/launch?utm_source=a-very-long-query", 16),
+            vec!["/blog/launch?", "utm_source=a-", "very-long-query"]
+        );
+        assert_eq!(wrap_name("Pricing page", 40), vec!["Pricing page"]);
+        assert_eq!(wrap_name("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        for name in ["/docs/a-very-long-section-name/with-a-deeply-nested-page", "x y  z", ""] {
+            for w in [1usize, 5, 9, 30] {
+                for piece in wrap_name(name, w) {
+                    assert!(tc::display_width(&piece) <= w, "{name:?} at {w}: {piece:?}");
+                }
+            }
+        }
     }
 
     #[test]

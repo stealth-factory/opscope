@@ -201,9 +201,14 @@ the movers heading, and a filter as `n of m shown · /text`.
 
 ## Width
 
-Under 70 columns the realtime breakdowns stack into one column and the
-movers drop PRIOR; above 120 the movers gain a 14-day sparkline. Names that do
-not fit their column wrap onto the next line. Nothing is cut.
+From about 70 columns the realtime pages, devices and countries sit side by
+side. Narrower, pages take the whole width and devices and countries share a
+row, down to about 40 columns, where all three stack. The movers keep PRIOR
+for as long as the name column stays 24 wide beside it, and above 120 they
+gain a 14-day sparkline. A table too narrow for a name beside its figures puts
+the figures on the line under it. Names that do not fit their column wrap onto
+the next line, at a space or after a `/`, `-`, `_`, `?`, `&`, `=` or `.` where
+one falls in the line, so a path breaks between its parts. Nothing is cut.
 
 ## Quota
 
