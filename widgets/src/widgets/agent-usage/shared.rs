@@ -629,6 +629,15 @@ impl<P: Lines> Logs<P> {
         !self.queue.is_empty()
     }
 
+    /// A log left part-read, so `catching_up` stays true until the
+    /// directory is dropped. The queue is otherwise filled only by `pass`.
+    #[cfg(test)]
+    pub fn unfinished(path: &str) -> Self {
+        let mut logs = Self::default();
+        logs.queue.push(path.to_string());
+        logs
+    }
+
     /// Paths in the order the last listing gave them, newest first.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.listed.iter().map(|l| l.path.as_str())

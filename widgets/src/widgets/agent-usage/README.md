@@ -1978,7 +1978,7 @@ refresh makes a tab a row longer.
 | `↑` `↓` | scroll the tab |
 | `pgup` `pgdn` | scroll a page |
 | `home` `end` | jump to the top or bottom |
-| `r` | re-read the files now, and ask each agent's endpoint again for any quota over 30s old (one that refused keeps its backoff) |
+| `r` | re-read the files now, and ask each agent's endpoint again for any quota over 30s old (one that refused keeps its backoff). Also rereads which agents are enabled when the saved settings changed; a failed reread keeps the previous agents and says why |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `,` | open settings |
 | `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
