@@ -1564,10 +1564,15 @@ fn main() {
     }
 }
 
-/// The world-clock block: a pinned heading, one line per miss, then the
-/// cities that fit. A miss is a coordinate that could not be used or a
+/// The world-clock block: a pinned heading, then a window onto every miss
+/// and every city. A miss is a coordinate that could not be used or a
 /// fetch that failed. It is not a temperature, and it does not replace
 /// the city's clock.
+///
+/// The window scrolls. A note that wraps past the rows under the heading
+/// stays in the body, and so does every note after it. Dropping one so a
+/// clock can stay on screen hides the reason the glyph is missing, and
+/// the city offset never reaches a row that was not built.
 fn world_clock_rows<Z: TimeZone>(
     ordered: &[&City],
     slots: &[weather::CityWeather],
@@ -1588,34 +1593,6 @@ fn world_clock_rows<Z: TimeZone>(
     };
     // The glyph and the space that separates it from the name.
     let weather_cells = if weather_col { glyph_w + 1 } else { 0 };
-    let blocks = city_weather_note_blocks(ordered, slots, width, p);
-    let mut notes = Vec::new();
-    // Header, then at least one city, then as many miss lines as fit.
-    let note_budget = room.saturating_sub(2);
-    for block in &blocks {
-        if notes.len() + block.len() > note_budget {
-            break;
-        }
-        notes.extend(block.iter().cloned());
-    }
-    let shown = room.saturating_sub(1 + notes.len()).min(ordered.len());
-    if shown == 0 {
-        return Vec::new();
-    }
-    if *scroll + shown > ordered.len() {
-        *scroll = ordered.len().saturating_sub(shown);
-    }
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-            (
-                p.dim.as_str(),
-                format!(" {}-{} of {}  ↑↓", *scroll + 1, *scroll + shown, ordered.len()),
-            ),
-        ],
-        width.saturating_sub(1),
-    )];
-    rows.extend(notes);
     // The name grows with the pane rather than being cut at 16. The
     // day/night glyph, the optional condition glyph, the time, the day
     // with a UTC+5:30 offset and a day shift are the fixed cells, and one
@@ -1629,9 +1606,16 @@ fn world_clock_rows<Z: TimeZone>(
         width.saturating_sub(1).saturating_sub(3 + weather_cells + 5 + 16 + 7),
         &[(16, longest)],
     )[0];
-    for city in ordered.iter().skip(*scroll).take(shown) {
+    // Misses first, then the clocks. Same order a tall pane already used,
+    // so a short one reveals the rest of it instead of a different list.
+    let mut body = city_weather_note_blocks(ordered, slots, width, p)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let note_rows = body.len();
+    for city in ordered {
         let there = now.with_timezone(&city.zone);
-        rows.push(world_clock_line(
+        body.push(world_clock_line(
             city,
             &there,
             now.date_naive(),
@@ -1643,7 +1627,46 @@ fn world_clock_rows<Z: TimeZone>(
             p,
         ));
     }
+    let window = (room - 1).min(body.len());
+    if window == 0 {
+        return Vec::new();
+    }
+    // `end` parks the offset past the last row. Clamp here, where the
+    // body height is known, including a note the city count does not cover.
+    if *scroll + window > body.len() {
+        *scroll = body.len() - window;
+    }
+    let mut rows = vec![tc::seg(
+        &[
+            (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
+            (p.dim.as_str(), city_span(*scroll, window, note_rows, ordered.len())),
+        ],
+        width.saturating_sub(1),
+    )];
+    rows.extend(body.into_iter().skip(*scroll).take(window));
     rows
+}
+
+/// Which clocks this window is showing. The number is cities, not note
+/// lines: a miss sitting above them must not make the slice look longer
+/// than the list. A window that has not reached a clock yet says so,
+/// rather than claiming a range that is not on screen.
+fn city_span(scroll: usize, window: usize, note_rows: usize, cities: usize) -> String {
+    let view_end = scroll + window;
+    let first = scroll.max(note_rows).saturating_sub(note_rows);
+    let last = view_end
+        .min(note_rows + cities)
+        .saturating_sub(note_rows);
+    if first < last {
+        format!(" {}-{} of {}  ↑↓", first + 1, last, cities)
+    } else {
+        // No middle dot. A `·` beside an arrow is a footer to the hint
+        // check, and a one-character word in one would be a key.
+        format!(
+            " {} below  ↑↓",
+            if cities == 1 { "clock" } else { "clocks" }
+        )
+    }
 }
 
 fn world_clock_line(
@@ -2555,6 +2578,85 @@ mod tests {
         for row in &narrow {
             assert!(tc::display_width(row) <= 23, "{row}");
         }
+    }
+
+    #[test]
+    fn a_short_pane_scrolls_to_a_weather_miss_and_a_city_miss() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        // Long enough to wrap under an 80-column pane. A one-line miss
+        // fits in the old budget and would not catch the drop.
+        let why = "weather unavailable: offline and the last reading is not a stand-in for this city today";
+        let tokyo = sample_city("Tokyo", "Asia/Tokyo", Some((35.68, 139.69)), None);
+        let london = sample_city(
+            "London",
+            "Europe/London",
+            None,
+            Some("weather: set longitude as well as latitude"),
+        );
+        let failed = vec![weather::CityWeather {
+            name: "Tokyo".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Failed(why.into()),
+        }];
+        let blocks = city_weather_note_blocks(&[&tokyo, &london], &failed, 80, &p);
+        let note_lines: usize = blocks.iter().map(|block| block.len()).sum();
+        assert!(
+            blocks[0].len() >= 2 && note_lines > 1,
+            "the fixture has to wrap past the old one-line budget: {blocks:?}"
+        );
+
+        // Heading plus two rows. The wrapped weather miss used to be
+        // dropped whole, and the city miss after it with it.
+        let mut scroll = 0usize;
+        let mut pages = Vec::new();
+        for _ in 0..32 {
+            let rows = world_clock_rows(
+                &[&tokyo, &london],
+                &failed,
+                &mut scroll,
+                3,
+                80,
+                &now,
+                &p,
+            );
+            assert_eq!(rows.len(), 3, "the window stays inside the room");
+            for row in &rows {
+                assert!(tc::display_width(row) <= 79, "{row}");
+            }
+            if pages.last() == Some(&rows) {
+                break;
+            }
+            pages.push(rows);
+            scroll += 1;
+        }
+        let seen = pages
+            .iter()
+            .flat_map(|page| page.iter().map(|row| strip_ansi(row)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            pages.len() > 1,
+            "a miss that does not fit is still in the body\n{seen}"
+        );
+        assert!(
+            seen.contains("offline"),
+            "the weather miss stays reachable\n{seen}"
+        );
+        assert!(
+            seen.contains("longitude"),
+            "the city miss after it stays reachable\n{seen}"
+        );
+        assert!(
+            seen.contains("21:00"),
+            "the clock stays reachable under the notes\n{seen}"
+        );
+        assert!(
+            !seen.contains('°') && !seen.contains("0.0"),
+            "a miss is not a temperature\n{seen}"
+        );
     }
 
     #[test]

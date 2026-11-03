@@ -404,14 +404,34 @@ fn same_target(slot: &CitySlot, target: &CityTarget) -> bool {
         && slot.longitude == target.longitude
 }
 
+fn same_city(a: &CityTarget, b: &CityTarget) -> bool {
+    a.name == b.name && a.zone == b.zone && a.latitude == b.latitude && a.longitude == b.longitude
+}
+
+fn target_of(slot: &CitySlot) -> CityTarget {
+    CityTarget {
+        name: slot.name.clone(),
+        zone: slot.zone.clone(),
+        latitude: slot.latitude,
+        longitude: slot.longitude,
+    }
+}
+
 /// Keep a reading only while the configured city is still that city.
 /// A new coordinate is a different request, so the glyph it used to have
 /// comes off before the next one arrives.
+///
+/// One slot per city. A repeated row used to leave a second slot that
+/// `set_city` never wrote, so it stayed due, `soonest` returned zero, and
+/// the poller asked again on every pass.
 fn apply_targets(state: &mut WeatherState, targets: &[CityTarget]) {
     let now = Instant::now();
     let mut pool = std::mem::take(&mut state.cities);
     let mut next = Vec::with_capacity(targets.len());
     for target in targets {
+        if next.iter().any(|slot| same_target(slot, target)) {
+            continue;
+        }
         if let Some(at) = pool.iter().position(|slot| same_target(slot, target)) {
             next.push(pool.swap_remove(at));
         } else {
@@ -428,11 +448,33 @@ fn apply_targets(state: &mut WeatherState, targets: &[CityTarget]) {
     state.cities = next;
 }
 
+/// Write the outcome onto every slot for this city. One fetch is one
+/// result: a twin left at `now` would make the next pass due immediately.
 fn set_city(state: &mut WeatherState, target: &CityTarget, outcome: CityOutcome, wait: Duration) {
-    if let Some(slot) = state.cities.iter_mut().find(|slot| same_target(slot, target)) {
-        slot.outcome = outcome;
-        slot.next = Instant::now() + wait;
+    let next = Instant::now() + wait;
+    for slot in &mut state.cities {
+        if same_target(slot, target) {
+            slot.outcome = outcome.clone();
+            slot.next = next;
+        }
     }
+}
+
+/// Cities a pass should request. The same city twice is one request, even
+/// when two slots are both due, so a duplicate cannot be fetched in a loop.
+fn due_targets(state: &WeatherState, now: Instant) -> Vec<CityTarget> {
+    let mut due = Vec::new();
+    for slot in &state.cities {
+        if slot.next > now {
+            continue;
+        }
+        let target = target_of(slot);
+        if due.iter().any(|have| same_city(have, &target)) {
+            continue;
+        }
+        due.push(target);
+    }
+    due
 }
 
 fn stop(state: &Mutex<WeatherState>, why: &str) {
@@ -494,17 +536,7 @@ fn step(state: &Mutex<WeatherState>, activity: &tc::Refresh, force: &AtomicBool)
         }
         let now = Instant::now();
         let place_due = st.place_next <= now;
-        let cities: Vec<CityTarget> = st
-            .cities
-            .iter()
-            .filter(|slot| slot.next <= now)
-            .map(|slot| CityTarget {
-                name: slot.name.clone(),
-                zone: slot.zone.clone(),
-                latitude: slot.latitude,
-                longitude: slot.longitude,
-            })
-            .collect();
+        let cities = due_targets(st, now);
         (place_due, cities)
     }) {
         Ok(due) => due,
@@ -1049,5 +1081,88 @@ mod tests {
         apply_targets(&mut state, &[tokyo()]);
         apply_targets(&mut state, &[]);
         assert!(state.cities.is_empty());
+    }
+
+    fn overdue(city: &CityTarget) -> CitySlot {
+        CitySlot {
+            name: city.name.clone(),
+            zone: city.zone.clone(),
+            latitude: city.latitude,
+            longitude: city.longitude,
+            outcome: CityOutcome::Waiting,
+            next: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_duplicate_city_is_one_slot_and_one_backed_off_request() {
+        let mut state = WeatherState::from_place(Ok(None));
+        let city = tokyo();
+        apply_targets(&mut state, &[city.clone(), city.clone()]);
+        assert_eq!(state.cities.len(), 1, "two identical rows are one fetch");
+        // The place is due at construction. Push it out so the assertion
+        // is about the city, which is the slot that used to stay at now.
+        state.place_next = Instant::now() + SUCCESS_EVERY;
+        set_city(
+            &mut state,
+            &city,
+            CityOutcome::Failed("weather unavailable: offline".into()),
+            RETRY_EVERY,
+        );
+        let wait = soonest(&mut state);
+        assert!(
+            wait > Duration::from_secs(30),
+            "a duplicate must wait out the failure backoff, waited {wait:?}"
+        );
+
+        // The shape apply_targets used to leave: two due slots, one result.
+        state.cities = vec![overdue(&city), overdue(&city)];
+        state.place_next = Instant::now() + SUCCESS_EVERY;
+        let due = due_targets(&state, Instant::now());
+        assert_eq!(due.len(), 1, "two due copies are still one request");
+        set_city(
+            &mut state,
+            &due[0],
+            CityOutcome::Failed("weather unavailable: offline".into()),
+            RETRY_EVERY,
+        );
+        assert!(
+            state
+                .cities
+                .iter()
+                .all(|slot| matches!(slot.outcome, CityOutcome::Failed(_))),
+            "both copies take the result"
+        );
+        let wait = soonest(&mut state);
+        assert!(
+            wait > Duration::from_secs(30),
+            "a twin left due would fetch again immediately, waited {wait:?}"
+        );
+    }
+
+    #[test]
+    fn two_different_cities_stay_two_requests() {
+        let mut state = WeatherState::from_place(Ok(None));
+        let tokyo = tokyo();
+        let london = CityTarget {
+            name: "London".into(),
+            zone: "Europe/London".into(),
+            latitude: 51.5,
+            longitude: -0.12,
+        };
+        apply_targets(&mut state, &[tokyo.clone(), london.clone()]);
+        assert_eq!(state.cities.len(), 2);
+        state.place_next = Instant::now() + SUCCESS_EVERY;
+        let due = due_targets(&state, Instant::now());
+        assert_eq!(due.len(), 2);
+        set_city(
+            &mut state,
+            &tokyo,
+            CityOutcome::Ready { code: 1 },
+            SUCCESS_EVERY,
+        );
+        let still = due_targets(&state, Instant::now());
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].name, "London");
     }
 }
