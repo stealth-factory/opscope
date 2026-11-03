@@ -50,8 +50,9 @@ mount order, fills soonest, percent used and inodes; disks through write,
 read and name. On macOS the write key is combined MB/s and the read key
 is transfers per second, and the heading names the one in force. `w`
 cycles the projection window through 6, 12 and 24 hours for this session;
-the pane starts on 24. The disk detail screen does not offer `w`, because
-its I/O chart is kept in memory and has no window.
+the pane starts on the `window_hours` setting, 24 by default (an old
+`window_days` setting is ignored). The disk detail screen does not offer
+`w`: its I/O chart is kept in memory and has no window.
 `v` shows idle disks, or hides them again.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
