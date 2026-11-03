@@ -2197,10 +2197,12 @@ struct LiveConfig {
 ///
 /// A missing file is an empty section: nothing has been saved, and the
 /// defaults are the answer a restart would use. A file that is there and
-/// cannot be read, or that does not parse, is a failure. Falling through
-/// to an empty section is how that failure draws no agents. The reason is
-/// the error itself — never the path, and never the bytes that failed,
-/// which are where a token would be.
+/// cannot be read, or that does not parse, is skipped, and the next one
+/// that loads is the section — the same fall-through a restart uses. The
+/// read fails only when nothing loads and at least one file was skipped
+/// for that reason. Treating that as an empty section is how the failure
+/// draws no agents. The reason is the error itself — never the path, and
+/// never the bytes that failed, which are where a token would be.
 fn read_saved_section(paths: &[std::path::PathBuf]) -> Result<(serde_json::Value, bool), String> {
     let mut failure: Option<String> = None;
     for path in paths {
@@ -2275,6 +2277,22 @@ fn reread_agents(live: &Mutex<LiveConfig>) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Drop Claude caches for directories the config no longer names.
+///
+/// A directory left in `transcripts` with a part-read queue is never
+/// visited again, and `catching_up` would keep the poller on the short
+/// interval for as long as the pane stays up. `claude_built` is the same
+/// set: a figure for a directory the config dropped is not a reading
+/// anyone can still see.
+fn keep_configured_claude(caches: &mut shared::Caches, cfg: &Config) {
+    let wanted: std::collections::HashSet<String> = claude::dirs_of(cfg)
+        .iter()
+        .map(|d| claude::projects_path(&d.path))
+        .collect();
+    caches.transcripts.retain(|dir, _| wanted.contains(dir));
+    caches.claude_built.retain(|dir, _| wanted.contains(dir));
 }
 
 fn request_pass(wake: &(Mutex<bool>, Condvar)) {
@@ -2732,17 +2750,6 @@ fn main() {
         // log on disk again from its first byte.
         let saved_at = store::path();
         store::restore(&mut caches, &saved_at);
-        // A directory dropped from the config is never read again, so
-        // nothing would ever prune what was saved for it. Later passes
-        // read the config afresh; this only drops what the first one
-        // already knows it will not want.
-        let start_cfg = match poller_live.lock() {
-            Ok(g) => g.cfg.clone(),
-            Err(_) => return,
-        };
-        let wanted: std::collections::HashSet<String> =
-            claude::dirs_of(&start_cfg).iter().map(|d| claude::projects_path(&d.path)).collect();
-        caches.transcripts.retain(|dir, _| wanted.contains(dir));
         let mut saver = store::Saver::new(now());
         let mut asked = false;
         loop {
@@ -2750,6 +2757,11 @@ fn main() {
                 Ok(g) => g.cfg.clone(),
                 Err(_) => return,
             };
+            // A directory dropped from the config is never read again.
+            // Pruned on every pass, not only the first: settings can
+            // remove one while its queue is still unfinished, and that
+            // queue would keep the short catch-up interval forever.
+            keep_configured_claude(&mut caches, &cfg);
             let refresh = refresh_override.unwrap_or(cfg.refresh);
             let work = poller_activity.start();
             if asked {
@@ -4956,6 +4968,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory removed from the config while its transcripts are still
+    /// part-read must leave both caches. Left in `transcripts`, the
+    /// unfinished queue keeps `catching_up` true and the poller on the
+    /// short interval for the rest of the process.
+    #[test]
+    fn a_dropped_claude_dir_stops_owing_a_slice() {
+        let kept = "/tmp/kept";
+        let dropped = "/tmp/dropped";
+        let mut caches = shared::Caches::default();
+        caches.transcripts.insert(
+            claude::projects_path(dropped),
+            shared::Logs::unfinished("session.jsonl"),
+        );
+        caches
+            .transcripts
+            .insert(claude::projects_path(kept), shared::Logs::default());
+        caches
+            .claude_built
+            .insert(claude::projects_path(dropped), claude::Built::default());
+        caches
+            .claude_built
+            .insert(claude::projects_path(kept), claude::Built::default());
+        assert!(caches.catching_up(), "the unfinished queue did not count");
+
+        let cfg = Config {
+            claude_dirs: vec![crate::claude::ClaudeDir {
+                path: kept.into(),
+                label: String::new(),
+            }],
+            ..Config::default()
+        };
+        keep_configured_claude(&mut caches, &cfg);
+
+        assert!(!caches.transcripts.contains_key(&claude::projects_path(dropped)));
+        assert!(!caches.claude_built.contains_key(&claude::projects_path(dropped)));
+        assert!(caches.transcripts.contains_key(&claude::projects_path(kept)));
+        assert!(caches.claude_built.contains_key(&claude::projects_path(kept)));
+        assert!(!caches.catching_up(), "a dropped directory kept the short interval");
     }
 
     #[test]
