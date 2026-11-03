@@ -397,7 +397,12 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
                         pane.last_exit = p.last_exit;
                         pane.fg = p.foreground.clone();
                         pane.doing = match (&p.foreground, p.child_pid) {
-                            (Some(fg), Some(child)) if fg.pid == child => Doing::Prompt,
+                            (Some(fg), Some(child))
+                                if fg.pid == child
+                                    && parse::is_shell(&p.child_name, &p.child_argv0) =>
+                            {
+                                Doing::Prompt
+                            }
                             (Some(_), _) => Doing::Running,
                             (None, _) => {
                                 why.push("no foreground process reported".to_string());
@@ -598,6 +603,22 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// Keep the end of a path, marking the cut so it does not read as a name.
+/// herdr-panes' rule: in a directory the end is the part that says where.
+fn tail_path(path: &str, n: usize) -> String {
+    if tc::display_width(path) <= n || n < 2 {
+        return path.to_string();
+    }
+    let mut start = path.len();
+    for (at, _) in path.char_indices().rev() {
+        if tc::display_width(&path[at..]) > n - 1 {
+            break;
+        }
+        start = at;
+    }
+    format!("…{}", &path[start..])
+}
+
 /// The home-relative form of a directory, which is how a person names it.
 fn homely(path: &str) -> String {
     let path = path
@@ -676,37 +697,41 @@ fn mark_of(state: &str, tick: usize) -> char {
     }
 }
 
-/// The words under a pane's first row, as one list of phrases.
+/// The facts under a pane's directory-and-title row, as phrases.
 ///
-/// Wrapped at word boundaries by the caller, never cut: a message from a
-/// blocked agent is the half of the row worth reading.
+/// Herdr's rows stop at the title; Rex knows more, and it goes here rather
+/// than into columns: what a blocked program is waiting on, how far along it
+/// is, the message it reported. Wrapped at word boundaries by the caller,
+/// never cut - a blocked agent's message is the half of the row worth
+/// reading.
 fn detail_phrases(pane: &Pane, wide: bool, at: f64) -> Vec<String> {
     let mut out = Vec::new();
     let root = pane.root();
-    if !wide {
-        if let Some(r) = root {
-            if !r.kind.is_empty() {
-                out.push(r.kind.clone());
-            }
-            if let Some(n) = r.progress {
-                out.push(format!("{}%", n));
+    if let Some(r) = root {
+        if !r.app.is_empty() && pane.agent.is_none() {
+            out.push(format!("reported by {}", r.app));
+        }
+        if !r.kind.is_empty() {
+            out.push(r.kind.clone());
+        }
+        if let Some(n) = r.progress {
+            out.push(format!("{}%", n));
+        }
+        if !r.msg.is_empty() {
+            out.push(r.msg.clone());
+        }
+        if pane.agent.is_none() {
+            if let Some(u) = r.updated_at {
+                out.push(format!("for {}", ago(at - u)));
             }
         }
-        out.push(pane.place());
-    }
-    if !pane.title.trim().is_empty() {
-        out.push(format!("title {}", pane.title.trim()));
-    }
-    match root {
-        Some(r) if !r.msg.is_empty() => out.push(format!("msg {}", r.msg)),
-        Some(_) => {}
-        None if pane.agent.is_some() => out.push("no status reported".into()),
-        None => {}
-    }
-    if let Some(r) = root {
         if pane.reporter_gone(r) {
             out.push("reporter not in foreground".into());
         }
+    } else if pane.agent.is_some() {
+        // Said on the row, because an unknown beside a known looks like the
+        // same kind of answer and is not one.
+        out.push("no status reported".into());
     }
     if let Some((when, said)) = &pane.attention {
         out.push(format!(
@@ -715,16 +740,18 @@ fn detail_phrases(pane: &Pane, wide: bool, at: f64) -> Vec<String> {
             said
         ));
     }
-    if let Some((_, source)) = &pane.agent {
-        out.push(source.words().into());
-    }
-    if pane.remote && pane.agent.is_some() && wide {
-        out.push("remote".into());
+    if !wide {
+        out.push(pane.place());
     }
     out
 }
 
 /// One frame's worth of a pane: its rows, each already coloured.
+///
+/// The same grammar as herdr-panes, so the two read alike side by side: an
+/// agent is its state row and then its directory and title; a process is one
+/// row; an idle shell is its directory. What only Rex knows - the reported
+/// kind, progress and message, and child records - follows as indented rows.
 fn render_pane(
     pane: &Pane,
     here: bool,
@@ -736,6 +763,8 @@ fn render_pane(
 ) -> Vec<String> {
     let state = pane.state();
     let loud = matches!(state.as_str(), "blocked" | "error" | "done");
+    // Blocked and done keep a tint of their own even unselected: the whole
+    // point is that they are visible without being looked for.
     let tint = if here {
         tc::bg(38, 56, 76)
     } else if matches!(state.as_str(), "blocked" | "error") {
@@ -770,27 +799,74 @@ fn render_pane(
             line.push((tint.clone(), " ".repeat(w)));
         }
     };
-    let cursor = if here { "▸" } else { " " };
-    let mut rows = Vec::new();
     let finish = |line: Vec<(String, String)>| {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         tc::seg(&refs, w.saturating_sub(1))
     };
+    // Indented prose under a row, wrapped to the pane, tinted with it.
+    let prose = |rows: &mut Vec<String>, colour: &str, text: &str| {
+        for line in tc::wrap_words(text, w.saturating_sub(5)) {
+            let mut l = vec![(c(colour), format!("   {}", line))];
+            fill(&mut l);
+            rows.push(finish(l));
+        }
+    };
+    let cursor = if here { "▸" } else { " " };
+    // `heat_on`, because these cells go through the tint closure and the
+    // plain ramp's hot end cannot be read on any of the three tints.
     let heat = match pane.cpu {
         Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
         _ => p.dim.clone(),
     };
-    let detail_body = if loud || here { &p.txt } else { &p.dim };
+    let usage = |line: &mut Vec<(String, String)>| {
+        if pane.remote {
+            line.push((c(&p.dim), format!("{:>5}", "—")));
+            if cols.wide {
+                line.push((c(&p.dim), format!(" {:>5}", "—")));
+            }
+        } else {
+            line.push((c(&heat), percent(pane.cpu)));
+            if cols.wide {
+                line.push((c(&p.dim), format!(" {}", mem(pane.rss))));
+            }
+        }
+    };
+    let body = if loud || here { &p.txt } else { &p.dim };
+    let mut rows = Vec::new();
+    let children = |rows: &mut Vec<String>| {
+        for r in pane.children() {
+            let mut words = vec![r.id.clone().unwrap_or_default(), r.state.clone()];
+            if !r.msg.is_empty() {
+                words.push(r.msg.clone());
+            }
+            if let Some(u) = r.updated_at {
+                words.push(ago(at - u));
+            }
+            for (i, text) in tc::wrap_words(&words.join("  "), w.saturating_sub(7))
+                .into_iter()
+                .enumerate()
+            {
+                let mut line = vec![(
+                    c(colour_of(&r.state, p)),
+                    format!("   {} {}", if i == 0 { "├" } else { " " }, text),
+                )];
+                fill(&mut line);
+                rows.push(finish(line));
+            }
+        }
+    };
     match pane.section() {
         Section::Agents => {
             let colour = colour_of(&state, p);
-            let root = pane.root();
             let name = pane
                 .agent
                 .as_ref()
                 .map(|(n, _)| n.clone())
                 .unwrap_or_default();
-            let for_cell = match root.and_then(|r| r.updated_at) {
+            // Reported states carry the server's timestamp and are exact;
+            // the rest are timed here, and say ≥ when they were already in
+            // place at the first read.
+            let for_cell = match pane.root().and_then(|r| r.updated_at) {
                 Some(u) => ago(at - u),
                 None => format!(
                     "{}{}",
@@ -814,52 +890,37 @@ fn render_pane(
                     ),
                 ),
                 (c(colour), format!(" {:<8}", state_cell)),
+                (c(&p.dim), format!(" {:<6}", for_cell)),
             ];
+            usage(&mut line);
             if cols.wide {
-                let kind = root.map(|r| r.kind.clone()).unwrap_or_default();
-                let prog = root
-                    .and_then(|r| r.progress)
-                    .map(|n| format!("{}%", n))
-                    .unwrap_or_default();
-                line.push((c(&p.dim), format!(" {:<10}", kind)));
-                line.push((c(&p.dim), format!(" {:<6}", for_cell)));
-                line.push((c(&p.dim), format!(" {:<4}", prog)));
                 line.push((
                     c(&p.accent),
                     format!(" {}", tc::pad(&pane.place(), cols.place)),
                 ));
-                line.push((c(&p.dim), format!(" {}", homely(&pane.cwd()))));
-            } else {
-                line.push((c(&p.dim), format!(" {}", for_cell)));
             }
             fill(&mut line);
             rows.push(finish(line));
-            let phrases = detail_phrases(pane, cols.wide, at);
-            for text in tc::wrap_words(&phrases.join(" · "), w.saturating_sub(4)) {
-                let mut line = vec![(c(detail_body), format!("   {}", text))];
+            // The second row is herdr's: where it is, and what its title says.
+            let title = pane.title.trim();
+            let mut line = vec![(c(&p.dim), format!("   {}  ", homely(&pane.cwd())))];
+            let room = w
+                .saturating_sub(1)
+                .saturating_sub(tc::display_width(&line[0].1));
+            if tc::display_width(title) <= room {
+                line.push((c(body), title.to_string()));
                 fill(&mut line);
                 rows.push(finish(line));
+            } else {
+                fill(&mut line);
+                rows.push(finish(line));
+                prose(&mut rows, body, title);
             }
-            for r in pane.children() {
-                let mut words = vec![r.id.clone().unwrap_or_default(), r.state.clone()];
-                if !r.msg.is_empty() {
-                    words.push(r.msg.clone());
-                }
-                if let Some(u) = r.updated_at {
-                    words.push(ago(at - u));
-                }
-                for (i, text) in tc::wrap_words(&words.join("  "), w.saturating_sub(6))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let mut line = vec![(
-                        c(colour_of(&r.state, p)),
-                        format!("   {} {}", if i == 0 { "├" } else { " " }, text),
-                    )];
-                    fill(&mut line);
-                    rows.push(finish(line));
-                }
+            let facts = detail_phrases(pane, cols.wide, at);
+            if !facts.is_empty() {
+                prose(&mut rows, body, &facts.join(" · "));
             }
+            children(&mut rows);
         }
         Section::Processes => {
             let unreadable = pane.doing == Doing::Unknown && pane.creator == TERMINAL;
@@ -869,120 +930,70 @@ fn render_pane(
                 let c = pane.command();
                 if c.is_empty() { "?".into() } else { c }
             };
-            let has_state = pane.root().is_some();
-            let mut line = vec![(
-                c(if unreadable { &p.unknown } else { &p.proc }),
-                format!("{}{} ", cursor, if unreadable { '⚠' } else { '▪' }),
-            )];
-            // The command takes the room it needs and wraps below when the
-            // pane is too narrow, rather than stopping at a cut.
+            // An unread pane says so in words where a command would go. A
+            // bare "?" is what a running pane with unparseable argv shows,
+            // and the two are not the same thing at all.
             let fits = tc::display_width(&command) <= cols.command;
-            line.push((
-                c(if unreadable { &p.unknown } else { &p.txt }),
-                tc::pad(if fits { &command } else { "" }, cols.command),
-            ));
-            line.push((
-                c(colour_of(&state, p)),
-                format!(
-                    " {:<8}",
-                    if has_state {
-                        state.clone()
-                    } else {
-                        String::new()
-                    }
+            let mut line = vec![
+                (
+                    c(if unreadable { &p.unknown } else { &p.proc }),
+                    format!("{}{} ", cursor, if unreadable { '⚠' } else { '▪' }),
                 ),
-            ));
+                (
+                    c(if unreadable { &p.unknown } else { &p.txt }),
+                    tc::pad(if fits { &command } else { "" }, cols.command),
+                ),
+            ];
+            if cols.states {
+                line.push((
+                    c(colour_of(&state, p)),
+                    format!(
+                        " {:<8}",
+                        if pane.root().is_some() {
+                            state.clone()
+                        } else {
+                            String::new()
+                        }
+                    ),
+                ));
+            }
+            line.push((String::new(), " ".into()));
+            usage(&mut line);
             if cols.wide {
-                if pane.remote {
-                    line.push((c(&p.dim), "  remote    ".into()));
-                } else {
-                    line.push((c(&heat), percent(pane.cpu)));
-                    line.push((c(&p.dim), format!(" {}", mem(pane.rss))));
-                }
                 line.push((
                     c(&p.accent),
                     format!(" {}", tc::pad(&pane.place(), cols.place)),
                 ));
-                line.push((c(&p.dim), format!(" {}", homely(&pane.cwd()))));
             }
             fill(&mut line);
             rows.push(finish(line));
-            let mut phrases = Vec::new();
+            // A command longer than its column is spelled out underneath,
+            // whole, rather than cut where the column ends.
             if !fits {
-                phrases.push(command.clone());
-            }
-            if !cols.wide {
-                // Narrow: where it is goes under the command, whole, rather
-                // than at the end of a first row that has no room for it.
-                phrases.push(pane.place());
+                prose(&mut rows, &p.txt, &command);
             }
             if unreadable {
-                phrases.push(if pane.why.is_empty() {
-                    "no reason given".into()
+                let why = if pane.why.is_empty() {
+                    "no reason given"
                 } else {
-                    pane.why.clone()
-                });
+                    &pane.why
+                };
+                prose(&mut rows, &p.unknown, &format!("⚠ {}", why));
             }
-            if let Some(r) = pane.root() {
-                if !r.app.is_empty() {
-                    phrases.push(format!("reported by {}", r.app));
-                }
-                if !r.kind.is_empty() {
-                    phrases.push(r.kind.clone());
-                }
-                if let Some(n) = r.progress {
-                    phrases.push(format!("{}%", n));
-                }
-                if !r.msg.is_empty() {
-                    phrases.push(format!("msg {}", r.msg));
-                }
-                if let Some(u) = r.updated_at {
-                    phrases.push(format!("for {}", ago(at - u)));
-                }
-                if pane.reporter_gone(r) {
-                    phrases.push("reporter not in foreground".into());
-                }
+            let facts = detail_phrases(pane, cols.wide, at);
+            if !facts.is_empty() {
+                prose(&mut rows, body, &facts.join(" · "));
             }
-            if let Some((when, said)) = &pane.attention {
-                phrases.push(format!(
-                    "asked for attention {} ago: {}",
-                    ago(at - when),
-                    said
-                ));
-            }
-            if !phrases.is_empty() {
-                for text in tc::wrap_words(&phrases.join(" · "), w.saturating_sub(4)) {
-                    let mut line = vec![(c(detail_body), format!("   {}", text))];
-                    fill(&mut line);
-                    rows.push(finish(line));
-                }
-            }
-            for r in pane.children() {
-                let mut words = vec![r.id.clone().unwrap_or_default(), r.state.clone()];
-                if !r.msg.is_empty() {
-                    words.push(r.msg.clone());
-                }
-                if let Some(u) = r.updated_at {
-                    words.push(ago(at - u));
-                }
-                for (i, text) in tc::wrap_words(&words.join("  "), w.saturating_sub(6))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let mut line = vec![(
-                        c(colour_of(&r.state, p)),
-                        format!("   {} {}", if i == 0 { "├" } else { " " }, text),
-                    )];
-                    fill(&mut line);
-                    rows.push(finish(line));
-                }
-            }
+            children(&mut rows);
         }
         Section::Idle => {
             let mut line = vec![
                 (c(&p.idle_c), format!("{}▫ ", cursor)),
-                (c(&p.idle_c), tc::pad(&homely(&pane.cwd()), cols.dir)),
-                (c(&p.accent), format!(" {}", pane.place())),
+                (
+                    c(&p.idle_c),
+                    tc::pad(&tail_path(&homely(&pane.cwd()), cols.dir), cols.dir + 1),
+                ),
+                (c(&p.accent), pane.place()),
             ];
             fill(&mut line);
             rows.push(finish(line));
@@ -992,8 +1003,14 @@ fn render_pane(
 }
 
 /// How wide each text column is drawn this frame.
+///
+/// The text columns grow with the pane, herdr's way: their fixed widths are
+/// the minimums and whatever the numbers leave goes to the column still
+/// cutting something.
 struct Columns {
     wide: bool,
+    /// Whether any process carries a reported state, so the column is drawn.
+    states: bool,
     name: usize,
     command: usize,
     place: usize,
@@ -1002,7 +1019,7 @@ struct Columns {
 
 impl Columns {
     fn fit(w: usize, panes: &[&Pane]) -> Columns {
-        let wide = w >= 72;
+        let wide = w >= 66;
         let widest = |f: &dyn Fn(&Pane) -> usize, sec: Section| -> usize {
             panes
                 .iter()
@@ -1011,6 +1028,9 @@ impl Columns {
                 .max()
                 .unwrap_or(0)
         };
+        let states = panes
+            .iter()
+            .any(|p| p.section() == Section::Processes && p.root().is_some());
         let name_want = widest(
             &|p| tc::display_width(&p.agent.as_ref().map(|a| a.0.clone()).unwrap_or_default()),
             Section::Agents,
@@ -1024,45 +1044,44 @@ impl Columns {
             .unwrap_or(0);
         let dir_want = widest(&|p| tc::display_width(&homely(&p.cwd())), Section::Idle);
         let row = w.saturating_sub(1);
-        if wide {
-            // Agent: cursor+mark+space, name, STATE, KIND, FOR, PROG; the
-            // place and the directory share what is left.
+        let state_w = if states { 9 } else { 0 };
+        // An agent row: `▸`, the mark and a space, the name, STATE, FOR and
+        // CPU; MEM and the place when wide. A process row: the same three,
+        // the command, an optional STATE, CPU; MEM and the place when wide.
+        let (name, command, place) = if wide {
             let agent = tc::fit_columns(
-                row.saturating_sub(3 + 9 + 11 + 7 + 5 + 2),
-                &[(8, name_want), (10, place_want), (12, usize::MAX / 4)],
+                row.saturating_sub(3 + 9 + 7 + 5 + 6 + 1),
+                &[(6, name_want), (12, place_want)],
             );
             let process = tc::fit_columns(
-                row.saturating_sub(3 + 9 + 5 + 6 + 2),
-                &[(14, command_want), (10, place_want), (12, usize::MAX / 4)],
+                row.saturating_sub(3 + state_w + 1 + 5 + 6 + 1),
+                &[(20, command_want), (12, place_want)],
             );
-            let idle = tc::fit_columns(
-                row.saturating_sub(3 + 1),
-                &[(20, dir_want), (10, place_want)],
-            );
-            Columns {
-                wide,
-                name: agent[0],
-                command: process[0],
-                place: agent[1].max(process[1]),
-                dir: idle[0],
-            }
+            (agent[0], process[0], agent[1].min(process[1]))
         } else {
-            let agent = tc::fit_columns(row.saturating_sub(3 + 9 + 7), &[(6, name_want)]);
-            let process = tc::fit_columns(row.saturating_sub(3 + 9), &[(6, command_want)]);
-            let idle = tc::fit_columns(row.saturating_sub(3 + 1 + place_want), &[(6, dir_want)]);
-            Columns {
-                wide,
-                name: agent[0],
-                command: process[0],
-                place: place_want,
-                dir: idle[0],
-            }
+            (
+                tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 5), &[(6, name_want)])[0],
+                tc::fit_columns(
+                    row.saturating_sub(3 + state_w + 1 + 5),
+                    &[(6, command_want)],
+                )[0],
+                place_want,
+            )
+        };
+        let dir = tc::fit_columns(row.saturating_sub(3 + 1 + place_want), &[(6, dir_want)])[0];
+        Columns {
+            wide,
+            states,
+            name,
+            command,
+            place,
+            dir,
         }
     }
 }
 
 /// The detail screen's text for one pane: every record, every identity.
-fn explain_lines(pane: &Pane, board: &Board, at: f64) -> Vec<(String, String)> {
+fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let heading = |s: &str| ("lbl".to_string(), format!(" ── {} ──", s));
     out.push(heading("PANE"));
@@ -1220,6 +1239,23 @@ fn explain_lines(pane: &Pane, board: &Board, at: f64) -> Vec<(String, String)> {
             format!(" asked for attention {} ago: {}", ago(at - when), said),
         ));
     }
+    out.push((String::new(), String::new()));
+    out.push(heading("SERVER"));
+    out.push((
+        "dim".into(),
+        format!(
+            " {} · rex {} · api {} · {} Rex app{} attached",
+            if server.is_empty() { "local" } else { server },
+            if board.rex_version.is_empty() {
+                "?"
+            } else {
+                &board.rex_version
+            },
+            board.api_revision,
+            board.apps,
+            plural(board.apps)
+        ),
+    ));
     out
 }
 
@@ -1533,7 +1569,7 @@ fn main() {
             )];
             let head = rows.len();
             let mut body: Vec<String> = Vec::new();
-            for (kind, text) in explain_lines(&pane, &board, at) {
+            for (kind, text) in explain_lines(&pane, &board, &server, at) {
                 let colour = match kind.as_str() {
                     "lbl" => p.lbl.clone(),
                     "txt" => p.txt.clone(),
@@ -1641,6 +1677,7 @@ fn main() {
             &p.accent,
             activity.tick(tick),
         )];
+        let mut plots = Vec::new();
         let mut all = board.as_ref().map(|b| b.panes.clone()).unwrap_or_default();
         let hidden_opscope = all
             .iter()
@@ -1688,36 +1725,35 @@ fn main() {
             ];
             for name in ["blocked", "error", "done", "working", "idle", "unknown"] {
                 if let Some(n) = counts.get(name) {
-                    summary.push((colour_of(name, &p), format!(" {} {}", n, name)));
+                    summary.push((colour_of(name, &p), format!("  {} {}", n, name)));
                 }
             }
             rows.extend(flow(&summary, w));
-            let about: Vec<(&str, String)> = vec![
-                (
-                    p.dim.as_str(),
-                    format!(
-                        "server {}",
-                        if server.is_empty() { "local" } else { &server }
-                    ),
-                ),
-                (
-                    p.dim.as_str(),
-                    format!(
-                        "· rex {}",
-                        if b.rex_version.is_empty() {
-                            "?"
-                        } else {
-                            &b.rex_version
-                        }
-                    ),
-                ),
-                (p.dim.as_str(), format!("· api {}", b.api_revision)),
-                (
-                    p.dim.as_str(),
-                    format!("· {} app{} attached", b.apps, plural(b.apps)),
-                ),
-            ];
-            rows.extend(flow(&about, w));
+            // The state mix as one bar, herdr's: drawn as text, and laid
+            // over with a graphic where the terminal can show one. Only
+            // while the header is pinned - a plot is placed by frame row,
+            // and a header that scrolls has no fixed row to place it on.
+            if !agents.is_empty() {
+                let mut states: Vec<_> = counts.iter().collect();
+                states.sort_by_key(|(state, _)| rank_of(state));
+                let parts: Vec<(f64, String)> = states
+                    .into_iter()
+                    .map(|(state, n)| {
+                        (
+                            *n as f64 / agents.len() as f64,
+                            colour_of(state, &p).to_string(),
+                        )
+                    })
+                    .collect();
+                let width = w.saturating_sub(2);
+                if h >= 20 {
+                    plots.push(tc::Plot::stacked_bar(1, rows.len(), width, &parts));
+                }
+                let bar = tc::stacked_bar(&parts, width);
+                let mut line = vec![(tc::RST, " ".to_string())];
+                line.extend(bar.iter().map(|(c, t)| (c.as_str(), t.clone())));
+                rows.push(tc::seg(&line, w.saturating_sub(1)));
+            }
             let waiting = all.iter().filter(|n| n.wants_a_human()).count();
             if waiting > 0 {
                 let blocked = all.iter().any(|n| {
@@ -1850,21 +1886,20 @@ fn main() {
                     ));
                 } else {
                     sections.push(index);
+                    // AGENT sits over the mark as well as the name, hence
+                    // the two; MEM and SESSION only once there is room.
+                    let mut head = format!(
+                        " {:<nw$} {:<8} {:<6} {:<5}",
+                        "AGENT",
+                        "STATE",
+                        "FOR",
+                        "CPU",
+                        nw = cols.name + 2
+                    );
                     if cols.wide {
-                        let head = format!(
-                            " {:<nw$} {:<8} {:<10} {:<6} {:<4} {:<pw$} {}",
-                            "AGENT",
-                            "STATE",
-                            "KIND",
-                            "FOR",
-                            "PROG",
-                            "WHERE",
-                            "DIR",
-                            nw = cols.name + 2,
-                            pw = cols.place
-                        );
-                        rows.push(tc::seg(&[(p.dim.as_str(), head)], w - 1));
+                        head += &format!(" {:<5} {}", "MEM", "SESSION");
                     }
+                    rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     for pane in &agents {
                         emit(&mut rows, pane, index);
                         index += 1;
@@ -1919,17 +1954,19 @@ fn main() {
                     sections.push(index);
                     if cols.wide {
                         let head = format!(
-                            " {:<cw$} {:<8} {:<5} {:<5} {:<pw$} {}",
+                            " {:<cw$} {}{:<5} {:<5} {}",
                             "COMMAND",
-                            "STATE",
+                            if cols.states {
+                                format!("{:<9}", "STATE")
+                            } else {
+                                String::new()
+                            },
                             "CPU",
                             "MEM",
-                            "WHERE",
-                            "DIR",
-                            cw = cols.command + 2,
-                            pw = cols.place
+                            "SESSION",
+                            cw = cols.command + 2
                         );
-                        rows.push(tc::seg(&[(p.dim.as_str(), head)], w - 1));
+                        rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     }
                     for pane in &busy {
                         emit(&mut rows, pane, index);
@@ -1965,24 +2002,24 @@ fn main() {
         // The footer is built before the window, because it wraps and the
         // body's room depends on how many rows it took.
         let zoomed = current.as_ref().is_some_and(|c| c.zoomed);
+        // herdr-panes' order, so the two footers read alike side by side;
+        // zoom and explain are Rex's own and sit after the shared ones.
         let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(
+                p.dim.as_str(),
+                format!(
+                    "[o]{} Opscope",
+                    if opscope_filter.show { "hide" } else { "show" }
+                ),
+            )],
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
             ],
             vec![
                 (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " focus".into()),
+                (p.dim.as_str(), " switch to this pane".into()),
             ],
-            vec![(
-                p.dim.as_str(),
-                if zoomed {
-                    "[z] unzoom".into()
-                } else {
-                    "[z]oom".into()
-                },
-            )],
-            vec![(p.dim.as_str(), "[e]xplain".into())],
             vec![
                 (p.accent.as_str(), "tab".into()),
                 (p.dim.as_str(), " section".into()),
@@ -1993,11 +2030,13 @@ fn main() {
             )],
             vec![(
                 p.dim.as_str(),
-                format!(
-                    "[o]{} Opscope",
-                    if opscope_filter.show { "hide" } else { "show" }
-                ),
+                if zoomed {
+                    "[z] unzoom".into()
+                } else {
+                    "[z]oom".into()
+                },
             )],
+            vec![(p.dim.as_str(), "[e]xplain".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
@@ -2032,7 +2071,12 @@ fn main() {
         // The placements index the vec the frame is windowed from, so a
         // click resolves through `item_at` with the same head and scroll.
         placed = rows_at;
-        tc::draw(&frame, w, h);
+        // The bar sits in the pinned header, so its frame row is its row.
+        let plots: Vec<_> = plots
+            .into_iter()
+            .filter_map(|plot| plot.in_viewport(0, 0, head_rows))
+            .collect();
+        tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
     }

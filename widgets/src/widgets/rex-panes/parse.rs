@@ -123,6 +123,10 @@ pub struct Process {
     /// The program Rex started in the block - usually the shell.
     pub child_pid: Option<i64>,
     pub child_cwd: String,
+    /// The name and argv0 of that program, to tell a shell from a pane
+    /// started with a command of its own.
+    pub child_name: String,
+    pub child_argv0: String,
     pub foreground: Option<Foreground>,
     pub last_exit: Option<i64>,
 }
@@ -132,6 +136,8 @@ pub fn parse_process_value(value: &Value) -> Process {
     Process {
         child_pid: value["child"]["pid"].as_i64(),
         child_cwd: text(&value["child"], "cwd"),
+        child_name: text(&value["child"], "name"),
+        child_argv0: text(&value["child"], "argv0"),
         foreground: fg["pid"].as_i64().map(|pid| Foreground {
             pid,
             name: text(fg, "name"),
@@ -143,6 +149,24 @@ pub fn parse_process_value(value: &Value) -> Process {
         }),
         last_exit: value["last_exit"]["exit_code"].as_i64(),
     }
+}
+
+/// Whether the program Rex started in a block is a shell.
+///
+/// "At a prompt" is the shell itself in the foreground. A pane started with
+/// a command - `rex split -- htop` - has that command as its child, and the
+/// child in the foreground there is the command running, not a prompt. A
+/// login shell's argv0 starts with `-`, which settles it on its own.
+pub fn is_shell(name: &str, argv0: &str) -> bool {
+    const SHELLS: &[&str] = &[
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh",
+        "pwsh", "ash", "yash", "oksh",
+    ];
+    if argv0.starts_with('-') {
+        return true;
+    }
+    let argv0 = base_name(argv0.split_whitespace().next().unwrap_or(""));
+    SHELLS.contains(&base_name(name)) || SHELLS.contains(&argv0)
 }
 
 fn base_name(path: &str) -> &str {
@@ -887,6 +911,15 @@ mod tests {
         let text = "one\n\n  \ntwo  \nthree\n\n";
         assert_eq!(parse_capture(text, 2), vec!["two", "three"]);
         assert_eq!(parse_capture(text, 10), vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_pane_started_with_a_command_is_not_a_shell() {
+        assert!(is_shell("bash", "-bash"));
+        assert!(is_shell("zsh", "zsh"));
+        assert!(is_shell("whatever", "-fish"));
+        assert!(!is_shell("rex-panes", "/opt/opscope/rex-panes"));
+        assert!(!is_shell("htop", "htop"));
     }
 
     #[test]

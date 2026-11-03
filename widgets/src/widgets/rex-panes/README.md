@@ -7,30 +7,36 @@ server, across every session — ordered by who needs you, with one key to get
 there.
 
 ```text
-╺━ REX PANES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 2 agents · 2 sessions · 9 panes  1 done  1 unknown
- server local · rex 0.0.1793716919 · api 10 · 1 app attached
- ▸ 2 panes waiting for you
+╺━ REX PANES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 3 agents · 2 sessions · 9 panes  1 blocked  1 done  1 unknown
+ ███████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░
+ ▸ 3 panes waiting for you
 
- ── AGENTS ── 2
- AGENT         STATE    KIND       FOR    PROG WHERE    DIR
-▸✓ claude-code DONE                3m          api:1    ~/src/api
-   title Ok · msg replied 'ok' as requested · id via report
- ? claude      unknown             ≥12m        work:1   ~
-   title ◑ opscope · no status reported · id via process
+ ── AGENTS ── 3
+ AGENT       STATE    FOR    CPU   MEM   SESSION
+▸⚠ claude    BLOCKED  2m      1%  412M  api:1
+   ~/src/api  ◑ api
+   permission · approve: cargo test --workspace
+ ✓ claude    done     16m     0%  388M  site:2
+   ~/work/site  Ok
+   replied 'ok' as requested
+ ? claude    unknown  ≥12m    0%  193M  work:1
+   ~  ◑ opscope
+   no status reported
 
- ── PROCESSES ── 6 panes running something
- COMMAND         STATE    CPU   MEM   WHERE    DIR
- ▪ sleep         blocked     0%    1M api:1    ~/src/api
-   reported by terraform · permission · 40% · msg approve: cargo test · for 3m
+ ── PROCESSES ── 3 panes running something
+ COMMAND                   STATE    CPU   MEM   SESSION
+ ▪ sleep                   blocked     0%    1M api:1
+   reported by terraform · permission · 40% · approve: cargo test · for 3m
    ├ build/test  done  3m
- ▪ cargo                    87%  412M site:2   ~/work/site
+ ▪ cargo                             87%  412M site:2
+ ▪ tail                               0%    2M site:2
 
  ── IDLE ── 1 pane at a prompt
  ▫ ~/work/site                       site:1
 
- ↑↓ select  ↵ focus  [z]oom  [e]xplain  tab section  [i]dle hide  [o]show Opscope
- [r]efresh  [,] settings  [q]uit
+ [o]show Opscope  ↑↓ select  ↵ switch to this pane  tab section  [i]dle hide
+ [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
 
 ## Why it is ordered this way
@@ -62,6 +68,13 @@ into PROCESSES with `⚠ could not be read` and the server's own reason, and the
 heading counts it apart. `[i]` hides only panes known to be at a prompt.
 
 ## How it knows
+
+It reads like `herdr-panes` on purpose — the same state bar, the same two-row
+agent (state, then directory and title), the same footer — so the two sit
+side by side. What only Rex knows goes on the rows under an agent: what it is
+blocked on, how far along it is, its message, and its child records. The
+server, its version and how many Rex apps are attached are on the explain
+screen.
 
 Every fact on screen says where it came from.
 
@@ -120,7 +133,7 @@ screenshotted.
 | `↑` `↓` `j` `k` `Home` `End` | select, across all three sections; the window follows |
 | `Tab` | jump to the head of the next section, wrapping past the last |
 | `Ctrl-Y` `Ctrl-E` `wheel` `PgUp` `PgDn` | scroll the window; the selection stays where it is |
-| `Enter` / `f` | **focus** the pane — its window becomes active in its session |
+| `Enter` / `f` | **switch to this pane** — its window becomes active in its session and the pane focused |
 | `z` | zoom the pane to fill its window, or undo that |
 | `e` | explain the pane: every status record with every field, the program's identity, and the last lines its screen shows; `esc` or `e` goes back |
 | `o` | show/hide opscope's own panes (hidden by default) |
