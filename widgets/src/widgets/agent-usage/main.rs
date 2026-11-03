@@ -1954,7 +1954,11 @@ fn day_calendar(
     })
 }
 
-/// Settings, read once, so no widget-wide mutable globals are needed.
+/// Settings the pane is drawing from.
+///
+/// Replaced when a reread of the saved file succeeds. A reread that fails
+/// leaves the previous value in place, so a bad file cannot turn the agent
+/// list into the empty one an unread section would discover.
 #[derive(Default, Clone)]
 struct Config {
     agents: Vec<String>,
@@ -2073,11 +2077,6 @@ struct Config {
     claude_dirs: Vec<crate::claude::ClaudeDir>,
 }
 
-fn read_config() -> Config {
-    let (raw, legacy_section) = load_agent_usage_config();
-    config_from(&raw, legacy_section)
-}
-
 /// The settings a section holds, with the widget's defaults filling in
 /// whatever it does not. Split from the file read so a default can be
 /// pinned by a test rather than by a comment.
@@ -2180,6 +2179,110 @@ fn first_readable_config() -> Option<serde_json::Value> {
         }
     }
     None
+}
+
+/// The config the pane is drawing, and the section it was read from.
+///
+/// `section` is what a refresh compares. The same value means the saved
+/// file has not changed, so the agent list stays put. `err` is set only
+/// when a later read fails; `cfg` is then still the last one that parsed.
+struct LiveConfig {
+    cfg: Config,
+    section: serde_json::Value,
+    legacy: bool,
+    err: String,
+}
+
+/// The saved section, or why this read cannot be trusted.
+///
+/// A missing file is an empty section: nothing has been saved, and the
+/// defaults are the answer a restart would use. A file that is there and
+/// cannot be read, or that does not parse, is a failure. Falling through
+/// to an empty section is how that failure draws no agents. The reason is
+/// the error itself — never the path, and never the bytes that failed,
+/// which are where a token would be.
+fn read_saved_section(paths: &[std::path::PathBuf]) -> Result<(serde_json::Value, bool), String> {
+    let mut failure: Option<String> = None;
+    for path in paths {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                if failure.is_none() {
+                    failure = Some(e.to_string());
+                }
+                continue;
+            }
+        };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(parsed) => {
+                let (name, legacy) = pick_config_section(&parsed);
+                let raw = parsed
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                return Ok((raw, legacy));
+            }
+            Err(e) => {
+                if failure.is_none() {
+                    failure = Some(e.to_string());
+                }
+            }
+        }
+    }
+    match failure {
+        Some(why) => Err(why),
+        None => Ok((serde_json::json!({}), false)),
+    }
+}
+
+/// Apply one reread. A changed section replaces `cfg`. A failure does not,
+/// and says why, so the agent list already on screen stays the one drawn.
+///
+/// True when the saved section changed and was applied.
+fn apply_reread(live: &mut LiveConfig, loaded: Result<(serde_json::Value, bool), String>) -> bool {
+    match loaded {
+        Err(why) => {
+            live.err = format!("could not reread settings ({why}); showing the previous agents");
+            false
+        }
+        Ok((raw, legacy)) => {
+            if raw == live.section && legacy == live.legacy {
+                live.err.clear();
+                return false;
+            }
+            live.cfg = config_from(&raw, legacy);
+            live.section = raw;
+            live.legacy = legacy;
+            live.err.clear();
+            true
+        }
+    }
+}
+
+/// Reread the saved settings into `live`. The caller wakes the poller when
+/// this reports a change, so a newly enabled agent is fetched as well as
+/// listed. A failure leaves the previous config locked in place.
+fn reread_agents(live: &Mutex<LiveConfig>) -> bool {
+    let loaded = read_saved_section(&tc::config_paths());
+    match live.lock() {
+        Ok(mut held) => {
+            let changed = apply_reread(&mut held, loaded);
+            if changed {
+                WORK_DAYS.store(held.cfg.work_days_per_week, Ordering::Relaxed);
+            }
+            changed
+        }
+        Err(_) => false,
+    }
+}
+
+fn request_pass(wake: &(Mutex<bool>, Condvar)) {
+    let (lock, cond) = wake;
+    if let Ok(mut asked) = lock.lock() {
+        *asked = true;
+        cond.notify_all();
+    }
 }
 
 /// Which section to read, and whether it is the pre-rename name.
@@ -2593,13 +2696,26 @@ fn main() {
     ) {
         return;
     }
-    let cfg = read_config();
+    let (raw, legacy) = load_agent_usage_config();
+    let cfg = config_from(&raw, legacy);
     WORK_DAYS.store(cfg.work_days_per_week, Ordering::Relaxed);
-    let mut refresh = cfg.refresh;
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = tc::poll_secs(args[1].parse().unwrap_or(refresh), refresh);
-    }
+    // A flag pins the wait for this process. A later reread may change the
+    // saved interval; it must not override the one the command asked for.
+    let refresh_override = if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
+        Some(tc::poll_secs(
+            args[1].parse().unwrap_or(cfg.refresh),
+            cfg.refresh,
+        ))
+    } else {
+        None
+    };
+    let live = Arc::new(Mutex::new(LiveConfig {
+        cfg,
+        section: raw,
+        legacy,
+        err: String::new(),
+    }));
 
     let p = palette();
     let state = Arc::new(Mutex::new(vendors::State::default()));
@@ -2607,7 +2723,7 @@ fn main() {
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
-    let poller_cfg = cfg.clone();
+    let poller_live = Arc::clone(&live);
     let poller_activity = activity.clone();
     std::thread::spawn(move || {
         tc::record_panics();
@@ -2617,13 +2733,24 @@ fn main() {
         let saved_at = store::path();
         store::restore(&mut caches, &saved_at);
         // A directory dropped from the config is never read again, so
-        // nothing would ever prune what was saved for it.
+        // nothing would ever prune what was saved for it. Later passes
+        // read the config afresh; this only drops what the first one
+        // already knows it will not want.
+        let start_cfg = match poller_live.lock() {
+            Ok(g) => g.cfg.clone(),
+            Err(_) => return,
+        };
         let wanted: std::collections::HashSet<String> =
-            claude::dirs_of(&poller_cfg).iter().map(|d| claude::projects_path(&d.path)).collect();
+            claude::dirs_of(&start_cfg).iter().map(|d| claude::projects_path(&d.path)).collect();
         caches.transcripts.retain(|dir, _| wanted.contains(dir));
         let mut saver = store::Saver::new(now());
         let mut asked = false;
         loop {
+            let cfg = match poller_live.lock() {
+                Ok(g) => g.cfg.clone(),
+                Err(_) => return,
+            };
+            let refresh = refresh_override.unwrap_or(cfg.refresh);
             let work = poller_activity.start();
             if asked {
                 caches.asked_at = now();
@@ -2643,13 +2770,13 @@ fn main() {
             // onto the previous snapshot, which has no reading for an agent
             // that was not there last time.
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let installed = detect_agents(&poller_cfg);
+                let installed = detect_agents(&cfg);
                 if let Ok(mut g) = poller.lock() {
                     if g.fetched <= 0.0 {
                         g.installed = installed.clone();
                     }
                 }
-                vendors::read_all(&mut caches, &poller_cfg, installed)
+                vendors::read_all(&mut caches, &cfg, installed)
             }));
             // The press is spent on the pass it asked for. Left standing, a
             // reading kept for being under the floor would be asked again
@@ -2740,6 +2867,13 @@ fn main() {
         for key in keyboard.poll() {
             if key == "," {
                 tc::run_settings(&mut keyboard, SETTINGS);
+                // Leaving settings is the save. The process is still this
+                // one when exec did not replace it, so the list has to be
+                // read again here — a restart is the thing this must not
+                // need. A failed read keeps the agents already on screen.
+                if reread_agents(&live) {
+                    request_pass(&wake);
+                }
                 continue;
             }
             match key.as_str() {
@@ -2757,11 +2891,12 @@ fn main() {
                 "home" => to_top = true,
                 "end" => to_bottom = true,
                 "r" | "R" => {
-                    let (lock, cond) = &*wake;
-                    if let Ok(mut asked) = lock.lock() {
-                        *asked = true;
-                        cond.notify_all();
-                    }
+                    // The same reread as a save, and only when the saved
+                    // file changed does the agent list move. The pass
+                    // still runs: refresh was already a request for new
+                    // readings, and a failed reread must not swallow it.
+                    reread_agents(&live);
+                    request_pass(&wake);
                 }
                 // A click on a tab opens it, which is what stepping to it
                 // with the arrows does - the same rule as everywhere else,
@@ -2789,6 +2924,13 @@ fn main() {
         }
 
         let (w, h) = tc::size();
+        // Live first, then the snapshot, matching the poller: the other
+        // order deadlocks when a pass is cloning config while this frame
+        // holds the snapshot.
+        let (cfg, reload_err) = match live.lock() {
+            Ok(g) => (g.cfg.clone(), g.err.clone()),
+            Err(_) => return,
+        };
         let snapshot = match state.lock() {
             Ok(g) => g.clone(),
             Err(_) => return,
@@ -2832,6 +2974,15 @@ fn main() {
         };
         if !gripe.is_empty() {
             for line in gripe_lines(&gripe, w) {
+                rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
+            }
+        }
+        // Its own rows. Joining it onto the line above with `·` made a
+        // working pane read as a failing one, and a failed reread must
+        // not be dropped either: the list underneath is the previous
+        // one, which is only obvious if the pane says why.
+        if !reload_err.is_empty() {
+            for line in gripe_lines(&reload_err, w) {
                 rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
             }
         }
@@ -4666,6 +4817,145 @@ mod tests {
         let got = config_complaints(&cfg);
         assert!(got.contains(LEGACY_SECTION_NOTE), "{got}");
         assert!(got.contains("unknown agent in config: nonsence"), "{got}");
+    }
+
+    fn held(raw: serde_json::Value) -> LiveConfig {
+        LiveConfig {
+            cfg: config_from(&raw, false),
+            section: raw,
+            legacy: false,
+            err: String::new(),
+        }
+    }
+
+    /// Saving a new agent set replaces the list. A refresh of the same
+    /// section does not. A failed reread leaves that list where it was,
+    /// including while nothing has been detected yet — the empty map is
+    /// how a failed read used to draw no agents at all.
+    #[test]
+    fn a_reread_updates_enabled_agents_and_a_failure_keeps_them() {
+        let named = serde_json::json!({
+            "auto_detect_agent": false,
+            "agents": ["claude", "cursor"]
+        });
+        let mut live = held(named);
+        assert_eq!(
+            visible_agents(&HashMap::new(), &live.cfg),
+            vec!["+", "claude", "cursor"]
+        );
+
+        let changed = apply_reread(
+            &mut live,
+            Ok((
+                serde_json::json!({
+                    "auto_detect_agent": false,
+                    "agents": ["codex"]
+                }),
+                false,
+            )),
+        );
+        assert!(changed, "a saved agent list was ignored");
+        assert!(live.err.is_empty(), "{}", live.err);
+        assert_eq!(
+            visible_agents(&HashMap::new(), &live.cfg),
+            vec!["+", "codex"]
+        );
+
+        let again = apply_reread(
+            &mut live,
+            Ok((
+                serde_json::json!({
+                    "auto_detect_agent": false,
+                    "agents": ["codex"]
+                }),
+                false,
+            )),
+        );
+        assert!(!again, "an unchanged file rebuilt the list");
+        assert_eq!(live.cfg.agents, vec!["codex".to_string()]);
+
+        let kept = live.cfg.agents.clone();
+        let failed = apply_reread(&mut live, Err("expected value at line 1 column 1".into()));
+        assert!(!failed);
+        assert_eq!(live.cfg.agents, kept, "a failed reread replaced the agents");
+        assert!(
+            live.err.contains("showing the previous agents"),
+            "the pane did not say why: {}",
+            live.err
+        );
+        assert!(
+            !live.err.contains("secret-token-value"),
+            "a reread error carried a token: {}",
+            live.err
+        );
+        let shown = visible_agents(&HashMap::new(), &live.cfg);
+        assert_eq!(shown, vec!["+", "codex"]);
+        assert!(
+            shown.iter().any(|t| t != "+"),
+            "a failed reread drew no agents: {shown:?}"
+        );
+    }
+
+    /// The file read itself. A broken document is a failure, and neither
+    /// the reason nor a later success may carry what the file held. A
+    /// missing file is the empty section a restart would read. A later
+    /// file that parses is the one used, which is the same rule as startup.
+    #[test]
+    fn a_broken_settings_file_fails_the_reread_and_names_nothing_it_held() {
+        let dir = std::env::temp_dir().join(format!(
+            "tt-agent-reread-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let token = "secret-token-value";
+        let bad = dir.join("broken.json");
+        std::fs::write(
+            &bad,
+            format!(r#"{{"agent_usage":{{"notion_token":"{token}",}}"#),
+        )
+        .expect("broken settings");
+        let err = read_saved_section(std::slice::from_ref(&bad)).expect_err("a broken file parsed");
+        assert!(
+            !err.contains(token),
+            "the parse error carried a token: {err}"
+        );
+        assert!(
+            !err.contains("notion_token"),
+            "the parse error named a secret field: {err}"
+        );
+        assert!(
+            !err.contains(&dir.display().to_string()),
+            "the parse error named a path: {err}"
+        );
+
+        let (empty, legacy) = read_saved_section(&[dir.join("missing.json")])
+            .expect("a missing file is the empty section");
+        assert_eq!(empty, serde_json::json!({}));
+        assert!(!legacy);
+
+        let good = dir.join("good.json");
+        std::fs::write(
+            &good,
+            r#"{"usage":{"grok_ping":false},"agent_usage":{"auto_detect_agent":false,"agents":["codex"]}}"#,
+        )
+        .expect("good settings");
+        let (raw, legacy) =
+            read_saved_section(&[bad.clone(), good.clone()]).expect("the later file");
+        assert!(!legacy, "the leftover section won");
+        assert_eq!(raw["agents"][0], "codex");
+
+        let unread = read_saved_section(&[dir.clone()]).expect_err("a directory was settings");
+        assert!(!unread.contains(token), "{unread}");
+        assert!(
+            !unread.contains(&dir.display().to_string()),
+            "the read error named a path: {unread}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
