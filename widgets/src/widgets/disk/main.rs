@@ -85,7 +85,10 @@ const DAY_W: usize = 8;
 const FULL_W: usize = 13;
 const BAR_MAX: usize = 11;
 const BAR_MIN: usize = 4;
-const WINDOWS: [u64; 3] = [7, 14, 30];
+/// Hours of samples the window rate, FULL IN and the trace fit. The
+/// longest is a day: a projection from last week says little about today.
+const WINDOWS: [u64; 3] = [6, 12, 24];
+const DEFAULT_WINDOW: u64 = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Columns {
@@ -492,7 +495,7 @@ struct View<'a> {
     disk_cursor: &'a str,
     hide_devices: &'a [String],
     usage: &'a state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
     history_note: &'a str,
     save_err: &'a str,
@@ -530,7 +533,7 @@ fn main() {
     let hide_devices = tc::cfg_strings(&cfg, "hide_devices", &[]);
     let warn = tc::cfg_f64(&cfg, "warn_percent", 80.0);
     let alert = tc::cfg_f64(&cfg, "alert_percent", 90.0);
-    let mut window_days = window_days_of(&cfg);
+    let mut window_hours = window_hours_of(&cfg);
 
     let state = Arc::new(Mutex::new(State::default()));
     let pause = Arc::new(AtomicBool::new(false));
@@ -657,7 +660,9 @@ fn main() {
                     chase = false;
                 }
                 "w" | "W" => {
-                    window_days = tc::cycle(&WINDOWS, window_days);
+                    if screen != Screen::DiskDetail {
+                        window_hours = tc::cycle(&WINDOWS, window_hours);
+                    }
                 }
                 "p" | "P" => {
                     pause.fetch_xor(true, Ordering::AcqRel);
@@ -711,7 +716,7 @@ fn main() {
             let count = snap.rows.len();
             let missing = !snap.rows.iter().any(|row| row.mount.mount_point == cursor);
             if count > 0 && ((screen == Screen::List && chase && focus == 0) || missing) {
-                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_days) {
+                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_hours) {
                     cursor = path;
                 }
             }
@@ -760,7 +765,7 @@ fn main() {
             disk_cursor: &disk_cursor,
             hide_devices: &hide_devices,
             usage: &usage,
-            window_days,
+            window_hours,
             now: tc::now(),
             history_note: &history_note,
             save_err: &save_err,
@@ -776,7 +781,7 @@ fn main() {
         if cursor.is_empty() || cursor_gone {
             if let Some(path) = snap
                 .as_ref()
-                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_days))
+                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_hours))
             {
                 cursor = path;
             }
@@ -806,7 +811,7 @@ fn main() {
             focus,
             show_idle,
             paused,
-            window_days,
+            window_hours,
             combined,
             &p,
         );
@@ -880,9 +885,9 @@ fn path_at(
     sort: Sort,
     selected: usize,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
 ) -> Option<String> {
-    let ordered = ordered(snap, sort, usage, window_days, tc::now());
+    let ordered = ordered(snap, sort, usage, window_hours, tc::now());
     ordered
         .get(selected)
         .map(|&index| snap.rows[index].mount.mount_point.clone())
@@ -1161,12 +1166,12 @@ fn figures_of(result: Result<Space, String>) -> Figures {
     }
 }
 
-fn window_days_of(cfg: &serde_json::Value) -> u64 {
-    let days = tc::cfg_usize(cfg, "window_days", 7) as u64;
-    if WINDOWS.contains(&days) {
-        days
+fn window_hours_of(cfg: &serde_json::Value) -> u64 {
+    let hours = tc::cfg_usize(cfg, "window_hours", DEFAULT_WINDOW as usize) as u64;
+    if WINDOWS.contains(&hours) {
+        hours
     } else {
-        7
+        DEFAULT_WINDOW
     }
 }
 
@@ -1320,7 +1325,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
     let selected = view
         .snap
         .and_then(|snap| {
-            let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+            let ordered = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
             ordered
                 .iter()
                 .position(|&index| snap.rows[index].mount.mount_point == view.cursor)
@@ -1412,8 +1417,8 @@ fn paint(
         return;
     }
     let cols = layout_for(width, longest_mount(snap));
-    rows.extend(header_row(&cols, view.window_days, width, p));
-    let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+    rows.extend(header_row(&cols, view.window_hours, width, p));
+    let ordered = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
     for (item, index) in ordered.iter().copied().enumerate() {
         let row = &snap.rows[index];
         let here = view.focus == 0 && row.mount.mount_point == view.cursor;
@@ -1426,7 +1431,7 @@ fn paint(
             view.warn,
             view.alert,
             view.usage,
-            view.window_days,
+            view.window_hours,
             view.now,
             p,
         ));
@@ -1445,7 +1450,7 @@ fn paint_detail(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    let Some(row) = ordered(snap, view.sort, view.usage, view.window_days, view.now)
+    let Some(row) = ordered(snap, view.sort, view.usage, view.window_hours, view.now)
         .into_iter()
         .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
         .map(|index| &snap.rows[index])
@@ -1509,7 +1514,7 @@ fn paint_detail(
     }
 }
 
-fn header_row(cols: &Columns, window_days: u64, width: usize, p: &Palette) -> Vec<String> {
+fn header_row(cols: &Columns, window_hours: u64, width: usize, p: &Palette) -> Vec<String> {
     let dim = p.dim.clone();
     let left = |text: &str, width: usize| (dim.clone(), tc::pad(text, width));
     let right = |text: String, width: usize| (dim.clone(), align_right(text, width));
@@ -1533,7 +1538,7 @@ fn header_row(cols: &Columns, window_days: u64, width: usize, p: &Palette) -> Ve
     if cols.hour {
         cells.push(right("1h Δ".into(), HOUR_W));
     }
-    cells.push(right(format!("{window_days}d Δ"), DAY_W));
+    cells.push(right(format!("{window_hours}h Δ"), DAY_W));
     cells.push(right("FULL IN".into(), FULL_W));
     if cols.inodes {
         cells.push(right("INODES".into(), INODES_W));
@@ -1567,7 +1572,7 @@ fn data_rows(
     warn: f64,
     alert: f64,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
     p: &Palette,
 ) -> Vec<String> {
@@ -1633,7 +1638,7 @@ fn data_rows(
             warn,
             alert,
             usage,
-            window_days,
+            window_hours,
             now,
             p,
             &c,
@@ -1669,7 +1674,7 @@ fn data_rows(
             warn,
             alert,
             usage,
-            window_days,
+            window_hours,
             now,
             p,
             &c,
@@ -1689,7 +1694,7 @@ fn figure_cells(
     warn: f64,
     alert: f64,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
     p: &Palette,
     c: &dyn Fn(&str) -> String,
@@ -1731,14 +1736,14 @@ fn figure_cells(
                 c(&hot),
                 format!("{:>width$}", pct_text(frac), width = PCT_W),
             ));
-            let (hour, window) = slopes(series, window_days, now);
+            let (hour, window) = slopes(series, window_hours, now);
             if cols.hour {
                 cells.push((c(p.txt.as_str()), rate_cell(hour, 3_600.0, HOUR_W)));
             }
             cells.push((c(p.txt.as_str()), rate_cell(window, 86_400.0, DAY_W)));
             cells.push((
                 c(p.txt.as_str()),
-                full_cell(space.usable, window, hour, series, window_days, now),
+                full_cell(space.usable, window, hour, series, window_hours, now),
             ));
             if cols.inodes {
                 let text = match inode_percent(space.files, space.ffree) {
@@ -1764,7 +1769,7 @@ fn ordered(
     snap: &Snap,
     sort: Sort,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
 ) -> Vec<usize> {
     let mut index: Vec<usize> = (0..snap.rows.len()).collect();
@@ -1774,7 +1779,7 @@ fn ordered(
     let fills = if sort == Sort::Fills {
         snap.rows
             .iter()
-            .map(|row| fill_ord(usage, row, window_days, now))
+            .map(|row| fill_ord(usage, row, window_hours, now))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -1795,7 +1800,7 @@ fn ordered(
     index
 }
 
-fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
+fn fill_ord(usage: &state::Store, row: &Row, hours: u64, now: f64) -> (u8, u64) {
     // 0 is a real projection, 1 is not filling or still measuring, 2 has
     // not answered. Mount order is the tie-break, so 2 has to be its own
     // rank or a quiet row with a later mount sorts after a row with no answer.
@@ -1805,7 +1810,7 @@ fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
     let Some(series) = series_for(usage, row) else {
         return (1, 0);
     };
-    let slope = state::slope_bytes_per_s(series, days as f64 * 86_400.0, now);
+    let slope = state::slope_bytes_per_s(series, hours as f64 * 3_600.0, now);
     match state::eta(space.usable, slope) {
         state::Eta::In(secs) => (0, secs.max(0.0) as u64),
         _ => (1, 0),
@@ -1825,7 +1830,7 @@ fn series_for<'a>(usage: &'a state::Store, row: &Row) -> Option<&'a state::Serie
 
 fn slopes(
     series: Option<&state::Series>,
-    days: u64,
+    hours: u64,
     now: f64,
 ) -> (Option<state::Slope>, Option<state::Slope>) {
     let Some(series) = series else {
@@ -1833,7 +1838,7 @@ fn slopes(
     };
     (
         state::slope_bytes_per_s(series, 3_600.0, now),
-        state::slope_bytes_per_s(series, days as f64 * 86_400.0, now),
+        state::slope_bytes_per_s(series, hours as f64 * 3_600.0, now),
     )
 }
 
@@ -1867,7 +1872,7 @@ fn full_cell(
     window: Option<state::Slope>,
     hour: Option<state::Slope>,
     series: Option<&state::Series>,
-    days: u64,
+    hours: u64,
     now: f64,
 ) -> String {
     let eta_window = state::eta(usable, window);
@@ -1879,7 +1884,7 @@ fn full_cell(
                 span
             } else {
                 series
-                    .map(|series| state::covered(series, days as f64 * 86_400.0, now).0)
+                    .map(|series| state::covered(series, hours as f64 * 3_600.0, now).0)
                     .unwrap_or(0.0)
             };
             format!("measuring {}", tc::age(span))
@@ -1953,15 +1958,15 @@ fn pack_cells(cells: Vec<(String, String)>, width: usize, tint: &str) -> Vec<Str
 }
 
 fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<String> {
-    let indexes = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+    let indexes = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
     let row = indexes
         .iter()
         .copied()
         .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
         .or(indexes.first().copied())
         .map(|index| &snap.rows[index]);
-    let days = view.window_days;
-    let window_s = days as f64 * 86_400.0;
+    let hours = view.window_hours;
+    let window_s = hours as f64 * 3_600.0;
     let fit = row
         .and_then(|row| series_for(view.usage, row))
         .map(|series| state::fit_window(series, window_s, view.now));
@@ -1980,12 +1985,12 @@ fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<St
     // older than the window on screen.
     let body = if retained > 0.0 && span + 60.0 >= window_s {
         format!(
-            "FULL IN at the {days}d rate of this widget's own samples (kept since {})",
+            "FULL IN at the {hours}h rate of this widget's own samples (kept since {})",
             labelled(retained)
         )
     } else {
         format!(
-            "FULL IN at the rate since {} ({of} of {days}d)",
+            "FULL IN at the rate since {} ({of} of {hours}h)",
             labelled(fit_start),
             of = tc::age(span)
         )
@@ -2043,7 +2048,7 @@ fn push_usage(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    let window_s = view.window_days as f64 * 86_400.0;
+    let window_s = view.window_hours as f64 * 3_600.0;
     let path = state::usage_path();
     let Some(series) = series_for(view.usage, row) else {
         for line in wrap("no samples yet", width.saturating_sub(1)) {
@@ -2063,13 +2068,13 @@ fn push_usage(
         .unwrap_or(view.now);
     let (raw, positions) = state::trace(&plotted, window_s, end);
     let seen: Vec<f64> = raw.iter().copied().flatten().collect();
-    let (hour, window) = slopes(Some(series), view.window_days, view.now);
+    let (hour, window) = slopes(Some(series), view.window_hours, view.now);
     let (span, count) = state::covered(series, window_s, view.now);
     let summary = format!(
-        "{count} samples over {} · 1h {} · {}d {}",
+        "{count} samples over {} · 1h {} · {}h {}",
         tc::age(span),
         slope_text(hour, 3_600.0),
-        view.window_days,
+        view.window_hours,
         slope_text(window, 86_400.0)
     );
     push_wrapped(&summary, width, p, rows);
@@ -3345,7 +3350,7 @@ fn footer(
     focus: usize,
     show_idle: bool,
     paused: bool,
-    window_days: u64,
+    window_hours: u64,
     combined: bool,
     p: &Palette,
 ) -> (tc::Footer, usize) {
@@ -3366,8 +3371,12 @@ fn footer(
         hints.push(vec![(p.dim.as_str(), "tab section".into())]);
         hints.push(vec![(p.dim.as_str(), idle_hint(show_idle).into())]);
     }
-    let next = tc::cycle(&WINDOWS, window_days);
-    hints.push(vec![(p.dim.as_str(), format!("[w] {next}d"))]);
+    // The window is filesystem history. The disk detail screen draws only
+    // the in-memory I/O chart, so a window key there would change nothing.
+    if screen != Screen::DiskDetail {
+        let next = tc::cycle(&WINDOWS, window_hours);
+        hints.push(vec![(p.dim.as_str(), format!("[w] {next}h"))]);
+    }
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
     hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
@@ -3534,7 +3543,7 @@ mod tests {
             disk_cursor: "",
             hide_devices: &[],
             usage: empty_usage(),
-            window_days: 7,
+            window_hours: 24,
             now: 1_700_000_000.0,
             history_note: "",
             save_err: "",
@@ -3626,7 +3635,7 @@ mod tests {
             assert_eq!(header.contains("TYPE"), cols.typ, "{width}");
             assert_eq!(header.contains("SIZE"), cols.size, "{width}");
             assert!(flat.contains("FULL IN"), "{width}");
-            assert!(flat.contains("7d"), "{width}");
+            assert!(flat.contains("24h"), "{width}");
             let (packed, _) = footer(
                 width,
                 Screen::List,
@@ -3635,7 +3644,7 @@ mod tests {
                 0,
                 false,
                 false,
-                7,
+                24,
                 false,
                 &p,
             );
@@ -3733,7 +3742,7 @@ mod tests {
             row("/wait", "ext4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let order = ordered(&snap, Sort::Percent, empty_usage(), 7, 0.0);
+        let order = ordered(&snap, Sort::Percent, empty_usage(), 24, 0.0);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3760,7 +3769,7 @@ mod tests {
             ],
             Hidden::default(),
         );
-        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let order = ordered(&snap, Sort::Fills, &store, 24, now);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3794,7 +3803,7 @@ mod tests {
             row("/wait", "ext4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let order = ordered(&snap, Sort::Fills, &store, 24, now);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3813,7 +3822,7 @@ mod tests {
             .join("\n");
         assert!(plain_flat.contains("FULL IN"), "{plain_flat}");
         assert!(plain_flat.contains('+'), "{plain_flat}");
-        assert!(plain_flat.contains("of 7d"), "{plain_flat}");
+        assert!(plain_flat.contains("of 24h"), "{plain_flat}");
         frame.screen = Screen::Detail;
         let drawn = draw_body(&frame, 80, &p, None);
         let detail = drawn
@@ -3830,9 +3839,9 @@ mod tests {
     #[test]
     fn the_footnote_names_the_fitted_start_and_a_full_window_keeps_its_own() {
         let now = 1_700_000_000.0;
-        let day = 86_400.0;
-        let kept = now - 10.0 * day;
-        let fit_at = now - 7.0 * day + 15.0 * 60.0;
+        let hour = 3_600.0;
+        let kept = now - 30.0 * hour;
+        let fit_at = now - 24.0 * hour + 15.0 * 60.0;
         let space = space(1_000, 1_000, 10, 9);
         let mut series = state::Series::default();
         state::record(&mut series, kept, 1);
@@ -3866,7 +3875,7 @@ mod tests {
 
         let mut full = state::Series::default();
         state::record(&mut full, kept, 1);
-        state::record(&mut full, now - 7.0 * day, 2);
+        state::record(&mut full, now - 24.0 * hour, 2);
         state::record(&mut full, now, 3);
         store
             .series
@@ -3887,7 +3896,7 @@ mod tests {
             "{flat}"
         );
         assert!(
-            !flat.contains(&format!("rate since {}", stamp(now - 7.0 * day))),
+            !flat.contains(&format!("rate since {}", stamp(now - 24.0 * hour))),
             "{flat}"
         );
     }
@@ -4596,5 +4605,38 @@ mod tests {
         // Short mount points stay beside their figures once the figures fit.
         assert!(!layout_for(80, 2).stacked);
         assert!(layout_for(40, 2).stacked);
+    }
+
+    #[test]
+    fn the_window_is_hours_and_tops_out_at_a_day() {
+        assert_eq!(window_hours_of(&serde_json::json!({})), 24);
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 6 })), 6);
+        // The old day windows, or any value not on offer, start on a day.
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 7 })), 24);
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 48 })), 24);
+        assert_eq!(tc::cycle(&WINDOWS, 24), 6);
+    }
+
+    #[test]
+    fn only_screens_that_use_the_window_offer_w() {
+        let p = palette();
+        let has_w = |screen| {
+            let (packed, _) = footer(
+                120,
+                screen,
+                Sort::Mount,
+                DiskSort::Write,
+                1,
+                false,
+                false,
+                24,
+                false,
+                &p,
+            );
+            packed.lines.join("\n").contains("[w]")
+        };
+        assert!(has_w(Screen::List));
+        assert!(has_w(Screen::Detail));
+        assert!(!has_w(Screen::DiskDetail));
     }
 }
