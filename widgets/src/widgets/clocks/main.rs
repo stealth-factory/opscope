@@ -17,9 +17,10 @@
 //! Clocks: this server's, everyone else's, and the ones counting down.
 //!
 //! A port of clocks.py: the big clock, the countdown bars, the pomodoro,
-//! and a world clock. Current weather for one configured place is fetched
-//! from Open-Meteo; the clock keeps drawing when that request fails.
-//! The timezone database is why the core carries one.
+//! and a world clock. Current weather for one configured place, and a
+//! condition glyph for each world-clock city that names its own
+//! coordinates, are fetched from Open-Meteo. The clock keeps drawing
+//! when a request fails. The timezone database is why the core carries one.
 
 use std::time::Duration;
 
@@ -1173,6 +1174,12 @@ impl Pomodoro {
 struct City {
     name: String,
     zone: Tz,
+    /// Set only when the row was `[label, zone, lat, lon]` and both
+    /// coordinates could be used. A pair stays `None`.
+    place: Option<weather::LatLon>,
+    /// The row tried to name a coordinate and it could not be fetched.
+    /// The clock is drawn either way.
+    coord_error: Option<String>,
 }
 
 /// The weather row under the date. Only a ready reading carries a
@@ -1245,7 +1252,7 @@ fn main() {
     }
     let cfg = tc::load_config("clocks");
     let office = Office::from_config(&cfg);
-    let cities = load_cities(&cfg);
+    let mut cities = load_cities(&cfg);
 
     let p = palette();
     let mut pomo = Pomodoro::new(&cfg);
@@ -1281,6 +1288,10 @@ fn main() {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
+                    // Cities are what the frame draws, and the poller reads
+                    // the same file on wake. Both have to move together or
+                    // a glyph lands on a row that is no longer that place.
+                    cities = load_cities(&tc::load_config("clocks"));
                     // The next scheduled read may be a quarter of an hour
                     // away. A place just saved should be asked for now.
                     weather.wake();
@@ -1498,66 +1509,29 @@ fn main() {
         // as the pane narrows, and every one it gains comes out of this.
         let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
         let room = free;
+        let city_weather = weather.cities();
         // This section is built from what is left rather than scrolled, so
         // a notices banner taking those rows would take the section with
-        // it. Say what it needs - its heading and two cities - and the
-        // banner gives way; the counter still says the notices are there.
+        // it. Say what it needs - its heading, a miss when one is up, and
+        // two cities - and the banner gives way; the counter still says
+        // the notices are there.
         if !ordered.is_empty() {
-            tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + ordered.len().min(2));
+            let miss = usize::from(
+                ordered
+                    .iter()
+                    .any(|city| city_problem(city, &city_weather).is_some()),
+            );
+            tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + miss + ordered.len().min(2));
         }
-        if room >= 2 && !ordered.is_empty() {
-            let shown = room.saturating_sub(1).min(ordered.len());
-            if scroll + shown > ordered.len() {
-                scroll = ordered.len().saturating_sub(shown);
-            }
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
-                    ),
-                ],
-                w - 1,
-            ));
-            // The name grows with the pane rather than being cut at 16. The
-            // glyph, the time, the day with a UTC+5:30 offset and a day shift
-            // are the fixed cells, and one more keeps a full-length name off
-            // the time.
-            let longest = ordered
-                .iter()
-                .map(|c| tc::display_width(&c.name) + 1)
-                .max()
-                .unwrap_or(0);
-            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
-            for city in ordered.iter().skip(scroll).take(shown) {
-                let there = now.with_timezone(&city.zone);
-                // Sun or moon by the local hour, which is the fastest way
-                // to read "is it a reasonable time to message them".
-                let (ink, glyph) = phase_of(&there, &p);
-                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
-                rows.push(tc::seg(
-                    &[
-                        (ink.as_str(), format!(" {} ", glyph)),
-                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
-                        (p.txt.as_str(), there.format("%H:%M").to_string()),
-                        (
-                            p.dim.as_str(),
-                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
-                        ),
-                        (
-                            p.dim.as_str(),
-                            match day_shift {
-                                0 => String::new(),
-                                d if d > 0 => format!("    +{}d", d),
-                                d => format!("    {}d", d),
-                            },
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-        }
+        rows.extend(world_clock_rows(
+            &ordered,
+            &city_weather,
+            &mut scroll,
+            room,
+            w,
+            &now,
+            &p,
+        ));
 
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         while rows.len() < h.saturating_sub(foot.len()) {
@@ -1588,6 +1562,206 @@ fn main() {
         }
         keyboard.wait(Duration::from_millis(200));
     }
+}
+
+/// The world-clock block: a pinned heading, one line per miss, then the
+/// cities that fit. A miss is a coordinate that could not be used or a
+/// fetch that failed. It is not a temperature, and it does not replace
+/// the city's clock.
+fn world_clock_rows<Z: TimeZone>(
+    ordered: &[&City],
+    slots: &[weather::CityWeather],
+    scroll: &mut usize,
+    room: usize,
+    width: usize,
+    now: &chrono::DateTime<Z>,
+    p: &Palette,
+) -> Vec<String> {
+    if room < 2 || ordered.is_empty() {
+        return Vec::new();
+    }
+    let weather_col = ordered.iter().any(|city| city.place.is_some());
+    let glyph_w = if weather_col {
+        condition_cell_width()
+    } else {
+        0
+    };
+    // The glyph and the space that separates it from the name.
+    let weather_cells = if weather_col { glyph_w + 1 } else { 0 };
+    let blocks = city_weather_note_blocks(ordered, slots, width, p);
+    let mut notes = Vec::new();
+    // Header, then at least one city, then as many miss lines as fit.
+    let note_budget = room.saturating_sub(2);
+    for block in &blocks {
+        if notes.len() + block.len() > note_budget {
+            break;
+        }
+        notes.extend(block.iter().cloned());
+    }
+    let shown = room.saturating_sub(1 + notes.len()).min(ordered.len());
+    if shown == 0 {
+        return Vec::new();
+    }
+    if *scroll + shown > ordered.len() {
+        *scroll = ordered.len().saturating_sub(shown);
+    }
+    let mut rows = vec![tc::seg(
+        &[
+            (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
+            (
+                p.dim.as_str(),
+                format!(" {}-{} of {}  ↑↓", *scroll + 1, *scroll + shown, ordered.len()),
+            ),
+        ],
+        width.saturating_sub(1),
+    )];
+    rows.extend(notes);
+    // The name grows with the pane rather than being cut at 16. The
+    // day/night glyph, the optional condition glyph, the time, the day
+    // with a UTC+5:30 offset and a day shift are the fixed cells, and one
+    // more keeps a full-length name off the time.
+    let longest = ordered
+        .iter()
+        .map(|city| tc::display_width(&city.name) + 1)
+        .max()
+        .unwrap_or(0);
+    let name_w = tc::fit_columns(
+        width.saturating_sub(1).saturating_sub(3 + weather_cells + 5 + 16 + 7),
+        &[(16, longest)],
+    )[0];
+    for city in ordered.iter().skip(*scroll).take(shown) {
+        let there = now.with_timezone(&city.zone);
+        rows.push(world_clock_line(
+            city,
+            &there,
+            now.date_naive(),
+            slots,
+            weather_col,
+            glyph_w,
+            name_w,
+            width,
+            p,
+        ));
+    }
+    rows
+}
+
+fn world_clock_line(
+    city: &City,
+    there: &chrono::DateTime<Tz>,
+    here: chrono::NaiveDate,
+    slots: &[weather::CityWeather],
+    weather_col: bool,
+    glyph_w: usize,
+    name_w: usize,
+    width: usize,
+    p: &Palette,
+) -> String {
+    // Sun or moon by the local hour, which is the fastest way to read
+    // "is it a reasonable time to message them". The condition glyph, when
+    // there is one, sits in its own column: the leading mark stays day
+    // and night.
+    let (ink, phase) = phase_of(there, p);
+    let day_shift = there.date_naive().signed_duration_since(here).num_days();
+    let mut parts: Vec<(&str, String)> = vec![(ink.as_str(), format!(" {} ", phase))];
+    if weather_col {
+        let cell = tc::pad(city_glyph(city, slots).unwrap_or(""), glyph_w);
+        parts.push((p.accent.as_str(), format!("{cell} ")));
+    }
+    parts.push((p.txt.as_str(), tc::pad(&city.name, name_w)));
+    parts.push((p.txt.as_str(), there.format("%H:%M").to_string()));
+    parts.push((
+        p.dim.as_str(),
+        format!("  {}  {}", there.format("%a"), offset_str(there)),
+    ));
+    parts.push((
+        p.dim.as_str(),
+        match day_shift {
+            0 => String::new(),
+            d if d > 0 => format!("    +{d}d"),
+            d => format!("    {d}d"),
+        },
+    ));
+    tc::seg(&parts, width.saturating_sub(1))
+}
+
+/// Widest condition glyph, so a clear row and a rain row share a column.
+fn condition_cell_width() -> usize {
+    (0..=99)
+        .map(|code| tc::display_width(parse::condition_glyph(code)))
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn city_glyph<'a>(city: &City, slots: &'a [weather::CityWeather]) -> Option<&'a str> {
+    let place = city.place.as_ref()?;
+    let slot = slots.iter().find(|slot| {
+        slot.name == city.name
+            && slot.zone == city.zone.name()
+            && slot.latitude == place.latitude
+            && slot.longitude == place.longitude
+    })?;
+    match slot.outcome {
+        weather::CityOutcome::Ready { code } => Some(parse::condition_glyph(code)),
+        _ => None,
+    }
+}
+
+/// Why this city's weather is absent, when the absence is a fault.
+/// A pair with no coordinates is not a fault. Waiting is not a fault.
+fn city_problem(city: &City, slots: &[weather::CityWeather]) -> Option<String> {
+    if let Some(why) = &city.coord_error {
+        return Some(why.clone());
+    }
+    let place = city.place.as_ref()?;
+    let slot = slots.iter().find(|slot| {
+        slot.name == city.name
+            && slot.zone == city.zone.name()
+            && slot.latitude == place.latitude
+            && slot.longitude == place.longitude
+    })?;
+    match &slot.outcome {
+        weather::CityOutcome::Failed(why) => Some(why.clone()),
+        _ => None,
+    }
+}
+
+fn city_weather_note_blocks(
+    ordered: &[&City],
+    slots: &[weather::CityWeather],
+    width: usize,
+    p: &Palette,
+) -> Vec<Vec<String>> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for city in ordered {
+        let Some(why) = city_problem(city, slots) else {
+            continue;
+        };
+        if let Some((_, names)) = groups.iter_mut().find(|(reason, _)| reason == &why) {
+            names.push(city.name.clone());
+        } else {
+            groups.push((why, vec![city.name.clone()]));
+        }
+    }
+    let room = width.saturating_sub(1);
+    groups
+        .into_iter()
+        .map(|(why, names)| {
+            let who = names
+                .iter()
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let text = if who.is_empty() {
+                why
+            } else {
+                format!("{who}: {why}")
+            };
+            note_rows(&text, room, &p.txt)
+        })
+        .collect()
 }
 
 /// Colour and glyph for what people there are plausibly doing.
@@ -1627,17 +1801,19 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
     // of our own for the answer they gave is the widget telling them about
     // somewhere they did not ask about.
     let asked = cfg.get("cities").and_then(|v| v.as_array()).is_some();
-    if let Some(items) = cfg.get("cities").and_then(|v| v.as_array()) {
-        for pair in items {
-            let name = pair.get(0).and_then(|v| v.as_str()).unwrap_or("");
-            let zone = pair.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            if let Ok(tz) = zone.parse::<Tz>() {
-                out.push(City {
-                    name: name.to_string(),
-                    zone: tz,
-                });
-            }
-        }
+    for spec in weather::read_cities(cfg) {
+        // `read_cities` already kept only zones that parse. Parsing again
+        // is the type the clock face needs; a failure here is the same
+        // drop as before.
+        let Ok(tz) = spec.zone.parse::<Tz>() else {
+            continue;
+        };
+        out.push(City {
+            name: spec.name,
+            zone: tz,
+            place: spec.place,
+            coord_error: spec.coord_error,
+        });
     }
     if !out.is_empty() {
         return out;
@@ -1645,7 +1821,8 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
     // Only when nothing was configured. A list that was set and parsed to
     // nothing - empty, or every zone a typo - is left empty, so the row that
     // is missing is the question rather than a plausible answer to a
-    // different one.
+    // different one. The defaults are clocks, not weather: a coordinate
+    // is never invented for them.
     if out.is_empty() && !asked {
         for (name, zone) in [
             ("San Francisco", "America/Los_Angeles"),
@@ -1657,6 +1834,8 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
                 out.push(City {
                     name: name.into(),
                     zone: tz,
+                    place: None,
+                    coord_error: None,
                 });
             }
         }
@@ -2181,10 +2360,14 @@ mod tests {
             City {
                 name: "Lagos".into(),
                 zone: "Africa/Lagos".parse().unwrap(),
+                place: None,
+                coord_error: None,
             },
             City {
                 name: "London".into(),
                 zone: "Europe/London".parse().unwrap(),
+                place: None,
+                coord_error: None,
             },
         ];
         let london: Tz = "Europe/London".parse().unwrap();
@@ -2223,6 +2406,187 @@ mod tests {
         });
         let got: Vec<_> = load_cities(&cfg).into_iter().map(|c| c.name).collect();
         assert_eq!(got, ["Tokyo", "San Francisco", "London"]);
+        assert!(load_cities(&cfg).iter().all(|city| city.place.is_none()));
+    }
+
+    #[test]
+    fn a_city_without_coordinates_is_only_a_clock() {
+        let cfg = serde_json::json!({
+            "cities": [
+                ["Tokyo", "Asia/Tokyo"],
+                ["London", "Europe/London", 51.5],
+                ["Nope", "Not/AZone", 1, 2],
+                ["Here", "Etc/UTC", 0, 0]
+            ]
+        });
+        let got = load_cities(&cfg);
+        assert_eq!(
+            got.iter().map(|city| city.name.as_str()).collect::<Vec<_>>(),
+            ["Tokyo", "London", "Here"]
+        );
+        assert!(got[0].place.is_none());
+        assert!(got[0].coord_error.is_none());
+        assert!(got[1].place.is_none());
+        assert!(got[1].coord_error.as_deref().unwrap().contains("longitude"));
+        assert_eq!(got[2].place.unwrap().latitude, 0.0);
+        assert_eq!(got[2].place.unwrap().longitude, 0.0);
+    }
+
+    fn sample_city(name: &str, zone: &str, place: Option<(f64, f64)>, err: Option<&str>) -> City {
+        City {
+            name: name.into(),
+            zone: zone.parse().unwrap(),
+            place: place.map(|(latitude, longitude)| weather::LatLon { latitude, longitude }),
+            coord_error: err.map(str::to_string),
+        }
+    }
+
+    fn clock_time_column(row: &str) -> Option<usize> {
+        let plain = strip_ansi(row);
+        let chars: Vec<char> = plain.chars().collect();
+        let at = chars.windows(5).position(|window| {
+            window[0].is_ascii_digit()
+                && window[1].is_ascii_digit()
+                && window[2] == ':'
+                && window[3].is_ascii_digit()
+                && window[4].is_ascii_digit()
+        })?;
+        let prefix: String = chars[..at].iter().collect();
+        Some(tc::display_width(&prefix))
+    }
+
+    #[test]
+    fn a_world_clock_glyph_is_a_reading_and_a_miss_is_not_a_temperature() {
+        let p = palette();
+        // Wednesday. Tokyo is 21:00, which is evening, so the day/night mark
+        // is a moon — a weather sun from a mismatched slot cannot hide in it.
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let tokyo = sample_city("Tokyo", "Asia/Tokyo", Some((35.68, 139.69)), None);
+        let london = sample_city("London", "Europe/London", None, None);
+        let ready = vec![weather::CityWeather {
+            name: "Tokyo".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Ready { code: 61 },
+        }];
+        let mut scroll = 0usize;
+        let rows = world_clock_rows(
+            &[&tokyo, &london],
+            &ready,
+            &mut scroll,
+            8,
+            80,
+            &now,
+            &p,
+        );
+        let text = rows.join("\n");
+        assert!(text.contains('☂'), "{text}");
+        assert!(text.contains("Tokyo"), "{text}");
+        assert!(text.contains("London"), "{text}");
+        assert!(!text.contains('°'), "{text}");
+        assert!(!text.contains("0.0"), "{text}");
+        let times: Vec<_> = rows.iter().filter_map(|row| clock_time_column(row)).collect();
+        assert_eq!(times.len(), 2, "{text}");
+        assert_eq!(times[0], times[1], "the condition column stays aligned\n{text}");
+        for row in &rows {
+            assert!(tc::display_width(row) <= 79, "{row}");
+        }
+
+        // A slot for a different coordinate is not this city's weather.
+        let other = vec![weather::CityWeather {
+            name: "Tokyo".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            outcome: weather::CityOutcome::Ready { code: 0 },
+        }];
+        let mismatched = world_clock_rows(&[&tokyo], &other, &mut scroll, 6, 80, &now, &p);
+        let mismatched_text = mismatched.join("\n");
+        assert!(!mismatched_text.contains('☀'), "{mismatched_text}");
+        assert!(!mismatched_text.contains('°'), "{mismatched_text}");
+
+        let failed = vec![weather::CityWeather {
+            name: "Tokyo".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Failed("weather unavailable: offline".into()),
+        }];
+        let missed = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 80, &now, &p);
+        let missed_text = missed.join("\n");
+        assert!(missed_text.contains("offline"), "{missed_text}");
+        assert!(missed_text.contains("Tokyo"), "{missed_text}");
+        assert!(!missed_text.contains('☂'), "{missed_text}");
+        assert!(!missed_text.contains('°'), "{missed_text}");
+        assert!(!missed_text.contains("0.0"), "{missed_text}");
+        assert!(
+            missed.iter().any(|row| strip_ansi(row).contains("21:00")),
+            "the clock stays when the fetch fails\n{missed_text}"
+        );
+
+        let waiting = vec![weather::CityWeather {
+            name: "Tokyo".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Waiting,
+        }];
+        let pending = world_clock_rows(&[&tokyo], &waiting, &mut scroll, 6, 40, &now, &p);
+        let pending_text = pending.join("\n");
+        assert!(!pending_text.contains('☂'), "{pending_text}");
+        assert!(!pending_text.contains('°'), "{pending_text}");
+        assert!(!pending_text.contains("offline"), "{pending_text}");
+
+        let broken = sample_city(
+            "London",
+            "Europe/London",
+            None,
+            Some("weather: set longitude as well as latitude"),
+        );
+        let noted = world_clock_rows(&[&broken], &[], &mut scroll, 6, 80, &now, &p);
+        let noted_text = noted.join("\n");
+        assert!(noted_text.contains("longitude"), "{noted_text}");
+        assert!(noted_text.contains("London"), "{noted_text}");
+        assert!(!noted_text.contains('°'), "{noted_text}");
+
+        let narrow = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 24, &now, &p);
+        assert!(narrow.len() > 2, "a narrow miss wraps");
+        for row in &narrow {
+            assert!(tc::display_width(row) <= 23, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_list_with_no_coordinates_keeps_the_old_column() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+        let london = sample_city("London", "Europe/London", None, None);
+        let tokyo = sample_city("Tokyo", "Asia/Tokyo", Some((35.68, 139.69)), None);
+        let mut scroll = 0usize;
+        let lone = world_clock_rows(&[&london], &[], &mut scroll, 4, 80, &now, &p);
+        let with = world_clock_rows(
+            &[&london, &tokyo],
+            &[weather::CityWeather {
+                name: "Tokyo".into(),
+                zone: "Asia/Tokyo".into(),
+                latitude: 35.68,
+                longitude: 139.69,
+                outcome: weather::CityOutcome::Ready { code: 2 },
+            }],
+            &mut scroll,
+            6,
+            80,
+            &now,
+            &p,
+        );
+        let lone_at = clock_time_column(&lone[1]).unwrap();
+        let london_row = with.iter().find(|row| strip_ansi(row).contains("London")).unwrap();
+        let with_at = clock_time_column(london_row).unwrap();
+        assert!(
+            with_at > lone_at,
+            "a condition column is reserved once any city opted in ({lone_at} vs {with_at})"
+        );
     }
 
     #[test]

@@ -2268,7 +2268,10 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
         }
         None => rows.push(match picker_kind(app, &key) {
             // A pair, so the pane has something to print that is not a
-            // database identifier.
+            // database identifier. Clocks may store latitude and longitude
+            // after the zone; this screen never writes them, and it does
+            // not strip them off a row it is not removing. Adding is a new
+            // pair. Removing drops the whole entry.
             Some(PickKind::Timezone) => Value::Array(vec![
                 Value::String(label.unwrap_or_else(|| zone_label(zone))),
                 Value::String(zone.to_string()),

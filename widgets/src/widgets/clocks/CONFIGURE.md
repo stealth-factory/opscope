@@ -4,7 +4,7 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-The machine clock, IANA timezone data, and timers maintained by this process. Current weather, when latitude and longitude are set, comes from one Open-Meteo request for those coordinates. No API key.
+The machine clock, IANA timezone data, and timers maintained by this process. Current weather, when latitude and longitude are set, comes from Open-Meteo. No API key. That is one request for `weather_latitude` and `weather_longitude`, plus one request for each `cities` row written as `[label, zone, latitude, longitude]`.
 
 ## Settings owned here
 
@@ -16,7 +16,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Read the machine timezone if useful. Ask which cities, work hours, and work days belong to the user; do not infer them from IP location. Ask whether current weather should be shown and, if so, for the latitude and longitude. Do not infer coordinates from IP, from a city name, or from a timezone. Leave both fields null when weather should stay off. A label is optional text and is not used to choose the place.
+1. Read the machine timezone if useful. Ask which cities, work hours, and work days belong to the user; do not infer them from IP location. Ask whether current weather should be shown and, if so, for the latitude and longitude. Do not infer coordinates from IP, from a city name, or from a timezone. Leave both weather fields null when that single place should stay off. A label is optional text and is not used to choose the place. A world-clock row stays `[label, zone]` unless the user supplies that city's latitude and longitude; only then is it `[label, zone, latitude, longitude]`. The timezone picker writes pairs and leaves a longer row's coordinates in place when it is not the row being removed. Never fill those two numbers in yourself.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Pomodoro lengths and notification choices are preferences, so ask rather than guessing.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.

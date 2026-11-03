@@ -3,7 +3,8 @@
 [← all widgets](../../../../docs/README.md)
 
 This server's clock, the clocks counting down, a pomodoro, everyone else's
-clock, and the current weather for one configured place.
+clock, the current weather for one configured place, and a condition glyph
+on each world-clock city that has its own coordinates.
 
 ```
 ╺━ CLOCKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -26,9 +27,9 @@ clock, and the current weather for one configured place.
  ████████████████████████████████░░░░░░░░░░░░░░
 
  ── WORLD CLOCK ──  1-12 of 19  ↑↓
- ☾ San Francisco   06:11  Thu  UTC-7
- ☀ London          11:11  Thu  UTC+1
- ☾ Taipei          18:11  Thu  UTC+8
+ ☾ San Francisco  ☁  06:11  Thu  UTC-7
+ ☀ London         ☂  11:11  Thu  UTC+1
+ ☾ Taipei            18:11  Thu  UTC+8
 ```
 
 ## Sections
@@ -55,6 +56,18 @@ the countdowns, and the world clock keep drawing. Nothing is substituted
 for a reading that was not fetched. There is no forecast, no history, and
 no chart. The sun and moon on a world-clock row are day and night in that
 zone, not the weather there.
+
+A world-clock row opts into its own glyph by being written `[label, zone,
+latitude, longitude]`. The glyph is the same WMO table as the place above,
+drawn in its own column so it is not the day/night mark. A `[label, zone]`
+pair is unchanged and the column stays blank on that row. Taipei in the
+picture has no coordinates, so it has a time and no glyph. A failed fetch
+for a city that did opt in leaves the time, names the miss under the
+heading, and does not draw a temperature. The other cities, the countdowns,
+and the server clock keep drawing. Coordinates are never taken from the
+label, the zone, or the machine. The timezone list in settings writes
+pairs; it does not invent the two numbers, and it leaves them on a row it
+is not removing.
 
 A successful observation is refreshed about every fifteen minutes. A failure
 is tried again about once a minute. `curl` does the request. Without it the
@@ -85,7 +98,9 @@ offsets (`UTC+5:30`) and `+1d` / `-1d` date rollovers are handled. Scroll with
 the arrow keys when the list is taller than the pane; everything else stays
 pinned. The order is recomputed every frame so a pane left up across a DST
 change keeps being a map: London is west of a UTC+1 neighbour in winter and
-level with it in summer.
+level with it in summer. The leading sun or moon is day and night. A
+condition glyph in the next column is that city's current weather, and only
+when the row carries a latitude and longitude that returned a reading.
 
 ## Pomodoro
 
@@ -148,7 +163,10 @@ shown — are not tied to the day and survive.
 
 ```json
 "clocks": {
-  "cities": [["San Francisco", "America/Los_Angeles"], ["Tokyo", "Asia/Tokyo"]],
+  "cities": [
+    ["San Francisco", "America/Los_Angeles", 37.77, -122.42],
+    ["Tokyo", "Asia/Tokyo"]
+  ],
   "weather_latitude": null,
   "weather_longitude": null,
   "weather_label": "",
@@ -170,7 +188,10 @@ shown — are not tied to the day and survive.
 ```
 
 `cities` is unordered. Rows are west to east by current UTC offset, with the
-name as tie-break, so arranging them in `config.json` does nothing.
+name as tie-break, so arranging them in `config.json` does nothing. A row of
+two fields is a clock. A row of four fields is a clock plus a current-conditions
+glyph for that latitude and longitude. One coordinate without the other is
+reported and not fetched, and the clock still draws.
 
 `weather_latitude` and `weather_longitude` are degrees. Leave both null to
 keep weather off. Set both, and only both, to fetch. A label does not

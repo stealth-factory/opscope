@@ -46,6 +46,13 @@ drawn in its place, and a failed request clears the previous reading rather
 than leaving it up as if it were still current. The sun and moon on a world
 clock row are day and night there, not that city's weather.
 
+A city written as label, zone, latitude, longitude also gets a condition
+glyph for its own current weather, from the same source, in a column of
+its own. A label and zone pair is unchanged and has no glyph. Coordinates
+are never taken from the label, the timezone, or the machine. When that
+city's request fails, its clock stays and the section says why, with no
+temperature standing in for the miss. There is still no forecast.
+
 Below the countdowns, each hub is shown in its own timezone, west to east
 by current offset — name as tie-break, config order ignored — coloured by
 whether people there are plausibly at work.
