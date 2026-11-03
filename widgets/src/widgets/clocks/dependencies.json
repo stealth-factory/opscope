@@ -3,7 +3,7 @@
   "recommended": {
     "curl": {
       "version": "*",
-      "why": "Current weather is fetched from Open-Meteo. Without curl the clock still runs and the weather row says why it cannot."
+      "why": "Current weather is fetched from Open-Meteo, for the configured place and for each world-clock city that has coordinates. Without curl the clock still runs and the pane says why it cannot."
     },
     "herdr": {
       "version": "*",

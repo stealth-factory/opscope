@@ -230,11 +230,50 @@ fn named_kind(value: &Value, kind: &str) -> bool {
     }
 }
 
+/// A world-clock row the timezone picker is allowed to write back.
+///
+/// The picker itself writes `[label, zone]`. A row that already carries
+/// latitude and longitude — or a broken attempt at them — has to survive
+/// that write, or opening settings and adding a city would refuse the file.
+fn timezone_city_row(row: &Value) -> bool {
+    let Some(items) = row.as_array() else {
+        return false;
+    };
+    items.len() >= 2 && items[0].is_string() && items[1].is_string()
+}
+
+/// `Some` when this value is a timezone list and has been judged.
+/// `None` when the field is not one, so the ordinary rules still apply.
+fn timezone_list(
+    value: &Value,
+    expected: &Value,
+    rule: Option<&Value>,
+) -> Option<Result<(), String>> {
+    let picker = rule
+        .and_then(Value::as_object)
+        .and_then(|rule| rule.get("picker"))
+        .and_then(Value::as_str)?;
+    if picker != "timezone" || !expected.is_array() || !value.is_array() {
+        return None;
+    }
+    let rows = value.as_array()?;
+    if rows.iter().all(timezone_city_row) {
+        Some(Ok(()))
+    } else {
+        Some(Err(
+            "each city is [label, zone] or [label, zone, latitude, longitude]".into(),
+        ))
+    }
+}
+
 fn validate_value(
     value: &Value,
     expected: &Value,
     rule: Option<&Value>,
 ) -> Result<(), String> {
+    if let Some(outcome) = timezone_list(value, expected, rule) {
+        return outcome;
+    }
     // A null default means the widget has no figure to offer, not that null
     // is the type it wants - a model the rate card does not carry has every
     // kind and a price for none of them. Demanding null back made those rows
@@ -4506,6 +4545,23 @@ mod tests {
         assert!(validate_value(&serde_json::json!("x"), &Value::Null, None).is_ok());
         // A declared type is still enforced where there is one.
         assert!(validate_value(&serde_json::json!("x"), &serde_json::json!(1.0), None).is_err());
+        let cities = serde_json::json!({"picker": "timezone"});
+        let shipped = serde_json::json!([["San Francisco", "America/Los_Angeles"]]);
+        let with_coords = serde_json::json!([
+            ["San Francisco", "America/Los_Angeles"],
+            ["Lisbon", "Europe/Lisbon", 38.72, -9.14],
+            ["Half", "Europe/Lisbon", 38.72]
+        ]);
+        assert_eq!(validate_value(&with_coords, &shipped, Some(&cities)), Ok(()));
+        assert_eq!(
+            validate_value(
+                &serde_json::json!([["Tokyo", "Asia/Tokyo"]]),
+                &shipped,
+                Some(&cities)
+            ),
+            Ok(())
+        );
+        assert!(validate_value(&serde_json::json!(["Europe/Lisbon"]), &shipped, Some(&cities)).is_err());
     }
 
     /// An App holding one field, for asking what kind of picker it gets.

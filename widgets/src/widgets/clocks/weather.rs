@@ -24,9 +24,10 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use chrono_tz::Tz;
 use opscope_core as tc;
 
-use crate::parse::{self, CurrentConditions};
+use crate::parse::{self, CityCoords, CurrentConditions};
 
 /// How long a successful observation stays up before the next request.
 /// Open-Meteo's current block moves on a fifteen-minute step.
@@ -52,6 +53,15 @@ pub enum View {
     Failed(String),
 }
 
+/// A world-clock row's own conditions. `Glyph` is the only arm that came
+/// back from a request. A miss is `Failed` and carries no temperature.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CityFace {
+    Pending,
+    Glyph(i64),
+    Failed(String),
+}
+
 /// A reading that came back from a request on this run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
@@ -66,6 +76,30 @@ struct WeatherState {
     err: String,
     reading: Option<Reading>,
     waiting: bool,
+    cities: Vec<CityMark>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CityMark {
+    key: String,
+    outcome: CityOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CityOutcome {
+    Pending,
+    Glyph(i64),
+    Failed(String),
+}
+
+struct Target {
+    key: String,
+    action: TargetAction,
+}
+
+enum TargetAction {
+    Fetch(f64, f64),
+    Invalid(String),
 }
 
 enum Event {
@@ -81,6 +115,7 @@ impl WeatherState {
             err: String::new(),
             reading: None,
             waiting: false,
+            cities: Vec::new(),
         };
         publish(&mut state, event_for_place(place));
         state
@@ -99,6 +134,17 @@ impl WeatherState {
             View::Waiting
         } else {
             View::Unset
+        }
+    }
+
+    fn city_face(&self, key: &str) -> CityFace {
+        match self.cities.iter().find(|mark| mark.key == key) {
+            Some(mark) => match &mark.outcome {
+                CityOutcome::Pending => CityFace::Pending,
+                CityOutcome::Glyph(code) => CityFace::Glyph(*code),
+                CityOutcome::Failed(why) => CityFace::Failed(why.clone()),
+            },
+            None => CityFace::Pending,
         }
     }
 }
@@ -239,6 +285,7 @@ fn stop(state: &Mutex<WeatherState>, why: &str) {
     if let Ok(mut guard) = state.lock() {
         guard.reading = None;
         guard.waiting = false;
+        guard.cities.clear();
         guard.err = format!("poller stopped: {why}");
     }
 }
@@ -253,52 +300,190 @@ fn lock_publish(state: &Mutex<WeatherState>, event: Event) -> Result<(), ()> {
     }
 }
 
-fn step(state: &Mutex<WeatherState>, activity: &tc::Refresh) -> Step {
-    match weather_place(&tc::load_config("clocks")) {
-        Ok(None) => {
-            if lock_publish(state, Event::Unset).is_err() {
-                return Step::Stop("the weather lock was poisoned".into());
-            }
-            Step::Wait(RETRY_EVERY)
+/// Identity of one opted-in city. The label and the zone are not
+/// coordinates; they only keep two rows that share a point distinct.
+pub fn city_key(label: &str, zone: &str, latitude: f64, longitude: f64) -> String {
+    format!("{label}\n{zone}\n{latitude:.6}\n{longitude:.6}")
+}
+
+/// Cities that opted into weather, in file order, duplicates skipped.
+///
+/// A `[label, zone]` pair is not here. An unknown zone is not here either:
+/// the world clock drops it, and a request for a row that is not drawn
+/// would be a reading with nowhere to put it.
+fn city_targets(cfg: &serde_json::Value) -> Vec<Target> {
+    let items = cfg
+        .get("cities")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let Ok(text) = serde_json::to_string(item) else {
+            continue;
+        };
+        let Ok(spec) = parse::parse_city_entry(&text) else {
+            continue;
+        };
+        if spec.zone.parse::<Tz>().is_err() {
+            continue;
         }
-        Err(why) => {
-            if lock_publish(state, Event::Failed(why)).is_err() {
-                return Step::Stop("the weather lock was poisoned".into());
-            }
-            Step::Wait(RETRY_EVERY)
+        let (key, action) = match spec.coords {
+            CityCoords::Absent => continue,
+            CityCoords::At {
+                latitude,
+                longitude,
+            } => (
+                city_key(&spec.label, &spec.zone, latitude, longitude),
+                TargetAction::Fetch(latitude, longitude),
+            ),
+            CityCoords::Invalid(why) => (
+                format!("invalid\n{}\n{}\n{why}", spec.label, spec.zone),
+                TargetAction::Invalid(why),
+            ),
+        };
+        if seen.insert(key.clone()) {
+            out.push(Target { key, action });
         }
-        Ok(Some(place)) => fetch_into(state, activity, place),
+    }
+    out
+}
+
+fn remember_cities(state: &mut WeatherState, targets: &[Target]) {
+    let keys: Vec<&str> = targets.iter().map(|t| t.key.as_str()).collect();
+    state
+        .cities
+        .retain(|mark| keys.contains(&mark.key.as_str()));
+    for target in targets {
+        if state.cities.iter().any(|mark| mark.key == target.key) {
+            continue;
+        }
+        let outcome = match &target.action {
+            TargetAction::Invalid(why) => CityOutcome::Failed(why.clone()),
+            TargetAction::Fetch(_, _) => CityOutcome::Pending,
+        };
+        state.cities.push(CityMark {
+            key: target.key.clone(),
+            outcome,
+        });
     }
 }
 
-fn fetch_into(state: &Mutex<WeatherState>, activity: &tc::Refresh, place: Place) -> Step {
+fn set_city(state: &mut WeatherState, key: &str, outcome: CityOutcome) {
+    if let Some(mark) = state.cities.iter_mut().find(|mark| mark.key == key) {
+        mark.outcome = outcome;
+    } else {
+        state.cities.push(CityMark {
+            key: key.to_string(),
+            outcome,
+        });
+    }
+}
+
+enum Attempt {
+    Ready(CurrentConditions),
+    Failed(String),
+    Panic(String),
+}
+
+fn attempt(latitude: f64, longitude: f64) -> Attempt {
+    let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fetch_current(latitude, longitude)
+    }));
+    match fetched {
+        Ok(Ok(conditions)) => Attempt::Ready(conditions),
+        Ok(Err(why)) => Attempt::Failed(as_failure(why)),
+        Err(payload) => Attempt::Panic(unwind_reason(payload)),
+    }
+}
+
+fn step(state: &Mutex<WeatherState>, activity: &tc::Refresh) -> Step {
+    let cfg = tc::load_config("clocks");
+    let home = weather_place(&cfg);
+    let targets = city_targets(&cfg);
     let keep_reading = match state.lock() {
         Ok(guard) => guard.reading.is_some(),
         Err(_) => return Step::Stop("the weather lock was poisoned".into()),
     };
-    if !keep_reading && lock_publish(state, Event::Waiting).is_err() {
+    // A refresh keeps the last success on screen until this request
+    // returns. Waiting is only the first request, when there is no reading.
+    let home_event = match (&home, keep_reading) {
+        (Ok(Some(_)), true) => None,
+        (Ok(Some(_)), false) => Some(Event::Waiting),
+        (Ok(None), _) => Some(Event::Unset),
+        (Err(why), _) => Some(Event::Failed(why.clone())),
+    };
+    if let Some(event) = home_event {
+        if lock_publish(state, event).is_err() {
+            return Step::Stop("the weather lock was poisoned".into());
+        }
+    }
+    if state
+        .lock()
+        .map(|mut guard| remember_cities(&mut guard, &targets))
+        .is_err()
+    {
         return Step::Stop("the weather lock was poisoned".into());
     }
-    let work = activity.start();
-    let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fetch_current(place.latitude, place.longitude)
-    }));
-    drop(work);
-    match fetched {
-        Ok(Ok(conditions)) => {
-            let reading = reading_from(&place.label, conditions);
-            if lock_publish(state, Event::Ready(reading)).is_err() {
-                return Step::Stop("the weather lock was poisoned".into());
-            }
-            Step::Wait(SUCCESS_EVERY)
+
+    let mut fetches: Vec<(String, f64, f64)> = Vec::new();
+    if let Ok(Some(place)) = &home {
+        fetches.push(("home".into(), place.latitude, place.longitude));
+    }
+    for target in &targets {
+        if let TargetAction::Fetch(latitude, longitude) = target.action {
+            fetches.push((target.key.clone(), latitude, longitude));
         }
-        Ok(Err(why)) => {
-            if lock_publish(state, Event::Failed(as_failure(why))).is_err() {
-                return Step::Stop("the weather lock was poisoned".into());
-            }
-            Step::Wait(RETRY_EVERY)
+    }
+    let mut attempts = Vec::new();
+    if !fetches.is_empty() {
+        let work = activity.start();
+        for (key, latitude, longitude) in &fetches {
+            attempts.push((key.clone(), attempt(*latitude, *longitude)));
         }
-        Err(payload) => Step::Stop(unwind_reason(payload)),
+        drop(work);
+    }
+
+    let mut retry = matches!(home, Err(_))
+        || targets
+            .iter()
+            .any(|target| matches!(target.action, TargetAction::Invalid(_)))
+        || fetches.is_empty();
+    let Ok(mut guard) = state.lock() else {
+        return Step::Stop("the weather lock was poisoned".into());
+    };
+    for (key, attempt) in attempts {
+        match attempt {
+            Attempt::Panic(why) => return Step::Stop(why),
+            Attempt::Failed(why) => {
+                retry = true;
+                if key == "home" {
+                    publish(&mut guard, Event::Failed(why));
+                } else {
+                    set_city(&mut guard, &key, CityOutcome::Failed(why));
+                }
+            }
+            Attempt::Ready(conditions) => {
+                if key == "home" {
+                    let label = match &home {
+                        Ok(Some(place)) => place.label.clone(),
+                        _ => String::new(),
+                    };
+                    publish(&mut guard, Event::Ready(reading_from(&label, conditions)));
+                } else {
+                    // The code is the glyph. The temperature was required
+                    // to accept the body and is not stored: a city row has
+                    // no number to invent a zero into.
+                    set_city(&mut guard, &key, CityOutcome::Glyph(conditions.code));
+                }
+            }
+        }
+    }
+    if retry {
+        Step::Wait(RETRY_EVERY)
+    } else {
+        Step::Wait(SUCCESS_EVERY)
     }
 }
 
@@ -368,6 +553,18 @@ impl Feed {
         match self.state.lock() {
             Ok(guard) => guard.view(),
             Err(_) => View::Failed("weather unavailable: the weather lock was poisoned".into()),
+        }
+    }
+
+    /// The glyph for one opted-in city, or why that city's request failed.
+    ///
+    /// A key this pass does not know is `Pending`: no glyph, and no
+    /// invented reading. The weather row, not this one, carries a poller
+    /// that stopped.
+    pub fn city_face(&self, key: &str) -> CityFace {
+        match self.state.lock() {
+            Ok(guard) => guard.city_face(key),
+            Err(_) => CityFace::Failed("weather unavailable: the weather lock was poisoned".into()),
         }
     }
 
@@ -524,6 +721,91 @@ mod tests {
             View::Ready(reading) => assert_eq!(reading.celsius, 0.0),
             other => panic!("a fetched zero is a reading, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pair_is_not_a_weather_target() {
+        let cfg = serde_json::json!({
+            "cities": [
+                ["Tokyo", "Asia/Tokyo"],
+                ["Lisbon", "Europe/Lisbon", 38.72, -9.14],
+                ["Gone", "Not/AZone", 1, 2],
+                ["Origin", "Etc/UTC", 0, 0]
+            ]
+        });
+        let keys: Vec<_> = city_targets(&cfg).into_iter().map(|t| t.key).collect();
+        assert!(
+            !keys.iter().any(|k| k.contains("Tokyo")),
+            "a label and a zone are not a place: {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.contains("Not/AZone")),
+            "an unknown zone is not fetched: {keys:?}"
+        );
+        assert!(keys.contains(&city_key("Lisbon", "Europe/Lisbon", 38.72, -9.14)));
+        assert!(keys.contains(&city_key("Origin", "Etc/UTC", 0.0, 0.0)));
+    }
+
+    #[test]
+    fn a_failed_city_request_drops_its_glyph() {
+        let mut state = WeatherState::from_place(Ok(None));
+        let key = city_key("Lisbon", "Europe/Lisbon", 38.72, -9.14);
+        set_city(&mut state, &key, CityOutcome::Glyph(2));
+        assert_eq!(state.city_face(&key), CityFace::Glyph(2));
+        set_city(
+            &mut state,
+            &key,
+            CityOutcome::Failed("weather unavailable: offline".into()),
+        );
+        match state.city_face(&key) {
+            CityFace::Failed(why) => {
+                assert!(why.contains("offline"), "{why}");
+                assert!(!why.contains('°'), "{why}");
+                assert!(!why.contains("0.0"), "{why}");
+            }
+            other => panic!("expected the miss, got {other:?}"),
+        }
+        assert_eq!(
+            state.city_face("other"),
+            CityFace::Pending,
+            "a city with no request has no glyph"
+        );
+    }
+
+    #[test]
+    fn one_city_failing_leaves_another_city_glyph() {
+        let mut state = WeatherState::from_place(Ok(None));
+        let lisbon = city_key("Lisbon", "Europe/Lisbon", 38.72, -9.14);
+        let tokyo = city_key("Tokyo", "Asia/Tokyo", 35.68, 139.69);
+        set_city(&mut state, &lisbon, CityOutcome::Glyph(1));
+        set_city(&mut state, &tokyo, CityOutcome::Glyph(3));
+        set_city(
+            &mut state,
+            &tokyo,
+            CityOutcome::Failed("weather unavailable: offline".into()),
+        );
+        assert_eq!(state.city_face(&lisbon), CityFace::Glyph(1));
+        assert!(matches!(state.city_face(&tokyo), CityFace::Failed(_)));
+    }
+
+    #[test]
+    fn a_poller_stopping_clears_city_glyphs() {
+        let state = Mutex::new(WeatherState::from_place(Ok(Some(Place {
+            latitude: 1.0,
+            longitude: 2.0,
+            label: String::new(),
+        }))));
+        let key = city_key("Lisbon", "Europe/Lisbon", 38.72, -9.14);
+        state.lock().unwrap().cities.push(CityMark {
+            key: key.clone(),
+            outcome: CityOutcome::Glyph(0),
+        });
+        stop(&state, "the request panicked");
+        let guard = state.lock().unwrap();
+        assert!(guard.city_face(&key) != CityFace::Glyph(0));
+        assert!(guard.err.contains("poller stopped"));
+        assert!(guard.reading.is_none());
+        assert!(!guard.err.contains('°'));
     }
 
     #[test]

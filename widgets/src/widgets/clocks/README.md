@@ -26,9 +26,9 @@ clock, and the current weather for one configured place.
  ████████████████████████████████░░░░░░░░░░░░░░
 
  ── WORLD CLOCK ──  1-12 of 19  ↑↓
- ☾ San Francisco   06:11  Thu  UTC-7
- ☀ London          11:11  Thu  UTC+1
- ☾ Taipei          18:11  Thu  UTC+8
+ ☾ San Francisco     06:11     Thu  UTC-7
+ ☀ London            14:11  ◑  Thu  UTC+1
+ ☾ Taipei            18:11     Thu  UTC+8
 ```
 
 ## Sections
@@ -54,7 +54,9 @@ A request that fails clears that number, and the row says why — the clock,
 the countdowns, and the world clock keep drawing. Nothing is substituted
 for a reading that was not fetched. There is no forecast, no history, and
 no chart. The sun and moon on a world-clock row are day and night in that
-zone, not the weather there.
+zone, not the weather there. A second glyph beside the time is that city's
+own conditions, and only when the row was written with latitude and
+longitude.
 
 A successful observation is refreshed about every fifteen minutes. A failure
 is tried again about once a minute. `curl` does the request. Without it the
@@ -86,6 +88,16 @@ the arrow keys when the list is taller than the pane; everything else stays
 pinned. The order is recomputed every frame so a pane left up across a DST
 change keeps being a map: London is west of a UTC+1 neighbour in winter and
 level with it in summer.
+
+A row stored as `[label, zone, latitude, longitude]` asks Open-Meteo for
+that point and, once a response arrives, draws the condition glyph in the
+column beside the time. `[label, zone]` is still a complete city and draws
+no glyph. The label and the zone are not a location, and nothing is looked
+up from them. A request that fails leaves the time in place, names the
+reason under the row, and does not keep the previous glyph or substitute a
+temperature. One city's miss does not blank the others. There is no
+forecast, history, or chart on these rows either. The timezone picker
+writes two fields; coordinates are added on the row itself.
 
 ## Pomodoro
 
@@ -148,7 +160,7 @@ shown — are not tied to the day and survive.
 
 ```json
 "clocks": {
-  "cities": [["San Francisco", "America/Los_Angeles"], ["Tokyo", "Asia/Tokyo"]],
+  "cities": [["San Francisco", "America/Los_Angeles"], ["Tokyo", "Asia/Tokyo", 35.68, 139.69]],
   "weather_latitude": null,
   "weather_longitude": null,
   "weather_label": "",
@@ -170,7 +182,10 @@ shown — are not tied to the day and survive.
 ```
 
 `cities` is unordered. Rows are west to east by current UTC offset, with the
-name as tie-break, so arranging them in `config.json` does nothing.
+name as tie-break, so arranging them in `config.json` does nothing. Two
+fields are the city. Two more, latitude and longitude in degrees, opt that
+row into its own glyph. The sample Tokyo above is the shape, not a place
+the widget assumes.
 
 `weather_latitude` and `weather_longitude` are degrees. Leave both null to
 keep weather off. Set both, and only both, to fetch. A label does not

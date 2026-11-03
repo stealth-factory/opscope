@@ -17,8 +17,10 @@
 //! Clocks: this server's, everyone else's, and the ones counting down.
 //!
 //! A port of clocks.py: the big clock, the countdown bars, the pomodoro,
-//! and a world clock. Current weather for one configured place is fetched
-//! from Open-Meteo; the clock keeps drawing when that request fails.
+//! and a world clock. Current weather for one configured place, and a
+//! condition glyph on each world-clock row that carries its own
+//! coordinates, are fetched from Open-Meteo. The clock keeps drawing when
+//! a request fails.
 //! The timezone database is why the core carries one.
 
 use std::time::Duration;
@@ -1173,6 +1175,14 @@ impl Pomodoro {
 struct City {
     name: String,
     zone: Tz,
+    /// `Absent` for a `[label, zone]` pair. Coordinates are never inferred
+    /// from the label or the zone.
+    coords: parse::CityCoords,
+}
+
+struct RowWx {
+    glyph: Option<&'static str>,
+    why: Option<String>,
 }
 
 /// The weather row under the date. Only a ready reading carries a
@@ -1236,6 +1246,123 @@ fn note_rows(text: &str, room: usize, ink: &str) -> Vec<String> {
         rows.push(tc::seg(&[(ink, format!(" {current}"))], room));
     }
     rows
+}
+
+fn city_opted_in(city: &City) -> bool {
+    !matches!(city.coords, parse::CityCoords::Absent)
+}
+
+fn row_weather(city: &City, feed: &weather::Feed) -> RowWx {
+    match &city.coords {
+        parse::CityCoords::Absent => RowWx {
+            glyph: None,
+            why: None,
+        },
+        parse::CityCoords::Invalid(why) => RowWx {
+            glyph: None,
+            why: Some(why.clone()),
+        },
+        parse::CityCoords::At {
+            latitude,
+            longitude,
+        } => {
+            let key = weather::city_key(&city.name, city.zone.name(), *latitude, *longitude);
+            match feed.city_face(&key) {
+                weather::CityFace::Glyph(code) => RowWx {
+                    glyph: Some(parse::condition_glyph(code)),
+                    why: None,
+                },
+                weather::CityFace::Failed(why) => RowWx {
+                    glyph: None,
+                    why: Some(why),
+                },
+                weather::CityFace::Pending => RowWx {
+                    glyph: None,
+                    why: None,
+                },
+            }
+        }
+    }
+}
+
+fn extra_why_lines(why: Option<&str>, room: usize, ink: &str) -> usize {
+    match why {
+        Some(why) if !why.is_empty() => note_rows(why, room, ink).len().min(3),
+        _ => 0,
+    }
+}
+
+/// One city: the clock row, then up to three lines saying why its weather
+/// is missing. The clock row is always first, so a long refusal cannot
+/// push the time off.
+fn render_city_block<Z: TimeZone>(
+    city: &City,
+    now: &chrono::DateTime<Z>,
+    name_w: usize,
+    room: usize,
+    reserve: bool,
+    glyph: Option<&str>,
+    why: Option<&str>,
+    p: &Palette,
+) -> Vec<String> {
+    let there = now.with_timezone(&city.zone);
+    let (ink, phase) = phase_of(&there, p);
+    let day_shift = there
+        .date_naive()
+        .signed_duration_since(now.date_naive())
+        .num_days();
+    let mut parts = vec![(ink.as_str(), format!(" {phase} "))];
+    if reserve {
+        if let Some(glyph) = glyph {
+            parts.push((p.accent.as_str(), format!(" {glyph} ")));
+        } else {
+            parts.push((p.dim.as_str(), "   ".into()));
+        }
+    }
+    parts.push((p.txt.as_str(), tc::pad(&city.name, name_w)));
+    parts.push((p.txt.as_str(), there.format("%H:%M").to_string()));
+    parts.push((
+        p.dim.as_str(),
+        format!("  {}  {}", there.format("%a"), offset_str(&there)),
+    ));
+    parts.push((
+        p.dim.as_str(),
+        match day_shift {
+            0 => String::new(),
+            d if d > 0 => format!("    +{d}d"),
+            d => format!("    {d}d"),
+        },
+    ));
+    let mut rows = vec![tc::seg(&parts, room)];
+    if let Some(why) = why.filter(|why| !why.is_empty()) {
+        let mut notes = note_rows(why, room, &p.dim);
+        notes.truncate(3);
+        rows.extend(notes);
+    }
+    rows
+}
+
+/// How many lines each city from `scroll` may take. The heading is the
+/// caller’s first row and is not included.
+fn city_takes(heights: &[usize], scroll: usize, room: usize) -> Vec<usize> {
+    let mut used = 1usize;
+    let mut takes = Vec::new();
+    for height in heights.iter().skip(scroll) {
+        let height = (*height).max(1);
+        if used + height > room && !takes.is_empty() {
+            break;
+        }
+        let take = height.min(room.saturating_sub(used));
+        if take == 0 {
+            break;
+        }
+        used += take;
+        takes.push(take);
+        if used >= room {
+            break;
+        }
+    }
+    takes
 }
 
 fn main() {
@@ -1506,20 +1633,6 @@ fn main() {
             tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + ordered.len().min(2));
         }
         if room >= 2 && !ordered.is_empty() {
-            let shown = room.saturating_sub(1).min(ordered.len());
-            if scroll + shown > ordered.len() {
-                scroll = ordered.len().saturating_sub(shown);
-            }
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
-                    ),
-                ],
-                w - 1,
-            ));
             // The name grows with the pane rather than being cut at 16. The
             // glyph, the time, the day with a UTC+5:30 offset and a day shift
             // are the fixed cells, and one more keeps a full-length name off
@@ -1529,33 +1642,66 @@ fn main() {
                 .map(|c| tc::display_width(&c.name) + 1)
                 .max()
                 .unwrap_or(0);
-            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
-            for city in ordered.iter().skip(scroll).take(shown) {
-                let there = now.with_timezone(&city.zone);
-                // Sun or moon by the local hour, which is the fastest way
-                // to read "is it a reasonable time to message them".
-                let (ink, glyph) = phase_of(&there, &p);
-                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
+            // A coordinate on any row reserves a glyph column on every row,
+            // so the times stay aligned. A row that has not opted in leaves
+            // that column blank. It is not a weather glyph.
+            let reserve = ordered.iter().any(|city| city_opted_in(city));
+            let weather_cols = if reserve { 3 } else { 0 };
+            let name_w = tc::fit_columns(
+                (w - 1).saturating_sub(3 + weather_cols + 5 + 16 + 7),
+                &[(16, longest)],
+            )[0];
+            let pane = w.saturating_sub(1);
+            let faces: Vec<RowWx> = ordered.iter().map(|city| row_weather(city, &weather)).collect();
+            let heights: Vec<usize> = faces
+                .iter()
+                .map(|face| 1 + extra_why_lines(face.why.as_deref(), pane, &p.dim))
+                .collect();
+            if scroll >= ordered.len() {
+                scroll = ordered.len().saturating_sub(1);
+            }
+            // At the end of the list, pull the window back until it is full
+            // or the previous city would not fit. A short last page with
+            // cities above it is the list hiding itself.
+            while scroll > 0 {
+                let here = city_takes(&heights, scroll, room);
+                let above = city_takes(&heights, scroll - 1, room);
+                let reaches_end = scroll + here.len() >= ordered.len();
+                if reaches_end && above.len() > here.len() {
+                    scroll -= 1;
+                } else {
+                    break;
+                }
+            }
+            let takes = city_takes(&heights, scroll, room);
+            let shown = takes.len();
+            if shown > 0 {
                 rows.push(tc::seg(
                     &[
-                        (ink.as_str(), format!(" {} ", glyph)),
-                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
-                        (p.txt.as_str(), there.format("%H:%M").to_string()),
+                        (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
                         (
                             p.dim.as_str(),
-                            format!("  {}  {}", there.format("%a"), offset_str(&there)),
-                        ),
-                        (
-                            p.dim.as_str(),
-                            match day_shift {
-                                0 => String::new(),
-                                d if d > 0 => format!("    +{}d", d),
-                                d => format!("    {}d", d),
-                            },
+                            format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
                         ),
                     ],
                     w - 1,
                 ));
+                for (offset, take) in takes.into_iter().enumerate() {
+                    let index = scroll + offset;
+                    let face = &faces[index];
+                    let mut block = render_city_block(
+                        ordered[index],
+                        &now,
+                        name_w,
+                        pane,
+                        reserve,
+                        face.glyph,
+                        face.why.as_deref(),
+                        &p,
+                    );
+                    block.truncate(take);
+                    rows.extend(block);
+                }
             }
         }
 
@@ -1627,16 +1773,24 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
     // of our own for the answer they gave is the widget telling them about
     // somewhere they did not ask about.
     let asked = cfg.get("cities").and_then(|v| v.as_array()).is_some();
-    if let Some(items) = cfg.get("cities").and_then(|v| v.as_array()) {
-        for pair in items {
-            let name = pair.get(0).and_then(|v| v.as_str()).unwrap_or("");
-            let zone = pair.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            if let Ok(tz) = zone.parse::<Tz>() {
-                out.push(City {
-                    name: name.to_string(),
-                    zone: tz,
-                });
-            }
+    let items = cfg
+        .get("cities")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for pair in items {
+        let Ok(text) = serde_json::to_string(pair) else {
+            continue;
+        };
+        let Ok(spec) = parse::parse_city_entry(&text) else {
+            continue;
+        };
+        if let Ok(tz) = spec.zone.parse::<Tz>() {
+            out.push(City {
+                name: spec.label,
+                zone: tz,
+                coords: spec.coords,
+            });
         }
     }
     if !out.is_empty() {
@@ -1657,6 +1811,7 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
                 out.push(City {
                     name: name.into(),
                     zone: tz,
+                    coords: parse::CityCoords::Absent,
                 });
             }
         }
@@ -2181,10 +2336,12 @@ mod tests {
             City {
                 name: "Lagos".into(),
                 zone: "Africa/Lagos".parse().unwrap(),
+                coords: parse::CityCoords::Absent,
             },
             City {
                 name: "London".into(),
                 zone: "Europe/London".parse().unwrap(),
+                coords: parse::CityCoords::Absent,
             },
         ];
         let london: Tz = "Europe/London".parse().unwrap();
@@ -2223,6 +2380,95 @@ mod tests {
         });
         let got: Vec<_> = load_cities(&cfg).into_iter().map(|c| c.name).collect();
         assert_eq!(got, ["Tokyo", "San Francisco", "London"]);
+        assert!(load_cities(&cfg).iter().all(|c| !city_opted_in(c)));
+    }
+
+    #[test]
+    fn a_fourth_and_fifth_field_are_coordinates_and_a_pair_is_not() {
+        let cfg = serde_json::json!({
+            "cities": [
+                ["Tokyo", "Asia/Tokyo"],
+                ["Lisbon", "Europe/Lisbon", 38.72, -9.14],
+                ["Origin", "Etc/UTC", 0, 0],
+                ["Half", "Europe/Lisbon", 38.72],
+                ["Nope", "Not/AZone", 1, 2]
+            ]
+        });
+        let cities = load_cities(&cfg);
+        let tokyo = cities.iter().find(|c| c.name == "Tokyo").unwrap();
+        assert_eq!(tokyo.coords, parse::CityCoords::Absent);
+        let lisbon = cities.iter().find(|c| c.name == "Lisbon").unwrap();
+        assert_eq!(
+            lisbon.coords,
+            parse::CityCoords::At {
+                latitude: 38.72,
+                longitude: -9.14,
+            }
+        );
+        let origin = cities.iter().find(|c| c.name == "Origin").unwrap();
+        assert_eq!(
+            origin.coords,
+            parse::CityCoords::At {
+                latitude: 0.0,
+                longitude: 0.0,
+            }
+        );
+        let half = cities.iter().find(|c| c.name == "Half").unwrap();
+        assert!(matches!(half.coords, parse::CityCoords::Invalid(_)));
+        assert!(cities.iter().all(|c| c.name != "Nope"));
+    }
+
+    fn london() -> City {
+        City {
+            name: "London".into(),
+            zone: "Europe/London".parse().unwrap(),
+            coords: parse::CityCoords::Absent,
+        }
+    }
+
+    #[test]
+    fn a_city_glyph_is_the_reading_and_not_a_temperature() {
+        let city = london();
+        let now = city.zone.with_ymd_and_hms(2026, 8, 22, 14, 11, 0).unwrap();
+        let p = palette();
+        let rows = render_city_block(&city, &now, 16, 80, true, Some("◑"), None, &p);
+        let plain: Vec<_> = rows.iter().map(|r| strip_ansi(r)).collect();
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].contains("14:11"), "{}", plain[0]);
+        assert!(plain[0].contains('◑'), "{}", plain[0]);
+        assert!(!plain[0].contains('°'), "{}", plain[0]);
+        assert!(!plain[0].contains("0.0"), "{}", plain[0]);
+        assert!(tc::display_width(&plain[0]) <= 80);
+    }
+
+    #[test]
+    fn a_miss_keeps_the_time_and_does_not_invent_weather() {
+        let city = london();
+        let now = city.zone.with_ymd_and_hms(2026, 8, 22, 14, 11, 0).unwrap();
+        let p = palette();
+        let why = "weather unavailable: offline";
+        let rows = render_city_block(&city, &now, 16, 40, true, None, Some(why), &p);
+        let plain: Vec<_> = rows.iter().map(|r| strip_ansi(r)).collect();
+        assert!(plain[0].contains("14:11"), "{}", plain[0]);
+        assert!(!plain.iter().any(|r| r.contains('◑') || r.contains('°') || r.contains("0.0")));
+        assert!(plain.iter().any(|r| r.contains("offline")), "{plain:?}");
+        for row in &plain {
+            assert!(tc::display_width(row) <= 40, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_pair_does_not_reserve_a_weather_column() {
+        let city = london();
+        let now = city.zone.with_ymd_and_hms(2026, 1, 22, 14, 11, 0).unwrap();
+        let p = palette();
+        let with = render_city_block(&city, &now, 16, 80, true, None, None, &p);
+        let without = render_city_block(&city, &now, 16, 80, false, None, None, &p);
+        let wide = strip_ansi(&with[0]);
+        let narrow = strip_ansi(&without[0]);
+        assert!(wide.contains("14:11") && narrow.contains("14:11"));
+        assert!(tc::display_width(&wide) > tc::display_width(&narrow));
+        assert!(!narrow.contains('°'));
     }
 
     #[test]

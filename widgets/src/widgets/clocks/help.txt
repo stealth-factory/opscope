@@ -44,7 +44,13 @@ when that request fails, and the row says why the weather is missing. A
 temperature is shown only after a response that carried one. Nothing is
 drawn in its place, and a failed request clears the previous reading rather
 than leaving it up as if it were still current. The sun and moon on a world
-clock row are day and night there, not that city's weather.
+clock row are day and night there, not that city's weather. A city written
+with its own latitude and longitude also gets a condition glyph beside the
+time, from the same source, and only after a response that carried a
+temperature. A pair with no coordinates stays a clock. A failed fetch for
+one city leaves that city's time on the row, says why underneath, and does
+not invent a temperature or a glyph. The clock, the countdowns and the
+other cities keep drawing.
 
 Below the countdowns, each hub is shown in its own timezone, west to east
 by current offset — name as tie-break, config order ignored — coloured by

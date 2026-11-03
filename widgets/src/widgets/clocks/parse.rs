@@ -164,6 +164,97 @@ pub fn format_celsius(celsius: f64) -> String {
     format!("{celsius:.1}°C")
 }
 
+/// One world-clock entry. Coordinates are optional and never invented:
+/// a label and a zone do not locate a city.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CitySpec {
+    pub label: String,
+    pub zone: String,
+    pub coords: CityCoords,
+}
+
+/// Whether this entry opted into its own current conditions.
+///
+/// `Absent` is a `[label, zone]` pair. `At` is a fourth-field pair of
+/// coordinates. `Invalid` is an entry that tried to opt in and did not
+/// name a place — fetched for nothing, drawn as a reason.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CityCoords {
+    Absent,
+    At { latitude: f64, longitude: f64 },
+    Invalid(String),
+}
+
+/// One `cities` element, as JSON text.
+///
+/// Two fields stay a clock only. Four fields — label, zone, latitude,
+/// longitude — opt that row into weather. A third field is not half a
+/// location, and nothing in the label or the zone is read as one.
+pub fn parse_city_entry(text: &str) -> Result<CitySpec, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "city entry is not JSON".to_string())?;
+    let Some(items) = value.as_array() else {
+        return Err("city entry is not a list".into());
+    };
+    if items.len() < 2 {
+        return Err("city entry needs a label and a zone".into());
+    }
+    let Some(label) = items[0].as_str() else {
+        return Err("city label is not text".into());
+    };
+    let Some(zone) = items[1].as_str() else {
+        return Err("city zone is not text".into());
+    };
+    let coords = if items.len() == 2 {
+        CityCoords::Absent
+    } else if items.len() == 3 {
+        CityCoords::Invalid("set both latitude and longitude".into())
+    } else {
+        match (
+            entry_coordinate(&items[2], "latitude"),
+            entry_coordinate(&items[3], "longitude"),
+        ) {
+            (Ok(latitude), Ok(longitude)) => {
+                if !(-90.0..=90.0).contains(&latitude) {
+                    CityCoords::Invalid("latitude must be between -90 and 90".into())
+                } else if !(-180.0..=180.0).contains(&longitude) {
+                    CityCoords::Invalid("longitude must be between -180 and 180".into())
+                } else {
+                    CityCoords::At {
+                        latitude,
+                        longitude,
+                    }
+                }
+            }
+            (Err(why), _) | (_, Err(why)) => CityCoords::Invalid(why),
+        }
+    };
+    Ok(CitySpec {
+        label: label.to_string(),
+        zone: zone.to_string(),
+        coords,
+    })
+}
+
+fn entry_coordinate(value: &serde_json::Value, key: &str) -> Result<f64, String> {
+    if value.is_null() {
+        return Err(format!("{key} is not a number"));
+    }
+    let n = if let Some(n) = value.as_f64() {
+        n
+    } else if let Some(text) = value.as_str() {
+        text.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{key} is not a number"))?
+    } else {
+        return Err(format!("{key} is not a number"));
+    };
+    if !n.is_finite() {
+        return Err(format!("{key} is not a finite number"));
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +371,88 @@ mod tests {
     #[test]
     fn below_zero_keeps_its_sign() {
         assert_eq!(format_celsius(-0.4), "-0.4°C");
+    }
+
+    #[test]
+    fn a_pair_is_a_clock_and_not_a_place() {
+        let got = parse_city_entry(r#"["Tokyo","Asia/Tokyo"]"#).unwrap();
+        assert_eq!(got.label, "Tokyo");
+        assert_eq!(got.zone, "Asia/Tokyo");
+        assert_eq!(got.coords, CityCoords::Absent);
+    }
+
+    #[test]
+    fn four_fields_are_the_coordinates_written_down() {
+        let got = parse_city_entry(r#"["Lisbon","Europe/Lisbon",38.72,-9.14]"#).unwrap();
+        assert_eq!(
+            got.coords,
+            CityCoords::At {
+                latitude: 38.72,
+                longitude: -9.14,
+            }
+        );
+        let zero = parse_city_entry(r#"["Origin","Etc/UTC",0,0]"#).unwrap();
+        assert_eq!(
+            zero.coords,
+            CityCoords::At {
+                latitude: 0.0,
+                longitude: 0.0,
+            }
+        );
+        let text = parse_city_entry(r#"["Lisbon","Europe/Lisbon","38.72","-9.14"]"#).unwrap();
+        assert_eq!(
+            text.coords,
+            CityCoords::At {
+                latitude: 38.72,
+                longitude: -9.14,
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_or_broken_coordinate_is_not_fetched_as_zero() {
+        for (text, needle) in [
+            (
+                r#"["Lisbon","Europe/Lisbon",38.72]"#,
+                "both latitude and longitude",
+            ),
+            (
+                r#"["Lisbon","Europe/Lisbon",38.72,null]"#,
+                "longitude is not a number",
+            ),
+            (
+                r#"["Lisbon","Europe/Lisbon","here",-9]"#,
+                "latitude is not a number",
+            ),
+            (
+                r#"["Lisbon","Europe/Lisbon",90.1,0]"#,
+                "latitude must be between",
+            ),
+            (
+                r#"["Lisbon","Europe/Lisbon",0,180.1]"#,
+                "longitude must be between",
+            ),
+        ] {
+            match parse_city_entry(text).unwrap().coords {
+                CityCoords::Invalid(why) => {
+                    assert!(why.contains(needle), "{why}");
+                    assert!(!why.contains('°'), "{why}");
+                    assert!(!why.contains("0.0"), "{why}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fields_past_the_coordinate_are_ignored() {
+        let got = parse_city_entry(r#"["Lisbon","Europe/Lisbon",38.72,-9.14,"note"]"#).unwrap();
+        assert!(matches!(got.coords, CityCoords::At { .. }));
+    }
+
+    #[test]
+    fn a_note_is_not_a_city() {
+        assert!(parse_city_entry(r#""Europe/Lisbon""#).is_err());
+        assert!(parse_city_entry(r#"["only-a-label"]"#).is_err());
     }
 }
