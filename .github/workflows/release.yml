@@ -748,13 +748,33 @@ jobs:
     permissions:
       contents: read
     steps:
+      # repository_dispatch needs Contents write on apt-repo. Listing
+      # repositories replaces the default scope, so this repo is named
+      # too. The token is not given to the checkout: that checkout does
+      # not push. GITHUB_TOKEN is not a fallback: it cannot write apt-repo.
+      - name: Mint the release app token
+        id: app
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: stealth-factory
+          repositories: opscope,apt-repo
+          permission-contents: write
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: Notify the shared APT repository of this published release
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.RELEASE_TOKEN }}
-        run: node debian/notify-apt.js
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Mint the release app token or set GH_TOKEN with Contents write on stealth-factory/apt-repo"
+            exit 1
+          fi
+          node debian/notify-apt.js
 
   homebrew:
     needs: publish
@@ -766,6 +786,20 @@ jobs:
       group: ${{ startsWith(github.ref, 'refs/tags/v') && 'homebrew-tap-opscope' || format('homebrew-tap-opscope-{0}', github.run_id) }}
       cancel-in-progress: false
     steps:
+      # Contents write updates Formula/opscope.rb on homebrew-tap. The
+      # checkout of this repo does not push, so it keeps the job token.
+      # The formula download below stays on github.token. GITHUB_TOKEN
+      # cannot write the tap, so it is not a fallback for the update.
+      - name: Mint the release app token
+        id: app
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: stealth-factory
+          repositories: opscope,homebrew-tap
+          permission-contents: write
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
@@ -793,13 +827,19 @@ jobs:
 
       - name: Update the shared Homebrew tap
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::Set GH_TOKEN or RELEASE_TOKEN with Contents write access to stealth-factory/homebrew-tap"
+            echo "::error::Mint the release app token or set GH_TOKEN with Contents write access to stealth-factory/homebrew-tap"
             exit 1
           fi
+          # The commit message is written by homebrew/update-tap.sh. It
+          # has no [skip ci]. An app token commit on the tap's main
+          # starts that repository's push workflows, which the PAT
+          # already did. Silencing them would be a change to the script
+          # this job calls, and this job still passes the token as
+          # GH_TOKEN.
           bash homebrew/update-tap.sh "${GITHUB_REF_NAME#v}" homebrew-artifacts
 
   # Both ways in, tried the way somebody would try them, after the release
