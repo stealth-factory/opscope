@@ -151,6 +151,13 @@ title = "ports"
 placement = "split"
 command = ["./luvus/bin/opscope", "ports"]
 
+# Everything running in Rex, across every session, ordered by who needs you.
+[[panes]]
+id = "rex-panes"
+title = "rex-panes"
+placement = "split"
+command = ["./luvus/bin/opscope", "rex-panes"]
+
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]
 id = "tailnet"

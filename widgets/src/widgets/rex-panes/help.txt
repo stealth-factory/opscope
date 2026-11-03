@@ -1,0 +1,50 @@
+Everything running in Rex, across every session, ordered by who needs you.
+
+Every pane on a Rex server in three sections. AGENTS lists coding agents with
+the state they reported themselves - blocked, error, done, working or idle -
+with what they are blocked on, their progress and their message. PROCESSES
+lists every other pane running something, IDLE the panes at a prompt. Enter
+focuses the pane, wherever it is.
+
+A Rex client, read-only, and every fact on it is labelled with where it came
+from. A state is what the program reported with OSC 7501, the Program
+Status Protocol; Claude Code reports it on its own. A program that reports
+nothing is drawn as unknown, never as idle - the widget does not read a
+state off a title or the screen. Whether a pane is running something, and
+what, is the foreground process Rex names. Durations of reported states are
+the server's own timestamps; one prefixed with ≥ is a lower bound the widget
+timed itself, because the state was already in place when it started.
+
+    blocked   waiting on a permission, a question or a sign-in, right now
+    error     failed and stopped
+    done      finished work you have not looked at yet
+    attention rang the bell or sent a notification since you last looked
+    working   busy
+    idle      at rest, waiting for its next instruction
+    unknown   an agent is there and has not reported a state
+
+The whole server is read with one `rex do` script on one connection, and
+`rex events` wakes a read the moment a status, a process or the layout
+changes. It never starts a Rex server, never types into a pane, and never
+shows a socket path, an address or a login.
+
+    rex-panes [-n SECONDS]
+
+Keys: up/down select (j and k too) and tab jumps to the head of the next
+section. ctrl-y and ctrl-e scroll the window a row at a time, as does the
+mouse wheel, and pgup and pgdn a page; none of them move the selection.
+Enter (or f) focuses the selected pane on the server, z zooms it to fill its
+window or undoes that, e explains it - every status record, the program's
+identity and the last lines its screen shows - and esc or e goes back.
+i shows or hides the idle section, o shows or hides opscope's own panes
+(hidden by default), r refreshes now, comma opens settings, q quits.
+
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a Rex server on another API
+revision - and dismiss them for this session, for 7 days or for 30. A new
+notice shows under the footer for a minute, and a [!] count stays on the top
+row for as long as it is still true. Clicking the count opens the same screen.
+
+Focus is the server's: Rex makes the window active and the pane focused, and
+every app showing that session follows. When no Rex app is attached to the
+session, the note says so instead of claiming a screen moved.

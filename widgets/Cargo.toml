@@ -36,6 +36,10 @@ name = "ports"
 path = "src/widgets/ports/main.rs"
 
 [[bin]]
+name = "rex-panes"
+path = "src/widgets/rex-panes/main.rs"
+
+[[bin]]
 name = "netwatch"
 path = "src/widgets/netwatch/main.rs"
 

@@ -5349,3 +5349,126 @@ fn agent_logs_are_followed_not_read_whole() {
         wrong.join("\n  ")
     );
 }
+
+/// Every method rex-panes' embedded Lua may call, and nothing else.
+///
+/// The script runs inside the `rex` CLI with the user's full authority over
+/// their Rex server - the same connection could type into a pane, close a
+/// session or resize a window, and nothing on screen would show that it
+/// had. A panel that is read-only by intent has to be read-only by
+/// construction. An allowlist rather than a list of dangerous names,
+/// because the API grows and a denylist is green against a method nobody
+/// thought to list.
+const REX_READS: &[&str] = &[
+    "session.list",
+    "session.attach",
+    "session.view",
+    "session.list_blocks",
+    "block.method",
+    "server.status",
+    "server.version",
+    "client.list",
+];
+/// The block methods `block.method` may be asked for.
+const REX_BLOCK_READS: &[&str] = &["process", "title", "program_status"];
+
+/// What a rex Lua script calls: (methods, block methods, other reaches).
+fn rex_script_calls(src: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let quoted = |after: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = src;
+        while let Some(at) = rest.find(after) {
+            rest = &rest[at + after.len()..];
+            let tail = rest.trim_start_matches([' ', '(', '{']);
+            if let Some(body) = tail.strip_prefix('"') {
+                if let Some(end) = body.find('"') {
+                    out.push(body[..end].to_string());
+                }
+            }
+        }
+        out
+    };
+    let methods = quoted("rex.call");
+    // The block methods are named in the list the loop walks, and any
+    // literal `method = "…"` besides.
+    let mut block_methods = Vec::new();
+    let mut rest = src;
+    while let Some(at) = rest.find("for _, m in ipairs(") {
+        let tail = &rest[at..];
+        let list = &tail[..tail.find('}').unwrap_or(tail.len())];
+        for part in list.split('"').skip(1).step_by(2) {
+            block_methods.push(part.to_string());
+        }
+        rest = &rest[at + 1..];
+    }
+    block_methods.extend(quoted("method ="));
+    let mut reaches = Vec::new();
+    for helper in [
+        "rex.session.",
+        "rex.block.",
+        "rex.client",
+        "rex.exec",
+        "io.",
+        "os.",
+        "require",
+    ] {
+        if src.contains(helper) {
+            reaches.push(helper.to_string());
+        }
+    }
+    (methods, block_methods, reaches)
+}
+
+#[test]
+fn every_rex_script_is_read_only() {
+    let path = root().join("widgets/src/widgets/rex-panes/gather.lua");
+    let src = std::fs::read_to_string(&path).expect("rex-panes' gather.lua");
+    let (methods, block_methods, reaches) = rex_script_calls(&src);
+    // A pattern that sees nothing is not a pass.
+    assert!(
+        methods.len() >= REX_READS.len(),
+        "the reader found only {} rex.call sites in gather.lua",
+        methods.len()
+    );
+    assert!(
+        !block_methods.is_empty(),
+        "no block methods found in gather.lua: the reader is stale"
+    );
+    let mut wrong: Vec<String> = methods
+        .iter()
+        .filter(|m| !REX_READS.contains(&m.as_str()))
+        .map(|m| format!("calls {m}, which is not on REX_READS"))
+        .collect();
+    wrong.extend(
+        block_methods
+            .iter()
+            .filter(|m| !REX_BLOCK_READS.contains(&m.as_str()))
+            .map(|m| format!("asks a block for {m}, which is not on REX_BLOCK_READS")),
+    );
+    wrong.extend(
+        reaches
+            .iter()
+            .map(|r| format!("reaches {r}, which goes around the allowlist")),
+    );
+    assert!(
+        wrong.is_empty(),
+        "gather.lua is not read-only:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
+fn the_rex_reader_sees_a_write_when_there_is_one() {
+    let bad = r#"
+local r = rex.call("session.list")
+rex.call("block.method", { method = "write" })
+rex.call( "session.destroy", {})
+for _, m in ipairs({ "process", "reset" }) do end
+os.execute("true")
+"#;
+    let (methods, block_methods, reaches) = rex_script_calls(bad);
+    assert!(methods.contains(&"session.destroy".to_string()));
+    assert!(block_methods.contains(&"write".to_string()));
+    assert!(block_methods.contains(&"reset".to_string()));
+    assert!(reaches.contains(&"os.".to_string()));
+}

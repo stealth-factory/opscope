@@ -5768,7 +5768,7 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: nineteen binaries that disagree about how to say their own version
+    // is: twenty binaries that disagree about how to say their own version
     // are nineteen answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
