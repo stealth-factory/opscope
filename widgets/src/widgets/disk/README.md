@@ -11,10 +11,10 @@ Linux example:
  sampled 2s ago · every 2s
  2 of 10 shown · pseudo, bind, read-only hidden
  FILESYSTEMS  usable = f_bavail (root reserve excluded) · sorted: mount
-MOUNT   TYPE         SIZE   USED USABLE           %     1h Δ     7d Δ       FULL IN INODES
+MOUNT   TYPE         SIZE   USED USABLE           %     1h Δ    24h Δ       FULL IN INODES
 ▸ /     ext4          100G   80G    15G █████░  84%  +1.2G/h  +8.0G/d     ~1d 17h ↑    12%
   /home xfs           200G   40G   160G █░░░░░  20%        —        —   not filling     4%
- FULL IN at the rate since Mon 09:12 (5d of 7d) · ↑↓ = 1h rate sooner/later
+ FULL IN at the rate since Mon 09:12 (5h of 24h) · ↑↓ = 1h rate sooner/later
  DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: write · QUEUE is
  instantaneous
 DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT BUSY* QUEUE
@@ -34,7 +34,7 @@ DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT B
  some 23.1% avg10 · 18.4% avg60 · 9.7% avg300   full 7.2% · 5.1% · 2.0%
 
  ↑↓ select  [↵] detail  [s] sort by fills soonest  tab section  [v] show idle disks
- [w] 14d  [p] pause  [,] settings  [q]uit
+ [w] 6h  [p] pause  [,] settings  [q]uit
 ```
 
 `↑↓` move the selection, including from one section into the next. `tab`
@@ -49,7 +49,10 @@ cycles the sort of the section that has the cursor: filesystems through
 mount order, fills soonest, percent used and inodes; disks through write,
 read and name. On macOS the write key is combined MB/s and the read key
 is transfers per second, and the heading names the one in force. `w`
-cycles the projection window through 7, 14 and 30 days for this session.
+cycles the projection window through 6, 12 and 24 hours for this session;
+the pane starts on the `window_hours` setting, 24 by default (an old
+`window_days` setting is ignored). The disk detail screen does not offer
+`w`: its I/O chart is kept in memory and has no window.
 `v` shows idle disks, or hides them again.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
@@ -129,8 +132,8 @@ The one-hour rate and the window rate come from samples this widget took
 itself. `FULL IN` projects that window rate onto the usable space now.
 `disk/usage.json` keeps the samples, not those rates. At most one sample
 a minute for the last day, then one every fifteen minutes, and nothing
-older than thirty days: about 4.2k points per filesystem. Twenty
-filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
+older than seven days: about 2k points per filesystem. Twenty
+filesystems stay under about 40k points, around 1 MB of JSON. A hole is a
 gap in the trace, not a slope invented across the time the pane was not
 running. The footnote says the rate is since the first fitted sample, and
 a full window also says when the series has been kept. `↵` on a filesystem

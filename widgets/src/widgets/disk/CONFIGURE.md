@@ -21,14 +21,15 @@ shared state directory (`disk/usage.json`). A series is the mount, the
 filesystem type and `f_blocks`. A resize or a reformat starts a new series.
 A gap longer than the window on screen restarts the projection for that
 window; the file still keeps the older points for a longer window. `w`
-cycles 7, 14 and 30 days for the session. `window_days` is which of those
-the pane starts on.
+cycles 6, 12 and 24 hours for the session. `window_hours` is which of those
+the pane starts on (24 by default). The disk detail screen does not offer
+`w`: its I/O chart is in memory and has no window.
 
 ## Settings owned here
 
 The owned section is `disk`.
 
-Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_days`
+Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_hours`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
