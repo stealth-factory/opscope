@@ -128,6 +128,7 @@ function platformManifest(p, version) {
       type: 'git',
       url: 'git+https://github.com/stealth-factory/opscope.git',
     },
+    homepage: 'https://opscope.stealth-factory.co',
     publishConfig: { access: 'public' },
   };
   if (p.libc) manifest.libc = [p.libc];

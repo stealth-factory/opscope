@@ -25,9 +25,10 @@ The launcher is a thin package. Each platform is an optional dependency
 npm installs only when `os` / `cpu` / `libc` match, so a Mac never
 downloads the Linux binaries.
 
-## Source
+## Links
 
-<https://github.com/stealth-factory/opscope>
+- Website: <https://opscope.stealth-factory.co>
+- Source: <https://github.com/stealth-factory/opscope>
 
 ## License
 
