@@ -72,7 +72,10 @@ sub-headings and the count line names the session instead.
 
 A pane Rex could not be asked about is neither running nor resting: it sorts
 into PROCESSES with `⚠ could not be read` and the server's own reason, and the
-heading counts it apart. `[i]` hides only panes known to be at a prompt.
+heading counts it apart. A pane whose process was read but whose status
+was not keeps the failure on its own `⚠` row - an unread status is never
+drawn as `no status reported`, and never lets a shell rest under IDLE.
+`[i]` hides only panes known to be at a prompt.
 
 ## How it knows
 
@@ -113,7 +116,9 @@ Every fact on screen says where it came from.
   `error` after the program exits, and so does this; a record whose reporter is
   no longer in the foreground says `reporter not in foreground`.
 - **`attention`** is a bell or a desktop notification, timed when it arrived
-  and cleared once the pane has had focus or the program has reported again.
+  and cleared once the pane is focused in a session a Rex app is showing, or
+  the program has reported again. A session nobody has attached keeps its
+  last focused block, so that focus alone does not count as looking.
 - **CPU and memory** come from the pids Rex reports, read on this machine —
   `/proc` on Linux, `ps` on macOS — and only when the widget talks to this
   machine's own server. A block on another host, or a server named in

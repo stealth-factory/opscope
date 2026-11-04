@@ -152,6 +152,9 @@ struct Pane {
     doing: Doing,
     /// Why a method failed for this block, when one did.
     why: String,
+    /// `program_status` itself failed, so an empty `records` is not an
+    /// answer: the program may be blocked and nobody could ask.
+    status_unread: bool,
     agent: Option<(String, Source)>,
     is_opscope: bool,
     cpu: Option<f64>,
@@ -205,7 +208,7 @@ impl Pane {
     fn section(&self) -> Section {
         if self.agent.is_some() {
             Section::Agents
-        } else if self.doing == Doing::Prompt && self.records.is_empty() {
+        } else if self.doing == Doing::Prompt && self.records.is_empty() && !self.status_unread {
             Section::Idle
         } else {
             Section::Processes
@@ -425,7 +428,10 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
                 }
                 match &b.records {
                     Some(Ok(r)) => pane.records = r.clone(),
-                    Some(Err(e)) => why.push(format!("program_status: {}", e)),
+                    Some(Err(e)) => {
+                        pane.status_unread = true;
+                        why.push(format!("program_status: {}", e));
+                    }
                     None => {}
                 }
             }
@@ -543,24 +549,7 @@ fn poll(
         )
     });
     if let Ok(mut guard) = state.lock() {
-        // A bell is answered once someone has looked: the pane has had focus
-        // since, or the program has reported anything newer.
-        let attention = &mut guard.attention;
-        for pane in &mut board.panes {
-            if let Some((when, said)) = attention.get(&pane.block_id).cloned() {
-                let newer = pane
-                    .records
-                    .iter()
-                    .any(|r| r.updated_at.is_some_and(|u| u > when));
-                if pane.focused || newer {
-                    attention.remove(&pane.block_id);
-                } else {
-                    pane.attention = Some((when, said));
-                }
-            }
-        }
-        let live: Vec<String> = board.panes.iter().map(|p| p.block_id.clone()).collect();
-        attention.retain(|id, _| live.contains(id));
+        answer_bells(&mut guard.attention, &mut board.panes, &board.app_sessions);
         order(&mut board.panes);
         guard.board = Some(board);
         guard.absence = None;
@@ -605,7 +594,11 @@ fn percent(cpu: Option<f64>) -> String {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Keep the end of a path, marking the cut so it does not read as a name.
@@ -733,9 +726,10 @@ fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
         if pane.reporter_gone(r) {
             out.push("reporter not in foreground".into());
         }
-    } else if pane.agent.is_some() {
+    } else if pane.agent.is_some() && !pane.status_unread {
         // Said on the row, because an unknown beside a known looks like the
-        // same kind of answer and is not one.
+        // same kind of answer and is not one. A status that could not be
+        // read is not this - its reason is drawn on its own row instead.
         out.push("no status reported".into());
     }
     if let Some((when, said)) = &pane.attention {
@@ -906,19 +900,23 @@ fn render_pane(
             } else {
                 state.clone()
             };
-            let mut line = vec![
-                (
-                    c(colour),
-                    format!(
-                        "{}{} {}",
-                        cursor,
-                        mark_of(&state, tick),
-                        tc::pad(&name, cols.name)
-                    ),
+            // Below about twenty-five columns the mark, a six-cell name,
+            // STATE and FOR do not fit on one row; the state and its
+            // duration go under the name rather than being cut off it.
+            let one_row = 3 + cols.name + 9 + 7 <= w.saturating_sub(1);
+            let mut line = vec![(
+                c(colour),
+                format!(
+                    "{}{} {}",
+                    cursor,
+                    mark_of(&state, tick),
+                    tc::pad(&name, cols.name)
                 ),
-                (c(colour), format!(" {:<8}", state_cell)),
-                (c(&p.dim), format!(" {:<6}", for_cell)),
-            ];
+            )];
+            if one_row {
+                line.push((c(colour), format!(" {:<8}", state_cell)));
+                line.push((c(&p.dim), format!(" {:<6}", for_cell)));
+            }
             usage(&mut line);
             if cols.wide {
                 line.push((
@@ -928,20 +926,38 @@ fn render_pane(
             }
             fill(&mut line);
             rows.push(finish(line));
+            if !one_row {
+                prose(&mut rows, colour, &format!("{}  {}", state_cell, for_cell));
+            }
             // The second row is herdr's: where it is, and what its title says.
             let title = pane.title.trim();
-            let mut line = vec![(c(&p.dim), format!("   {}  ", homely(&pane.cwd())))];
+            let dir = homely(&pane.cwd());
+            let mut line = vec![(c(&p.dim), format!("   {}  ", dir))];
             let room = w
                 .saturating_sub(1)
-                .saturating_sub(tc::display_width(&line[0].1));
-            if tc::display_width(title) <= room {
-                line.push((c(body), title.to_string()));
-                fill(&mut line);
-                rows.push(finish(line));
-            } else {
-                fill(&mut line);
-                rows.push(finish(line));
-                prose(&mut rows, body, title);
+                .checked_sub(tc::display_width(&line[0].1));
+            match room {
+                Some(room) if tc::display_width(title) <= room => {
+                    line.push((c(body), title.to_string()));
+                    fill(&mut line);
+                    rows.push(finish(line));
+                }
+                Some(_) => {
+                    fill(&mut line);
+                    rows.push(finish(line));
+                    prose(&mut rows, body, title);
+                }
+                // A directory wider than the pane wraps whole, so its
+                // distinguishing tail is still on screen.
+                None => {
+                    prose(&mut rows, &p.dim, &dir);
+                    if !title.is_empty() {
+                        prose(&mut rows, body, title);
+                    }
+                }
+            }
+            if !pane.why.is_empty() {
+                prose(&mut rows, &p.unknown, &format!("⚠ {}", pane.why));
             }
             let facts = detail_phrases(pane, at);
             if !facts.is_empty() {
@@ -955,7 +971,11 @@ fn render_pane(
                 "could not be read".to_string()
             } else {
                 let c = pane.command();
-                if c.is_empty() { "?".into() } else { c }
+                if c.is_empty() {
+                    "?".into()
+                } else {
+                    c
+                }
             };
             // An unread pane says so in words where a command would go. A
             // bare "?" is what a running pane with unparseable argv shows,
@@ -1014,7 +1034,7 @@ fn render_pane(
                 fill(&mut l);
                 rows.push(finish(l));
             }
-            if unreadable {
+            if unreadable || !pane.why.is_empty() {
                 let why = if pane.why.is_empty() {
                     "no reason given"
                 } else {
@@ -1149,6 +1169,56 @@ impl Columns {
 }
 
 /// The detail screen's text for one pane: every record, every identity.
+/// Hand each pane the bell it rang, unless it has been answered - dropping
+/// those, and any for a pane that has gone.
+///
+/// A bell is answered once someone has looked: the pane is focused in a
+/// session a Rex app is showing, or the program has reported anything newer.
+/// Focus alone is not looking - a session nobody has attached keeps its last
+/// focused block forever, and a bell from that one is exactly what this
+/// board is for.
+fn answer_bells(
+    attention: &mut HashMap<String, (f64, String)>,
+    panes: &mut [Pane],
+    shown: &[String],
+) {
+    for pane in panes.iter_mut() {
+        if let Some((when, said)) = attention.get(&pane.block_id).cloned() {
+            let newer = pane
+                .records
+                .iter()
+                .any(|r| r.updated_at.is_some_and(|u| u > when));
+            if (pane.focused && shown.contains(&pane.session_id)) || newer {
+                attention.remove(&pane.block_id);
+            } else {
+                pane.attention = Some((when, said));
+            }
+        }
+    }
+    attention.retain(|id, _| panes.iter().any(|p| &p.block_id == id));
+}
+
+/// Where the cursor lands once the list is rebuilt. The cursor is a pane,
+/// not a position: a refresh that puts a newly blocked agent above it must
+/// not move `↵` onto somebody else. A pane that has gone leaves the index
+/// where it was, clamped by the caller.
+fn reselect(before: &[Pane], selected: usize, after: &[Pane]) -> usize {
+    before
+        .get(selected)
+        .and_then(|held| after.iter().position(|n| n.block_id == held.block_id))
+        .unwrap_or(selected)
+}
+
+/// The server, as the pane may name it: never the setting itself, which
+/// can be an address, because the pane gets screenshotted.
+fn server_words(server: &str) -> &'static str {
+    if server.is_empty() {
+        "local server"
+    } else {
+        "server set in ,"
+    }
+}
+
 fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let heading = |s: &str| ("lbl".to_string(), format!(" ── {} ──", s));
@@ -1252,7 +1322,12 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(Stri
     }
     out.push((String::new(), String::new()));
     out.push(heading("STATUS REPORTS (OSC 7501)"));
-    if pane.records.is_empty() {
+    if pane.status_unread {
+        out.push((
+            "unknown".into(),
+            format!(" could not be read: {}", pane.why),
+        ));
+    } else if pane.records.is_empty() {
         out.push((
             "dim".into(),
             " none - this program has not reported a status, so none is shown".into(),
@@ -1313,7 +1388,7 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(Stri
         "dim".into(),
         format!(
             " {} · rex {} · api {} · {} Rex app{} attached",
-            if server.is_empty() { "local" } else { server },
+            server_words(server),
             if board.rex_version.is_empty() {
                 "?"
             } else {
@@ -1771,12 +1846,14 @@ fn main() {
         let agents = by_session(agents);
         let busy = by_session(busy);
         let resting = by_session(resting);
+        let before = std::mem::take(&mut panes_now);
         panes_now = agents
             .iter()
             .chain(busy.iter())
             .chain(resting.iter().filter(|_| show_idle))
             .map(|n| (*n).clone())
             .collect();
+        selected = reselect(&before, selected, &panes_now);
         if !panes_now.is_empty() && selected >= panes_now.len() {
             selected = panes_now.len() - 1;
         }
@@ -1912,7 +1989,7 @@ fn main() {
                         (p.dim.as_str(), "start Rex, or name another server with ,".into()),
                     ],
                     Absence::Unreachable => vec![
-                        (p.blocked.as_str(), format!("⚠ server {} did not answer", if server.is_empty() { "local" } else { &server })),
+                        (p.blocked.as_str(), format!("⚠ the {} did not answer", server_words(&server))),
                         (p.dim.as_str(), "check the name with rex hosts, or change it with ,".into()),
                     ],
                     Absence::Gone => vec![(p.blocked.as_str(), "⚠ a session went away during the read".into())],
@@ -2486,11 +2563,9 @@ mod tests {
         assert!(!pane.reporter_gone(&mine));
         assert!(pane.reporter_gone(&gone));
         pane.records = vec![gone];
-        assert!(
-            detail_phrases(&pane, 0.0)
-                .iter()
-                .any(|s| s.contains("not in foreground"))
-        );
+        assert!(detail_phrases(&pane, 0.0)
+            .iter()
+            .any(|s| s.contains("not in foreground")));
     }
 
     #[test]
@@ -2513,6 +2588,116 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn unread_status(agent: bool) -> Pane {
+        Pane {
+            block_id: "b1".into(),
+            session_id: "s1".into(),
+            creator: TERMINAL.into(),
+            doing: Doing::Prompt,
+            status_unread: true,
+            why: "program_status: timed out".into(),
+            agent: agent.then(|| ("claude".to_string(), Source::Process)),
+            ..Default::default()
+        }
+    }
+
+    fn drawn(pane: &Pane, w: usize) -> String {
+        let cols = Columns::fit(w, &[pane]);
+        render_pane(pane, false, w, &cols, &palette(), 0, 2.0e9).join("\n")
+    }
+
+    #[test]
+    fn a_status_that_could_not_be_read_is_said_and_never_resting() {
+        let shell = unread_status(false);
+        assert_eq!(
+            shell.section(),
+            Section::Processes,
+            "a shell whose status read failed is not known to be idle"
+        );
+        assert!(drawn(&shell, 80).contains("program_status: timed out"));
+        let agent = unread_status(true);
+        let screen = drawn(&agent, 80);
+        assert!(screen.contains("program_status: timed out"), "{}", screen);
+        assert!(
+            !screen.contains("no status reported"),
+            "a failed read is not an empty answer"
+        );
+        let board = Board::default();
+        assert!(explain_lines(&agent, &board, "", 2.0e9)
+            .iter()
+            .any(|(_, t)| t.contains("could not be read: program_status: timed out")));
+    }
+
+    #[test]
+    fn a_bell_in_a_session_nobody_is_showing_stays_until_looked_at() {
+        let mut pane = unread_status(true);
+        pane.focused = true;
+        let mut attention = HashMap::new();
+        attention.insert("b1".to_string(), (1.0e9, "bell".to_string()));
+        let mut panes = vec![pane];
+        answer_bells(&mut attention, &mut panes, &[]);
+        assert!(
+            panes[0].attention.is_some(),
+            "stored focus in an unattached session is not somebody looking"
+        );
+        let mut panes = vec![Pane {
+            attention: None,
+            ..panes[0].clone()
+        }];
+        answer_bells(&mut attention, &mut panes, &["s1".to_string()]);
+        assert!(panes[0].attention.is_none());
+        assert!(
+            attention.is_empty(),
+            "answered once a Rex app shows it focused"
+        );
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_cursor_on_the_same_pane() {
+        let named = |id: &str| Pane {
+            block_id: id.into(),
+            ..Default::default()
+        };
+        let before = vec![named("a"), named("b")];
+        let after = vec![named("new"), named("a"), named("b")];
+        assert_eq!(reselect(&before, 1, &after), 2, "still on b");
+        let gone = vec![named("a")];
+        assert_eq!(reselect(&before, 1, &gone), 1, "b went: left for the clamp");
+    }
+
+    #[test]
+    fn a_narrow_agent_row_keeps_its_duration_and_its_directory() {
+        let mut pane = unread_status(true);
+        pane.status_unread = false;
+        pane.why.clear();
+        pane.seen_exact = true;
+        pane.seen_since = 2.0e9 - 120.0;
+        pane.child_cwd = "/srv/a-rather-long/path/that-ends/in-the-part-that-matters".into();
+        for w in 20..=30 {
+            let screen = drawn(&pane, w);
+            assert!(screen.contains("2m"), "w={} lost FOR:\n{}", w, screen);
+            // Escapes out, then the rows joined back into the text they were
+            // wrapped from: a hard-wrapped path breaks mid-word.
+            let mut plain = String::new();
+            let mut esc = false;
+            for ch in screen.chars() {
+                match ch {
+                    '\x1b' => esc = true,
+                    'm' if esc => esc = false,
+                    _ if esc => {}
+                    _ => plain.push(ch),
+                }
+            }
+            let flat: String = plain.split('\n').map(str::trim).collect();
+            assert!(
+                flat.contains("matters"),
+                "w={} cut the directory's tail:\n{}",
+                w,
+                screen
+            );
         }
     }
 
