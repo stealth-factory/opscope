@@ -608,20 +608,23 @@ pub fn body(shared: &Shared, v: &View, w: usize) -> Frame {
         return f;
     };
     let tz = model::tz_of(prop.zone_name());
+    // Two blank lines between sections, one between the blocks inside a
+    // section: the gap says which of the two it is.
+    let gap = |f: &mut Frame| f.lines.extend([Vec::new(), Vec::new()]);
     f.lines.push(Vec::new());
     right_now(&mut f, prop, v, budget, tz, &p);
-    f.lines.push(Vec::new());
+    gap(&mut f);
     today(&mut f, prop, v, budget, tz, &p);
 
     let mut counts = (0usize, 0usize);
-    f.lines.push(Vec::new());
+    gap(&mut f);
     key_events(&mut f, prop, v, budget, tz, &p, &mut counts);
-    f.lines.push(Vec::new());
+    gap(&mut f);
     organic(&mut f, prop, v, budget, &p, &mut counts);
-    f.lines.push(Vec::new());
+    gap(&mut f);
     movers(&mut f, prop, v, budget, &p, &mut counts);
     if shared.props.len() > 1 {
-        f.lines.push(Vec::new());
+        gap(&mut f);
         properties(&mut f, shared, v, budget, &p);
     }
     // The filter, named, with the count saying it is a subset - placed at
@@ -724,6 +727,7 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
     } else if let Some(line) = hourly_fallback(prop, v.now, tz) {
         f.lines.extend(prose(&p.dim, &line, budget, " "));
     }
+    f.lines.push(Vec::new());
     let hi = rt.minutes.iter().cloned().fold(0.0, f64::max);
     let series = bar(&rt.minutes.iter().map(|x| Some(*x)).collect::<Vec<_>>(), hi);
     // Three rows of bars, one column a minute, with what they measure and
@@ -761,6 +765,7 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
             )]);
         }
     }
+    f.lines.push(Vec::new());
     let last_min = rt.views_minutes.get(28).copied().unwrap_or(0.0);
     let mut chunks = vec![
         vec![
@@ -793,6 +798,7 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
         ]);
     }
     f.lines.extend(flow(chunks, budget, "   "));
+    f.lines.push(Vec::new());
     match &prop.breakdown {
         None => f.lines.extend(prose(
             &p.dim,
@@ -968,6 +974,7 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
         .chain(week.iter().flatten())
         .cloned()
         .fold(0.0, f64::max);
+    f.lines.push(Vec::new());
     // Both days on one chart and one scale, so the gap between them is
     // the thing read rather than two shapes compared by eye. Today's line
     // stops at the last hour GA has processed: an unprocessed hour is a
@@ -1034,6 +1041,7 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
             " ",
         ));
     }
+    f.lines.push(Vec::new());
     let Some(vs) = model::versus(&h) else {
         f.lines.extend(prose(
             &p.warn,
@@ -1265,6 +1273,9 @@ fn key_events(
             table_row(p, true, here, &name, &p.txt, name_w, &cells, budget)
         });
     }
+    if upto.is_none() || spark {
+        f.lines.push(Vec::new());
+    }
     if upto.is_none() {
         f.lines.extend(prose(
             &p.dim,
@@ -1442,6 +1453,7 @@ fn organic(
         budget,
         " ",
     ));
+    f.lines.push(Vec::new());
     let Some(r) = prop.processed.as_ref().and_then(|x| x.organic.as_ref()) else {
         let said = if prop.processed.is_some() {
             "no organic report - the reason is above"
