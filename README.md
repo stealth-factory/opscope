@@ -4,6 +4,8 @@
 
 *Sci-fi hacker panels from the movies — except these ones tell you the truth.*
 
+**[opscope.stealth-factory.co](https://opscope.stealth-factory.co)** — see every widget running live in your browser.
+
 Fill your screen with glowing panels, scrolling graphs and blinking status
 readouts. The difference is that every number on them is real: actual network
 latency, actual deployments, actual machines on your tailnet, actual agents

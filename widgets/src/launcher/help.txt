@@ -34,3 +34,5 @@ which is what the arrows are for.
 
 --configure-help prints the launcher's guide, which says what it has to say:
 there is nothing here to configure.
+
+Every widget, running live in the browser: https://opscope.stealth-factory.co

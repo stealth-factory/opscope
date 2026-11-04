@@ -3,6 +3,8 @@ name = "opscope-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 # The terminal is an ioctl and a termios struct away, both of which are in
