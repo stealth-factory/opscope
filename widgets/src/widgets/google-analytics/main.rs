@@ -562,8 +562,8 @@ fn main() {
                 model::tz_of(prop.zone_name()),
             )
             .0;
-            let lines = match &open {
-                Item::Property(_) => draw::property_detail(&prop, &view, w),
+            let lines: draw::Detail = match &open {
+                Item::Property(_) => draw::property_detail(&prop, &view, w).into(),
                 Item::Page(path) => {
                     draw::page_detail(path, reports.as_ref(), !configured.is_empty(), asked_on, w)
                 }
@@ -575,7 +575,7 @@ fn main() {
                         asked_on,
                         w,
                     );
-                    l.insert(
+                    l.insert_line(
                         1,
                         vec![(
                             p.hint.clone(),
@@ -598,7 +598,7 @@ fn main() {
                     asked_on,
                     w,
                 ),
-                _ => Vec::new(),
+                _ => draw::Detail::default(),
             };
             let mut hints: Vec<Vec<(&str, String)>> = vec![
                 vec![(p.hint.as_str(), "esc back".into())],
@@ -627,7 +627,18 @@ fn main() {
             }
             let foot_top = rows.len();
             rows.extend(foot);
-            tc::draw(&rows, w, h);
+            // The charts sit one row down, under the title, and scroll with
+            // the lines; `in_viewport` crops one the window has cut.
+            let plots: Vec<tc::Plot> = lines
+                .plots
+                .iter()
+                .cloned()
+                .filter_map(|mut plot| {
+                    plot.y += 1;
+                    plot.in_viewport(dscroll, 1, room)
+                })
+                .collect();
+            tc::draw_plots(&rows, w, h, &plots);
             keyboard.footer_at(&packed, foot_top, 1);
             keyboard.wait(Duration::from_millis(200));
             continue;
@@ -705,7 +716,16 @@ fn main() {
         }
         let foot_top = out.len();
         out.extend(foot);
-        tc::draw(&out, w, h);
+        let plots: Vec<tc::Plot> = frame
+            .plots
+            .iter()
+            .cloned()
+            .filter_map(|mut plot| {
+                plot.y += 1;
+                plot.in_viewport(scroll, 1, below)
+            })
+            .collect();
+        tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
     }

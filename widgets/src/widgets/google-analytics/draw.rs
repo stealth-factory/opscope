@@ -112,6 +112,55 @@ pub struct Frame {
     pub placed: Vec<(usize, usize)>,
     /// The last line of the selected item.
     pub cursor: Option<usize>,
+    /// Charts drawn over the lines, `y` being the line they start on.
+    /// Core draws them as pixels in Kitty and as Braille or block bars
+    /// everywhere else, from the same data.
+    pub plots: Vec<tc::Plot>,
+}
+
+/// A detail screen: its lines, and the charts drawn over them.
+///
+/// Dereferences to its lines, so a screen is still built by pushing and
+/// extending them; the charts ride along with `y` set to the line each
+/// starts on.
+#[derive(Default)]
+pub struct Detail {
+    pub lines: Vec<Line>,
+    pub plots: Vec<tc::Plot>,
+}
+
+impl std::ops::Deref for Detail {
+    type Target = Vec<Line>;
+    fn deref(&self) -> &Vec<Line> {
+        &self.lines
+    }
+}
+
+impl std::ops::DerefMut for Detail {
+    fn deref_mut(&mut self) -> &mut Vec<Line> {
+        &mut self.lines
+    }
+}
+
+impl From<Vec<Line>> for Detail {
+    fn from(lines: Vec<Line>) -> Self {
+        Detail {
+            lines,
+            plots: Vec::new(),
+        }
+    }
+}
+
+impl Detail {
+    /// Insert a line, moving every chart at or below it down with it.
+    pub fn insert_line(&mut self, at: usize, line: Line) {
+        self.lines.insert(at, line);
+        for plot in &mut self.plots {
+            if plot.y >= at {
+                plot.y += 1;
+            }
+        }
+    }
 }
 
 /// The plain width of a line.
@@ -548,6 +597,7 @@ pub fn body(shared: &Shared, v: &View, w: usize) -> Frame {
         items: Vec::new(),
         placed: Vec::new(),
         cursor: None,
+        plots: Vec::new(),
     };
     f.lines.extend(status(shared, v, budget, &p));
     let Some(prop) = shared.props.get(v.prop) else {
@@ -602,6 +652,11 @@ pub fn body(shared: &Shared, v: &View, w: usize) -> Frame {
         }
         for pl in &mut f.placed {
             pl.0 += n;
+        }
+        for plot in &mut f.plots {
+            if plot.y >= at {
+                plot.y += n;
+            }
         }
         if let Some(c) = f.cursor.as_mut() {
             *c += n;
@@ -671,7 +726,28 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
     }
     let hi = rt.minutes.iter().cloned().fold(0.0, f64::max);
     let series = bar(&rt.minutes.iter().map(|x| Some(*x)).collect::<Vec<_>>(), hi);
-    if 13 + 30 <= budget {
+    // Three rows of bars, one column a minute, with what they measure and
+    // their scale to the left: pixel bars in Kitty, eighth-block bars
+    // elsewhere, from the same columns. One row of sparkline flattened a
+    // quiet minute and a busy one into two of eight heights.
+    let lw = 15usize;
+    let n = rt.minutes.len();
+    if n > 0 && lw + n <= budget {
+        let labels = [
+            " per minute".to_string(),
+            format!(" peak {}", model::thousands(hi)),
+            " 30 min → now".to_string(),
+        ];
+        let y0 = f.lines.len();
+        for label in &labels {
+            f.lines
+                .push(vec![part(&p.dim, left(label, lw)), part("", " ".repeat(n))]);
+        }
+        let columns: Vec<(f64, String)> =
+            rt.minutes.iter().map(|v| (*v, p.good.clone())).collect();
+        f.plots
+            .push(tc::Plot::bars(lw, y0, &columns, labels.len(), hi, false));
+    } else if 13 + 30 <= budget {
         f.lines
             .push(vec![part(&p.dim, " per minute "), part(&p.good, series)]);
     } else {
@@ -892,28 +968,64 @@ fn today(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz::Tz,
         .chain(week.iter().flatten())
         .cloned()
         .fold(0.0, f64::max);
-    let label_w = 1 + tc::display_width(&last_label).max(5) + 1;
-    for (label, values, colour) in [
-        ("today", &h.today, &p.good),
-        (last_label.as_str(), &week, &p.dim),
-    ] {
-        let drawn = bar(values, hi);
-        if label_w + 24 <= budget {
-            f.lines.push(vec![
-                part(&p.dim, left(&format!(" {}", label), label_w)),
-                part(colour, drawn),
-            ]);
-        } else {
-            f.lines.push(vec![part(&p.dim, format!(" {}", label))]);
-            f.lines.push(vec![part(colour, format!(" {}", drawn))]);
-        }
-    }
-    f.lines.extend(prose(
-        &p.dim,
-        "░ = hour not yet processed, not zero · · = no sessions that hour",
+    // Both days on one chart and one scale, so the gap between them is
+    // the thing read rather than two shapes compared by eye. Today's line
+    // stops at the last hour GA has processed: an unprocessed hour is a
+    // break in the line, never a fall to zero.
+    let ticks = [
+        (0usize, "00".to_string()),
+        (6, "06".to_string()),
+        (12, "12".to_string()),
+        (18, "18".to_string()),
+        (23, "23".to_string()),
+    ];
+    let charted = pair_chart(
+        p,
+        &mut f.lines,
+        &mut f.plots,
+        &[
+            ("today".to_string(), h.today.clone(), p.good.clone()),
+            (last_label.clone(), week.clone(), p.dim.clone()),
+        ],
+        &ticks,
+        5,
         budget,
-        " ",
-    ));
+    );
+    if charted {
+        // Said only when it is true: with every hour processed there is no
+        // end to the line to explain.
+        if h.today.iter().any(|v| v.is_none()) {
+            f.lines.extend(prose(
+                &p.dim,
+                "today's line ends at the last hour GA has processed; the rest of the day is not yet known, not zero",
+                budget,
+                " ",
+            ));
+        }
+    } else {
+        let label_w = 1 + tc::display_width(&last_label).max(5) + 1;
+        for (label, values, colour) in [
+            ("today", &h.today, &p.good),
+            (last_label.as_str(), &week, &p.dim),
+        ] {
+            let drawn = bar(values, hi);
+            if label_w + 24 <= budget {
+                f.lines.push(vec![
+                    part(&p.dim, left(&format!(" {}", label), label_w)),
+                    part(colour, drawn),
+                ]);
+            } else {
+                f.lines.push(vec![part(&p.dim, format!(" {}", label))]);
+                f.lines.push(vec![part(colour, format!(" {}", drawn))]);
+            }
+        }
+        f.lines.extend(prose(
+            &p.dim,
+            "░ = hour not yet processed, not zero · · = no sessions that hour",
+            budget,
+            " ",
+        ));
+    }
     if proc_.hourly.rows.is_empty() && !proc_.hourly.meta.empty_reason.is_empty() {
         f.lines.extend(prose(
             &p.dim,
@@ -1908,6 +2020,100 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     out
 }
 
+/// Series over the same slots as one line chart on one scale.
+///
+/// The first series is the one being read and is drawn on top; the rest
+/// are what it is compared with. The scale is labelled at its top and its
+/// zero on the left, `ticks` name slots along the bottom, and a legend
+/// names each line in its colour. `None` is a break in a line - a slot not
+/// measured - never a zero. Core draws the chart as antialiased pixels in
+/// Kitty and as Braille elsewhere, from the same values.
+///
+/// Returns false, drawing nothing, when the pane cannot give every slot a
+/// column; the caller keeps its one-row fallback for that.
+#[allow(clippy::too_many_arguments)]
+fn pair_chart(
+    p: &Palette,
+    lines: &mut Vec<Line>,
+    plots: &mut Vec<tc::Plot>,
+    series: &[(String, Vec<Option<f64>>, String)],
+    ticks: &[(usize, String)],
+    height: usize,
+    budget: usize,
+) -> bool {
+    let slots = series.iter().map(|s| s.1.len()).max().unwrap_or(0);
+    if slots < 2 || height < 2 {
+        return false;
+    }
+    let hi = series
+        .iter()
+        .flat_map(|s| s.1.iter().flatten())
+        .cloned()
+        .fold(0.0, f64::max);
+    let top = if hi > 0.0 { hi } else { 1.0 };
+    let top_label = model::thousands(hi);
+    let lw = 1 + tc::display_width(&top_label).max(1) + 1;
+    if lw + slots > budget {
+        return false;
+    }
+    // Up to four columns a slot: past that a day of hours is a wide flat
+    // band, and the pane's spare width says nothing more.
+    let cw = budget.saturating_sub(lw).min(slots * 4).max(slots);
+    let y0 = lines.len();
+    for row in 0..height {
+        // An empty chart has one honest label, its zero: a top also
+        // reading 0 made the scale look like it had a height.
+        let label = if row + 1 == height {
+            "0"
+        } else if row == 0 && hi > 0.0 {
+            top_label.as_str()
+        } else {
+            ""
+        };
+        lines.push(vec![
+            part(&p.dim, format!(" {:>w$} ", label, w = lw - 2)),
+            part("", " ".repeat(cw)),
+        ]);
+    }
+    // Slot i sits at the same fraction of the width in both renderers.
+    let mut axis = vec![' '; lw + cw];
+    for (slot, text) in ticks {
+        let at = lw + (slot.min(&(slots - 1)) * (cw - 1) + (slots - 1) / 2) / (slots - 1);
+        let width = tc::display_width(text);
+        let start = at.saturating_sub(width / 2).min(lw + cw - width);
+        if axis[start..start + width].iter().all(|c| *c == ' ') {
+            for (k, ch) in text.chars().enumerate() {
+                axis[start + k] = ch;
+            }
+        }
+    }
+    lines.push(vec![part(
+        &p.dim,
+        axis.into_iter().collect::<String>().trim_end().to_string(),
+    )]);
+    let mut legend = vec![part("", " ".repeat(lw - 1))];
+    for (name, _, colour) in series {
+        legend.push(part(colour, "━━ "));
+        legend.push(part(&p.dim, format!("{}   ", name)));
+    }
+    lines.push(legend);
+    let chart = tc::LineChart {
+        slots,
+        traces: series
+            .iter()
+            .map(|(_, values, colour)| tc::Trace {
+                values: values.iter().map(|v| v.map(|x| x / top)).collect(),
+                positions: None,
+                colour: colour.clone(),
+                baseline: None,
+            })
+            .collect(),
+        focus: Some(0),
+    };
+    plots.push(tc::Plot::new(lw, y0, cw, height, chart).on_axis(0.0, top));
+    true
+}
+
 /// A one-line chart. `hi` is the top of the scale: pass one shared by
 /// charts drawn to be compared, or a fall of 90% draws as two identical
 /// full-height lines.
@@ -2001,10 +2207,10 @@ pub fn page_detail(
     configured: bool,
     asked_on: chrono::NaiveDate,
     w: usize,
-) -> Vec<Line> {
+) -> Detail {
     let p = palette();
     let budget = w.saturating_sub(1).max(1);
-    let mut out = prose(&p.txt, path, budget, " ");
+    let mut out: Detail = prose(&p.txt, path, budget, " ").into();
     out.push(Vec::new());
     let reports = match reports {
         None => {
@@ -2051,8 +2257,24 @@ pub fn page_detail(
         let c = model::day_grid(&cur, yesterday, 28);
         let pv = model::day_grid(&prev, prior_end, 28);
         let hi = top_of(&[&c, &pv]);
-        out.extend(spark_line(&p, word, &c, hi, &p.good, budget));
-        out.extend(spark_line(&p, "prior", &pv, hi, &p.dim, budget));
+        let some = |v: &[f64]| v.iter().map(|x| Some(*x)).collect::<Vec<_>>();
+        let Detail { lines, plots } = &mut out;
+        let charted = pair_chart(
+            &p,
+            lines,
+            plots,
+            &[
+                (format!("{} 28d", word), some(&c), p.good.clone()),
+                ("prior 28d".to_string(), some(&pv), p.dim.clone()),
+            ],
+            &[(0, "28d ago".into()), (13, "14d".into()), (27, "yesterday".into())],
+            5,
+            budget,
+        );
+        if !charted {
+            out.extend(spark_line(&p, word, &c, hi, &p.good, budget));
+            out.extend(spark_line(&p, "prior", &pv, hi, &p.dim, budget));
+        }
         let window = |name: &str| {
             totals
                 .rows
@@ -2153,10 +2375,10 @@ pub fn event_detail(
     metric: &str,
     asked_on: chrono::NaiveDate,
     w: usize,
-) -> Vec<Line> {
+) -> Detail {
     let p = palette();
     let budget = w.saturating_sub(1).max(1);
-    let mut out = prose(&p.txt, name, budget, " ");
+    let mut out: Detail = prose(&p.txt, name, budget, " ").into();
     out.push(Vec::new());
     let reports = match reports {
         None => {
@@ -2193,14 +2415,30 @@ pub fn event_detail(
     if days.is_empty() {
         out.extend(prose(&p.dim, "none in 28 days", budget, " "));
     } else {
-        out.extend(spark_line(
+        let Detail { lines, plots } = &mut out;
+        let charted = pair_chart(
             &p,
-            "per day",
-            &vals,
-            top_of(&[&vals]),
-            &p.good,
+            lines,
+            plots,
+            &[(
+                "per day".to_string(),
+                vals.iter().map(|x| Some(*x)).collect(),
+                p.good.clone(),
+            )],
+            &[(0, "28d ago".into()), (13, "14d".into()), (27, "today".into())],
+            5,
             budget,
-        ));
+        );
+        if !charted {
+            out.extend(spark_line(
+                &p,
+                "per day",
+                &vals,
+                top_of(&[&vals]),
+                &p.good,
+                budget,
+            ));
+        }
         out.extend(prose(
             &p.dim,
             &format!("{} in 28 days", model::thousands(vals.iter().sum())),
@@ -2446,14 +2684,15 @@ mod tests {
                 }
                 let details = [
                     property_detail(&s.props[0], &v, w),
-                    page_detail("/pricing", None, false, day(), w),
+                    page_detail("/pricing", None, false, day(), w).lines,
                     event_detail(
                         "purchase",
                         Some(&Err("HTTP 500".into())),
                         "keyEvents",
                         day(),
                         w,
-                    ),
+                    )
+                    .lines,
                 ];
                 for d in details.iter().flatten() {
                     assert!(width_of(d) <= w - 1, "{} cols: {:?}", w, plain(d));
@@ -2960,32 +3199,90 @@ mod tests {
         // Asked on Oct 27: the current window ends Oct 26 and the prior
         // Sep 28, so prior holds Sep 1-28 and current Sep 29-Oct 26.
         let on = chrono::NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
-        let lines = page_detail("/p", Some(&Ok(batch)), false, on, 200);
-        let chart = |label: &str| {
-            lines
-                .iter()
-                .map(plain)
-                .find(|l| l.trim_start().starts_with(label))
-                .unwrap_or_default()
-        };
-        let prior = chart("prior");
+        let detail = page_detail("/p", Some(&Ok(batch)), false, on, 200);
+        // Views first, then users: one chart each, both windows on it.
+        let views = &detail.plots[0].chart;
+        assert_eq!(views.slots, 28);
+        assert_eq!(views.traces.len(), 2);
+        let (current, prior) = (&views.traces[0].values, &views.traces[1].values);
         assert!(
-            prior.contains('█'),
-            "the larger window reaches the top: {}",
-            prior
+            prior.iter().all(|v| *v == Some(1.0)),
+            "the larger window reaches the top: {prior:?}"
         );
-        let views = chart("views");
         assert!(
-            !views.contains('█'),
-            "the smaller window does not: {}",
-            views
+            current.iter().flatten().all(|v| *v <= 0.1 + 1e-9),
+            "the smaller window sits at a tenth, on the same scale: {current:?}"
         );
         assert_eq!(
-            views.matches('·').count(),
+            current.iter().filter(|v| **v == Some(0.0)).count(),
             15,
-            "Sep 29-30 and the odd days of October are drawn as zero: {}",
-            views
+            "Sep 29-30 and the odd days of October are drawn as zero, not left out: {current:?}"
         );
+        // The window being read is drawn on top.
+        assert_eq!(views.focus, Some(0));
+        let text = detail.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("views 28d") && text.contains("prior 28d"), "{text}");
+    }
+
+    #[test]
+    fn today_is_one_chart_that_stops_at_the_last_processed_hour() {
+        let mut today = vec![Some(5.0); 15];
+        today.extend(vec![None; 9]);
+        let week: Vec<Option<f64>> = (0..24).map(|h| Some(h as f64)).collect();
+        let (mut lines, mut plots) = (Vec::new(), Vec::new());
+        let p = palette();
+        assert!(pair_chart(
+            &p,
+            &mut lines,
+            &mut plots,
+            &[
+                ("today".into(), today, p.good.clone()),
+                ("last Tue".into(), week, p.dim.clone()),
+            ],
+            &[(0, "00".into()), (23, "23".into())],
+            5,
+            80,
+        ));
+        let chart = &plots[0].chart;
+        // An hour not processed is a break in the line, never a zero.
+        assert_eq!(chart.traces[0].values.iter().filter(|v| v.is_none()).count(), 9);
+        assert_eq!(chart.traces[1].values[23], Some(1.0), "the peak is the top of the scale");
+        // Rows of chart, then the hour axis, then the legend - none wider
+        // than the pane.
+        assert_eq!(lines.len(), 5 + 2);
+        assert!(
+            lines.iter().all(|l| width_of(l) <= 80),
+            "{:?}",
+            lines.iter().map(plain).collect::<Vec<_>>()
+        );
+        assert!(plain(&lines[5]).contains("00") && plain(&lines[5]).contains("23"));
+        assert!(plain(&lines[0]).contains("23"), "the top of the scale is labelled");
+        // An empty chart names only its zero.
+        let (mut lines, mut plots) = (Vec::new(), Vec::new());
+        assert!(pair_chart(
+            &p,
+            &mut lines,
+            &mut plots,
+            &[("today".into(), vec![Some(0.0); 24], p.good.clone())],
+            &[],
+            5,
+            80,
+        ));
+        assert!(plain(&lines[0]).trim().is_empty(), "{:?}", plain(&lines[0]));
+        assert_eq!(plain(&lines[4]).trim(), "0");
+        // Too narrow to give each hour a column: nothing drawn, so the
+        // caller keeps its one-row fallback.
+        let (mut lines, mut plots) = (Vec::new(), Vec::new());
+        assert!(!pair_chart(
+            &p,
+            &mut lines,
+            &mut plots,
+            &[("today".into(), vec![Some(1.0); 24], p.good.clone())],
+            &[],
+            5,
+            20,
+        ));
+        assert!(lines.is_empty() && plots.is_empty());
     }
 
     #[test]
