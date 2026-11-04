@@ -2380,7 +2380,7 @@ mod tests {
         assert!(pane.reporter_gone(&gone));
         pane.records = vec![gone];
         assert!(
-            detail_phrases(&pane, true, 0.0)
+            detail_phrases(&pane, &Columns::fit(100, &[]), 0.0)
                 .iter()
                 .any(|s| s.contains("not in foreground"))
         );
