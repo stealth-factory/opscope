@@ -5557,6 +5557,27 @@ mod tests {
         assert!(matches!(picker_kind(&zones, "cities"), Some(PickKind::Timezone)));
     }
 
+    /// A city row may be a pair or a pair plus coordinates. The shipped
+    /// pairs are not the only legal shape, or adding a zone while one city
+    /// carries a latitude refuses the whole list.
+    #[test]
+    fn a_coordinate_city_validates_beside_a_pair() {
+        let shipped = serde_json::json!([["London", "Europe/London"]]);
+        let edited = serde_json::json!([
+            ["London", "Europe/London", 51.5, -0.12],
+            ["Tokyo", "Asia/Tokyo"]
+        ]);
+        let rule = serde_json::json!({"items": "array", "picker": "timezone"});
+        assert_eq!(validate_value(&edited, &shipped, Some(&rule)), Ok(()));
+        let err = validate_value(
+            &edited,
+            &shipped,
+            Some(&serde_json::json!({"picker": "timezone"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("array"), "{err}");
+    }
+
     /// One zone gets the same database as a list of them, and choosing from
     /// it sets the field rather than adding to it.
     ///

@@ -128,6 +128,9 @@ struct CitySlot {
 struct WeatherState {
     err: String,
     reading: Option<Reading>,
+    /// The coordinates `reading` was fetched for. A later place does not
+    /// keep showing the previous one while its own request is in flight.
+    fetched_for: Option<(f64, f64)>,
     waiting: bool,
     cities: Vec<CitySlot>,
     place_next: Instant,
@@ -145,6 +148,7 @@ impl WeatherState {
         let mut state = Self {
             err: String::new(),
             reading: None,
+            fetched_for: None,
             waiting: false,
             cities: Vec::new(),
             place_next: Instant::now(),
@@ -201,6 +205,7 @@ fn publish(state: &mut WeatherState, event: Event) {
     match event {
         Event::Unset => {
             state.reading = None;
+            state.fetched_for = None;
             state.waiting = false;
             state.err.clear();
         }
@@ -217,6 +222,7 @@ fn publish(state: &mut WeatherState, event: Event) {
         }
         Event::Failed(why) => {
             state.reading = None;
+            state.fetched_for = None;
             state.waiting = false;
             state.err = why;
         }
@@ -592,12 +598,22 @@ fn soonest(state: &mut WeatherState) -> Duration {
     next.saturating_duration_since(now)
 }
 
+/// Drop a reading that belongs to another place, and say the row is
+/// waiting when there is nothing left to show. The same place keeps its
+/// number up until the refresh returns.
+fn prepare_place_fetch(state: &mut WeatherState, place: &Place) {
+    let here = (place.latitude, place.longitude);
+    if state.fetched_for != Some(here) {
+        state.reading = None;
+        state.fetched_for = None;
+    }
+    if state.reading.is_none() {
+        publish(state, Event::Waiting);
+    }
+}
+
 fn fetch_into(state: &Mutex<WeatherState>, activity: &tc::Refresh, place: Place) -> Step {
-    let keep_reading = match state.lock() {
-        Ok(guard) => guard.reading.is_some(),
-        Err(_) => return Step::Stop("the weather lock was poisoned".into()),
-    };
-    if !keep_reading && lock_publish(state, Event::Waiting).is_err() {
+    if state.lock().map(|mut guard| prepare_place_fetch(&mut guard, &place)).is_err() {
         return Step::Stop("the weather lock was poisoned".into());
     }
     let work = activity.start();
@@ -608,9 +624,15 @@ fn fetch_into(state: &Mutex<WeatherState>, activity: &tc::Refresh, place: Place)
     match fetched {
         Ok(Ok(conditions)) => {
             let reading = reading_from(&place.label, conditions);
-            if lock_publish(state, Event::Ready(reading)).is_err()
-                || schedule_place(state, SUCCESS_EVERY).is_err()
-            {
+            let stored = match state.lock() {
+                Ok(mut guard) => {
+                    publish(&mut guard, Event::Ready(reading));
+                    guard.fetched_for = Some((place.latitude, place.longitude));
+                    Ok(())
+                }
+                Err(_) => Err(()),
+            };
+            if stored.is_err() || schedule_place(state, SUCCESS_EVERY).is_err() {
                 return Step::Stop("the weather lock was poisoned".into());
             }
             Step::Wait(SUCCESS_EVERY)
@@ -1073,6 +1095,61 @@ mod tests {
         apply_targets(&mut state, &[moved]);
         assert!(matches!(state.cities[0].outcome, CityOutcome::Waiting));
         assert_eq!(state.cities[0].latitude, 35.7);
+    }
+
+    #[test]
+    fn a_changed_place_drops_the_previous_temperature() {
+        let mut state = WeatherState::from_place(Ok(Some(Place {
+            latitude: 51.5,
+            longitude: -0.1,
+            label: "London".into(),
+        })));
+        publish(
+            &mut state,
+            Event::Ready(Reading {
+                label: "London".into(),
+                celsius: 10.5,
+                code: 2,
+                observed: "11:30".into(),
+            }),
+        );
+        state.fetched_for = Some((51.5, -0.1));
+        let moved = Place {
+            latitude: 35.7,
+            longitude: 139.7,
+            label: "Tokyo".into(),
+        };
+        prepare_place_fetch(&mut state, &moved);
+        assert!(state.reading.is_none(), "the old temperature stayed on the new place");
+        assert!(matches!(state.view(), View::Waiting));
+        prepare_place_fetch(
+            &mut state,
+            &Place {
+                latitude: 51.5,
+                longitude: -0.1,
+                label: "London".into(),
+            },
+        );
+        assert!(state.reading.is_none());
+        publish(
+            &mut state,
+            Event::Ready(Reading {
+                label: "London".into(),
+                celsius: 10.5,
+                code: 2,
+                observed: "11:30".into(),
+            }),
+        );
+        state.fetched_for = Some((51.5, -0.1));
+        prepare_place_fetch(
+            &mut state,
+            &Place {
+                latitude: 51.5,
+                longitude: -0.1,
+                label: "London".into(),
+            },
+        );
+        assert_eq!(state.reading.as_ref().map(|r| r.celsius), Some(10.5));
     }
 
     #[test]

@@ -33,6 +33,7 @@
       "minimum": 0
     },
     "cities": {
+      "items": "array",
       "picker": "timezone"
     },
     "weather_latitude": {

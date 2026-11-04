@@ -1202,17 +1202,15 @@ fn weather_plot(
     y: usize,
     ink: &str,
 ) -> Option<tc::Plot> {
-    let glyph = parse::condition_glyph(reading.code);
-    let x = if reading.label.is_empty() {
-        1
-    } else {
-        tc::display_width(&format!(" {}", reading.label)) + 1
-    };
-    let cols = tc::display_width(glyph).max(1);
+    let (label, glyph, _, _) = weather_layout(reading, room);
+    // `glyph` is a leading space plus the mark. The picture replaces the mark.
+    let x = tc::display_width(&label) + 1;
+    let mark = glyph.trim();
+    let cols = tc::display_width(mark).max(1);
     if x + cols > room {
         return None;
     }
-    Some(tc::Plot::sky(x, y, sky_of(reading.code), glyph, ink))
+    Some(tc::Plot::sky(x, y, sky_of(reading.code), mark, ink))
 }
 
 fn sky_of(code: i64) -> tc::Sky {
@@ -1228,24 +1226,65 @@ fn sky_of(code: i64) -> tc::Sky {
     }
 }
 
-fn ready_weather(reading: &weather::Reading, room: usize, p: &Palette) -> String {
-    let glyph = parse::condition_glyph(reading.code);
-    let mut parts = Vec::new();
-    if reading.label.is_empty() {
-        parts.push((p.accent.as_str(), format!(" {glyph}")));
+/// Glyph, then temperature, then whatever of the label still fits, then the
+/// condition in words, then the observation time. The label is optional
+/// text; spending the row on it and clipping the temperature would show a
+/// place and hide the reading.
+fn weather_layout(reading: &weather::Reading, room: usize) -> (String, String, bool, bool) {
+    let glyph = format!(" {}", parse::condition_glyph(reading.code));
+    let temp = format!("  {}", parse::format_celsius(reading.celsius));
+    let reserved = tc::display_width(&glyph) + tc::display_width(&temp);
+    let label = if reading.label.is_empty() {
+        String::new()
     } else {
-        parts.push((p.txt.as_str(), format!(" {}", reading.label)));
-        parts.push((p.accent.as_str(), format!(" {glyph}")));
+        let fitted = fit_cells(&format!(" {}", reading.label), room.saturating_sub(reserved));
+        if fitted.trim().is_empty() { String::new() } else { fitted }
+    };
+    let used = tc::display_width(&label) + reserved;
+    let name = format!("  {}", parse::condition_name(reading.code));
+    let show_name = tc::display_width(&name) <= room.saturating_sub(used);
+    let after_name = if show_name { used + tc::display_width(&name) } else { used };
+    let observed = if reading.observed.is_empty() {
+        String::new()
+    } else {
+        format!(" · observed {}", reading.observed)
+    };
+    let show_observed = !observed.is_empty() && tc::display_width(&observed) <= room.saturating_sub(after_name);
+    (label, glyph, show_name, show_observed)
+}
+
+fn fit_cells(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = tc::display_width(&ch.to_string());
+        if used + w > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
     }
+    out
+}
+
+fn ready_weather(reading: &weather::Reading, room: usize, p: &Palette) -> String {
+    let (label, glyph, show_name, show_observed) = weather_layout(reading, room);
+    let mut parts = Vec::new();
+    if !label.is_empty() {
+        parts.push((p.txt.as_str(), label));
+    }
+    parts.push((p.accent.as_str(), glyph));
     parts.push((
         p.txt.as_str(),
         format!("  {}", parse::format_celsius(reading.celsius)),
     ));
-    parts.push((
-        p.dim.as_str(),
-        format!("  {}", parse::condition_name(reading.code)),
-    ));
-    if !reading.observed.is_empty() {
+    if show_name {
+        parts.push((
+            p.dim.as_str(),
+            format!("  {}", parse::condition_name(reading.code)),
+        ));
+    }
+    if show_observed {
         parts.push((
             p.dim.as_str(),
             format!(" · observed {}", reading.observed),
@@ -1400,6 +1439,7 @@ fn main() {
             }
         }
         rows.extend(draw_weather(&view, w, &p));
+        let after_weather = rows.len();
         rows.push(String::new());
 
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
@@ -1478,6 +1518,7 @@ fn main() {
             ));
             rows.push(bar(&mut plots, rows.len(), item.frac, bar_w, item.hue, &p));
         }
+        let before_clocks = rows.len();
         rows.push(String::new());
 
         // Navigation first, as every other widget in the collection has it,
@@ -1548,7 +1589,33 @@ fn main() {
         let ordered = cities_west_to_east(&cities, &now);
         // The footer as packed, not a guess at it: it wraps to more lines
         // as the pane narrows, and every one it gains comes out of this.
-        let free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
+        // The weather line took the row an 80×22 pane used for the first
+        // city. A spacer gives it back; a content row does not.
+        let mut free = h.saturating_sub(rows.len() + packed.lines.len() + 1);
+        if !ordered.is_empty() && free < 2 {
+            let mut trailing = before_clocks;
+            if after_weather < rows.len() && rows[after_weather].is_empty() {
+                rows.remove(after_weather);
+                for plot in &mut plots {
+                    if plot.y > after_weather {
+                        plot.y -= 1;
+                    }
+                }
+                if trailing > after_weather {
+                    trailing -= 1;
+                }
+                free += 1;
+            }
+            if free < 2 && trailing < rows.len() && rows[trailing].is_empty() {
+                rows.remove(trailing);
+                for plot in &mut plots {
+                    if plot.y > trailing {
+                        plot.y -= 1;
+                    }
+                }
+                free += 1;
+            }
+        }
         let room = free;
         let city_weather = weather.cities();
         // This section is built from what is left rather than scrolled, so
@@ -2813,7 +2880,9 @@ mod tests {
             code: 0,
             observed: String::new(),
         };
-        assert!(weather_plot(&crowded, 40, 1, "ink").is_none());
+        let plot = weather_plot(&crowded, 40, 1, "ink").unwrap();
+        assert!(plot.x + plot.width <= 40, "the picture sat past the clipped row");
+        assert!(strip_ansi(&ready_weather(&crowded, 40, &palette())).contains("1.0°C"));
     }
 
     #[test]
@@ -3567,6 +3636,10 @@ mod tests {
         );
         assert_eq!(wide.len(), 1);
         assert!(tc::display_width(&wide[0]) <= 29, "{}", wide[0]);
+        let shown = strip_ansi(&wide[0]);
+        assert!(shown.contains("12.0°C"), "the temperature was clipped away: {shown}");
+        assert!(shown.contains('◑'), "the glyph was clipped away: {shown}");
+        assert!(!shown.contains("partly"), "the condition words outranked the reading: {shown}");
     }
 
     #[test]
