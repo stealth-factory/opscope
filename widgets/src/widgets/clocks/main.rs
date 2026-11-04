@@ -1194,6 +1194,40 @@ fn draw_weather(view: &weather::View, width: usize, p: &Palette) -> Vec<String> 
     }
 }
 
+/// Where the condition glyph sits on the weather row, when the pane is
+/// wide enough to draw it. The picture uses the same cell.
+fn weather_plot(
+    reading: &weather::Reading,
+    room: usize,
+    y: usize,
+    ink: &str,
+) -> Option<tc::Plot> {
+    let glyph = parse::condition_glyph(reading.code);
+    let x = if reading.label.is_empty() {
+        1
+    } else {
+        tc::display_width(&format!(" {}", reading.label)) + 1
+    };
+    let cols = tc::display_width(glyph).max(1);
+    if x + cols > room {
+        return None;
+    }
+    Some(tc::Plot::sky(x, y, sky_of(reading.code), glyph, ink))
+}
+
+fn sky_of(code: i64) -> tc::Sky {
+    match code {
+        0 | 1 => tc::Sky::Clear,
+        2 => tc::Sky::Partly,
+        3 => tc::Sky::Overcast,
+        45 | 48 => tc::Sky::Fog,
+        51 | 53 | 55 | 61 | 63 | 65 | 80 | 81 | 82 => tc::Sky::Rain,
+        56 | 57 | 66 | 67 | 71 | 73 | 75 | 77 | 85 | 86 => tc::Sky::Snow,
+        95 | 96 | 99 => tc::Sky::Storm,
+        _ => tc::Sky::Unknown,
+    }
+}
+
 fn ready_weather(reading: &weather::Reading, room: usize, p: &Palette) -> String {
     let glyph = parse::condition_glyph(reading.code);
     let mut parts = Vec::new();
@@ -1358,7 +1392,14 @@ fn main() {
             ],
             w - 1,
         ));
-        rows.extend(draw_weather(&weather.view(), w, &p));
+        let view = weather.view();
+        let weather_y = rows.len();
+        if let weather::View::Ready(reading) = &view {
+            if let Some(plot) = weather_plot(reading, w.saturating_sub(1), weather_y, &p.accent) {
+                plots.push(plot);
+            }
+        }
+        rows.extend(draw_weather(&view, w, &p));
         rows.push(String::new());
 
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
@@ -1523,7 +1564,9 @@ fn main() {
             );
             tc::needs_rows(rows.len() + packed.lines.len() + 1 + 1 + miss + ordered.len().min(2));
         }
-        rows.extend(world_clock_rows(
+        let mut spots = Vec::new();
+        let clock_y = rows.len();
+        let clocks = world_clock_rows(
             &ordered,
             &city_weather,
             &mut scroll,
@@ -1531,7 +1574,19 @@ fn main() {
             w,
             &now,
             &p,
-        ));
+            &mut spots,
+        );
+        for spot in spots {
+            let glyph = parse::condition_glyph(spot.code);
+            plots.push(tc::Plot::sky(
+                spot.x,
+                clock_y + spot.row,
+                sky_of(spot.code),
+                glyph,
+                &p.accent,
+            ));
+        }
+        rows.extend(clocks);
 
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         while rows.len() < h.saturating_sub(foot.len()) {
@@ -1573,6 +1628,14 @@ fn main() {
 /// stays in the body, and so does every note after it. Dropping one so a
 /// clock can stay on screen hides the reason the glyph is missing, and
 /// the city offset never reaches a row that was not built.
+/// A condition picture on a visible world-clock row. `row` is an index in
+/// the block `world_clock_rows` returns, heading included.
+struct GlyphSpot {
+    row: usize,
+    x: usize,
+    code: i64,
+}
+
 fn world_clock_rows<Z: TimeZone>(
     ordered: &[&City],
     slots: &[weather::CityWeather],
@@ -1581,6 +1644,7 @@ fn world_clock_rows<Z: TimeZone>(
     width: usize,
     now: &chrono::DateTime<Z>,
     p: &Palette,
+    spots: &mut Vec<GlyphSpot>,
 ) -> Vec<String> {
     if room < 2 || ordered.is_empty() {
         return Vec::new();
@@ -1613,8 +1677,12 @@ fn world_clock_rows<Z: TimeZone>(
         .flatten()
         .collect::<Vec<_>>();
     let note_rows = body.len();
+    let mut pending = Vec::new();
     for city in ordered {
         let there = now.with_timezone(&city.zone);
+        if let Some((x, code)) = glyph_column(city, &there, slots, weather_col, width, p) {
+            pending.push((body.len(), x, code));
+        }
         body.push(world_clock_line(
             city,
             &there,
@@ -1644,7 +1712,36 @@ fn world_clock_rows<Z: TimeZone>(
         width.saturating_sub(1),
     )];
     rows.extend(body.into_iter().skip(*scroll).take(window));
+    let start = *scroll;
+    for (index, x, code) in pending {
+        if (start..start + window).contains(&index) {
+            spots.push(GlyphSpot { row: 1 + index - start, x, code });
+        }
+    }
     rows
+}
+
+/// The condition glyph's column on a world-clock row, when that row has a
+/// reading and the pane still has room for it.
+fn glyph_column(
+    city: &City,
+    there: &chrono::DateTime<Tz>,
+    slots: &[weather::CityWeather],
+    weather_col: bool,
+    width: usize,
+    p: &Palette,
+) -> Option<(usize, i64)> {
+    if !weather_col {
+        return None;
+    }
+    let code = city_code(city, slots)?;
+    let (_, phase) = phase_of(there, p);
+    let x = tc::display_width(&format!(" {} ", phase));
+    let cols = tc::display_width(parse::condition_glyph(code)).max(1);
+    if x + cols > width.saturating_sub(1) {
+        return None;
+    }
+    Some((x, code))
 }
 
 /// Which clocks this window is showing. The number is cities, not note
@@ -1715,6 +1812,20 @@ fn condition_cell_width() -> usize {
         .max()
         .unwrap_or(1)
         .max(1)
+}
+
+fn city_code(city: &City, slots: &[weather::CityWeather]) -> Option<i64> {
+    let place = city.place.as_ref()?;
+    let slot = slots.iter().find(|slot| {
+        slot.name == city.name
+            && slot.zone == city.zone.name()
+            && slot.latitude == place.latitude
+            && slot.longitude == place.longitude
+    })?;
+    match slot.outcome {
+        weather::CityOutcome::Ready { code } => Some(code),
+        _ => None,
+    }
 }
 
 fn city_glyph<'a>(city: &City, slots: &'a [weather::CityWeather]) -> Option<&'a str> {
@@ -2502,6 +2613,7 @@ mod tests {
             80,
             &now,
             &p,
+            &mut Vec::new(),
         );
         let text = rows.join("\n");
         assert!(text.contains('☂'), "{text}");
@@ -2524,7 +2636,7 @@ mod tests {
             longitude: 0.0,
             outcome: weather::CityOutcome::Ready { code: 0 },
         }];
-        let mismatched = world_clock_rows(&[&tokyo], &other, &mut scroll, 6, 80, &now, &p);
+        let mismatched = world_clock_rows(&[&tokyo], &other, &mut scroll, 6, 80, &now, &p, &mut Vec::new());
         let mismatched_text = mismatched.join("\n");
         assert!(!mismatched_text.contains('☀'), "{mismatched_text}");
         assert!(!mismatched_text.contains('°'), "{mismatched_text}");
@@ -2536,7 +2648,7 @@ mod tests {
             longitude: 139.69,
             outcome: weather::CityOutcome::Failed("weather unavailable: offline".into()),
         }];
-        let missed = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 80, &now, &p);
+        let missed = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 80, &now, &p, &mut Vec::new());
         let missed_text = missed.join("\n");
         assert!(missed_text.contains("offline"), "{missed_text}");
         assert!(missed_text.contains("Tokyo"), "{missed_text}");
@@ -2555,7 +2667,7 @@ mod tests {
             longitude: 139.69,
             outcome: weather::CityOutcome::Waiting,
         }];
-        let pending = world_clock_rows(&[&tokyo], &waiting, &mut scroll, 6, 40, &now, &p);
+        let pending = world_clock_rows(&[&tokyo], &waiting, &mut scroll, 6, 40, &now, &p, &mut Vec::new());
         let pending_text = pending.join("\n");
         assert!(!pending_text.contains('☂'), "{pending_text}");
         assert!(!pending_text.contains('°'), "{pending_text}");
@@ -2567,13 +2679,13 @@ mod tests {
             None,
             Some("weather: set longitude as well as latitude"),
         );
-        let noted = world_clock_rows(&[&broken], &[], &mut scroll, 6, 80, &now, &p);
+        let noted = world_clock_rows(&[&broken], &[], &mut scroll, 6, 80, &now, &p, &mut Vec::new());
         let noted_text = noted.join("\n");
         assert!(noted_text.contains("longitude"), "{noted_text}");
         assert!(noted_text.contains("London"), "{noted_text}");
         assert!(!noted_text.contains('°'), "{noted_text}");
 
-        let narrow = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 24, &now, &p);
+        let narrow = world_clock_rows(&[&tokyo, &london], &failed, &mut scroll, 8, 24, &now, &p, &mut Vec::new());
         assert!(narrow.len() > 2, "a narrow miss wraps");
         for row in &narrow {
             assert!(tc::display_width(row) <= 23, "{row}");
@@ -2621,6 +2733,7 @@ mod tests {
                 80,
                 &now,
                 &p,
+                &mut Vec::new(),
             );
             assert_eq!(rows.len(), 3, "the window stays inside the room");
             for row in &rows {
@@ -2660,13 +2773,87 @@ mod tests {
     }
 
     #[test]
+    fn every_condition_picture_matches_its_glyph() {
+        for code in 0..=99 {
+            let sky = sky_of(code);
+            let glyph = parse::condition_glyph(code);
+            let expect = match glyph {
+                "☀" => tc::Sky::Clear,
+                "◑" => tc::Sky::Partly,
+                "☁" => tc::Sky::Overcast,
+                "≡" => tc::Sky::Fog,
+                "☂" => tc::Sky::Rain,
+                "❄" => tc::Sky::Snow,
+                "⚡" => tc::Sky::Storm,
+                "·" => tc::Sky::Unknown,
+                other => panic!("{code} drew {other}"),
+            };
+            assert_eq!(sky, expect, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_ready_place_names_a_picture_for_the_glyph_cell() {
+        let reading = weather::Reading {
+            label: "London".into(),
+            celsius: 10.2,
+            code: 3,
+            observed: "10:45".into(),
+        };
+        let row = ready_weather(&reading, 80, &palette());
+        assert!(strip_ansi(&row).contains('☁'), "{row}");
+        let plot = weather_plot(&reading, 80, 6, &palette().accent).unwrap();
+        assert_eq!(plot.y, 6);
+        assert_eq!(plot.x, tc::display_width(" London") + 1);
+        assert_eq!(plot.width, 1);
+        assert!(!plot.is_text());
+        let crowded = weather::Reading {
+            label: "x".repeat(80),
+            celsius: 1.0,
+            code: 0,
+            observed: String::new(),
+        };
+        assert!(weather_plot(&crowded, 40, 1, "ink").is_none());
+    }
+
+    #[test]
+    fn a_visible_city_reading_places_its_picture_on_that_row() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+        let london = sample_city("London", "Europe/London", Some((51.5, -0.12)), None);
+        let mut scroll = 0usize;
+        let mut spots = Vec::new();
+        let rows = world_clock_rows(
+            &[&london],
+            &[weather::CityWeather {
+                name: "London".into(),
+                zone: "Europe/London".into(),
+                latitude: 51.5,
+                longitude: -0.12,
+                outcome: weather::CityOutcome::Ready { code: 2 },
+            }],
+            &mut scroll,
+            4,
+            80,
+            &now,
+            &p,
+            &mut spots,
+        );
+        assert_eq!(spots.len(), 1);
+        assert_eq!(spots[0].row, 1);
+        assert_eq!(spots[0].code, 2);
+        assert_eq!(spots[0].x, tc::display_width(" ☀ "));
+        assert!(strip_ansi(&rows[spots[0].row]).contains('◑'));
+    }
+
+    #[test]
     fn a_list_with_no_coordinates_keeps_the_old_column() {
         let p = palette();
         let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
         let london = sample_city("London", "Europe/London", None, None);
         let tokyo = sample_city("Tokyo", "Asia/Tokyo", Some((35.68, 139.69)), None);
         let mut scroll = 0usize;
-        let lone = world_clock_rows(&[&london], &[], &mut scroll, 4, 80, &now, &p);
+        let lone = world_clock_rows(&[&london], &[], &mut scroll, 4, 80, &now, &p, &mut Vec::new());
         let with = world_clock_rows(
             &[&london, &tokyo],
             &[weather::CityWeather {
@@ -2681,6 +2868,7 @@ mod tests {
             80,
             &now,
             &p,
+            &mut Vec::new(),
         );
         let lone_at = clock_time_column(&lone[1]).unwrap();
         let london_row = with.iter().find(|row| strip_ansi(row).contains("London")).unwrap();

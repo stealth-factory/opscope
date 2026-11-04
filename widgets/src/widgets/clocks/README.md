@@ -49,6 +49,8 @@ Null, or a missing key, leaves the row as an instruction to set them and
 sends nothing. Zero is a real coordinate once it is written down, so it is
 not used as the stand-in for "unset". `weather_label` is optional text
 beside the glyph; it is not looked up and it does not choose the place.
+A terminal that has accepted graphics draws that glyph's cell as a picture;
+every other terminal keeps the glyph, in the same cell.
 
 The number on screen is the latest response that carried a temperature.
 A request that fails clears that number, and the row says why — the clock,
@@ -100,7 +102,8 @@ pinned. The order is recomputed every frame so a pane left up across a DST
 change keeps being a map: London is west of a UTC+1 neighbour in winter and
 level with it in summer. The leading sun or moon is day and night. A
 condition glyph in the next column is that city's current weather, and only
-when the row carries a latitude and longitude that returned a reading.
+when the row carries a latitude and longitude that returned a reading. The
+same cell is a picture when graphics are on.
 
 ## Pomodoro
 

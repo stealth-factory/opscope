@@ -461,6 +461,10 @@ sliver to its neighbours, as it did in whole cells. Fill colours are the same
 ones the widget passed, so the contrast rule on the selected-row tint is
 unchanged.
 
+`Plot::sky` is the one picture that does become an image: a one-cell weather
+drawing in the cell the glyph already occupies. Text mode, and any terminal
+that has not accepted graphics, keeps that glyph. The row does not grow.
+
 No image is animated either (OPS-204). `Plot::as_text()` makes any filled plot
 text in every mode, and `is_text()` reports it. `github` and `linear` use it
 for their flow charts while the bars dance on a `dance` placeholder and while
