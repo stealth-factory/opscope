@@ -24,7 +24,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Boundaries
 
-The widget only reads. The embedded script calls `session.list`, `session.attach`, `session.view`, `session.list_blocks`, the `process`, `title` and `program_status` block methods, `server.status`, `server.version` and `client.list`, and a repository check fails the build if it calls anything else. The two keys that change anything, focus and zoom, change only which pane is focused or zoomed.
+The embedded script only reads: it calls `session.list`, `session.attach`, `session.view`, `session.list_blocks`, the `process`, `title` and `program_status` block methods, `server.status`, `server.version` and `client.list`, and a repository check fails the build if it calls anything else. The two keys that change anything, focus and zoom, change only which pane is focused or zoomed.
 
 Agent state is never inferred. If the user asks why an agent shows `unknown`, the answer is that it has not reported a status; Claude Code's chat reports on its own, `claude agents` does not. Do not suggest editing titles or installing hooks to make a state appear.
 

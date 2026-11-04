@@ -589,7 +589,7 @@ fn mem(bytes: Option<u64>) -> String {
 fn percent(cpu: Option<f64>) -> String {
     match cpu {
         Some(v) => format!("{:>4.0}%", v),
-        None => "   -".to_string(),
+        None => format!("{:>5}", "-"),
     }
 }
 
@@ -626,9 +626,15 @@ fn homely(path: &str) -> String {
     if home.is_empty() {
         return path.to_string();
     }
-    match path.strip_prefix(&home) {
-        Some(rest) => format!("~{}", rest),
-        None => path.to_string(),
+    tilde(path, &home)
+}
+
+/// `path` with `home` written as `~`, only where `home` ends at a directory
+/// boundary: `/home/al` is not the start of `/home/alice`.
+fn tilde(path: &str, home: &str) -> String {
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{}", rest),
+        _ => path.to_string(),
     }
 }
 
@@ -1490,6 +1496,24 @@ fn main() {
     // The explain screen's screen capture, read off the input loop.
     let capture: Arc<Mutex<Option<(String, Result<Vec<String>, String>)>>> =
         Arc::new(Mutex::new(None));
+    // What focus or zoom answered, also off the input loop: on a slow or
+    // remote server either can take the whole run timeout, and the pane
+    // must keep drawing and reading keys while it does.
+    let acted: Arc<Mutex<Option<(String, bool, f64)>>> = Arc::new(Mutex::new(None));
+    let act = |what: &'static str, pane: Pane, board: Option<Board>| {
+        let (acted, wake, server) = (Arc::clone(&acted), Arc::clone(&wake), server.clone());
+        std::thread::spawn(move || {
+            let answer = if what == "zoom" {
+                zoom(&server, &pane, tc::now())
+            } else {
+                focus(&server, &pane, board.as_ref(), tc::now())
+            };
+            if let Ok(mut slot) = acted.lock() {
+                *slot = Some(answer);
+            }
+            refresh_wake::request(&wake);
+        });
+    };
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -1659,8 +1683,8 @@ fn main() {
                         None => current.clone(),
                     };
                     if let Some(pane) = target {
-                        note = Some(focus(&server, &pane, board_now.as_ref(), at));
-                        refresh_wake::request(&wake);
+                        note = Some(("focusing…".into(), true, at + 10.0));
+                        act("focus", pane, board_now.clone());
                     }
                 }
                 "z" | "Z" => {
@@ -1669,8 +1693,8 @@ fn main() {
                         None => current.clone(),
                     };
                     if let Some(pane) = target {
-                        note = Some(zoom(&server, &pane, at));
-                        refresh_wake::request(&wake);
+                        note = Some(("zooming…".into(), true, at + 10.0));
+                        act("zoom", pane, None);
                     }
                 }
                 _ => {}
@@ -1689,6 +1713,9 @@ fn main() {
             ),
             Err(_) => return,
         };
+        if let Some(answer) = acted.lock().ok().and_then(|mut slot| slot.take()) {
+            note = Some(answer);
+        }
         if note.as_ref().is_some_and(|(_, _, until)| at >= *until) {
             note = None;
         }
@@ -2699,6 +2726,21 @@ mod tests {
                 screen
             );
         }
+    }
+
+    #[test]
+    fn home_is_shortened_only_at_a_directory_boundary() {
+        assert_eq!(tilde("/home/al/src", "/home/al"), "~/src");
+        assert_eq!(tilde("/home/al", "/home/al"), "~");
+        assert_eq!(tilde("/home/alice/src", "/home/al"), "/home/alice/src");
+    }
+
+    #[test]
+    fn an_unread_cpu_is_as_wide_as_a_read_one() {
+        assert_eq!(
+            tc::display_width(&percent(None)),
+            tc::display_width(&percent(Some(12.0)))
+        );
     }
 
     #[test]

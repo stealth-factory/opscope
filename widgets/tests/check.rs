@@ -5380,8 +5380,10 @@ fn rex_script_calls(src: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         while let Some(at) = rest.find(after) {
             rest = &rest[at + after.len()..];
             let tail = rest.trim_start_matches([' ', '(', '{']);
-            if let Some(body) = tail.strip_prefix('"') {
-                if let Some(end) = body.find('"') {
+            // Lua takes either quote; a reader of one is blind to the other.
+            if let Some(quote) = tail.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let body = &tail[1..];
+                if let Some(end) = body.find(quote) {
                     out.push(body[..end].to_string());
                 }
             }
@@ -5389,20 +5391,34 @@ fn rex_script_calls(src: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         out
     };
     let methods = quoted("rex.call");
-    // The block methods are named in the list the loop walks, and any
-    // literal `method = "…"` besides.
+    let mut reaches = Vec::new();
+    // A call whose method the reader could not name - an alias such as
+    // `local c = rex.call`, or a name held in a variable - is a call the
+    // allowlist cannot vouch for.
+    let calls = src.matches("rex.call").count();
+    if calls != methods.len() {
+        reaches.push(format!(
+            "rex.call {} times, {} of them with a method name the reader can read",
+            calls,
+            methods.len()
+        ));
+    }
+    // The block methods are named in any list a loop walks, whatever its
+    // variable is called, and any literal `method = "…"` besides.
     let mut block_methods = Vec::new();
     let mut rest = src;
-    while let Some(at) = rest.find("for _, m in ipairs(") {
+    while let Some(at) = rest.find("in ipairs(") {
         let tail = &rest[at..];
         let list = &tail[..tail.find('}').unwrap_or(tail.len())];
-        for part in list.split('"').skip(1).step_by(2) {
-            block_methods.push(part.to_string());
+        for quote in ['"', '\''] {
+            for part in list.split(quote).skip(1).step_by(2) {
+                block_methods.push(part.to_string());
+            }
         }
         rest = &rest[at + 1..];
     }
     block_methods.extend(quoted("method ="));
-    let mut reaches = Vec::new();
+    block_methods.extend(quoted("method="));
     for helper in [
         "rex.session.",
         "rex.block.",
@@ -5471,4 +5487,19 @@ os.execute("true")
     assert!(block_methods.contains(&"write".to_string()));
     assert!(block_methods.contains(&"reset".to_string()));
     assert!(reaches.contains(&"os.".to_string()));
+
+    let hidden = r#"
+rex.call('session.destroy', {})
+rex.call("block.method", { method='write' })
+for _, name in ipairs({ 'reset' }) do end
+local c = rex.call; c("session.destroy")
+"#;
+    let (methods, block_methods, reaches) = rex_script_calls(hidden);
+    assert!(methods.contains(&"session.destroy".to_string()), "single quotes");
+    assert!(block_methods.contains(&"write".to_string()), "method= with no space");
+    assert!(block_methods.contains(&"reset".to_string()), "any loop variable");
+    assert!(
+        reaches.iter().any(|r| r.starts_with("rex.call 3 times, 2 of them")),
+        "an alias leaves a call the reader cannot name: {reaches:?}"
+    );
 }

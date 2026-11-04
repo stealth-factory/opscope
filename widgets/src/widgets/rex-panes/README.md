@@ -45,12 +45,12 @@ On a server with a dozen sessions, an agent finishes or gets stuck where
 nobody is looking. **Every section is sorted by who needs a human**, worst
 first, and the one waiting longest first among equals:
 
-| State | Meaning |
+| Sorts as | Meaning |
 |---|---|
 | `blocked` | waiting on a permission, a question or a sign-in, right now |
 | `error` | failed and stopped |
 | `done` | finished work you have not looked at yet |
-| `attention` | rang the bell or sent a notification since you last looked |
+| `attention` | not a reported state but a signal: rang the bell or sent a notification since you last looked |
 | `working` | busy |
 | `idle` | at rest, waiting for its next instruction |
 | `unknown` | an agent is there and has **not reported** a state — not the same as idle |
