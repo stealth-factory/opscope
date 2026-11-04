@@ -208,7 +208,11 @@ impl Pane {
     fn section(&self) -> Section {
         if self.agent.is_some() {
             Section::Agents
-        } else if self.doing == Doing::Prompt && self.records.is_empty() && !self.status_unread {
+        } else if self.doing == Doing::Prompt
+            && self.records.is_empty()
+            && !self.status_unread
+            && self.attention.is_none()
+        {
             Section::Idle
         } else {
             Section::Processes
@@ -1204,6 +1208,15 @@ fn answer_bells(
     attention.retain(|id, _| panes.iter().any(|p| &p.block_id == id));
 }
 
+/// The pane under the cursor now. Read where it is used, never once per
+/// batch of keys: `↓` and `↵` can arrive in the same poll, and `↵` must open
+/// the pane `↓` moved to.
+fn at_cursor(panes: &[Pane], selected: usize) -> Option<Pane> {
+    panes
+        .get(selected.min(panes.len().saturating_sub(1)))
+        .cloned()
+}
+
 /// Where the cursor lands once the list is rebuilt. The cursor is a pane,
 /// not a position: a refresh that puts a newly blocked agent above it must
 /// not move `↵` onto somebody else. A pane that has gone leaves the index
@@ -1554,9 +1567,6 @@ fn main() {
                 moved = true;
             }
         }
-        let current = panes_now
-            .get(selected.min(panes_now.len().saturating_sub(1)))
-            .cloned();
         let board_now = state.lock().ok().and_then(|g| g.board.clone());
         for key in keys {
             match key.as_str() {
@@ -1573,7 +1583,7 @@ fn main() {
                 "e" | "E" => {
                     if explaining.is_some() {
                         explaining = None;
-                    } else if let Some(pane) = &current {
+                    } else if let Some(pane) = &at_cursor(&panes_now, selected) {
                         explaining = Some(pane.block_id.clone());
                         explain_scroll = 0;
                         if let Ok(mut slot) = capture.lock() {
@@ -1680,7 +1690,7 @@ fn main() {
                 "enter" | "f" | "F" => {
                     let target = match &explaining {
                         Some(id) => panes_now.iter().find(|p| &p.block_id == id).cloned(),
-                        None => current.clone(),
+                        None => at_cursor(&panes_now, selected),
                     };
                     if let Some(pane) = target {
                         note = Some(("focusing…".into(), true, at + 10.0));
@@ -1690,7 +1700,7 @@ fn main() {
                 "z" | "Z" => {
                     let target = match &explaining {
                         Some(id) => panes_now.iter().find(|p| &p.block_id == id).cloned(),
-                        None => current.clone(),
+                        None => at_cursor(&panes_now, selected),
                     };
                     if let Some(pane) = target {
                         note = Some(("zooming…".into(), true, at + 10.0));
@@ -2222,7 +2232,7 @@ fn main() {
 
         // The footer is built before the window, because it wraps and the
         // body's room depends on how many rows it took.
-        let zoomed = current.as_ref().is_some_and(|c| c.zoomed);
+        let zoomed = at_cursor(&panes_now, selected).is_some_and(|c| c.zoomed);
         // herdr-panes' order, so the two footers read alike side by side;
         // zoom and explain are Rex's own and sit after the shared ones.
         let mut hints: Vec<Vec<(&str, String)>> = vec![
@@ -2726,6 +2736,35 @@ mod tests {
                 screen
             );
         }
+    }
+
+    #[test]
+    fn a_shell_that_rang_the_bell_is_not_resting() {
+        let mut shell = unread_status(false);
+        shell.status_unread = false;
+        shell.why.clear();
+        assert_eq!(shell.section(), Section::Idle);
+        shell.attention = Some((1.0e9, "bell".into()));
+        assert_eq!(
+            shell.section(),
+            Section::Processes,
+            "IDLE draws no attention line, and [i] hides it"
+        );
+        assert!(drawn(&shell, 80).contains("asked for attention"));
+    }
+
+    #[test]
+    fn an_action_reads_the_cursor_where_the_key_before_it_left_it() {
+        let named = |id: &str| Pane {
+            block_id: id.into(),
+            ..Default::default()
+        };
+        let panes = vec![named("a"), named("b")];
+        let mut selected = 0;
+        selected += 1; // `↓`, earlier in the same poll
+        assert_eq!(at_cursor(&panes, selected).unwrap().block_id, "b");
+        assert_eq!(at_cursor(&panes, 9).unwrap().block_id, "b", "clamped");
+        assert!(at_cursor(&[], 0).is_none());
     }
 
     #[test]
