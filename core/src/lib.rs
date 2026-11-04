@@ -910,6 +910,7 @@ const STATUS_CLEAR: &str = "\x1b]7501;state=clear\x1b\\";
 fn clear_program_status() {
     if STATUS_HELD.swap(false, Ordering::AcqRel) {
         out(STATUS_CLEAR);
+        flush();
     }
 }
 
@@ -4923,6 +4924,10 @@ fn hung_up(fd: i32) -> bool {
 impl Drop for Keyboard {
     fn drop(&mut self) {
         self.restore();
+        // The third way out: a panic unwinding past the loop never reaches
+        // `restore_screen`. Here rather than in `restore`, which also runs
+        // when a launcher hands the terminal to a child.
+        clear_program_status();
     }
 }
 
@@ -7549,11 +7554,13 @@ mod tests {
         // The exit paths write a constant, since one is a signal handler;
         // it has to be the same report.
         assert_eq!(clear, super::STATUS_CLEAR);
-        // Both exits clear: `q` through `restore_screen`, Ctrl-C and
-        // SIGTERM through `handle_signal`, which never reaches a widget.
+        // Every exit clears: `q` through `restore_screen`, Ctrl-C and
+        // SIGTERM through `handle_signal`, which never reaches a widget, and
+        // a panic through the `Drop` that runs while it unwinds.
         let src = include_str!("lib.rs");
         for (start, call) in [
             ("pub fn restore_screen() {", "clear_program_status();"),
+            ("impl Drop for Keyboard {", "clear_program_status();"),
             ("extern \"C\" fn handle_signal(", "clear_program_status_signal();"),
         ] {
             let at = src.find(start).unwrap_or_else(|| panic!("{start} moved"));

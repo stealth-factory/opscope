@@ -138,7 +138,7 @@ record per pane, and the pomodoro keeps it current: `working` with how much of
 the phase has gone while it runs, `done` when it runs out - worded as the bell
 is, `FOCUS elapsed, 3 min over` - and `idle` while it is paused, with the
 overtime if it was paused after running out. Hiding it clears the record, and
-so does quitting - by `q`, Ctrl-C or SIGTERM alike - so a finished phase does
+so does quitting - by `q`, Ctrl-C, SIGTERM or a panic alike - so a finished phase does
 not outlive the widget. What Rex makes of it is Rex's Program Activity settings: the tab's
 progress pie and finished dot, and - for `done` - a macOS notification that
 opens the tab, the Dock badge and a sound. A report goes out only when it
