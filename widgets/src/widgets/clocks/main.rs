@@ -1881,29 +1881,25 @@ fn condition_cell_width() -> usize {
         .max(1)
 }
 
-fn city_code(city: &City, slots: &[weather::CityWeather]) -> Option<i64> {
+fn city_slot<'a>(city: &City, slots: &'a [weather::CityWeather]) -> Option<&'a weather::CityWeather> {
     let place = city.place.as_ref()?;
-    let slot = slots.iter().find(|slot| {
+    slots.iter().find(|slot| {
         slot.name == city.name
             && slot.zone == city.zone.name()
             && slot.latitude == place.latitude
             && slot.longitude == place.longitude
-    })?;
-    match slot.outcome {
+    })
+}
+
+fn city_code(city: &City, slots: &[weather::CityWeather]) -> Option<i64> {
+    match city_slot(city, slots)?.outcome {
         weather::CityOutcome::Ready { code } => Some(code),
         _ => None,
     }
 }
 
-fn city_glyph<'a>(city: &City, slots: &'a [weather::CityWeather]) -> Option<&'a str> {
-    let place = city.place.as_ref()?;
-    let slot = slots.iter().find(|slot| {
-        slot.name == city.name
-            && slot.zone == city.zone.name()
-            && slot.latitude == place.latitude
-            && slot.longitude == place.longitude
-    })?;
-    match slot.outcome {
+fn city_glyph(city: &City, slots: &[weather::CityWeather]) -> Option<&'static str> {
+    match city_slot(city, slots)?.outcome {
         weather::CityOutcome::Ready { code } => Some(parse::condition_glyph(code)),
         _ => None,
     }
@@ -1915,14 +1911,7 @@ fn city_problem(city: &City, slots: &[weather::CityWeather]) -> Option<String> {
     if let Some(why) = &city.coord_error {
         return Some(why.clone());
     }
-    let place = city.place.as_ref()?;
-    let slot = slots.iter().find(|slot| {
-        slot.name == city.name
-            && slot.zone == city.zone.name()
-            && slot.latitude == place.latitude
-            && slot.longitude == place.longitude
-    })?;
-    match &slot.outcome {
+    match &city_slot(city, slots)?.outcome {
         weather::CityOutcome::Failed(why) => Some(why.clone()),
         _ => None,
     }
