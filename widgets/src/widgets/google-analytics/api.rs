@@ -133,7 +133,7 @@ pub fn account_summaries(
 ) -> Result<String, Fail> {
     let mut url = format!("{}/accountSummaries?pageSize=200", ADMIN);
     if let Some(p) = page {
-        url.push_str(&format!("&pageToken={}", p));
+        url.push_str(&format!("&pageToken={}", query_component(p)));
     }
     get(cred, &url, grant)
 }
@@ -150,9 +150,23 @@ pub fn key_event_list(
 ) -> Result<String, Fail> {
     let mut url = format!("{}/properties/{}/keyEvents?pageSize=200", ADMIN, id);
     if let Some(p) = page {
-        url.push_str(&format!("&pageToken={}", p));
+        url.push_str(&format!("&pageToken={}", query_component(p)));
     }
     get(cred, &url, grant)
+}
+
+/// A page token as a query component. Google's tokens are opaque and may
+/// hold `+`, `/` or `=`; sent raw, a `+` arrives as a space and an `&`
+/// ends the token, and discovery stops partway through the list.
+fn query_component(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
 }
 
 fn dims(names: &[&str]) -> Value {
@@ -328,13 +342,19 @@ pub fn window_body(window: usize) -> Value {
 }
 
 /// Landing pages for Google Search visitors, this window and the last.
+///
+/// Source `google` and medium `organic`, as Google's own guide to comparing
+/// GA with Search Console filters: the Organic Search channel also holds
+/// Bing, DuckDuckGo and the rest, and the section says Google Search.
 pub fn organic_body(window: usize) -> Value {
     json!({
         "dateRanges": windows(window),
         "dimensions": dims(&["landingPage"]),
         "metrics": mets(&["sessions", "keyEvents"]),
-        "dimensionFilter": { "filter": { "fieldName": "sessionDefaultChannelGroup",
-            "stringFilter": { "matchType": "EXACT", "value": "Organic Search" } } },
+        "dimensionFilter": { "andGroup": { "expressions": [
+            exact("sessionSource", "google"),
+            exact("sessionMedium", "organic"),
+        ] } },
         "orderBys": [{ "metric": { "metricName": "sessions" }, "desc": true }],
         "limit": 10000,
         "returnPropertyQuota": true,
@@ -644,14 +664,30 @@ mod tests {
     fn organic_is_filtered_to_google_search() {
         let o = organic_body(7);
         assert_eq!(o["dimensions"][0]["name"], "landingPage");
+        // Google's organic traffic, not the whole Organic Search channel,
+        // which holds every other engine too.
+        let e = &o["dimensionFilter"]["andGroup"]["expressions"];
+        let pairs: Vec<(&str, &str)> = e
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["filter"]["fieldName"].as_str().unwrap(),
+                    x["filter"]["stringFilter"]["value"].as_str().unwrap(),
+                )
+            })
+            .collect();
         assert_eq!(
-            o["dimensionFilter"]["filter"]["fieldName"],
-            "sessionDefaultChannelGroup"
+            pairs,
+            vec![("sessionSource", "google"), ("sessionMedium", "organic")]
         );
-        assert_eq!(
-            o["dimensionFilter"]["filter"]["stringFilter"]["value"],
-            "Organic Search"
-        );
+    }
+
+    #[test]
+    fn a_page_token_is_sent_as_one_query_component() {
+        assert_eq!(query_component("Ab-9._~"), "Ab-9._~");
+        assert_eq!(query_component("a+b/c=&#%"), "a%2Bb%2Fc%3D%26%23%25");
     }
 
     #[test]

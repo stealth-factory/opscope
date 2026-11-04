@@ -100,7 +100,6 @@ pub struct View {
     pub selected: usize,
     pub configured: Vec<String>,
     pub weeks: usize,
-    pub cred_note: Option<String>,
     pub now: f64,
 }
 
@@ -554,9 +553,6 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
             out.extend(prose(colour, text, budget, " ! "));
         }
     };
-    if let Some(note) = &v.cred_note {
-        say(&p.warn, note);
-    }
     say(&p.dim, &shared.discovery);
     say(&p.bad, &shared.discovery_err);
     if let Some(prop) = shared.props.get(v.prop) {
@@ -1189,6 +1185,13 @@ fn key_events(
         "eventCount"
     };
     let lines = model::key_events(&proc_.key_events, &names, date, upto, metric);
+    if let Some(cut) = cut_note(
+        &proc_.key_events,
+        "event-hour rows",
+        "the counts below may be short",
+    ) {
+        f.lines.extend(prose(&p.warn, &cut, budget, " "));
+    }
     let vs = h.as_ref().and_then(model::versus);
     let wide = budget >= 60;
     let spark = budget >= 72;
@@ -2655,7 +2658,6 @@ mod tests {
             selected: 0,
             configured: Vec::new(),
             weeks: 4,
-            cred_note: Some("~/key.json is readable by others; chmod 600 it".into()),
             now: NOW,
         }
     }
@@ -2782,7 +2784,6 @@ mod tests {
             "sources: not in GA realtime",
             "live 60s (backed off: 0 active for 5m+)",
             "quota realtime used 1.2k/14k h 31k/200k d",
-            "~/key.json is readable by others; chmod 600 it",
             "429 quota: property tokens per hour exhausted",
             "realtime paused 5m, last reading kept below",
             "active users 71",
@@ -2964,6 +2965,22 @@ mod tests {
     }
 
     #[test]
+    fn cut_key_event_counts_say_so_beside_them() {
+        // A total summed from a report GA stopped short of is not a total.
+        let prop = full_prop();
+        let all = text(&body(&shared(vec![prop]), &view(), 100).lines);
+        assert!(!all.contains("event-hour rows"), "{}", all);
+        let mut prop = full_prop();
+        let ke = &mut prop.processed.as_mut().unwrap().key_events;
+        ke.row_count = ke.rows.len() + 5000;
+        let all = text(&body(&shared(vec![prop]), &view(), 100).lines);
+        let at = all.find("KEY EVENTS").expect("the section");
+        let cut = all.find("event-hour rows").expect("the cut note");
+        assert!(cut > at, "the note sits in KEY EVENTS:\n{}", all);
+        assert!(all.contains("the counts below may be short"), "{}", all);
+    }
+
+    #[test]
     fn reports_from_before_midnight_are_not_called_today() {
         let mut prop = full_prop();
         prop.processed.as_mut().unwrap().date =
@@ -3024,8 +3041,7 @@ mod tests {
         let mut s = shared(vec![prop]);
         s.discovery_err =
             "no GA4 properties visible to reader@example-project.iam.gserviceaccount.com".into();
-        let mut v = view();
-        v.cred_note = Some("~/key.json is readable by others; chmod 600 it".into());
+        let v = view();
         let all = text(&body(&s, &v, 100).lines);
         for want in [
             "poller stopped: index out of bounds",
@@ -3037,7 +3053,6 @@ mod tests {
             "could not write the sample file",
             "realtime breakdowns: could not reach GA",
             "no GA4 properties visible",
-            "chmod 600",
             "no realtime reading - the reason is above",
             "no processed reports - the reason is above",
         ] {

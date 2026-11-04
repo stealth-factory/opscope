@@ -107,7 +107,8 @@ figure with `none today`, and `░` / `not processed` while GA has not processed
 any of today.
 
 **Top organic landing pages** - the pages Google Search visitors land on
-(`landingPage` where `sessionDefaultChannelGroup` is `Organic Search`), with
+(`landingPage` where `sessionSource` is `google` and `sessionMedium` is
+`organic`; the Organic Search channel would add every other engine), with
 sessions, key events and the change against the previous window. GA4 does
 not give the search terms themselves: Google withholds them as "not
 provided", and the Data API has no Search Console query dimension. The
@@ -264,7 +265,7 @@ banner.
 | key | default | |
 |---|---|---|
 | `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set |
-| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; the screen warns if it is not `chmod 600` |
+| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; a notice (`!`) warns if it is not `chmod 600` |
 | `properties` | `[]` | numeric GA4 property ids; empty lists every property the account can see |
 | `realtime_refresh` | `15` | 15, 30 or 60 seconds; anything else means 15 |
 | `refresh` | `300` | seconds between processed reports, at least 60 |

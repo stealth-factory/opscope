@@ -104,9 +104,11 @@ JSON, or google_analytics.credentials_file to the key's path
 (docs/google-setup.md) — press `,` to set it here
 ```
 
-Show `cred.warning()` beside the data whenever it says something. It is
+Raise `cred.warning()` as a notice whenever it says something, with a
+stable id, through `tc::notices::when` - not as a row beside the data. It is
 `<path> is readable by others; chmod 600 it` - the key signs in as the
-account indefinitely, so it is held to the same rule as `config.json`.
+account indefinitely, so it is held to the same rule as `config.json`, whose
+readable-by-others warning is a notice too: it explains no number on screen.
 
 ## A minimal widget
 

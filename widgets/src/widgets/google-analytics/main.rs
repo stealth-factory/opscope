@@ -302,7 +302,6 @@ fn main() {
         selected: 0,
         configured: configured.clone(),
         weeks,
-        cred_note: cred.as_ref().and_then(Credential::warning),
         now: tc::now(),
     };
     let mut scroll = 0usize;
@@ -322,9 +321,21 @@ fn main() {
     loop {
         let tick = tc::animation_tick();
         frames += 1;
-        if frames % 40 == 0 {
-            // The key file's mode can change under a running pane.
-            view.cred_note = cred.as_ref().and_then(Credential::warning);
+        if frames % 40 == 1 {
+            // The key file's mode can change under a running pane. A key
+            // others can read explains no number on screen, so it is a
+            // notice rather than a row; checked on the first frame too.
+            let warning = cred.as_ref().and_then(Credential::warning);
+            tc::notices::when(warning.is_some(), || {
+                tc::notices::Notice::warn(
+                    "google-analytics-key-file-readable",
+                    warning.clone().unwrap_or_default(),
+                )
+            });
+        }
+        // An open `/` filter takes `!` as a character, not as the notices key.
+        if view.typing && detail.is_none() {
+            keyboard.typing();
         }
         let mut keys = keyboard.poll();
         if detail.is_none() {

@@ -379,7 +379,9 @@ pub fn missing_credential(section: &str) -> String {
 pub fn credential(credentials: &str, credentials_file: &str) -> Result<Option<Credential>, String> {
     let inline = credentials.trim();
     if !inline.is_empty() {
-        return parse_service_account_key(inline).map(|key| Some(Credential::Inline(key)));
+        return parse_service_account_key(inline)
+            .map(|key| Some(Credential::Inline(key)))
+            .map_err(pasted);
     }
     let path = credentials_file.trim();
     if path.is_empty() {
@@ -389,6 +391,12 @@ pub fn credential(credentials: &str, credentials_file: &str) -> Result<Option<Cr
             path: path.to_string(),
         }))
     }
+}
+
+/// A key pasted into `credentials` has no file, so its errors say which
+/// setting is wrong rather than sending somebody to `credentials_file`.
+fn pasted(e: String) -> String {
+    e.replacen("the key file", "the credentials setting", 1)
 }
 
 impl Credential {
@@ -402,7 +410,11 @@ impl Credential {
     /// A bearer token for `scopes`, minted from the key and cached until
     /// shortly before it expires.
     pub fn bearer(&self, scopes: &[&str]) -> Result<Token, String> {
-        access_token(&self.key()?, scopes)
+        let minted = access_token(&self.key()?, scopes);
+        match self {
+            Credential::Inline(_) => minted.map_err(pasted),
+            Credential::File { .. } => minted,
+        }
     }
 
     /// The service account's email, for telling somebody whom to grant
@@ -969,6 +981,14 @@ mod tests {
         );
         let err = credential("{", "~/k.json").unwrap_err();
         assert!(err.contains("not JSON"), "{err}");
+        // A pasted key names the setting it came from, not a file nobody
+        // configured.
+        assert!(err.starts_with("the credentials setting "), "{err}");
+        let err = cred.bearer(&["scope"]).unwrap_err();
+        assert!(
+            err.starts_with("the credentials setting's private_key is not a PKCS#8"),
+            "{err}"
+        );
         assert_eq!(
             format!(
                 "{:?}",
