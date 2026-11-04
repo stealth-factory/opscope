@@ -7,18 +7,34 @@ Which filesystems can still take a write, which disks are doing I/O, and, on Lin
 Linux example:
 
 ```
-╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ DISK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  sampled 2s ago · every 2s
- 4 of 12 shown · pseudo, bind, read-only hidden
+ 2 of 10 shown · pseudo, bind, read-only hidden
  FILESYSTEMS  usable = f_bavail (root reserve excluded) · sorted: mount
- MOUNT   TYPE   SIZE   USED  USABLE        %   1h Δ     7d Δ      FULL IN  INODES
- ▸ /     ext4   100G    80G     15G  ████  84%  +1.2G/h  +8.0G/d  ~1d 17h ↑     12%
-   /home xfs    200G    40G    160G  ██    20%       —        —   not filling     4%
- DISKS  whole disks only · /proc/diskstats · 512-byte sectors
- DISK     TYPE    SIZE   READ  WRITE  IOPS  AWAIT  BUSY*  QUEUE
- ▸ sda    ssd     1.0T   12M   40M    1.2K   2ms    18%      1
+MOUNT   TYPE         SIZE   USED USABLE           %     1h Δ    24h Δ       FULL IN INODES
+▸ /     ext4          100G   80G    15G █████░  84%  +1.2G/h  +8.0G/d     ~1d 17h ↑    12%
+  /home xfs           200G   40G   160G █░░░░░  20%        —        —   not filling     4%
+ FULL IN at the rate since Mon 09:12 (5h of 24h) · ↑↓ = 1h rate sooner/later
+ DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: write · QUEUE is
+ instantaneous
+DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT BUSY* QUEUE
+  sda                                    ssd        1T   1.5M   18M  1.2K   2ms   18%     1
+  sdb                                    ssd        1T   400K  1.0M  48.0   1ms    2%     0
+ * BUSY = share of time with at least one request in flight (field 10); an NVMe reaches
+ 100% with headroom
+ total of sda, sdb
+┌read  peak 3.3M/s  now 1.9M/s───────────────────────────────────────────────────────────┐
+│⣀⠤⠤⠤⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠢⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀│
+│                                                                                        │
+├0───────────────────────────────────────────────────────────────────────────────────────┤
+│                       ⣀⣀⣀⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤⢄⣀⣀⡀                                 │
+│⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠒⠒⠒⠒⠊⠉⠉                               ⠈⠉⠉⠑⠒⠒⠒⠒⠤⠤⠤⠤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠒⠒⠒⠒⠊⠉⠉│
+└write  peak 36M/s  now 19M/s────────────────────────────────────────────────────────────┘
+ /proc/pressure/io · stall time, not busy time
+ some 23.1% avg10 · 18.4% avg60 · 9.7% avg300   full 7.2% · 5.1% · 2.0%
 
- ↑↓ select  [↵] detail  [s] sort by fills soonest  [w] 14d  tab section  [v] show idle disks  [p] pause
+ ↑↓ select  [↵] detail  [s] sort by fills soonest  tab section  [v] show idle disks
+ [w] 6h  [p] pause  [,] settings  [q]uit
 ```
 
 `↑↓` move the selection, including from one section into the next. `tab`
@@ -33,7 +49,10 @@ cycles the sort of the section that has the cursor: filesystems through
 mount order, fills soonest, percent used and inodes; disks through write,
 read and name. On macOS the write key is combined MB/s and the read key
 is transfers per second, and the heading names the one in force. `w`
-cycles the projection window through 7, 14 and 30 days for this session.
+cycles the projection window through 6, 12 and 24 hours for this session;
+the pane starts on the `window_hours` setting, 24 by default (an old
+`window_days` setting is ignored). The disk detail screen does not offer
+`w`: its I/O chart is kept in memory and has no window.
 `v` shows idle disks, or hides them again.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
@@ -100,8 +119,11 @@ poller that stops says `stopped:` and why.
 
 Columns leave as the pane narrows: the one-hour rate, then inodes, then
 type, then size. The window rate and FULL IN stay. A row that still does
-not fit wraps whole cells onto the next line. The mount point wraps onto
-the next row rather than being cut. A pane that is too short to hold the
+not fit wraps whole cells onto the next line. When the longest mount
+point cannot sit whole beside its figures, every mount point gets a line
+of its own and its figures go under it, indented, with the full width to
+choose columns from. A mount point longer than the pane wraps rather than
+being cut, and so does an error. A pane that is too short to hold the
 table scrolls; the title stays put.
 
 ## What this widget kept
@@ -110,8 +132,8 @@ The one-hour rate and the window rate come from samples this widget took
 itself. `FULL IN` projects that window rate onto the usable space now.
 `disk/usage.json` keeps the samples, not those rates. At most one sample
 a minute for the last day, then one every fifteen minutes, and nothing
-older than thirty days: about 4.2k points per filesystem. Twenty
-filesystems stay under about 90k points, around 2 MB of JSON. A hole is a
+older than seven days: about 2k points per filesystem. Twenty
+filesystems stay under about 40k points, around 1 MB of JSON. A hole is a
 gap in the trace, not a slope invented across the time the pane was not
 running. The footnote says the rate is since the first fitted sample, and
 a full window also says when the series has been kept. `↵` on a filesystem
@@ -133,22 +155,20 @@ sample says `measuring`. A counter that went backwards is a gap, drawn as
 A disk with no reads and no writes since boot is hidden until `v`. The
 count is on the filter line (`7 idle hidden`). `hide_devices` matches a
 whole-disk name exactly, and that disk stays hidden when `v` shows idle
-disks. Its count is the next category on the same line. On Linux the
-selected disk keeps a 60-sample read-up, write-down chart in the same
-frame as netwatch. The top edge names the read peak and the current read;
+disks. Its count is the next category on the same line. Below the table
+is one 60-sample read-up, write-down chart in the same frame as netwatch.
+On Linux it is the sum of every disk until the disk section has focus;
+then it is the disk under the cursor, named on the line above it. The top edge names the read peak and the current read;
 the bottom edge names the write peak and the current write; the zero line
 sits between them. Text mode
 draws the line in Braille; a Kitty terminal draws the same line in pixels
 under the frame. Each half has its own scale, and an idle stretch stays
 blank inside the frame. On macOS the chart is one trace of combined I/O.
 
-Above that table, when more than one disk is in the total, the same frame
-shows their sum. A disk named as another's slave is left out, and so is
-a disk whose partition is that slave, and the line says so, because adding
-both would count the same bytes twice. A disk
-hidden by name stays in the sum. One disk with nothing under it draws no
-second chart. A sample where any included disk has no rate is a gap, not
-a partial sum.
+The sum leaves out a disk named as another's slave, and a disk whose
+partition is that slave, and its line says so, because adding both would
+count the same bytes twice. A disk hidden by name stays in the sum. A
+sample where any included disk has no rate is a gap, not a partial sum.
 
 On macOS the same section is `iostat`: read and write are one number, and
 the heading says await, busy and queue need IOKit. The write sort is that

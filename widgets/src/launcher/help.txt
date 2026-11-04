@@ -1,6 +1,6 @@
 Every widget here, what it does, and a preview before it runs.
 
-Nineteen widget binaries are a list you have to already know. This is the
+Twenty widget binaries are a list you have to already know. This is the
 front door: pick one and it runs, quit it and you are back here.
 
     opscope [WIDGET] [ARGS...]
@@ -34,3 +34,5 @@ which is what the arrows are for.
 
 --configure-help prints the launcher's guide, which says what it has to say:
 there is nothing here to configure.
+
+Every widget, running live in the browser: https://opscope.stealth-factory.co

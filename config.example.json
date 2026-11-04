@@ -63,7 +63,7 @@
     "ga_api_secret": ""
   },
   "clocks": {
-    "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
+    "_cities_comment": "World clocks as [label, IANA timezone] pairs. A row may also be [label, zone, latitude, longitude]; those two numbers opt that city into its own current-conditions glyph, and nothing else does — the label and the timezone are never looked up. The search list writes pairs, so coordinates are added by editing the row. A zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
     "cities": [
       [
         "San Francisco",
@@ -82,6 +82,12 @@
         "Asia/Tokyo"
       ]
     ],
+    "_weather_latitude_comment": "Latitude, in degrees from -90 to 90, of the one place whose current weather is shown. Null leaves weather off. Zero is the equator, so it is a real place once you set it — an unset field stays null rather than zero. Set longitude as well; one without the other is reported on the pane and not fetched.",
+    "weather_latitude": null,
+    "_weather_longitude_comment": "Longitude, in degrees from -180 to 180, of that same place. Null leaves weather off. The widget does not guess a coordinate from a city name or from the machine.",
+    "weather_longitude": null,
+    "_weather_label_comment": "Optional name drawn beside the temperature. Empty shows the conditions without a place name. The coordinates are what is fetched; this text is only a label.",
+    "weather_label": "",
     "_work_start_hour_comment": "Local 24-hour clock hour when the work day begins.",
     "work_start_hour": 9,
     "_work_end_hour_comment": "Local 24-hour clock hour when the work day ends.",
@@ -135,8 +141,8 @@
     "warn_percent": 80,
     "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",
     "alert_percent": 90,
-    "_window_days_comment": "How many days of this widget's own samples the FULL IN column and the filesystem trace start from. 7, 14 or 30. w on the pane cycles the same three for this session and does not write the choice back.",
-    "window_days": 7
+    "_window_hours_comment": "How many hours of this widget's own samples the window rate, the FULL IN column and the filesystem trace start from. 6, 12 or 24. w on the pane cycles the same three for this session and does not write the choice back.",
+    "window_hours": 24
   },
   "github": {
     "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
@@ -320,6 +326,35 @@
     ],
     "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
     "refresh": 4.0
+  },
+  "rex_panes": {
+    "_comment": "What rex-panes reads: every session on one Rex server, through the rex CLI, read-only.",
+    "_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. CPU and memory are shown only for this machine's server.",
+    "server": "",
+    "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
+    "refresh": 4.0,
+    "_agents_comment": "Command names that count as coding agents. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
+    "agents": [
+      "claude",
+      "codex",
+      "gemini",
+      "copilot",
+      "cursor-agent",
+      "aider",
+      "opencode",
+      "pi",
+      "goose",
+      "amp",
+      "grok",
+      "droid",
+      "kiro",
+      "cline",
+      "crush",
+      "qwen",
+      "kimi",
+      "devin",
+      "jules"
+    ]
   },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",

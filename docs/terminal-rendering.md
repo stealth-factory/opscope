@@ -461,6 +461,10 @@ sliver to its neighbours, as it did in whole cells. Fill colours are the same
 ones the widget passed, so the contrast rule on the selected-row tint is
 unchanged.
 
+`Plot::sky` is the one picture that does become an image: a one-cell weather
+drawing in the cell the glyph already occupies. Text mode, and any terminal
+that has not accepted graphics, keeps that glyph. The row does not grow.
+
 No image is animated either (OPS-204). `Plot::as_text()` makes any filled plot
 text in every mode, and `is_text()` reports it. `github` and `linear` use it
 for their flow charts while the bars dance on a `dance` placeholder and while
@@ -543,6 +547,7 @@ and intentional text presentation, not unimplemented widget migrations.
 | `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
+| `disk` | One shared pixel/Braille read-up, write-down I/O chart under the disk table: the total of every disk until the disk section has focus, then the selected disk; each half keeps its own peak. macOS draws one combined trace. Filesystem fill meters are eighth-cell text | Keep the filesystem and disk tables as text; a narrow pane stacks each mount point above its figures rather than cutting the path |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## OSC 8 hyperlinks

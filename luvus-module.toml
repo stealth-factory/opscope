@@ -10,7 +10,7 @@
 id = "opscope.widgets"
 name = "opscope"
 description = "Terminal widgets that look like sci-fi movie panels and show only real data."
-version = "2.4.0"
+version = "2.5.0"
 min_luvus_version = "0.8.3"
 platforms = ["macos", "linux"]
 
@@ -157,6 +157,13 @@ id = "ports"
 title = "ports"
 placement = "split"
 command = ["./luvus/bin/opscope", "ports"]
+
+# Everything running in Rex, across every session, ordered by who needs you.
+[[panes]]
+id = "rex-panes"
+title = "rex-panes"
+placement = "split"
+command = ["./luvus/bin/opscope", "rex-panes"]
 
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]

@@ -73,6 +73,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 /// 11 cells to 4 before a column is dropped. A row that still does not fit
 /// wraps whole cells onto the next line.
 const MOUNT_MIN: usize = 5;
+const STACK_INDENT: usize = 3;
 const USED_W: usize = 5;
 const USABLE_W: usize = 6;
 const PCT_W: usize = 4;
@@ -84,11 +85,18 @@ const DAY_W: usize = 8;
 const FULL_W: usize = 13;
 const BAR_MAX: usize = 11;
 const BAR_MIN: usize = 4;
-const WINDOWS: [u64; 3] = [7, 14, 30];
+/// Hours of samples the window rate, FULL IN and the trace fit. The
+/// longest is a day: a projection from last week says little about today.
+const WINDOWS: [u64; 3] = [6, 12, 24];
+const DEFAULT_WINDOW: u64 = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Columns {
     mount: usize,
+    /// The mount point is a line of its own and the figures sit under it,
+    /// indented by `mount`: the pane cannot hold the longest mount point
+    /// beside the figures without breaking it into pieces.
+    stacked: bool,
     typ: bool,
     size: bool,
     inodes: bool,
@@ -96,24 +104,27 @@ struct Columns {
     bar: usize,
 }
 
+/// Which of 1h Δ, inodes, type and size a row carries, widest first.
+const COLUMN_SETS: [(bool, bool, bool, bool); 5] = [
+    (true, true, true, true),
+    (false, true, true, true),
+    (false, false, true, true),
+    (false, false, false, true),
+    (false, false, false, false),
+];
+
 fn columns_for(width: usize) -> Columns {
     // Drop order as the pane shrinks: 1h Δ, then inodes, then type, then
     // size. The window Δ and FULL IN stay; they are why the section exists.
     // The sets are that order reversed, so the first one that fits is the
     // widest the pane can hold.
-    let sets = [
-        (true, true, true, true),
-        (false, true, true, true),
-        (false, false, true, true),
-        (false, false, false, true),
-        (false, false, false, false),
-    ];
-    for &(hour, inodes, typ, size) in &sets {
+    for &(hour, inodes, typ, size) in &COLUMN_SETS {
         for bar in (BAR_MIN..=BAR_MAX).rev() {
             let need = column_need(hour, inodes, typ, size, bar);
             if need <= width {
                 return Columns {
                     mount: MOUNT_MIN + width - need,
+                    stacked: false,
                     typ,
                     size,
                     inodes,
@@ -125,12 +136,53 @@ fn columns_for(width: usize) -> Columns {
     }
     Columns {
         mount: MOUNT_MIN,
+        stacked: false,
         typ: false,
         size: false,
         inodes: false,
         hour: false,
         bar: BAR_MIN,
     }
+}
+
+/// Mount points beside their figures when the widest one fits whole there
+/// at the cost of no more than one column the stacked layout would keep;
+/// otherwise each mount point gets a line and its figures go under it,
+/// where they have the full width. The bar narrows first to make room.
+fn layout_for(width: usize, longest: usize) -> Columns {
+    let mut stacked = columns_for((width + MOUNT_MIN).saturating_sub(STACK_INDENT));
+    let mount = (longest + 2).max(MOUNT_MIN);
+    let from = COLUMN_SETS
+        .iter()
+        .position(|&set| set == (stacked.hour, stacked.inodes, stacked.typ, stacked.size))
+        .unwrap_or(COLUMN_SETS.len() - 1);
+    for &(hour, inodes, typ, size) in COLUMN_SETS.iter().skip(from).take(2) {
+        for bar in (BAR_MIN..=BAR_MAX).rev() {
+            let need = column_need(hour, inodes, typ, size, bar) - MOUNT_MIN + mount;
+            if need <= width {
+                return Columns {
+                    mount: mount + width - need,
+                    stacked: false,
+                    typ,
+                    size,
+                    inodes,
+                    hour,
+                    bar,
+                };
+            }
+        }
+    }
+    stacked.mount = 0;
+    stacked.stacked = true;
+    stacked
+}
+
+fn longest_mount(snap: &Snap) -> usize {
+    snap.rows
+        .iter()
+        .map(|row| tc::display_width(&row.mount.mount_point))
+        .max()
+        .unwrap_or(0)
 }
 
 fn column_need(hour: bool, inodes: bool, typ: bool, size: bool, bar: usize) -> usize {
@@ -443,7 +495,7 @@ struct View<'a> {
     disk_cursor: &'a str,
     hide_devices: &'a [String],
     usage: &'a state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
     history_note: &'a str,
     save_err: &'a str,
@@ -481,7 +533,7 @@ fn main() {
     let hide_devices = tc::cfg_strings(&cfg, "hide_devices", &[]);
     let warn = tc::cfg_f64(&cfg, "warn_percent", 80.0);
     let alert = tc::cfg_f64(&cfg, "alert_percent", 90.0);
-    let mut window_days = window_days_of(&cfg);
+    let mut window_hours = window_hours_of(&cfg);
 
     let state = Arc::new(Mutex::new(State::default()));
     let pause = Arc::new(AtomicBool::new(false));
@@ -608,7 +660,9 @@ fn main() {
                     chase = false;
                 }
                 "w" | "W" => {
-                    window_days = tc::cycle(&WINDOWS, window_days);
+                    if screen != Screen::DiskDetail {
+                        window_hours = tc::cycle(&WINDOWS, window_hours);
+                    }
                 }
                 "p" | "P" => {
                     pause.fetch_xor(true, Ordering::AcqRel);
@@ -662,7 +716,7 @@ fn main() {
             let count = snap.rows.len();
             let missing = !snap.rows.iter().any(|row| row.mount.mount_point == cursor);
             if count > 0 && ((screen == Screen::List && chase && focus == 0) || missing) {
-                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_days) {
+                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_hours) {
                     cursor = path;
                 }
             }
@@ -711,7 +765,7 @@ fn main() {
             disk_cursor: &disk_cursor,
             hide_devices: &hide_devices,
             usage: &usage,
-            window_days,
+            window_hours,
             now: tc::now(),
             history_note: &history_note,
             save_err: &save_err,
@@ -727,7 +781,7 @@ fn main() {
         if cursor.is_empty() || cursor_gone {
             if let Some(path) = snap
                 .as_ref()
-                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_days))
+                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_hours))
             {
                 cursor = path;
             }
@@ -757,7 +811,7 @@ fn main() {
             focus,
             show_idle,
             paused,
-            window_days,
+            window_hours,
             combined,
             &p,
         );
@@ -831,9 +885,9 @@ fn path_at(
     sort: Sort,
     selected: usize,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
 ) -> Option<String> {
-    let ordered = ordered(snap, sort, usage, window_days, tc::now());
+    let ordered = ordered(snap, sort, usage, window_hours, tc::now());
     ordered
         .get(selected)
         .map(|&index| snap.rows[index].mount.mount_point.clone())
@@ -1112,12 +1166,12 @@ fn figures_of(result: Result<Space, String>) -> Figures {
     }
 }
 
-fn window_days_of(cfg: &serde_json::Value) -> u64 {
-    let days = tc::cfg_usize(cfg, "window_days", 7) as u64;
-    if WINDOWS.contains(&days) {
-        days
+fn window_hours_of(cfg: &serde_json::Value) -> u64 {
+    let hours = tc::cfg_usize(cfg, "window_hours", DEFAULT_WINDOW as usize) as u64;
+    if WINDOWS.contains(&hours) {
+        hours
     } else {
-        7
+        DEFAULT_WINDOW
     }
 }
 
@@ -1271,7 +1325,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
     let selected = view
         .snap
         .and_then(|snap| {
-            let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+            let ordered = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
             ordered
                 .iter()
                 .position(|&index| snap.rows[index].mount.mount_point == view.cursor)
@@ -1362,9 +1416,9 @@ fn paint(
     if snap.rows.is_empty() {
         return;
     }
-    let cols = columns_for(width);
-    rows.extend(header_row(&cols, view.window_days, width, p));
-    let ordered = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+    let cols = layout_for(width, longest_mount(snap));
+    rows.extend(header_row(&cols, view.window_hours, width, p));
+    let ordered = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
     for (item, index) in ordered.iter().copied().enumerate() {
         let row = &snap.rows[index];
         let here = view.focus == 0 && row.mount.mount_point == view.cursor;
@@ -1377,7 +1431,7 @@ fn paint(
             view.warn,
             view.alert,
             view.usage,
-            view.window_days,
+            view.window_hours,
             view.now,
             p,
         ));
@@ -1396,7 +1450,7 @@ fn paint_detail(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    let Some(row) = ordered(snap, view.sort, view.usage, view.window_days, view.now)
+    let Some(row) = ordered(snap, view.sort, view.usage, view.window_hours, view.now)
         .into_iter()
         .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
         .map(|index| &snap.rows[index])
@@ -1460,11 +1514,17 @@ fn paint_detail(
     }
 }
 
-fn header_row(cols: &Columns, window_days: u64, width: usize, p: &Palette) -> Vec<String> {
+fn header_row(cols: &Columns, window_hours: u64, width: usize, p: &Palette) -> Vec<String> {
     let dim = p.dim.clone();
     let left = |text: &str, width: usize| (dim.clone(), tc::pad(text, width));
     let right = |text: String, width: usize| (dim.clone(), align_right(text, width));
-    let mut cells = vec![left("MOUNT", cols.mount)];
+    let mut lines = Vec::new();
+    let mut cells = Vec::new();
+    if cols.stacked {
+        lines.push(tc::seg(&[(dim.as_str(), "MOUNT".to_string())], width));
+    } else {
+        cells.push(left("MOUNT", cols.mount));
+    }
     if cols.typ {
         cells.push(left("TYPE", TYPE_W));
     }
@@ -1478,12 +1538,30 @@ fn header_row(cols: &Columns, window_days: u64, width: usize, p: &Palette) -> Ve
     if cols.hour {
         cells.push(right("1h Δ".into(), HOUR_W));
     }
-    cells.push(right(format!("{window_days}d Δ"), DAY_W));
+    cells.push(right(format!("{window_hours}h Δ"), DAY_W));
     cells.push(right("FULL IN".into(), FULL_W));
     if cols.inodes {
         cells.push(right("INODES".into(), INODES_W));
     }
-    pack_cells(cells, width, "")
+    if cols.stacked {
+        lines.extend(indented(
+            pack_cells(cells, width.saturating_sub(STACK_INDENT), ""),
+            "",
+        ));
+    } else {
+        lines.extend(pack_cells(cells, width, ""));
+    }
+    lines
+}
+
+/// The figures under a stacked mount point, pushed right by the indent.
+/// Packed at the narrower width first, so a header and its rows wrap at
+/// the same cells.
+fn indented(lines: Vec<String>, tint: &str) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| format!("{tint}{}{line}", " ".repeat(STACK_INDENT)))
+        .collect()
 }
 
 fn data_rows(
@@ -1494,7 +1572,7 @@ fn data_rows(
     warn: f64,
     alert: f64,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
     p: &Palette,
 ) -> Vec<String> {
@@ -1515,9 +1593,62 @@ fn data_rows(
         };
         format!("{}{}", tint, colour)
     };
+    let mut out = Vec::new();
+    let name_ink = c(if here {
+        p.accent.as_str()
+    } else {
+        p.txt.as_str()
+    });
+    let tint_fill = if here { tint.as_str() } else { "" };
+    if cols.stacked {
+        // The mount point on its own line or lines, the figures under it.
+        let room = width.saturating_sub(2).max(1);
+        for (index, chunk) in chunks(&row.mount.mount_point, room).iter().enumerate() {
+            let marker = if index == 0 && here { "▸ " } else { "  " };
+            out.push(tc::seg(
+                &[(
+                    name_ink.as_str(),
+                    tc::pad(&format!("{marker}{chunk}"), width),
+                )],
+                width,
+            ));
+        }
+        let room = width.saturating_sub(STACK_INDENT);
+        let fill = if here { tint.as_str() } else { "" };
+        let note = match &row.figures {
+            Figures::NoAnswer => Some("no answer in 2s"),
+            Figures::Failed(err) => Some(err.as_str()),
+            Figures::Ready(_) => None,
+        };
+        if let Some(note) = note {
+            // A sentence, so it wraps at words rather than being cut.
+            let ink = c(p.accent.as_str());
+            let lines = wrap(note, room)
+                .into_iter()
+                .map(|line| tc::seg(&[(ink.as_str(), tc::pad(&line, room))], room))
+                .collect();
+            out.extend(indented(lines, fill));
+            return out;
+        }
+        let mut cells = Vec::new();
+        figure_cells(
+            row,
+            cols,
+            here,
+            warn,
+            alert,
+            usage,
+            window_hours,
+            now,
+            p,
+            &c,
+            &mut cells,
+        );
+        out.extend(indented(pack_cells(cells, room, tint_fill), fill));
+        return out;
+    }
     let room = cols.mount.saturating_sub(2).max(1);
     let chunks = chunks(&row.mount.mount_point, room);
-    let mut out = Vec::new();
     for (index, chunk) in chunks.iter().enumerate() {
         let marker = if index == 0 {
             if here {
@@ -1535,88 +1666,110 @@ fn data_rows(
             out.push(line);
             continue;
         }
-        let mut cells = vec![(
-            c(if here {
-                p.accent.as_str()
-            } else {
-                p.txt.as_str()
-            }),
-            mount,
-        )];
-        let series = series_for(usage, row);
-        match &row.figures {
-            Figures::Ready(space) => {
-                let frac = percent_used(space.used, space.usable);
-                let points = frac * 100.0;
-                let hot = tc::heat_on(heat_frac(points, warn, alert), here);
-                if cols.typ {
-                    let ink = if is_remote(&row.mount.fstype) {
-                        p.dim.as_str()
-                    } else {
-                        p.txt.as_str()
-                    };
-                    cells.push((
-                        c(ink),
-                        tc::pad(&clip_chars(&row.mount.fstype, TYPE_W), TYPE_W),
-                    ));
-                }
-                if cols.size {
-                    cells.push((
-                        c(p.txt.as_str()),
-                        format!("{:>width$}", human(space.size), width = SIZE_W),
-                    ));
-                }
-                cells.push((
-                    c(p.txt.as_str()),
-                    format!("{:>width$}", human(space.used), width = USED_W),
-                ));
-                cells.push((
-                    c(p.txt.as_str()),
-                    format!("{:>width$}", human(space.usable), width = USABLE_W),
-                ));
-                cells.push((c(&hot), tc::meter(frac, cols.bar)));
-                cells.push((
-                    c(&hot),
-                    format!("{:>width$}", pct_text(frac), width = PCT_W),
-                ));
-                let (hour, window) = slopes(series, window_days, now);
-                if cols.hour {
-                    cells.push((c(p.txt.as_str()), rate_cell(hour, 3_600.0, HOUR_W)));
-                }
-                cells.push((c(p.txt.as_str()), rate_cell(window, 86_400.0, DAY_W)));
-                cells.push((
-                    c(p.txt.as_str()),
-                    full_cell(space.usable, window, hour, series, window_days, now),
-                ));
-                if cols.inodes {
-                    let text = match inode_percent(space.files, space.ffree) {
-                        Some(share) => pct_text(share),
-                        None => "n/a".into(),
-                    };
-                    cells.push((
-                        c(p.txt.as_str()),
-                        format!("{:>width$}", text, width = INODES_W),
-                    ));
-                }
-            }
-            Figures::NoAnswer => {
-                cells.push((c(p.accent.as_str()), "no answer in 2s".into()));
-            }
-            Figures::Failed(err) => {
-                cells.push((c(p.accent.as_str()), err.clone()));
-            }
-        }
-        let tint_fill = if here { tint.as_str() } else { "" };
+        let mut cells = vec![(name_ink.clone(), mount)];
+        figure_cells(
+            row,
+            cols,
+            here,
+            warn,
+            alert,
+            usage,
+            window_hours,
+            now,
+            p,
+            &c,
+            &mut cells,
+        );
         out.extend(pack_cells(cells, width, tint_fill));
     }
     out
+}
+
+/// Every cell after the mount point, in the columns `cols` keeps.
+#[allow(clippy::too_many_arguments)]
+fn figure_cells(
+    row: &Row,
+    cols: &Columns,
+    here: bool,
+    warn: f64,
+    alert: f64,
+    usage: &state::Store,
+    window_hours: u64,
+    now: f64,
+    p: &Palette,
+    c: &dyn Fn(&str) -> String,
+    cells: &mut Vec<(String, String)>,
+) {
+    let series = series_for(usage, row);
+    match &row.figures {
+        Figures::Ready(space) => {
+            let frac = percent_used(space.used, space.usable);
+            let points = frac * 100.0;
+            let hot = tc::heat_on(heat_frac(points, warn, alert), here);
+            if cols.typ {
+                let ink = if is_remote(&row.mount.fstype) {
+                    p.dim.as_str()
+                } else {
+                    p.txt.as_str()
+                };
+                cells.push((
+                    c(ink),
+                    tc::pad(&clip_chars(&row.mount.fstype, TYPE_W), TYPE_W),
+                ));
+            }
+            if cols.size {
+                cells.push((
+                    c(p.txt.as_str()),
+                    format!("{:>width$}", human(space.size), width = SIZE_W),
+                ));
+            }
+            cells.push((
+                c(p.txt.as_str()),
+                format!("{:>width$}", human(space.used), width = USED_W),
+            ));
+            cells.push((
+                c(p.txt.as_str()),
+                format!("{:>width$}", human(space.usable), width = USABLE_W),
+            ));
+            cells.push((c(&hot), tc::meter(frac, cols.bar)));
+            cells.push((
+                c(&hot),
+                format!("{:>width$}", pct_text(frac), width = PCT_W),
+            ));
+            let (hour, window) = slopes(series, window_hours, now);
+            if cols.hour {
+                cells.push((c(p.txt.as_str()), rate_cell(hour, 3_600.0, HOUR_W)));
+            }
+            cells.push((c(p.txt.as_str()), rate_cell(window, 86_400.0, DAY_W)));
+            cells.push((
+                c(p.txt.as_str()),
+                full_cell(space.usable, window, hour, series, window_hours, now),
+            ));
+            if cols.inodes {
+                let text = match inode_percent(space.files, space.ffree) {
+                    Some(share) => pct_text(share),
+                    None => "n/a".into(),
+                };
+                cells.push((
+                    c(p.txt.as_str()),
+                    format!("{:>width$}", text, width = INODES_W),
+                ));
+            }
+        }
+        Figures::NoAnswer => {
+            cells.push((c(p.accent.as_str()), "no answer in 2s".into()));
+        }
+        Figures::Failed(err) => {
+            cells.push((c(p.accent.as_str()), err.clone()));
+        }
+    }
 }
 
 fn ordered(
     snap: &Snap,
     sort: Sort,
     usage: &state::Store,
-    window_days: u64,
+    window_hours: u64,
     now: f64,
 ) -> Vec<usize> {
     let mut index: Vec<usize> = (0..snap.rows.len()).collect();
@@ -1626,7 +1779,7 @@ fn ordered(
     let fills = if sort == Sort::Fills {
         snap.rows
             .iter()
-            .map(|row| fill_ord(usage, row, window_days, now))
+            .map(|row| fill_ord(usage, row, window_hours, now))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -1647,7 +1800,7 @@ fn ordered(
     index
 }
 
-fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
+fn fill_ord(usage: &state::Store, row: &Row, hours: u64, now: f64) -> (u8, u64) {
     // 0 is a real projection, 1 is not filling or still measuring, 2 has
     // not answered. Mount order is the tie-break, so 2 has to be its own
     // rank or a quiet row with a later mount sorts after a row with no answer.
@@ -1657,7 +1810,7 @@ fn fill_ord(usage: &state::Store, row: &Row, days: u64, now: f64) -> (u8, u64) {
     let Some(series) = series_for(usage, row) else {
         return (1, 0);
     };
-    let slope = state::slope_bytes_per_s(series, days as f64 * 86_400.0, now);
+    let slope = state::slope_bytes_per_s(series, hours as f64 * 3_600.0, now);
     match state::eta(space.usable, slope) {
         state::Eta::In(secs) => (0, secs.max(0.0) as u64),
         _ => (1, 0),
@@ -1677,7 +1830,7 @@ fn series_for<'a>(usage: &'a state::Store, row: &Row) -> Option<&'a state::Serie
 
 fn slopes(
     series: Option<&state::Series>,
-    days: u64,
+    hours: u64,
     now: f64,
 ) -> (Option<state::Slope>, Option<state::Slope>) {
     let Some(series) = series else {
@@ -1685,7 +1838,7 @@ fn slopes(
     };
     (
         state::slope_bytes_per_s(series, 3_600.0, now),
-        state::slope_bytes_per_s(series, days as f64 * 86_400.0, now),
+        state::slope_bytes_per_s(series, hours as f64 * 3_600.0, now),
     )
 }
 
@@ -1719,7 +1872,7 @@ fn full_cell(
     window: Option<state::Slope>,
     hour: Option<state::Slope>,
     series: Option<&state::Series>,
-    days: u64,
+    hours: u64,
     now: f64,
 ) -> String {
     let eta_window = state::eta(usable, window);
@@ -1731,7 +1884,7 @@ fn full_cell(
                 span
             } else {
                 series
-                    .map(|series| state::covered(series, days as f64 * 86_400.0, now).0)
+                    .map(|series| state::covered(series, hours as f64 * 3_600.0, now).0)
                     .unwrap_or(0.0)
             };
             format!("measuring {}", tc::age(span))
@@ -1805,15 +1958,15 @@ fn pack_cells(cells: Vec<(String, String)>, width: usize, tint: &str) -> Vec<Str
 }
 
 fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<String> {
-    let indexes = ordered(snap, view.sort, view.usage, view.window_days, view.now);
+    let indexes = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
     let row = indexes
         .iter()
         .copied()
         .find(|&index| snap.rows[index].mount.mount_point == view.cursor)
         .or(indexes.first().copied())
         .map(|index| &snap.rows[index]);
-    let days = view.window_days;
-    let window_s = days as f64 * 86_400.0;
+    let hours = view.window_hours;
+    let window_s = hours as f64 * 3_600.0;
     let fit = row
         .and_then(|row| series_for(view.usage, row))
         .map(|series| state::fit_window(series, window_s, view.now));
@@ -1832,12 +1985,12 @@ fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<St
     // older than the window on screen.
     let body = if retained > 0.0 && span + 60.0 >= window_s {
         format!(
-            "FULL IN at the {days}d rate of this widget's own samples (kept since {})",
+            "FULL IN at the {hours}h rate of this widget's own samples (kept since {})",
             labelled(retained)
         )
     } else {
         format!(
-            "FULL IN at the rate since {} ({of} of {days}d)",
+            "FULL IN at the rate since {} ({of} of {hours}h)",
             labelled(fit_start),
             of = tc::age(span)
         )
@@ -1895,7 +2048,7 @@ fn push_usage(
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    let window_s = view.window_days as f64 * 86_400.0;
+    let window_s = view.window_hours as f64 * 3_600.0;
     let path = state::usage_path();
     let Some(series) = series_for(view.usage, row) else {
         for line in wrap("no samples yet", width.saturating_sub(1)) {
@@ -1915,13 +2068,13 @@ fn push_usage(
         .unwrap_or(view.now);
     let (raw, positions) = state::trace(&plotted, window_s, end);
     let seen: Vec<f64> = raw.iter().copied().flatten().collect();
-    let (hour, window) = slopes(Some(series), view.window_days, view.now);
+    let (hour, window) = slopes(Some(series), view.window_hours, view.now);
     let (span, count) = state::covered(series, window_s, view.now);
     let summary = format!(
-        "{count} samples over {} · 1h {} · {}d {}",
+        "{count} samples over {} · 1h {} · {}h {}",
         tc::age(span),
         slope_text(hour, 3_600.0),
-        view.window_days,
+        view.window_hours,
         slope_text(window, 86_400.0)
     );
     push_wrapped(&summary, width, p, rows);
@@ -2394,7 +2547,6 @@ fn paint_disks(
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
         }
     }
-    push_total(board, width, p, rows, plots);
     let indexes = ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices);
     if indexes.is_empty() {
         if let Some(line) = tc::filtered_to_nothing(lives.len(), &labels) {
@@ -2404,6 +2556,9 @@ fn paint_disks(
         } else if view.disk_err.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " no disks".into())], width));
         }
+        // A disk hidden by name stays in the sum, so hiding every row
+        // still leaves the machine's chart.
+        push_io_chart(view, board, &indexes, width, p, rows, plots);
         return 0;
     }
     rows.push(disk_header(board.combined, &cols, width, p));
@@ -2420,23 +2575,7 @@ fn paint_disks(
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
         }
     }
-    if let Some(row) = indexes
-        .iter()
-        .copied()
-        .find(|&index| board.rows[index].disk.name == view.disk_cursor)
-        .map(|index| &board.rows[index])
-    {
-        push_chart(
-            &row.read,
-            &row.write,
-            4,
-            board.combined,
-            width,
-            p,
-            rows,
-            plots,
-        );
-    }
+    push_io_chart(view, board, &indexes, width, p, rows, plots);
     indexes.len()
 }
 
@@ -2866,15 +3005,43 @@ fn paint_pressure(
     }
 }
 
-fn push_total(
+/// One chart under the disk table. A disk the cursor is on (the disk
+/// section has focus) charts that disk; otherwise the chart is the total
+/// of every disk, so the section never shows one disk's line as if it
+/// were the machine's.
+fn push_io_chart(
+    view: &View,
     board: &DiskBoard,
+    indexes: &[usize],
     width: usize,
     p: &Palette,
     rows: &mut Vec<String>,
     plots: &mut Vec<tc::Plot>,
 ) {
-    // One disk with nothing under it is already the chart below the table.
-    if board.total_names.len() <= 1 && board.total_covered.is_empty() {
+    let selected = (view.focus == 1)
+        .then(|| {
+            indexes
+                .iter()
+                .copied()
+                .find(|&index| board.rows[index].disk.name == view.disk_cursor)
+        })
+        .flatten()
+        .map(|index| &board.rows[index]);
+    if let Some(row) = selected {
+        push_wrapped(&row.disk.name, width, p, rows);
+        push_chart(
+            &row.read,
+            &row.write,
+            4,
+            board.combined,
+            width,
+            p,
+            rows,
+            plots,
+        );
+        return;
+    }
+    if board.total_names.is_empty() {
         return;
     }
     push_wrapped(
@@ -3183,7 +3350,7 @@ fn footer(
     focus: usize,
     show_idle: bool,
     paused: bool,
-    window_days: u64,
+    window_hours: u64,
     combined: bool,
     p: &Palette,
 ) -> (tc::Footer, usize) {
@@ -3204,8 +3371,12 @@ fn footer(
         hints.push(vec![(p.dim.as_str(), "tab section".into())]);
         hints.push(vec![(p.dim.as_str(), idle_hint(show_idle).into())]);
     }
-    let next = tc::cycle(&WINDOWS, window_days);
-    hints.push(vec![(p.dim.as_str(), format!("[w] {next}d"))]);
+    // The window is filesystem history. The disk detail screen draws only
+    // the in-memory I/O chart, so a window key there would change nothing.
+    if screen != Screen::DiskDetail {
+        let next = tc::cycle(&WINDOWS, window_hours);
+        hints.push(vec![(p.dim.as_str(), format!("[w] {next}h"))]);
+    }
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
     hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
@@ -3372,7 +3543,7 @@ mod tests {
             disk_cursor: "",
             hide_devices: &[],
             usage: empty_usage(),
-            window_days: 7,
+            window_hours: 24,
             now: 1_700_000_000.0,
             history_note: "",
             save_err: "",
@@ -3442,21 +3613,29 @@ mod tests {
             assert!(flat.contains("f_bavail"), "{width}");
             assert!(flat.contains("sorted: mount"), "{width}");
             assert!(flat.contains("no answer in 2s"), "{width}");
-            let cols = columns_for(width);
+            let cols = layout_for(width, 2);
             if cols.inodes {
                 assert!(flat.contains("n/a"), "inode n/a missing at {width}");
             }
-            let header = drawn
-                .rows
+            // A stacked header is MOUNT on a line of its own and the figure
+            // names under it, down to the first mount.
+            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+            let from = lines
                 .iter()
-                .find(|line| tc::display_width(line) > 0 && line.contains("MOUNT"))
+                .position(|line| line.starts_with("MOUNT"))
                 .unwrap_or_else(|| panic!("no header at {width}"));
+            let to = lines[from..]
+                .iter()
+                .position(|line| line.starts_with("▸ "))
+                .map(|at| from + at)
+                .unwrap_or_else(|| panic!("no cursor row at {width}"));
+            let header = lines[from..to].join("\n");
             assert!(header.contains("USED") && header.contains("USABLE"));
             assert_eq!(header.contains("INODES"), cols.inodes, "{width}");
             assert_eq!(header.contains("TYPE"), cols.typ, "{width}");
             assert_eq!(header.contains("SIZE"), cols.size, "{width}");
             assert!(flat.contains("FULL IN"), "{width}");
-            assert!(flat.contains("7d"), "{width}");
+            assert!(flat.contains("24h"), "{width}");
             let (packed, _) = footer(
                 width,
                 Screen::List,
@@ -3465,7 +3644,7 @@ mod tests {
                 0,
                 false,
                 false,
-                7,
+                24,
                 false,
                 &p,
             );
@@ -3480,7 +3659,7 @@ mod tests {
 
     #[test]
     fn a_long_mount_point_is_wrapped_rather_than_cut() {
-        let path = "/mnt/example-data";
+        let path = "/mnt/example-data/with/a/long/tail";
         let rows = vec![row(path, "ext4", Figures::Ready(space(1, 1, 10, 9)), 0)];
         let snap = snap(rows, Hidden::default());
         let p = palette();
@@ -3488,8 +3667,9 @@ mod tests {
         for line in &drawn.rows {
             assert!(tc::display_width(line) <= 28, "{line:?}");
         }
-        let room = columns_for(28).mount.saturating_sub(2).max(1);
-        let pieces = chunks(path, room);
+        assert!(layout_for(28, path.len()).stacked);
+        // Stacked, the mount point has the whole line less the marker.
+        let pieces = chunks(path, 26);
         assert!(
             pieces.len() > 1,
             "the path fits the mount column, so this tests nothing"
@@ -3562,7 +3742,7 @@ mod tests {
             row("/wait", "ext4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let order = ordered(&snap, Sort::Percent, empty_usage(), 7, 0.0);
+        let order = ordered(&snap, Sort::Percent, empty_usage(), 24, 0.0);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3589,7 +3769,7 @@ mod tests {
             ],
             Hidden::default(),
         );
-        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let order = ordered(&snap, Sort::Fills, &store, 24, now);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3623,7 +3803,7 @@ mod tests {
             row("/wait", "ext4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let order = ordered(&snap, Sort::Fills, &store, 7, now);
+        let order = ordered(&snap, Sort::Fills, &store, 24, now);
         let names: Vec<&str> = order
             .iter()
             .map(|&index| snap.rows[index].mount.mount_point.as_str())
@@ -3642,7 +3822,7 @@ mod tests {
             .join("\n");
         assert!(plain_flat.contains("FULL IN"), "{plain_flat}");
         assert!(plain_flat.contains('+'), "{plain_flat}");
-        assert!(plain_flat.contains("of 7d"), "{plain_flat}");
+        assert!(plain_flat.contains("of 24h"), "{plain_flat}");
         frame.screen = Screen::Detail;
         let drawn = draw_body(&frame, 80, &p, None);
         let detail = drawn
@@ -3659,9 +3839,9 @@ mod tests {
     #[test]
     fn the_footnote_names_the_fitted_start_and_a_full_window_keeps_its_own() {
         let now = 1_700_000_000.0;
-        let day = 86_400.0;
-        let kept = now - 10.0 * day;
-        let fit_at = now - 7.0 * day + 15.0 * 60.0;
+        let hour = 3_600.0;
+        let kept = now - 30.0 * hour;
+        let fit_at = now - 24.0 * hour + 15.0 * 60.0;
         let space = space(1_000, 1_000, 10, 9);
         let mut series = state::Series::default();
         state::record(&mut series, kept, 1);
@@ -3695,7 +3875,7 @@ mod tests {
 
         let mut full = state::Series::default();
         state::record(&mut full, kept, 1);
-        state::record(&mut full, now - 7.0 * day, 2);
+        state::record(&mut full, now - 24.0 * hour, 2);
         state::record(&mut full, now, 3);
         store
             .series
@@ -3716,7 +3896,7 @@ mod tests {
             "{flat}"
         );
         assert!(
-            !flat.contains(&format!("rate since {}", stamp(now - 7.0 * day))),
+            !flat.contains(&format!("rate since {}", stamp(now - 24.0 * hour))),
             "{flat}"
         );
     }
@@ -4209,7 +4389,9 @@ mod tests {
     }
 
     #[test]
-    fn the_total_chart_sits_above_the_disk_table() {
+    fn one_chart_sits_below_the_disk_table() {
+        // The total and the cursor's disk used to be two charts, and with
+        // one busy disk they drew the same line twice.
         let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
         board.total_read = vec![Some(1000.0), Some(2000.0)];
         board.total_write = vec![Some(100.0), Some(200.0)];
@@ -4218,30 +4400,98 @@ mod tests {
         let mut frame = view(None, "");
         frame.board = Some(&board);
         frame.disk_cursor = "sda";
-        frame.focus = 1;
-        for width in [28usize, 80] {
-            let drawn = draw_body(&frame, width, &p, None);
-            for line in &drawn.rows {
-                assert!(
-                    tc::display_width(line) <= width,
-                    "width {width} drew {} cells",
-                    tc::display_width(line)
-                );
+        for focus in [0usize, 1] {
+            frame.focus = focus;
+            for width in [28usize, 80] {
+                let drawn = draw_body(&frame, width, &p, None);
+                for line in &drawn.rows {
+                    assert!(
+                        tc::display_width(line) <= width,
+                        "width {width} drew {} cells",
+                        tc::display_width(line)
+                    );
+                }
+                let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+                let header_at = lines
+                    .iter()
+                    .position(|line| line.contains("READ"))
+                    .unwrap_or_else(|| panic!("{width} missing the disk header"));
+                let charts: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("read") && line.contains("peak"))
+                    .map(|(at, _)| at)
+                    .collect();
+                assert_eq!(charts.len(), 1, "focus {focus} width {width}: {lines:?}");
+                assert!(charts[0] > header_at, "focus {focus} width {width}");
             }
-            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
-            let total_at = lines
-                .iter()
-                .position(|line| line.contains("total of sda, sdb"))
-                .unwrap_or_else(|| panic!("{width} missing the total: {lines:?}"));
-            let header_at = lines
-                .iter()
-                .position(|line| line.contains("READ"))
-                .unwrap_or_else(|| panic!("{width} missing the disk header"));
-            assert!(total_at < header_at, "{width}");
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert_eq!(drawn.plots.len(), 2, "focus {focus}");
         }
+    }
+
+    #[test]
+    fn hiding_every_disk_row_keeps_the_total_chart() {
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
+        board.total_read = vec![Some(1000.0), Some(2000.0)];
+        board.total_write = vec![Some(100.0), Some(200.0)];
+        board.total_names = vec!["sda".into(), "sdb".into()];
+        let hidden = vec!["sda".to_string(), "sdb".to_string()];
+        let p = palette();
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        frame.hide_devices = &hidden;
+        frame.focus = 1;
         let drawn = draw_body(&frame, 100, &p, None);
-        assert_eq!(drawn.plots.len(), 4);
-        assert!(drawn.plots.iter().all(|plot| plot.height == 2));
+        assert!(!plain_has(&drawn, "READ"));
+        assert!(plain_has(&drawn, "total of sda, sdb"));
+        assert_eq!(drawn.plots.len(), 2);
+    }
+
+    #[test]
+    fn the_chart_is_the_total_until_the_disk_section_has_focus() {
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("sdb", 1, 1, 8.0)]);
+        board.total_read = vec![Some(1000.0), Some(2000.0)];
+        board.total_write = vec![Some(100.0), Some(200.0)];
+        board.total_names = vec!["sda".into(), "sdb".into()];
+        board.rows[0].read = vec![Some(10.0), Some(40.0)];
+        board.rows[0].write = vec![Some(5.0), Some(20.0)];
+        let p = palette();
+        // Read grows up from zero, write grows down, each on its own peak.
+        let traces = |drawn: &Drawn| -> Vec<Vec<Option<f64>>> {
+            drawn
+                .plots
+                .iter()
+                .map(|plot| plot.chart.traces[0].values.clone())
+                .collect()
+        };
+        let mut frame = view(None, "");
+        frame.board = Some(&board);
+        frame.disk_cursor = "sda";
+        for focus in [0usize, 2] {
+            frame.focus = focus;
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert!(plain_has(&drawn, "total of sda, sdb"), "focus {focus}");
+            assert_eq!(
+                traces(&drawn),
+                vec![vec![Some(0.5), Some(1.0)], vec![Some(0.5), Some(0.0)]],
+                "focus {focus}"
+            );
+        }
+        frame.focus = 1;
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(!plain_has(&drawn, "total of"));
+        assert_eq!(
+            traces(&drawn),
+            vec![vec![Some(0.25), Some(1.0)], vec![Some(0.75), Some(0.0)]]
+        );
+        let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+        let chart_at = lines
+            .iter()
+            .position(|line| line.contains("read") && line.contains("peak"))
+            .unwrap();
+        assert_eq!(lines[chart_at - 1].trim(), "sda");
     }
 
     #[test]
@@ -4295,5 +4545,98 @@ mod tests {
             .join("\n");
         assert!(plain.contains("mounted /data"), "{plain}");
         assert!(plain.contains("no partitions"), "{plain}");
+    }
+    #[test]
+    fn a_mount_point_too_wide_to_sit_beside_its_figures_gets_its_own_line() {
+        let long = "/home/example/GoogleDrive";
+        let rows = vec![
+            row("/", "ext4", Figures::Ready(space(80, 20, 100, 90)), 0),
+            row(long, "fuse.rclone", Figures::Ready(space(40, 60, 0, 0)), 1),
+            row(
+                "/run/user/1000/doc",
+                "fuse.portal",
+                Figures::Failed("statvfs: Operation not permitted (os error 1)".into()),
+                2,
+            ),
+        ];
+        let snap = snap(rows, Hidden::default());
+        let p = palette();
+        for width in [28usize, 40, 60, 80, 100, 160] {
+            let cols = layout_for(width, long.len());
+            let drawn = draw_body(&view(Some(&snap), long), width, &p, None);
+            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+            for line in &drawn.rows {
+                assert!(tc::display_width(line) <= width, "{width}: {line:?}");
+            }
+            if cols.stacked {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line.trim_end() == format!("▸ {long}")),
+                    "{width}: {lines:?}"
+                );
+                assert!(
+                    lines.iter().any(|line| line.trim_end() == "MOUNT"),
+                    "{width}"
+                );
+                // The error is a sentence, so it wraps rather than being cut.
+                let all = lines.join(" ");
+                assert!(all.contains("Operation not"), "{width}");
+                assert!(all.contains("error 1)"), "{width}");
+            } else {
+                let at = lines
+                    .iter()
+                    .position(|line| line.starts_with(&format!("▸ {long}")))
+                    .unwrap_or_else(|| panic!("{width}: {lines:?}"));
+                assert!(lines[at].contains('%'), "{width}: figures beside the mount");
+            }
+            // Every line of the selected mount is that mount's item.
+            let item = drawn
+                .placed
+                .iter()
+                .find(|(row, _)| lines[*row].starts_with("▸ "))
+                .map(|(_, item)| *item)
+                .unwrap();
+            let rows_of = drawn.placed.iter().filter(|(_, at)| *at == item).count();
+            assert!(rows_of >= if cols.stacked { 2 } else { 1 }, "{width}");
+        }
+        assert!(layout_for(60, long.len()).stacked);
+        assert!(!layout_for(160, long.len()).stacked);
+        // Short mount points stay beside their figures once the figures fit.
+        assert!(!layout_for(80, 2).stacked);
+        assert!(layout_for(40, 2).stacked);
+    }
+
+    #[test]
+    fn the_window_is_hours_and_tops_out_at_a_day() {
+        assert_eq!(window_hours_of(&serde_json::json!({})), 24);
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 6 })), 6);
+        // The old day windows, or any value not on offer, start on a day.
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 7 })), 24);
+        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 48 })), 24);
+        assert_eq!(tc::cycle(&WINDOWS, 24), 6);
+    }
+
+    #[test]
+    fn only_screens_that_use_the_window_offer_w() {
+        let p = palette();
+        let has_w = |screen| {
+            let (packed, _) = footer(
+                120,
+                screen,
+                Sort::Mount,
+                DiskSort::Write,
+                1,
+                false,
+                false,
+                24,
+                false,
+                &p,
+            );
+            packed.lines.join("\n").contains("[w]")
+        };
+        assert!(has_w(Screen::List));
+        assert!(has_w(Screen::Detail));
+        assert!(!has_w(Screen::DiskDetail));
     }
 }

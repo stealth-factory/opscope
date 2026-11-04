@@ -3,9 +3,11 @@ resolver = "2"
 members = ["core", "widgets"]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.5.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
+homepage = "https://opscope.stealth-factory.co"
+repository = "https://github.com/stealth-factory/opscope"
 
 # Thirteen of these run at once, so size is worth more here than the last
 # few percent of speed: optimise for it, strip symbols, and let LTO drop

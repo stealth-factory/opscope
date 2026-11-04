@@ -14,7 +14,7 @@ use opscope_core as tc;
 const MINUTE: f64 = 60.0;
 const QUARTER: f64 = 15.0 * MINUTE;
 const DAY: f64 = 86_400.0;
-const RETAIN: f64 = 30.0 * DAY;
+const RETAIN: f64 = 7.0 * DAY;
 const MIN_SPAN: f64 = 15.0 * MINUTE;
 const TEN_YEARS: f64 = 10.0 * 365.25 * DAY;
 
@@ -99,7 +99,7 @@ pub fn record(series: &mut Series, t: f64, used: u64) -> bool {
 }
 
 /// One sample a minute for the last day, one every fifteen minutes before
-/// that, and nothing older than thirty days.
+/// that, and nothing older than seven days.
 pub fn compact(series: &mut Series, now: f64) {
     let oldest = now - RETAIN;
     let fine = now - DAY;
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_keeps_the_day_and_drops_the_month() {
+    fn compaction_keeps_the_day_and_drops_past_the_week() {
         let mut series = Series::default();
         let now = 40.0 * DAY;
         for minute in 0..(31 * 24 * 60) {

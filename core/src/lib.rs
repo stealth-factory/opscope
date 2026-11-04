@@ -32,7 +32,7 @@ mod shm;
 mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
-pub use graphics::{braille, line_col, line_row, LineChart, Plot, StickyRange, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, Sky, StickyRange, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
@@ -5768,8 +5768,8 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: twenty binaries that disagree about how to say their own version
-    // are twenty answers to one question. netwatch used to answer this
+    // is: twenty-one binaries that disagree about how to say their own version
+    // are twenty-one answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {
