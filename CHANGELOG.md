@@ -3,6 +3,14 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.6.0] - 2026-11-04
+
+### Features
+
+- **clocks**: Show weather for one place and world-clock glyphs (OPS-78) (#546)
+- **google-analytics**: New widget for GA4 realtime, baselines and key events (OPS-186) (#449)
+- **clocks**: Report the pomodoro to Rex as a program status (#563)
+
 ## [2.5.0] - 2026-11-04
 
 ### Bug Fixes
