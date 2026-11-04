@@ -4,7 +4,8 @@ Every pane on a Rex server in three sections. AGENTS lists coding agents with
 the state they reported themselves - blocked, error, done, working or idle -
 with what they are blocked on, their progress and their message. PROCESSES
 lists every other pane running something, IDLE the panes at a prompt. Enter
-focuses the pane, wherever it is.
+focuses the pane, wherever it is. Inside each section the panes are grouped
+by session, the session holding the most urgent pane first.
 
 A Rex client, read-only, and every fact on it is labelled with where it came
 from. A state is what the program reported with OSC 7501, the Program

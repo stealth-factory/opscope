@@ -232,7 +232,13 @@ impl Pane {
     /// `work:2`, the session and the window's tab position - what `rex -s
     /// work -w 2` means - or what stands in for a window when there is none.
     fn place(&self) -> String {
-        let window = if self.detached {
+        format!("{}:{}", self.session_label, self.window())
+    }
+
+    /// The window's tab position on its own - what a row under its
+    /// session's sub-heading needs, since the heading already names it.
+    fn window(&self) -> String {
+        if self.detached {
             "detached".to_string()
         } else {
             match (self.window_ord, self.floating) {
@@ -241,8 +247,7 @@ impl Pane {
                 (Some(n), None) => n.to_string(),
                 (None, _) => "?".into(),
             }
-        };
-        format!("{}:{}", self.session_label, window)
+        }
     }
 
     /// A record whose reporter is neither in front nor the shell has
@@ -704,7 +709,7 @@ fn mark_of(state: &str, tick: usize) -> char {
 /// is, the message it reported. Wrapped at word boundaries by the caller,
 /// never cut - a blocked agent's message is the half of the row worth
 /// reading.
-fn detail_phrases(pane: &Pane, cols: &Columns, at: f64) -> Vec<String> {
+fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
     let mut out = Vec::new();
     let root = pane.root();
     if let Some(r) = root {
@@ -740,13 +745,32 @@ fn detail_phrases(pane: &Pane, cols: &Columns, at: f64) -> Vec<String> {
             said
         ));
     }
-    // Narrow, the session moves here from its column - but only when
-    // there is more than one: on a server with one session it is the same
-    // word under every row, a line each that says nothing.
-    if !cols.wide && cols.sessions {
-        out.push(pane.place());
-    }
     out
+}
+
+/// A section's panes regrouped by session, without losing who needs you.
+///
+/// Each session's panes stay together, in the order they already had -
+/// worst first. The sessions are ordered by their most urgent pane, then by
+/// Rex's own session order, so a blocked agent still puts its session at
+/// the top of the section rather than waiting behind a quiet one that
+/// happens to sort first by name.
+fn by_session(panes: Vec<&Pane>) -> Vec<&Pane> {
+    let mut groups: Vec<(usize, usize, Vec<&Pane>)> = Vec::new();
+    for pane in panes {
+        match groups
+            .iter_mut()
+            .find(|(_, _, g)| g[0].session_id == pane.session_id)
+        {
+            Some((worst, _, g)) => {
+                *worst = (*worst).min(pane.rank());
+                g.push(pane);
+            }
+            None => groups.push((pane.rank(), pane.session_ord, vec![pane])),
+        }
+    }
+    groups.sort_by_key(|(worst, ord, _)| (*worst, *ord));
+    groups.into_iter().flat_map(|(_, _, g)| g).collect()
 }
 
 /// One frame's worth of a pane: its rows, each already coloured.
@@ -899,7 +923,7 @@ fn render_pane(
             if cols.wide {
                 line.push((
                     c(&p.accent),
-                    format!(" {}", tc::pad(&pane.place(), cols.place)),
+                    format!(" {}", tc::pad(&pane.window(), cols.place)),
                 ));
             }
             fill(&mut line);
@@ -919,7 +943,7 @@ fn render_pane(
                 rows.push(finish(line));
                 prose(&mut rows, body, title);
             }
-            let facts = detail_phrases(pane, cols, at);
+            let facts = detail_phrases(pane, at);
             if !facts.is_empty() {
                 prose(&mut rows, body, &facts.join(" · "));
             }
@@ -980,7 +1004,7 @@ fn render_pane(
             if cols.wide {
                 line.push((
                     c(&p.accent),
-                    format!(" {}", tc::pad(&pane.place(), cols.place)),
+                    format!(" {}", tc::pad(&pane.window(), cols.place)),
                 ));
             }
             fill(&mut line);
@@ -998,7 +1022,7 @@ fn render_pane(
                 };
                 prose(&mut rows, &p.unknown, &format!("⚠ {}", why));
             }
-            let facts = detail_phrases(pane, cols, at);
+            let facts = detail_phrases(pane, at);
             if !facts.is_empty() {
                 prose(&mut rows, body, &facts.join(" · "));
             }
@@ -1013,8 +1037,8 @@ fn render_pane(
                 ),
                 (
                     c(&p.accent),
-                    if cols.wide || cols.sessions {
-                        pane.place()
+                    if cols.wide {
+                        pane.window()
                     } else {
                         String::new()
                     },
@@ -1069,7 +1093,8 @@ impl Columns {
             .max(tc::display_width("could not be read"));
         let place_want = panes
             .iter()
-            .map(|p| tc::display_width(&p.place()))
+            .map(|p| tc::display_width(&p.window()))
+            .chain(std::iter::once(tc::display_width("WINDOW")))
             .max()
             .unwrap_or(0);
         let dir_want = widest(&|p| tc::display_width(&homely(&p.cwd())), Section::Idle);
@@ -1108,7 +1133,7 @@ impl Columns {
                 place_want,
             )
         };
-        let place_cells = if wide || sessions { 1 + place_want } else { 0 };
+        let place_cells = if wide { 1 + place_want } else { 0 };
         let dir = tc::fit_columns(row.saturating_sub(3 + place_cells), &[(6, dir_want)])[0];
         Columns {
             wide,
@@ -1740,6 +1765,12 @@ fn main() {
             .iter()
             .filter(|n| n.section() == Section::Idle)
             .collect();
+        // Grouped by session inside each section, when there is more than
+        // one: the flat index the keys walk is this order, so the cursor and
+        // the sub-headings cannot disagree.
+        let agents = by_session(agents);
+        let busy = by_session(busy);
+        let resting = by_session(resting);
         panes_now = agents
             .iter()
             .chain(busy.iter())
@@ -1762,7 +1793,15 @@ fn main() {
                 ),
                 (
                     p.dim.as_str(),
-                    format!("{} session{} ·", b.sessions, plural(b.sessions)),
+                    // With one session there are no sub-headings to name it,
+                    // so the count line does.
+                    match (
+                        b.sessions,
+                        agents.first().or(busy.first()).or(resting.first()),
+                    ) {
+                        (1, Some(pane)) => format!("session {} ·", pane.session_label),
+                        (n, _) => format!("{} session{} ·", n, plural(n)),
+                    },
                 ),
                 (p.dim.as_str(), format!("{} pane{}", total, plural(total))),
             ];
@@ -1906,7 +1945,27 @@ fn main() {
                 let listed: Vec<&Pane> = panes_now.iter().collect();
                 let cols = Columns::fit(w, &listed);
                 let mut index = 0usize;
-                let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize| {
+                // A session's sub-heading goes above its first pane in each
+                // section, and only when the board holds more than one
+                // session: with one, the count line has already named it.
+                // Decided from the section's own list, so each section
+                // starts its own run of sub-headings.
+                let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize, of: &[&Pane]| {
+                    let first = of.iter().position(|o| o.session_id == pane.session_id)
+                        == of.iter().position(|o| o.block_id == pane.block_id);
+                    if cols.sessions && first {
+                        let n = of
+                            .iter()
+                            .filter(|o| o.session_id == pane.session_id)
+                            .count();
+                        rows.extend(flow(
+                            &[
+                                (p.accent.as_str(), format!("  ╶ {}", pane.session_label)),
+                                (p.dim.as_str(), format!("· {}", n)),
+                            ],
+                            w,
+                        ));
+                    }
                     let from = rows.len();
                     rows.extend(render_pane(pane, index == selected, w, &cols, &p, tick, at));
                     rows_at.extend((from..rows.len()).map(|row| (row, index)));
@@ -1940,11 +1999,11 @@ fn main() {
                         nw = cols.name + 2
                     );
                     if cols.wide {
-                        head += &format!(" {:<5} {}", "MEM", "SESSION");
+                        head += &format!(" {:<5} {}", "MEM", "WINDOW");
                     }
                     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     for pane in &agents {
-                        emit(&mut rows, pane, index);
+                        emit(&mut rows, pane, index, &agents);
                         index += 1;
                     }
                 }
@@ -2017,13 +2076,13 @@ fn main() {
                             },
                             "CPU",
                             "MEM",
-                            "SESSION",
+                            "WINDOW",
                             cw = cols.command + 2
                         );
                         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     }
                     for pane in &busy {
-                        emit(&mut rows, pane, index);
+                        emit(&mut rows, pane, index, &busy);
                         index += 1;
                     }
                 }
@@ -2050,7 +2109,7 @@ fn main() {
                     ));
                     sections.push(index);
                     for pane in &resting {
-                        emit(&mut rows, pane, index);
+                        emit(&mut rows, pane, index, &resting);
                         index += 1;
                     }
                 }
@@ -2348,6 +2407,54 @@ mod tests {
         assert!(claude.wants_a_human());
     }
 
+    fn pane_in(session: &str, ord: usize, block: &str, state: Option<&str>) -> Pane {
+        Pane {
+            session_id: format!("session:{}", session),
+            session_label: session.into(),
+            session_ord: ord,
+            block_id: format!("block:{}", block),
+            records: state
+                .map(|s| {
+                    vec![Record {
+                        state: s.into(),
+                        ..Default::default()
+                    }]
+                })
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_session_with_a_blocked_pane_comes_first_and_stays_together() {
+        let quiet_a = pane_in("alpha", 1, "a1", Some("idle"));
+        let blocked = pane_in("beta", 2, "b1", Some("blocked"));
+        let quiet_b = pane_in("beta", 2, "b2", Some("working"));
+        let quiet_c = pane_in("alpha", 1, "a2", None);
+        // Already worst-first, as `order` leaves them: blocked, working,
+        // idle, unknown - with the two sessions interleaved.
+        let grouped = by_session(vec![&blocked, &quiet_b, &quiet_a, &quiet_c]);
+        let ids: Vec<&str> = grouped.iter().map(|p| p.block_id.as_str()).collect();
+        assert_eq!(ids, ["block:b1", "block:b2", "block:a1", "block:a2"]);
+        // Two quiet sessions keep Rex's own order.
+        let x = pane_in("x", 2, "x1", Some("idle"));
+        let y = pane_in("y", 1, "y1", Some("idle"));
+        let grouped = by_session(vec![&x, &y]);
+        assert_eq!(grouped[0].session_label, "y");
+    }
+
+    #[test]
+    fn the_column_says_the_window_once_the_heading_says_the_session() {
+        let mut pane = pane_in("work", 1, "w1", None);
+        pane.window_ord = Some(2);
+        assert_eq!(pane.place(), "work:2");
+        assert_eq!(pane.window(), "2");
+        pane.floating = Some(true);
+        assert_eq!(pane.window(), "2·float·min");
+        pane.detached = true;
+        assert_eq!(pane.window(), "detached");
+    }
+
     #[test]
     fn rank_puts_people_first_and_unknown_last() {
         for pair in RANK.windows(2) {
@@ -2380,7 +2487,7 @@ mod tests {
         assert!(pane.reporter_gone(&gone));
         pane.records = vec![gone];
         assert!(
-            detail_phrases(&pane, &Columns::fit(100, &[]), 0.0)
+            detail_phrases(&pane, 0.0)
                 .iter()
                 .any(|s| s.contains("not in foreground"))
         );

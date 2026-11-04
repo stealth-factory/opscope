@@ -63,6 +63,13 @@ pane running something, plus any pane holding a status report — a `terraform`
 waiting for approval belongs at the top whatever it is. **IDLE** is the panes
 at a shell prompt, by directory, because the panel is also how you get around.
 
+**Inside each section, panes are grouped by session** under a `╶ work · 3`
+sub-heading, and the row's own column says only the window. The sessions are
+ordered by their most urgent pane, so a blocked agent still brings its session
+to the top of the section; within a session the order is the same worst-first
+one. On a server with one session there is nothing to group, so there are no
+sub-headings and the count line names the session instead.
+
 A pane Rex could not be asked about is neither running nor resting: it sorts
 into PROCESSES with `⚠ could not be read` and the server's own reason, and the
 heading counts it apart. `[i]` hides only panes known to be at a prompt.
