@@ -6,38 +6,58 @@ Google Analytics 4 on a wall: is traffic normal right now, and did the last
 change hurt key events?
 
 ```text
-╺━ GOOGLE ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   breakdowns 40s ago   reports 3m ago   live 15s
- quota realtime used 1.2k/14k h 31k/200k d
+╺━ GOOGLE ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   breakdowns 40s ago   reports 3m ago
+ live 15s   quota realtime used 1.2k/14k h 31k/200k d
 
  ── RIGHT NOW ── last 30 min · GA realtime · hits land within seconds
  active users 71   baseline 48 · from 2 of 4 weeks   +48% ▲
  baseline = median active users at this minute of the week, from this widget's own samples
- per minute ▁▂▂▃▂▃▄▄▃▅▅▆▅▆█▇▆▅▅▆▇▇█▇▆▅▄▃▃▂
+
+ per minute               ▃ ▃█▅▃  ▃▅▅█▅▃
+ peak 9           ▃ ▃▅▅▃█████████████████▅▃▃
+ 30 min → now  ▅█████████████████████████████
+
  views last full minute 18   views 30m 540   key events 30m: purchase 3 (base 2)   sign_up 1 (base 1)
+
  PAGE (title)               NOW  DEVICE                     NOW  COUNTRY                    NOW
  Pricing                     34  mobile                      52  United States               41
  Home                        19  desktop                     16  Germany                      9
  sources: not in GA realtime - see TODAY below (2–6 h behind)
 
+
  ── TODAY VS SAME WEEKDAY ── sessions by hour · GA says 2–6 h behind, not final for 24–48 h
- today    ▂▁▁▁▁▂▃▅▆▇█▇▇▆▆░░░░░░░░░
- last Tue ▂▁▁▁▁▂▃▄▆▇▇▇▇▆▆▆▅▅▄▃▃▂▂▁
- ░ = hour not yet processed, not zero · · = no sessions that hour
+
+ 214 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⡤⠤⠒⠒⠊⠉⠉⠉⠉⠛⠛⠛⠛⠒⠒⠒⠒⠤⠤⠤⢤⣄⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+     ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡤⠞⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠁⠀⠉⠉⠉⠑⠒⠤⠤⠤⢄⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+     ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡤⠞⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠑⠒⠒⠤⠤⠤⠤⢄⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+     ⠒⠤⢄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠤⠚⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠉⠉⠒⠒⠒⠢⠤⠤
+   0 ⠀⠀⠀⠈⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠊⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+    00                      06                       12                      18                  23
+    ━━ today   ━━ last Tue
+ today's line ends at the last hour GA has processed; the rest of the day is not yet known, not
+ zero
+
  to 15:00: today 1,842  last Tue 1,690 +9%  3-week median 1,710 +8%
  top sources today: google / organic 1,120 (+6%) · (direct) / (none) 410 (+15%) · newsletter / email 86 (−40%)
+
 
  ── KEY EVENTS ── today to 15:00 vs same weekday · same lag as above
  EVENT                         TODAY LAST TUE  Δ            RATE/SESSION  LAST 7 D
 ▸purchase                         23       31  −26% ▼       1.2% (1.8%)   ▅▆▅▇▆▇░
  sign_up                          41       38  +8%          2.2% (2.2%)   ▃▄▃▅▄▅░
 
+ last 7 days: today ░ is still being processed
+
+
  ── TOP ORGANIC LANDING PAGES ── Google Search visitors · sessions · last 7 days vs prior 7
  GA4 does not give the search terms - Google withholds them as "not provided" and the Data API has
  no Search Console query dimension. The google-search-console widget shows the terms and the page
  each lands on.
+
  LANDING PAGE                                         SESSIONS  KEY EV  Δ
  /pricing                                                1,204      19  +12%
+
 
  ── MOVERS ── views · last 7 days vs prior 7 · by change · pages 1-8 of 212
  PAGE                                          7D    PRIOR  Δ
