@@ -59,8 +59,7 @@ pub struct SettingsSpec {
 /// `grok-build-0.1` is xAI's, and nothing in either string says so. It is
 /// carried rather than derived from the name - a prefix rule reads fine over
 /// today's table and mislabels the first entry that does not follow it.
-pub type Catalogue =
-    &'static [(&'static str, &'static str, &'static [(&'static str, f64)])];
+pub type Catalogue = &'static [(&'static str, &'static str, &'static [(&'static str, f64)])];
 
 #[derive(Clone)]
 struct Field {
@@ -148,9 +147,7 @@ impl Field {
 
     fn kind(&self) -> &'static str {
         match &self.default {
-            Value::Number(number)
-                if number.as_u64().is_some() || number.as_i64().is_some() =>
-            {
+            Value::Number(number) if number.as_u64().is_some() || number.as_i64().is_some() => {
                 "integer"
             }
             _ => kind_name(&self.default),
@@ -230,11 +227,7 @@ fn named_kind(value: &Value, kind: &str) -> bool {
     }
 }
 
-fn validate_value(
-    value: &Value,
-    expected: &Value,
-    rule: Option<&Value>,
-) -> Result<(), String> {
+fn validate_value(value: &Value, expected: &Value, rule: Option<&Value>) -> Result<(), String> {
     // A null default means the widget has no figure to offer, not that null
     // is the type it wants - a model the rate card does not carry has every
     // kind and a price for none of them. Demanding null back made those rows
@@ -291,20 +284,24 @@ fn validate_value(
             }
         }
     }
-    if let (Some(actual), Some(minimum)) = (
-        value.as_f64(),
-        rule.get("minimum").and_then(Value::as_f64),
-    ) {
+    if let (Some(actual), Some(minimum)) =
+        (value.as_f64(), rule.get("minimum").and_then(Value::as_f64))
+    {
         if actual < minimum {
-            return Err(format!("must be at least {}", compact(&Value::from(minimum))));
+            return Err(format!(
+                "must be at least {}",
+                compact(&Value::from(minimum))
+            ));
         }
     }
-    if let (Some(actual), Some(maximum)) = (
-        value.as_f64(),
-        rule.get("maximum").and_then(Value::as_f64),
-    ) {
+    if let (Some(actual), Some(maximum)) =
+        (value.as_f64(), rule.get("maximum").and_then(Value::as_f64))
+    {
         if actual > maximum {
-            return Err(format!("must be at most {}", compact(&Value::from(maximum))));
+            return Err(format!(
+                "must be at most {}",
+                compact(&Value::from(maximum))
+            ));
         }
     }
     Ok(())
@@ -596,7 +593,10 @@ fn find_object_at(s: &str, path: &[&str]) -> Result<Option<usize>, String> {
 
 fn line_indent(s: &str, at: usize) -> String {
     let start = s[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
-    s[start..at].chars().take_while(|c| c.is_whitespace()).collect()
+    s[start..at]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect()
 }
 
 fn infer_indent(s: &str, obj_open: usize, entries: &[Entry]) -> String {
@@ -671,16 +671,14 @@ fn remove_json_path(text: &str, path: &[&str]) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     out.push_str(&text[..start]);
     out.push_str(&text[end..]);
-    serde_json::from_str::<Value>(&out)
-        .map_err(|e| format!("refusing to remove {key}: {e}"))?;
+    serde_json::from_str::<Value>(&out).map_err(|e| format!("refusing to remove {key}: {e}"))?;
     Ok(out)
 }
 
 fn insert_member(text: &str, obj_open: usize, key: &str, value: &str) -> Result<String, String> {
     let entries = object_entries(text, obj_open)?;
     let close = object_close(text, obj_open)?;
-    let key_json = serde_json::to_string(key)
-        .map_err(|e| format!("refusing to write key: {e}"))?;
+    let key_json = serde_json::to_string(key).map_err(|e| format!("refusing to write key: {e}"))?;
     let piece = format!("{key_json}: {value}");
     if entries.is_empty() {
         let indent = infer_indent(text, obj_open, &entries);
@@ -707,11 +705,7 @@ fn insert_member(text: &str, obj_open: usize, key: &str, value: &str) -> Result<
     Ok(out)
 }
 
-fn parse_edit(
-    raw: &str,
-    expected: &Value,
-    rule: Option<&Value>,
-) -> Result<Value, String> {
+fn parse_edit(raw: &str, expected: &Value, rule: Option<&Value>) -> Result<Value, String> {
     let trimmed = raw.trim();
     if expected.is_string() {
         let value = if trimmed.starts_with('"') {
@@ -798,11 +792,7 @@ fn summary(v: &Value, secret: bool) -> String {
 
 /// The new section wins. A legacy section is consulted only when its
 /// owning widget explicitly declares it and the new section is absent.
-fn live_section<'a>(
-    live: &Value,
-    canonical: &'a str,
-    legacy: Option<&'a str>,
-) -> &'a str {
+fn live_section<'a>(live: &Value, canonical: &'a str, legacy: Option<&'a str>) -> &'a str {
     if live.get(canonical).is_some() {
         return canonical;
     }
@@ -819,11 +809,7 @@ fn row_index(step: &str) -> Option<usize> {
     step.strip_prefix('#')?.parse().ok()
 }
 
-fn current_of<'a>(
-    live: &'a Value,
-    field: &Field,
-    legacy: Option<&str>,
-) -> Option<&'a Value> {
+fn current_of<'a>(live: &'a Value, field: &Field, legacy: Option<&str>) -> Option<&'a Value> {
     let mut at = live.get(live_section(live, &field.section, legacy))?;
     for step in field.steps() {
         // `#3` is the fourth row of a list, not a key called "#3". An array
@@ -984,7 +970,12 @@ fn load(spec: SettingsSpec) -> App {
     }
     let (path, raw, live, exists) = match found {
         Some((p, t, v)) => (p, t, v, true),
-        None => (crate::default_config_path(), String::new(), serde_json::json!({}), false),
+        None => (
+            crate::default_config_path(),
+            String::new(),
+            serde_json::json!({}),
+            false,
+        ),
     };
     App {
         widget: spec.widget,
@@ -1035,8 +1026,7 @@ fn fresh_config(app: &App) -> Result<(String, Value), String> {
         ));
     }
     let raw = if app.path.exists() {
-        std::fs::read_to_string(&app.path)
-            .map_err(|e| format!("{}: {e}", app.path.display()))?
+        std::fs::read_to_string(&app.path).map_err(|e| format!("{}: {e}", app.path.display()))?
     } else {
         String::new()
     };
@@ -1188,25 +1178,20 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
     }
     let (key, steps, schema_path, schema_section) = {
         let field = app.fields.get(index).ok_or("no such field")?;
-        validate_value(
-            &value,
-            &field.default,
-            constraint_for(app, field),
-        )?;
+        validate_value(&value, &field.default, constraint_for(app, field))?;
         (
             field.key.clone(),
-            field.steps().iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            field
+                .steps()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
             field.path(),
             field.section.clone(),
         )
     };
     let (fresh_raw, fresh_live) = fresh_config(app)?;
-    let section = live_section(
-        &fresh_live,
-        &schema_section,
-        app.legacy_section,
-    )
-    .to_string();
+    let section = live_section(&fresh_live, &schema_section, app.legacy_section).to_string();
     let mut path = vec![section.as_str()];
     path.extend(steps.iter().map(String::as_str));
     let next = set_json_path(&fresh_raw, &path, &value)?;
@@ -1258,12 +1243,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
     let schema_section = field.section.clone();
     let shown_default = summary(&field.default, false);
     let (fresh_raw, fresh_live) = fresh_config(app)?;
-    let section = live_section(
-        &fresh_live,
-        &schema_section,
-        app.legacy_section,
-    )
-    .to_string();
+    let section = live_section(&fresh_live, &schema_section, app.legacy_section).to_string();
     // section, then every key the field sits under, then the field itself.
     let mut full: Vec<&str> = vec![section.as_str()];
     full.extend(steps.iter().map(String::as_str));
@@ -1305,8 +1285,7 @@ fn move_sel(app: &mut App, delta: isize) {
     if app.fields.is_empty() {
         return;
     }
-    let next = (app.selected as isize + delta)
-        .clamp(0, app.fields.len() as isize - 1) as usize;
+    let next = (app.selected as isize + delta).clamp(0, app.fields.len() as isize - 1) as usize;
     app.selected = next;
     app.chase = true;
 }
@@ -1353,9 +1332,47 @@ fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
             // callers with a smaller width.
             .unwrap_or(fit.max(1).min(rest.len()));
         lines.push(rest[..cut].iter().collect());
-        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
+        rest = rest[cut..]
+            .iter()
+            .skip_while(|c| **c == ' ')
+            .copied()
+            .collect();
     }
     lines
+}
+
+/// A `{` object that has not closed yet.
+///
+/// Enter in the settings box writes the value. A pasted service-account
+/// key is that object across many lines, and the newline after `{` would
+/// otherwise save `{` and throw the rest away. While the object is open,
+/// Enter is another line of the value.
+fn json_object_open(text: &str) -> bool {
+    if !text.trim_start().starts_with('{') {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for c in text.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0
 }
 
 fn insert_chars(buffer: &mut String, cursor: &mut usize, ch: &str) {
@@ -1390,7 +1407,11 @@ fn delete_before(buffer: &mut String, cursor: &mut usize) {
 /// nothing. `"inactive_when": {"key": "detect_agents", "is": true}` lets the
 /// field say so, and the screen says it before you edit rather than after.
 fn inactive_because(app: &App, key: &str) -> Option<String> {
-    let rule = app.constraints.get(key)?.as_object()?.get("inactive_when")?;
+    let rule = app
+        .constraints
+        .get(key)?
+        .as_object()?
+        .get("inactive_when")?;
     let rule = rule.as_object()?;
     let other = rule.get("key")?.as_str()?;
     let when = rule.get("is")?;
@@ -1470,7 +1491,10 @@ fn constraint_for<'a>(app: &'a App, field: &Field) -> Option<&'a Value> {
     // whatever the reader added - so the rules of the map itself stand for
     // each entry, and `values` below reads the same either way.
     for step in rest {
-        let Some(next) = here.get("fields").and_then(Value::as_object).and_then(|f| f.get(step))
+        let Some(next) = here
+            .get("fields")
+            .and_then(Value::as_object)
+            .and_then(|f| f.get(step))
         else {
             return Some(here);
         };
@@ -1575,7 +1599,10 @@ fn model_fields(app: &App, field: &Field, model: &str) -> Vec<Field> {
     // default rather than not offered at all.
     let kinds: Vec<(&str, Option<f64>)> = match listed {
         Some(rates) => rates.iter().map(|(k, v)| (*k, Some(*v))).collect(),
-        None => catalogue_kinds(table).into_iter().map(|k| (k, None)).collect(),
+        None => catalogue_kinds(table)
+            .into_iter()
+            .map(|k| (k, None))
+            .collect(),
     };
     kinds
         .into_iter()
@@ -1632,7 +1659,6 @@ fn catalogue_kinds(table: Catalogue) -> Vec<&'static str> {
     seen
 }
 
-
 /// Who publishes a catalogue entry, for the column beside its name.
 fn catalogue_group(kind: &PickKind, key: &str) -> Option<String> {
     let PickKind::Catalogue(table) = kind else {
@@ -1645,9 +1671,11 @@ fn catalogue_group(kind: &PickKind, key: &str) -> Option<String> {
 }
 
 fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
-    app.catalogues.iter().find(|(f, _)| *f == key).map(|(_, t)| *t)
+    app.catalogues
+        .iter()
+        .find(|(f, _)| *f == key)
+        .map(|(_, t)| *t)
 }
-
 
 fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     // A field the widget handed a table for needs no `picker` declaration:
@@ -1698,11 +1726,7 @@ fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
 ///
 /// Arrays keep the checklist they have: ticking several is a different act
 /// from choosing one, and `work_days` wants the first.
-fn one_of_kind(
-    app: &App,
-    key: &str,
-    rule: &serde_json::Map<String, Value>,
-) -> Option<PickKind> {
+fn one_of_kind(app: &App, key: &str, rule: &serde_json::Map<String, Value>) -> Option<PickKind> {
     let field = app.fields.iter().find(|f| f.key == key)?;
     if field.default.is_array() {
         return None;
@@ -2390,7 +2414,10 @@ fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
         return false;
     }
     if let Some(path) = row_path(&value) {
-        if let Some(held) = rows.iter().find(|v| row_path(v).as_deref() == Some(path.as_str())) {
+        if let Some(held) = rows
+            .iter()
+            .find(|v| row_path(v).as_deref() == Some(path.as_str()))
+        {
             app.status = Some(format!(
                 "{path} is already listed, as {} - remove that row first.",
                 entry_shown(held)
@@ -2704,7 +2731,15 @@ fn remove_map_entry(app: &mut App, index: usize, named: &str) {
 }
 
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
-    let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &mut app.mode
+    let Mode::Pick {
+        index,
+        query,
+        sel,
+        scroll,
+        show_all,
+        on_list,
+        cursor,
+    } = &mut app.mode
     else {
         return false;
     };
@@ -2824,8 +2859,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             let Some(parent) = app.fields.get(index).cloned() else {
                 return false;
             };
-            let held = current_of(&app.live, &parent, app.legacy_section)
-                .or(Some(&parent.default));
+            let held = current_of(&app.live, &parent, app.legacy_section).or(Some(&parent.default));
             if held.and_then(|v| v.get(&named)).is_some() {
                 app.status = Some(format!("{named} is already there."));
                 if let Mode::Pick { query, cursor, .. } = &mut app.mode {
@@ -2879,8 +2913,15 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 let at = held.len();
                 held.push(Value::Object(serde_json::Map::new()));
                 if write_field(app, index, Value::Array(held)).is_ok() {
-                    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } =
-                        &mut app.mode
+                    if let Mode::Pick {
+                        query,
+                        sel,
+                        scroll,
+                        show_all,
+                        on_list,
+                        cursor,
+                        ..
+                    } = &mut app.mode
                     {
                         *query = q.clone();
                         *sel = s_;
@@ -2930,8 +2971,15 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                     // Put it back where the caller left it before opening a
                     // screen over the top: the picker is restored from the
                     // stack when that screen closes.
-                    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } =
-                        &mut app.mode
+                    if let Mode::Pick {
+                        query,
+                        sel,
+                        scroll,
+                        show_all,
+                        on_list,
+                        cursor,
+                        ..
+                    } = &mut app.mode
                     {
                         *query = q.clone();
                         *sel = s_;
@@ -3008,7 +3056,16 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         _ => {}
     }
     let total = zone_choices(app, index, &q, all).len();
-    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } = &mut app.mode {
+    if let Mode::Pick {
+        query,
+        sel,
+        scroll,
+        show_all,
+        on_list,
+        cursor,
+        ..
+    } = &mut app.mode
+    {
         *cursor = cur.min(q.chars().count());
         *query = q;
         *sel = s_.min(total.saturating_sub(1));
@@ -3125,8 +3182,8 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     //
                     // unset -> true -> false -> unset, so the cycle always
                     // comes back and nothing is a one-way door.
-                    let current = current_of(&app.live, field, app.legacy_section)
-                        .and_then(|v| v.as_bool());
+                    let current =
+                        current_of(&app.live, field, app.legacy_section).and_then(|v| v.as_bool());
                     let outcome = match current {
                         None => write_field(app, app.selected, Value::Bool(true)),
                         Some(true) => write_field(app, app.selected, Value::Bool(false)),
@@ -3191,6 +3248,11 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
             app.status = Some("Nothing written.".into());
         }
         "enter" => {
+            if json_object_open(buffer) {
+                insert_chars(buffer, cursor, "\n");
+                *error = None;
+                return false;
+            }
             let keep_secret = {
                 let field = match app.fields.get(*index) {
                     Some(f) => f,
@@ -3222,11 +3284,7 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
                     return false;
                 }
             };
-            match parse_edit(
-                buffer,
-                &field.default,
-                app.constraints.get(&field.key),
-            ) {
+            match parse_edit(buffer, &field.default, app.constraints.get(&field.key)) {
                 Ok(value) => {
                     let i = *index;
                     match write_field(app, i, value) {
@@ -3274,7 +3332,10 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
     let path_note = if app.exists {
         format!(" {}", app.path.display())
     } else {
-        format!(" {} — does not exist yet, will be created 0600", app.path.display())
+        format!(
+            " {} — does not exist yet, will be created 0600",
+            app.path.display()
+        )
     };
     say(&mut body, p.dim.as_str(), " ", path_note.trim(), w);
     let unset = app
@@ -3342,7 +3403,9 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
     let value_w = if show_default {
         ((after_key - if show_set { 8 } else { 0 }) / 2).max(8)
     } else if show_value {
-        after_key.saturating_sub(if show_set { 8 } else { 0 }).max(8)
+        after_key
+            .saturating_sub(if show_set { 8 } else { 0 })
+            .max(8)
     } else {
         0
     };
@@ -3397,10 +3460,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
         }
         if show_default {
             let shown = summary(&field.default, false);
-            parts.push((
-                c_of(&p.dim),
-                format!(" {}", crate::pad(&shown, value_w)),
-            ));
+            parts.push((c_of(&p.dim), format!(" {}", crate::pad(&shown, value_w))));
         }
         if show_set {
             parts.push((
@@ -3411,14 +3471,18 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
         if here {
             parts.push((tint.clone(), " ".repeat(w)));
         }
-        let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        let refs: Vec<(&str, String)> =
+            parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         body.push(crate::seg(&refs, w.saturating_sub(1)));
     }
 
     if let Some(field) = app.fields.get(app.selected) {
         body.push(String::new());
         body.push(crate::seg(
-            &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
+            &[(
+                p.lbl.as_str(),
+                format!(" ── {} ── ", field.under_section().to_uppercase()),
+            )],
             w.saturating_sub(1),
         ));
         let current = current_of(&app.live, field, app.legacy_section);
@@ -3520,7 +3584,11 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     } = &app.mode
     else {
         return (
-            vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)],
+            vec![crate::title(
+                &format!("{} settings", app.widget),
+                w,
+                &p.accent,
+            )],
             Clickable::default(),
         );
     };
@@ -3530,37 +3598,46 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         w,
         &p.accent,
     )];
-    say(&mut body, p.dim.as_str(), " ", &app.path.display().to_string(), w);
+    say(
+        &mut body,
+        p.dim.as_str(),
+        " ",
+        &app.path.display().to_string(),
+        w,
+    );
     body.push(String::new());
     body.push(crate::seg(
-        &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
+        &[(
+            p.lbl.as_str(),
+            format!(" ── {} ── ", field.under_section().to_uppercase()),
+        )],
         w.saturating_sub(1),
     ));
     say(&mut body, p.dim.as_str(), "  ", &field.help, w);
     body.push(crate::seg(
-        &[(
-            p.dim.as_str(),
-            {
-                let unit = constraint_for(app, field)
-                    .and_then(Value::as_object)
-                    .and_then(|r| r.get("unit"))
-                    .and_then(Value::as_str)
-                    .map(|u| format!(" · {u}"))
-                    .unwrap_or_default();
-                format!(
-                    "  {}{} · default {} · {} reloads on the way out",
-                    field.kind(),
-                    unit,
-                    summary(&field.default, false),
-                    field.widget()
-                )
-            },
-        )],
+        &[(p.dim.as_str(), {
+            let unit = constraint_for(app, field)
+                .and_then(Value::as_object)
+                .and_then(|r| r.get("unit"))
+                .and_then(Value::as_str)
+                .map(|u| format!(" · {u}"))
+                .unwrap_or_default();
+            format!(
+                "  {}{} · default {} · {} reloads on the way out",
+                field.kind(),
+                unit,
+                summary(&field.default, false),
+                field.widget()
+            )
+        })],
         w.saturating_sub(1),
     ));
     if field.secret() {
         body.push(crate::seg(
-            &[(p.warn.as_str(), "  A token. Never shown once written.".into())],
+            &[(
+                p.warn.as_str(),
+                "  A token. Never shown once written.".into(),
+            )],
             w.saturating_sub(1),
         ));
     }
@@ -3587,8 +3664,14 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     }
 
     let hints: Vec<Vec<(&str, String)>> = vec![
-        vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " write".into())],
-        vec![(p.accent.as_str(), "ctrl-u".into()), (p.dim.as_str(), " clear".into())],
+        vec![
+            (p.accent.as_str(), "↵".into()),
+            (p.dim.as_str(), " write".into()),
+        ],
+        vec![
+            (p.accent.as_str(), "ctrl-u".into()),
+            (p.dim.as_str(), " clear".into()),
+        ],
         vec![(p.dim.as_str(), "esc cancel".into())],
     ];
     let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
@@ -3648,7 +3731,9 @@ fn input_row(
     // Enough of the tail to hold the caret, and no more.
     let start = if cursor >= room { cursor + 1 - room } else { 0 };
     let head: String = chars[start..cursor].iter().collect();
-    let tail: String = chars[cursor..(start + room).min(chars.len())].iter().collect();
+    let tail: String = chars[cursor..(start + room).min(chars.len())]
+        .iter()
+        .collect();
 
     let field = crate::bg(24, 36, 50);
     let ink = format!("{field}{}", p.txt);
@@ -3676,7 +3761,10 @@ fn input_row(
             (p.dim.as_str(), "  ".to_string()),
             (edge.as_str(), " ".to_string()),
             (ink.as_str(), head),
-            (edge.as_str(), if lit { "▏".into() } else { " ".to_string() }),
+            (
+                edge.as_str(),
+                if lit { "▏".into() } else { " ".to_string() },
+            ),
             (ink.as_str(), tail),
             (ghost.as_str(), hint),
             (field.as_str(), " ".repeat(box_w)),
@@ -3686,10 +3774,22 @@ fn input_row(
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
-    let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &app.mode
+    let Mode::Pick {
+        index,
+        query,
+        sel,
+        scroll,
+        show_all,
+        on_list,
+        cursor,
+    } = &app.mode
     else {
         return (
-            vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)],
+            vec![crate::title(
+                &format!("{} settings", app.widget),
+                w,
+                &p.accent,
+            )],
             Clickable::default(),
         );
     };
@@ -3709,11 +3809,24 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     // to someone with four cities configured, which reads as having none.
     let chosen = picked_zones(app, *index).len();
 
-    let mut body = vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
-    say(&mut body, p.dim.as_str(), " ", &app.path.display().to_string(), w);
+    let mut body = vec![crate::title(
+        &format!("{} settings", app.widget),
+        w,
+        &p.accent,
+    )];
+    say(
+        &mut body,
+        p.dim.as_str(),
+        " ",
+        &app.path.display().to_string(),
+        w,
+    );
     body.push(String::new());
     body.push(crate::seg(
-        &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
+        &[(
+            p.lbl.as_str(),
+            format!(" ── {} ── ", field.under_section().to_uppercase()),
+        )],
         w.saturating_sub(1),
     ));
     // Said here rather than only in the file's comment: someone arranging
@@ -3778,7 +3891,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
             chosen
         ),
         PickKind::Catalogue(_) if *show_all => {
-format!(
+            format!(
                 "  All {}. {} with custom rates — tab for those.",
                 total_choices, chosen
             )
@@ -3786,9 +3899,9 @@ format!(
         PickKind::Catalogue(_) if chosen == 0 => {
             format!("  Nothing set. Tab or type to search all {total_choices}.")
         }
-        PickKind::Catalogue(_) => format!(
-            "  {chosen} with custom rates. Tab or type to search all {total_choices}."
-        ),
+        PickKind::Catalogue(_) => {
+            format!("  {chosen} with custom rates. Tab or type to search all {total_choices}.")
+        }
         _ => heading,
     };
     say(&mut body, p.dim.as_str(), "  ", heading.trim(), w);
@@ -3814,7 +3927,9 @@ format!(
         // Nothing is being ordered when the field holds one, and "not in the
         // order added" describes an adding this screen is not doing.
         PickKind::Timezone if single => None,
-        PickKind::Timezone => Some("  Drawn west to east by each zone's offset, not in the order added."),
+        PickKind::Timezone => {
+            Some("  Drawn west to east by each zone's offset, not in the order added.")
+        }
         PickKind::Choices(_) => Some("  Shown in the order picked here."),
         PickKind::Free => Some("  In the order you add them."),
         // A map's keys are a BTreeMap here - serde_json is taken without
@@ -3934,7 +4049,11 @@ format!(
         // go, so its selection always stands.
         let focused = !matches!(kind, PickKind::Free | PickKind::Map) || *on_list;
         let here = focused && i == *sel;
-        let tint = if here { crate::bg(28, 44, 62) } else { String::new() };
+        let tint = if here {
+            crate::bg(28, 44, 62)
+        } else {
+            String::new()
+        };
         let mark = if *on { "✓" } else { " " };
         // Owned first, borrowed after: `seg` takes `&str`, so a colour
         // composed inline would not outlive the slice it is put in. The tint
@@ -3960,8 +4079,9 @@ format!(
                         // Only where it says something the first column
                         // does not. For a named set the label is the value,
                         // and printing it twice is furniture.
-                        (None, true) if zones => picked_label(app, *index, zone)
-                            .unwrap_or_else(|| zone_label(zone)),
+                        (None, true) if zones => {
+                            picked_label(app, *index, zone).unwrap_or_else(|| zone_label(zone))
+                        }
                         // Who publishes it. A key does not always say - o3
                         // and codex-mini-latest are OpenAI's - and a flat
                         // list of sixty-eight is a list you scan by vendor.
@@ -3995,7 +4115,10 @@ format!(
                 (p.dim.as_str(), " clear".into()),
             ]);
         } else if *on_list {
-            h.push(vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " edit it".into())]);
+            h.push(vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " edit it".into()),
+            ]);
             h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
@@ -4011,14 +4134,23 @@ format!(
             }
         }
         if *on_list {
-            h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+            h.push(vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " pick".into()),
+            ]);
         }
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
         h
     } else if matches!(kind, PickKind::One(_)) {
         vec![
-            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " choose it".into())],
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
+            vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " choose it".into()),
+            ],
+            vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " pick".into()),
+            ],
             vec![(p.dim.as_str(), "esc without changing it".into())],
         ]
     } else if matches!(kind, PickKind::Free) {
@@ -4069,7 +4201,10 @@ format!(
             }
         }
         if *on_list {
-            h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+            h.push(vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " pick".into()),
+            ]);
         }
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
         h
@@ -4102,7 +4237,10 @@ format!(
                 (p.dim.as_str(), " clear".into()),
             ]);
         }
-        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " pick".into()),
+        ]);
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
         h
     } else if single {
@@ -4118,7 +4256,10 @@ format!(
                 (p.dim.as_str(), " clear".into()),
             ]);
         }
-        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " pick".into()),
+        ]);
         h.push(vec![(p.dim.as_str(), "esc without changing it".into())]);
         h
     } else if !zones {
@@ -4133,24 +4274,39 @@ format!(
                 (p.dim.as_str(), " clear".into()),
             ]);
         }
-        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " pick".into()),
+        ]);
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
         h
     } else if query.is_empty() {
         vec![
-            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " remove".into())],
+            vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " remove".into()),
+            ],
             vec![(p.dim.as_str(), "type to add".into())],
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
+            vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " pick".into()),
+            ],
             vec![(p.dim.as_str(), "esc done".into())],
         ]
     } else {
         vec![
-            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " add / remove".into())],
+            vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " add / remove".into()),
+            ],
             vec![
                 (p.accent.as_str(), "ctrl-u".into()),
                 (p.dim.as_str(), " clear".into()),
             ],
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
+            vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " pick".into()),
+            ],
             vec![(p.dim.as_str(), "esc done".into())],
         ]
     };
@@ -4189,10 +4345,20 @@ format!(
 fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
     // `edit` is wrong for the row under the cursor when that row is a
     // boolean: enter does not open anything, it moves it on one place.
-    let enter = if boolean { " true / false / default" } else { " edit" };
+    let enter = if boolean {
+        " true / false / default"
+    } else {
+        " edit"
+    };
     vec![
-        vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-        vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), enter.into())],
+        vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " select".into()),
+        ],
+        vec![
+            (p.accent.as_str(), "↵".into()),
+            (p.dim.as_str(), enter.into()),
+        ],
         vec![(p.dim.as_str(), "[r]eload".into())],
         vec![(p.dim.as_str(), "[d]efault".into())],
         vec![(p.dim.as_str(), "esc / [,] back".into())],
@@ -4344,7 +4510,11 @@ mod tests {
     /// exercise the same path `agent-usage` takes rather than a stand-in.
     const CARD: Catalogue = &[
         ("model-a", "Acme", &[("input", 4.0), ("output", 20.0)]),
-        ("model-b", "Others", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.1)]),
+        (
+            "model-b",
+            "Others",
+            &[("input", 1.0), ("output", 2.0), ("cache_read", 0.1)],
+        ),
     ];
 
     /// An App standing on one catalogue-backed field, holding `live`.
@@ -4391,7 +4561,10 @@ mod tests {
         let rows = model_fields(&app, &parent, "model-a");
         assert_eq!(rows.len(), 2, "model-a prices two kinds");
         assert_eq!(rows[0].key, "input");
-        assert_eq!(rows[0].parents, vec!["rates".to_string(), "model-a".to_string()]);
+        assert_eq!(
+            rows[0].parents,
+            vec!["rates".to_string(), "model-a".to_string()]
+        );
         assert_eq!(rows[0].default, serde_json::json!(4.0));
         // Opening a model writes nothing, so nothing is set.
         assert!(current_of(&app.live, &rows[0], None).is_none());
@@ -4450,7 +4623,10 @@ mod tests {
     fn a_catalogue_field_has_no_flat_screen_of_its_own() {
         let app = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {"input": 1.0}}}}));
         assert!(nested_fields(&app, 0).is_none());
-        assert!(matches!(picker_kind(&app, "rates"), Some(PickKind::Catalogue(_))));
+        assert!(matches!(
+            picker_kind(&app, "rates"),
+            Some(PickKind::Catalogue(_))
+        ));
     }
 
     /// A model the card has never heard of still offers every kind, with no
@@ -4475,7 +4651,10 @@ mod tests {
         // An entry left behind with nothing in it is not "chosen": it would
         // otherwise show as configured over a column of shipped defaults.
         let husk = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {}}}}));
-        assert!(picked_zones(&husk, 0).is_empty(), "an empty object is not a choice");
+        assert!(
+            picked_zones(&husk, 0).is_empty(),
+            "an empty object is not a choice"
+        );
 
         let edited =
             catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {"input": 3.5}}}}));
@@ -4553,7 +4732,10 @@ mod tests {
             );
         }
         assert_eq!(click.head, 1, "the title is the pinned row");
-        assert!(!click.footer.spots.is_empty(), "the footer is clickable too");
+        assert!(
+            !click.footer.spots.is_empty(),
+            "the footer is clickable too"
+        );
     }
 
     fn field_app(key: &str, default: Value, rule: Option<Value>) -> App {
@@ -4585,12 +4767,18 @@ mod tests {
             serde_json::json!([]),
             Some(serde_json::json!({"items": "string"})),
         );
-        assert!(matches!(picker_kind(&declared, "accounts"), Some(PickKind::Free)));
+        assert!(matches!(
+            picker_kind(&declared, "accounts"),
+            Some(PickKind::Free)
+        ));
 
         // Undeclared, but the shipped default says what the elements are -
         // latency.hosts declares nothing and is plainly a list of hosts.
         let inferred = field_app("hosts", serde_json::json!(["1.1.1.1", "8.8.8.8"]), None);
-        assert!(matches!(picker_kind(&inferred, "hosts"), Some(PickKind::Free)));
+        assert!(matches!(
+            picker_kind(&inferred, "hosts"),
+            Some(PickKind::Free)
+        ));
     }
 
     /// A single-valued field offers its answers instead of expecting them.
@@ -4626,7 +4814,10 @@ mod tests {
             serde_json::json!([]),
             Some(serde_json::json!({"picker": {"choices": ["mon", "tue"]}})),
         );
-        assert!(matches!(picker_kind(&app, "work_days"), Some(PickKind::Choices(_))));
+        assert!(matches!(
+            picker_kind(&app, "work_days"),
+            Some(PickKind::Choices(_))
+        ));
     }
 
     /// A scalar that named no set keeps the box it had.
@@ -4803,7 +4994,11 @@ mod tests {
     /// An empty list has nothing to step into.
     #[test]
     fn down_stays_in_the_box_when_there_is_nothing_to_select() {
-        let mut app = field_app("hosts", serde_json::json!([]), Some(serde_json::json!({"items": "string"})));
+        let mut app = field_app(
+            "hosts",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
         app.mode = Mode::Pick {
             index: 0,
             query: String::new(),
@@ -4929,7 +5124,10 @@ mod tests {
             Some((_, _, Some(Mode::Pick { .. })))
         ));
         handle_edit_key(&mut app, "esc");
-        assert!(matches!(app.mode, Mode::Pick { .. }), "esc returns to the picker");
+        assert!(
+            matches!(app.mode, Mode::Pick { .. }),
+            "esc returns to the picker"
+        );
         assert!(app.live.get("w").and_then(|w| w.get("sources")).is_none());
     }
 
@@ -5012,14 +5210,15 @@ mod tests {
         // And neither form is refused on the way to the file.
         assert_eq!(validate_value(&mixed, &mixed, Some(&rule)), Ok(()));
         assert!(
-            validate_value(&mixed, &mixed, Some(&serde_json::json!({"items": "string"})))
-                .is_err(),
+            validate_value(
+                &mixed,
+                &mixed,
+                Some(&serde_json::json!({"items": "string"}))
+            )
+            .is_err(),
             "a string-only list is what refused the labelled entry"
         );
-        assert_eq!(
-            constraint_summary(Some(&rule)),
-            "string or object items"
-        );
+        assert_eq!(constraint_summary(Some(&rule)), "string or object items");
     }
 
     /// Only a list whose entries have fields of their own has a screen to
@@ -5128,7 +5327,10 @@ mod tests {
     #[test]
     fn the_box_takes_a_path_and_a_name_is_set_on_the_row() {
         let typed = |t| parse_free_entry("string-or-object", t);
-        assert_eq!(typed("~/.agent-work"), Ok(serde_json::json!("~/.agent-work")));
+        assert_eq!(
+            typed("~/.agent-work"),
+            Ok(serde_json::json!("~/.agent-work"))
+        );
         assert_eq!(typed("  ~/.spaced  "), Ok(serde_json::json!("~/.spaced")));
         // A line carrying `=` is refused rather than taken literally: read
         // at face value it is a path with an `=` in it, which is legal and
@@ -5166,7 +5368,10 @@ mod tests {
         let mut app = field_app("dirs", named, Some(rule));
         assert!(!add_free_entry(&mut app, 0, "~/.agent"));
         assert!(
-            app.status.clone().unwrap_or_default().contains("already listed"),
+            app.status
+                .clone()
+                .unwrap_or_default()
+                .contains("already listed"),
             "{:?}",
             app.status
         );
@@ -5219,7 +5424,10 @@ mod tests {
         assert_eq!(names, vec!["path".to_string(), "label".to_string()]);
         // Both point into the second row of the list, which is the only way
         // an array entry can be addressed - it has no key of its own.
-        assert_eq!(app.fields[0].parents, vec!["dirs".to_string(), "#1".to_string()]);
+        assert_eq!(
+            app.fields[0].parents,
+            vec!["dirs".to_string(), "#1".to_string()]
+        );
         // And the index is how the screen finds it, not something to read.
         assert_eq!(app.fields[0].label(), "path");
         assert!(!app.fields[0].under_section().contains('#'));
@@ -5243,7 +5451,14 @@ mod tests {
         );
         let fields = row_fields(&app, &app.fields[0], 0);
         let names: Vec<String> = fields.iter().map(|f| f.key.clone()).collect();
-        assert_eq!(names, vec!["path".to_string(), "label".to_string(), "colour".to_string()]);
+        assert_eq!(
+            names,
+            vec![
+                "path".to_string(),
+                "label".to_string(),
+                "colour".to_string()
+            ]
+        );
     }
 
     /// A `#N` step is a position in a list, not a key called "#N".
@@ -5283,7 +5498,9 @@ mod tests {
             !row_is_abandoned(&serde_json::json!({ "label": "bbi", "colour": "green" })),
             "a file row with no path was treated as a placeholder"
         );
-        assert!(!row_is_abandoned(&serde_json::json!({ "path": "~/.claude" })));
+        assert!(!row_is_abandoned(
+            &serde_json::json!({ "path": "~/.claude" })
+        ));
     }
 
     /// Clearing path used to write `{"label":"…"}`, which the widget
@@ -5330,11 +5547,11 @@ mod tests {
             !handle_list_key(&mut app, "esc"),
             "esc walked back as if the placeholder had gone"
         );
-        let said = app.status.clone().expect("the write error must reach the screen");
-        assert!(
-            said.contains("reload before writing"),
-            "{said}"
-        );
+        let said = app
+            .status
+            .clone()
+            .expect("the write error must reach the screen");
+        assert!(said.contains("reload before writing"), "{said}");
         assert_eq!(app.stack.len(), 1, "the row screen was left");
         assert_eq!(app.fields[0].key, "path");
         assert_eq!(
@@ -5364,12 +5581,15 @@ mod tests {
         app.live = serde_json::json!({ "w": { "dirs": rows } });
         let parent = app.fields[0].clone();
         open_row_entry(&mut app, 0, &parent, 0);
-        let said = app.status.clone().expect("the write error must reach the screen");
+        let said = app
+            .status
+            .clone()
+            .expect("the write error must reach the screen");
+        assert!(said.contains("reload before writing"), "{said}");
         assert!(
-            said.contains("reload before writing"),
-            "{said}"
+            app.stack.is_empty(),
+            "the editor opened over a write that failed"
         );
-        assert!(app.stack.is_empty(), "the editor opened over a write that failed");
         assert_eq!(app.fields.len(), 1);
         assert_eq!(app.fields[0].key, "dirs");
         assert_eq!(
@@ -5387,11 +5607,17 @@ mod tests {
             serde_json::json!([]),
             Some(serde_json::json!({"items": "integer"})),
         );
-        assert!(matches!(picker_kind(&declared, "ports"), Some(PickKind::Free)));
+        assert!(matches!(
+            picker_kind(&declared, "ports"),
+            Some(PickKind::Free)
+        ));
 
         // Undeclared, but a shipped default of numbers says it just as well.
         let inferred = field_app("windows", serde_json::json!([60, 300, 900]), None);
-        assert!(matches!(picker_kind(&inferred, "windows"), Some(PickKind::Free)));
+        assert!(matches!(
+            picker_kind(&inferred, "windows"),
+            Some(PickKind::Free)
+        ));
     }
 
     /// A refused entry says why, and leaves what was typed where it is.
@@ -5512,7 +5738,10 @@ mod tests {
     #[test]
     fn an_entry_becomes_the_kind_its_list_holds() {
         assert_eq!(parse_free_entry("integer", "22"), Ok(serde_json::json!(22)));
-        assert_eq!(parse_free_entry("number", "0.5"), Ok(serde_json::json!(0.5)));
+        assert_eq!(
+            parse_free_entry("number", "0.5"),
+            Ok(serde_json::json!(0.5))
+        );
         assert_eq!(
             parse_free_entry("string", "db1.internal"),
             Ok(serde_json::json!("db1.internal"))
@@ -5547,14 +5776,20 @@ mod tests {
             serde_json::json!([]),
             Some(serde_json::json!({"picker": {"choices": ["claude", "codex"]}})),
         );
-        assert!(matches!(picker_kind(&choices, "agents"), Some(PickKind::Choices(_))));
+        assert!(matches!(
+            picker_kind(&choices, "agents"),
+            Some(PickKind::Choices(_))
+        ));
 
         let zones = field_app(
             "cities",
             serde_json::json!([]),
             Some(serde_json::json!({"picker": "timezone"})),
         );
-        assert!(matches!(picker_kind(&zones, "cities"), Some(PickKind::Timezone)));
+        assert!(matches!(
+            picker_kind(&zones, "cities"),
+            Some(PickKind::Timezone)
+        ));
     }
 
     /// A city row may be a pair or a pair plus coordinates. The shipped
@@ -5593,8 +5828,14 @@ mod tests {
         let many = field_app("cities", serde_json::json!([]), rule);
 
         // Both are the timezone picker; they differ only in shape.
-        assert!(matches!(picker_kind(&one, "timezone"), Some(PickKind::Timezone)));
-        assert!(matches!(picker_kind(&many, "cities"), Some(PickKind::Timezone)));
+        assert!(matches!(
+            picker_kind(&one, "timezone"),
+            Some(PickKind::Timezone)
+        ));
+        assert!(matches!(
+            picker_kind(&many, "cities"),
+            Some(PickKind::Timezone)
+        ));
         assert!(one_zone(&one, 0), "a string default holds one zone");
         assert!(!one_zone(&many, 0), "an array default collects them");
 
@@ -5659,7 +5900,9 @@ mod tests {
                 }
                 expected += 1;
                 assert!(
-                    fields.iter().any(|f| f.section == *section && f.key == *key),
+                    fields
+                        .iter()
+                        .any(|f| f.section == *section && f.key == *key),
                     "missing {section}.{key}"
                 );
             }
@@ -5911,6 +6154,33 @@ mod tests {
     }
 
     #[test]
+    fn enter_inside_an_open_json_object_is_a_newline() {
+        assert!(!json_object_open(""));
+        assert!(!json_object_open("not-a-real-key"));
+        assert!(json_object_open("{"));
+        assert!(json_object_open("{\n  \"private_key\": \"abc"));
+        assert!(!json_object_open("{\"a\": 1}"));
+        // A brace inside a string is not the object's own.
+        assert!(!json_object_open("{\"k\": \"}\" }"));
+
+        let mut app = catalogue_app(serde_json::json!({ "w": {} }));
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: "{".into(),
+            cursor: 1,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        match app.mode {
+            Mode::Edit { buffer, cursor, .. } => {
+                assert_eq!(buffer, "{\n");
+                assert_eq!(cursor, 2);
+            }
+            _ => panic!("an open object was written"),
+        }
+    }
+
+    #[test]
     fn enter_on_an_empty_secret_leaves_the_stored_value() {
         let fields = secret_fixture();
         let mut app = catalogue_app(serde_json::json!({
@@ -6049,8 +6319,7 @@ mod tests {
             .unwrap();
         assert_eq!(sources.kind(), "object");
         let parsed =
-            parse_edit(r#"{"orgs":"is:open is:pr @mine"}"#, &sources.default, None)
-                .unwrap();
+            parse_edit(r#"{"orgs":"is:open is:pr @mine"}"#, &sources.default, None).unwrap();
         assert!(parsed.is_object());
     }
 
@@ -6096,10 +6365,7 @@ mod tests {
             marked_secret: false,
         };
         let old_pr = serde_json::json!({"pr": {"limit": 10}});
-        assert_eq!(
-            live_section(&old_pr, "github_prs", Some("pr")),
-            "pr"
-        );
+        assert_eq!(live_section(&old_pr, "github_prs", Some("pr")), "pr");
         assert_eq!(
             current_of(&old_pr, &prs, Some("pr")),
             Some(&Value::from(10))
@@ -6114,10 +6380,7 @@ mod tests {
             marked_secret: false,
         };
         let old_gha = serde_json::json!({"gha": {"max_repos": 8}});
-        assert_eq!(
-            live_section(&old_gha, "github_actions", Some("gha")),
-            "gha"
-        );
+        assert_eq!(live_section(&old_gha, "github_actions", Some("gha")), "gha");
         assert_eq!(
             current_of(&old_gha, &actions, Some("gha")),
             Some(&Value::from(8))
@@ -6141,8 +6404,7 @@ mod tests {
     #[test]
     fn duplicate_keys_update_the_effective_last_value() {
         let src = r#"{"clocks":{"show_hints":false,"show_hints":true}}"#;
-        let next =
-            set_json_path(src, &["clocks", "show_hints"], &Value::Bool(false)).unwrap();
+        let next = set_json_path(src, &["clocks", "show_hints"], &Value::Bool(false)).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&next).unwrap()["clocks"]["show_hints"],
             false

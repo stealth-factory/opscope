@@ -51,6 +51,7 @@ you are back. It is the launcher, not another widget.
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](widgets/src/widgets/github/README.md) |
 | **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-actions/README.md) |
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
+| **`google-analytics`** | Google Analytics 4 on a wall: live users against a baseline this widget records itself, today and key events against the same weekday to the same hour, the pages Google Search sends visitors to, and the pages and channels that moved - with every figure labelled with how far behind GA says it is. | `curl`, a Google service-account key | [read →](widgets/src/widgets/google-analytics/README.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](widgets/src/widgets/linear/README.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or to publish it over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
@@ -63,7 +64,7 @@ you are back. It is the launcher, not another widget.
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-All nineteen widgets run on Linux and macOS.
+All twenty widgets run on Linux and macOS.
 
 Each is a single self-contained binary — every library it needs is compiled
 in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
@@ -127,7 +128,7 @@ any release. It is for trying a fix or a new widget early, and it can break;
 `--version` names the commit it was built from. Plain `npx opscope` and
 `@latest` are never moved by a canary.
 
-It fetches the launcher and nineteen widget binaries for this machine into
+It fetches the launcher and twenty widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -185,7 +186,7 @@ opscope doctor              # check optional external tools
 ```
 
 Apple Silicon and Intel Macs use the same release binaries as npm and the
-tarball download. Only `opscope` goes on `PATH`; all twenty binaries
+tarball download. Only `opscope` goes on `PATH`; all twenty-one binaries
 ship together, with the widgets kept private beside the launcher.
 No Node or Rust installation is needed.
 
@@ -193,7 +194,7 @@ Upgrade with `brew update && brew upgrade opscope`. Settings stay in
 `~/.config/opscope/config.json` (or the location selected by `OPSCOPE_CONFIG`
 or `XDG_CONFIG_HOME`), outside Homebrew's versioned installation.
 
-You can also download a release or build all twenty binaries below.
+You can also download a release or build all twenty-one binaries below.
 
 ### Inside Luvus
 
@@ -237,7 +238,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The twenty binaries are right there, beside `config.example.json` and a
+The twenty-one binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -264,13 +265,13 @@ xattr -dr com.apple.quarantine opscope-*-apple-darwin
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + nineteen widgets in ./target/release
+cargo build --release   # launcher + twenty widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the nineteen widgets, with a live preview of
+`opscope` is the front door — a menu of the twenty widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -280,7 +281,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and nineteen
+The launcher looks for each widget beside itself, so the launcher and twenty
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -352,8 +353,8 @@ Every widget reads optional settings from the first readable of
 the working directory, and `config.json` beside the binary.
 
 **Nothing has to be configured.** Every key is optional, and a key you leave
-out is not a gap — the widget uses the default built into it. Five widgets
-need a token before they can show you something; they are named under
+out is not a gap — the widget uses the default built into it. Six widgets
+need a credential before they can show you something; they are named under
 Credentials below. Every other widget starts on its own defaults.
 
 There are two ways in, and they write the same file.
@@ -362,7 +363,7 @@ There are two ways in, and they write the same file.
 
 Press `,` in any configurable widget. The launcher has no settings of its
 own — that screen lives on the widget that reads the keys. It is one
-screen, owned by `opscope-core` rather than written sixteen times, so it
+screen, owned by `opscope-core` rather than written nineteen times, so it
 behaves the same everywhere.
 
 The list shows every key that widget answers to, and for each one the value
@@ -431,7 +432,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read nineteen widget pages to find out what you can
+**So you do not have to read twenty widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The
@@ -453,12 +454,13 @@ own copy key.
 
 ### Credentials
 
-**Five widgets define their own token settings:** `vercel-deployments` wants
+**Six widgets define their own credential settings:** `vercel-deployments` wants
 a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
-`linear` a personal API key from Settings → Security & access, and
+`linear` a personal API key from Settings → Security & access,
 `github-prs` and `github-actions` each hold their own GitHub token rather
-than borrowing one. Every other widget needs no configuration to start.
+than borrowing one, and `google-analytics` a service-account key
+([docs/google-setup.md](docs/google-setup.md)). Every other widget needs no configuration to start.
 
 All three GitHub widgets also reach **GitHub Enterprise**: set
 `enterprise_hostname` in each one's section (for example `acme.ghe.com`), or

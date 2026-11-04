@@ -205,6 +205,25 @@
     "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
     "refresh": 60.0
   },
+  "google_analytics": {
+    "_comment": "GA4 properties through a Google service-account key: realtime against a baseline this widget records itself, today against the same weekday, key events, organic landing pages and movers. Setup on Google's side is docs/google-setup.md. Keep the key file and config.json chmod 600.",
+    "_credentials_comment": "The service-account JSON key itself, the whole file pasted here. Get it from the Google Cloud console (console.cloud.google.com). Under APIs & Services → Library, enable the Google Analytics Data API and the Google Analytics Admin API. Under IAM & Admin → Service accounts, create a service account with no project role, open it, and choose Keys → Add key → Create new key → JSON. Paste that downloaded file here. In Google Analytics, Admin → Property access management → Add users, enter the key's client_email, and choose Viewer for each property. The widget re-mints its hour-long token from the key indefinitely. Empty uses credentials_file; when both are set, this wins. Stored in config.json, which should be chmod 600, and never shown again after it is written. Full steps: docs/google-setup.md.",
+    "credentials": "",
+    "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), used when credentials is empty. The file is the JSON downloaded from the Google Cloud console: IAM & Admin → Service accounts → the account → Keys → Add key → Create new key → JSON. Enable the Analytics Data and Admin APIs first, and in Google Analytics add the key's client_email as Viewer under Property access management. The screen warns when that file is readable by anyone but you. Full steps: docs/google-setup.md.",
+    "credentials_file": "",
+    "_properties_comment": "Numeric GA4 property ids - the number after p in GA's admin URLs. Empty lists every property the service account can see (Admin API account summaries).",
+    "properties": [],
+    "_realtime_refresh_comment": "Seconds between realtime readings: 15, 30 or 60; anything else means 15. The l key cycles them while running. It backs off to 60 s after 5 minutes at 0 active users and slows to 120 s under 10% of quota left, and the title says which.",
+    "realtime_refresh": 15,
+    "_refresh_comment": "Seconds between processed reports (hourly, sources, key events, movers, organic landing pages); minimum 60. GA's processed data is 2-6 hours behind, so faster gains nothing.",
+    "refresh": 300,
+    "_window_days_comment": "Days in the movers and organic landing page window, compared with the equal window before it. The w key cycles 7, 14 and 28.",
+    "window_days": 7,
+    "_baseline_weeks_comment": "How many past weeks the realtime baseline is the median of. Samples older than this plus one week are pruned from the sample file.",
+    "baseline_weeks": 4,
+    "_key_events_comment": "Event names to treat as key events, counted by event count. Empty uses every event GA flags as a key event.",
+    "key_events": []
+  },
   "google_trends": {
     "_comment": "Google's Trending Now feed for one or more regions, read from trends.google.com/trending/rss with no account or key. Traffic is Google's bucket, shown as written; SEEN and LEFT THE FEED are this widget's own counts across fetches.",
     "_geos_comment": "Region codes to show, as Google's feed takes them in ?geo= - two-letter country codes such as \"US\", \"GB\", \"JP\". The first is shown at start; ←/→ steps through the rest. A code Google does not know is shown as rejected rather than dropped.",

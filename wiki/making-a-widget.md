@@ -334,9 +334,9 @@ A key ending in `_env` names a variable and stays visible. A cookie or a
 session is marked in this file; core does not keep a list of field names.
 
 A widget that reads a **Google API** signs in through core's `google`
-helper rather than its own: the same three fields (`credentials_file`,
-`token`, `token_env`), the scope constants, and one shared wording for a
-missing credential and for Google's refusals.
+helper rather than its own: `credentials` for the JSON key itself, or
+`credentials_file` for a path to it, the scope constants, and one shared
+wording for a missing credential and for Google's refusals.
 [Building a widget on Google APIs](../docs/google-widgets.md) has the
 fields to declare, the calls, and how to test without key material.
 
@@ -470,7 +470,7 @@ cargo build --workspace --bins
 `cargo test` compiles every parser on the current target, runs widget and core
 unit tests, runs the source-contract checks below, and runs the npm packaging
 tests. CI repeats it on Linux and macOS. `cargo build --workspace --bins`
-separately proves all twenty executable targets build as binaries.
+separately proves all twenty-one executable targets build as binaries.
 
 ### 8. Smoke-test the built widget
 
