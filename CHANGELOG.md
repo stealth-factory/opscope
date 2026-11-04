@@ -3,6 +3,30 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.5.0] - 2026-11-04
+
+### Bug Fixes
+
+- **disk**: One io chart, and stack mount points in narrow panes (#544)
+- **disk**: Refresh the launcher preview and keep short mounts beside their figures (#545)
+- **agent-usage**: Reread enabled agents after a settings save (#550)
+
+### CI
+
+- **release**: Mint the org GitHub App token in place of the PAT (#553)
+
+### Documentation
+
+- Link the opscope.stealth-factory.co product page (#555)
+
+### Features
+
+- **disk**: Show filesystem space and inodes (#527)
+- **disk**: Show per-disk io and pressure (#530)
+- **disk**: Project when a filesystem fills (#533)
+- **disk**: Filesystem window in hours, 24 h by default; no [w] on disk detail (#552)
+- **rex-panes**: Every Rex pane across every session, ordered by who needs you (#556)
+
 ## [2.4.0] - 2026-11-02
 
 ### Features
