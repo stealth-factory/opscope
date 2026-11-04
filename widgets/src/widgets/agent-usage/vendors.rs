@@ -1345,7 +1345,15 @@ mod tests {
         let rows = plain(&summary_for(&present, 100, &p, &["claude"]));
         let text = rows.join("\n");
         assert!(text.contains("overall") || text.contains("weekly"), "{text}");
-        assert!(!text.contains("5h"), "a session lane was drawn for a window the server did not send:\n{text}");
+        // A lane's label is its row's first word; a bare `contains("5h")`
+        // also matched the weekly lane's reset countdown, `36367d 15h`.
+        assert!(
+            !rows.iter().any(|row| {
+                let words: Vec<&str> = row.split_whitespace().take(2).collect();
+                matches!(words.as_slice(), ["5h", ..] | ["session", "5h"])
+            }),
+            "a session lane was drawn for a window the server did not send:\n{text}"
+        );
         assert!(!text.contains("not reported"), "{text}");
         assert!(!reads_as_zero_percent(&text), "{text}");
         assert!(!text.contains("published no limit"), "{text}");

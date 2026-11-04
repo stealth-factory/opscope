@@ -4650,6 +4650,34 @@ mod tests {
         assert!(!text.contains("Ultra") && !text.contains("Max"), "{text}");
     }
 
+    /// Whether a drawn row is the five-hour bar: it is labelled `5h` - on
+    /// its own, or as `session 5h` in the tab - and carries a percentage.
+    ///
+    /// The label, not the letters anywhere on the row. These tests used to
+    /// ask `row.contains("5h")`, and the weekly row ends in a reset countdown
+    /// read off the real clock - `resets in 36367d 15h` - so for every hour
+    /// whose count ends in a 5 the weekly bar read as a five-hour one and
+    /// three tests failed on a tree nobody had touched.
+    fn is_five_hour_bar(row: &str) -> bool {
+        let words: Vec<&str> = row.split_whitespace().take(2).collect();
+        let labelled = matches!(words.as_slice(), ["5h", ..] | ["session", "5h"]);
+        labelled && row.contains('%')
+    }
+
+    #[test]
+    fn the_five_hour_check_reads_the_label_not_a_countdown() {
+        assert!(!is_five_hour_bar(" overall 7d ███▎░░░░   41%  resets in 36367d 15h"));
+        assert!(!is_five_hour_bar(" overall 7d ███▎░░░░   41%  resets in 36367d 5h"));
+        assert!(is_five_hour_bar(" 5h  ██████░░░░   25%  resets in 2h"));
+        assert!(is_five_hour_bar(" session 5h ██████░░░░   25%  resets in 2h"));
+        // The no-limit sentence carries the label and no percentage.
+        assert!(!is_five_hour_bar(" 5h  no 5-hour limit (Ultra)"));
+        // And it still finds the bar when the server sends one.
+        let data = Data::with_plan_quota("max", "default_claude_max_20x", session_limit(serde_json::json!(25)));
+        let rows = tab_text(&data, 100);
+        assert!(rows.iter().any(|row| is_five_hour_bar(row)), "{}", joined(&rows));
+    }
+
     #[test]
     fn ultra_without_a_session_limit_says_so_and_draws_no_bar() {
         let data = Data::with_plan_quota(
@@ -4663,7 +4691,7 @@ mod tests {
         assert!(text.contains("── QUOTA ──"), "{text}");
         assert!(text.contains("Ultra"), "{text}");
         assert!(
-            !rows.iter().any(|row| row.contains("5h") && row.contains('%')),
+            !rows.iter().any(|row| is_five_hour_bar(row)),
             "the absent window became a bar: {text}"
         );
         assert!(!text.contains("not reported"), "{text}");
@@ -4875,7 +4903,7 @@ mod tests {
             }
             assert!(!text.contains('…'), "width {w}: {text}");
             assert!(
-                !rows.iter().any(|row| row.contains("5h") && row.contains('%')),
+                !rows.iter().any(|row| is_five_hour_bar(row)),
                 "width {w} drew a 5h bar: {text}"
             );
         }
