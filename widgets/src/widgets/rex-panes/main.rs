@@ -1936,7 +1936,7 @@ fn main() {
                         "AGENT",
                         "STATE",
                         "FOR",
-                        if cols.cpu { " CPU" } else { "" },
+                        if cols.cpu { " CPU  " } else { "" },
                         nw = cols.name + 2
                     );
                     if cols.wide {
