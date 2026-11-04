@@ -302,6 +302,35 @@
     "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
     "refresh": 4.0
   },
+  "rex_panes": {
+    "_comment": "What rex-panes reads: every session on one Rex server, through the rex CLI, read-only.",
+    "_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. CPU and memory are shown only for this machine's server.",
+    "server": "",
+    "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
+    "refresh": 4.0,
+    "_agents_comment": "Command names that count as coding agents. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
+    "agents": [
+      "claude",
+      "codex",
+      "gemini",
+      "copilot",
+      "cursor-agent",
+      "aider",
+      "opencode",
+      "pi",
+      "goose",
+      "amp",
+      "grok",
+      "droid",
+      "kiro",
+      "cline",
+      "crush",
+      "qwen",
+      "kimi",
+      "devin",
+      "jules"
+    ]
+  },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",
     "history": 180,

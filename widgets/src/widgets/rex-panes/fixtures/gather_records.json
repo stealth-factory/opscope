@@ -1,0 +1,247 @@
+{
+ "errors": {},
+ "server": {
+  "api_revision": 10,
+  "config": {
+   "generation": 1,
+   "hash": ""
+  },
+  "exit_empty": true,
+  "host_id": "01a10000-0000-7000-8000-000000000101",
+  "instance_id": "01a10000-0000-7000-8000-000000000102",
+  "pid": 257306,
+  "session_count": 2,
+  "started_at": "2026-11-03T19:38:24.16294104Z",
+  "tailscale": {
+   "allow_tailnet_members": false,
+   "state": "disabled"
+  }
+ },
+ "sessions": [
+  {
+   "blocks": [
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000103",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000101",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000104",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000105"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/tmp",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 289619,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/tmp",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 289619,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "sleep",
+       "cwd": "/tmp",
+       "invoked_path": "/usr/bin/sleep",
+       "name": "sleep",
+       "path": "/usr/bin/sleep",
+       "pid": 289979,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": [
+       {
+        "app": "terraform",
+        "effective_app": "terraform",
+        "kind": "permission",
+        "msg": "approve: cargo test",
+        "owner": {
+         "name": "bash",
+         "pid": 289619
+        },
+        "progress": 40,
+        "state": "blocked",
+        "updated_at": "2026-11-04T04:36:01.674084511+08:00"
+       },
+       {
+        "app": "cargo",
+        "effective_app": "cargo",
+        "id": "build/test",
+        "owner": {
+         "name": "bash",
+         "pid": 289619
+        },
+        "state": "done",
+        "updated_at": "2026-11-04T04:36:01.674101301+08:00"
+       }
+      ]
+     },
+     "title": {
+      "owner": {
+       "name": "bash",
+       "pid": 289619
+      },
+      "title": "user: /tmp"
+     }
+    },
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000106",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000101",
+      "label": "shell",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000105"
+     },
+     "process": {
+      "child": {
+       "argv0": "claude",
+       "cwd": "/tmp/smoke-dir",
+       "invoked_path": "/home/user/.local/bin/claude",
+       "name": "2.1.317",
+       "path": "/home/user/.local/share/claude/versions/2.1.317",
+       "pid": 290088,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "claude",
+       "cwd": "/tmp/smoke-dir",
+       "invoked_path": "/home/user/.local/bin/claude",
+       "name": "2.1.317",
+       "path": "/home/user/.local/share/claude/versions/2.1.317",
+       "pid": 290088,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": [
+       {
+        "app": "claude-code",
+        "effective_app": "claude-code",
+        "msg": "replied 'ok' as requested",
+        "owner": {
+         "name": "2.1.317",
+         "pid": 290088
+        },
+        "state": "done",
+        "updated_at": "2026-11-04T04:36:54.527773749+08:00"
+       }
+      ]
+     },
+     "title": {
+      "owner": {
+       "name": "2.1.317",
+       "pid": 290088
+      },
+      "title": "Ok"
+     }
+    }
+   ],
+   "label": "smoke",
+   "session_id": "session:01a10000-0000-7000-8000-000000000107",
+   "view": {
+    "active_window_id": "window:01a10000-0000-7000-8000-000000000105",
+    "label": "smoke",
+    "revision": 3,
+    "session_id": "session:01a10000-0000-7000-8000-000000000107",
+    "windows": [
+     {
+      "focused_block_id": "block:01a10000-0000-7000-8000-000000000103",
+      "label": "Window 7b731bb2",
+      "layers": [
+       {
+        "blocks": [
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000103",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000101",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000104"
+         },
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000106",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000101",
+          "label": "shell"
+         }
+        ],
+        "bounds": [
+         0,
+         0,
+         1,
+         1
+        ],
+        "kind": "tiled",
+        "layer_id": "layer:01a10000-0000-7000-8000-000000000108",
+        "layout": {
+         "rect": [
+          0,
+          0,
+          1,
+          1
+         ],
+         "split": {
+          "after": {
+           "block_id": "block:01a10000-0000-7000-8000-000000000106",
+           "rect": [
+            0.5,
+            0,
+            0.5,
+            1
+           ]
+          },
+          "before": {
+           "block_id": "block:01a10000-0000-7000-8000-000000000103",
+           "rect": [
+            0,
+            0,
+            0.5,
+            1
+           ]
+          },
+          "direction": "horizontal",
+          "ratio": 0.5,
+          "split_id": "split:01a10000-0000-7000-8000-000000000109"
+         }
+        }
+       }
+      ],
+      "window_id": "window:01a10000-0000-7000-8000-000000000105"
+     }
+    ]
+   }
+  }
+ ],
+ "version": {
+  "api_revision": 10,
+  "built_at": "2026-11-03T14:41:59Z",
+  "commit": "1af98f6a42f5fd415b3cd205cca9064a3ffeca15",
+  "dirty": false,
+  "platform": "linux_amd64",
+  "rex_version": "0.0.1793716919-g1af98f"
+ }
+}
