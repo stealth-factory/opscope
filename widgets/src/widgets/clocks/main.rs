@@ -471,6 +471,110 @@ fn toast(title: &str, body: &str, deadline: f64, minute: i64) {
     }
 }
 
+/// What the pomodoro tells a terminal that keeps program status (OSC 7501).
+///
+/// Rex is the one that does today: it keeps the latest report per pane and
+/// turns it into a tab indicator, and - by the user's Program Activity
+/// settings - a macOS notification, a Dock badge and a sound. A running
+/// phase is `working` with how much of it has gone; one that has run out
+/// is `done`, worded as the bell's alert is, which is what notifies; a
+/// paused one is `idle`. `None` - the timer is hidden - clears the record.
+///
+/// Minutes, not seconds, in every message: a report goes out whenever this
+/// changes, and a message that moved every second would re-send every
+/// second. With `pomodoro_notify` off an elapsed phase is `idle`, so the
+/// setting that silences the toast silences this too.
+#[derive(Clone, Debug, PartialEq)]
+struct Report {
+    state: &'static str,
+    progress: Option<u8>,
+    msg: String,
+}
+
+fn status_report(p: &Pomodoro, now: f64) -> Option<Report> {
+    if !p.shown {
+        return None;
+    }
+    let label = p.phase.label();
+    let left = (p.remaining(now) / 60.0).ceil() as i64;
+    if !p.running {
+        // A phase paused after it ran out keeps its overtime, and the pane
+        // still shows it, so the report says it too rather than `0 min left`.
+        let over = (p.overtime(now) / 60.0) as i64;
+        let msg = if p.overtime(now) > 0.0 && over > 0 {
+            format!("{} paused · {} min over", label, over)
+        } else if p.overtime(now) > 0.0 {
+            format!("{} paused · elapsed", label)
+        } else {
+            format!("{} paused · {} min left", label, left)
+        };
+        return Some(Report {
+            state: "idle",
+            progress: None,
+            msg,
+        });
+    }
+    let over = p.overtime(now);
+    if over > 0.0 {
+        let minutes = (over / 60.0) as i64;
+        return Some(Report {
+            state: if p.notify { "done" } else { "idle" },
+            progress: None,
+            msg: if minutes > 0 {
+                format!("{} elapsed, {} min over", label, minutes)
+            } else {
+                format!("{} elapsed", label)
+            },
+        });
+    }
+    let gone = 1.0 - p.remaining(now) / p.duration().max(1.0);
+    Some(Report {
+        state: "working",
+        progress: Some((gone * 100.0).floor().clamp(0.0, 100.0) as u8),
+        msg: format!("{} · {} min left", label, left),
+    })
+}
+
+/// Send `report` when it differs from the last one this pane sent.
+///
+/// A `done` goes through the same once-per-event claim the toasts use, on a
+/// channel of its own: every pane holding the shared deadline crosses it in
+/// the same tick, and one notification is the point. A pane that loses the
+/// claim reports `idle` with the same words, so its tab still says what
+/// happened without saying it twice. Nothing at all on a terminal that did
+/// not answer the OSC 7501 probe - not even a claim, which would write a
+/// marker for a channel this pane cannot deliver.
+fn send_status(report: Option<Report>, p: &Pomodoro, now: f64, sent: &mut Option<Option<Report>>) {
+    if !tc::capabilities().program_status || sent.as_ref() == Some(&report) {
+        return;
+    }
+    *sent = Some(report.clone());
+    let Some(r) = report else {
+        tc::program_status(&tc::Status {
+            state: "clear",
+            app: "",
+            progress: None,
+            title: None,
+            msg: None,
+        });
+        return;
+    };
+    let mut state = r.state;
+    if state == "done" {
+        let minute = (p.overtime(now) / 60.0) as i64;
+        if !claim_event(p.deadline, minute, "rex") {
+            state = "idle";
+        }
+    }
+    tc::program_status(&tc::Status {
+        state,
+        app: "opscope-clocks",
+        progress: r.progress,
+        title: Some("Pomodoro"),
+        msg: Some(&r.msg),
+    });
+}
+
 /// Where the marker for one event lives.
 ///
 /// Named for the event rather than for the pane, because every instance
@@ -1346,6 +1450,9 @@ fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let mut flash_started: Option<f64> = None;
+    // The last program-status report this pane sent: `None` before the
+    // first, so the first frame always reports.
+    let mut status_sent: Option<Option<Report>> = None;
     let weather = weather::Feed::start(&cfg);
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -1371,6 +1478,8 @@ fn main() {
                     continue;
                 }
                 "q" | "Q" => {
+                    // `restore_screen` clears the program status, as every
+                    // exit does, Ctrl-C included.
                     keyboard.restore();
                     tc::restore_screen();
                     return;
@@ -1455,6 +1564,7 @@ fn main() {
             // the settings allow, the toast among them.
             flash_started = Some(stamp);
         }
+        send_status(status_report(&pomo, stamp), &pomo, stamp, &mut status_sent);
         if pomo.shown {
             let over = pomo.overtime(stamp);
             let left = pomo.remaining(stamp);
@@ -2216,6 +2326,77 @@ mod tests {
         p.save();
         let back = Pomodoro::new(&serde_json::json!({}));
         assert_eq!(back.done, 0, "yesterday's count was loaded as today's");
+    }
+
+    #[test]
+    fn the_pomodoro_reports_working_done_idle_and_clears_when_hidden() {
+        // Pure: no state file, no terminal.
+        let now = 10_000.0;
+        let mut pomo = Pomodoro {
+            phase: Phase::Focus,
+            running: true,
+            shown: true,
+            deadline: now + 15.0 * 60.0,
+            left: 25.0 * 60.0,
+            done: 0,
+            focus: 25.0,
+            short: 5.0,
+            long: 15.0,
+            before_long: 4,
+            bell: false,
+            rang_at: -1,
+            day: today(),
+            hints: true,
+            notify: true,
+            seq: 0,
+            swept_seq: None,
+        };
+        // Ten of twenty-five minutes gone.
+        assert_eq!(
+            status_report(&pomo, now),
+            Some(Report {
+                state: "working",
+                progress: Some(40),
+                msg: "FOCUS · 15 min left".into()
+            })
+        );
+        // A second later the message and the percentage have not moved, so
+        // nothing is re-sent every second.
+        assert_eq!(status_report(&pomo, now + 1.0), status_report(&pomo, now));
+
+        // Run out: done, worded as the bell is, counting whole minutes over.
+        let at_end = pomo.deadline + 1.0;
+        assert_eq!(status_report(&pomo, at_end).unwrap().state, "done");
+        assert_eq!(status_report(&pomo, at_end).unwrap().msg, "FOCUS elapsed");
+        assert_eq!(
+            status_report(&pomo, pomo.deadline + 185.0).unwrap().msg,
+            "FOCUS elapsed, 3 min over"
+        );
+        // pomodoro_notify off silences this as it silences the toast.
+        pomo.notify = false;
+        assert_eq!(status_report(&pomo, at_end).unwrap().state, "idle");
+        pomo.notify = true;
+
+        // Paused.
+        pomo.running = false;
+        pomo.left = 7.5 * 60.0;
+        assert_eq!(
+            status_report(&pomo, now),
+            Some(Report {
+                state: "idle",
+                progress: None,
+                msg: "FOCUS paused · 8 min left".into()
+            })
+        );
+        // Paused after it ran out: the overtime, not `0 min left`.
+        pomo.left = -185.0;
+        assert_eq!(status_report(&pomo, now).unwrap().msg, "FOCUS paused · 3 min over");
+        pomo.left = -20.0;
+        assert_eq!(status_report(&pomo, now).unwrap().msg, "FOCUS paused · elapsed");
+
+        // Hidden clears the record.
+        pomo.shown = false;
+        assert_eq!(status_report(&pomo, now), None);
     }
 
     #[test]

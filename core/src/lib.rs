@@ -862,6 +862,109 @@ pub fn notify(title: &str, body: &str) {
     flush();
 }
 
+/// One OSC 7501 program-status report: what this pane's program is doing.
+///
+/// Rex keeps the latest report per pane and turns it into a tab indicator,
+/// and - depending on the user's Program Activity settings - a macOS
+/// notification, a Dock badge and a sound. `done` is the one that says
+/// "finished, come and look".
+#[derive(Clone, Debug, PartialEq)]
+pub struct Status<'a> {
+    /// `idle`, `working`, `done`, `blocked`, `error`, or `clear` to drop
+    /// the record.
+    pub state: &'a str,
+    /// A stable program name - `[A-Za-z0-9_.+-]`, at most 32.
+    pub app: &'a str,
+    /// 0 to 100, with `working` or `blocked`.
+    pub progress: Option<u8>,
+    /// A short label.
+    pub title: Option<&'a str>,
+    /// One line: what it is doing or what finished.
+    pub msg: Option<&'a str>,
+}
+
+/// Report this pane's program status, where the terminal said it can take
+/// one. Every other terminal gets nothing, so no widget branches on Rex.
+pub fn program_status(status: &Status) {
+    if !capabilities().program_status {
+        return;
+    }
+    STATUS_HELD.store(status.state != "clear", Ordering::Release);
+    out(&status_bytes(status));
+    flush();
+}
+
+/// Whether this pane's last report left a record behind in the terminal.
+///
+/// Rex keeps a `done` past the exit of the program that sent it, on
+/// purpose, so a widget that reported one and then quit - by `q`, by
+/// Ctrl-C or by SIGTERM - would leave a finished timer on a tab with
+/// nothing running in it. Every exit clears it here, in core, rather than
+/// in each widget's quit arm, because the signal path never reaches one:
+/// `handle_signal` calls `_exit`. An atomic because that path is a signal
+/// handler, and the clear is a constant for the same reason.
+static STATUS_HELD: AtomicBool = AtomicBool::new(false);
+const STATUS_CLEAR: &str = "\x1b]7501;state=clear\x1b\\";
+
+/// Drop this pane's program-status record, if it left one.
+fn clear_program_status() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        out(STATUS_CLEAR);
+        flush();
+    }
+}
+
+/// The same, from a signal handler: one `write`, nothing allocated.
+fn clear_program_status_signal() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                STATUS_CLEAR.as_ptr() as *const libc::c_void,
+                STATUS_CLEAR.len(),
+            );
+        }
+    }
+}
+
+/// The bytes of one report.
+///
+/// `msg` and `title` are base64 of their UTF-8, with every control
+/// character taken out first: the terminal discards a report whole when
+/// either decodes to one, and a newline in a message would cost the
+/// notification rather than one character of it. Each is cut to 300
+/// characters, inside the protocol's 4096-byte cap on the sequence.
+pub fn status_bytes(status: &Status) -> String {
+    let app: String = status
+        .app
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "_.+-".contains(*c))
+        .take(32)
+        .collect();
+    let line = |text: &str| -> String {
+        let clean: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(300)
+            .collect();
+        base64(clean.trim().as_bytes())
+    };
+    let mut pairs = vec![format!("state={}", status.state)];
+    if !app.is_empty() {
+        pairs.push(format!("app={}", app));
+    }
+    if let Some(progress) = status.progress {
+        pairs.push(format!("progress={}", progress.min(100)));
+    }
+    if let Some(title) = status.title.filter(|t| !t.trim().is_empty()) {
+        pairs.push(format!("title={}", line(title)));
+    }
+    if let Some(msg) = status.msg.filter(|m| !m.trim().is_empty()) {
+        pairs.push(format!("msg={}", line(msg)));
+    }
+    format!("\x1b]7501;{}\x1b\\", pairs.join(":"))
+}
+
 /// Actions the query listed. `focus` is the protocol default, so listing it
 /// is what makes `-focus` a value the terminal already understands.
 #[derive(Clone, Copy)]
@@ -1852,6 +1955,8 @@ fn restore_terminal_signal() {
 }
 
 extern "C" fn handle_signal(sig: libc::c_int) {
+    // Exit only, not suspend: a pane stopped with Ctrl-Z is still there.
+    clear_program_status_signal();
     restore_terminal_signal();
     unsafe { libc::_exit(128 + sig); }
 }
@@ -1864,6 +1969,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    clear_program_status();
     forget_frame();
     graphics::cleanup();
     terminal::release_terminal();
@@ -4818,6 +4924,10 @@ fn hung_up(fd: i32) -> bool {
 impl Drop for Keyboard {
     fn drop(&mut self) {
         self.restore();
+        // The third way out: a panic unwinding past the loop never reaches
+        // `restore_screen`. Here rather than in `restore`, which also runs
+        // when a launcher hands the terminal to a child.
+        clear_program_status();
     }
 }
 
@@ -7399,6 +7509,68 @@ mod tests {
         // count that has not settled yet must not wrap round to red.
         assert_eq!(health(2.0), health(1.0));
         assert_eq!(health(-1.0), health(0.0));
+    }
+
+    #[test]
+    fn a_program_status_report_is_one_clean_osc_7501() {
+        let bytes = super::status_bytes(&super::Status {
+            state: "working",
+            app: "opscope-clocks",
+            progress: Some(40),
+            title: Some("Pomodoro"),
+            msg: Some("FOCUS · 15 min left"),
+        });
+        assert_eq!(
+            bytes,
+            format!(
+                "\x1b]7501;state=working:app=opscope-clocks:progress=40:title={}:msg={}\x1b\\",
+                super::base64("Pomodoro".as_bytes()),
+                super::base64("FOCUS · 15 min left".as_bytes())
+            )
+        );
+        // A control character would make the terminal drop the report
+        // whole, so it becomes a space; progress caps at 100; an app name
+        // keeps only what the protocol allows.
+        let bytes = super::status_bytes(&super::Status {
+            state: "done",
+            app: "opscope clocks!",
+            progress: Some(250),
+            title: None,
+            msg: Some("FOCUS elapsed\nnow"),
+        });
+        assert!(bytes.contains("app=opscopeclocks:"), "{bytes:?}");
+        assert!(bytes.contains("progress=100"), "{bytes:?}");
+        assert!(bytes.contains(&format!("msg={}", super::base64("FOCUS elapsed now".as_bytes()))));
+        assert!(!bytes.contains("title="));
+        // `clear` with nothing else is the whole report.
+        let clear = super::status_bytes(&super::Status {
+            state: "clear",
+            app: "",
+            progress: None,
+            title: None,
+            msg: None,
+        });
+        assert_eq!(clear, "\x1b]7501;state=clear\x1b\\");
+        // The exit paths write a constant, since one is a signal handler;
+        // it has to be the same report.
+        assert_eq!(clear, super::STATUS_CLEAR);
+        // Every exit clears: `q` through `restore_screen`, Ctrl-C and
+        // SIGTERM through `handle_signal`, which never reaches a widget, and
+        // a panic through the `Drop` that runs while it unwinds.
+        let src = include_str!("lib.rs");
+        for (start, call) in [
+            ("pub fn restore_screen() {", "clear_program_status();"),
+            ("impl Drop for Keyboard {", "clear_program_status();"),
+            ("extern \"C\" fn handle_signal(", "clear_program_status_signal();"),
+        ] {
+            let at = src.find(start).unwrap_or_else(|| panic!("{start} moved"));
+            let end = src[at..].find("\n}\n").expect("the body ends");
+            assert!(src[at..at + end].contains(call), "{start} leaves the status behind");
+        }
+        // Without the capability nothing is written: `program_status` is a
+        // no-op on every terminal that did not answer the probe, and the
+        // test process negotiated nothing.
+        assert!(!super::capabilities().program_status);
     }
 
     #[test]

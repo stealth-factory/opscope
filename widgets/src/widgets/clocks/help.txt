@@ -17,7 +17,10 @@ with the sound muted. The terminal is alerted when the phase elapses and again
 every minute it keeps running: BEL, plus one OSC 99 notification on Kitty that
 replaces itself, or OSC 9 and OSC 777 on every other terminal. Those escapes are the only
 channels that survive SSH. Under Herdr it additionally raises a native toast
-with a sound — additive, never required, and skipped entirely elsewhere.
+with a sound — additive, never required, and skipped entirely elsewhere. Under
+Rex the pomodoro reports its status over OSC 7501 - working with its progress,
+done when a phase runs out, idle while paused - so Rex shows it on the tab and
+notifies by its own settings; quitting clears it.
 
 Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
 countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
