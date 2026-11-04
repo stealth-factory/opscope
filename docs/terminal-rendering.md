@@ -46,6 +46,10 @@ scale probe two more. `clocks` and
 `months` use it only when a scale from 2× to 4× fits the pane. A block that
 does not fit stays the block digits or the ordinary heading. `draw` keeps an
 OSC 66 block, and that block occupies scale times the width of its text.
+Program status is OSC 7501, the Program Status Protocol: core sends
+`OSC 7501 ; ?` in the same window, and a terminal that answers it with `done`
+among its states - Rex - gets `tc::program_status` reports. Every other
+terminal gets none. `clocks` reports its pomodoro that way (OPS-249).
 Core emits the sequences; widgets do not branch on the terminal.
 
 ## Choosing a renderer

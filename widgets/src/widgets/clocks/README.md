@@ -120,7 +120,7 @@ if you routinely run 40 minutes over a 25-minute block, that is telling you the
 block is the wrong length.
 
 **Alerts** fire when a phase elapses and again every minute it keeps running, so
-ignoring one gets progressively harder. Five channels; the first three need
+ignoring one gets progressively harder. Seven channels; the first four need
 nothing but a terminal:
 
 | Channel | Reaches |
@@ -131,6 +131,21 @@ nothing but a terminal:
 | OSC 777 | urxvt and the same fallback path as OSC 9 |
 | Herdr toast + sound | only under Herdr; additive, skipped elsewhere |
 | Luvus notification | only under Luvus; additive, skipped elsewhere |
+| OSC 7501 program status | a terminal that answers the Program Status Protocol probe - Rex today. See below |
+
+**Under Rex the pomodoro is a program with a status.** Rex keeps one OSC 7501
+record per pane, and the pomodoro keeps it current: `working` with how much of
+the phase has gone while it runs, `done` when it runs out - worded as the bell
+is, `FOCUS elapsed, 3 min over` - and `idle` while it is paused. Hiding it clears
+the record, and so does quitting, so a finished phase does not outlive the
+widget. What Rex makes of it is Rex's Program Activity settings: the tab's
+progress pie and finished dot, and - for `done` - a macOS notification that
+opens the tab, the Dock badge and a sound. A report goes out only when it
+changes, which is at most once a minute plus a percentage step; each `done`
+repeat is claimed once per event, as the Herdr and Luvus toasts are, so two
+clocks panes do not notify twice; and with `pomodoro_notify` off an elapsed
+phase reports `idle`. Nothing is sent to a terminal that did not answer the
+probe.
 
 Escape sequences are the only channel that survives SSH — the widget runs on a
 server, so anything local to it would fire where nobody is sitting. The panel
