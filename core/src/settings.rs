@@ -2268,7 +2268,10 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
         }
         None => rows.push(match picker_kind(app, &key) {
             // A pair, so the pane has something to print that is not a
-            // database identifier.
+            // database identifier. Clocks may store latitude and longitude
+            // after the zone; this screen never writes them, and it does
+            // not strip them off a row it is not removing. Adding is a new
+            // pair. Removing drops the whole entry.
             Some(PickKind::Timezone) => Value::Array(vec![
                 Value::String(label.unwrap_or_else(|| zone_label(zone))),
                 Value::String(zone.to_string()),
@@ -5552,6 +5555,27 @@ mod tests {
             Some(serde_json::json!({"picker": "timezone"})),
         );
         assert!(matches!(picker_kind(&zones, "cities"), Some(PickKind::Timezone)));
+    }
+
+    /// A city row may be a pair or a pair plus coordinates. The shipped
+    /// pairs are not the only legal shape, or adding a zone while one city
+    /// carries a latitude refuses the whole list.
+    #[test]
+    fn a_coordinate_city_validates_beside_a_pair() {
+        let shipped = serde_json::json!([["London", "Europe/London"]]);
+        let edited = serde_json::json!([
+            ["London", "Europe/London", 51.5, -0.12],
+            ["Tokyo", "Asia/Tokyo"]
+        ]);
+        let rule = serde_json::json!({"items": "array", "picker": "timezone"});
+        assert_eq!(validate_value(&edited, &shipped, Some(&rule)), Ok(()));
+        let err = validate_value(
+            &edited,
+            &shipped,
+            Some(&serde_json::json!({"picker": "timezone"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("array"), "{err}");
     }
 
     /// One zone gets the same database as a list of them, and choosing from

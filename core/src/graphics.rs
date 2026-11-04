@@ -95,6 +95,20 @@ impl StickyRange {
     }
 }
 
+/// A one-cell weather picture. Text mode keeps the glyph the widget named;
+/// a terminal that accepted graphics draws this in that same cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sky {
+    Clear,
+    Partly,
+    Overcast,
+    Fog,
+    Rain,
+    Snow,
+    Storm,
+    Unknown,
+}
+
 /// A chart region in body coordinates. Use `in_viewport` after scrolling the
 /// text body; it crops graphics without changing the plotted time/value range.
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +126,8 @@ pub struct Plot {
     under_text: bool,
     /// The value range the widget's axis labels name, when it set one.
     axis: Option<(f64, f64)>,
+    /// A weather picture for this cell. Absent on every other plot.
+    sky: Option<Sky>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,7 +183,27 @@ impl Plot {
             visible_rows: height,
             under_text: false,
             axis: None,
+            sky: None,
         }
+    }
+
+    /// One weather picture, in the cell the glyph already occupies.
+    ///
+    /// `glyph` is what text mode draws, in `ink`. Pixel mode replaces those
+    /// cells with the picture and leaves the rest of the row alone, so the
+    /// list does not grow when graphics are on.
+    pub fn sky(x: usize, y: usize, sky: Sky, glyph: &str, ink: &str) -> Self {
+        let width = super::display_width(glyph).max(1);
+        let mut plot = Self::filled(
+            x,
+            y,
+            width,
+            1,
+            Vec::new(),
+            vec![vec![(ink.to_string(), glyph.to_string())]],
+        );
+        plot.sky = Some(sky);
+        plot
     }
 
     /// Draw this line chart under the cell text instead of blanking it.
@@ -1732,6 +1768,115 @@ fn crop_px(
     (0, row0 * cell_h, cols * cell_w, rows * cell_h)
 }
 
+const SUN: [u8; 3] = [255, 196, 64];
+const CLOUD: [u8; 3] = [206, 220, 234];
+const RAIN: [u8; 3] = [110, 176, 230];
+const SNOW: [u8; 3] = [236, 244, 255];
+const BOLT: [u8; 3] = [255, 214, 80];
+const FOG: [u8; 3] = [176, 192, 206];
+
+/// A weather picture at the crop's pixel size. Shapes are fractions of the
+/// cell, so a taller cell stays a picture rather than a stretched stamp.
+fn paint_sky(buf: &mut [u8], w: usize, h: usize, sky: Sky) {
+    match sky {
+        Sky::Clear => sun(buf, w, h, 0.50, 0.50, 0.30),
+        Sky::Partly => {
+            sun(buf, w, h, 0.34, 0.36, 0.22);
+            cloud(buf, w, h, 0.60, 0.64, 0.78);
+        }
+        Sky::Overcast => cloud(buf, w, h, 0.50, 0.50, 0.90),
+        Sky::Fog => {
+            for (y, width) in [(0.32, 0.78), (0.52, 0.62), (0.72, 0.74)] {
+                capsule(buf, w, h, 0.5 - width / 2.0, y, 0.5 + width / 2.0, y, 0.07, FOG);
+            }
+        }
+        Sky::Rain => {
+            cloud(buf, w, h, 0.50, 0.36, 0.86);
+            for x in [0.32, 0.50, 0.68] {
+                capsule(buf, w, h, x, 0.62, x, 0.86, 0.045, RAIN);
+            }
+        }
+        Sky::Snow => {
+            cloud(buf, w, h, 0.50, 0.36, 0.86);
+            for (x, y) in [(0.30, 0.70), (0.50, 0.82), (0.70, 0.68), (0.58, 0.58)] {
+                disc(buf, w, h, x, y, 0.055, SNOW);
+            }
+        }
+        Sky::Storm => {
+            cloud(buf, w, h, 0.50, 0.34, 0.88);
+            bolt(buf, w, h);
+        }
+        Sky::Unknown => disc(buf, w, h, 0.50, 0.50, 0.10, FOG),
+    }
+}
+
+fn sun(buf: &mut [u8], w: usize, h: usize, cx: f64, cy: f64, radius: f64) {
+    disc(buf, w, h, cx, cy, radius, SUN);
+    for step in 0..8 {
+        let angle = step as f64 * std::f64::consts::FRAC_PI_4;
+        let (s, c) = angle.sin_cos();
+        capsule(
+            buf, w, h,
+            cx + c * (radius + 0.06), cy + s * (radius + 0.06),
+            cx + c * (radius + 0.20), cy + s * (radius + 0.20),
+            0.035, SUN,
+        );
+    }
+}
+
+fn cloud(buf: &mut [u8], w: usize, h: usize, cx: f64, cy: f64, span: f64) {
+    disc(buf, w, h, cx - span * 0.22, cy + 0.04, span * 0.22, CLOUD);
+    disc(buf, w, h, cx, cy - 0.06, span * 0.28, CLOUD);
+    disc(buf, w, h, cx + span * 0.22, cy + 0.05, span * 0.20, CLOUD);
+}
+
+fn bolt(buf: &mut [u8], w: usize, h: usize) {
+    capsule(buf, w, h, 0.58, 0.46, 0.42, 0.66, 0.055, BOLT);
+    capsule(buf, w, h, 0.42, 0.66, 0.56, 0.66, 0.055, BOLT);
+    capsule(buf, w, h, 0.56, 0.66, 0.40, 0.90, 0.055, BOLT);
+}
+
+fn disc(buf: &mut [u8], w: usize, h: usize, cx: f64, cy: f64, radius: f64, colour: [u8; 3]) {
+    stamp(buf, w, h, cx, cy, cx, cy, radius, colour);
+}
+
+fn capsule(
+    buf: &mut [u8], w: usize, h: usize,
+    x0: f64, y0: f64, x1: f64, y1: f64, radius: f64, colour: [u8; 3],
+) {
+    stamp(buf, w, h, x0, y0, x1, y1, radius, colour);
+}
+
+/// `radius` is a fraction of the shorter side. Ends and the segment between
+/// them are the same thickness, with a one-pixel soft edge.
+fn stamp(
+    buf: &mut [u8], w: usize, h: usize,
+    x0: f64, y0: f64, x1: f64, y1: f64, radius: f64, colour: [u8; 3],
+) {
+    let scale = w.min(h) as f64;
+    let (ax, ay) = (x0 * w as f64, y0 * h as f64);
+    let (bx, by) = (x1 * w as f64, y1 * h as f64);
+    let r = radius * scale;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len2 = dx * dx + dy * dy;
+    for y in 0..h {
+        for x in 0..w {
+            let px = x as f64 + 0.5;
+            let py = y as f64 + 0.5;
+            let t = if len2 == 0.0 {
+                0.0
+            } else {
+                (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+            };
+            let dist = ((px - (ax + t * dx)).powi(2) + (py - (ay + t * dy)).powi(2)).sqrt();
+            let alpha = ((r + 0.75 - dist) * 255.0).clamp(0.0, 255.0) as u32;
+            let i = (y * w + x) * 4;
+            blend(&mut buf[i..i + 4], colour, alpha);
+        }
+    }
+}
+
 #[cfg(test)]
 fn pixels(plot: &Plot) -> Vec<u8> {
     raster_pixels(plot, plot.width, CELL_W, CELL_H)
@@ -1745,6 +1890,10 @@ fn raster_pixels(plot: &Plot, cols: usize, cell_w: usize, cell_h: usize) -> Vec<
     let full_w = plot.width * cell_w;
     let full_h = plot.height * cell_h;
     let mut pixels = alloc_bytes(w * h * 4);
+    if let Some(sky) = plot.sky {
+        paint_sky(&mut pixels, w, h, sky);
+        return pixels;
+    }
     if let Some(fill) = &plot.fill {
         for (index, rect) in fill.rects.iter().enumerate() {
             let colour = rgb(&rect.colour).unwrap_or([180, 200, 220]);
@@ -2368,6 +2517,32 @@ pub(crate) fn cropped_chart_command(plot: &Plot, pane_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alpha_at(px: &[u8], w: usize, x: usize, y: usize) -> u8 {
+        px[(y * w + x) * 4 + 3]
+    }
+
+    #[test]
+    fn a_clear_sky_is_a_picture_in_its_cell_and_the_glyph_when_it_is_not() {
+        let plot = Plot::sky(2, 4, Sky::Clear, "☀", "ink");
+        assert_eq!((plot.x, plot.y, plot.width, plot.height), (2, 4, 1, 1));
+        assert!(!plot.is_text());
+        assert!(plot.fill.as_ref().unwrap().row(0, 8).contains('☀'));
+        let wide = Plot::sky(0, 1, Sky::Storm, "⚡", "ink");
+        assert_eq!(wide.width, 2);
+        let px = raster_pixels(&plot, 1, 24, 24);
+        assert!(alpha_at(&px, 24, 12, 12) > 200);
+        assert_eq!(alpha_at(&px, 24, 0, 0), 0);
+        let partly = raster_pixels(&Plot::sky(0, 1, Sky::Partly, "◑", "ink"), 1, 24, 24);
+        let overcast = raster_pixels(&Plot::sky(0, 1, Sky::Overcast, "☁", "ink"), 1, 24, 24);
+        let rain = raster_pixels(&Plot::sky(0, 1, Sky::Rain, "☂", "ink"), 1, 24, 24);
+        assert_ne!(px, partly);
+        assert_ne!(partly, overcast);
+        assert_ne!(overcast, rain);
+        // Drops sit under the cloud, and the corner of a rain cell stays open.
+        assert!(alpha_at(&rain, 24, 12, 20) > 80);
+        assert_eq!(alpha_at(&rain, 24, 0, 23), 0);
+    }
 
     #[test]
     fn a_meter_between_chosen_stops_keeps_them_unless_they_would_not_read() {

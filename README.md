@@ -27,6 +27,8 @@ npx opscope clocks       # or name one and skip it
 ```
 
 `clocks` needs no configuration at all, so it is the one to try first.
+Current weather stays off until a latitude and longitude are set, and the
+clock still runs when that request fails.
 [Other ways to get them →](#getting-them)
 
 ## The launcher
@@ -57,7 +59,7 @@ you are back. It is the launcher, not another widget.
 | **`disk`** | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling — space and inodes from the kernel, per-disk I/O (macOS needs `iostat`), and Linux I/O pressure. | Linux, macOS | [read →](widgets/src/widgets/disk/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`google-trends`** | What a region is searching for right now, from Google's own Trending Now feed: every trend in Google's order with its traffic bucket as Google writes it, when it started and the news attached — plus, labelled as the widget's own count, what is new since the last look and what has left the feed. No account or key. | `curl` | [read →](widgets/src/widgets/google-trends/README.md) |
-| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
+| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, a world clock, current weather for one configured place, and a condition glyph on each world-clock city that has coordinates. | `curl`, for weather | [read →](widgets/src/widgets/clocks/README.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 

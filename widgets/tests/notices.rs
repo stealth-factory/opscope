@@ -232,6 +232,8 @@ fn a_counter_click_opens_the_screen_from_a_filter() {
 /// clocks builds its world clock from the rows the clock above leaves, so
 /// a banner taking them would take the section. With a notice outstanding
 /// on an 80 x 22 pane, the banner gives way and the world clock is drawn.
+/// 22 fits the clock, the countdowns, the weather line and one city; the
+/// spacer under the weather line is what gives that city its row back.
 #[test]
 fn the_world_clock_survives_a_pending_banner() {
     let pane = Pane::start_sized(env!("CARGO_BIN_EXE_clocks"), "clocks", 22);
