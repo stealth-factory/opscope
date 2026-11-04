@@ -553,7 +553,13 @@ fn poll(
         )
     });
     if let Ok(mut guard) = state.lock() {
-        answer_bells(&mut guard.attention, &mut board.panes, &board.app_sessions);
+        let complete = board.unread_sessions.is_empty();
+        answer_bells(
+            &mut guard.attention,
+            &mut board.panes,
+            &board.app_sessions,
+            complete,
+        );
         order(&mut board.panes);
         guard.board = Some(board);
         guard.absence = None;
@@ -1180,7 +1186,10 @@ impl Columns {
 
 /// The detail screen's text for one pane: every record, every identity.
 /// Hand each pane the bell it rang, unless it has been answered - dropping
-/// those, and any for a pane that has gone.
+/// those, and any for a pane that has gone. A pane missing from a read in
+/// which some session could not be listed has not been shown to be gone, so
+/// nothing is pruned until a read that listed every session: the event
+/// stream rang the bell once and will not ring it again.
 ///
 /// A bell is answered once someone has looked: the pane is focused in a
 /// session a Rex app is showing, or the program has reported anything newer.
@@ -1191,6 +1200,7 @@ fn answer_bells(
     attention: &mut HashMap<String, (f64, String)>,
     panes: &mut [Pane],
     shown: &[String],
+    complete: bool,
 ) {
     for pane in panes.iter_mut() {
         if let Some((when, said)) = attention.get(&pane.block_id).cloned() {
@@ -1205,7 +1215,21 @@ fn answer_bells(
             }
         }
     }
-    attention.retain(|id, _| panes.iter().any(|p| &p.block_id == id));
+    if complete {
+        attention.retain(|id, _| panes.iter().any(|p| &p.block_id == id));
+    }
+}
+
+/// How many rows stay pinned above the body. The whole header only when it
+/// fits with the footer and still leaves half the pane for the body - on a
+/// narrow pane the summary wraps, and a header taller than the pane pins
+/// everything below it out of reach of the wheel. Otherwise just the title.
+fn pinned_rows(h: usize, header: usize, footer: usize) -> usize {
+    if h >= 20 && header + footer + 1 + h / 2 <= h {
+        header
+    } else {
+        1
+    }
 }
 
 /// Put a finished read in its slot, unless a newer request has taken the
@@ -2027,7 +2051,7 @@ fn main() {
         // under it. On a short pane only the title stays, and the counts
         // scroll with everything else - a header that leaves one row of body
         // is a pane that shows its own summary and none of what it sums.
-        head_rows = if h >= 20 { rows.len() } else { 1 };
+        let header_len = rows.len();
         rows.push(String::new());
 
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
@@ -2294,6 +2318,7 @@ fn main() {
 
         // A pane too short is a pane you scroll: the body is built whole
         // and shown through a window under the pinned header.
+        head_rows = pinned_rows(h, header_len, footer.len());
         let room = h.saturating_sub(head_rows + footer.len() + 1).max(1);
         let body_len = rows.len() - head_rows;
         if moved {
@@ -2692,7 +2717,7 @@ mod tests {
         let mut attention = HashMap::new();
         attention.insert("b1".to_string(), (1.0e9, "bell".to_string()));
         let mut panes = vec![pane];
-        answer_bells(&mut attention, &mut panes, &[]);
+        answer_bells(&mut attention, &mut panes, &[], true);
         assert!(
             panes[0].attention.is_some(),
             "stored focus in an unattached session is not somebody looking"
@@ -2701,7 +2726,7 @@ mod tests {
             attention: None,
             ..panes[0].clone()
         }];
-        answer_bells(&mut attention, &mut panes, &["s1".to_string()]);
+        answer_bells(&mut attention, &mut panes, &["s1".to_string()], true);
         assert!(panes[0].attention.is_none());
         assert!(
             attention.is_empty(),
@@ -2791,6 +2816,24 @@ mod tests {
         deliver(&slot, &generation, 2, "B");
         deliver(&slot, &generation, 1, "A"); // A finishes last
         assert_eq!(*slot.lock().unwrap(), Some("B"));
+    }
+
+    #[test]
+    fn a_bell_survives_a_read_that_could_not_list_its_session() {
+        let mut attention = HashMap::new();
+        attention.insert("gone?".to_string(), (1.0e9, "bell".to_string()));
+        answer_bells(&mut attention, &mut [], &[], false);
+        assert!(attention.contains_key("gone?"), "not shown to be gone");
+        answer_bells(&mut attention, &mut [], &[], true);
+        assert!(attention.is_empty(), "a complete read without it prunes it");
+    }
+
+    #[test]
+    fn a_header_taller_than_its_share_of_the_pane_is_not_pinned() {
+        assert_eq!(pinned_rows(40, 6, 2), 6);
+        assert_eq!(pinned_rows(20, 27, 3), 1, "would pin the whole pane");
+        assert_eq!(pinned_rows(20, 9, 3), 1, "leaves under half for the body");
+        assert_eq!(pinned_rows(19, 3, 1), 1, "short panes pin the title only");
     }
 
     #[test]
