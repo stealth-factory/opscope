@@ -704,7 +704,7 @@ fn mark_of(state: &str, tick: usize) -> char {
 /// is, the message it reported. Wrapped at word boundaries by the caller,
 /// never cut - a blocked agent's message is the half of the row worth
 /// reading.
-fn detail_phrases(pane: &Pane, wide: bool, at: f64) -> Vec<String> {
+fn detail_phrases(pane: &Pane, cols: &Columns, at: f64) -> Vec<String> {
     let mut out = Vec::new();
     let root = pane.root();
     if let Some(r) = root {
@@ -740,7 +740,10 @@ fn detail_phrases(pane: &Pane, wide: bool, at: f64) -> Vec<String> {
             said
         ));
     }
-    if !wide {
+    // Narrow, the session moves here from its column - but only when
+    // there is more than one: on a server with one session it is the same
+    // word under every row, a line each that says nothing.
+    if !cols.wide && cols.sessions {
         out.push(pane.place());
     }
     out
@@ -819,12 +822,12 @@ fn render_pane(
         _ => p.dim.clone(),
     };
     let usage = |line: &mut Vec<(String, String)>| {
-        if pane.remote {
+        if pane.remote && cols.cpu {
             line.push((c(&p.dim), format!("{:>5}", "—")));
             if cols.wide {
                 line.push((c(&p.dim), format!(" {:>5}", "—")));
             }
-        } else {
+        } else if cols.cpu {
             line.push((c(&heat), percent(pane.cpu)));
             if cols.wide {
                 line.push((c(&p.dim), format!(" {}", mem(pane.rss))));
@@ -916,7 +919,7 @@ fn render_pane(
                 rows.push(finish(line));
                 prose(&mut rows, body, title);
             }
-            let facts = detail_phrases(pane, cols.wide, at);
+            let facts = detail_phrases(pane, cols, at);
             if !facts.is_empty() {
                 prose(&mut rows, body, &facts.join(" · "));
             }
@@ -934,6 +937,14 @@ fn render_pane(
             // bare "?" is what a running pane with unparseable argv shows,
             // and the two are not the same thing at all.
             let fits = tc::display_width(&command) <= cols.command;
+            // Too long for its column: the head of it stays on the row, and
+            // the rest wraps underneath at its own spaces, under where it
+            // started. Never cut, and never a row with an empty command.
+            let pieces = if fits {
+                Vec::new()
+            } else {
+                tc::wrap_words(&command, cols.command.max(1))
+            };
             let mut line = vec![
                 (
                     c(if unreadable { &p.unknown } else { &p.proc }),
@@ -941,7 +952,14 @@ fn render_pane(
                 ),
                 (
                     c(if unreadable { &p.unknown } else { &p.txt }),
-                    tc::pad(if fits { &command } else { "" }, cols.command),
+                    tc::pad(
+                        if fits {
+                            &command
+                        } else {
+                            pieces.first().map_or("", |s| s.as_str())
+                        },
+                        cols.command,
+                    ),
                 ),
             ];
             if cols.states {
@@ -967,10 +985,10 @@ fn render_pane(
             }
             fill(&mut line);
             rows.push(finish(line));
-            // A command longer than its column is spelled out underneath,
-            // whole, rather than cut where the column ends.
-            if !fits {
-                prose(&mut rows, &p.txt, &command);
+            for piece in pieces.iter().skip(1) {
+                let mut l = vec![(c(&p.txt), format!("   {}", piece))];
+                fill(&mut l);
+                rows.push(finish(l));
             }
             if unreadable {
                 let why = if pane.why.is_empty() {
@@ -980,7 +998,7 @@ fn render_pane(
                 };
                 prose(&mut rows, &p.unknown, &format!("⚠ {}", why));
             }
-            let facts = detail_phrases(pane, cols.wide, at);
+            let facts = detail_phrases(pane, cols, at);
             if !facts.is_empty() {
                 prose(&mut rows, body, &facts.join(" · "));
             }
@@ -993,7 +1011,14 @@ fn render_pane(
                     c(&p.idle_c),
                     tc::pad(&tail_path(&homely(&pane.cwd()), cols.dir), cols.dir + 1),
                 ),
-                (c(&p.accent), pane.place()),
+                (
+                    c(&p.accent),
+                    if cols.wide || cols.sessions {
+                        pane.place()
+                    } else {
+                        String::new()
+                    },
+                ),
             ];
             fill(&mut line);
             rows.push(finish(line));
@@ -1011,6 +1036,11 @@ struct Columns {
     wide: bool,
     /// Whether any process carries a reported state, so the column is drawn.
     states: bool,
+    /// Whether CPU fits beside the name. Below about thirty columns it does
+    /// not, and the column goes whole - head included - rather than `C`.
+    cpu: bool,
+    /// More than one session on the board, so where a pane is says something.
+    sessions: bool,
     name: usize,
     command: usize,
     place: usize,
@@ -1045,6 +1075,16 @@ impl Columns {
         let dir_want = widest(&|p| tc::display_width(&homely(&p.cwd())), Section::Idle);
         let row = w.saturating_sub(1);
         let state_w = if states { 9 } else { 0 };
+        let sessions = {
+            let mut ids: Vec<&str> = panes.iter().map(|p| p.session_id.as_str()).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len() > 1
+        };
+        // CPU earns its five cells once the name and the state still fit
+        // beside it: the mark, a six-cell name, STATE and FOR come first.
+        let cpu = wide || row >= 3 + 6 + 9 + 7 + 5;
+        let cpu_w = if cpu { 5 } else { 0 };
         // An agent row: `▸`, the mark and a space, the name, STATE, FOR and
         // CPU; MEM and the place when wide. A process row: the same three,
         // the command, an optional STATE, CPU; MEM and the place when wide.
@@ -1060,18 +1100,21 @@ impl Columns {
             (agent[0], process[0], agent[1].min(process[1]))
         } else {
             (
-                tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 5), &[(6, name_want)])[0],
+                tc::fit_columns(row.saturating_sub(3 + 9 + 7 + cpu_w), &[(6, name_want)])[0],
                 tc::fit_columns(
-                    row.saturating_sub(3 + state_w + 1 + 5),
+                    row.saturating_sub(3 + state_w + 1 + cpu_w),
                     &[(6, command_want)],
                 )[0],
                 place_want,
             )
         };
-        let dir = tc::fit_columns(row.saturating_sub(3 + 1 + place_want), &[(6, dir_want)])[0];
+        let place_cells = if wide || sessions { 1 + place_want } else { 0 };
+        let dir = tc::fit_columns(row.saturating_sub(3 + place_cells), &[(6, dir_want)])[0];
         Columns {
             wide,
             states,
+            cpu,
+            sessions,
             name,
             command,
             place,
@@ -1715,13 +1758,13 @@ fn main() {
             let mut summary: Vec<(&str, String)> = vec![
                 (
                     p.dim.as_str(),
-                    format!("{} agent{}", agents.len(), plural(agents.len())),
+                    format!("{} agent{} ·", agents.len(), plural(agents.len())),
                 ),
                 (
                     p.dim.as_str(),
-                    format!("· {} session{}", b.sessions, plural(b.sessions)),
+                    format!("{} session{} ·", b.sessions, plural(b.sessions)),
                 ),
-                (p.dim.as_str(), format!("· {} pane{}", total, plural(total))),
+                (p.dim.as_str(), format!("{} pane{}", total, plural(total))),
             ];
             for name in ["blocked", "error", "done", "working", "idle", "unknown"] {
                 if let Some(n) = counts.get(name) {
@@ -1889,11 +1932,11 @@ fn main() {
                     // AGENT sits over the mark as well as the name, hence
                     // the two; MEM and SESSION only once there is room.
                     let mut head = format!(
-                        " {:<nw$} {:<8} {:<6} {:<5}",
+                        " {:<nw$} {:<8} {:<6}{}",
                         "AGENT",
                         "STATE",
                         "FOR",
-                        "CPU",
+                        if cols.cpu { " CPU" } else { "" },
                         nw = cols.name + 2
                     );
                     if cols.wide {
@@ -1915,17 +1958,28 @@ fn main() {
                     (p.lbl.as_str(), "── PROCESSES ──".into()),
                     (
                         p.dim.as_str(),
-                        format!(
-                            "{} pane{} running something",
-                            busy.len() - unread,
-                            plural(busy.len() - unread)
-                        ),
+                        // The same count in fewer words when the pane is
+                        // narrow, so the heading stays one line: a heading
+                        // whose count wraps under it reads as two headings.
+                        if w < 50 {
+                            format!("{} running", busy.len() - unread)
+                        } else {
+                            format!(
+                                "{} pane{} running something",
+                                busy.len() - unread,
+                                plural(busy.len() - unread)
+                            )
+                        },
                     ),
                 ];
                 if unread > 0 {
                     heading.push((
                         p.unknown.as_str(),
-                        format!(" · {} could not be read", unread),
+                        if w < 50 {
+                            format!("· {} unread", unread)
+                        } else {
+                            format!("· {} could not be read", unread)
+                        },
                     ));
                 }
                 if !b.local_usage {
@@ -1981,11 +2035,15 @@ fn main() {
                             (p.lbl.as_str(), "── IDLE ──".into()),
                             (
                                 p.dim.as_str(),
-                                format!(
-                                    "{} pane{} at a prompt",
-                                    resting.len(),
-                                    plural(resting.len())
-                                ),
+                                if w < 50 {
+                                    format!("{} at a prompt", resting.len())
+                                } else {
+                                    format!(
+                                        "{} pane{} at a prompt",
+                                        resting.len(),
+                                        plural(resting.len())
+                                    )
+                                },
                             ),
                         ],
                         w,
