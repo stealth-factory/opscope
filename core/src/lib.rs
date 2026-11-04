@@ -889,8 +889,41 @@ pub fn program_status(status: &Status) {
     if !capabilities().program_status {
         return;
     }
+    STATUS_HELD.store(status.state != "clear", Ordering::Release);
     out(&status_bytes(status));
     flush();
+}
+
+/// Whether this pane's last report left a record behind in the terminal.
+///
+/// Rex keeps a `done` past the exit of the program that sent it, on
+/// purpose, so a widget that reported one and then quit - by `q`, by
+/// Ctrl-C or by SIGTERM - would leave a finished timer on a tab with
+/// nothing running in it. Every exit clears it here, in core, rather than
+/// in each widget's quit arm, because the signal path never reaches one:
+/// `handle_signal` calls `_exit`. An atomic because that path is a signal
+/// handler, and the clear is a constant for the same reason.
+static STATUS_HELD: AtomicBool = AtomicBool::new(false);
+const STATUS_CLEAR: &str = "\x1b]7501;state=clear\x1b\\";
+
+/// Drop this pane's program-status record, if it left one.
+fn clear_program_status() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        out(STATUS_CLEAR);
+    }
+}
+
+/// The same, from a signal handler: one `write`, nothing allocated.
+fn clear_program_status_signal() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                STATUS_CLEAR.as_ptr() as *const libc::c_void,
+                STATUS_CLEAR.len(),
+            );
+        }
+    }
 }
 
 /// The bytes of one report.
@@ -1921,6 +1954,8 @@ fn restore_terminal_signal() {
 }
 
 extern "C" fn handle_signal(sig: libc::c_int) {
+    // Exit only, not suspend: a pane stopped with Ctrl-Z is still there.
+    clear_program_status_signal();
     restore_terminal_signal();
     unsafe { libc::_exit(128 + sig); }
 }
@@ -1933,6 +1968,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    clear_program_status();
     forget_frame();
     graphics::cleanup();
     terminal::release_terminal();
@@ -7510,6 +7546,20 @@ mod tests {
             msg: None,
         });
         assert_eq!(clear, "\x1b]7501;state=clear\x1b\\");
+        // The exit paths write a constant, since one is a signal handler;
+        // it has to be the same report.
+        assert_eq!(clear, super::STATUS_CLEAR);
+        // Both exits clear: `q` through `restore_screen`, Ctrl-C and
+        // SIGTERM through `handle_signal`, which never reaches a widget.
+        let src = include_str!("lib.rs");
+        for (start, call) in [
+            ("pub fn restore_screen() {", "clear_program_status();"),
+            ("extern \"C\" fn handle_signal(", "clear_program_status_signal();"),
+        ] {
+            let at = src.find(start).unwrap_or_else(|| panic!("{start} moved"));
+            let end = src[at..].find("\n}\n").expect("the body ends");
+            assert!(src[at..at + end].contains(call), "{start} leaves the status behind");
+        }
         // Without the capability nothing is written: `program_status` is a
         // no-op on every terminal that did not answer the probe, and the
         // test process negotiated nothing.

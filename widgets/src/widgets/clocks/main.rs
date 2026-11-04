@@ -498,10 +498,20 @@ fn status_report(p: &Pomodoro, now: f64) -> Option<Report> {
     let label = p.phase.label();
     let left = (p.remaining(now) / 60.0).ceil() as i64;
     if !p.running {
+        // A phase paused after it ran out keeps its overtime, and the pane
+        // still shows it, so the report says it too rather than `0 min left`.
+        let over = (p.overtime(now) / 60.0) as i64;
+        let msg = if p.overtime(now) > 0.0 && over > 0 {
+            format!("{} paused · {} min over", label, over)
+        } else if p.overtime(now) > 0.0 {
+            format!("{} paused · elapsed", label)
+        } else {
+            format!("{} paused · {} min left", label, left)
+        };
         return Some(Report {
             state: "idle",
             progress: None,
-            msg: format!("{} paused · {} min left", label, left),
+            msg,
         });
     }
     let over = p.overtime(now);
@@ -1468,9 +1478,8 @@ fn main() {
                     continue;
                 }
                 "q" | "Q" => {
-                    // A `done` outlives its program on purpose, but not one
-                    // whose program you have just closed: you have seen it.
-                    send_status(None, &pomo, seconds(), &mut status_sent);
+                    // `restore_screen` clears the program status, as every
+                    // exit does, Ctrl-C included.
                     keyboard.restore();
                     tc::restore_screen();
                     return;
@@ -2379,6 +2388,12 @@ mod tests {
                 msg: "FOCUS paused · 8 min left".into()
             })
         );
+        // Paused after it ran out: the overtime, not `0 min left`.
+        pomo.left = -185.0;
+        assert_eq!(status_report(&pomo, now).unwrap().msg, "FOCUS paused · 3 min over");
+        pomo.left = -20.0;
+        assert_eq!(status_report(&pomo, now).unwrap().msg, "FOCUS paused · elapsed");
+
         // Hidden clears the record.
         pomo.shown = false;
         assert_eq!(status_report(&pomo, now), None);
