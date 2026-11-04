@@ -23,7 +23,7 @@
 //! server on one connection, and `rex events` wakes it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1208,6 +1208,17 @@ fn answer_bells(
     attention.retain(|id, _| panes.iter().any(|p| &p.block_id == id));
 }
 
+/// Put a finished read in its slot, unless a newer request has taken the
+/// slot since: checked under the slot's own lock, the same lock a new
+/// request clears it under, so a late answer cannot land after a newer one.
+fn deliver<T>(slot: &Mutex<Option<T>>, generation: &AtomicU64, ticket: u64, value: T) {
+    if let Ok(mut slot) = slot.lock() {
+        if generation.load(Ordering::SeqCst) == ticket {
+            *slot = Some(value);
+        }
+    }
+}
+
 /// The pane under the cursor now. Read where it is used, never once per
 /// batch of keys: `↓` and `↵` can arrive in the same poll, and `↵` must open
 /// the pane `↓` moved to.
@@ -1509,6 +1520,9 @@ fn main() {
     // The explain screen's screen capture, read off the input loop.
     let capture: Arc<Mutex<Option<(String, Result<Vec<String>, String>)>>> =
         Arc::new(Mutex::new(None));
+    // Which explain request the slot belongs to. A capture for a pane the
+    // reader has already left must not land over the one they opened since.
+    let capture_gen = Arc::new(AtomicU64::new(0));
     // What focus or zoom answered, also off the input loop: on a slow or
     // remote server either can take the whole run timeout, and the pane
     // must keep drawing and reading keys while it does.
@@ -1586,11 +1600,16 @@ fn main() {
                     } else if let Some(pane) = &at_cursor(&panes_now, selected) {
                         explaining = Some(pane.block_id.clone());
                         explain_scroll = 0;
-                        if let Ok(mut slot) = capture.lock() {
-                            *slot = None;
-                        }
+                        let ticket = match capture.lock() {
+                            Ok(mut slot) => {
+                                *slot = None;
+                                capture_gen.fetch_add(1, Ordering::SeqCst) + 1
+                            }
+                            Err(_) => 0,
+                        };
                         if pane.creator == TERMINAL {
                             let capture = Arc::clone(&capture);
+                            let capture_gen = Arc::clone(&capture_gen);
                             let (server, session, block) = (
                                 server.clone(),
                                 pane.session_id.clone(),
@@ -1608,9 +1627,7 @@ fn main() {
                                     Absence::Unreachable => "the server did not answer".to_string(),
                                     Absence::Other(text) => text,
                                 });
-                                if let Ok(mut slot) = capture.lock() {
-                                    *slot = Some((block, read));
-                                }
+                                deliver(&capture, &capture_gen, ticket, (block, read));
                             });
                         }
                     }
@@ -2765,6 +2782,15 @@ mod tests {
         assert_eq!(at_cursor(&panes, selected).unwrap().block_id, "b");
         assert_eq!(at_cursor(&panes, 9).unwrap().block_id, "b", "clamped");
         assert!(at_cursor(&[], 0).is_none());
+    }
+
+    #[test]
+    fn a_capture_for_a_pane_already_left_does_not_land() {
+        let slot = Mutex::new(None);
+        let generation = AtomicU64::new(2); // A was ticket 1, B is ticket 2
+        deliver(&slot, &generation, 2, "B");
+        deliver(&slot, &generation, 1, "A"); // A finishes last
+        assert_eq!(*slot.lock().unwrap(), Some("B"));
     }
 
     #[test]
