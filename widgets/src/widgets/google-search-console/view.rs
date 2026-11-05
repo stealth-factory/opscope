@@ -87,7 +87,10 @@ impl Section {
 pub enum Item {
     Page(String),
     Query(String),
-    Term(usize),
+    /// By its query, not its row: terms are grouped by query, so it names
+    /// one, and a refresh that reorders them must not move an open detail
+    /// onto another.
+    Term(String),
     Inspected(String),
     Sitemap(usize),
     Site(usize),
@@ -379,6 +382,13 @@ fn heading(name: &str, about: Vec<(&str, String)>, p: &Palette, w: usize) -> Vec
     flow(" ", &pieces, " · ", w)
 }
 
+/// Only the warning that a part's value is a kept one, behind a failure:
+/// a detail repeats the figures its section held, and says what the
+/// section said about how old they are.
+fn stale_rows<T>(part: &Part<T>, now: f64, p: &Palette, w: usize) -> Vec<String> {
+    if part.value.is_some() && part.error.is_some() { part_rows(part, now, p, w) } else { Vec::new() }
+}
+
 /// What a part holds that is not a value: its error, its note, or that it
 /// is still on its way. Empty when it has a fresh value.
 fn part_rows<T>(part: &Part<T>, now: f64, p: &Palette, w: usize) -> Vec<String> {
@@ -615,9 +625,8 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         if let Some(t) = &site.terms.value {
             entries[2] = t
                 .iter()
-                .enumerate()
-                .filter(|(_, t)| wanted(s.needle, &[&t.query, &t.page]))
-                .map(|(i, _)| Item::Term(i))
+                .filter(|t| wanted(s.needle, &[&t.query, &t.page]))
+                .map(|t| Item::Term(t.query.clone()))
                 .collect();
         }
         let (inspected, _, _, _) = inspected_rows(site, cache, s.inspect_top, s.now);
@@ -858,7 +867,10 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     // TOP SEARCH TERMS
     rows.push(String::new());
     let terms = site.terms.value.clone().unwrap_or_default();
-    let shown_terms: Vec<usize> = entries[2].iter().filter_map(|i| if let Item::Term(n) = i { Some(*n) } else { None }).collect();
+    let shown_terms: Vec<usize> = entries[2]
+        .iter()
+        .filter_map(|i| if let Item::Term(q) = i { terms.iter().position(|t| t.query == *q) } else { None })
+        .collect();
     let (from, to) = slice(&mut starts[2], shown_terms.len(), at_in[2]);
     let mut about: Vec<(String, String)> = vec![(p.dim.clone(), format!("top {} query and page pairs by clicks", TERM_ROWS))];
     if let Some(((a, b), _)) = windows {
@@ -1958,6 +1970,7 @@ fn detail_rows(
             rows.extend(heading("PAGE", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), url.clone())], "", w));
             window_fields(&mut rows);
+            rows.extend(stale_rows(&site.pages, s.now, p, w));
             if let Some(mv) = site.pages.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *url)) {
                 mover_fields(&mut rows, mv, site.params.has_position(), p, w);
             }
@@ -1986,6 +1999,7 @@ fn detail_rows(
             rows.extend(heading("QUERY", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), q.clone())], "", w));
             window_fields(&mut rows);
+            rows.extend(stale_rows(&site.queries, s.now, p, w));
             if let Some(mv) = site.queries.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *q)) {
                 mover_fields(&mut rows, mv, site.params.has_position(), p, w);
             }
@@ -1994,11 +2008,17 @@ fn detail_rows(
                 top_rows(&mut rows, &d, "PAGES RANKING", true);
             }
         }
-        Item::Term(n) => {
-            let Some(t) = site.terms.value.as_ref().and_then(|t| t.get(*n)) else { return rows };
+        Item::Term(q) => {
             rows.extend(heading("SEARCH TERM", Vec::new(), p, w));
-            rows.extend(flow(" ", &[(p.txt.as_str(), t.query.clone())], "", w));
+            rows.extend(flow(" ", &[(p.txt.as_str(), q.clone())], "", w));
+            // Opened by its query: a refresh can drop it from the top pairs,
+            // and the detail says so rather than going blank.
+            let Some(t) = site.terms.value.as_ref().and_then(|t| t.iter().find(|t| t.query == *q)) else {
+                rows.extend(note_rows(&p.dim, &format!("no longer among the top {} search terms", TERM_ROWS), w));
+                return rows;
+            };
             window_fields(&mut rows);
+            rows.extend(stale_rows(&site.terms, s.now, p, w));
             rows.push(String::new());
             rows.extend(heading(
                 "LANDING PAGES",
@@ -2417,7 +2437,7 @@ mod tests {
             children_error: None,
             span: Some((parse_date("2026-09-21").unwrap(), parse_date("2026-10-18").unwrap())),
         });
-        let items = [Item::Page(LONG.into()), Item::Inspected("https://example.com/docs/old-guide".into()), Item::Query("example".into()), Item::Term(0), Item::Sitemap(0), Item::Site(1)];
+        let items = [Item::Page(LONG.into()), Item::Inspected("https://example.com/docs/old-guide".into()), Item::Query("example".into()), Item::Term("example widget".into()), Item::Sitemap(0), Item::Site(1)];
         for w in WIDTHS {
             for item in &items {
                 for f in [None, Some(&fetched), Some(&Err("429 quota: queries per minute exhausted (per-minute bucket, refills within a minute)".to_string()))] {
@@ -2453,6 +2473,36 @@ mod tests {
             assert!(built.placed.iter().any(|(_, i)| *i == g), "item {g} has no row");
         }
         assert!(built.cursor.is_some());
+    }
+
+    #[test]
+    fn a_detail_says_its_figures_are_a_kept_reading_as_its_section_does() {
+        let p = params();
+        let caches = BTreeMap::new();
+        let text = |sites: &[SiteData], item: Item| {
+            detail(&screen(sites, &caches, &p, "", 0), &item, None, &palette(), 100).rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ")
+        };
+        let page = Item::Page("https://example.com/pricing".into());
+        let query = Item::Query("example".into());
+        let term = Item::Term("example widget".into());
+        // Fresh readings: no warning anywhere.
+        let fresh = vec![site("sc-domain:example.com")];
+        for item in [page.clone(), query.clone(), term.clone()] {
+            assert!(!text(&fresh, item.clone()).contains("because the newest failed"), "{item:?}");
+        }
+        // Each section's refresh failed behind its kept reading: its detail says so.
+        let mut stale = site("sc-domain:example.com");
+        stale.pages = Part::failed("HTTP 500").after(stale.pages.clone());
+        stale.queries = Part::failed("HTTP 500").after(stale.queries.clone());
+        stale.terms = Part::failed("HTTP 500").after(stale.terms.clone());
+        let stale = vec![stale];
+        for item in [page, query, term] {
+            let t = text(&stale, item.clone());
+            assert!(t.contains("because the newest failed: HTTP 500"), "{item:?}: {t}");
+        }
+        // A term the refresh dropped says so, rather than an empty screen.
+        let t = text(&fresh, Item::Term("a query no longer in the list".into()));
+        assert!(t.contains("no longer among the top"), "{t}");
     }
 
     #[test]

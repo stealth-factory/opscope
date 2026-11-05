@@ -588,7 +588,7 @@ fn detail_job(site: &SiteData, item: &Item) -> Option<(String, String)> {
     match item {
         Item::Page(u) | Item::Inspected(u) => Some(("page".into(), u.clone())),
         Item::Query(q) => Some(("query".into(), q.clone())),
-        Item::Term(n) => site.terms.value.as_ref().and_then(|t| t.get(*n)).map(|t| ("query".to_string(), t.query.clone())),
+        Item::Term(q) => Some(("query".into(), q.clone())),
         Item::Sitemap(n) => site
             .sitemaps
             .value
@@ -623,7 +623,7 @@ fn copy_text(item: &Item, sites: &[SiteData], at: usize) -> Option<String> {
     Some(match item {
         Item::Page(u) | Item::Inspected(u) => u.clone(),
         Item::Query(q) => q.clone(),
-        Item::Term(n) => site.terms.value.as_ref()?.get(*n)?.query.clone(),
+        Item::Term(q) => q.clone(),
         Item::Sitemap(n) => site.sitemaps.value.as_ref()?.get(*n)?.path.clone(),
         // The property the row names, which need not be the one on screen.
         Item::Site(n) => sites.get(*n)?.site.clone(),
@@ -634,7 +634,7 @@ fn copy_text(item: &Item, sites: &[SiteData], at: usize) -> Option<String> {
 fn page_of(item: &Item, site: &SiteData) -> Option<String> {
     match item {
         Item::Page(u) | Item::Inspected(u) => Some(u.clone()),
-        Item::Term(n) => site.terms.value.as_ref()?.get(*n).map(|t| t.page.clone()),
+        Item::Term(q) => site.terms.value.as_ref()?.iter().find(|t| t.query == *q).map(|t| t.page.clone()),
         _ => None,
     }
 }
@@ -1513,9 +1513,12 @@ mod tests {
         before.terms = Part::ok(vec![term("example widget"), term("example tool")], 1.0);
         let mut after = before.clone();
         after.terms = Part::ok(vec![term("example tool"), term("example widget")], 2.0);
-        // Row 0 is another query after the refresh, so its detail is too.
-        assert_ne!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(0)));
-        assert_eq!(detail_key(&before, &Item::Term(0)), detail_key(&after, &Item::Term(1)));
+        // The refresh swapped their rows; each query keeps its own detail.
+        let widget = Item::Term("example widget".into());
+        assert_eq!(detail_key(&before, &widget), detail_key(&after, &widget));
+        assert_ne!(detail_key(&after, &widget), detail_key(&after, &Item::Term("example tool".into())));
+        // And `i` on an open term still inspects that query's landing page.
+        assert_eq!(page_of(&widget, &after), Some("https://example.com/".into()));
     }
 
     #[test]
