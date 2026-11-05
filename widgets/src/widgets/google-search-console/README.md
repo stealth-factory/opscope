@@ -13,24 +13,24 @@ index.
 
  ── LAST 24 HOURS ── · clicks by hour, hourly_all · local time; Google reports Pacific
  Google marks hours from 12:00 as still collecting
- clicks               ▂▅█▅▂▂
- peak 148           ▁▇██████▇▇▄▁▁▁
-             ▆▆▃▃▃▃▆██████████████
-                                  ░░░
- impressions          ▁▅█▅▁▁
- peak 4,120         ▁▆██████▆▆▃▁▁▁
-             ▆▆▃▃▃▃▆██████████████
-                                  ░░░
-             12:00              11:00
+ clicks                                 ▂▂ ▅▅ ██ ▅▅ ▂▂ ▂▂
+ peak 148                         ▁▁ ▇▇ ██ ██ ██ ██ ██ ██ ▇▇ ▇▇ ▄▄ ▁▁ ▁▁ ▁▁
+             ▆▆ ▆▆ ▃▃ ▃▃ ▃▃ ▃▃ ▆▆ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+                                                                           ░░ ░░ ░░
+ impressions                            ▁▁ ▅▅ ██ ▅▅ ▁▁ ▁▁
+ peak 4,120                       ▁▁ ▆▆ ██ ██ ██ ██ ██ ██ ▆▆ ▆▆ ▃▃ ▁▁ ▁▁ ▁▁
+             ▆▆ ▆▆ ▃▃ ▃▃ ▃▃ ▃▃ ▆▆ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+                                                                           ░░ ░░ ░░
+             12:00   15:00       19:00       23:00       03:00       07:00      11:00
  ░ still collecting or not reported · a complete hour with nothing
  21 complete hours:  1,284 clicks  same hours last week 1,190  +8%  impressions 38.2k vs 35.9k +6%
 
  ── DAILY · IMPRESSIONS ── · Oct 12–18 vs the 7 days before · final data, 2-3 days behind
- 5.2k          ⢀⣀⡠⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒
-     ⣀⣀⣀⣀⣀⡠⠤⠒⠊⠉⠁⠉⠁
-     ⠉⠉⠉⠉⠉⠁
+ 5.2k                                   ⣀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒
+      ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠔⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉
+      ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠁
     0
-      Oct 12                Oct 18
+      Oct 12       Oct 13         Oct 14          Oct 15         Oct 16          Oct 17       Oct 18
  ━━ Oct 12–18 total 29,000 ━━ Oct 5–11 total 26,100
 
  ── MOVERS · PAGES ── · impressions · 7 complete days (Oct 12–18) vs prior 7 (Oct 5–11)
@@ -114,9 +114,15 @@ protocol they are drawn as pixels, and everywhere else as the eighth-block
 bars and Braille lines above, from the same numbers. Labels, scales and
 legends are text in both. `OPSCOPE_GRAPHICS=text` keeps the text charts in a
 Kitty terminal; see [terminal rendering](../../../../docs/terminal-rendering.md).
-A pane too narrow to give each hour or day its own column falls back to a
-one-row strip. Every chart reads data the widget already holds: none of
-them asks Google anything.
+The charts follow the pane's width. The hourly bars share every column
+the pane has, with a gap between hours once an hour is three columns wide.
+When the labels do not fit beside them, the labels go above, so the bars
+stay down to a column an hour. The line charts take every column after
+their scale, and stay charts down to half a column a day, as Braille holds
+two days a cell. The axes name more hours and days as the pane grows,
+always evenly spaced and always the newest. Only a pane narrower than an
+hour a column falls back to the one-row strip, wrapped. Every chart reads
+data the widget already holds: none of them asks Google anything.
 
 ## Sections
 

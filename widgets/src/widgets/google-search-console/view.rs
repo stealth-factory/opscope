@@ -1064,65 +1064,62 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Drawn
         .max()
         .unwrap_or(0)
         + 1;
-    let bars = n > 0 && lw + n <= room;
+    // Where the bars start: beside their labels when the pane has the
+    // width, under a label row of their own when it does not.
+    let beside = n > 0 && lw + n <= room;
+    let bars = beside || (n > 0 && 1 + n <= room);
+    let x = if beside { lw } else { 1 };
+    let fit = hour_fit(n, room.saturating_sub(x));
     for (i, (label, f)) in metrics.iter().enumerate() {
         if !bars {
             break;
         }
         let hi = peak(*f);
+        if !beside {
+            rows.extend(flow(" ", &[(p.dim.as_str(), label.to_string()), (p.dim.as_str(), peaks[i].trim().to_string())], " · ", w));
+        }
         let y0 = rows.len();
         for text in [format!(" {}", label), peaks[i].clone(), String::new()] {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!("{:<lw$}", text)), ("", " ".repeat(n))], room));
+            let text = if beside { format!("{:<lw$}", text) } else { " ".to_string() };
+            rows.push(tc::seg(&[(p.dim.as_str(), text), ("", " ".repeat(n * fit.cell))], room));
         }
         let columns: Vec<(f64, String)> = h
             .hours
             .iter()
-            .map(|x| (if x.state == HourState::Complete { f(x) } else { 0.0 }, p.bar.clone()))
+            .flat_map(|hour| {
+                let v = if hour.state == HourState::Complete { f(hour) } else { 0.0 };
+                fit.spread(v).into_iter().map(|v| (v, p.bar.clone()))
+            })
             .collect();
-        plots.push(tc::Plot::bars(lw, y0, &columns, 3, hi, false));
+        plots.push(tc::Plot::bars(x, y0, &columns, 3, hi, false));
         let marks: Vec<(String, String)> = h
             .hours
             .iter()
-            .map(|x| match x.state {
-                HourState::Complete if f(x) <= 0.0 => (p.grid.clone(), "·".to_string()),
-                HourState::Complete => (String::new(), " ".to_string()),
-                _ => (p.grid.clone(), "░".to_string()),
+            .map(|hour| match hour.state {
+                HourState::Complete if f(hour) <= 0.0 => (p.grid.clone(), fit.mark("·")),
+                HourState::Complete => (String::new(), " ".repeat(fit.cell)),
+                _ => (p.grid.clone(), fit.fill("░")),
             })
             .collect();
-        if marks.iter().any(|(_, m)| m != " ") {
-            let mut parts: Vec<(&str, String)> = vec![("", " ".repeat(lw))];
+        if marks.iter().any(|(_, m)| !m.trim().is_empty()) {
+            let mut parts: Vec<(&str, String)> = vec![("", " ".repeat(x))];
             parts.extend(marks.iter().map(|(c, m)| (c.as_str(), m.clone())));
             rows.push(tc::seg(&parts, room));
         }
     }
-    let inline = room >= 8 + n;
     // Hour cells a wrapped row holds, after its leading space.
     let per = room.saturating_sub(1).max(1);
     for (label, f) in [("clicks", &(|x: &Hour| x.clicks()) as &dyn Fn(&Hour) -> f64), ("impr", &|x: &Hour| x.impressions())] {
         if bars {
             break;
         }
-        let cells = strip(f, peak(f));
-        let mut parts: Vec<(String, String)> = Vec::new();
-        if inline {
-            parts.push((p.dim.clone(), format!(" {:<7}", label)));
-        } else {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", label))], room));
-            parts.push((String::new(), " ".into()));
-        }
-        if inline {
-            parts.extend(cells);
-            let refs: Vec<(&str, String)> = parts.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
-            rows.push(tc::seg(&refs, room));
-        } else {
-            // Too narrow for every hour on one row: wrap the strip rather
-            // than let the clip drop the newest hours off its right end.
-            for chunk in cells.chunks(per) {
-                let mut row = parts.clone();
-                row.extend(chunk.iter().cloned());
-                let refs: Vec<(&str, String)> = row.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
-                rows.push(tc::seg(&refs, room));
-            }
+        // Too narrow for a column an hour: the strip, wrapped rather than
+        // clipped, so the newest hours are not dropped off its right end.
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", label))], room));
+        for chunk in strip(f, peak(f)).chunks(per) {
+            let mut row: Vec<(&str, String)> = vec![("", " ".into())];
+            row.extend(chunk.iter().map(|(a, b)| (a.as_str(), b.clone())));
+            rows.push(tc::seg(&row, room));
         }
     }
     // The axis: first and last hour of the strip, in local time.
@@ -1130,11 +1127,14 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Drawn
     if let (Some(a), Some(b)) = (first, last) {
         let (a, b) = (local_hour(a.start), local_hour(b.start));
         if bars {
-            let gap = n.saturating_sub(a.len() + b.len()).max(1);
-            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(lw), a, " ".repeat(gap), b))], room));
-        } else if inline {
-            let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
-            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(8), a, " ".repeat(gap), b))], room));
+            // A tick every so many hours, as many as the width holds,
+            // counted back from the newest so it is always named.
+            let every = [1, 2, 3, 4, 6, 8, 12].into_iter().find(|s| s * fit.cell >= TICK_ROOM_HOURS).unwrap_or(n.max(1));
+            let mut ticks: Vec<(usize, String)> = Vec::new();
+            for i in (0..n).rev().filter(|i| (n - 1 - i) % every == 0).chain([0]) {
+                ticks.push((i * fit.cell + fit.bar / 2, local_hour(h.hours[i].start)));
+            }
+            rows.push(axis_row(x, n * fit.cell, &ticks, p));
         } else if h.hours.len() <= per {
             let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}{}{}", a, " ".repeat(gap), b))], room));
@@ -1187,6 +1187,69 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Drawn
 }
 
 // --------------------------------------------------------------- charts --
+
+/// How wide each hour's bar is drawn: `cell` columns an hour, `bar` of
+/// them filled and the rest a gap, so neighbouring hours stay apart once
+/// there is room for a gap at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HourFit {
+    pub cell: usize,
+    pub bar: usize,
+}
+
+impl HourFit {
+    /// One hour's value across its cell: the bar, then the gap.
+    fn spread(&self, v: f64) -> Vec<f64> {
+        (0..self.cell).map(|i| if i < self.bar { v } else { 0.0 }).collect()
+    }
+    /// A mark across the hour's bar, its gap left blank.
+    fn fill(&self, mark: &str) -> String {
+        format!("{}{}", mark.repeat(self.bar), " ".repeat(self.cell - self.bar))
+    }
+    /// One mark in the middle of the hour's bar.
+    fn mark(&self, mark: &str) -> String {
+        let at = (self.bar.saturating_sub(1)) / 2;
+        format!("{}{}{}", " ".repeat(at), mark, " ".repeat(self.cell - at - 1))
+    }
+}
+
+/// The widest hours that fit `n` of them in `width` columns: a column an
+/// hour at least, a one-column gap from three columns up.
+pub fn hour_fit(n: usize, width: usize) -> HourFit {
+    let cell = (width / n.max(1)).max(1);
+    HourFit { cell, bar: if cell >= 3 { cell - 1 } else { cell } }
+}
+
+/// Columns between two ticks that keeps every label on the axis: the label,
+/// a blank either side, and half a label more, which is how far a label at
+/// either end is pushed in from the edge it would hang over. Any closer and
+/// the label beside an end is the one dropped, and the ticks stop being
+/// evenly spaced. `12:00` and `Oct 12`.
+const TICK_ROOM_HOURS: usize = 5 + 2 + 3;
+const TICK_ROOM_DAYS: usize = 6 + 2 + 3;
+
+/// An axis row under a chart `width` columns wide starting at `indent`:
+/// each label centred on its column and dropped when it would touch one
+/// already placed. Labels are placed in the order given, so the ones that
+/// must be there go first.
+fn axis_row(indent: usize, width: usize, labels: &[(usize, String)], p: &Palette) -> String {
+    let mut line = vec![' '; width];
+    for (col, text) in labels {
+        let wide = tc::display_width(text);
+        if wide > width {
+            continue;
+        }
+        let start = col.saturating_sub(wide / 2).min(width - wide);
+        let (lo, hi) = (start.saturating_sub(1), (start + wide + 1).min(width));
+        if line[lo..hi].iter().all(|c| *c == ' ') {
+            for (k, ch) in text.chars().enumerate() {
+                line[start + k] = ch;
+            }
+        }
+    }
+    let text: String = line.into_iter().collect();
+    tc::seg(&[(p.dim.as_str(), format!("{}{}", " ".repeat(indent), text.trim_end()))], indent + width)
+}
 
 /// A day's value of `metric`, as the chart scales it: CTR in percent.
 /// A day Google returned no row for had no impressions, so its counts are
@@ -1280,17 +1343,28 @@ fn label_width(sets: &[(Metric, Vec<&[Option<f64>]>)]) -> usize {
         + 2
 }
 
-/// `Oct 12` at the chart's left edge and `Oct 18` at its right.
+/// Dates under a chart of the days `first` to `last`: the last day and the
+/// first always, and between them a tick every day, two days, week or two
+/// weeks - as close together as the width allows - counted back from the
+/// last day so it is always named.
 fn date_axis(first: chrono::NaiveDate, last: chrono::NaiveDate, lw: usize, cw: usize, p: &Palette) -> String {
-    let (a, b) = (day(first), day(last));
-    let gap = cw.saturating_sub(tc::display_width(&a) + tc::display_width(&b)).max(1);
-    tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(lw), a, " ".repeat(gap), b))], lw + cw)
+    let slots = (last - first).num_days().max(1) as usize + 1;
+    let pitch = cw.saturating_sub(1) as f64 / (slots - 1) as f64;
+    let col = |i: usize| (i as f64 * pitch).round() as usize;
+    let every = [1, 2, 7, 14].into_iter().find(|s| *s as f64 * pitch >= TICK_ROOM_DAYS as f64).unwrap_or(slots);
+    let mut ticks: Vec<(usize, String)> = vec![(col(slots - 1), day(last)), (0, day(first))];
+    for i in (1..slots - 1).rev().filter(|i| (slots - 1 - i) % every == 0) {
+        ticks.push((col(i), day(first + chrono::Duration::days(i as i64))));
+    }
+    axis_row(lw, cw, &ticks, p)
 }
 
-/// Columns for a chart of `slots` days: a column a day at least, and up to
-/// four when the pane has them, past which a week is a wide flat band.
+/// Columns for a line chart of `slots` days: the whole width the pane
+/// leaves after the labels. A Braille cell holds two days, so a pane down
+/// to half a column a day still gets a chart; below that, `None`.
 fn chart_width(slots: usize, lw: usize, room: usize) -> Option<usize> {
-    (slots >= 2 && lw + slots <= room).then(|| room.saturating_sub(lw).min(slots * 4).max(slots))
+    let cw = room.saturating_sub(lw);
+    (slots >= 2 && cw >= 4 && cw * 2 >= slots).then_some(cw)
 }
 
 /// The current window against the one before it, a day at a time, for the
@@ -2337,7 +2411,7 @@ mod tests {
                     let d = detail(&screen(&sites, &caches, &p, "", 0), item, f, &palette(), w);
                     assert_fits(&d.rows, w, &format!("{item:?}"));
                     assert_plots_fit(&d, w, &format!("{item:?}"));
-                    if w >= 60 && matches!(item, Item::Page(_) | Item::Query(_)) && matches!(f, Some(Ok(_))) {
+                    if matches!(item, Item::Page(_) | Item::Query(_)) && matches!(f, Some(Ok(_))) {
                         assert_eq!(d.plots.len(), 4, "clicks, impressions, CTR and position at {w}");
                     }
                 }
@@ -2459,30 +2533,38 @@ mod tests {
         let h = hour_view(&Analytics { rows, first_incomplete_hour: Some("2026-10-21T09:00:00-07:00".into()), first_incomplete_date: None }, now);
         // Wide: three rows of bars, then the row that marks the hours with
         // no bar - collecting, and the one complete hour with nothing.
+        let n = h.hours.len();
+        // Wide: three rows of bars filling the pane, an hour `cell` columns
+        // with a gap, then the row that marks the hours with no bar -
+        // collecting across their bar, the one empty complete hour once.
         let d = hours_rows(&h, true, &palette(), 100);
         assert_eq!(d.plots.len(), 2, "a bar chart each for clicks and impressions");
-        assert_eq!((d.plots[0].y, d.plots[0].height, d.plots[0].width), (0, 3, h.hours.len()));
+        let fit = hour_fit(n, d.plots[0].width);
+        let plot = &d.plots[0];
+        assert!(fit.cell >= 3 && fit.bar == fit.cell - 1, "{fit:?}");
+        assert_eq!((plot.y, plot.height, plot.width), (0, 3, n * fit.cell));
+        // Every hour the same width, so what is left over is less than an hour each.
+        assert!(99 - (plot.x + plot.width) < n, "the bars fill the pane: {} + {}", plot.x, plot.width);
         let marks = plain(&d.rows[3]);
-        assert_eq!(marks.chars().filter(|c| *c == '░').count(), 3, "{marks:?}");
+        assert_eq!(marks.chars().filter(|c| *c == '░').count(), 3 * fit.bar, "{marks:?}");
         assert_eq!(marks.chars().filter(|c| *c == '·').count(), 1, "{marks:?}");
-        assert!(marks.ends_with("░░░"), "{marks:?}");
-        // Too narrow for a column an hour beside the labels: the one-row
-        // strip, which says the same with no chart.
-        let d = hours_rows(&h, true, &palette(), h.hours.len() + 10);
-        assert!(d.plots.is_empty());
-        let strip: String = plain(&d.rows[0]).chars().skip(8).collect();
-        assert_eq!(strip.chars().filter(|c| *c == '░').count(), 3);
-        assert_eq!(strip.chars().filter(|c| *c == '·').count(), 1);
-        assert!(strip.ends_with("░░░"));
-        // Too narrow for 24 cells and a label: the strip wraps, and every
-        // hour - the newest above all - is still drawn.
-        for w in [14, 20, 25, 26, 30, 40] {
+        assert!(marks.trim_end().ends_with(&"░".repeat(fit.bar)), "{marks:?}");
+        // The axis names more hours than its two ends, and always the newest.
+        let axis = d.rows.iter().map(|r| plain(r)).find(|r| r.contains(':')).unwrap();
+        assert!(axis.matches(':').count() > 2, "{axis:?}");
+        assert!(axis.trim_end().ends_with(&local_hour(h.hours[n - 1].start)), "{axis:?}");
+        // A column an hour and no room for the labels beside it: the labels
+        // go above, and the bars stay.
+        let d = hours_rows(&h, true, &palette(), n + 3);
+        assert_eq!(d.plots.len(), 2);
+        assert_eq!((d.plots[0].x, d.plots[0].width), (1, n));
+        assert_fits(&d.rows, n + 3, "hours");
+        // Too narrow for even that: the strip, which wraps, and every hour
+        // - the newest above all - is still drawn.
+        for w in [14, 20, n + 1] {
             let drawn = hours_rows(&h, true, &palette(), w);
             assert_fits(&drawn.rows, w, "hours");
-            if !drawn.plots.is_empty() {
-                // Wide enough for the bars, checked above.
-                continue;
-            }
+            assert!(drawn.plots.is_empty(), "{w}");
             let rows = drawn.rows;
             // Strip rows only: they all come before the axis, whose hours
             // carry a colon; the key below it also draws a ░ and a ·.
@@ -2521,7 +2603,9 @@ mod tests {
         let daily = (0..70).map(|i| (end - Duration::days(i), metrics(1.0 + i as f64, 100.0, 3.0))).collect();
         d.days = Part::ok(Days { final_end: Some(end), fresh_end: Some(end), daily }, 1.0);
         let mut checked = 0;
-        for w in [14, 20, 26, 30, 36, 40, 60] {
+        // The chart holds down to half a column a day, so the strip is for
+        // the narrowest panes; the wider widths check the chart fits.
+        for w in [10, 12, 14, 16, 20, 26, 30, 36, 40, 60] {
             let Some(drawn) = daily_chart(&d, Metric::Clicks, &palette(), w) else { panic!("no chart at {w}") };
             assert_fits(&drawn.rows, w, "daily");
             if !drawn.plots.is_empty() {
@@ -2613,12 +2697,33 @@ mod tests {
                 let b = list(&sc, &mut starts, &palette(), w);
                 assert_fits(&b.rows, w, "list");
                 assert_plots_fit(&Drawn { rows: b.rows.clone(), plots: b.plots.clone() }, w, "list");
-                if w >= 60 {
-                    // Two bar charts of hours and the daily comparison.
-                    assert_eq!(b.plots.len(), 3, "at {w} with {metric:?}");
-                }
+                // Two bar charts of hours and the daily comparison, from 30
+                // columns up.
+                assert_eq!(b.plots.len(), 3, "at {w} with {metric:?}");
             }
         }
+    }
+
+    #[test]
+    fn line_charts_take_the_width_and_name_more_days_as_it_grows() {
+        let start = parse_date("2026-10-01").unwrap();
+        let series: Vec<_> = (0..28).map(|i| (start + Duration::days(i), metrics(5.0 + i as f64, 50.0, 4.0))).collect();
+        let mut last = (0, 0);
+        for w in [30, 60, 100, 140, 200] {
+            let d = series_charts(&series, true, &palette(), w).expect("a chart at every width");
+            let plot = &d.plots[0];
+            // Every column after the labels, to the pane's last.
+            assert_eq!(plot.x + plot.width, w - 1, "at {w}");
+            let axis = plain(d.rows.last().unwrap());
+            let dates = axis.matches("Oct ").count();
+            assert!(axis.trim_end().ends_with("Oct 28"), "the last day is always named: {axis:?}");
+            assert!(plot.width > last.0 && dates >= last.1, "at {w}: {} wide, {dates} dates: {axis:?}", plot.width);
+            last = (plot.width, dates);
+        }
+        assert!(last.1 > 2, "a wide pane names days between the ends");
+        // Half a column a day is the floor: below it, no chart.
+        assert!(series_charts(&series, true, &palette(), 8 + 14).is_some());
+        assert!(series_charts(&series, true, &palette(), 8 + 10).is_none());
     }
 
     #[test]
