@@ -7,9 +7,9 @@ the site, and which of the pages that earn the traffic are broken in the
 index.
 
 ```text
-╺━ SEARCH CONSOLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- sc-domain:example.com   site 1 of 2   fetched 4m ago   hourly to 11:00 (Google: a few hours behind)
- final to Oct 18   inspections 27/2,000 today
+╺━ SEARCH CONSOLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ sc-domain:example.com   site 1 of 2   fetched 4m ago
+ hourly to 11:00 (Google: a few hours behind)   final to Oct 18   inspections 3/2,000 today
 
  ── LAST 24 HOURS ── · clicks by hour, hourly_all · local time; Google reports Pacific
  Google marks hours from 12:00 as still collecting
@@ -26,37 +26,56 @@ index.
  21 complete hours:  1,284 clicks  same hours last week 1,190  +8%  impressions 38.2k vs 35.9k +6%
 
  ── DAILY · IMPRESSIONS ── · Oct 12–18 vs the 7 days before · final data, 2-3 days behind
- 5.2k                                   ⣀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒
-      ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠔⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉
-      ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠁
-    0
-      Oct 12       Oct 13         Oct 14          Oct 15         Oct 16          Oct 17       Oct 18
- ━━ Oct 12–18 total 29,000 ━━ Oct 5–11 total 26,100
+ 5,200                                   ⢀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠒⠒⠒⠒
+       ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠁⠉⠉⠉⠉⠉⠉⠉
+       ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉
+     0
+       Oct 12      Oct 13         Oct 14          Oct 15         Oct 16         Oct 17       Oct 18
+ ━━ Oct 12–18 total 28,860 ━━ Oct 5–11 total 25,974
 
  ── MOVERS · PAGES ── · impressions · 7 complete days (Oct 12–18) vs prior 7 (Oct 5–11)
- final data, 2-3 days behind · 1-10 of 184
-  PAGE                          IMPR    PRIOR       Δ   CLICKS      Δ   POS      Δ  INDEX
-▸ /pricing                    41,200   29,800    +38%    3,120   +41%   4.1   ▲0.6  ok · crawled 2d
-  /docs/getting-started       12,100   17,400    −30%      640   −35%   9.8   ▼2.1  ok · crawled 9d
-  /blog/launch                 8,300        0     new      410    new   6.2      –  not inspected
-  /docs/old-guide                  0    4,100    gone        0   gone     –      –  SOFT_404 · crawled 1d
+ final data, 2-3 days behind · top 1,000 of more: Google's row limit · 4 shown
+  PAGE                                           IMPR    PRIOR       Δ   CLICKS      Δ   POS      Δ
+▸ /pricing                                     41,200   29,800    +38%    3,120   +41%   4.1   ▲0.6
+  /blog/launch                                  8,300        0     new      410    new   6.2      –
+  /docs/a-very-long-path/that-goes-on/and-on   12,100   17,400    −30%      640   −35%   9.8   ▼2.1
+  /past-any-narrow-pane/getting-started
+  /docs/old-guide                                   0    4,100    gone        0   gone     –      –
+
+ ── MOVERS · QUERIES ── · impressions · 7 complete days (Oct 12–18) vs prior 7 (Oct 5–11)
+ final data, 2-3 days behind
+ Google omits rare and anonymised queries, so rows sum below the totals · 2 shown
+  QUERY                                          IMPR    PRIOR       Δ   CLICKS      Δ   POS      Δ
+  example widget pricing                        6,000    4,000    +50%      300   +50%   5.0    0.0
+  example                                       1,000        0     new       50    new   5.0      –
 
  ── TOP SEARCH TERMS ── · top 25 query and page pairs by clicks · Oct 12–18
-  QUERY                                   CLICKS    IMPR    CTR   POS      Δ
-  example widget pricing                     312   4,410   7.1%   3.2   +12%
-    → /pricing  +2 pages
+ Δ against the prior window's top pairs · Google omits rare and anonymised queries · 2 shown
+  example widget                                                    90      900  10.0%   3.0   +13%
+    → /pricing  +1 page
+  a long search term somebody typed into google                      3       30  10.0%   3.0      –
+    → /docs/a-very-long-path/that-goes-on/and-on/past-any-narrow-pane/getting-started
 
- ── INDEX HEALTH ── · 25 top pages + 2 dropped, inspected daily · 27/2,000 today
- not the Page Indexing report (no API)
-  FAIL     /docs/old-guide
-            Submitted and indexed · SOFT_404 · crawled 1d ago · inspected 3h ago
-  NEUTRAL  /de/pricing
-            Duplicate, Google chose different canonical than user · Google chose /pricing
-  PASS   23 pages   crawled within 9d
+ ── INDEX HEALTH ── · 3 top pages + 1 dropped, inspected daily · 3/2,000 today
+ not the Page Indexing report (no API) · 2 shown
+  FAIL    /docs/a-very-long-path/that-goes-on/and-on/past-any-narrow-pane/getting-started
+            Submitted and indexed · SOFT_404 · Google chose /pricing · crawled 34h ago
+            inspected 60m ago
+  ERROR   /docs/old-guide
+            HTTP 400 · Google said: URL is not in property, and this sentence is long enough to
+            wrap at thirty columns · inspected 2h ago
+  PASS   1 pages   crawled within 34h
+   1 pages not inspected yet
 
  ── SITEMAPS ── · 1 shown
   /sitemap.xml (index)
-    1,214 urls · read 2d ago · 0 errors · 3 warnings · not pending
+    1,214 urls · not read for 20d · 2 errors · 3 warnings · pending
+
+ ── SITES ── · each property's own totals, current window vs prior · 2 shown
+  sc-domain:example.com
+    clicks 999  +11%  impr 28.9k  +11%  pos 6.0  0.0  2 not PASS  2 sitemap errors
+  https://example.org/
+    clicks 721  −6%  impr 21.0k  0%  pos 8.0  0.0  none inspected  2 sitemap errors
  ↑↓ select  tab section  ←→ site  ↵ open  [m]etric clicks  [w]indow 28d  [d]ata fresh
  [t]ype image  [i]nspect  [/]filter  [c]opy  [r]efresh  [,] settings  [q]uit
 ```
