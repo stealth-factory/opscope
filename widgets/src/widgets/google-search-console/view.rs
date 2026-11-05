@@ -1326,7 +1326,18 @@ pub fn daily_chart(site: &SiteData, metric: Metric, p: &Palette, w: usize) -> Op
                         }
                     })
                     .collect();
-                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {:<6}", name)), (colour.as_str(), cells)], room));
+                if 7 + n <= room {
+                    rows.push(tc::seg(&[(p.dim.as_str(), format!(" {:<6}", name)), (colour.as_str(), cells)], room));
+                } else {
+                    // Narrower still: the name above and the days wrapped,
+                    // oldest first, so the newest are not clipped off a
+                    // series whose window the heading still names.
+                    rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", name))], room));
+                    let chars: Vec<char> = cells.chars().collect();
+                    for chunk in chars.chunks(room.saturating_sub(1).max(1)) {
+                        rows.push(tc::seg(&[("", " ".to_string()), (colour.as_str(), chunk.iter().collect())], room));
+                    }
+                }
             }
         }
     }
@@ -2445,6 +2456,27 @@ mod tests {
         for t in [text(&unread, None), text(&unread, Some(&InspectionCache::default()))] {
             assert!(t.contains("none inspected") && !t.contains("not PASS"), "{t}");
         }
+    }
+
+    #[test]
+    fn the_daily_chart_fallback_draws_every_day_at_every_width() {
+        let p = Params { days: 28, ..params() };
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let mut d = SiteData::new("https://example.com/", &p);
+        let daily = (0..70).map(|i| (end - Duration::days(i), metrics(1.0 + i as f64, 100.0, 3.0))).collect();
+        d.days = Part::ok(Days { final_end: Some(end), fresh_end: Some(end), daily }, 1.0);
+        let mut checked = 0;
+        for w in [14, 20, 26, 30, 36, 40, 60] {
+            let Some(drawn) = daily_chart(&d, Metric::Clicks, &palette(), w) else { panic!("no chart at {w}") };
+            assert_fits(&drawn.rows, w, "daily");
+            if !drawn.plots.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let cells: usize = drawn.rows.iter().map(|r| plain(r).chars().filter(|c| tc::SPARK.contains(c)).count()).sum();
+            assert_eq!(cells, 2 * 28, "{w}: {:#?}", drawn.rows.iter().map(|r| plain(r)).collect::<Vec<_>>());
+        }
+        assert!(checked >= 3, "the fallback was reached at only {checked} widths");
     }
 
     #[test]
