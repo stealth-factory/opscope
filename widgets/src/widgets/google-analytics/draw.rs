@@ -732,7 +732,16 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
     // quiet minute and a busy one into two of eight heights.
     let lw = 15usize;
     let n = rt.minutes.len();
-    if n > 0 && lw + n <= budget {
+    if n == 0 {
+        // A property read off screen has totals only; the series comes
+        // with the first reading on screen.
+        f.lines.extend(prose(
+            &p.dim,
+            "per minute: not read yet - read while the property is on screen",
+            budget,
+            " ",
+        ));
+    } else if lw + n <= budget {
         let labels = [
             " per minute".to_string(),
             format!(" peak {}", model::thousands(hi)),
@@ -762,17 +771,17 @@ fn right_now(f: &mut Frame, prop: &Prop, v: &View, budget: usize, tz: chrono_tz:
         }
     }
     f.lines.push(Vec::new());
-    let last_min = rt.views_minutes.get(28).copied().unwrap_or(0.0);
-    let mut chunks = vec![
-        vec![
+    let mut chunks = Vec::new();
+    if let Some(last_min) = rt.views_minutes.get(28) {
+        chunks.push(vec![
             part(&p.dim, "views last full minute "),
-            part(&p.txt, model::thousands(last_min)),
-        ],
-        vec![
-            part(&p.dim, "views 30m "),
-            part(&p.txt, model::thousands(rt.views)),
-        ],
-    ];
+            part(&p.txt, model::thousands(*last_min)),
+        ]);
+    }
+    chunks.push(vec![
+        part(&p.dim, "views 30m "),
+        part(&p.txt, model::thousands(rt.views)),
+    ]);
     let events = prop
         .breakdown
         .as_ref()
@@ -2767,6 +2776,20 @@ mod tests {
             );
             assert!(flat.contains("the page each lands on."), "{} cols", w);
         }
+    }
+
+    #[test]
+    fn a_totals_only_reading_says_the_series_is_not_read_instead_of_drawing_zeros() {
+        let mut prop = full_prop();
+        if let Some(rt) = prop.rt.as_mut() {
+            rt.minutes.clear();
+            rt.views_minutes.clear();
+        }
+        let s = shared(vec![prop]);
+        let all = text(&body(&s, &view(), 140).lines);
+        assert!(all.contains("per minute: not read yet"), "{}", all);
+        assert!(!all.contains("views last full minute"), "{}", all);
+        assert!(all.contains("views 30m 540"), "{}", all);
     }
 
     #[test]

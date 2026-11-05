@@ -477,15 +477,10 @@ fn run_live(
             let mut sample: Option<Sample> = None;
             with(shared, i, |p| {
                 match got {
-                    Ok((mut rt, quota)) => {
-                        // A totals-only read keeps the last series; the
-                        // property reads it again as soon as it is shown.
-                        if !series_last {
-                            if let Some(old) = &p.rt {
-                                rt.minutes = old.minutes.clone();
-                                rt.views_minutes = old.views_minutes.clone();
-                            }
-                        }
+                    // A totals-only read carries no series, and an older
+                    // one is not kept under the newer totals' timestamp:
+                    // the screen says the series is not read yet instead.
+                    Ok((rt, quota)) => {
                         if rt.active > 0.0 {
                             p.idle_since = None;
                         } else if p.idle_since.is_none() {
