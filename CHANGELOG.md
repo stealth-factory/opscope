@@ -3,6 +3,78 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.6.0] - 2026-11-04
+
+### Features
+
+- **clocks**: Show weather for one place and world-clock glyphs (OPS-78) (#546)
+- **google-analytics**: New widget for GA4 realtime, baselines and key events (OPS-186) (#449)
+- **clocks**: Report the pomodoro to Rex as a program status (#563)
+
+## [2.5.0] - 2026-11-04
+
+### Bug Fixes
+
+- **disk**: One io chart, and stack mount points in narrow panes (#544)
+- **disk**: Refresh the launcher preview and keep short mounts beside their figures (#545)
+- **agent-usage**: Reread enabled agents after a settings save (#550)
+
+### CI
+
+- **release**: Mint the org GitHub App token in place of the PAT (#553)
+
+### Documentation
+
+- Link the opscope.stealth-factory.co product page (#555)
+
+### Features
+
+- **disk**: Show filesystem space and inodes (#527)
+- **disk**: Show per-disk io and pressure (#530)
+- **disk**: Project when a filesystem fills (#533)
+- **disk**: Filesystem window in hours, 24 h by default; no [w] on disk detail (#552)
+- **rex-panes**: Every Rex pane across every session, ordered by who needs you (#556)
+
+## [2.4.0] - 2026-11-02
+
+### Features
+
+- **agent-usage**: Name claude max and ultra and show when ultra has no 5-hour limit (OPS-242) (#540)
+- **core**: Own the notices channel for every binary (OPS-243) (#539)
+- **core**: Count widget and launcher starts (OPS-127) (#536)
+
+## [2.3.0] - 2026-10-27
+
+### CI
+
+- Publish main to npm as opscope@canary (#531)
+
+### Documentation
+
+- Explain GitHub Enterprise setup for the GitHub widgets (#532)
+
+### Features
+
+- **google-trends**: New widget showing Google's Trending Now feed (OPS-188) (#447)
+- **core**: Persist 7- and 30-day notice dismissals and share a state-file writer (OPS-212) (#517)
+- **google-trends**: Show regions as tabs (OPS-239) (#525)
+
+## [2.2.0] - 2026-10-26
+
+### Features
+
+- **github**: Route github, github-actions, and github-prs to an Enterprise Cloud host (#521)
+
+## [2.1.0] - 2026-10-26
+
+### Bug Fixes
+
+- **agent-usage**: Read Antigravity's Gemini weekly and 5h limits from `agy /usage` (OPS-198) (#514)
+
+### Features
+
+- **core**: A notices channel for warnings not tied to a row (OPS-195) (#460)
+
 ## [2.0.1] - 2026-10-26
 
 ### Bug Fixes

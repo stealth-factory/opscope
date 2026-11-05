@@ -46,10 +46,13 @@ macro_rules! widget {
 const WIDGETS: &[Widget] = &[
     widget!("agent-usage"),
     widget!("clocks"),
+    widget!("disk"),
     widget!("github"),
     widget!("github-actions"),
     widget!("github-prs"),
+    widget!("google-analytics"),
     widget!("google-search-console"),
+    widget!("google-trends"),
     widget!("herdr-panes"),
     widget!("latency"),
     widget!("linear"),
@@ -59,6 +62,7 @@ const WIDGETS: &[Widget] = &[
     widget!("months"),
     widget!("netwatch"),
     widget!("ports"),
+    widget!("rex-panes"),
     widget!("tailnet"),
     widget!("vercel-deployments"),
 ];
@@ -687,7 +691,9 @@ mod tests {
     fn a_click_on_a_visible_list_row_picks_that_widget() {
         // Title pinned on frame row 0, body window starting at scroll 0,
         // so the first widget is on frame row 1 + LIST_TOP.
-        let (top, first, shown) = list_on_frame(0, 20);
+        // Room for the whole list, however many widgets there are: a fixed
+        // 20 stopped holding them all when the twenty-first was added.
+        let (top, first, shown) = list_on_frame(0, LIST_TOP + WIDGETS.len());
         assert_eq!(first, 0);
         assert_eq!(shown, WIDGETS.len());
         assert_eq!(top, 1 + LIST_TOP);

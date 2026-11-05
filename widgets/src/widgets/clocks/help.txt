@@ -1,8 +1,9 @@
 Clocks: this server's, everyone else's, and the ones counting down.
 
 A big clock in the machine's own timezone, countdown bars for the next hour,
-office hours and the end of day, an optional pomodoro, and a world clock
-covering the hubs you care about.
+office hours and the end of day, an optional pomodoro, a world clock
+covering the hubs you care about, and the current weather for one place
+once a latitude and longitude are set.
 
 The pomodoro is off until you press p. It runs the standard 25/5 with a longer
 break every fourth session, all configurable, and persists across restarts so
@@ -16,7 +17,10 @@ with the sound muted. The terminal is alerted when the phase elapses and again
 every minute it keeps running: BEL, plus one OSC 99 notification on Kitty that
 replaces itself, or OSC 9 and OSC 777 on every other terminal. Those escapes are the only
 channels that survive SSH. Under Herdr it additionally raises a native toast
-with a sound — additive, never required, and skipped entirely elsewhere.
+with a sound — additive, never required, and skipped entirely elsewhere. Under
+Rex the pomodoro reports its status over OSC 7501 - working with its progress,
+done when a phase runs out, idle while paused - so Rex shows it on the tab and
+notifies by its own settings; quitting clears it.
 
 Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
 countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
@@ -26,14 +30,35 @@ a break - b and e do the same, and the footer names whichever applies - +/-
 change the focus length, ? hides or shows the pomodoro controls,
 0 zeroes today's completed count, comma opens settings, q quits.
 
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows under the footer for a minute, and a [!] count stays on the top row for
+as long as it is still true. Clicking the count opens the same screen.
+
 The completed tally is per day: it resets when the date changes, including
 while the panel is running. Preferences - focus length, whether the timer is
 shown - are not tied to the day and persist.
 
-Big digits show this server's system-timezone clock. Below it, each hub
-is shown in its own timezone, west to east by current offset — name as
-tie-break, config order ignored — coloured by whether people there are
-plausibly at work.
+Big digits show this server's system-timezone clock. Under the date, current
+weather for weather_latitude and weather_longitude: a temperature in °C and
+a condition glyph, from Open-Meteo, with no key. The clock keeps drawing
+when that request fails, and the row says why the weather is missing. A
+temperature is shown only after a response that carried one. Nothing is
+drawn in its place, and a failed request clears the previous reading rather
+than leaving it up as if it were still current. The sun and moon on a world
+clock row are day and night there, not that city's weather.
+
+A city written as label, zone, latitude, longitude also gets a condition
+glyph for its own current weather, from the same source, in a column of
+its own. A label and zone pair is unchanged and has no glyph. Coordinates
+are never taken from the label, the timezone, or the machine. When that
+city's request fails, its clock stays and the section says why, with no
+temperature standing in for the miss. There is still no forecast.
+
+Below the countdowns, each hub is shown in its own timezone, west to east
+by current offset — name as tie-break, config order ignored — coloured by
+whether people there are plausibly at work.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same - which is what up and down do here too.

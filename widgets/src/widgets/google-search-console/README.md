@@ -178,7 +178,7 @@ then say *Google may still change this*. `d` again goes back.
 
 | on screen | means |
 |---|---|
-| `no credential: set google_search_console.credentials_file …` | nothing to sign in with |
+| `no credential: set google_search_console.credentials …` | nothing to sign in with |
 | `cannot read the key file …`, `… is readable by others; chmod 600 it` | the key file, worded by core |
 | `Google refused the sign-in: invalid_grant - …` | Google's own description; a clock hint when it is about `iat`/`exp` |
 | `API not enabled: turn on searchconsole.googleapis.com …` | the Search Console API is off in the key's Cloud project |
@@ -226,8 +226,8 @@ The section is `google_search_console`. Press `,` for the settings screen.
 
 | key | default | |
 |---|---|---|
-| `credentials_file` | `""` | service-account key file, the same one `google-analytics` uses |
-| `token` / `token_env` | `""` / `GOOGLE_OAUTH_ACCESS_TOKEN` | a pasted token for an hour of testing |
+| `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set. The settings row says where to create it |
+| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; the screen warns if it is not `chmod 600` |
 | `sites` | `[]` | `sc-domain:example.com` or `https://example.com/`; empty reads every property the account can see |
 | `refresh` | `600` | seconds, at least 120 |
 | `window_days` | `7` | complete days per movers window |

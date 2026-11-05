@@ -34,8 +34,8 @@ bypass warning, not a rejection. To stay off it:
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Seventeen widget binaries plus the `opscope` launcher share `opscope-core`;
-build all eighteen with `cargo build --release` from the root.
+Twenty-one widget binaries plus the `opscope` launcher share `opscope-core`;
+build all twenty-one with `cargo build --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
 gone, and `docs/port-decisions.md` records what the port changed and why.
@@ -169,6 +169,31 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   when configurable. It also has a row in the root README table.
 - Every configurable widget opens the shared settings screen with `,`.
   `CONFIGURE.md` is plain AI-facing documentation, not an executable skill.
+- **A warning that explains a missing or partial number stays in the body;
+  everything else goes through `tc::notices`.** A token's missing scope, an
+  unread page of jobs, a poller that stopped: beside the number. A config
+  file others can read, an old section name, a recommended tool that is
+  missing: a notice, raised by a stable id with `tc::notices::when(cond, ||
+  Notice::warn("id", ..))` from any thread. Never glue one onto a fetch
+  error with `·` - that made a working pane read as a failing one - and
+  never drop one. Raising is all a widget does: **core shows notices for
+  every binary.** `maybe_widget_help` starts the channel under the binary's
+  name, `Keyboard::poll` answers `!` with the screen, the `[!]` counter is
+  stamped on the top row before the version, and the 60 s banner goes on
+  the rows under the widget's frame - `size()` hands the widget a pane that
+  many rows shorter, so it lays out as on any shorter pane and nothing it
+  registered with `footer_at` moves. A widget with a text field (a filter
+  box, a `/` search, a line editor) calls `keyboard.typing()` before `poll`
+  on every pass the field is open, so `!` is a character there; `poll`
+  reads each `!` only after the keys before it have been handed back, and
+  a click on the counter opens the screen even from a field. A widget that
+  builds a section from leftover rows rather than scrolling it says how
+  tall its content is with `tc::needs_rows(n)`, and the banner gives way. A dead poller keeps its body
+  row and raises no notice. On that screen a notice is dismissed for this
+  session, for 7 days or for 30; the two for days go to one `notices.json`
+  under `tc::state_dir()` that every widget reads again each minute, so a
+  Core notice dismissed in one pane goes quiet in all of them. An error is
+  dismissed for the session only.
 - `widgets/src/launcher/` is the source for the public `opscope` command.
   It is the launcher, not a widget, and does not count as one.
 
@@ -235,6 +260,22 @@ screen, exactly like "there is no data":
   empty table on a Mac looks like a machine with nothing listening. The
   widget needs a `macos.rs` beside `main.rs`, a call to `unsupported()`, or a row on the
   allowlist that names the issue still open.
+- **a notice id built at run time, or a Core notice raised by a widget**
+  (`every_notice_has_a_stable_id`) — the id is what de-duplicates a notice
+  and keys its dismissal, so a `format!` id raises a new one each time its
+  input moves and a dismissal never holds;
+- **a widget that wires notices itself**
+  (`a_widget_never_wires_notices_itself`) — a widget or the launcher that
+  calls `notices::start`, `run`, `hint` or `banner_rows` is a second copy of
+  what core does for every binary, and the four calls were four chances to
+  leave one out: google-trends merged without them and `matrix` had no way
+  to show a Core warning. The same check fails when core stops starting the
+  channel, answering `!`, reserving the banner or stamping the counter. The
+  key checks count `!` as answered by every widget;
+- **a widget with a notices screen of its own**
+  (`only_core_draws_the_notices_screen`) — a type called `Notice`, or a
+  module or function with `notices` in its name. ports' kill confirmation is
+  a `Toast` for that reason.
 
 The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
 `[::1]`, `[[bin]]` and `args[0]` out; the glyphs `↵ → ← ↑ ↓`; the names
@@ -330,7 +371,7 @@ which the compiler now makes impossible. It went with the Python.
   rebuild - it made it rebuild almost never, and `--version` reported a
   four-commit-old sha with a stale `-dirty` while the tree was clean. A
   full thirty-second rebuild did not move it. Watching nothing and watching
-  everything are both wrong: unconditional reruns relink all eighteen
+  everything are both wrong: unconditional reruns relink all twenty-two
   binaries on every no-op build, measured at 28s against 0.04s. Watch the
   git files `git rev-parse --git-path` resolves - the only form that works
   in a linked worktree, where `.git` is a file - plus the source trees.
@@ -393,10 +434,13 @@ that also says where each hint landed, `follow()` for a window
 that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `filter_row()` and `filtered_to_nothing()` for the one wording every pane
-says its filters in, `config_token_warning()` for widgets holding a secret,
-`google` for Google sign-in, scopes and wording
-([docs/google-widgets.md](docs/google-widgets.md)),
-non-blocking
+says its filters in, `config_token_warning()` for widgets holding a secret
+(raised for them as the Core notice `config-world-readable` by
+`load_config()`), `notices` (`tc::notices`) for warnings not tied to a row -
+the 60 s banner under the frame, the `[!]` counter on the top row and the
+`!` screen, all wired by core for every binary - `google` for
+Google sign-in, scopes and wording
+([docs/google-widgets.md](docs/google-widgets.md)), non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only

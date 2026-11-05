@@ -1,0 +1,41 @@
+What a region is searching for right now, from Google's own Trending Now feed.
+
+Reads Google's public Trending Now RSS feed for each configured region - no
+account, no key - and shows every trend in Google's order with its traffic
+bucket exactly as Google writes it, when it started, and the news Google
+attaches. What changed between fetches - new trends, and the ones that left
+the feed - is this widget's own observation, and is labelled that way.
+
+    google-trends [-n SECONDS] [GEO ...]
+
+Polls every 300s by default (-n changes it, minimum 60s). Region codes on the
+command line replace google_trends.geos for that run.
+
+Keys while running: up/down select a row, tab moves between TRENDING NOW and
+LEFT THE FEED, left/right switch region and a click on a region's tab does
+the same, Enter opens the news for the selected trend, / filters
+by term, story headline or news source, esc clears the filter. In the list c
+copies the trend's Google Trends Explore link; in the news view c copies the
+selected story's URL, and esc, left or backspace go back. r refreshes now,
+comma opens settings, q quits.
+
+On the region tabs, the marker · says the last fetch succeeded, ! that it
+failed or would not parse, and × that Google rejected the region code; a
+number after it counts the trends new since the fetch before, and is
+absent when that count is zero, on a first check, or after Google rejects
+the region, because those rows are gone. When the tabs
+wrap past the pane, the strip keeps the open region on screen and the feed
+keeps a row.
+
+Press ! to read this widget's notices - warnings that are not about a number on
+screen, such as a config file others can read - and dismiss them for this
+session, for 7 days or for 30. A new notice shows under the footer for a
+minute, and a [!] count stays on the top row for as long as it is still true.
+Clicking the count opens the same screen.
+
+Copying uses OSC 52, so the terminal you are sitting at performs it. If your
+terminal blocks OSC 52, the link is shown on screen instead.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.

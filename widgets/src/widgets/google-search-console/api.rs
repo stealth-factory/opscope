@@ -63,9 +63,9 @@ impl Client {
 }
 
 /// "add <email> as a Restricted user…", or the same without an address
-/// when the credential is a pasted token and nobody knows whose it is.
+/// when the key file could not be read.
 pub fn grant_for(email: Option<&str>, site: &str) -> String {
-    let who = email.unwrap_or("the account the token belongs to");
+    let who = email.unwrap_or("the service account");
     format!(
         "add {} as a Restricted user on {} in Search Console (Settings, Users and permissions)",
         who, site
@@ -622,6 +622,6 @@ mod tests {
     fn the_grant_names_the_account_or_says_it_cannot() {
         let with = grant_for(Some("reader@example-project.iam.gserviceaccount.com"), "sc-domain:example.com");
         assert!(with.starts_with("add reader@example-project.iam.gserviceaccount.com as a Restricted user"));
-        assert!(grant_for(None, "sc-domain:example.com").contains("the account the token belongs to"));
+        assert!(grant_for(None, "sc-domain:example.com").contains("the service account"));
     }
 }

@@ -10,18 +10,18 @@ Google's Search Console API, read with curl and the read-only `webmasters.readon
 
 The owned section is `google_search_console`.
 
-Declared fields: `credentials_file`, `token`, `token_env`, `sites`, `refresh`, `window_days`, `inspect_top`, `search_type`
+Declared fields: `credentials`, `credentials_file`, `sites`, `refresh`, `window_days`, `inspect_top`, `search_type`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
-`credentials_file` is the same key file `google_analytics.credentials_file` points at; one key serves both widgets, each asking for its own scope.
+`credentials` is the service-account JSON itself. `credentials_file` is a path to that file, used when `credentials` is empty. A pasted JSON wins when both are set. One key serves both Google widgets, each asking for its own scope.
 
 ## Safe configuration process
 
-1. Check that `curl` exists. Check whether `credentials_file` is set and whether the file exists and is mode 600, without printing its contents. Check whether the variable named by `token_env` is set, without printing its value.
+1. Check that `curl` exists. Ask whether the key should be pasted into `credentials` or kept in its own file and named by `credentials_file`. Check a file's mode is `600` without printing its contents. Never read, copy, paste or summarise the key's `private_key`.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Ask which properties should be shown, and in which form Search Console names each one: `sc-domain:<domain>` for a domain property, or the URL with its trailing slash for a URL-prefix property. Do not guess a property from a domain name; leaving `sites` empty reads every property the account can see.
-4. Never copy the key file's contents, a token, or the service account's private key into chat, logs, command arguments, or source files. The key file stays outside every repository.
+4. Never copy the key's contents or the service account's private key into chat, logs, command arguments, or source files. A pasted key lives in gitignored `config.json`; a key file stays outside every repository.
 5. Change only this widget's declared section, through the settings screen. The widget reloads itself on the way out.
 6. Verify that a real answer arrives, or that the pane names the reason it cannot: no credential, the API not enabled, the account not a user on the property, an unverified user, or a quota.
 

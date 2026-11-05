@@ -46,6 +46,10 @@ scale probe two more. `clocks` and
 `months` use it only when a scale from 2× to 4× fits the pane. A block that
 does not fit stays the block digits or the ordinary heading. `draw` keeps an
 OSC 66 block, and that block occupies scale times the width of its text.
+Program status is OSC 7501, the Program Status Protocol: core sends
+`OSC 7501 ; ?` in the same window, and a terminal that answers it with `done`
+among its states - Rex - gets `tc::program_status` reports. Every other
+terminal gets none. `clocks` reports its pomodoro that way (OPS-249).
 Core emits the sequences; widgets do not branch on the terminal.
 
 ## Choosing a renderer
@@ -461,6 +465,10 @@ sliver to its neighbours, as it did in whole cells. Fill colours are the same
 ones the widget passed, so the contrast rule on the selected-row tint is
 unchanged.
 
+`Plot::sky` is the one picture that does become an image: a one-cell weather
+drawing in the cell the glyph already occupies. Text mode, and any terminal
+that has not accepted graphics, keeps that glyph. The row does not grow.
+
 No image is animated either (OPS-204). `Plot::as_text()` makes any filled plot
 text in every mode, and `is_text()` reports it. `github` and `linear` use it
 for their flow charts while the bars dance on a `dance` placeholder and while
@@ -543,6 +551,7 @@ and intentional text presentation, not unimplemented widget migrations.
 | `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
+| `disk` | One shared pixel/Braille read-up, write-down I/O chart under the disk table: the total of every disk until the disk section has focus, then the selected disk; each half keeps its own peak. macOS draws one combined trace. Filesystem fill meters are eighth-cell text | Keep the filesystem and disk tables as text; a narrow pane stacks each mount point above its figures rather than cutting the path |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## OSC 8 hyperlinks
@@ -655,6 +664,88 @@ check; the managed test workspace has no attached graphical terminal. A
 scroll or a pane move is expected to keep a placeholder image, and that was
 not checked by eye. A static chart whose image was dropped stays blank until
 the whole-frame upload fires, every 5 seconds. That upload is not a heal.
+
+## Notices: the counter and the banner
+
+Core draws a raised notice in every binary, `matrix` included, and no widget
+places any of it (OPS-243). There are two pieces, and each goes where core
+already owns the screen rather than where a widget would have to leave room.
+
+**The counter goes on the top row**, after the title's `╸` and before the
+version: `╺━ CLOCKS ━━━━╸ [!] 1 warning v2.2.0`. `draw` already cuts that
+row short and appends the version after a reset, so nothing a widget hands
+it can cover the counter either, and `title()` is already built short by
+what `draw` will append - it now leaves room for both. The counter shortens
+to `[!] 3 notices` and then `[!] 3` rather than overflow, and the shortest
+always goes down: on a pane too narrow for both, the version stands down
+first, the way it already does below about twenty-two columns, because the
+counter is the one of the two a reader can act on. It is in the worst
+level's colour, and a click on its cells opens the notices screen as `!`
+does, so it is clickable in every widget without one of them registering
+it - and, unlike a typed `!`, from inside a text field too, because a click
+is never typing. A full-screen
+animation keeps it too: `matrix` has no title, and its top row of rain is
+cut for the counter exactly as for the version.
+
+**The banner goes under the widget's frame**, on the bottom rows of the
+pane. `size()` decides it once a frame - at most a quarter of the pane, and
+nothing at all on a pane under ten rows - and returns the pane *less those
+rows*. The widget lays itself out in what it was handed, exactly as on a
+pane that much shorter: its body scrolls, its footer is pinned to the bottom
+of its frame, and the rows it registers with `footer_at` are rows of that
+frame. `draw` then appends the banner below. Why under rather than above the
+footer, which is where widgets used to put it:
+
+- **The footer and its click placements do not move.** Above the footer, the
+  banner would have to be inserted at a row only the widget knows, and every
+  hint the widget registered would shift by the banner's height under the
+  pointer - the bug `footer_at` exists to prevent. Under it, the frame the
+  widget drew is the top of the screen row for row, so a click lands on the
+  hint the widget put there. No coordinate is translated anywhere.
+- **A short pane scrolls rather than hides.** The widget never sees the
+  banner's rows, so it cannot draw into them or under them; it sees a
+  shorter pane and does what it already does at every height. The budget
+  and the floor mean the banner stands down before content does: below ten
+  rows it is not drawn, and the counter still says the notice is there.
+  A widget that builds a section from the rows left over rather than
+  scrolling it - `clocks`' world clock - calls `tc::needs_rows(n)` after
+  `size()` with the height its content needs, and the banner takes only
+  the rows above that. It is spent by the next `size()`, like `typing`.
+- **Nothing is truncated.** Each notice is its title alone, wrapped whole by
+  `error_rows()`; one that does not fit whole in the budget is left to the
+  counter rather than cut.
+- **It holds for widgets that never thought about it.** Detail screens,
+  overlays, loading screens, the settings screen and `cannot_start` all get
+  their height from `size()`, so all of them carry the banner. The OPS-195
+  and OPS-212 reviews found five widgets whose detail screens had no
+  banner or counter; that class of finding is gone.
+
+`draw` adds the banner only when it is handed the height `size()` returned,
+so a frame drawn at any other height is drawn without it, never over it.
+`matrix` keeps falling through a banner arriving or leaving: it reseeds its
+drops on a width change only, and a height change grows or shrinks the
+field at the bottom. While the notices screen is up nothing is reserved or
+stamped; it is the list they would repeat.
+
+**`!` is answered in `Keyboard::poll`**, before the widget sees the key, and
+the widget's next frame paints over the screen when it closes. A text field
+- a filter box, a `/` search, the settings editor - calls
+`keyboard.typing()` before `poll` on each pass it has the keyboard, and that
+poll hands `!` back as a character. The flag is spent by the poll that reads
+it, so a widget that closes its field without saying so cannot leave `!`
+dead for the session.
+
+Whether a `!` is text depends on the keys before it, and one read can hold
+`/a!b`: the `/` opens the filter that makes the `!` a character. So `poll`
+hands keys back only up to the next `!` or counter click and holds the rest
+for the next poll, by which time the widget has acted on the `/` and said
+`typing()`. Held keys make `wait` return at once, so the delay is one pass
+of the loop.
+
+Measured with the OPS-201 harness at 57x40 for 60 s after 6 s warm-up, the
+counter and the banner change nothing a frame sends once they are on
+screen: they are rows that do not change, and only rows that change are
+sent.
 
 ## Keyboard protocol
 

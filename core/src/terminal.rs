@@ -36,6 +36,10 @@ const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 /// Ask whether OSC 99 notifications exist. An unanswered query stays disabled
 /// when the shared capability window expires.
 const NOTIFY_QUERY: &str = "\x1b]99;i=opscope:p=?;\x1b\\";
+/// Ask whether OSC 7501, the Program Status Protocol, exists. A supporting
+/// terminal must answer `? …`; one that does not answers the DA query in
+/// the tail first, so no answer here costs no wait.
+const STATUS_QUERY: &str = "\x1b]7501;?\x1b\\";
 /// OSC 66 support is a cursor-position round trip, not a flag in DA.
 /// CR, report, a two-cell space, report, a 2×2 space, report. Three equal
 /// positions means the terminal ignored it.
@@ -126,6 +130,10 @@ pub struct Capabilities {
     pub notification_focus: bool,
     /// OSC 66 scale (`s=`), from the cursor moving on the sizing probe.
     pub text_sizing: bool,
+    /// OSC 7501 program status, with `done` among the states it accepts.
+    /// Rex answers it; a report is what raises its tab dot, notification,
+    /// badge and sound.
+    pub program_status: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -174,6 +182,7 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
         notification_report: false,
         notification_focus: false,
         text_sizing: false,
+        program_status: false,
     },
     deadline: None,
     mode: GraphicsMode::Auto,
@@ -420,7 +429,7 @@ pub(crate) fn start() {
     };
     let cell_query = if query_cells { "\x1b[16t" } else { "" };
     let mut query = format!(
-        "{leading}{NOTIFY_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}"
+        "{leading}{NOTIFY_QUERY}{STATUS_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}"
     );
     if let Some(probe) = probe {
         query.push_str(&probe);
@@ -621,6 +630,11 @@ impl Session {
                 }
             }
             false
+        } else if let Some(states) = parse_status_answer(sequence) {
+            // `done` is the state a report is sent for; a terminal that
+            // lists states without it would ignore the report whole.
+            self.capabilities.program_status = states.iter().any(|s| s == "done");
+            false
         } else if notification_query_answer(sequence) {
             let (report, focus) = notification_actions(sequence);
             self.capabilities.kitty_notifications = true;
@@ -708,6 +722,40 @@ fn scale_supported(columns: [Option<usize>; 3]) -> bool {
         return false;
     };
     first == 1 && second.saturating_sub(first) == 2 && third.saturating_sub(second) == 2
+}
+
+/// The states an OSC 7501 feature-detection reply says the terminal accepts.
+///
+/// `OSC 7501 ; ? [: states=a,b] [: kinds=…] ST`. A reply without `states`
+/// means exactly idle, working, done, blocked and error - the protocol fixes
+/// that list. Pairs it does not know are ignored, as the protocol requires.
+/// `None` for anything that is not the reply, including a report.
+pub(crate) fn parse_status_answer(sequence: &str) -> Option<Vec<String>> {
+    let body = sequence.strip_prefix("\x1b]7501;")?;
+    let body = body
+        .strip_suffix("\x1b\\")
+        .or_else(|| body.strip_suffix('\x07'))?;
+    let mut fields = body.split(':').map(str::trim);
+    if fields.next()? != "?" {
+        return None;
+    }
+    let mut states = None;
+    for field in fields {
+        if let Some(list) = field.strip_prefix("states=") {
+            states = Some(
+                list.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
+        }
+    }
+    Some(states.unwrap_or_else(|| {
+        ["idle", "working", "done", "blocked", "error"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }))
 }
 
 /// The answer to our OSC 99 query, not a click report and not some other id.
@@ -1487,6 +1535,38 @@ mod tests {
         late.reply("\x1bP1+r536d756c78=1b\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!late.underline_answered);
         assert!(!late.capabilities.styled_underlines);
+    }
+
+    #[test]
+    fn program_status_needs_the_reply_and_done_among_its_states() {
+        // Rex's reply, as its binary carries it.
+        let rex = "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\";
+        assert_eq!(
+            parse_status_answer(rex).unwrap(),
+            ["idle", "working", "done", "blocked", "error"]
+        );
+        // No `states` means the protocol's fixed five; BEL ends it too.
+        assert_eq!(parse_status_answer("\x1b]7501;?\x07").unwrap().len(), 5);
+        // A report is not a reply, and neither is another OSC.
+        assert_eq!(parse_status_answer("\x1b]7501;state=done:app=x\x1b\\"), None);
+        assert_eq!(parse_status_answer("\x1b]99;i=opscope:p=?;\x1b\\"), None);
+
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        assert!(!s.capabilities.program_status);
+        s.reply(rex, now);
+        assert!(s.capabilities.program_status);
+        // A terminal that lists states without `done` would drop every
+        // report this widget sends, so it is not enabled.
+        let mut partial = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        partial.reply("\x1b]7501;?:states=idle,working\x1b\\", now);
+        assert!(!partial.capabilities.program_status);
     }
 
     #[test]

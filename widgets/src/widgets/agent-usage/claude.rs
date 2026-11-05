@@ -132,6 +132,35 @@ impl Data {
             ..Self::default()
         }
     }
+
+    /// A profile and a usage body, the two inputs the plan name is read from.
+    ///
+    /// `plan` is the credentials `subscriptionType`. `tier` is
+    /// `rateLimitTier`. Both are stored as the poller stores them, so a test
+    /// builds the same pair the pane maps.
+    #[cfg(test)]
+    pub(crate) fn with_plan_quota(plan: &str, tier: &str, quota: serde_json::Value) -> Self {
+        Self {
+            quota: Some(quota),
+            quota_live: true,
+            quota_at: now(),
+            quota_plan: plan.into(),
+            profile: Some(serde_json::json!({
+                "_plan": plan,
+                "organization": { "rate_limit_tier": tier },
+            })),
+            ..Self::default()
+        }
+    }
+
+    /// The same reading after the next fetch failed and the snapshot was kept.
+    #[cfg(test)]
+    pub(crate) fn failed_refresh(mut self, why: &str, age_secs: f64) -> Self {
+        self.quota_live = false;
+        self.quota_at = now() - age_secs;
+        self.quota_why = why.into();
+        self
+    }
 }
 
 /// One `claude_config_dirs` entry as it was written.
@@ -1104,19 +1133,114 @@ pub fn claude_lane_rank(limit: &serde_json::Value) -> usize {
     }
 }
 
-/// The scope note, shortened before it can push a reset off the line.
+/// The scope note, shortened before it can push what follows it off the line.
 ///
-/// "not this machine" is the point of the sentence, but it is also sixteen
-/// characters, and seg() clips whatever runs past the pane. Losing the
-/// clause leaves a shorter true line; losing the end of "resets in 15d"
-/// leaves "resets in 1", which is a different and wrong number.
+/// `used` is the cells already spoken for, including the token that comes
+/// after this phrase: a reset, or the plan name. "not this machine" is the
+/// point of the sentence, and it is also the first thing to go. seg() clips
+/// whatever runs past the pane. Losing the clause leaves a shorter true
+/// line; losing the end of "resets in 15d" leaves "resets in 1", and losing
+/// the end of "Ultra" leaves a different plan.
 pub fn scope_phrase(w: usize, used: usize) -> &'static str {
-    let full = " · account-wide, not this machine   ";
-    if used + full.len() <= w - 1 {
-        full
-    } else {
-        " · account-wide   "
+    let room = w.saturating_sub(1);
+    // Longest first. The trailing spaces are only the gap before the token
+    // `used` already counted, so they go before the words do. A single
+    // space is the last form that still keeps that token off the clause.
+    const PHRASES: &[&str] = &[
+        " · account-wide, not this machine   ",
+        " · account-wide   ",
+        " · account-wide ",
+        " · ",
+        " ",
+    ];
+    for phrase in PHRASES {
+        if used + tc::display_width(phrase) <= room {
+            return phrase;
+        }
     }
+    ""
+}
+
+/// The subscription id and the rate-limit tier, from the profile when it
+/// has arrived and from the usage cache's plan when it has not.
+fn plan_ids(c: &Data) -> (String, String) {
+    let tier = c
+        .profile
+        .as_ref()
+        .map(|prof| text(&prof["organization"], "rate_limit_tier"))
+        .unwrap_or_default();
+    let from_profile = c
+        .profile
+        .as_ref()
+        .map(|prof| text(prof, "_plan"))
+        .unwrap_or_default();
+    let plan = if from_profile.is_empty() {
+        c.quota_plan.clone()
+    } else {
+        from_profile
+    };
+    (plan, tier)
+}
+
+/// The name in the table, or the server's own string when the pair is not.
+fn shown_plan(plan: &str, tier: &str) -> String {
+    crate::parse::parse_claude_plan(plan, tier)
+        .unwrap_or(plan)
+        .to_string()
+}
+
+/// A `limits[]` session entry that carries a percentage.
+///
+/// That entry is the five-hour lane. `percent: null` and a missing entry
+/// are the same fact: the server did not report the lane. `five_hour` is
+/// the same window under another key. A numeric `utilization` there is a
+/// reading, so the pane does not say the limit is gone while that number
+/// is still in the body. It is not drawn as a bar: the lane has always
+/// come from `limits[]`, and the scale of `utilization` is not one this
+/// table states.
+fn session_limit_reported(u: &serde_json::Value) -> bool {
+    let listed = u["limits"].as_array().into_iter().flatten().any(|l| {
+        (text(l, "kind") == "session" || text(l, "group") == "session")
+            && l.get("percent").is_some_and(|p| !p.is_null())
+    });
+    if listed {
+        return true;
+    }
+    u.get("five_hour")
+        .filter(|w| w.is_object())
+        .and_then(|w| w.get("utilization"))
+        .is_some_and(|v| v.as_f64().is_some())
+}
+
+/// Ultra, and neither the session lane nor `five_hour.utilization` arrived.
+fn ultra_without_session(c: &Data) -> bool {
+    let Some(u) = c.quota.as_ref() else {
+        return false;
+    };
+    if session_limit_reported(u) {
+        return false;
+    }
+    let (plan, tier) = plan_ids(c);
+    crate::parse::parse_claude_plan(&plan, &tier) == Some("Ultra")
+}
+
+/// The sentence that stands where the five-hour bar would have been.
+///
+/// One line when the pane can hold it. Below that it wraps on spaces, so
+/// the words stay whole down to a 24-column pane. It is text, not a bar:
+/// there is no percentage to fill.
+fn session_unlimited_rows(w: usize, p: &Palette) -> Vec<String> {
+    let sentence = "5h  no 5-hour limit (Ultra)";
+    let room = w.saturating_sub(1).max(1);
+    let one = format!(" {sentence}");
+    if one.chars().count() <= room {
+        return vec![tc::seg(&[(p.dim.as_str(), one)], room)];
+    }
+    let avail = room.saturating_sub(1).max(1);
+    wrap_text(sentence, avail)
+        .into_iter()
+        .map(|line| tc::seg(&[(p.dim.as_str(), format!(" {line}"))], room))
+        .collect()
 }
 
 /// The windows Claude Code's own /usage shows.
@@ -1135,10 +1259,13 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
         .flatten()
         .filter(|l| !l["percent"].is_null())
         .collect();
-    if lanes.is_empty() {
+    let no_session = ultra_without_session(c);
+    if lanes.is_empty() && !no_session {
         return Vec::new();
     }
     lanes.sort_by_key(|l| claude_lane_rank(l));
+    let (plan, tier) = plan_ids(c);
+    let shown = shown_plan(&plan, &tier);
     let src = if c.quota_live {
         "live".to_string()
     } else if c.quota_why.is_empty() {
@@ -1151,21 +1278,67 @@ pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<
         format!("cached {} ago · {}", ago(c.quota_at), c.quota_why)
     };
     let hue = agent_hue("claude");
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (
-                if c.quota_live { p.ok.as_str() } else { p.warn.as_str() },
-                src.clone(),
-            ),
-            (
-                p.dim.as_str(),
-                scope_phrase(w, 13 + src.len() + c.quota_plan.len()).to_string(),
-            ),
-            (p.dim.as_str(), c.quota_plan.clone()),
-        ],
-        w - 1,
-    )];
+    let room = w.saturating_sub(1).max(1);
+    let label = " ── QUOTA ── ";
+    let ink = if c.quota_live { p.ok.as_str() } else { p.warn.as_str() };
+    // The plan name and the refusal are what the scope clause must not eat.
+    // A cached "too many requests" is longer than a 40-column heading, and
+    // clipping it is how a failed refresh disappears. The name, then the
+    // refusal, move under the label whole.
+    let label_w = tc::display_width(label);
+    let src_w = tc::display_width(&src);
+    let name_w = tc::display_width(&shown);
+    let scope = scope_phrase(w, label_w + src_w + name_w);
+    let one_line = !scope.is_empty() && label_w + src_w + tc::display_width(scope) + name_w <= room;
+    let budget = room.saturating_sub(1).max(1);
+    let mut rows = Vec::new();
+    if one_line || (shown.is_empty() && label_w + src_w <= room) {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (ink, src.clone()),
+                (p.dim.as_str(), scope.to_string()),
+                (p.dim.as_str(), shown.clone()),
+            ],
+            room,
+        ));
+    } else if label_w + src_w <= room {
+        let scope = scope_phrase(w, label_w + src_w);
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (ink, src.clone()),
+                (p.dim.as_str(), scope.to_string()),
+            ],
+            room,
+        ));
+        for part in crate::flow_cells(&shown, budget) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], room));
+        }
+    } else {
+        let scope = scope_phrase(w, label_w);
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), label.into()),
+                (p.dim.as_str(), scope.to_string()),
+            ],
+            room,
+        ));
+        for part in crate::flow_cells(&src, budget) {
+            rows.push(tc::seg(&[(ink, format!(" {part}"))], room));
+        }
+        if !shown.is_empty() {
+            for part in crate::flow_cells(&shown, budget) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], room));
+            }
+        }
+    }
+    // Where the session bar would have been. A percentage lane still sorts
+    // ahead of the weekly ones, so this row only exists when that lane was
+    // not reported.
+    if no_session {
+        rows.extend(session_unlimited_rows(w, p));
+    }
 
     let label_of = |l: &serde_json::Value| -> String {
         let scope = text(&l["scope"]["model"], "display_name");
@@ -1784,9 +1957,15 @@ pub fn claude_plan_rows(prof: &serde_json::Value, w: usize, p: &Palette) -> Vec<
     if !billing.is_empty() {
         pairs.push(("billing".into(), billing.replace('_', " ")));
     }
-    let headline = match text(prof, "_plan") {
-        s if !s.is_empty() => s,
-        _ => text(org, "organization_type"),
+    let raw = text(prof, "_plan");
+    let tier = text(org, "rate_limit_tier");
+    // A known pair takes the name in the table. Anything else stays the
+    // string the server sent, which is the raw plan id and, failing that,
+    // the organisation type. The tier row below keeps the id either way.
+    let headline = match crate::parse::parse_claude_plan(&raw, &tier) {
+        Some(name) => name.to_string(),
+        None if !raw.is_empty() => raw,
+        None => text(org, "organization_type"),
     };
     plan_rows(
         &headline,
@@ -2275,6 +2454,26 @@ fn quota_heading(c: &Data) -> bool {
 pub fn why_no_lane(c: &Data) -> String {
     if !lanes(c).is_empty() {
         return String::new();
+    }
+    if ultra_without_session(c) {
+        // The five-hour window is not an unread quota on this plan. [+]
+        // would otherwise say the server published no percentages, which
+        // is how a missing reading looks, and would draw no row where the
+        // session lane went.
+        //
+        // A refresh that failed and fell back to that snapshot is a
+        // different fact. The plan note stays, and the age and the refusal
+        // stay with it. Without them a lapsed login reads as a healthy
+        // account that simply has no five-hour window.
+        if c.quota_why.is_empty() {
+            return "no 5-hour limit (Ultra)".into();
+        }
+        let refusal = if !c.quota_live && c.quota_at > 0.0 {
+            format!("cached {} ago · {}", ago(c.quota_at), c.quota_why)
+        } else {
+            c.quota_why.clone()
+        };
+        return format!("no 5-hour limit (Ultra) · {refusal}");
     }
     why_no_limits(c)
 }
@@ -4356,6 +4555,358 @@ mod tests {
         assert_eq!(bank_section_of(&tab_text(&none, 100)), vec![
             " ── 0 BANK RESETS ──".to_string(), "  None in the account.".to_string(),
         ]);
+    }
+
+    /// Weekly limit, extra usage with a real spend, and no session lane.
+    /// Synthetic: no account id, no host, no token.
+    fn weekly_without_session() -> serde_json::Value {
+        serde_json::json!({
+            "limits": [{
+                "group": "weekly",
+                "kind": "weekly_all",
+                "percent": 41,
+                "resets_at": "2126-06-01T00:00:00Z",
+                "is_active": false,
+                "severity": "normal"
+            }],
+            "spend": {
+                "enabled": true,
+                "percent": 20,
+                "severity": "normal",
+                "limit": {"amount_minor": 5000, "currency": "USD", "exponent": 2},
+                "used": {"amount_minor": 1000, "currency": "USD", "exponent": 2}
+            },
+            "extra_usage": {
+                "is_enabled": true,
+                "currency": "USD",
+                "decimal_places": 2,
+                "monthly_limit": 5000,
+                "used_credits": 10.0
+            }
+        })
+    }
+
+    fn session_limit(percent: serde_json::Value) -> serde_json::Value {
+        let mut body = weekly_without_session();
+        body["limits"] = serde_json::json!([
+            {
+                "group": "session",
+                "kind": "session",
+                "percent": percent,
+                "resets_at": "2126-06-01T00:00:00Z",
+                "is_active": true,
+                "severity": "normal"
+            },
+            {
+                "group": "weekly",
+                "kind": "weekly_all",
+                "percent": 41,
+                "resets_at": "2126-06-01T00:00:00Z",
+                "is_active": false,
+                "severity": "normal"
+            }
+        ]);
+        body
+    }
+
+    fn joined(rows: &[String]) -> String {
+        rows.join("\n")
+    }
+
+    #[test]
+    fn the_subscription_headline_uses_the_renamed_plan() {
+        let ultra = serde_json::json!({
+            "_plan": "max",
+            "organization": {"rate_limit_tier": "default_claude_max_20x"},
+        });
+        let rows = claude_plan_rows(&ultra, 80, &palette());
+        let text = joined(&rows.iter().map(|r| bare(r)).collect::<Vec<_>>());
+        assert!(text.contains("── SUBSCRIPTION ── Ultra"), "{text}");
+        assert!(text.contains("default_claude_max_20x"), "the tier id left the detail row: {text}");
+        assert!(
+            !text.contains("── SUBSCRIPTION ── max"),
+            "the headline kept the raw plan id: {text}"
+        );
+
+        let max = serde_json::json!({
+            "_plan": "max",
+            "organization": {"rate_limit_tier": "default_claude_max_5x"},
+        });
+        let text = joined(&claude_plan_rows(&max, 80, &palette()).iter().map(|r| bare(r)).collect::<Vec<_>>());
+        assert!(text.contains("── SUBSCRIPTION ── Max"), "{text}");
+        assert!(text.contains("default_claude_max_5x"), "{text}");
+
+        let pro = serde_json::json!({"_plan": "pro", "organization": {"rate_limit_tier": ""}});
+        let text = joined(&claude_plan_rows(&pro, 80, &palette()).iter().map(|r| bare(r)).collect::<Vec<_>>());
+        assert!(text.contains("── SUBSCRIPTION ── Pro"), "{text}");
+
+        let unknown = serde_json::json!({
+            "_plan": "team-seat",
+            "organization": {"rate_limit_tier": "default_claude_team"},
+        });
+        let text = joined(&claude_plan_rows(&unknown, 80, &palette()).iter().map(|r| bare(r)).collect::<Vec<_>>());
+        assert!(text.contains("── SUBSCRIPTION ── team-seat"), "{text}");
+        assert!(text.contains("default_claude_team"), "{text}");
+        assert!(!text.contains("Ultra") && !text.contains("Max"), "{text}");
+    }
+
+    /// Whether a drawn row is the five-hour bar: it is labelled `5h` - on
+    /// its own, or as `session 5h` in the tab - and carries a percentage.
+    ///
+    /// The label, not the letters anywhere on the row. These tests used to
+    /// ask `row.contains("5h")`, and the weekly row ends in a reset countdown
+    /// read off the real clock - `resets in 36367d 15h` - so for every hour
+    /// whose count ends in a 5 the weekly bar read as a five-hour one and
+    /// three tests failed on a tree nobody had touched.
+    fn is_five_hour_bar(row: &str) -> bool {
+        let words: Vec<&str> = row.split_whitespace().take(2).collect();
+        let labelled = matches!(words.as_slice(), ["5h", ..] | ["session", "5h"]);
+        labelled && row.contains('%')
+    }
+
+    #[test]
+    fn the_five_hour_check_reads_the_label_not_a_countdown() {
+        assert!(!is_five_hour_bar(" overall 7d ███▎░░░░   41%  resets in 36367d 15h"));
+        assert!(!is_five_hour_bar(" overall 7d ███▎░░░░   41%  resets in 36367d 5h"));
+        assert!(is_five_hour_bar(" 5h  ██████░░░░   25%  resets in 2h"));
+        assert!(is_five_hour_bar(" session 5h ██████░░░░   25%  resets in 2h"));
+        // The no-limit sentence carries the label and no percentage.
+        assert!(!is_five_hour_bar(" 5h  no 5-hour limit (Ultra)"));
+        // And it still finds the bar when the server sends one.
+        let data = Data::with_plan_quota("max", "default_claude_max_20x", session_limit(serde_json::json!(25)));
+        let rows = tab_text(&data, 100);
+        assert!(rows.iter().any(|row| is_five_hour_bar(row)), "{}", joined(&rows));
+    }
+
+    #[test]
+    fn ultra_without_a_session_limit_says_so_and_draws_no_bar() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            weekly_without_session(),
+        );
+        let rows = tab_text(&data, 80);
+        let text = joined(&rows);
+        assert!(text.contains("5h  no 5-hour limit (Ultra)"), "{text}");
+        assert!(text.contains("── QUOTA ──"), "{text}");
+        assert!(text.contains("Ultra"), "{text}");
+        assert!(
+            !rows.iter().any(|row| is_five_hour_bar(row)),
+            "the absent window became a bar: {text}"
+        );
+        assert!(!text.contains("not reported"), "{text}");
+        assert!(!text.contains("$200"), "a credit was inferred from the plan: {text}");
+        assert!(!text.contains("platform"), "{text}");
+        let found = lanes(&data);
+        assert!(found.iter().all(|lane| !lane.label.contains("5h")), "{found:?}");
+        assert!(found.iter().all(|lane| lane.pct != 0.0), "{found:?}");
+        assert!(why_no_lane(&data).is_empty(), "{}", why_no_lane(&data));
+    }
+
+    #[test]
+    fn ultra_keeps_the_session_bar_when_the_server_still_sends_one() {
+        let data = Data::with_plan_quota("max", "default_claude_max_20x", session_limit(serde_json::json!(25)));
+        let text = joined(&tab_text(&data, 100));
+        assert!(text.contains("session"), "{text}");
+        assert!(text.contains("25%"), "{text}");
+        assert!(!text.contains("no 5-hour limit"), "{text}");
+        assert_eq!(lanes(&data)[0].pct, 25.0);
+        assert!(lanes(&data)[0].label.contains("5h"), "{:?}", lanes(&data)[0].label);
+    }
+
+    #[test]
+    fn a_null_session_percent_on_ultra_is_the_same_as_no_session_limit() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            session_limit(serde_json::Value::Null),
+        );
+        let text = joined(&tab_text(&data, 80));
+        assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+        assert!(!text.contains("25%"), "{text}");
+        assert!(lanes(&data).iter().all(|lane| !lane.label.contains("5h")));
+    }
+
+    #[test]
+    fn a_five_hour_utilization_still_in_the_body_is_not_called_gone() {
+        let mut body = weekly_without_session();
+        body["five_hour"] = serde_json::json!({"utilization": 0.25});
+        let data = Data::with_plan_quota("max", "default_claude_max_20x", body);
+        let text = joined(&tab_text(&data, 80));
+        assert!(!text.contains("no 5-hour limit"), "{text}");
+        assert!(lanes(&data).iter().all(|lane| !lane.label.contains("5h")));
+        assert!(why_no_lane(&data).is_empty(), "{}", why_no_lane(&data));
+    }
+
+    #[test]
+    fn max_or_pro_without_a_session_limit_stays_a_missing_reading() {
+        for (plan, tier) in [("max", "default_claude_max_5x"), ("pro", "")] {
+            let data = Data::with_plan_quota(plan, tier, weekly_without_session());
+            let text = joined(&tab_text(&data, 80));
+            assert!(!text.contains("no 5-hour limit"), "{plan}: {text}");
+            assert!(lanes(&data).iter().all(|lane| !lane.label.contains("5h")));
+            assert!(why_no_lane(&data).is_empty(), "{plan}");
+        }
+    }
+
+    #[test]
+    fn ultra_with_no_lanes_at_all_is_not_an_unread_quota() {
+        // No percentage lanes, and a spend block that states no ceiling.
+        // An empty body would still draw "extra usage not reported", which
+        // is the extra-usage line and not the missing five-hour window.
+        // Unlimited draws no lane and does not say the quota was unread.
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            serde_json::json!({
+                "limits": [],
+                "spend": {
+                    "enabled": true,
+                    "severity": "normal",
+                    "used": {"amount_minor": 250, "currency": "USD", "exponent": 2}
+                }
+            }),
+        );
+        let text = joined(&tab_text(&data, 80));
+        assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+        assert!(!text.contains("not reported"), "{text}");
+        assert!(!text.contains("published no limit"), "{text}");
+        assert_eq!(why_no_lane(&data), "no 5-hour limit (Ultra)");
+        assert!(lanes(&data).is_empty());
+    }
+
+    #[test]
+    fn a_failed_refresh_of_unlimited_ultra_keeps_the_refusal() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            serde_json::json!({"limits": []}),
+        )
+        .failed_refresh("too many requests", 4.0 * 3600.0);
+        let note = why_no_lane(&data);
+        assert!(note.contains("no 5-hour limit (Ultra)"), "{note}");
+        assert!(note.contains("cached 4h ago"), "{note}");
+        assert!(note.contains("too many requests"), "{note}");
+        assert_ne!(note, "no 5-hour limit (Ultra)");
+        let text = joined(&tab_text(&data, 80));
+        assert!(text.contains("too many requests"), "{text}");
+        assert!(text.contains("no 5-hour limit (Ultra)"), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_failed_refresh_keeps_the_refusal_whole() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            serde_json::json!({"limits": []}),
+        )
+        .failed_refresh("too many requests", 4.0 * 3600.0);
+        let rows = tab_text(&data, 40);
+        let text = joined(&rows);
+        assert!(text.contains("cached 4h ago"), "{text}");
+        assert!(text.contains("too many requests"), "{text}");
+        assert!(text.split_whitespace().any(|word| word == "Ultra"), "{text}");
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 39,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
+    }
+
+    #[test]
+    fn the_quota_heading_keeps_ultra_whole_at_40_columns() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            weekly_without_session(),
+        );
+        let rows = tab_text(&data, 40);
+        let head = rows.iter().find(|row| row.contains("QUOTA")).expect("a heading");
+        assert!(
+            head.split_whitespace().any(|word| word == "Ultra"),
+            "the plan name was clipped: {head}"
+        );
+        assert!(tc::display_width(head) <= 39, "{head} is {} wide", tc::display_width(head));
+    }
+
+    #[test]
+    fn a_long_plan_id_is_split_rather_than_clipped_at_24_columns() {
+        let unknown = serde_json::json!({
+            "_plan": "enterprise-australia-2026",
+            "organization": {"rate_limit_tier": "default_claude_team"},
+        });
+        let rows = claude_plan_rows(&unknown, 24, &palette())
+            .iter()
+            .map(|row| bare(row))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 23,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
+        let flat: String = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join("");
+        assert!(
+            flat.contains("enterprise-australia-2026"),
+            "the id was clipped: {rows:#?}"
+        );
+        assert!(!flat.contains('…'), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_fullwidth_plan_name_is_split_on_cells() {
+        // Twelve fullwidth letters are twelve characters and twenty-four
+        // cells. A character budget of twenty-two keeps them on one line,
+        // and seg then cuts the last letter.
+        let name = "Ａ".repeat(12);
+        let unknown = serde_json::json!({
+            "_plan": name,
+            "organization": {"rate_limit_tier": ""},
+        });
+        let rows = claude_plan_rows(&unknown, 24, &palette())
+            .iter()
+            .map(|row| bare(row))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            assert!(
+                tc::display_width(row) <= 23,
+                "{row:?} is {} wide",
+                tc::display_width(row)
+            );
+        }
+        let flat: String = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join("");
+        assert!(flat.contains(&name), "the wide name was clipped: {rows:#?}");
+    }
+
+    #[test]
+    fn the_no_limit_row_keeps_every_word_from_24_columns_up() {
+        let data = Data::with_plan_quota(
+            "max",
+            "default_claude_max_20x",
+            weekly_without_session(),
+        );
+        for w in 24..=140 {
+            let rows = tab_text(&data, w);
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= w.saturating_sub(1),
+                    "{w} columns: {row:?} is {} wide",
+                    tc::display_width(row)
+                );
+            }
+            let text = joined(&rows);
+            for word in ["no", "5-hour", "limit", "(Ultra)"] {
+                assert!(text.contains(word), "width {w} lost {word}: {text}");
+            }
+            assert!(!text.contains('…'), "width {w}: {text}");
+            assert!(
+                !rows.iter().any(|row| is_five_hour_bar(row)),
+                "width {w} drew a 5h bar: {text}"
+            );
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 Every widget here, what it does, and a preview before it runs.
 
-Seventeen widget binaries are a list you have to already know. This is the
+Twenty-one widget binaries are a list you have to already know. This is the
 front door: pick one and it runs, quit it and you are back here.
 
     opscope [WIDGET] [ARGS...]
@@ -20,7 +20,9 @@ required and recommended tools separately, and prints host-specific installation
 guidance for the detected macOS or Linux family. It never installs anything.
 
 Keys: up/down select, enter launches, q quits. The launcher has no settings
-of its own; each widget owns its own, on its own comma screen.
+of its own; each widget owns its own, on its own comma screen. Whether
+starts are counted is one shared choice, asked once and stored in
+config.json, not a setting of this menu.
 
 The Python original rescanned its directory on r. This one has no directory
 to rescan - the list is compiled in - so there is no recheck key here, and
@@ -32,3 +34,5 @@ which is what the arrows are for.
 
 --configure-help prints the launcher's guide, which says what it has to say:
 there is nothing here to configure.
+
+Every widget, running live in the browser: https://opscope.stealth-factory.co

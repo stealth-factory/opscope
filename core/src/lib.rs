@@ -20,23 +20,28 @@
 //! a time, and while both versions ran they had to agree on screen, so
 //! where a choice existed this kept the earlier behaviour.
 
+mod analytics;
 mod dependencies;
 pub mod google;
+pub mod notices;
 mod settings;
+pub mod statefile;
 mod terminal;
 mod graphics;
 mod shm;
 mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
-pub use graphics::{braille, line_col, line_row, LineChart, Plot, StickyRange, Trace};
+pub use graphics::{braille, line_col, line_row, LineChart, Plot, Sky, StickyRange, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
     dependency_install_hint, dependency_status, doctor_report, install_command,
-    parse_dependencies, parse_os_release, tool_available, unsatisfied_required,
+    parse_dependencies, parse_os_release, tool_available, unsatisfied_recommended,
+    unsatisfied_required,
 };
 pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use statefile::state_dir;
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -734,7 +739,12 @@ pub fn title(text: &str, w: usize, colour: &str) -> String {
 
 /// Spend only rule fill on a refresh spinner; the title and version take priority.
 pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> String {
-    let w = w - version_room(w);
+    title_short_of(text, w, colour, tick, top_room(w))
+}
+
+/// `title_busy`, built `room` cells short of `w` for what core stamps after it.
+fn title_short_of(text: &str, w: usize, colour: &str, tick: Option<usize>, room: usize) -> String {
+    let w = w - room;
     let left = "╺━";
     let chrome = display_width(left) + 1;
     if w <= chrome {
@@ -769,8 +779,43 @@ pub fn title_busy(text: &str, w: usize, colour: &str, tick: Option<usize>) -> St
     )
 }
 
-/// The terminal's size, or a sane pair if it will not say.
+/// The pane a widget has to lay itself out in: the terminal's size, less
+/// the rows core is about to put under it.
+///
+/// Those rows are the notices banner - see [`notices::reserve`]. A widget
+/// handed a pane a row or two shorter lays itself out exactly as it would
+/// on one: its body scrolls, its footer stays pinned to the bottom of what
+/// it was given, and every placement it registers with `footer_at` is in
+/// the frame it drew. `draw` then puts the banner on the rows below.
+///
+/// So call it once a frame, before laying anything out, and hand `draw`
+/// the height it returned. A frame drawn at any other height is drawn
+/// without the banner, never over it.
 pub fn size() -> (usize, usize) {
+    let (w, h) = pane_size();
+    let taken = notices::reserve(w, h, counter_room(w));
+    (w, h - taken)
+}
+
+/// Say this frame needs a pane `rows` tall to show everything it has, so
+/// the notices banner never takes one of those rows.
+///
+/// Most widgets never call it: their body scrolls, so a pane a banner
+/// shortens loses nothing it cannot scroll back. A widget that sizes a
+/// section to the rows it was given, and leaves the section out when they
+/// run short, says how tall it needs to be instead, and the banner gives
+/// way - the `[!]` counter still says the notices are there. `clocks`
+/// lays its world clock out of what the clock above it left over.
+///
+/// Call it once a frame after `size()`, with the height of everything
+/// laid out that must stay on screen. Spent by the next `size()`, like
+/// `typing`, so a widget that stops saying it cannot hold the banner off.
+pub fn needs_rows(rows: usize) {
+    notices::needs_rows(rows);
+}
+
+/// The terminal's size, or a sane pair if it will not say.
+fn pane_size() -> (usize, usize) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
     if ok == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -815,6 +860,109 @@ pub fn notify(title: &str, body: &str) {
     });
     out(&notify_bytes(title, body, kitty));
     flush();
+}
+
+/// One OSC 7501 program-status report: what this pane's program is doing.
+///
+/// Rex keeps the latest report per pane and turns it into a tab indicator,
+/// and - depending on the user's Program Activity settings - a macOS
+/// notification, a Dock badge and a sound. `done` is the one that says
+/// "finished, come and look".
+#[derive(Clone, Debug, PartialEq)]
+pub struct Status<'a> {
+    /// `idle`, `working`, `done`, `blocked`, `error`, or `clear` to drop
+    /// the record.
+    pub state: &'a str,
+    /// A stable program name - `[A-Za-z0-9_.+-]`, at most 32.
+    pub app: &'a str,
+    /// 0 to 100, with `working` or `blocked`.
+    pub progress: Option<u8>,
+    /// A short label.
+    pub title: Option<&'a str>,
+    /// One line: what it is doing or what finished.
+    pub msg: Option<&'a str>,
+}
+
+/// Report this pane's program status, where the terminal said it can take
+/// one. Every other terminal gets nothing, so no widget branches on Rex.
+pub fn program_status(status: &Status) {
+    if !capabilities().program_status {
+        return;
+    }
+    STATUS_HELD.store(status.state != "clear", Ordering::Release);
+    out(&status_bytes(status));
+    flush();
+}
+
+/// Whether this pane's last report left a record behind in the terminal.
+///
+/// Rex keeps a `done` past the exit of the program that sent it, on
+/// purpose, so a widget that reported one and then quit - by `q`, by
+/// Ctrl-C or by SIGTERM - would leave a finished timer on a tab with
+/// nothing running in it. Every exit clears it here, in core, rather than
+/// in each widget's quit arm, because the signal path never reaches one:
+/// `handle_signal` calls `_exit`. An atomic because that path is a signal
+/// handler, and the clear is a constant for the same reason.
+static STATUS_HELD: AtomicBool = AtomicBool::new(false);
+const STATUS_CLEAR: &str = "\x1b]7501;state=clear\x1b\\";
+
+/// Drop this pane's program-status record, if it left one.
+fn clear_program_status() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        out(STATUS_CLEAR);
+        flush();
+    }
+}
+
+/// The same, from a signal handler: one `write`, nothing allocated.
+fn clear_program_status_signal() {
+    if STATUS_HELD.swap(false, Ordering::AcqRel) {
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                STATUS_CLEAR.as_ptr() as *const libc::c_void,
+                STATUS_CLEAR.len(),
+            );
+        }
+    }
+}
+
+/// The bytes of one report.
+///
+/// `msg` and `title` are base64 of their UTF-8, with every control
+/// character taken out first: the terminal discards a report whole when
+/// either decodes to one, and a newline in a message would cost the
+/// notification rather than one character of it. Each is cut to 300
+/// characters, inside the protocol's 4096-byte cap on the sequence.
+pub fn status_bytes(status: &Status) -> String {
+    let app: String = status
+        .app
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "_.+-".contains(*c))
+        .take(32)
+        .collect();
+    let line = |text: &str| -> String {
+        let clean: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(300)
+            .collect();
+        base64(clean.trim().as_bytes())
+    };
+    let mut pairs = vec![format!("state={}", status.state)];
+    if !app.is_empty() {
+        pairs.push(format!("app={}", app));
+    }
+    if let Some(progress) = status.progress {
+        pairs.push(format!("progress={}", progress.min(100)));
+    }
+    if let Some(title) = status.title.filter(|t| !t.trim().is_empty()) {
+        pairs.push(format!("title={}", line(title)));
+    }
+    if let Some(msg) = status.msg.filter(|m| !m.trim().is_empty()) {
+        pairs.push(format!("msg={}", line(msg)));
+    }
+    format!("\x1b]7501;{}\x1b\\", pairs.join(":"))
 }
 
 /// Actions the query listed. `focus` is the protocol default, so listing it
@@ -957,6 +1105,27 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // What core adds: the counter on the top row and the banner under the
+    // widget's frame, both as `size()` decided them for this frame. The
+    // banner goes on only when the widget drew at the height `size()`
+    // handed it, so it can never be laid over rows the widget thinks it has.
+    let chrome = notices::chrome(w);
+    let counter = top_counter(w);
+    let with_banner: Vec<String>;
+    let (rows, h) = match &chrome {
+        Some(c) if !c.banner.is_empty() && c.h == h + c.banner.len() => {
+            let mut full: Vec<String> = rows.iter().take(h).cloned().collect();
+            full.resize(h, String::new());
+            full.extend(c.banner.iter().cloned());
+            with_banner = full;
+            (with_banner.as_slice(), c.h)
+        }
+        _ => (rows, h),
+    };
+    *COUNTER_SPOT.lock().unwrap_or_else(|e| e.into_inner()) = counter.as_ref().map(|(_, text)| {
+        // After the space that leads it, from where the top row's tail starts.
+        (w - top_room_with(w, Some(text)) + 1, display_width(text))
+    });
     // A font change is a SIGWINCH. Read the window's pixel fields before
     // this frame is rasterised, unless a cell-size reply already won.
     terminal::apply_pending_cell_size();
@@ -984,7 +1153,7 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         reset,
         whole && !reset,
     );
-    let bytes = paint(&mut shown, &rows, w, h, lost);
+    let bytes = paint(&mut shown, &rows, w, h, lost, counter.as_ref());
     // Placeholder uploads are in `before`, so the virtual placement exists
     // before the cells that name it. Direct placements stay in `after`.
     let bytes = format!("{before}{bytes}{after}");
@@ -1107,8 +1276,15 @@ fn forget_frame() {
 /// reached with a cursor move of core's own and erased from column 0
 /// before they are written, exactly as `painted` does it. A frame identical
 /// to the last writes nothing at all.
-fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: bool) -> String {
-    let lines = lines(rows, w, h);
+fn paint(
+    shown: &mut Option<Shown>,
+    rows: &[String],
+    w: usize,
+    h: usize,
+    lost: bool,
+    counter: Option<&(&'static str, String)>,
+) -> String {
+    let lines = lines_with(rows, w, h, counter);
     let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
@@ -1164,6 +1340,46 @@ fn version_room(w: usize) -> usize {
     }
 }
 
+/// Where the notices counter was put on the top row by the last frame:
+/// its first column and its width. A click there opens the notices screen,
+/// as `!` does, so the counter is clickable in every widget without any of
+/// them registering it - and from a text field, where `!` is a character.
+static COUNTER_SPOT: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+
+/// The space before the counter, which keeps it off the title's `╸`.
+const COUNTER_GAP: usize = 1;
+
+/// The most the counter may take of a top row `w` wide before the title or
+/// the version gives way: what is left after a title of [`TITLE_KEEPS`],
+/// the version and the gap. `notices::hint_of` picks the widest wording
+/// that fits, and its shortest, `[!] 3`, goes down regardless.
+fn counter_room(w: usize) -> usize {
+    w.saturating_sub(TITLE_KEEPS + display_width(&version_tag()) + COUNTER_GAP)
+}
+
+/// The counter the top row of a pane `w` wide carries this frame, if a
+/// notice is outstanding - as `size()` decided it.
+fn top_counter(w: usize) -> Option<(&'static str, String)> {
+    notices::chrome(w)
+        .and_then(|c| c.counter)
+        .filter(|(_, text)| display_width(text) + COUNTER_GAP <= w)
+}
+
+/// Everything core puts on the end of the top row: the counter when there
+/// is one, then the version if what the counter leaves still holds it.
+/// The counter comes first because it is the one of the two the reader can
+/// act on; the version stands down the way it already does on a narrow
+/// pane, all of it or none.
+fn top_room_with(w: usize, counter: Option<&str>) -> usize {
+    let taken = counter.map_or(0, |text| display_width(text) + COUNTER_GAP);
+    taken + version_room(w - taken)
+}
+
+/// The cells `title` leaves for core on a pane `w` wide this frame.
+fn top_room(w: usize) -> usize {
+    top_room_with(w, top_counter(w).as_ref().map(|(_, text)| text.as_str()))
+}
+
 /// The `h` rows `draw` puts on screen: each made inert, and the top one
 /// stamped with the version. These are what it compares from one frame to
 /// the next, so a row is only the same as last time if it would look the
@@ -1191,7 +1407,19 @@ fn version_room(w: usize) -> usize {
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
 /// the half that watches for that.
+#[cfg(test)]
 fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
+    lines_with(rows, w, h, None)
+}
+
+/// `lines`, with the notices counter stamped before the version.
+fn lines_with(
+    rows: &[String],
+    w: usize,
+    h: usize,
+    counter: Option<&(&'static str, String)>,
+) -> Vec<String> {
+    let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
     (0..h)
         .map(|i| {
             let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
@@ -1204,10 +1432,10 @@ fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
             }
             if i == 0 {
                 let line = match graphics_notice() {
-                    Some(notice) => with_notice(&line, notice, w),
+                    Some(notice) => with_notice(&line, notice, w, room),
                     None => line,
                 };
-                stamped(&line, w)
+                stamped_with(&line, w, counter)
             } else {
                 line
             }
@@ -1525,7 +1753,7 @@ fn inert(row: &str) -> String {
 /// pane, so it stays first. The notice is never cut: where it does not fit
 /// whole, its short form (`Kitty unavailable`) is used, and where that does
 /// not fit either, the row is left as it was.
-fn with_notice(title: &str, notice: &str, w: usize) -> String {
+fn with_notice(title: &str, notice: &str, w: usize, room: usize) -> String {
     let mut name_end = 0;
     let mut text = String::new();
     let mut i = 0;
@@ -1543,7 +1771,7 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
         i += n;
     }
     let name = display_width(text.trim_end_matches(['━', '╸', ' ']));
-    let keep = w.saturating_sub(version_room(w));
+    let keep = w.saturating_sub(room);
     let short = notice.split(';').next().unwrap_or(notice);
     match [notice, short]
         .into_iter()
@@ -1554,8 +1782,15 @@ fn with_notice(title: &str, notice: &str, w: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn stamped(row: &str, w: usize) -> String {
-    let room = version_room(w);
+    stamped_with(row, w, None)
+}
+
+/// The top row cut to what core's tail leaves, then the tail: the notices
+/// counter in its level's colour, and the version.
+fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -> String {
+    let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
     if room == 0 {
         return row.to_string();
     }
@@ -1586,12 +1821,16 @@ fn stamped(row: &str, w: usize) -> String {
     }
     let cut = close_dangling_link(&cut);
     let (r, g, b) = VERSION_INK;
-    format!(
-        "{cut}{RST}{}{}{}",
-        " ".repeat(keep - used),
-        rgb(r, g, b),
-        version_tag()
-    )
+    let mut tail = String::new();
+    let mut taken = 0;
+    if let Some((colour, text)) = counter {
+        tail.push_str(&format!("{}{colour}{text}{RST}", " ".repeat(COUNTER_GAP)));
+        taken = display_width(text) + COUNTER_GAP;
+    }
+    if version_room(w - taken) > 0 {
+        tail.push_str(&format!("{}{}", rgb(r, g, b), version_tag()));
+    }
+    format!("{cut}{RST}{}{tail}", " ".repeat(keep - used))
 }
 
 /// Hide the cursor and clear, and put it all back on the way out.
@@ -1716,6 +1955,8 @@ fn restore_terminal_signal() {
 }
 
 extern "C" fn handle_signal(sig: libc::c_int) {
+    // Exit only, not suspend: a pane stopped with Ctrl-Z is still there.
+    clear_program_status_signal();
     restore_terminal_signal();
     unsafe { libc::_exit(128 + sig); }
 }
@@ -1728,6 +1969,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    clear_program_status();
     forget_frame();
     graphics::cleanup();
     terminal::release_terminal();
@@ -1935,6 +2177,112 @@ pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str)
     Footer { lines, spots }
 }
 
+/// One tab of a strip: the title, an optional one-cell state marker in its
+/// own colour, and an optional badge (e.g. a count) drawn dim after the marker.
+pub struct Tab {
+    pub title: String,
+    pub marker: Option<(String, &'static str)>, // (colour, one display cell)
+    pub badge: Option<String>,
+}
+
+/// Draws the strip; `open` is the full colour for the open tab (the caller
+/// composes tint+accent), `closed` the colour for the others, `dim` the
+/// badge colour. Returns the lines and, per column of each tab's title,
+/// `(line, col, tab index)` for clicks.
+///
+/// The placements come back with the row because this is where the widths
+/// are known - a tab is its title plus the two brackets, and working the
+/// layout out again at the click would be a second copy that drifts the
+/// first time a tab changed shape. One entry per column rather than a
+/// range, the same idiom the row placements use along the other axis: an
+/// exact match then says a click landed on a tab rather than in the gap
+/// beside it.
+///
+/// Brackets as well as the tint mark the open tab: which tab is open must
+/// not depend on a background colour surviving. Both forms are the title
+/// plus two columns - `[TITLE]` and ` TITLE ` - which is what lets the
+/// brackets mark it without the strip shifting under them.
+///
+/// A tab is never split across lines, for the reason `pack_hints` never
+/// splits a key hint: half a name teaches a tab that does not exist. It
+/// goes to the next line whole, or - where a single tab is wider than the
+/// pane - it stays on a line of its own and `seg` clips it, which is the
+/// safe end of it. The marker and badge are inside the fit check for the
+/// same reason: leaving the marker out let `seg` clip a `·` and a marked
+/// tab read as an unmarked one. A badge that still does not fit on a line
+/// of its own is left off: `seg` would clip `100` down to `1`, and a
+/// shorter count is a different count. The gap after the badge is not part
+/// of that fit: clipping the gap leaves the count whole, and requiring the
+/// gap dropped a one-cell count the line could hold.
+pub fn tab_strip(
+    active: usize,
+    tabs: &[Tab],
+    w: usize,
+    open: &str,
+    closed: &str,
+    dim: &str,
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
+    let mut parts: Vec<(String, String)> = vec![(RST.to_string(), " ".into())];
+    let mut at = 1usize;
+    let flush = |parts: &mut Vec<(String, String)>, lines: &mut Vec<String>| {
+        let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        lines.push(seg(&refs, w.saturating_sub(1)));
+        *parts = vec![(RST.to_string(), " ".into())];
+    };
+    for (i, tab) in tabs.iter().enumerate() {
+        let wide = display_width(&tab.title) + 2;
+        let room = w.saturating_sub(1);
+        let mut badge_len = tab.badge.as_deref().map(display_width).unwrap_or(0);
+        if at > 1 && at + wide + 1 + badge_len + 1 > room {
+            flush(&mut parts, &mut lines);
+            at = 1;
+        }
+        // The badge's own cells have to fit. The gap after it may be clipped;
+        // a clipped count would not.
+        let show_badge = badge_len > 0 && at + wide + 1 + badge_len <= room;
+        if !show_badge {
+            badge_len = 0;
+        }
+        let here = i == active;
+        parts.push((
+            if here { open.to_string() } else { closed.to_string() },
+            if here {
+                format!("[{}]", tab.title)
+            } else {
+                format!(" {} ", tab.title)
+            },
+        ));
+        placed.extend((at..at + wide).map(|col| (lines.len(), col, i)));
+        at += wide + 1 + badge_len + 1;
+        parts.push(match &tab.marker {
+            Some((colour, cell)) => (colour.clone(), (*cell).to_string()),
+            None => (RST.to_string(), " ".into()),
+        });
+        if show_badge {
+            if let Some(badge) = &tab.badge {
+                parts.push((dim.to_string(), badge.clone()));
+            }
+        }
+        parts.push((RST.to_string(), " ".into()));
+    }
+    flush(&mut parts, &mut lines);
+    (lines, placed)
+}
+
+/// Where a tab cursor lands after moving `by` tabs among `count`.
+///
+/// rem_euclid rather than %, because the left key drives this negative
+/// and Rust's % keeps the sign where Python's does not. Named rather than
+/// inlined so a test can reach the arithmetic the loop actually runs.
+pub fn step_tab(at: i64, by: i64, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (at + by).rem_euclid(count as i64) as usize
+}
+
 /// The frame cell a click key names, or nothing if the key is not one.
 ///
 /// Zero-based and in the widget's own coordinates: `(0, 0)` is the first
@@ -2108,6 +2456,10 @@ pub fn config_paths() -> Vec<std::path::PathBuf> {
 /// defaults rather than stopping a running panel - a widget on a wall
 /// should not vanish because a comma went missing in a file it shares.
 pub fn load_config(section: &str) -> serde_json::Value {
+    // The file's permissions are the same fact in every pane, so it is
+    // raised here, once, as a Core notice - not glued onto a widget's fetch
+    // error, where it made a working pane read as a failing one.
+    notices::raise_config_permissions();
     for path in config_paths() {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -2456,9 +2808,10 @@ pub fn cannot_start_because(name: &str, reason: &str, why: &[&str], install: &st
 /// Check the calling widget's owned dependency declaration before it starts.
 ///
 /// Required tools block on the same persistent screen as every other startup
-/// failure. Recommended tools are deliberately absent here: they belong in
-/// `opscope doctor`, because losing an enhancement must not make a useful
-/// widget unavailable.
+/// failure. A missing recommended tool never blocks - losing an enhancement
+/// must not make a useful widget unavailable - but it is not dropped either:
+/// each one is raised as an Info notice, so the pane says what it is doing
+/// without and `opscope doctor` is one key away from being mentioned.
 pub fn dependencies_available(
     name: &str,
     source: &str,
@@ -2479,6 +2832,7 @@ pub fn dependencies_available(
         }
     };
     let host = Host::detect();
+    raise_missing_recommended(&dependencies, &host);
     let missing = unsatisfied_required(&dependencies, host.platform);
     if missing.is_empty() {
         return true;
@@ -2526,6 +2880,40 @@ pub fn dependencies_available(
     let install = dependency_install_hint(&host, &needed);
     cannot_start_inner(name, &reason, &refs, &install, settings);
     false
+}
+
+/// One Info notice per recommended tool this host lacks.
+fn raise_missing_recommended(dependencies: &Dependencies, host: &Host) {
+    for (dependency, status) in unsatisfied_recommended(dependencies, host.platform) {
+        let command = dependency.tool.command();
+        let what = match status {
+            DependencyStatus::TooOld(version) => format!(
+                "{command} is {version}; {} is recommended",
+                dependency.version_text
+            ),
+            DependencyStatus::VersionUnknown => format!(
+                "{command}'s version could not be checked (recommended {})",
+                dependency.version_text
+            ),
+            _ => format!("{command} is not installed (recommended)"),
+        };
+        let install = dependency_install_hint(host, std::slice::from_ref(&dependency));
+        let mut detail = dependency.why.clone().unwrap_or_default();
+        if !detail.is_empty() && !detail.ends_with('.') {
+            detail.push('.');
+        }
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+        detail.push_str(&format!(
+            "The widget runs without it. To add it: {install}. `opscope doctor` lists every tool."
+        ));
+        notices::raise(
+            notices::Notice::info(dependency.tool.recommended_notice_id(), what)
+                .detail(detail)
+                .source("tools"),
+        );
+    }
 }
 
 fn cannot_start_inner(
@@ -2601,20 +2989,16 @@ fn cannot_start_inner(
 /// Any widget that takes a token writes it into this file, so the check
 /// belongs beside the loader rather than in whichever widget happened to
 /// need it first.
+///
+/// The file checked is the one `load_config` reads - the first that exists
+/// *and parses* - not merely the first that exists: a malformed earlier
+/// candidate is skipped by the loader, so it must be skipped here too, or
+/// the file actually holding the tokens goes unchecked.
 pub fn config_token_warning() -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
-    for path in config_paths() {
-        if !path.exists() {
-            continue;
-        }
-        let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
-        return if mode != 0 {
-            Some("config.json is readable by others; chmod 600 it".into())
-        } else {
-            None
-        };
-    }
-    None
+    let path = resolved_config_path()?;
+    let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
+    (mode != 0).then(|| "config.json is readable by others; chmod 600 it".into())
 }
 
 /// One HTTPS GET, returning the body.
@@ -2761,6 +3145,145 @@ pub fn get_answer(
     Ok((status, body, found))
 }
 
+/// Strip a URL down to a hostname, keeping a numeric port.
+pub fn normalize_github_hostname(raw: &str) -> String {
+    let raw = raw.trim();
+    // A scheme is case-insensitive, so `HTTPS://` is stripped like `https://`.
+    let lower = raw.to_ascii_lowercase();
+    let rest = if lower.starts_with("https://") {
+        &raw[8..]
+    } else if lower.starts_with("http://") {
+        &raw[7..]
+    } else {
+        raw
+    };
+    let host = rest
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(raw);
+    host.to_string()
+}
+
+/// Hostname from the widget's `enterprise_hostname`, then from the named env var.
+///
+/// Widgets read both keys with `cfg_str` and pass them here. An empty hostname
+/// reads `env_name`, and only when one is named: a variable read by default
+/// would move every GitHub widget, and the github.com token it holds, onto
+/// whatever host some other tool put there. Empty after that means the
+/// public github.com API (`api.github.com`).
+pub fn github_enterprise_hostname(hostname: &str, env_name: &str) -> Option<String> {
+    if !hostname.trim().is_empty() {
+        let host = normalize_github_hostname(hostname);
+        if !host.is_empty() {
+            return Some(host);
+        }
+    }
+    let env_name = env_name.trim();
+    if env_name.is_empty() {
+        return None;
+    }
+    match std::env::var(env_name) {
+        Ok(value) if !value.trim().is_empty() => {
+            let host = normalize_github_hostname(&value);
+            if host.is_empty() { None } else { Some(host) }
+        }
+        _ => None,
+    }
+}
+
+/// Where a configured GitHub host is actually called.
+enum GithubHostKind {
+    /// `api.github.com`, including a hostname of `github.com` or `api.github.com`.
+    Public,
+    /// Enterprise Cloud with data residency. `host` is `api.<tenant>.ghe.com`.
+    Cloud(String),
+    /// Any other host, called the way GitHub Enterprise Server is.
+    Server(String),
+}
+
+fn classify_github_host(hostname: Option<&str>) -> GithubHostKind {
+    let Some(raw) = hostname.filter(|h| !h.trim().is_empty()) else {
+        return GithubHostKind::Public;
+    };
+    let normalized = normalize_github_hostname(raw);
+    if normalized.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let (name, port) = split_github_host_port(&normalized);
+    if name.is_empty() {
+        return GithubHostKind::Public;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "github.com" || lower == "api.github.com" {
+        return GithubHostKind::Public;
+    }
+    let with_port = |api_name: &str| match port {
+        Some(p) => format!("{api_name}:{p}"),
+        None => api_name.to_string(),
+    };
+    // Data residency tenants are `*.ghe.com` on the web and `api.*.ghe.com` on the API.
+    // A host that already starts with `api.` is the API host; do not prefix it again.
+    if lower.ends_with(".ghe.com") {
+        if lower.starts_with("api.") {
+            GithubHostKind::Cloud(with_port(name))
+        } else {
+            GithubHostKind::Cloud(with_port(&format!("api.{name}")))
+        }
+    } else {
+        GithubHostKind::Server(with_port(name))
+    }
+}
+
+/// Split `host` or `host:port`. A colon inside the name is left alone.
+fn split_github_host_port(host: &str) -> (&str, Option<&str>) {
+    match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.is_empty()
+                && !name.contains(':')
+                && !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    }
+}
+
+/// Whether `hostname` is called the way GitHub Enterprise Server is.
+///
+/// Server ships its own schema releases, so a field github.com and
+/// `*.ghe.com` both have can be missing there. A widget that asks for one
+/// checks this first and leaves it out.
+pub fn github_host_is_server(hostname: Option<&str>) -> bool {
+    matches!(classify_github_host(hostname), GithubHostKind::Server(_))
+}
+
+/// GraphQL endpoint for `hostname`, or github.com when `hostname` is absent.
+///
+/// A `*.ghe.com` tenant is called at `https://api.<host>/graphql`. Any other
+/// enterprise host is called at `https://<host>/api/graphql`.
+pub fn github_graphql_url(hostname: Option<&str>) -> String {
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com/graphql".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}/graphql"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/graphql"),
+    }
+}
+
+/// REST API base for `hostname`, or github.com when `hostname` is absent.
+///
+/// A `*.ghe.com` tenant is called at `https://api.<host>`. Any other
+/// enterprise host is called at `https://<host>/api/v3`. Paths start with
+/// `/repos/...` either way.
+pub fn github_rest_base_url(hostname: Option<&str>) -> String {
+    match classify_github_host(hostname) {
+        GithubHostKind::Public => "https://api.github.com".to_string(),
+        GithubHostKind::Cloud(host) => format!("https://{host}"),
+        GithubHostKind::Server(host) => format!("https://{host}/api/v3"),
+    }
+}
+
 /// One HTTPS POST of a JSON body, returning the body and its headers.
 ///
 /// The headers come back because a rate limit is only knowable from them,
@@ -2801,17 +3324,41 @@ pub fn post_answer(
     body: &str,
     seconds: u64,
 ) -> Result<(u16, String, Vec<(String, String)>), String> {
-    use std::io::Write;
+    post_answer_with(url, headers, body, seconds, "")
+}
+
+/// The configuration `post_answer_with` hands curl on stdin. `extra` is
+/// whole option lines, each ending in a newline, added after the rest.
+///
+/// Read after the user's own `.curlrc`, so a line here overrides one
+/// there: that is how a caller pins something a `.curlrc` could
+/// otherwise change for it, such as following a redirect.
+pub(crate) fn post_config(url: &str, headers: &[(&str, &str)], body: &str, seconds: u64, extra: &str) -> String {
     let mut config = format!(
         "--silent\n--show-error\n--request POST\n--dump-header -\n\
-         --max-time {}\n--url {}\n--data {}\n",
+         --max-time {}\n--url {}\n--data {}\n{}",
         seconds,
         quoted(url),
-        quoted(body)
+        quoted(body),
+        extra
     );
     for (name, value) in headers {
         config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
     }
+    config
+}
+
+/// `post_answer` with curl option lines of the caller's own added; see
+/// `post_config`.
+pub(crate) fn post_answer_with(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+    extra: &str,
+) -> Result<(u16, String, Vec<(String, String)>), String> {
+    use std::io::Write;
+    let config = post_config(url, headers, body, seconds, extra);
     let mut child = std::process::Command::new("curl")
         .arg("--config")
         .arg("-")
@@ -3740,6 +4287,115 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod github_api_tests {
+    use super::*;
+
+    #[test]
+    fn enterprise_cloud_urls_use_the_api_subdomain() {
+        assert_eq!(
+            github_graphql_url(Some("acme.ghe.com")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("acme.ghe.com")),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("https://acme.ghe.com/api/v3")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("api.acme.ghe.com")),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("API.Acme.ghe.com")),
+            "https://API.Acme.ghe.com/graphql"
+        );
+        assert_eq!(
+            github_graphql_url(Some("Acme.GHE.com:8443")),
+            "https://api.Acme.GHE.com:8443/graphql"
+        );
+        assert_eq!(github_graphql_url(None), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(None), "https://api.github.com");
+        assert_eq!(github_graphql_url(Some("")), "https://api.github.com/graphql");
+        assert_eq!(github_graphql_url(Some("github.com")), "https://api.github.com/graphql");
+        assert_eq!(github_rest_base_url(Some("api.github.com")), "https://api.github.com");
+    }
+
+    #[test]
+    fn other_enterprise_hosts_use_the_server_paths() {
+        assert_eq!(
+            github_graphql_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/graphql"
+        );
+        assert_eq!(
+            github_rest_base_url(Some("ghe.example.com")),
+            "https://ghe.example.com/api/v3"
+        );
+        assert_eq!(
+            normalize_github_hostname("https://acme.ghe.com/api/v3/"),
+            "acme.ghe.com"
+        );
+        assert_eq!(
+            github_graphql_url(Some("HTTPS://acme.ghe.com")),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(normalize_github_hostname("Http://ghe.example.com/"), "ghe.example.com");
+        assert!(github_host_is_server(Some("ghe.example.com")));
+        assert!(!github_host_is_server(Some("acme.ghe.com")));
+        assert!(!github_host_is_server(Some("github.com")));
+        assert!(!github_host_is_server(None));
+    }
+
+    struct RestoreEnv {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl RestoreEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn enterprise_hostname_prefers_config_then_env() {
+        let _held = RestoreEnv::set("OPSCOPE_TEST_GHE_HOST", "https://from-env.ghe.com/api");
+        assert_eq!(
+            github_enterprise_hostname(" https://from-config.ghe.com/ ", "OPSCOPE_TEST_GHE_HOST")
+                .as_deref(),
+            Some("from-config.ghe.com")
+        );
+        assert_eq!(
+            github_enterprise_hostname("  ", "OPSCOPE_TEST_GHE_HOST").as_deref(),
+            Some("from-env.ghe.com")
+        );
+        assert_eq!(github_enterprise_hostname("", "OPSCOPE_TEST_GHE_HOST_UNSET"), None);
+    }
+
+    #[test]
+    fn an_unnamed_env_var_is_never_read() {
+        // Opt-in: with no variable named, a value some other tool exported
+        // must not move the widget off github.com.
+        let _held = RestoreEnv::set("GITHUB_ENTERPRISE_HOSTNAME", "ambient.ghe.com");
+        assert_eq!(github_enterprise_hostname("", ""), None);
+        assert_eq!(github_enterprise_hostname("", "   "), None);
+    }
+}
+
+#[cfg(test)]
 mod guard_tests {
     use super::*;
 
@@ -3902,6 +4558,13 @@ pub struct Keyboard {
     /// something a widget opts into rather than something that happens to
     /// it.
     hints: Vec<(String, usize, usize, usize)>,
+    /// Set by `typing` and spent by the next `poll`: a text field is open,
+    /// so `!` is a character for it rather than the notices screen.
+    typing: bool,
+    /// Keys decoded but not yet handed back, because a `!` or a counter
+    /// click among them cannot be read until the widget has acted on the
+    /// keys before it - see `poll`.
+    held: Vec<String>,
 }
 
 impl Keyboard {
@@ -3937,6 +4600,8 @@ impl Keyboard {
             saved,
             buf: Vec::new(),
             hints: Vec::new(),
+            typing: false,
+            held: Vec::new(),
         }
     }
 
@@ -3996,6 +4661,7 @@ impl Keyboard {
         self.pending.clear();
         self.lone_esc = false;
         self.string_since = None;
+        self.held.clear();
         // Whatever was on screen while the child had the terminal was the
         // child's, so no placement of ours describes it. Dropped for the
         // same reason the buffered input above is.
@@ -4057,6 +4723,17 @@ impl Keyboard {
         let Some((x, y)) = click_at(&key) else {
             return key;
         };
+        // The notices counter core stamped on the top row. Not `!`: a typed
+        // `!` is a character while a text field is open, and a click on
+        // the counter is never typing, so it stays its own key until
+        // `poll` has opened the screen with it.
+        if y == 0 {
+            if let Some((col, width)) = *COUNTER_SPOT.lock().unwrap_or_else(|e| e.into_inner()) {
+                if x >= col && x < col + width {
+                    return COUNTER_CLICK.to_string();
+                }
+            }
+        }
         for (name, row, col, width) in &self.hints {
             if y == *row && x >= *col && x < col + width {
                 return name.clone();
@@ -4068,6 +4745,10 @@ impl Keyboard {
     /// Wait between frames, waking immediately when terminal input arrives.
     /// Does not consume input; poll() still owns decoding and protocol replies.
     pub fn wait(&self, timeout: Duration) {
+        // Keys `poll` held back are already here: the next frame is theirs.
+        if !self.held.is_empty() {
+            return;
+        }
         if self.saved.is_none() {
             std::thread::sleep(timeout);
             return;
@@ -4086,10 +4767,55 @@ impl Keyboard {
         }
     }
 
+    /// Say a text field is open, so the next `poll` hands `!` back as the
+    /// character typed rather than opening the notices screen.
+    ///
+    /// Call it on every pass that a filter box, a `/` search or a line
+    /// editor has the keyboard, just before `poll`:
+    ///
+    /// ```ignore
+    /// if typing {
+    ///     keyboard.typing();
+    /// }
+    /// let mut keys = keyboard.poll();
+    /// ```
+    ///
+    /// Spent by that one poll rather than held until someone turns it off,
+    /// so a widget that closes its field without saying so cannot leave `!`
+    /// dead for the rest of the session - the worst it can do is open the
+    /// screen from a field, which is on screen at once rather than silent.
+    pub fn typing(&mut self) {
+        self.typing = true;
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
+    ///
+    /// `!` is answered here, for every widget: it opens the notices screen
+    /// and comes back when the reader backs out, and the widget's next
+    /// frame paints over it. Not while a text field is open - see
+    /// `typing` - and a click on the `[!]` counter opens it even then.
+    ///
+    /// Whether a `!` is text depends on every key before it, and a paste or
+    /// a fast typist puts `/a!b` in one read: the `/` opens the filter that
+    /// makes the `!` a character. So a read is handed back only up to the
+    /// next `!` or counter click, and the rest is held for the next poll,
+    /// by which time the widget has acted on what came before and said
+    /// `typing()` again if a field is now open. Keys after the one that
+    /// opens the screen are the screen's, in order.
     ///
     /// Never returns once the terminal has gone away: see `leave_after_hangup`.
     pub fn poll(&mut self) -> Vec<String> {
+        let typing = std::mem::take(&mut self.typing);
+        let fresh = self.poll_keys();
+        self.held.extend(fresh);
+        let (keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
+        if opens {
+            notices::run(self);
+        }
+        keys
+    }
+
+    fn poll_keys(&mut self) -> Vec<String> {
         if self.saved.is_none() {
             return Vec::new();
         }
@@ -4123,6 +4849,37 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+/// What a click on the notices counter arrives as inside `Keyboard`, until
+/// `poll` has opened the screen with it. Not a key any widget answers, and
+/// not `click:x,y`, so a widget handed one does nothing with it.
+const COUNTER_CLICK: &str = "click:notices";
+
+/// One poll's share of the keys waiting in `held`, and whether it opens
+/// the notices screen.
+///
+/// A key at the front that opens the screen is taken alone: a `!` while no
+/// text field has the keyboard, or a click on the counter whatever does.
+/// Neither opens anything when the channel cannot answer - not started, or
+/// its screen already up, where `!` is the key that closes it. Otherwise
+/// everything up to the next `!` or counter click is handed back, and what
+/// is left waits until the widget has acted on it.
+fn next_turn(held: &mut Vec<String>, typing: bool, answers: bool) -> (Vec<String>, bool) {
+    let decides = |k: &String| k == "!" || k == COUNTER_CLICK;
+    if let Some(first) = held.first() {
+        if answers && (first == COUNTER_CLICK || (first == "!" && !typing)) {
+            held.remove(0);
+            return (Vec::new(), true);
+        }
+    }
+    let cut = held
+        .iter()
+        .skip(1)
+        .position(decides)
+        .map(|at| at + 1)
+        .unwrap_or(held.len());
+    (held.drain(..cut).collect(), false)
 }
 
 impl Keyboard {
@@ -4167,6 +4924,10 @@ fn hung_up(fd: i32) -> bool {
 impl Drop for Keyboard {
     fn drop(&mut self) {
         self.restore();
+        // The third way out: a panic unwinding past the loop never reaches
+        // `restore_screen`. Here rather than in `restore`, which also runs
+        // when a launcher hands the terminal to a child.
+        clear_program_status();
     }
 }
 
@@ -5117,8 +5878,8 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: eighteen binaries that disagree about how to say their own version
-    // are eighteen answers to one question. netwatch used to answer this
+    // is: twenty-two binaries that disagree about how to say their own version
+    // are twenty-two answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {
@@ -5149,6 +5910,14 @@ pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
         std::process::exit(0);
     }
     maybe_help(doc);
+    // After help and version have already exited. A `--help` process is not
+    // a start, and neither is `--configure-help`. Every binary calls this,
+    // so the launcher and the widgets share one place that asks and counts.
+    analytics::on_launch(&binary_name());
+    // Every binary passes through here, after the arguments that print and
+    // leave and before it draws anything, so this is where core opens the
+    // notices channel for it. No widget does: see `notices::start`.
+    notices::start_for_this_binary();
 }
 
 /// What this binary is, in one line.
@@ -5183,11 +5952,67 @@ pub fn version_number() -> &'static str {
 }
 
 /// The name this binary was invoked as, for the first word of `--version`.
-fn binary_name() -> String {
+pub(crate) fn binary_name() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "opscope".into())
+}
+
+#[cfg(test)]
+mod bang_tests {
+    use super::{next_turn, COUNTER_CLICK};
+
+    fn keys(k: &[&str]) -> Vec<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bang_opens_the_screen_unless_a_text_field_has_the_keyboard() {
+        let mut held = keys(&["a", "!", "b"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["a"]), false), "keys before it are handed back");
+        assert_eq!(next_turn(&mut held, false, true), (keys(&[]), true), "then it opens the screen");
+        assert_eq!(held, keys(&["b"]), "and what follows is the screen's");
+        // A filter box, a `/` search or a line editor said `typing()`: the
+        // `!` is a character in it, handed back where it was typed.
+        let mut held = keys(&["!", "b"]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "b"]), false));
+        // On the notices screen itself `!` closes it, so it is not reopened;
+        // and before core has started the channel there is nothing to open.
+        let mut held = keys(&["!", "b"]);
+        assert_eq!(next_turn(&mut held, false, false), (keys(&["!", "b"]), false));
+        let mut held = keys(&["q", "j"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["q", "j"]), false));
+    }
+
+    /// `/a!b` in one read, with the filter closed when it arrived. The `/`
+    /// is handed back alone with what follows it up to the `!`, so the
+    /// widget opens its filter and says `typing()` before the `!` is read.
+    #[test]
+    fn a_bang_waits_for_the_keys_before_it() {
+        let mut held = keys(&["/", "a", "!", "b"]);
+        assert_eq!(next_turn(&mut held, false, true), (keys(&["/", "a"]), false));
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "b"]), false));
+        assert!(held.is_empty());
+        // And a field closed in the same read gives the next `!` back to core.
+        let mut held = keys(&["!", "x", "esc", "!"]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["!", "x", "esc"]), false));
+        assert_eq!(next_turn(&mut held, false, true), (keys(&[]), true));
+    }
+
+    #[test]
+    fn a_counter_click_opens_the_screen_even_from_a_text_field() {
+        let mut held = keys(&[COUNTER_CLICK]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&[]), true));
+        // Keys typed before it still reach the field first.
+        let mut held = keys(&["a", COUNTER_CLICK]);
+        assert_eq!(next_turn(&mut held, true, true), (keys(&["a"]), false));
+        assert_eq!(next_turn(&mut held, true, true), (keys(&[]), true));
+        // Never a `!` in the field when the screen cannot open.
+        let mut held = keys(&[COUNTER_CLICK]);
+        let (out, opens) = next_turn(&mut held, true, false);
+        assert!(!opens && !out.iter().any(|k| k == "!"));
+    }
 }
 
 #[cfg(test)]
@@ -5265,7 +6090,7 @@ mod tests {
         // The notice once went first and took a 40-column pane's whole top
         // row, so the pane no longer said which widget it was.
         let notice = "Kitty unavailable; using text";
-        let at = |w| super::stamped(&super::with_notice(&super::title("latency", w, ""), notice, w), w);
+        let at = |w| super::stamped(&super::with_notice(&super::title("latency", w, ""), notice, w, super::version_room(w)), w);
         assert!(at(80).contains("LATENCY") && at(80).contains(notice));
         assert!(at(40).contains("LATENCY") && at(40).contains("Kitty unavailable") && !at(40).contains("using"));
         assert!(at(24).contains("LATENCY") && !at(24).contains("Kitty"));
@@ -5689,13 +6514,13 @@ mod tests {
         let w = 40;
         let rows = vec![super::title("clocks", w, ""), "12:00:00".into(), "".into()];
         let mut shown = None;
-        let first = super::paint(&mut shown, &rows, w, 3, false);
+        let first = super::paint(&mut shown, &rows, w, 3, false, None);
         assert_eq!(
             first,
             super::frame(&rows, w, 3),
             "the first frame is not painted whole"
         );
-        assert_eq!(super::paint(&mut shown, &rows, w, 3, false), "");
+        assert_eq!(super::paint(&mut shown, &rows, w, 3, false, None), "");
     }
 
     #[test]
@@ -5707,9 +6532,9 @@ mod tests {
         let top = super::title("clocks", w, "");
         let mut shown = None;
         let before = [top.clone(), "12:00:00".into(), "steady".into()];
-        super::paint(&mut shown, &before, w, 3, false);
+        super::paint(&mut shown, &before, w, 3, false, None);
         let after = [top.clone(), "12:00:01".into(), "steady".into()];
-        let bytes = super::paint(&mut shown, &after, w, 3, false);
+        let bytes = super::paint(&mut shown, &after, w, 3, false, None);
         assert_eq!(rewritten(&bytes), vec![(2, "12:00:01".to_string())]);
         let erased = format!("\x1b[2H{}{}", super::RST, super::EL);
         assert!(bytes.starts_with(&erased), "{bytes:?}");
@@ -5721,7 +6546,7 @@ mod tests {
             "12:00:01".into(),
             "steady".into(),
         ];
-        let again = rewritten(&super::paint(&mut shown, &retitled, w, 3, false));
+        let again = rewritten(&super::paint(&mut shown, &retitled, w, 3, false, None));
         assert_eq!(again.len(), 1, "{again:?}");
         assert_eq!(again[0].0, 1);
         assert!(again[0].1.ends_with(&tag), "{:?}", again[0].1);
@@ -5744,7 +6569,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        super::paint(&mut shown, &big, w, 6, false);
+        super::paint(&mut shown, &big, w, 6, false, None);
         let small = vec![
             "title".into(),
             super::sized_sequence("12:34:56", 2),
@@ -5753,7 +6578,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        let bytes = super::paint(&mut shown, &small, w, 6, false);
+        let bytes = super::paint(&mut shown, &small, w, 6, false, None);
         let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
         assert!(rows.contains(&2), "the smaller face was not sent: {rows:?}");
         assert!(
@@ -5773,7 +6598,7 @@ mod tests {
             String::new(),
             "tail".into(),
         ];
-        let bytes = super::paint(&mut shown, &plain, w, 6, false);
+        let bytes = super::paint(&mut shown, &plain, w, 6, false, None);
         let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
         assert!(rows.contains(&2), "{rows:?}");
         assert!(rows.contains(&3), "the last covered row was left: {rows:?}");
@@ -5786,8 +6611,8 @@ mod tests {
         // drawn there stays on screen for good.
         let w = 30;
         let mut shown = None;
-        super::paint(&mut shown, &["t".into(), "loading".into()], w, 2, false);
-        let bytes = super::paint(&mut shown, &["t".into()], w, 2, false);
+        super::paint(&mut shown, &["t".into(), "loading".into()], w, 2, false, None);
+        let bytes = super::paint(&mut shown, &["t".into()], w, 2, false, None);
         assert_eq!(
             bytes,
             format!("\x1b[2H{}{}{}", super::RST, super::EL, super::RST)
@@ -5803,22 +6628,22 @@ mod tests {
         // them, nothing stored says what is on screen.
         let rows = vec!["top".to_string(), "same".into(), "same".into()];
         let mut shown = None;
-        super::paint(&mut shown, &rows, 40, 3, false);
+        super::paint(&mut shown, &rows, 40, 3, false, None);
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 3, false),
+            super::paint(&mut shown, &rows, 41, 3, false, None),
             super::frame(&rows, 41, 3)
         );
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 4, false),
+            super::paint(&mut shown, &rows, 41, 4, false, None),
             super::frame(&rows, 41, 4)
         );
         assert_eq!(
-            super::paint(&mut shown, &rows, 41, 4, true),
+            super::paint(&mut shown, &rows, 41, 4, true, None),
             super::frame(&rows, 41, 4)
         );
         let mut lost = None;
         assert_eq!(
-            super::paint(&mut lost, &rows, 41, 4, false),
+            super::paint(&mut lost, &rows, 41, 4, false, None),
             super::frame(&rows, 41, 4)
         );
     }
@@ -5831,10 +6656,10 @@ mod tests {
         let rows = vec!["top".to_string(), "12:00:00".into()];
         let mut shown = None;
         assert!(!super::due(&shown, std::time::Instant::now()));
-        super::paint(&mut shown, &rows, 40, 2, false);
+        super::paint(&mut shown, &rows, 40, 2, false, None);
         let whole_at = shown.as_ref().unwrap().whole_at;
         let ticked = vec!["top".to_string(), "12:00:01".into()];
-        assert_ne!(super::paint(&mut shown, &ticked, 40, 2, false), "");
+        assert_ne!(super::paint(&mut shown, &ticked, 40, 2, false, None), "");
         assert_eq!(shown.as_ref().unwrap().whole_at, whole_at);
         let almost = whole_at + super::WHOLE_EVERY - std::time::Duration::from_millis(1);
         assert!(!super::due(&shown, almost));
@@ -5892,7 +6717,7 @@ mod tests {
         let stamped = super::stamped(&row, 40);
         assert!(stamped.find(close).is_some_and(|at| at < stamped.find(&super::version_tag()).unwrap()));
         let row = super::link("https://example.com", "LATENCY");
-        let notice = super::with_notice(&row, "Kitty unavailable", 80);
+        let notice = super::with_notice(&row, "Kitty unavailable", 80, super::version_room(80));
         assert!(notice.find(close).is_some_and(|at| at < notice.find("Kitty unavailable").unwrap()));
         assert_eq!(super::display_width(&stamped), 40);
     }
@@ -6684,6 +7509,68 @@ mod tests {
         // count that has not settled yet must not wrap round to red.
         assert_eq!(health(2.0), health(1.0));
         assert_eq!(health(-1.0), health(0.0));
+    }
+
+    #[test]
+    fn a_program_status_report_is_one_clean_osc_7501() {
+        let bytes = super::status_bytes(&super::Status {
+            state: "working",
+            app: "opscope-clocks",
+            progress: Some(40),
+            title: Some("Pomodoro"),
+            msg: Some("FOCUS · 15 min left"),
+        });
+        assert_eq!(
+            bytes,
+            format!(
+                "\x1b]7501;state=working:app=opscope-clocks:progress=40:title={}:msg={}\x1b\\",
+                super::base64("Pomodoro".as_bytes()),
+                super::base64("FOCUS · 15 min left".as_bytes())
+            )
+        );
+        // A control character would make the terminal drop the report
+        // whole, so it becomes a space; progress caps at 100; an app name
+        // keeps only what the protocol allows.
+        let bytes = super::status_bytes(&super::Status {
+            state: "done",
+            app: "opscope clocks!",
+            progress: Some(250),
+            title: None,
+            msg: Some("FOCUS elapsed\nnow"),
+        });
+        assert!(bytes.contains("app=opscopeclocks:"), "{bytes:?}");
+        assert!(bytes.contains("progress=100"), "{bytes:?}");
+        assert!(bytes.contains(&format!("msg={}", super::base64("FOCUS elapsed now".as_bytes()))));
+        assert!(!bytes.contains("title="));
+        // `clear` with nothing else is the whole report.
+        let clear = super::status_bytes(&super::Status {
+            state: "clear",
+            app: "",
+            progress: None,
+            title: None,
+            msg: None,
+        });
+        assert_eq!(clear, "\x1b]7501;state=clear\x1b\\");
+        // The exit paths write a constant, since one is a signal handler;
+        // it has to be the same report.
+        assert_eq!(clear, super::STATUS_CLEAR);
+        // Every exit clears: `q` through `restore_screen`, Ctrl-C and
+        // SIGTERM through `handle_signal`, which never reaches a widget, and
+        // a panic through the `Drop` that runs while it unwinds.
+        let src = include_str!("lib.rs");
+        for (start, call) in [
+            ("pub fn restore_screen() {", "clear_program_status();"),
+            ("impl Drop for Keyboard {", "clear_program_status();"),
+            ("extern \"C\" fn handle_signal(", "clear_program_status_signal();"),
+        ] {
+            let at = src.find(start).unwrap_or_else(|| panic!("{start} moved"));
+            let end = src[at..].find("\n}\n").expect("the body ends");
+            assert!(src[at..at + end].contains(call), "{start} leaves the status behind");
+        }
+        // Without the capability nothing is written: `program_status` is a
+        // no-op on every terminal that did not answer the probe, and the
+        // test process negotiated nothing.
+        assert!(!super::capabilities().program_status);
     }
 
     #[test]
@@ -8011,5 +8898,155 @@ mod tests {
             .expect_err("a child that never reads is a timeout");
         assert!(why.contains("did not answer in 1s"), "{:?}", why);
         assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
+    }
+
+    /// The text a line draws, escapes removed.
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn tab(title: &str) -> Tab {
+        Tab { title: title.into(), marker: None, badge: None }
+    }
+
+    #[test]
+    fn the_open_tab_is_bracketed_and_both_forms_share_a_width() {
+        let tabs = || vec![tab("A"), tab("B"), tab("C")];
+        let (lines, _) = tab_strip(1, &tabs(), 40, "", "", "");
+        let text = plain(&lines.join("\n"));
+        assert!(text.contains("[B]"), "{text}");
+        assert!(text.contains(" A "), "{text}");
+        assert!(text.contains(" C "), "{text}");
+        // The bracketed and the spaced form are the same two columns
+        // wider than the title, so switching which is open moves nothing.
+        let wide: Vec<usize> = (0..3)
+            .map(|active| display_width(&plain(&tab_strip(active, &tabs(), 40, "", "", "").0[0])))
+            .collect();
+        assert!(wide.iter().all(|&n| n == wide[0]), "{wide:?}");
+    }
+
+    #[test]
+    fn tabs_wrap_whole_and_placements_follow_the_line() {
+        // From 11 up a tab (its 8 columns, marker, gap) fits whole; below
+        // it `seg` clips, which is the documented end of a too-wide tab.
+        let tabs = || (0..6).map(|_| tab("REGION")).collect::<Vec<_>>();
+        for w in 11..=40 {
+            let (lines, placed) = tab_strip(0, &tabs(), w, "", "", "");
+            let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+            for line in &text {
+                assert!(display_width(line) <= w - 1, "w {w}: {line:?}");
+            }
+            // Every title lands whole on one line - a split one would sit
+            // cut at a line's end.
+            assert_eq!(text.concat().matches("REGION").count(), 6, "w {w}: {text:?}");
+            for &(row, col, i) in &placed {
+                let want = if i == 0 { "[REGION]" } else { " REGION " };
+                let on: String = text[row].chars().skip(col).take(1).collect();
+                assert!(want.contains(on.as_str()), "w {w} col {col}: {on:?} in {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_is_never_clipped() {
+        let tabs = || {
+            (0..4)
+                .map(|_| Tab {
+                    title: "REGION".into(),
+                    marker: Some((String::new(), "·")),
+                    badge: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for w in 11..=40 {
+            let (lines, placed) = tab_strip(0, &tabs(), w, "", "", "");
+            let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+            // Every marker a line holds is drawn on it; a clipped one
+            // would leave the count short.
+            for (row, line) in text.iter().enumerate() {
+                let mut tabs_here: Vec<usize> = placed
+                    .iter()
+                    .filter(|&&(r, _, _)| r == row)
+                    .map(|&(_, _, i)| i)
+                    .collect();
+                tabs_here.dedup();
+                assert_eq!(line.matches('·').count(), tabs_here.len(), "w {w}: {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_badge_shows_only_when_given() {
+        let tabs = vec![
+            Tab { title: "US".into(), marker: Some((String::new(), "·")), badge: Some("2".into()) },
+            tab("GB"),
+        ];
+        let (lines, _) = tab_strip(0, &tabs, 40, "", "", "");
+        let text = plain(&lines.join("\n"));
+        // The badge sits right after the marker cell.
+        assert!(text.contains("·2"), "{text}");
+        assert!(!text.contains(" GB 2"), "{text}");
+        let (lines, _) = tab_strip(
+            0,
+            &[Tab { title: "US".into(), marker: Some((String::new(), "·")), badge: None }],
+            40,
+            "",
+            "",
+            "",
+        );
+        assert!(!plain(&lines.join("\n")).contains('2'));
+    }
+
+    #[test]
+    fn a_badge_that_does_not_fit_is_left_off() {
+        // Width 8, room 7. `[US]` plus the marker and the gap fill the line,
+        // so `100` would be clipped to `1`.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("100".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines.join("\n"));
+        assert!(text.contains("[US]"), "{text}");
+        assert!(text.contains('·'), "{text}");
+        assert!(!text.contains('1'), "{text}");
+        assert!(!text.contains("100"), "{text}");
+    }
+
+    #[test]
+    fn a_badge_that_fits_without_the_trailing_gap_is_shown() {
+        // Width 8, room 7. ` [US]·1` fills the line; the gap after the count
+        // does not, and clipping that gap leaves the count whole.
+        let tabs = [Tab {
+            title: "US".into(),
+            marker: Some((String::new(), "·")),
+            badge: Some("1".into()),
+        }];
+        let (lines, _) = tab_strip(0, &tabs, 8, "", "", "");
+        let text = plain(&lines[0]);
+        assert_eq!(text, " [US]·1", "{text}");
+    }
+
+    #[test]
+    fn step_tab_wraps_at_every_count() {
+        for count in 1..=6 {
+            assert_eq!(step_tab(0, -1, count), count - 1, "left from the first of {count}");
+            assert_eq!(step_tab(count as i64 - 1, 1, count), 0, "right from the last of {count}");
+        }
+        assert_eq!(step_tab(0, -1, 0), 0);
     }
 }

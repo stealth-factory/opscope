@@ -46,8 +46,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-const GQL: &str = "https://api.github.com/graphql";
-const REST: &str = "https://api.github.com";
 const WINDOWS: &[i64] = &[12, 24, 48, 168];
 const FILTERS: &[&str] = &["all", "failed", "running"];
 
@@ -102,14 +100,37 @@ fn token(gha: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// Enterprise host from this widget's own section.
+///
+/// A `*.ghe.com` value is the web host; requests go to `api.<host>`. Empty
+/// reads `enterprise_hostname_env`, then the public github.com API.
+fn enterprise_host(cfg: &serde_json::Value) -> Option<String> {
+    tc::github_enterprise_hostname(
+        &tc::cfg_str(cfg, "enterprise_hostname", ""),
+        &tc::cfg_str(cfg, "enterprise_hostname_env", ""),
+    )
+}
+
+/// The host this run talks to, resolved once in main beside the token.
+///
+/// The settings screen saves each field as it goes and restarts only on
+/// exit, so a host read per request could send the startup token to a
+/// server typed in since. Every request reads this snapshot instead.
+static API_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn api_host() -> Option<&'static str> {
+    API_HOST.get().and_then(|h| h.as_deref())
+}
+
 fn graphql(
     query: &str,
     tok: &str,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
     let (out, headers) = tc::post_json(
-        GQL,
+        gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),
@@ -157,8 +178,9 @@ fn rest_get(
     path: &str,
     tok: &str,
     rate: &mut Option<(i64, i64)>,
+    rest_base: &str,
 ) -> Result<serde_json::Value, String> {
-    let url = format!("{}{}", REST, path);
+    let url = format!("{}{}", rest_base, path);
     let (body, headers) = tc::get_with_headers(
         &url,
         &[
@@ -918,6 +940,7 @@ fn fetch_runs_for(
     tok: &str,
     hours: i64,
     rate: &mut Option<(i64, i64)>,
+    rest_base: &str,
 ) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
@@ -938,7 +961,7 @@ fn fetch_runs_for(
             page,
             urlencoding_lite(&created)
         );
-        let res = rest_get(&path, tok, rate)?;
+        let res = rest_get(&path, tok, rate, rest_base)?;
         if page == 1 {
             total = res["total_count"].as_i64().unwrap_or(0);
         }
@@ -984,12 +1007,16 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-fn discover_accounts(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<(String, Vec<String>), String> {
+fn discover_accounts(
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
+) -> Result<(String, Vec<String>), String> {
     let mut viewer = String::new();
     let mut accounts = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let data = graphql(&orgs_query(cursor.as_deref()), tok, rate)?;
+        let data = graphql(&orgs_query(cursor.as_deref()), tok, rate, gql_url)?;
         if viewer.is_empty() {
             viewer = data["viewer"]["login"].as_str().unwrap_or("").to_string();
             if viewer.is_empty() {
@@ -1031,6 +1058,7 @@ fn discover_account_pages(
     acc: &str,
     since: f64,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<(Vec<FoundRepo>, Option<String>), String> {
     let mut found = Vec::new();
     let mut cursor: Option<String> = None;
@@ -1041,7 +1069,7 @@ fn discover_account_pages(
         } else {
             discover_query(acc, cursor.as_deref())
         };
-        let data = match graphql(&query, tok, rate) {
+        let data = match graphql(&query, tok, rate, gql_url) {
             Ok(d) => d,
             Err(said) => {
                 return Ok((found, Some(format!("{}: {}", acc, said))));
@@ -1086,12 +1114,13 @@ fn discover_repos(
     cap: usize,
     viewer: &str,
     rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
 ) -> Result<(Vec<String>, PickStats, Option<String>), String> {
     let since = tc::now() - (pushed_days as f64 * 86400.0);
     let mut found: Vec<FoundRepo> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for acc in accounts {
-        match discover_account_pages(tok, acc, since, rate) {
+        match discover_account_pages(tok, acc, since, rate, gql_url) {
             Ok((page, note)) => {
                 found.extend(page);
                 if let Some(said) = note {
@@ -1118,8 +1147,12 @@ fn discover_repos(
     Ok((picked, stats, note))
 }
 
-fn viewer_login(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<String, String> {
-    let data = graphql("{ viewer { login } }", tok, rate)?;
+fn viewer_login(
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+    gql_url: &str,
+) -> Result<String, String> {
+    let data = graphql("{ viewer { login } }", tok, rate, gql_url)?;
     let login = data["viewer"]["login"].as_str().unwrap_or("").to_string();
     if login.is_empty() {
         Err("no viewer login in the response".into())
@@ -1141,10 +1174,20 @@ fn on_legacy_section() -> bool {
 
 /// And said out loud, because a silent fallback is how a rename becomes
 /// permanent: nothing ever tells anyone the old name is still doing the
-/// work.
-fn legacy_section_note() -> Option<String> {
-    on_legacy_section()
-        .then(|| "config: reading the old `gha` section — rename it to `github_actions`".into())
+/// work. A notice rather than a clause on the fetch error, which made a
+/// working board read as a failing one.
+fn raise_legacy_section_notice() {
+    tc::notices::when(on_legacy_section(), || {
+        tc::notices::Notice::info(
+            "legacy-config-section",
+            "config: reading the old `gha` section — rename it to `github_actions`",
+        )
+        .detail(
+            "github-actions reads the old name until the section is renamed; \
+             saving from the settings screen (,) or editing config.json renames it.",
+        )
+        .source("config")
+    });
 }
 
 /// Report a step to the pane, if the lock is free.
@@ -1161,26 +1204,17 @@ fn note(live: &Arc<Mutex<State>>, f: impl FnOnce(&mut tc::Progress)) {
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
-    source: &str,
     accounts: &[String],
     explicit: &[String],
     pushed_days: i64,
     cap: usize,
     hours: i64,
     live: &Arc<Mutex<State>>,
+    host: Option<&str>,
 ) -> Result<State, String> {
-    let mut err = if source == "config" {
-        tc::config_token_warning().unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if let Some(said) = legacy_section_note() {
-        err = if err.is_empty() {
-            said
-        } else {
-            format!("{} · {}", err, said)
-        };
-    }
+    let gql_url = tc::github_graphql_url(host);
+    let rest_base = tc::github_rest_base_url(host);
+    let mut err = String::new();
     let mut rate = None;
     let empty_stats = PickStats::default();
     note(live, |p| {
@@ -1188,7 +1222,7 @@ fn one_pass(
         p.begin("accounts");
     });
     let (repos, stats, viewer, orgs, n_accounts, is_explicit) = if !explicit.is_empty() {
-        let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+        let viewer = viewer_login(tok, &mut rate, &gql_url).unwrap_or_default();
         let n = explicit
             .iter()
             .map(|r| repo_owner(r))
@@ -1198,7 +1232,7 @@ fn one_pass(
         (unique_repos(explicit), empty_stats, viewer, 0usize, n, true)
     } else {
         let (viewer, want) = if accounts.is_empty() {
-            match discover_accounts(tok, &mut rate) {
+            match discover_accounts(tok, &mut rate, &gql_url) {
                 Ok(got) => got,
                 Err(said) => {
                     return Ok(State {
@@ -1210,7 +1244,7 @@ fn one_pass(
                 }
             }
         } else {
-            let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+            let viewer = viewer_login(tok, &mut rate, &gql_url).unwrap_or_default();
             (viewer, accounts.to_vec())
         };
         if want.is_empty() {
@@ -1234,7 +1268,7 @@ fn one_pass(
             p.finish("accounts");
             p.begin("repos");
         });
-        match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate) {
+        match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate, &gql_url) {
             Ok((repos, stats, note)) => {
                 if let Some(said) = note {
                     err = if err.is_empty() {
@@ -1295,7 +1329,7 @@ fn one_pass(
         note(live, |p| {
             p.count("runs", done, Some(repos.len()));
         });
-        match fetch_runs_for(repo, tok, hours, &mut rate) {
+        match fetch_runs_for(repo, tok, hours, &mut rate, &rest_base) {
             Ok((got, note)) => {
                 runs.extend(got);
                 if let Some(said) = note {
@@ -1356,6 +1390,7 @@ fn one_pass(
 }
 
 fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
+    let rest_base = tc::github_rest_base_url(api_host());
     let repo = text(run, "repo");
     let id = run["id"].as_i64().unwrap_or(0);
     let Some((owner, name)) = split_repo(&repo) else {
@@ -1375,7 +1410,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
             "/repos/{}/{}/actions/runs/{}/jobs?per_page=100&page={}",
             owner, name, id, page
         );
-        let res = match rest_get(&path, tok, &mut None) {
+        let res = match rest_get(&path, tok, &mut None, &rest_base) {
             Ok(v) => v,
             // Whatever arrived is real and worth drawing; only a failure on
             // the first page leaves nothing to show.
@@ -1629,6 +1664,7 @@ fn main() {
     ) {
         return;
     }
+    raise_legacy_section_notice();
     let cfg = if on_legacy_section() {
         tc::load_config("gha")
     } else {
@@ -1664,7 +1700,7 @@ fn main() {
     });
 
     let p = palette();
-    let (tok, source) = token(&cfg);
+    let (tok, _) = token(&cfg);
     // The variable this widget would read, for the message that names it
     // when there is no token. Its own, like everything else here.
     let env_name = {
@@ -1685,6 +1721,7 @@ fn main() {
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
     let poll_env = env_name.clone();
+    let _ = API_HOST.set(enterprise_host(&cfg));
     std::thread::spawn(move || loop {
         let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
         if poll_tok.is_empty() {
@@ -1699,13 +1736,13 @@ fn main() {
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 one_pass(
                     &poll_tok,
-                    source,
                     &poll_accounts,
                     &poll_explicit,
                     pushed_days,
                     max_repos,
                     hours,
                     &poller,
+                    api_host(),
                 )
             }));
             // However the pass ended - answer, error or panic - it is no
@@ -1771,6 +1808,10 @@ fn main() {
 
     loop {
         let tick = tc::animation_tick();
+        // The filter box takes `!` as a character, not the notices screen.
+        if typing && !overlay {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -2276,9 +2317,42 @@ fn main() {
             w - 1,
         ));
 
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " details".into()),
+            ],
+            // Both name what the next press moves to, not what is in
+            // force: the state filter is on the count line whenever it is
+            // narrowing anything, and the window is in the ACTIVITY
+            // heading and the figures under it.
+            vec![(
+                p.dim.as_str(),
+                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
+            )],
+            vec![(p.dim.as_str(), "[/]filter".into())],
+            vec![(
+                p.dim.as_str(),
+                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
+            )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        if !typing {
+            hints.insert(hints.len() - 1, vec![(
+                p.dim.as_str(),
+                "[,] settings".into(),
+            )]);
+        }
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        // The hints, built before the list so the list is sized with them
+        // already taken.
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
-        visible = (h.saturating_sub(rows.len() + 2) / per_item).max(1);
+        visible = (h.saturating_sub(rows.len() + footer.len() + 1) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
@@ -2305,7 +2379,7 @@ fn main() {
         // and ended: a run is one row, or two when its jobs are drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
-            if rows.len() >= h.saturating_sub(1) {
+            if !row_fits_above_footer(rows.len(), h, footer.len()) {
                 break;
             }
             let from = rows.len();
@@ -2398,7 +2472,7 @@ fn main() {
             }
             let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
-            if !cols.single && rows.len() < h.saturating_sub(1) {
+            if !cols.single && row_fits_above_footer(rows.len(), h, footer.len()) {
                 // The workflow joins the subject here rather than fighting
                 // the repo for room on the row above. Both are as long as
                 // whoever named them made them, and this line carries only
@@ -2443,38 +2517,7 @@ fn main() {
             }
         }
 
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " details".into()),
-            ],
-            // Both name what the next press moves to, not what is in
-            // force: the state filter is on the count line whenever it is
-            // narrowing anything, and the window is in the ACTIVITY
-            // heading and the figures under it.
-            vec![(
-                p.dim.as_str(),
-                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
-            )],
-            vec![(p.dim.as_str(), "[/]filter".into())],
-            vec![(
-                p.dim.as_str(),
-                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
-            )],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        if !typing {
-            hints.insert(hints.len() - 1, vec![(
-                p.dim.as_str(),
-                "[,] settings".into(),
-            )]);
-        }
         placed = rows_at;
-        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         rows.truncate(h.saturating_sub(footer.len()));
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
@@ -2486,8 +2529,9 @@ fn main() {
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
         let foot_top = rows.len();
+        let body_end = rows.len();
         rows.extend(footer);
-        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, body_end.saturating_sub(1))).collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
@@ -2495,9 +2539,34 @@ fn main() {
 }
 
 
+/// Whether another run row still fits above a footer of `footer` rows.
+///
+/// Both lines of a run use this. The second used to stop at `h - 1`, which
+/// is the footer only when the footer is one row. A taller one let the
+/// second line land on the row `truncate` then cut, and the placement
+/// survived, so a click on the footer selected that run.
+fn row_fits_above_footer(rows: usize, h: usize, footer: usize) -> bool {
+    rows < h.saturating_sub(footer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runs_second_line_stops_where_the_first_does() {
+        // A one-row footer: the old `h - 1` bound and this one agree.
+        assert!(row_fits_above_footer(10, 12, 1));
+        assert!(!row_fits_above_footer(11, 12, 1));
+        // A wrapped footer is taller than one row. Index `h - footer`
+        // is the first footer row. The old bound still called that a fit.
+        let h = 20;
+        let footer = 4;
+        let first_footer_row = h - footer;
+        assert!(row_fits_above_footer(first_footer_row - 1, h, footer));
+        assert!(!row_fits_above_footer(first_footer_row, h, footer));
+        assert!(first_footer_row < h - 1);
+    }
 
     #[test]
     fn the_filters_are_named_and_neither_all_nor_the_window_is_one() {

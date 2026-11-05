@@ -1576,7 +1576,7 @@ fn main() {
         // ---- the footer, built before the body ----
         // It wraps, so how many rows it takes depends on the width, and the
         // body cannot know its own budget until that is settled.
-        let hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
             vec![(
                 p.dim.as_str(),
                 format!(
@@ -1606,9 +1606,9 @@ fn main() {
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
         ];
+        hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 

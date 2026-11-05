@@ -634,7 +634,8 @@ fn footer(w: usize, neighbours: bool, p: &Palette) -> (tc::Footer, usize) {
         .max()
         .unwrap_or(0);
     let indent = usize::from(widest + 1 <= w);
-    let mut packed = tc::pack_hints_placed(&hints, w.saturating_sub(indent + 1).max(1), "  ");
+    let room = w.saturating_sub(indent + 1).max(1);
+    let mut packed = tc::pack_hints_placed(&hints, room, "  ");
     packed.lines = packed
         .lines
         .into_iter()
@@ -936,7 +937,7 @@ fn main() {
         let view = anchor.unwrap_or_else(|| Month::of(today));
         let body = frame(w, today, view, start, &zone.label(now), zone_note.as_deref(), neighbours, weeks, &p);
         let (packed, indent) = footer(w, neighbours, &p);
-        let foot = &packed.lines;
+        let foot: Vec<String> = packed.lines.to_vec();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: on a wall of panes it is the only row saying which
         // widget this is.

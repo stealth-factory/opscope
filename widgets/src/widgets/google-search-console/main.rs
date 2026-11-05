@@ -46,9 +46,6 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-/// The variable a pasted token is read from when `token_env` is unset;
-/// spelled out for the settings check, and held to core's by a test.
-const TOKEN_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
 /// The shortest wait between refreshes. The data moves hourly at best, so
 /// anything shorter only spends quota.
 const MIN_REFRESH: f64 = 120.0;
@@ -60,9 +57,8 @@ const WINDOWS: &[i64] = &[7, 28];
 /// Everything read from the widget's own config section.
 #[derive(Clone)]
 struct Config {
+    credentials: String,
     credentials_file: String,
-    token: String,
-    token_env: String,
     sites: Vec<String>,
     refresh: f64,
     inspect_top: usize,
@@ -75,7 +71,8 @@ struct Shared {
     /// What stops every site at once: no credential, a key file that cannot
     /// be read, a refused sign-in, sites.list refused, the poller died.
     err: String,
-    /// A key file others can read, or a pasted token's one-hour life.
+    /// A key file others can read. A key stored in config is covered by
+    /// the config-file permission notice instead.
     warning: String,
 }
 
@@ -113,8 +110,10 @@ type Caches = Arc<Mutex<BTreeMap<String, InspectionCache>>>;
 
 /// Sign in, or say why not, in the wording every Google widget shares.
 fn signed_in(cfg: &Config) -> Result<(google::Credential, Client), String> {
-    let Some(cred) = google::credential(&cfg.credentials_file, &cfg.token, &cfg.token_env) else {
-        return Err(google::missing_credential(SETTINGS.section, &cfg.token_env));
+    let cred = match google::credential(&cfg.credentials, &cfg.credentials_file) {
+        Ok(Some(cred)) => cred,
+        Ok(None) => return Err(google::missing_credential(SETTINGS.section)),
+        Err(why) => return Err(why),
     };
     // Read-only: it cannot submit a sitemap or change a property.
     let token = cred.bearer(&[google::SCOPE_WEBMASTERS_READONLY])?;
@@ -326,10 +325,7 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             return;
         }
     };
-    let warning = google::credential(&cfg.credentials_file, &cfg.token, &cfg.token_env)
-        .and_then(|c| c.warning())
-        .or_else(tc::config_token_warning)
-        .unwrap_or_default();
+    let warning = cred.warning().or_else(tc::config_token_warning).unwrap_or_default();
     let (targets, err) = resolve_sites(cfg, &client);
     if let Ok(mut g) = shared.lock() {
         g.err = err.unwrap_or_default();
@@ -442,9 +438,8 @@ fn page_of(item: &Item, site: &SiteData) -> Option<String> {
 fn read_config() -> Config {
     let cfg = tc::load_config("google_search_console");
     Config {
+        credentials: tc::cfg_str(&cfg, "credentials", ""),
         credentials_file: tc::cfg_str(&cfg, "credentials_file", ""),
-        token: tc::cfg_str(&cfg, "token", ""),
-        token_env: tc::cfg_str(&cfg, "token_env", TOKEN_ENV),
         sites: tc::cfg_strings(&cfg, "sites", &[]),
         refresh: tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 600.0), 600.0).max(MIN_REFRESH),
         inspect_top: tc::cfg_usize(&cfg, "inspect_top", 25).min(200),
@@ -961,19 +956,26 @@ mod tests {
 
     #[test]
     fn sign_in_is_worded_by_core_for_this_section() {
-        assert_eq!(TOKEN_ENV, google::DEFAULT_TOKEN_ENV);
         let cfg = Config {
+            credentials: String::new(),
             credentials_file: String::new(),
-            token: String::new(),
-            token_env: "OPSCOPE_TEST_UNSET_TOKEN_VARIABLE".into(),
             sites: Vec::new(),
             refresh: 600.0,
             inspect_top: 25,
         };
         let Err(row) = signed_in(&cfg) else { panic!("no credential must not sign in") };
-        assert_eq!(row, google::missing_credential("google_search_console", "OPSCOPE_TEST_UNSET_TOKEN_VARIABLE"));
-        assert!(row.starts_with("no credential: set google_search_console.credentials_file "), "{row}");
+        assert_eq!(row, google::missing_credential("google_search_console"));
+        assert!(row.starts_with("no credential: set google_search_console.credentials "), "{row}");
+        assert!(row.contains("google_search_console.credentials_file "), "{row}");
         assert!(row.ends_with(tc::SET_IN_SETTINGS), "{row}");
+        // A pasted key that is not one says so, rather than falling through
+        // to the file or to "no credential".
+        let pasted = Config {
+            credentials: "{not a key".into(),
+            ..cfg
+        };
+        let Err(row) = signed_in(&pasted) else { panic!("a broken paste must not sign in") };
+        assert_ne!(row, google::missing_credential("google_search_console"), "{row}");
     }
 
     fn site(url: &str, permission: &str) -> Site {

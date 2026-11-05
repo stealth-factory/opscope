@@ -50,7 +50,7 @@ function generateFormula(version, artifacts, repoRoot = path.resolve(__dirname, 
 # Release: ${version}
 class Opscope < Formula
   desc "Terminal widgets showing real operational data"
-  homepage "https://github.com/stealth-factory/opscope"
+  homepage "https://opscope.stealth-factory.co"
   license "AGPL-3.0-or-later"
 
   depends_on :macos

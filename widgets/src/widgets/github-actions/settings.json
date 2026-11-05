@@ -2,6 +2,8 @@
   "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
   "_schema": {
     "token": { "secret": true },
+    "enterprise_hostname": { "type": "string" },
+    "enterprise_hostname_env": { "type": "string" },
     "accounts": {
       "items": "string"
     },
@@ -25,6 +27,10 @@
   "token": "",
   "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
   "token_env": "GITHUB_TOKEN",
+  "_enterprise_hostname_comment": "Web hostname of a GitHub Enterprise Cloud tenant (for example acme.ghe.com). A *.ghe.com host is called at api.<host>. Empty reads the variable enterprise_hostname_env names, if any; otherwise github.com.",
+  "enterprise_hostname": "",
+  "_enterprise_hostname_env_comment": "Name of an environment variable to read when enterprise_hostname is empty, for example GITHUB_ENTERPRISE_HOSTNAME. Empty reads none. This is a variable name, never a hostname.",
+  "enterprise_hostname_env": "",
   "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
   "accounts": [],
   "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",

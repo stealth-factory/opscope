@@ -10,7 +10,15 @@ GitHub search and pull-request APIs using this widget's own credential.
 
 The owned section is `github_prs`. A legacy `pr` section is used only when `github_prs` is absent.
 
-Declared fields: `token`, `token_env`, `sources`, `limit`, `refresh`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `sources`, `limit`, `refresh`
+
+For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
+to the web host (for example `acme.ghe.com`). Requests go to
+`https://api.acme.ghe.com`. Or name an environment variable in
+`enterprise_hostname_env` (for example `GITHUB_ENTERPRISE_HOSTNAME`) and set
+the host there. No variable is read unless one is named, so a host some other
+tool exported never moves the widget. Otherwise it uses the public github.com
+API.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

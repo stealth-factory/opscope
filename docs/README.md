@@ -25,11 +25,15 @@ navigation, not itself a widget.
 | [`github-prs`](../widgets/src/widgets/github-prs/README.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
 | [`google-search-console`](../widgets/src/widgets/google-search-console/README.md) | Which pages and queries moved in Google Search, what people search to arrive, and which pages that earn the traffic are broken in the index. |
 | [`linear`](../widgets/src/widgets/linear/README.md) | Linear across every team at once — what is outstanding, which cycles are running, and whether issues are being closed faster than they arrive. |
+| [`google-analytics`](../widgets/src/widgets/google-analytics/README.md) | Google Analytics 4: is traffic normal right now against a baseline this widget records itself, and did key events hold up against the same weekday. |
 | [`agent-usage`](../widgets/src/widgets/agent-usage/README.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
 | [`ports`](../widgets/src/widgets/ports/README.md) | What is listening on this machine, what started it, and who can reach it. |
+| [`rex-panes`](../widgets/src/widgets/rex-panes/README.md) | Everything running under a [Rex](https://www.superlogical.com/rex/docs/) server, across every session — agents by the state they report themselves, blocked first, and one key to focus any pane. |
 | [`netwatch`](../widgets/src/widgets/netwatch/README.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
+| [`disk`](../widgets/src/widgets/disk/README.md) | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling. |
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
-| [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, and everyone else's clock — the four things you need to know about time while working across timezones. |
+| [`google-trends`](../widgets/src/widgets/google-trends/README.md) | What a region is searching for right now — Google's own Trending Now feed, shown as Google states it, with what changed since the last look. |
+| [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, everyone else's clock, the current weather for one configured place, and a condition glyph on each world-clock city that has coordinates. |
 | [`matrix`](../widgets/src/widgets/matrix/README.md) | Digital rain. It computes nothing and reports no data on purpose. |
 | [`months`](../widgets/src/widgets/months/README.md) | A month grid you can page through, with today in context — every square computed from the machine clock and the timezone database rather than fetched from anywhere. |
 

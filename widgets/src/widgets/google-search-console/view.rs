@@ -106,7 +106,7 @@ pub struct Screen<'a> {
     /// What stops everything: no credential, sites.list refused, the
     /// poller died.
     pub err: &'a str,
-    /// A key file others can read, or a pasted token's one-hour life.
+    /// A key file others can read.
     pub warning: &'a str,
     pub selected: usize,
     pub now: f64,
@@ -1876,7 +1876,7 @@ mod tests {
         let base = site("sc-domain:example.com");
         let caches = BTreeMap::new();
         let mut cases: Vec<(&str, SiteData, &str, &str)> = Vec::new();
-        let no_credential = opscope_core::google::missing_credential("google_search_console", "");
+        let no_credential = opscope_core::google::missing_credential("google_search_console");
         cases.push(("no credential", base.clone(), no_credential.as_str(), "no credential"));
         let mut not_enabled = base.clone();
         not_enabled.problem = Some("API not enabled: turn on searchconsole.googleapis.com in the key's Cloud project (APIs & Services)".into());

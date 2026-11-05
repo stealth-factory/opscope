@@ -1,0 +1,565 @@
+{
+ "clients": {
+  "clients": [
+   {
+    "client_id": "client:01a10000-0000-7000-8000-000000000015",
+    "connected_at": "2026-11-04T03:54:44.383844382+08:00",
+    "connection_state": "connected",
+    "info": {
+     "kind": "app",
+     "label": "laptop",
+     "name": "Rex Beta",
+     "platform": "macos",
+     "version": "0.1.0 (1758)"
+    },
+    "principal": {
+     "display": "user@example.com",
+     "kind": "tailscale",
+     "login_name": "user@example.com",
+     "node": "laptop-mac",
+     "path": [
+      "tailnet-serve",
+      "login-server"
+     ],
+     "remote_addr": "192.0.2.1",
+     "transport": "tailscale",
+     "user_id": "userid:1000000000000000"
+    },
+    "session_ids": [
+     "session:01a10000-0000-7000-8000-000000000001"
+    ]
+   },
+   {
+    "client_id": "client:01a10000-0000-7000-8000-000000000014",
+    "connected_at": "2026-11-04T04:03:46.967312563+08:00",
+    "connection_state": "connected",
+    "info": {
+     "kind": "app",
+     "label": "desk",
+     "name": "Rex Beta",
+     "platform": "macos",
+     "version": "0.1.0 (1758)"
+    },
+    "principal": {
+     "display": "user@example.com",
+     "kind": "tailscale",
+     "login_name": "user@example.com",
+     "node": "desk-mac",
+     "path": [
+      "tailnet-serve",
+      "login-server"
+     ],
+     "remote_addr": "192.0.2.2",
+     "transport": "tailscale",
+     "user_id": "userid:1000000000000000"
+    },
+    "session_ids": [
+     "session:01a10000-0000-7000-8000-000000000001"
+    ]
+   },
+   {
+    "client_id": "client:01a10000-0000-7000-8000-000000000017",
+    "connected_at": "2026-11-04T04:29:23.94546428+08:00",
+    "connection_state": "connected",
+    "info": {
+     "kind": "cli",
+     "name": "rex",
+     "platform": "linux",
+     "version": "0.0.1793716919-g000000"
+    },
+    "principal": {
+     "display": "uid 1000",
+     "gid": 1000,
+     "kind": "peer",
+     "pid": 285672,
+     "remote_addr": "@",
+     "transport": "unix",
+     "uid": 1000
+    }
+   }
+  ]
+ },
+ "errors": {},
+ "server": {
+  "api_revision": 10,
+  "config": {
+   "generation": 1,
+   "hash": ""
+  },
+  "exit_empty": true,
+  "host_id": "01a10000-0000-7000-8000-000000000013",
+  "instance_id": "01a10000-0000-7000-8000-000000000019",
+  "pid": 257306,
+  "session_count": 1,
+  "started_at": "2026-11-03T19:38:24.16294104Z",
+  "tailscale": {
+   "allow_tailnet_members": false,
+   "state": "disabled"
+  }
+ },
+ "sessions": [
+  {
+   "blocks": [
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000006",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000013",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000014",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/home/user",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 262152,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/home/user",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 262152,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "claude",
+       "cwd": "/home/user",
+       "invoked_path": "/home/user/.local/bin/claude",
+       "name": "2.1.300",
+       "path": "/home/user/.local/share/claude/versions/2.1.300",
+       "pid": 268228,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": {}
+     },
+     "title": {
+      "owner": {
+       "name": "2.1.300",
+       "pid": 268228
+      },
+      "title": "\u25d0 opscope"
+     }
+    },
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000011",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000013",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000014",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/home/user",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 265969,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/home/user",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 265969,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "npm exec opscope@latest",
+       "cwd": "/home/user",
+       "invoked_path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "name": "node",
+       "path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "pid": 267089,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": {}
+     },
+     "title": {
+      "owner": {
+       "name": "bash",
+       "pid": 265969
+      },
+      "title": "user: /home/user"
+     }
+    },
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000012",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000013",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000014",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/home/user",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 266244,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/home/user",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 266244,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "npm exec opscope@latest",
+       "cwd": "/home/user",
+       "invoked_path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "name": "node",
+       "path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "pid": 267185,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": {}
+     },
+     "title": {
+      "owner": {
+       "name": "bash",
+       "pid": 266244
+      },
+      "title": "user: /home/user"
+     }
+    },
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000003",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000013",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000014",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/home/user",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 266792,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/home/user",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 266792,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "npm exec opscope@latest",
+       "cwd": "/home/user",
+       "invoked_path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "name": "node",
+       "path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "pid": 267368,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": {}
+     },
+     "title": {
+      "owner": {
+       "name": "bash",
+       "pid": 266792
+      },
+      "title": "user: /home/user"
+     }
+    },
+    {
+     "block": {
+      "block_id": "block:01a10000-0000-7000-8000-000000000009",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "01a10000-0000-7000-8000-000000000013",
+      "label": "shell",
+      "owner": "client:01a10000-0000-7000-8000-000000000014",
+      "placement": "placed",
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     },
+     "process": {
+      "ancestors": [
+       {
+        "argv0": "-bash",
+        "cwd": "/home/user",
+        "invoked_path": "/bin/bash",
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "pid": 268893,
+        "user": "user",
+        "user_id": 1000
+       }
+      ],
+      "child": {
+       "argv0": "-bash",
+       "cwd": "/home/user",
+       "invoked_path": "/bin/bash",
+       "name": "bash",
+       "path": "/usr/bin/bash",
+       "pid": 268893,
+       "user": "user",
+       "user_id": 1000
+      },
+      "foreground": {
+       "argv0": "npm exec opscope@latest",
+       "cwd": "/home/user",
+       "invoked_path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "name": "node",
+       "path": "/home/user/.nvm/versions/node/v24.0.0/bin/node",
+       "pid": 269589,
+       "user": "user",
+       "user_id": 1000
+      },
+      "home": "/home/user"
+     },
+     "program_status": {
+      "records": {}
+     },
+     "title": {
+      "owner": {
+       "name": "bash",
+       "pid": 268893
+      },
+      "title": "user: /home/user"
+     }
+    }
+   ],
+   "label": "work",
+   "session_id": "session:01a10000-0000-7000-8000-000000000001",
+   "view": {
+    "active_window_id": "window:01a10000-0000-7000-8000-000000000002",
+    "label": "work",
+    "revision": 123,
+    "session_id": "session:01a10000-0000-7000-8000-000000000001",
+    "windows": [
+     {
+      "focused_block_id": "block:01a10000-0000-7000-8000-000000000003",
+      "label": "Window 00000001",
+      "layers": [
+       {
+        "blocks": [
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000006",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000013",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000014"
+         },
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000009",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000013",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000014"
+         },
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000003",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000013",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000014"
+         },
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000011",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000013",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000014"
+         },
+         {
+          "block_id": "block:01a10000-0000-7000-8000-000000000012",
+          "creator_name": "com.superlogical.terminal",
+          "flavor": "com.superlogical.terminal.shell",
+          "host_id": "01a10000-0000-7000-8000-000000000013",
+          "label": "shell",
+          "owner": "client:01a10000-0000-7000-8000-000000000014"
+         }
+        ],
+        "bounds": [
+         0,
+         0,
+         1,
+         1
+        ],
+        "kind": "tiled",
+        "layer_id": "layer:01a10000-0000-7000-8000-000000000004",
+        "layout": {
+         "rect": [
+          0,
+          0,
+          1,
+          1
+         ],
+         "split": {
+          "after": {
+           "rect": [
+            0.3333333333333333,
+            0,
+            0.6666666666666667,
+            1
+           ],
+           "split": {
+            "after": {
+             "rect": [
+              0.6666666666666667,
+              0,
+              0.33333333333333337,
+              1
+             ],
+             "split": {
+              "after": {
+               "block_id": "block:01a10000-0000-7000-8000-000000000012",
+               "rect": [
+                0.6666666666666667,
+                0.5,
+                0.33333333333333337,
+                0.5
+               ]
+              },
+              "before": {
+               "block_id": "block:01a10000-0000-7000-8000-000000000011",
+               "rect": [
+                0.6666666666666667,
+                0,
+                0.33333333333333337,
+                0.5
+               ]
+              },
+              "direction": "vertical",
+              "ratio": 0.5,
+              "split_id": "split:01a10000-0000-7000-8000-000000000010"
+             }
+            },
+            "before": {
+             "rect": [
+              0.3333333333333333,
+              0,
+              0.33333333333333337,
+              1
+             ],
+             "split": {
+              "after": {
+               "block_id": "block:01a10000-0000-7000-8000-000000000003",
+               "rect": [
+                0.3333333333333333,
+                0.5,
+                0.33333333333333337,
+                0.5
+               ]
+              },
+              "before": {
+               "block_id": "block:01a10000-0000-7000-8000-000000000009",
+               "rect": [
+                0.3333333333333333,
+                0,
+                0.33333333333333337,
+                0.5
+               ]
+              },
+              "direction": "vertical",
+              "ratio": 0.5,
+              "split_id": "split:01a10000-0000-7000-8000-000000000008"
+             }
+            },
+            "direction": "horizontal",
+            "ratio": 0.5,
+            "split_id": "split:01a10000-0000-7000-8000-000000000007"
+           }
+          },
+          "before": {
+           "block_id": "block:01a10000-0000-7000-8000-000000000006",
+           "rect": [
+            0,
+            0,
+            0.3333333333333333,
+            1
+           ]
+          },
+          "direction": "horizontal",
+          "ratio": 0.3333333333333333,
+          "split_id": "split:01a10000-0000-7000-8000-000000000005"
+         }
+        }
+       }
+      ],
+      "window_id": "window:01a10000-0000-7000-8000-000000000002"
+     }
+    ]
+   }
+  }
+ ],
+ "version": {
+  "api_revision": 10,
+  "built_at": "2026-11-03T14:41:59Z",
+  "commit": "0000000000000000000000000000000000000000",
+  "dirty": false,
+  "platform": "linux_amd64",
+  "rex_version": "0.0.1793716919-g000000"
+ }
+}

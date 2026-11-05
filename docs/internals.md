@@ -21,7 +21,15 @@ test gated by `cfg(target_os)` (which would vanish from the macOS CI run), an
 invalid or unwired `dependencies.json`, a widget that does not answer the
 wheel, a footer that is drawn and never registered so nobody can click it,
 a widget with a cursor that ignores a click,
-and a widget that opens `/proc` with no macOS path and no explanation.
+a widget that opens `/proc` with no macOS path and no explanation, a notice
+id that is not a literal or a const or a Core-scope notice raised by a
+widget (`every_notice_has_a_stable_id`), a widget or the launcher that
+starts the channel, draws the banner or counter, or opens the screen itself
+when core does all of that for every binary - and core that stops doing any
+of it (`a_widget_never_wires_notices_itself`), and a widget with a notices
+type, module or function of its own (`only_core_draws_the_notices_screen`).
+The key checks count `!` as answered by every widget, because
+`Keyboard::poll` answers it before the widget sees a key.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -49,14 +57,116 @@ atomic writer.
 `core/src/google.rs` is the Google sign-in every Google widget shares: a
 service-account key signs an RS256 JWT locally (`rsa` and `sha2`, both pure
 Rust), Google trades it for an hour-long token, and the token is cached per
-process and re-minted five minutes before it runs out. A pasted token in
-`token` / `token_env` is the testing fallback, and says on screen that it
-lasts an hour. `Refusal` reads Google's error body into one wording for an
+process and re-minted five minutes before it runs out. `Refusal` reads Google's error body into one wording for an
 API that is not enabled, a 403 on the resource, a 401, and a 429 that names
 its quota bucket. It goes through `post_answer()`, the sibling of
 `get_answer()` that hands back a refusal's whole body rather than the
 200-character line `post_json()` makes of it. The setup it needs on
 Google's side is [Google setup](google-setup.md).
+
+### Notices
+
+`core/src/notices.rs`, used as `tc::notices`, is the one place a warning
+that is not about a number goes. `start(widget)` names the widget once in
+`main`; `raise(Notice)`, `clear(id)` and `when(cond, || Notice)` work from
+any thread, against a process-global registry that recovers a poisoned lock
+rather than propagating it, so nothing in the module panics or returns an
+error. A notice is keyed by its scope and a stable id - a widget notice
+sharing an id with a Core one is a second notice, not an overwrite: raising the same id again updates
+it in place, and a change to its title or detail — hashed with FNV-1a, so the
+number is the same in every build — banners it again and voids a dismissal.
+
+Core shows notices for every binary, and a widget only raises them.
+`maybe_widget_help` - which every binary runs after `--help` and `--version`
+- calls `start_for_this_binary()`, which names the channel after the binary
+and looks at the config file's permissions once. Each frame `size()` calls
+`reserve(w, h, room)`, which decides two things from one reading of the
+registry and keeps them for `title` and `draw`:
+
+- the **counter**, `[!] 1 error, 2 warnings`, worst level first and coloured
+  by it, stamped by `draw` on the top row after a space and before the
+  version. It shortens to `[!] 3 notices` and then `[!] 3` rather than
+  overflow, and the shortest always goes down: the version stands down
+  before it does, the way the version already stands down on a narrow pane,
+  because the counter is the one the reader can act on. `title` is built
+  short by the same width, so the rule keeps its `╸`. A click on its cells
+  opens the screen, from a text field too.
+- the **banner**: up to two notices, newest first, for sixty seconds each -
+  each one's title alone, wrapped by `error_rows()`, the detail left to the
+  `!` screen. At most a quarter of the pane, and nothing below ten rows; a
+  title that does not fit whole in what is left is not shown rather than
+  cut, and the counter still counts it. `size()` returns the pane less those
+  rows, the widget lays out in what it was handed, and `draw` puts the
+  banner on the rows below - only when the widget drew at the height
+  `size()` returned, so it is never laid over rows a widget thinks it owns.
+  A widget whose section is built from leftover rows rather than scrolled
+  says how tall its content is with `tc::needs_rows(n)`, and the banner
+  takes only the rows above that.
+
+`Keyboard::poll` answers `!` with `run(keyboard)`, the screen, unless the
+widget called `typing()` before that poll because a text field has the
+keyboard. It decides key by key: a read is handed back only up to the next
+`!` or counter click and the rest held for the next poll, so a `/` in the
+same read has opened the filter before the `!` after it is read. While the screen is up nothing is reserved or stamped, since it is
+the list those would repeat, and `!` there is the key that closes it.
+
+Core raises its own: `config-world-readable` (Core scope, at start and from
+`load_config()`, and looked at again every five seconds from `reserve`, so a
+`chmod 600` clears it and a file rewritten wider raises it without a
+restart), and one Info per recommended tool `dependencies_available()`
+finds missing, and two about its own file below.
+
+A dismissal is keyed `core/<id>` or `<widget>/<id>` with the hash it was
+taken against. `s` dismisses for this session, in memory only, so a restart
+forgets it. `d` and `m` dismiss a Warn or Info for 7 or 30 days, and on an
+Error do nothing but say on the status line that errors can only be
+dismissed for this session. Those two are written to
+`tc::state_dir()/notices.json`, one file for every widget:
+
+```json
+{"version": 1, "dismissed": {"core/config-world-readable":
+  {"hash": "566dda1943ee58c7", "at": 1800000000.0, "until": 1800604800.0}}}
+```
+
+`until` is absolute unix seconds, `at + 7 * 86400` or `at + 30 * 86400`. The
+hash is a 16-digit hex string rather than a number, because a u64 above
+2^53 survives serde_json but not every editor that might open the file. A
+write is a read-modify-write under `tc::statefile::with_lock` - `flock` on
+`notices.json.lock` - then `write_atomic`, so two panes dismissing at once
+merge; each write also drops what has expired. An entry taken against
+content this pane's notice no longer has is kept, since another pane may
+still show that content and have dismissed it; it hides nothing here and
+goes when it expires. `start()` reads the file and `reserve()`
+reads it again at most once a minute, on the drawing
+thread: it is a few hundred bytes, and a thread for it would be one more
+poller to keep alive. `u` removes the entry from the file as well.
+
+A file that does not parse, or names a version this build does not know,
+is read as empty and **never overwritten**: a dismissal for days taken
+meanwhile holds for this session only, and the Core Warn
+`notices-file-unreadable` says the path cannot be read, with the error, until
+it reads again; the same notice covers a file that cannot be opened at all.
+A write that fails for another reason raises `notices-file-unwritable` and
+keeps the dismissal for the session; a restore that cannot be written is not
+made. Errors ignore dismissals saved in the file, since a notice's hash does
+not include its level.
+
+### State files
+
+`core/src/statefile.rs`, used as `tc::statefile`, is where a widget keeps
+what it learned between runs. `tc::state_dir()` is `$XDG_STATE_HOME/opscope`,
+else `$HOME/.local/state/opscope`, else `./.opscope-state` when neither is
+set - never a panic. `write_atomic(path, contents)` is the writer the
+settings screen uses for `config.json`, lifted rather than rewritten: a
+same-directory temporary created `O_EXCL | O_NOFOLLOW` at `0600`, re-read
+and re-parsed as JSON before the rename, the directory synced after, a
+symlink at the path kept. `write_atomic_if` adds settings' compare-and-swap,
+refusing when the file no longer holds what was read. `with_lock(path, f)`
+holds `flock(LOCK_EX)` on `<path>.lock`, created `0600` and never removed,
+for the closure's duration. It waits about half a second for another holder
+and then returns an `Err`, so a pane stopped mid-write cannot freeze the
+rest; notices then keeps the dismissal for the session. clocks, agent-usage, ports and google-trends still compute
+their state paths by hand; new code uses `state_dir()`.
 
 ### The mouse
 
