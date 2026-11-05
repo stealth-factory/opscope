@@ -1,0 +1,42 @@
+{
+  "_comment": "What panes reads: every pane of the multiplexer it runs in, through that multiplexer's CLI, read-only. Rex today; Herdr and Luvus still use herdr-panes and luvus-panes.",
+  "_schema": {
+    "backend": {
+      "choices": ["auto", "rex", "herdr", "luvus"]
+    },
+    "refresh": {
+      "minimum": 0.5
+    },
+    "agents": {
+      "items": "string"
+    }
+  },
+  "_backend_comment": "Which multiplexer to read. auto finds out from the pane panes runs in: REX_SESSION and REX_BLOCK for Rex, HERDR_ENV=1 for Herdr, LUVUS_ENV=1 for Luvus, and the nearest of them in the process tree when several are set. The --mux flag overrides this.",
+  "backend": "auto",
+  "_rex_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. Set, it is read from anywhere, inside a multiplexer or not. CPU and memory are shown only for this machine's server.",
+  "rex_server": "",
+  "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
+  "refresh": 4.0,
+  "_agents_comment": "Command names that count as coding agents. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
+  "agents": [
+    "claude",
+    "codex",
+    "gemini",
+    "copilot",
+    "cursor-agent",
+    "aider",
+    "opencode",
+    "pi",
+    "goose",
+    "amp",
+    "grok",
+    "droid",
+    "kiro",
+    "cline",
+    "crush",
+    "qwen",
+    "kimi",
+    "devin",
+    "jules"
+  ]
+}

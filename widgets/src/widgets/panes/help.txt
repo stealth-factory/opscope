@@ -1,6 +1,16 @@
-Everything running in Rex, across every session, ordered by who needs you.
+Every pane of the multiplexer it runs in, ordered by who needs you.
 
-Every pane on a Rex server in three sections. AGENTS lists coding agents with
+panes finds out where it is from the pane it was started in: REX_SESSION
+and REX_BLOCK mean Rex, HERDR_ENV=1 Herdr, LUVUS_ENV=1 Luvus. When several
+are set - Herdr started inside a Rex pane inherits Rex's - the nearest
+multiplexer above it in the process tree decides, and the explain screen
+says which and why. Outside all three it prints why and exits with status 2
+before taking the terminal. --mux rex, herdr or luvus, or the backend
+setting, chooses regardless; a rex_server set in settings is read from
+anywhere. Rex is read here today; Herdr and Luvus still use herdr-panes and
+luvus-panes.
+
+Under Rex, every pane on the server in three sections. AGENTS lists coding agents with
 the state they reported themselves - blocked, error, done, working or idle -
 with what they are blocked on, their progress and their message. PROCESSES
 lists every other pane running something, IDLE the panes at a prompt. Enter
@@ -30,7 +40,7 @@ The whole server is read with one `rex do` script on one connection, and
 changes. It never starts a Rex server, never types into a pane, and never
 shows a socket path, an address or a login.
 
-    rex-panes [-n SECONDS]
+    panes [--mux rex|herdr|luvus] [-n SECONDS]
 
 Keys: up/down select (j and k too) and tab jumps to the head of the next
 section. ctrl-y and ctrl-e scroll the window a row at a time, as does the

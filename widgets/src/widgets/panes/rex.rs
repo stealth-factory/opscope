@@ -14,7 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Everything running under a Rex server, across every session.
+//! The Rex backend: everything running under a Rex server, across every
+//! session. This was rex-panes, and its board is the one every backend of
+//! `panes` draws into.
 //!
 //! A Rex client, read-only, and honest about where each fact came from.
 //! State is what a program reported with OSC 7501 and nothing else; the
@@ -29,37 +31,14 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-#[path = "../../process_filter.rs"]
-mod process_filter;
-
-#[path = "parse.rs"]
-mod parse;
-
-#[path = "events.rs"]
-mod events;
-
-#[path = "../refresh_wake.rs"]
-mod refresh_wake;
-
-#[cfg(target_os = "linux")]
-#[path = "linux.rs"]
-mod host;
-#[cfg(target_os = "macos")]
-#[path = "macos.rs"]
-mod host;
+use super::rex_events as events;
+use super::rex_parse as parse;
+use super::{host, process_filter, refresh_wake};
 
 use parse::{Absence, Foreground, Record, Source};
 
-const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "rex-panes",
-    section: "rex_panes",
-    legacy_section: None,
-    schema: include_str!("settings.json"),
-    catalogues: &[],
-};
-
 /// The read, run inside the `rex` CLI on one connection.
-const GATHER_LUA: &str = include_str!("gather.lua");
+const GATHER_LUA: &str = include_str!("rex_gather.lua");
 
 /// The API revision this widget was written against. A server on another
 /// revision is still read - a method it lacks fails per block, visibly -
@@ -307,7 +286,7 @@ pub struct State {
     absence: Option<Absence>,
     /// Why the poller stopped, when it did.
     err: String,
-    watcher_err: String,
+    pub watcher_err: String,
     /// Bells and notifications, newest per block: (when, what it said).
     pub attention: HashMap<String, (f64, String)>,
     restarted_at: Option<f64>,
@@ -1273,7 +1252,7 @@ fn server_words(server: &str) -> &'static str {
     }
 }
 
-fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(String, String)> {
+fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let heading = |s: &str| ("lbl".to_string(), format!(" ── {} ──", s));
     out.push(heading("PANE"));
@@ -1453,25 +1432,20 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, at: f64) -> Vec<(Stri
             plural(board.apps)
         ),
     ));
+    out.push(("dim".into(), format!(" panes reads Rex because {}", why)));
     out
 }
 
-fn main() {
-    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    if !tc::dependencies_available(
-        "rex-panes",
-        include_str!("dependencies.json"),
-        Some(SETTINGS),
-    ) {
-        return;
-    }
-    let cfg = tc::load_config("rex_panes");
-    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0);
-    let server = tc::cfg_str(&cfg, "server", "");
-    let catalogue = tc::cfg_strings(&cfg, "agents", DEFAULT_AGENTS);
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
+/// Run the board against a Rex server until `q`. `why` is what chose Rex,
+/// for the explain screen; `comma` opens the shared settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
+    let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
+    let server = tc::cfg_str(cfg, "rex_server", "");
+    let catalogue = tc::cfg_strings(cfg, "agents", DEFAULT_AGENTS);
+    if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
+        if let Some(n) = args.get(at + 1) {
+            refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
+        }
     }
 
     let p = palette();
@@ -1613,7 +1587,7 @@ fn main() {
                     return;
                 }
                 "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
+                    comma(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => refresh_wake::request(&wake),
@@ -1783,14 +1757,14 @@ fn main() {
             };
             let board = board.clone().unwrap_or_default();
             let mut rows = vec![tc::title_busy(
-                "rex panes · explain",
+                "panes · rex · explain",
                 w,
                 &p.accent,
                 activity.tick(tick),
             )];
             let head = rows.len();
             let mut body: Vec<String> = Vec::new();
-            for (kind, text) in explain_lines(&pane, &board, &server, at) {
+            for (kind, text) in explain_lines(&pane, &board, &server, why, at) {
                 let colour = match kind.as_str() {
                     "lbl" => p.lbl.clone(),
                     "txt" => p.txt.clone(),
@@ -1893,7 +1867,7 @@ fn main() {
 
         // ── the board ──
         let mut rows = vec![tc::title_busy(
-            "rex panes",
+            "panes · rex",
             w,
             &p.accent,
             activity.tick(tick),
@@ -2502,8 +2476,8 @@ fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
 mod tests {
     use super::*;
 
-    const GATHER: &str = include_str!("fixtures/gather.json");
-    const GATHER_RECORDS: &str = include_str!("fixtures/gather_records.json");
+    const GATHER: &str = include_str!("fixtures/rex/gather.json");
+    const GATHER_RECORDS: &str = include_str!("fixtures/rex/gather_records.json");
 
     fn catalogue() -> Vec<String> {
         DEFAULT_AGENTS.iter().map(|s| s.to_string()).collect()
@@ -2705,7 +2679,7 @@ mod tests {
             "a failed read is not an empty answer"
         );
         let board = Board::default();
-        assert!(explain_lines(&agent, &board, "", 2.0e9)
+        assert!(explain_lines(&agent, &board, "", "REX_SESSION and REX_BLOCK are set", 2.0e9)
             .iter()
             .any(|(_, t)| t.contains("could not be read: program_status: timed out")));
     }

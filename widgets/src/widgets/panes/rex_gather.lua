@@ -1,4 +1,4 @@
--- rex-panes: one read of the whole server, on one connection.
+-- panes, Rex backend: one read of the whole server, on one connection.
 --
 -- Run as `rex --autostart=false do -e <this>`, locally in the CLI, and the
 -- table it returns is printed as JSON. Read-only by construction: it calls

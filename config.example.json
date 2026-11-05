@@ -330,24 +330,12 @@
     "_mine_comment": "Linux only: hide unattributed sockets initially. macOS nettop rows are already process-labelled.",
     "mine": true
   },
-  "ports": {
-    "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc and ss on Linux or lsof, ps and nettop on macOS, plus `tailscale serve status` for the exposure column.",
-    "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
-    "system_ports": [
-      22,
-      53,
-      123,
-      323,
-      631,
-      5353
-    ],
-    "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
-    "refresh": 4.0
-  },
-  "rex_panes": {
-    "_comment": "What rex-panes reads: every session on one Rex server, through the rex CLI, read-only.",
-    "_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. CPU and memory are shown only for this machine's server.",
-    "server": "",
+  "panes": {
+    "_comment": "What panes reads: every pane of the multiplexer it runs in, through that multiplexer's CLI, read-only. Rex today; Herdr and Luvus still use herdr-panes and luvus-panes.",
+    "_backend_comment": "Which multiplexer to read. auto finds out from the pane panes runs in: REX_SESSION and REX_BLOCK for Rex, HERDR_ENV=1 for Herdr, LUVUS_ENV=1 for Luvus, and the nearest of them in the process tree when several are set. The --mux flag overrides this.",
+    "backend": "auto",
+    "_rex_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. Set, it is read from anywhere, inside a multiplexer or not. CPU and memory are shown only for this machine's server.",
+    "rex_server": "",
     "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
     "refresh": 4.0,
     "_agents_comment": "Command names that count as coding agents. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
@@ -372,6 +360,20 @@
       "devin",
       "jules"
     ]
+  },
+  "ports": {
+    "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc and ss on Linux or lsof, ps and nettop on macOS, plus `tailscale serve status` for the exposure column.",
+    "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
+    "system_ports": [
+      22,
+      53,
+      123,
+      323,
+      631,
+      5353
+    ],
+    "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
+    "refresh": 4.0
   },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",

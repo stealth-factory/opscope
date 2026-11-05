@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use opscope_core as tc;
 
-use super::parse;
+use super::rex_parse as parse;
 
 #[derive(Default)]
 pub struct Usage;
@@ -47,4 +47,23 @@ impl Usage {
             .map(|(pid, (cpu, rss))| (pid, (Some(cpu), rss)))
             .collect()
     }
+}
+
+/// Process names from this process's parent upward, nearest first: one
+/// `ps` a step, which is a handful at start-up and never again. Stops at
+/// launchd, at a pid `ps` will not describe, and after 64 steps.
+pub fn ancestors() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pid = unsafe { libc::getppid() } as i64;
+    while pid > 1 && out.len() < 64 {
+        let Ok(text) = tc::run(&["ps", "-o", "ppid=,comm=", "-p", &pid.to_string()], 5) else {
+            break;
+        };
+        let Some((name, parent)) = super::detect::parse_ps_parent(&text) else {
+            break;
+        };
+        out.push(name);
+        pid = parent;
+    }
+    out
 }

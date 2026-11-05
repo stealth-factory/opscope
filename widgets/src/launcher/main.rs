@@ -61,8 +61,8 @@ const WIDGETS: &[Widget] = &[
     widget!("matrix"),
     widget!("months"),
     widget!("netwatch"),
+    widget!("panes"),
     widget!("ports"),
-    widget!("rex-panes"),
     widget!("tailnet"),
     widget!("vercel-deployments"),
 ];

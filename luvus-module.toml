@@ -158,19 +158,19 @@ title = "netwatch"
 placement = "split"
 command = ["./luvus/bin/opscope", "netwatch"]
 
+# Every pane of the multiplexer it runs in, ordered by who needs you.
+[[panes]]
+id = "panes"
+title = "panes"
+placement = "split"
+command = ["./luvus/bin/opscope", "panes"]
+
 # What is listening on this machine, what started it, and who can reach it.
 [[panes]]
 id = "ports"
 title = "ports"
 placement = "split"
 command = ["./luvus/bin/opscope", "ports"]
-
-# Everything running in Rex, across every session, ordered by who needs you.
-[[panes]]
-id = "rex-panes"
-title = "rex-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "rex-panes"]
 
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]

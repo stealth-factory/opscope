@@ -5350,7 +5350,8 @@ fn agent_logs_are_followed_not_read_whole() {
     );
 }
 
-/// Every method rex-panes' embedded Lua may call, and nothing else.
+/// Every method the Rex backend of panes may call from its embedded Lua,
+/// and nothing else.
 ///
 /// The script runs inside the `rex` CLI with the user's full authority over
 /// their Rex server - the same connection could type into a pane, close a
@@ -5437,8 +5438,8 @@ fn rex_script_calls(src: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
 
 #[test]
 fn every_rex_script_is_read_only() {
-    let path = root().join("widgets/src/widgets/rex-panes/gather.lua");
-    let src = std::fs::read_to_string(&path).expect("rex-panes' gather.lua");
+    let path = root().join("widgets/src/widgets/panes/rex_gather.lua");
+    let src = std::fs::read_to_string(&path).expect("panes' rex_gather.lua");
     let (methods, block_methods, reaches) = rex_script_calls(&src);
     // A pattern that sees nothing is not a pass.
     assert!(

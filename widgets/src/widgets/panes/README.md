@@ -1,13 +1,13 @@
-# `rex-panes`
+# `panes`
 
 [← all widgets](../../../../docs/README.md)
 
-Everything running under a [Rex](https://www.superlogical.com/rex/docs/)
-server, across every session — ordered by who needs you, with one key to get
-there.
+Every pane of the multiplexer it runs in — ordered by who needs you, with one
+key to get there. Under [Rex](https://www.superlogical.com/rex/docs/), that is
+everything running on the server, across every session.
 
 ```text
-╺━ REX PANES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ PANES · REX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  3 agents · 2 sessions · 9 panes  1 blocked  1 done  1 unknown
  ███████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░
  ▸ 3 panes waiting for you
@@ -38,6 +38,42 @@ there.
  [o]show Opscope  ↑↓ select  ↵ switch to this pane  tab section  [i]dle hide
  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
+
+
+## Where it runs
+
+`panes` reads the multiplexer whose pane it was started in. Each one marks
+its panes in their environment, and that is what decides:
+
+| Multiplexer | Marker | Read by |
+|---|---|---|
+| Rex | `REX_SESSION` and `REX_BLOCK` set | `panes` |
+| Herdr | `HERDR_ENV=1` | [`herdr-panes`](../herdr-panes/README.md), until its backend moves in |
+| Luvus | `LUVUS_ENV=1` | [`luvus-panes`](../luvus-panes/README.md), until its backend moves in |
+
+A program started inside a pane inherits that pane's markers, so Herdr run
+from a Rex pane has both. When several are set, the nearest multiplexer above
+`panes` in the process tree is the one whose pane it is, and the explain
+screen (`e`) says which was picked and why. When the tree names none of them,
+`panes` takes Herdr, then Luvus, then Rex, and says to use `--mux`.
+
+Outside all three, `panes` prints which multiplexers it reads and how to
+start each, and exits with status 2 before taking over the terminal:
+
+```console
+$ panes
+panes runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:
+  Rex    start rex, then run panes in one of its panes
+  Herdr  start herdr, then run panes in one of its panes
+  Luvus  start luvus, then run panes in one of its panes
+To watch a Rex server from anywhere, set its rex_server in panes' settings.
+To choose one regardless of where this runs: panes --mux rex|herdr|luvus
+```
+
+`--mux rex|herdr|luvus` or the `backend` setting chooses regardless of the
+markers, the flag first. A `rex_server` set in settings counts as being
+inside Rex, so a pane watching another machine's Rex server works from
+anywhere, as rex-panes always did.
 
 ## Why it is ordered this way
 
@@ -166,12 +202,15 @@ that too.
 ## Configuration
 
 ```json
-"rex_panes": { "server": "", "refresh": 4, "agents": ["claude", "codex"] }
+"panes": { "backend": "auto", "rex_server": "", "refresh": 4, "agents": ["claude", "codex"] }
 ```
 
-`server` picks a Rex server — a host label from `rex hosts`, or an address;
-empty is the CLI's own default. A second `rex-panes` with `server` set is how
-to watch another machine. `refresh` is the maximum idle delay between reads;
+`backend` is `auto`, or `rex`, `herdr` or `luvus` to read that one wherever
+`panes` starts. `rex_server` picks a Rex server — a host label from
+`rex hosts`, or an address; empty is the CLI's own default. A second `panes`
+with `rex_server` set is how to watch another machine. A `rex_panes` section
+from before the rename is still read when there is no `panes` section, its
+`server` as `rex_server`, and a notice asks for it to be renamed. `refresh` is the maximum idle delay between reads;
 events wake one sooner. `agents` is the list of command names that count as
 coding agents — a program reporting under any other app name still shows,
 with its state, in PROCESSES.

@@ -658,9 +658,9 @@ pub fn parse_capture(text: &str, n: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const GATHER: &str = include_str!("fixtures/gather.json");
-    const GATHER_RECORDS: &str = include_str!("fixtures/gather_records.json");
-    const EVENTS: &str = include_str!("fixtures/events.ndjson");
+    const GATHER: &str = include_str!("fixtures/rex/gather.json");
+    const GATHER_RECORDS: &str = include_str!("fixtures/rex/gather_records.json");
+    const EVENTS: &str = include_str!("fixtures/rex/events.ndjson");
 
     fn catalogue() -> Vec<String> {
         ["claude", "codex"].iter().map(|s| s.to_string()).collect()

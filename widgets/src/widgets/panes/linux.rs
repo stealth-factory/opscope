@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use super::parse;
+use super::rex_parse as parse;
 
 /// Ticks and the time they were read, per pid, so a percentage is two
 /// readings apart rather than a lifetime average.
@@ -59,4 +59,23 @@ impl Usage {
         self.seen.retain(|pid, _| pids.contains(pid));
         out
     }
+}
+
+/// Process names from this process's parent upward, nearest first, read
+/// from `/proc/<pid>/stat`. Stops at init, at a pid that cannot be read,
+/// and after 64 steps whatever happens.
+pub fn ancestors() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pid = unsafe { libc::getppid() } as i64;
+    while pid > 1 && out.len() < 64 {
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+            break;
+        };
+        let Some((name, parent)) = super::detect::parse_stat_parent(&text) else {
+            break;
+        };
+        out.push(name);
+        pid = parent;
+    }
+    out
 }

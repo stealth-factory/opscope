@@ -38,8 +38,8 @@ name = "ports"
 path = "src/widgets/ports/main.rs"
 
 [[bin]]
-name = "rex-panes"
-path = "src/widgets/rex-panes/main.rs"
+name = "panes"
+path = "src/widgets/panes/main.rs"
 
 [[bin]]
 name = "netwatch"
