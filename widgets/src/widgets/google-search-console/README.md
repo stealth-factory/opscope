@@ -201,6 +201,7 @@ then say *Google may still change this*. `d` again goes back.
 | `cannot read the key file …` | the key file, worded by core |
 | `[!]` notice: `… is readable by others; chmod 600 it` | the key file others can read; a notice, since it explains no number |
 | `daily totals from … ago, because the newest read failed: …` | the totals and "final to" shown are the last good read; beside them in the status line, SITES and the property detail |
+| `listing the properties failed, so the last list is read on: …` | with `sites` empty, `sites.list` failed; the properties it last found stay on screen and are read as before |
 | `Google refused the sign-in: invalid_grant - …` | Google's own description; a clock hint when it is about `iat`/`exp` |
 | `API not enabled: turn on searchconsole.googleapis.com …` | the Search Console API is off in the key's Cloud project |
 | `403 no access: add <email> as a Restricted user on <property> …` | the service account is not a user on the property |

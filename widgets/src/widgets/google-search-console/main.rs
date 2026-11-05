@@ -146,18 +146,31 @@ fn signed_in(cfg: &Config) -> Result<(google::Credential, Client), String> {
 }
 
 /// Which properties to read, and the problem with any that cannot be.
-fn resolve_sites(cfg: &Config, client: &Client) -> (Vec<(String, String, Option<String>)>, Option<String>) {
-    plan_sites(&cfg.sites, api::sites(client), client.email.as_deref())
+/// `last` is the list the previous round settled on.
+#[allow(clippy::type_complexity)]
+fn resolve_sites(
+    cfg: &Config,
+    client: &Client,
+    last: &[(String, String, Option<String>)],
+) -> (Vec<(String, String, Option<String>)>, Option<String>) {
+    plan_sites(&cfg.sites, api::sites(client), client.email.as_deref(), last)
 }
 
 /// `resolve_sites` apart from the network: the configured names against
 /// what `sites.list` answered, as (site, permission, problem) and an error
 /// that applies to all of them.
+///
+/// With no sites configured, the list is the only way to know what to read.
+/// When asking for it fails, the properties `last` found are read on behind
+/// the error: an empty answer there would drop every reading on screen and
+/// throw away what each would otherwise not need to ask again. A refused
+/// token (401) still ends it, as it does for configured sites.
 #[allow(clippy::type_complexity)]
 fn plan_sites(
     configured: &[String],
     listed: Result<Vec<Site>, Fail>,
     email: Option<&str>,
+    last: &[(String, String, Option<String>)],
 ) -> (Vec<(String, String, Option<String>)>, Option<String>) {
     let configured: Vec<String> = configured.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     match (configured.is_empty(), listed) {
@@ -174,7 +187,11 @@ fn plan_sites(
             list.sort_by(|a, b| a.url.cmp(&b.url));
             (list.into_iter().map(|s| (s.url, s.permission, None)).collect(), None)
         }
-        (true, Err(f)) => (Vec::new(), Some(format!("listing the properties failed: {}", f.said))),
+        (true, Err(f)) if f.status == 401 || last.is_empty() => (Vec::new(), Some(format!("listing the properties failed: {}", f.said))),
+        (true, Err(f)) => (
+            last.iter().map(|(site, permission, _)| (site.clone(), permission.clone(), None)).collect(),
+            Some(format!("listing the properties failed, so the last list is read on: {}", f.said)),
+        ),
         // A refused token is refused everywhere: asking each property as
         // well would only repeat the same sentence once per site.
         (false, Err(f)) if f.status == 401 => (Vec::new(), Some(f.said)),
@@ -479,7 +496,7 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
         tc::notices::Notice::warn("google-search-console-key-file-readable", warning.clone().unwrap_or_default())
     });
     if list_due {
-        let (targets, err) = resolve_sites(cfg, &client);
+        let (targets, err) = resolve_sites(cfg, &client, &round.targets);
         *round = Round { targets, err, at: now };
     }
     let targets = round.targets.clone();
@@ -1375,7 +1392,7 @@ mod tests {
 
     #[test]
     fn an_empty_list_discovers_every_property() {
-        let (plan, err) = plan_sites(&[], Ok(vec![site("https://example.org/", "siteOwner"), site("sc-domain:example.com", "siteRestrictedUser")]), Some(EMAIL));
+        let (plan, err) = plan_sites(&[], Ok(vec![site("https://example.org/", "siteOwner"), site("sc-domain:example.com", "siteRestrictedUser")]), Some(EMAIL), &[]);
         assert_eq!(err, None);
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].0, "https://example.org/");
@@ -1383,7 +1400,7 @@ mod tests {
 
     #[test]
     fn an_account_that_sees_nothing_says_whom_to_add() {
-        let (plan, err) = plan_sites(&[], Ok(Vec::new()), Some(EMAIL));
+        let (plan, err) = plan_sites(&[], Ok(Vec::new()), Some(EMAIL), &[]);
         assert!(plan.is_empty());
         assert!(err.unwrap().contains(&format!("add {} as a Restricted user", EMAIL)));
     }
@@ -1391,7 +1408,7 @@ mod tests {
     #[test]
     fn a_configured_site_the_account_cannot_see_is_named_with_its_form() {
         let listed = Ok(vec![site("sc-domain:example.com", "siteRestrictedUser")]);
-        let (plan, _) = plan_sites(&["https://example.com".into()], listed, Some(EMAIL));
+        let (plan, _) = plan_sites(&["https://example.com".into()], listed, Some(EMAIL), &[]);
         let problem = plan[0].2.as_deref().unwrap();
         assert!(problem.contains("is not among the 1 properties"), "{problem}");
         assert!(problem.contains("trailing slash"), "{problem}");
@@ -1399,9 +1416,32 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_discovery_reads_on_the_properties_it_last_found() {
+        let last = vec![
+            ("https://example.org/".to_string(), "siteOwner".to_string(), None),
+            ("sc-domain:example.com".to_string(), "siteRestrictedUser".to_string(), Some("403 old".to_string())),
+        ];
+        let failed = || Err(Fail { status: 500, said: "HTTP 500".into() });
+        let (plan, err) = plan_sites(&[], failed(), Some(EMAIL), &last);
+        assert_eq!(plan.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["https://example.org/", "sc-domain:example.com"]);
+        assert_eq!(plan[1].1, "siteRestrictedUser");
+        // The site's own refusal is kept by the rebuild, not restated here.
+        assert_eq!(plan[1].2, None);
+        assert!(err.unwrap().contains("the last list is read on: HTTP 500"));
+        // Nothing found before: nothing to read on.
+        let (plan, err) = plan_sites(&[], failed(), Some(EMAIL), &[]);
+        assert!(plan.is_empty() && err.unwrap().contains("listing the properties failed: HTTP 500"));
+        // A refused token is refused for every property.
+        let refused = Err(Fail { status: 401, said: "401 refused".into() });
+        assert!(plan_sites(&[], refused, Some(EMAIL), &last).0.is_empty());
+        // A list that came back empty is an answer, not a failure.
+        assert!(plan_sites(&[], Ok(Vec::new()), Some(EMAIL), &last).0.is_empty());
+    }
+
+    #[test]
     fn a_refused_token_is_one_error_not_one_per_site() {
         let refused = Err(Fail { status: 401, said: "401 the access token was refused".into() });
-        let (plan, err) = plan_sites(&["sc-domain:example.com".into()], refused, None);
+        let (plan, err) = plan_sites(&["sc-domain:example.com".into()], refused, None, &[]);
         assert!(plan.is_empty());
         assert_eq!(err.as_deref(), Some("401 the access token was refused"));
     }
@@ -1409,7 +1449,7 @@ mod tests {
     #[test]
     fn without_the_list_a_wrong_form_is_still_caught() {
         let failed = Err(Fail { status: 500, said: "HTTP 500".into() });
-        let (plan, err) = plan_sites(&["example.com".into(), "sc-domain:example.com".into()], failed, None);
+        let (plan, err) = plan_sites(&["example.com".into(), "sc-domain:example.com".into()], failed, None, &[]);
         assert!(err.unwrap().contains("each is asked directly"));
         assert!(plan[0].2.as_deref().unwrap().contains("sc-domain:example.com"));
         assert_eq!(plan[1].2, None);
