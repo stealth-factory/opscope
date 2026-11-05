@@ -46,9 +46,23 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     catalogues: &[],
 };
 
-/// The shortest wait between refreshes. The data moves hourly at best, so
-/// anything shorter only spends quota.
-const MIN_REFRESH: f64 = 120.0;
+/// The shortest `refresh`. The hourly data moves a few times an hour at
+/// best, and Google counts repeated asks for the same data against the
+/// site's load quota, so anything shorter only spends it.
+const MIN_REFRESH: f64 = 300.0;
+/// How often a site not on screen has its daily totals read, for the SITES
+/// table. Nothing else of it is read until it is shown.
+const OFF_SCREEN_EVERY: f64 = 3600.0;
+/// The expensive reports - pages, queries and terms, grouped by page or by
+/// query over two windows - are read when their windows move, which is
+/// about once a day, and at most this long apart otherwise, so a late
+/// correction in Google's numbers still arrives.
+const HEAVY_EVERY: f64 = 6.0 * 3600.0;
+/// Sitemaps change when a site publishes one, which is rare.
+const SITEMAPS_EVERY: f64 = 6.0 * 3600.0;
+/// How often the poller looks at what is due. Looking costs nothing; only a
+/// part that is due is asked for.
+const TICK: f64 = 60.0;
 /// The search types `t` steps through.
 const KINDS: &[&str] = &["web", "image", "video", "news", "discover"];
 /// The windows `w` steps between.
@@ -74,6 +88,19 @@ struct Shared {
     /// A key file others can read. A key stored in config is covered by
     /// the config-file permission notice instead.
     warning: String,
+    /// The site on screen, set by the screen every frame. Only it is read in
+    /// full.
+    focus: String,
+    /// `r` was pressed: read everything of the site on screen now, whatever
+    /// is due. Taken by the poller.
+    force: bool,
+}
+
+/// `r`: read the site on screen in full on the next tick, cadence aside.
+fn force_read(shared: &Arc<Mutex<Shared>>) {
+    if let Ok(mut g) = shared.lock() {
+        g.force = true;
+    }
 }
 
 /// Where inspections are kept between runs.
@@ -314,8 +341,101 @@ fn publish(shared: &Arc<Mutex<Shared>>, params: &Params, data: &SiteData) {
     }
 }
 
-/// One refresh of every property.
-fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches: &Caches) {
+/// What one site needs asking this time, from the reading it already has.
+///
+/// The site on screen reads its last 24 hours and daily totals every
+/// `refresh`, its sitemaps every six hours, and its pages, queries and terms
+/// only when Google finalises another day - the windows they compare move -
+/// or six hours have passed. A site off screen reads only its daily totals,
+/// hourly, for the SITES table, and its sitemaps. Search Console counts
+/// asking for the same data again against the site's load quota, and these
+/// reports only change when Google finalises a day.
+///
+/// New settings, `r`, and a part never read are due at once. A failed part
+/// is retried on its own cadence from the last attempt, not every tick.
+/// While Google's 429 wait is running nothing is due, `r` included.
+fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f64, refresh: f64) -> Plan {
+    let nothing = Plan { hours: false, days: false, heavy: Heavy::No, sitemaps: false };
+    if prev.load_wait_until.is_some_and(|until| now < until) {
+        return nothing;
+    }
+    let renewed = prev.params != *params || forced;
+    // A part never asked for is due now - a site read while off screen has
+    // its daily totals and no hours yet. Otherwise its own time when it
+    // holds a value, or when the site was last asked anything, which is
+    // when it last failed or was noted.
+    fn due<T>(part: &Part<T>, fetched: f64, renewed: bool, now: f64, every: f64) -> bool {
+        let never = part.value.is_none() && part.error.is_none() && part.note.is_none();
+        let last = if part.at > 0.0 { part.at } else { fetched };
+        renewed || never || last <= 0.0 || now - last >= every
+    }
+    let (f, r) = (prev.fetched, renewed);
+    if !focus {
+        return Plan {
+            hours: false,
+            days: due(&prev.days, f, r, now, OFF_SCREEN_EVERY),
+            heavy: Heavy::No,
+            sitemaps: due(&prev.sitemaps, f, r, now, SITEMAPS_EVERY),
+        };
+    }
+    let pages = &prev.pages;
+    let never = pages.value.is_none() && pages.error.is_none() && pages.note.is_none();
+    let days = due(&prev.days, f, r, now, refresh);
+    let heavy = if renewed || never {
+        Heavy::Yes
+    } else if pages.error.is_some() {
+        if now - prev.fetched >= refresh { Heavy::Yes } else { Heavy::No }
+    } else if pages.at > 0.0 && now - pages.at >= HEAVY_EVERY {
+        Heavy::Yes
+    } else if days {
+        // Only alongside a daily read: that is what can show the windows
+        // moved. Without one there is nothing to find out, and a plan that
+        // is not empty would sign in for nothing.
+        Heavy::IfMoved
+    } else {
+        Heavy::No
+    };
+    Plan {
+        hours: due(&prev.hours, f, r, now, refresh),
+        days,
+        heavy,
+        sitemaps: due(&prev.sitemaps, f, r, now, SITEMAPS_EVERY),
+    }
+}
+
+/// The site list and when it was read, kept between ticks: it is asked for
+/// every `refresh`, not every minute.
+#[derive(Default)]
+struct Round {
+    targets: Vec<(String, String, Option<String>)>,
+    err: Option<String>,
+    at: f64,
+}
+
+/// One tick: every part of every property that is due, and nothing else.
+fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches: &Caches, round: &mut Round, activity: &tc::Refresh) {
+    let now = tc::now();
+    let (focus, forced) = match shared.lock() {
+        Ok(mut g) => (g.focus.clone(), std::mem::take(&mut g.force)),
+        Err(_) => return,
+    };
+    let previous = |site: &str| -> SiteData {
+        shared
+            .lock()
+            .ok()
+            .and_then(|g| g.sites.iter().find(|o| o.site == site).cloned())
+            .unwrap_or_else(|| SiteData::new(site, params))
+    };
+    let list_due = forced || round.at <= 0.0 || now - round.at >= cfg.refresh;
+    let plans: Vec<Plan> = round
+        .targets
+        .iter()
+        .map(|(site, _, _)| plan_for(&previous(site), params, *site == focus, forced, now, cfg.refresh))
+        .collect();
+    if !list_due && plans.iter().all(Plan::nothing) {
+        return;
+    }
+    let _work = activity.start();
     let (cred, mut client) = match signed_in(cfg) {
         Ok(ok) => ok,
         Err(why) => {
@@ -326,7 +446,12 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
         }
     };
     let warning = cred.warning().or_else(tc::config_token_warning).unwrap_or_default();
-    let (targets, err) = resolve_sites(cfg, &client);
+    if list_due {
+        let (targets, err) = resolve_sites(cfg, &client);
+        *round = Round { targets, err, at: now };
+    }
+    let targets = round.targets.clone();
+    let err = round.err.clone();
     if let Ok(mut g) = shared.lock() {
         g.err = err.unwrap_or_default();
         g.warning = warning;
@@ -354,6 +479,11 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             }
             return;
         }
+        let prev = previous(&site);
+        let plan = plan_for(&prev, params, site == focus, forced, now, cfg.refresh);
+        if plan.nothing() && permission != "siteUnverifiedUser" {
+            continue;
+        }
         let mut data = if permission == "siteUnverifiedUser" {
             let mut d = SiteData::new(&site, params);
             d.problem = Some(format!(
@@ -363,14 +493,16 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             ));
             d
         } else {
-            fetch_site(&client, &site, params, google_today(), Utc::now())
+            fetch_site(&client, &site, params, google_today(), Utc::now(), &prev, plan)
         };
         data.permission = permission;
         // The reading goes on screen first: inspections are one request a
         // page, and a cold cache must not hold the numbers back behind
         // every one of them. Then again with what inspecting had to say.
         publish(shared, params, &data);
-        if data.problem.is_none() && cfg.inspect_top > 0 {
+        // Inspections for the site on screen: they have a budget of their
+        // own, 2,000 a day per site, and a page is asked at most daily.
+        if data.problem.is_none() && data.load_wait_until.is_none() && site == focus && cfg.inspect_top > 0 {
             inspect_due(&cred, &mut client, &mut data, caches, cfg.inspect_top);
             publish(shared, params, &data);
         }
@@ -472,15 +604,14 @@ fn main() {
             (Arc::clone(&shared), Arc::clone(&caches), Arc::clone(&asked), Arc::clone(&wake), activity.clone(), cfg.clone());
         std::thread::spawn(move || {
             tc::record_panics();
+            let mut round = Round::default();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
                 let params = asked.lock().map(|p| p.clone()).unwrap_or_else(|p| p.into_inner().clone());
-                let work = activity.start();
-                poll_round(&cfg, &params, &shared, &caches);
-                drop(work);
+                poll_round(&cfg, &params, &shared, &caches, &mut round, &activity);
                 let (lock, cond) = &*wake;
                 let Ok(mut woken) = lock.lock() else { return };
                 if !*woken {
-                    woken = match cond.wait_timeout(woken, Duration::from_secs_f64(cfg.refresh)) {
+                    woken = match cond.wait_timeout(woken, Duration::from_secs_f64(TICK)) {
                         Ok((g, _)) => g,
                         Err(_) => return,
                     };
@@ -532,6 +663,20 @@ fn main() {
             }
         }
         let snapshot = shared.lock().map(|g| g.sites.clone()).unwrap_or_default();
+        // Tell the poller which site is on screen. A newly shown site wakes
+        // it, so whatever of that site is due is read now, not next tick.
+        let on_screen = snapshot.get(at.min(snapshot.len().saturating_sub(1))).map(|s| s.site.clone()).unwrap_or_default();
+        let shown_new = shared
+            .lock()
+            .map(|mut g| {
+                let changed = g.focus != on_screen;
+                g.focus = on_screen;
+                changed
+            })
+            .unwrap_or(false);
+        if shown_new {
+            poke(&wake);
+        }
         for key in keys {
             if typing {
                 match key.as_str() {
@@ -602,7 +747,10 @@ fn main() {
                         }
                         // A property or a plain sitemap is drawn from the
                         // main round, so asking again is a refresh of it.
-                        None => poke(&wake),
+                        None => {
+                            force_read(&shared);
+                            poke(&wake);
+                        }
                     },
                     _ => {}
                 }
@@ -712,7 +860,10 @@ fn main() {
                         }
                     }
                 }
-                "r" | "R" => poke(&wake),
+                "r" | "R" => {
+                    force_read(&shared);
+                    poke(&wake);
+                }
                 _ => {}
             }
         }
@@ -953,6 +1104,98 @@ fn start_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_at(t: f64, params: &Params) -> SiteData {
+        // A read always leaves a value, a note or an error; a note stands
+        // in for the value here.
+        let mut d = SiteData::new("https://example.com/", params);
+        d.fetched = t;
+        d.hours = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.days = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.pages = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d
+    }
+
+    fn params() -> Params {
+        Params { fresh: false, days: 7, kind: "web".into() }
+    }
+
+    #[test]
+    fn a_site_never_read_is_read_in_full_when_shown_and_only_its_totals_when_not() {
+        let p = params();
+        let fresh = SiteData::new("https://example.com/", &p);
+        let shown = plan_for(&fresh, &p, true, false, 1_000.0, 900.0);
+        assert_eq!(shown, Plan { hours: true, days: true, heavy: Heavy::Yes, sitemaps: true });
+        let hidden = plan_for(&fresh, &p, false, false, 1_000.0, 900.0);
+        assert_eq!(hidden, Plan { hours: false, days: true, heavy: Heavy::No, sitemaps: true });
+    }
+
+    #[test]
+    fn the_expensive_reports_wait_for_the_windows_to_move() {
+        let p = params();
+        let t = 100_000.0;
+        let d = read_at(t, &p);
+        // A minute later nothing is due.
+        assert!(plan_for(&d, &p, true, false, t + 60.0, 900.0).nothing());
+        // After `refresh`, the cheap reads are; the expensive ones only if
+        // the daily read shows the windows moved.
+        let later = plan_for(&d, &p, true, false, t + 901.0, 900.0);
+        assert_eq!(later, Plan { hours: true, days: true, heavy: Heavy::IfMoved, sitemaps: false });
+        // Six hours on they are read whatever moved, so a correction lands.
+        assert_eq!(plan_for(&d, &p, true, false, t + HEAVY_EVERY, 900.0).heavy, Heavy::Yes);
+        // Off screen: the daily totals hourly, nothing expensive, ever.
+        assert!(plan_for(&d, &p, false, false, t + 900.0, 900.0).nothing());
+        let hour = plan_for(&d, &p, false, false, t + OFF_SCREEN_EVERY, 900.0);
+        assert_eq!(hour, Plan { hours: false, days: true, heavy: Heavy::No, sitemaps: false });
+    }
+
+    #[test]
+    fn new_settings_and_r_read_everything_but_a_429_wait_holds_even_against_r() {
+        let p = params();
+        let t = 100_000.0;
+        let d = read_at(t, &p);
+        let full = Plan { hours: true, days: true, heavy: Heavy::Yes, sitemaps: true };
+        assert_eq!(plan_for(&d, &p, true, true, t + 1.0, 900.0), full);
+        let other = Params { days: 28, ..params() };
+        assert_eq!(plan_for(&d, &other, true, false, t + 1.0, 900.0), full);
+        let mut waiting = d.clone();
+        waiting.load_wait_until = Some(t + LOAD_WAIT);
+        assert!(plan_for(&waiting, &p, true, true, t + 60.0, 900.0).nothing());
+        // Once the wait is over the site is asked again.
+        assert!(!plan_for(&waiting, &p, true, false, t + LOAD_WAIT + 1.0, 900.0).nothing());
+    }
+
+    #[test]
+    fn a_site_read_off_screen_reads_its_hours_the_moment_it_is_shown() {
+        // At start the screen has not said which site it shows, so the
+        // first round reads every site as off screen: daily totals, no
+        // hours. Shown a minute later, its hours must not wait `refresh`.
+        let p = params();
+        let t = 100_000.0;
+        let mut d = SiteData::new("https://example.com/", &p);
+        d.fetched = t;
+        d.days = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t };
+        let shown = plan_for(&d, &p, true, false, t + 60.0, 900.0);
+        assert!(shown.hours, "{shown:?}");
+        assert_eq!(shown.heavy, Heavy::Yes, "never read: {shown:?}");
+        assert!(!shown.days, "{shown:?}");
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_on_its_cadence_not_every_minute() {
+        let p = params();
+        let t = 100_000.0;
+        let mut d = read_at(t, &p);
+        d.pages = Part::failed("HTTP 500");
+        d.hours = Part::failed("HTTP 500");
+        // A minute after a failure: neither is asked again yet.
+        let soon = plan_for(&d, &p, true, false, t + 60.0, 900.0);
+        assert!(!soon.hours && soon.heavy == Heavy::No, "{soon:?}");
+        let later = plan_for(&d, &p, true, false, t + 900.0, 900.0);
+        assert!(later.hours && later.heavy == Heavy::Yes, "{later:?}");
+    }
 
     #[test]
     fn sign_in_is_worded_by_core_for_this_section() {

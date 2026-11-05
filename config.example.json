@@ -232,7 +232,7 @@
     "credentials_file": "",
     "_sites_comment": "Properties exactly as Search Console names them: sc-domain:example.com for a domain property, or https://example.com/ with its trailing slash for a URL prefix. Empty reads every property the account can see.",
     "sites": [],
-    "_refresh_comment": "Seconds between refreshes, at least 120. Google's data moves hourly at best.",
+    "_refresh_comment": "Seconds between reads of the site on screen's last 24 hours and daily totals, at least 300. Its pages, queries and terms are read when Google finalises another day, or every six hours; sites not on screen read only their daily totals, hourly.",
     "refresh": 600.0,
     "_window_days_comment": "Complete days in each movers window, compared with the equal window before it. w switches between 7 and 28 while running.",
     "window_days": 7,

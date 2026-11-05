@@ -67,12 +67,31 @@ A round asks, per property:
 | `sites.list` | which properties there are, and the permission on each |
 | `urlInspection/index:inspect` | INDEX HEALTH, bounded as below |
 
-That is nine requests per property per refresh, plus one `sites.list` for
-the round (every 600 seconds by default), against Google's 1,200 a minute
-per property. Eight of the nine are the hourly, movers, terms and sitemaps
-requests above; the ninth is the `date` grouping, which is the only answer
-that says where final data ends. Opening a page or a query asks two more,
-once.
+**Each is asked only when what it shows can have changed.** Google's own
+limits for Search Analytics are generous by count - 1,200 a minute per
+property - but it also keeps a *load* quota, counted in ten-minute and
+one-day chunks, and names what spends it: grouping by page or by query,
+long date ranges, and asking for the same data again. The six requests
+grouped by page or query are the expensive kind, and they are read from
+Google's *final* days, which change about once a day. Asking for them every
+few minutes was asking for the same answer.
+
+| part | site on screen | other sites |
+|---|---|---|
+| LAST 24 HOURS (`hour`) | every `refresh` (600 s) | not read until shown |
+| daily totals and where final data ends (`date`) | every `refresh` | hourly, for SITES |
+| movers and TOP SEARCH TERMS (by page, by query) | when the windows move - Google finalised another day - or six hours on, or `w`, `d`, `t`, `r` | never; read when the site is shown |
+| SITEMAPS | every six hours, or `r` | every six hours |
+| `sites.list` | every `refresh` | |
+| INDEX HEALTH inspections | as below, for the site on screen | not read |
+
+Only the site on screen is read in full; switching to another reads
+whatever of it is due at once. A part that failed is tried again on its
+own cadence, not every minute. If Google answers 429, that site is left
+alone for the fifteen minutes Google asks for, with every value on screen
+kept and a line saying when it will be asked again - `r` included, since
+asking sooner only spends the next chunk on refusals. Opening a page or a
+query asks two more, once.
 
 ## Sections
 
@@ -229,7 +248,7 @@ The section is `google_search_console`. Press `,` for the settings screen.
 | `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set. The settings row says where to create it |
 | `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; the screen warns if it is not `chmod 600` |
 | `sites` | `[]` | `sc-domain:example.com` or `https://example.com/`; empty reads every property the account can see |
-| `refresh` | `600` | seconds, at least 120 |
+| `refresh` | `600` | seconds, at least 300: how often the site on screen reads its last 24 hours and daily totals. The expensive reports follow Google's finalised days instead |
 | `window_days` | `7` | complete days per movers window |
 | `inspect_top` | `25` | 0-200; 0 turns inspection off and the section says so |
 | `search_type` | `web` | web, image, video, news or discover |

@@ -685,6 +685,16 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     if !s.warning.is_empty() {
         rows.extend(said(&p.warn, s.warning, w));
     }
+    // Google's load quota refused this site. Everything on screen is the
+    // last reading, kept; this says why it is not moving and until when.
+    if let Some(until) = site.and_then(|d| d.load_wait_until).filter(|until| *until > s.now) {
+        let at = DateTime::<Utc>::from_timestamp(until as i64, 0).map(local_hour).unwrap_or_default();
+        rows.extend(said(
+            &p.warn,
+            &format!("Google's load quota refused this site (429): asking again at {}, the 15 minutes Google asks for", at),
+            w,
+        ));
+    }
     if let Some(problem) = site.and_then(|s| s.problem.as_deref()) {
         rows.extend(said(&p.down, problem, w));
     }

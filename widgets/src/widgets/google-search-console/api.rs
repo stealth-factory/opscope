@@ -277,6 +277,8 @@ pub struct SiteData {
     /// spent. Absent when it inspected everything due.
     pub inspect_error: Option<String>,
     pub fetched: f64,
+    /// Google refused this site with a 429: when asking again is due.
+    pub load_wait_until: Option<f64>,
 }
 
 impl SiteData {
@@ -295,6 +297,7 @@ impl SiteData {
             sitemaps: Part::default(),
             inspect_error: None,
             fetched: 0.0,
+            load_wait_until: None,
         }
     }
 
@@ -370,111 +373,163 @@ fn terms(c: &Client, site: &str, p: &Params, w: ((NaiveDate, NaiveDate), (NaiveD
 ///
 /// `today` is Google's date (Pacific), which is what its date ranges mean.
 /// A 401 or 403 ends the round at once and becomes the site's problem.
-pub fn fetch_site(c: &Client, site: &str, p: &Params, today: NaiveDate, now: chrono::DateTime<chrono::Utc>) -> SiteData {
+/// How long to leave a site alone after Google refuses it with a 429.
+///
+/// Search Console's load quota is counted in ten-minute chunks, and Google's
+/// own advice for a refusal is to wait fifteen minutes before asking again.
+/// Asking sooner only spends the next chunk on refusals.
+pub const LOAD_WAIT: f64 = 15.0 * 60.0;
+
+/// When the expensive reports are read for the site on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Heavy {
+    /// Not this time: off screen, or nothing they show can have changed.
+    No,
+    /// Only if the windows they compare have moved - Google finalised
+    /// another day, or a fresh reading has a later last day.
+    IfMoved,
+    /// Now: never read for these settings, last read failed, `r`, or the
+    /// reading is old enough to refresh anyway.
+    Yes,
+}
+
+/// Which parts of a site one round asks Google for. A part not asked for
+/// keeps the value, and the time, it already had.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plan {
+    /// The last 24 hours, by the hour. Cheap: no page or query grouping.
+    pub hours: bool,
+    /// The daily totals, which also say where final data ends. Cheap.
+    pub days: bool,
+    /// Pages, queries and terms, each over two windows: grouped by page
+    /// or query, which Search Console counts as its expensive kind.
+    pub heavy: Heavy,
+    pub sitemaps: bool,
+}
+
+impl Plan {
+    pub fn nothing(&self) -> bool {
+        !self.hours && !self.days && self.heavy == Heavy::No && !self.sitemaps
+    }
+}
+
+/// One round for one site: the parts `plan` says are due, on top of the
+/// reading it had. A 401 or 403 ends the round for the whole property; a
+/// 429 ends it too, keeps every value already on screen, and says how long
+/// to wait (`load_wait_until`).
+pub fn fetch_site(c: &Client, site: &str, p: &Params, today: NaiveDate, now: chrono::DateTime<chrono::Utc>, prev: &SiteData, plan: Plan) -> SiteData {
     let at = tc::now();
-    let mut d = SiteData::new(site, p);
+    // Start from what is on screen, so a part not asked for - and every
+    // part after an early stop - keeps its value rather than blanking.
+    let mut d = if prev.site == site && prev.params == *p { prev.clone() } else { SiteData::new(site, p) };
+    d.problem = None;
+    d.load_wait_until = None;
     d.fetched = at;
-    macro_rules! stop_on {
-        ($fail:expr) => {
-            if ends_the_round(&$fail) {
-                d.problem = Some($fail.said.clone());
+    macro_rules! fail {
+        ($part:ident, $fail:expr) => {{
+            let f = $fail;
+            if ends_the_round(&f) {
+                d.problem = Some(f.said.clone());
                 return d;
             }
-        };
+            d.$part = Part::failed(f.said.clone()).after(std::mem::take(&mut d.$part));
+            if f.status == 429 {
+                d.load_wait_until = Some(at + LOAD_WAIT);
+                return d;
+            }
+        }};
     }
-    match query(c, site, &Query {
-        from: today - Duration::days(HOURLY_DAYS),
-        to: today,
-        dimensions: &["hour"],
-        kind: &p.kind,
-        state: "hourly_all",
-        rows: MOVER_ROWS,
-        filter: None,
-    }) {
-        Ok(a) => d.hours = Part::ok(hour_view(&a, now), at),
-        Err(f) => {
-            stop_on!(f);
-            d.hours = Part::failed(f.said);
+    if plan.hours {
+        match query(c, site, &Query {
+            from: today - Duration::days(HOURLY_DAYS),
+            to: today,
+            dimensions: &["hour"],
+            kind: &p.kind,
+            state: "hourly_all",
+            rows: MOVER_ROWS,
+            filter: None,
+        }) {
+            Ok(a) => d.hours = Part::ok(hour_view(&a, now), at),
+            Err(f) => fail!(hours, f),
         }
     }
     // The last days: one `date` grouping in `all`, which carries the
     // first incomplete date and so says where final data ends, and where
     // any data ends, in one request.
-    let span = 2 * p.days.max(1) + 14;
-    let end = match query(c, site, &Query {
-        from: today - Duration::days(span),
-        to: today,
-        dimensions: &["date"],
-        kind: &p.kind,
-        state: "all",
-        rows: MOVER_ROWS,
-        filter: None,
-    }) {
-        Ok(a) => {
-            let (final_end, fresh_end) = last_days(&a);
-            d.days = Part::ok(Days { final_end, fresh_end, daily: daily(&a) }, at);
-            if p.fresh { fresh_end } else { final_end }
-        }
-        Err(f) => {
-            stop_on!(f);
-            d.days = Part::failed(f.said.clone());
-            d.pages = Part::failed(format!("could not tell which days are final: {}", f.said));
-            None
-        }
-    };
-    match end {
-        Some(end) => {
-            let w = windows(end, p.days);
-            d.windows = Some(w);
-            match movers(c, site, "page", p, w) {
-                Ok(m) => d.pages = Part::ok(m, at),
-                Err(f) => {
-                    stop_on!(f);
-                    d.pages = Part::failed(f.said);
-                }
+    if plan.days {
+        let span = 2 * p.days.max(1) + 14;
+        match query(c, site, &Query {
+            from: today - Duration::days(span),
+            to: today,
+            dimensions: &["date"],
+            kind: &p.kind,
+            state: "all",
+            rows: MOVER_ROWS,
+            filter: None,
+        }) {
+            Ok(a) => {
+                let (final_end, fresh_end) = last_days(&a);
+                d.days = Part::ok(Days { final_end, fresh_end, daily: daily(&a) }, at);
             }
-            if p.kind == "discover" {
-                let why = "Google reports no search queries for Discover";
-                d.queries = Part::noted(why);
-                d.terms = Part::noted(why);
-            } else {
-                match movers(c, site, "query", p, w) {
-                    Ok(m) => d.queries = Part::ok(m, at),
-                    Err(f) => {
-                        stop_on!(f);
-                        d.queries = Part::failed(f.said);
-                    }
-                }
-                match terms(c, site, p, w) {
-                    Ok(t) => d.terms = Part::ok(t, at),
-                    Err(f) => {
-                        stop_on!(f);
-                        d.terms = Part::failed(f.said);
-                    }
-                }
-            }
-        }
-        None if d.days.value.is_some() => {
-            let why = if p.fresh {
-                "no day with data yet for this property"
-            } else {
-                "no final days yet: Google finalises a day 2-3 days after it ends, and a new property has none"
-            };
-            d.pages = Part::noted(why);
-            d.queries = Part::noted(why);
-            d.terms = Part::noted(why);
-        }
-        None => {
-            let said = d.pages.error.clone().unwrap_or_default();
-            d.queries = Part::failed(said.clone());
-            d.terms = Part::failed(said);
+            Err(f) => fail!(days, f),
         }
     }
-    match sitemaps(c, site, None) {
-        Ok(s) => d.sitemaps = Part::ok(s, at),
-        Err(f) => {
-            stop_on!(f);
-            d.sitemaps = Part::failed(f.said);
+    let end = d.days.value.as_ref().and_then(|x| if p.fresh { x.fresh_end } else { x.final_end });
+    let moved = end.map(|e| windows(e, p.days)) != d.windows;
+    let heavy = match plan.heavy {
+        Heavy::Yes => true,
+        Heavy::IfMoved => moved,
+        Heavy::No => false,
+    };
+    if heavy {
+        match end {
+            Some(end) => {
+                let w = windows(end, p.days);
+                d.windows = Some(w);
+                match movers(c, site, "page", p, w) {
+                    Ok(m) => d.pages = Part::ok(m, at),
+                    Err(f) => fail!(pages, f),
+                }
+                if p.kind == "discover" {
+                    let why = "Google reports no search queries for Discover";
+                    d.queries = Part::noted(why);
+                    d.terms = Part::noted(why);
+                } else {
+                    match movers(c, site, "query", p, w) {
+                        Ok(m) => d.queries = Part::ok(m, at),
+                        Err(f) => fail!(queries, f),
+                    }
+                    match terms(c, site, p, w) {
+                        Ok(t) => d.terms = Part::ok(t, at),
+                        Err(f) => fail!(terms, f),
+                    }
+                }
+            }
+            None if d.days.value.is_some() => {
+                let why = if p.fresh {
+                    "no day with data yet for this property"
+                } else {
+                    "no final days yet: Google finalises a day 2-3 days after it ends, and a new property has none"
+                };
+                d.pages = Part::noted(why);
+                d.queries = Part::noted(why);
+                d.terms = Part::noted(why);
+            }
+            None => {
+                let said = match &d.days.error {
+                    Some(e) => format!("could not tell which days are final: {}", e),
+                    None => "could not tell which days are final".to_string(),
+                };
+                d.pages = Part::failed(said.clone());
+                d.queries = Part::failed(said.clone());
+                d.terms = Part::failed(said);
+            }
+        }
+    }
+    if plan.sitemaps {
+        match sitemaps(c, site, None) {
+            Ok(s) => d.sitemaps = Part::ok(s, at),
+            Err(f) => fail!(sitemaps, f),
         }
     }
     d
