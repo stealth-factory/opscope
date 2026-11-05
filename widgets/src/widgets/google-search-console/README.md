@@ -198,7 +198,9 @@ then say *Google may still change this*. `d` again goes back.
 | on screen | means |
 |---|---|
 | `no credential: set google_search_console.credentials …` | nothing to sign in with |
-| `cannot read the key file …`, `… is readable by others; chmod 600 it` | the key file, worded by core |
+| `cannot read the key file …` | the key file, worded by core |
+| `[!]` notice: `… is readable by others; chmod 600 it` | the key file others can read; a notice, since it explains no number |
+| `daily totals from … ago, because the newest read failed: …` | the totals and "final to" shown are the last good read; beside them in the status line, SITES and the property detail |
 | `Google refused the sign-in: invalid_grant - …` | Google's own description; a clock hint when it is about `iat`/`exp` |
 | `API not enabled: turn on searchconsole.googleapis.com …` | the Search Console API is off in the key's Cloud project |
 | `403 no access: add <email> as a Restricted user on <property> …` | the service account is not a user on the property |
@@ -246,7 +248,7 @@ The section is `google_search_console`. Press `,` for the settings screen.
 | key | default | |
 |---|---|---|
 | `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set. The settings row says where to create it |
-| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; the screen warns if it is not `chmod 600` |
+| `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; a `[!]` notice warns if it is not `chmod 600` |
 | `sites` | `[]` | `sc-domain:example.com` or `https://example.com/`; empty reads every property the account can see |
 | `refresh` | `600` | seconds, at least 300: how often the site on screen reads its last 24 hours and daily totals. The expensive reports follow Google's finalised days instead |
 | `window_days` | `7` | complete days per movers window |

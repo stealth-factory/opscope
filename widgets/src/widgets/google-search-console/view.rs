@@ -106,8 +106,6 @@ pub struct Screen<'a> {
     /// What stops everything: no credential, sites.list refused, the
     /// poller died.
     pub err: &'a str,
-    /// A key file others can read.
-    pub warning: &'a str,
     pub selected: usize,
     pub now: f64,
     pub busy: Option<usize>,
@@ -682,8 +680,10 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     if !s.err.is_empty() {
         rows.extend(said(&p.down, s.err, w));
     }
-    if !s.warning.is_empty() {
-        rows.extend(said(&p.warn, s.warning, w));
+    // The status line's "final to" comes from the daily totals: when their
+    // newest read failed, say so beside it rather than let it read current.
+    if let Some((kept, why)) = site.filter(|d| d.problem.is_none()).and_then(|d| days_failed(d, s.now)) {
+        rows.extend(said(if kept { &p.warn } else { &p.down }, &why, w));
     }
     // Google's load quota refused this site. Everything on screen is the
     // last reading, kept; this says why it is not moving and until when.
@@ -1297,6 +1297,17 @@ pub fn site_totals(d: &SiteData) -> Option<(Totals, Totals)> {
     Some((window_totals(&days.daily, cur), window_totals(&days.daily, prior)))
 }
 
+/// Why the daily totals - and where final data ends - are not the newest:
+/// the last read failed. `true` with a kept reading, which the words date;
+/// `false` when there is none to show.
+pub fn days_failed(d: &SiteData, now: f64) -> Option<(bool, String)> {
+    let err = d.days.error.as_deref()?;
+    Some(match d.days.value {
+        Some(_) => (true, format!("daily totals from {} ago, because the newest read failed: {}", tc::age(now - d.days.at), err)),
+        None => (false, format!("no daily totals: {}", err)),
+    })
+}
+
 fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usize, now: f64, p: &Palette, w: usize) -> Vec<String> {
     let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
     let c = |colour: &str| format!("{}{}", tint, colour);
@@ -1321,8 +1332,14 @@ fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usi
             detail.push((c(&p.txt), format!("pos {:.1}", a)));
             detail.push((c(good_colour(g, p)), t));
         }
-    } else {
+    } else if d.days.error.is_none() {
         detail.push((c(&p.dim), "no window to compare yet".into()));
+    }
+    // Beside the totals it dates, or in their place when there are none.
+    if d.problem.is_none() {
+        if let Some((kept, why)) = days_failed(d, now) {
+            detail.push((c(if kept { &p.warn } else { &p.down }), why));
+        }
     }
     let (inspected, _, _, _) = inspected_rows(d, cache, top, now);
     let bad = inspected.iter().filter(|(_, e)| !matches!(&e.result, Ok(i) if i.verdict == "PASS")).count();
@@ -1586,6 +1603,9 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
                 field(&mut rows, "final to", days.final_end.map(day).unwrap_or_else(|| "no final day yet".into()), &p.txt);
                 field(&mut rows, "fresh to", days.fresh_end.map(day).unwrap_or_else(|| "no day with data".into()), &p.txt);
             }
+            if let Some((kept, why)) = days_failed(d, s.now) {
+                rows.extend(said(if kept { &p.warn } else { &p.down }, &why, w));
+            }
             if let Some(problem) = &d.problem {
                 rows.extend(said(&p.down, problem, w));
             }
@@ -1787,7 +1807,6 @@ mod tests {
             needle: "",
             typing: false,
             err,
-            warning: "",
             selected,
             now: Utc.with_ymd_and_hms(2026, 10, 21, 18, 0, 0).unwrap().timestamp() as f64,
             busy: None,
@@ -1801,6 +1820,34 @@ mod tests {
             let n = tc::display_width(r);
             assert!(n < w, "{what} at {w} columns: row {i} is {n} wide: {:?}", plain(r));
         }
+    }
+
+    #[test]
+    fn a_failed_daily_read_is_said_beside_the_totals_it_leaves_standing() {
+        let p = params();
+        let pal = palette();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let now = 10_000.0;
+        let mut d = SiteData::new("https://example.com/", &p);
+        let kept = Part::ok(Days { final_end: Some(end), fresh_end: Some(end), daily: Vec::new() }, now - 3_600.0);
+        d.days = Part::failed("HTTP 500").after(kept);
+        let (kept, why) = days_failed(&d, now).expect("a failure to say");
+        assert!(kept && why.contains("HTTP 500") && why.contains(&tc::age(3_600.0)), "{why}");
+        // In the SITES row, beside the totals, at every width.
+        for w in WIDTHS {
+            let rows = site_rows(&d, None, false, 25, now, &pal, w);
+            assert_fits(&rows, w, "site row");
+            // Narrow panes wrap it across rows; read it back as one line.
+            let text = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(text.contains("clicks") && text.contains("newest read failed: HTTP 500"), "{w}: {text}");
+        }
+        // With nothing kept, the failure stands in for the totals.
+        let mut none = SiteData::new("https://example.com/", &p);
+        none.days = Part::failed("HTTP 500");
+        let text = site_rows(&none, None, false, 25, now, &pal, 100).iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("no daily totals: HTTP 500") && !text.contains("no window"), "{text}");
+        // A read that did not fail says nothing.
+        assert!(days_failed(&SiteData::new("https://example.com/", &p), now).is_none());
     }
 
     #[test]

@@ -85,9 +85,6 @@ struct Shared {
     /// What stops every site at once: no credential, a key file that cannot
     /// be read, a refused sign-in, sites.list refused, the poller died.
     err: String,
-    /// A key file others can read. A key stored in config is covered by
-    /// the config-file permission notice instead.
-    warning: String,
     /// The site on screen, set by the screen every frame. Only it is read in
     /// full.
     focus: String,
@@ -389,11 +386,19 @@ fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f6
         };
     }
     let pages = &prev.pages;
-    let never = pages.value.is_none() && pages.error.is_none() && pages.note.is_none();
+    // Pages, queries and terms are read in that order and a 429 stops the
+    // round, so any of them can be the one that failed or was never asked.
+    // Pages alone would leave a failed queries read waiting for the window
+    // to move, up to six hours, behind a 15-minute retry time.
+    fn unread<T>(part: &Part<T>) -> bool {
+        part.value.is_none() && part.error.is_none() && part.note.is_none()
+    }
+    let never = unread(&prev.pages) || unread(&prev.queries) || unread(&prev.terms);
+    let failed = prev.pages.error.is_some() || prev.queries.error.is_some() || prev.terms.error.is_some();
     let days = due(&prev.days, f, r, now, refresh);
     let heavy = if renewed || never {
         Heavy::Yes
-    } else if pages.error.is_some() {
+    } else if failed {
         if now - prev.fetched >= refresh { Heavy::Yes } else { Heavy::No }
     } else if pages.at > 0.0 && now - pages.at >= HEAVY_EVERY {
         Heavy::Yes
@@ -455,7 +460,13 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             return;
         }
     };
-    let warning = cred.warning().or_else(tc::config_token_warning).unwrap_or_default();
+    // A key file others can read explains no number on screen, so it is a
+    // notice, not a row. A key pasted into config is covered by core's own
+    // config-file notice, which `load_config` raises.
+    let warning = cred.warning();
+    tc::notices::when(warning.is_some(), || {
+        tc::notices::Notice::warn("google-search-console-key-file-readable", warning.clone().unwrap_or_default())
+    });
     if list_due {
         let (targets, err) = resolve_sites(cfg, &client);
         *round = Round { targets, err, at: now };
@@ -464,7 +475,6 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
     let err = round.err.clone();
     if let Ok(mut g) = shared.lock() {
         g.err = err.unwrap_or_default();
-        g.warning = warning;
         // Keep what is already on screen for sites still wanted; add the
         // rest as waiting so the site count is right from the start.
         let old = std::mem::take(&mut g.sites);
@@ -668,6 +678,10 @@ fn main() {
 
     loop {
         let tick = tc::animation_tick();
+        // An open `/` filter takes `!` as a character, not as the notices key.
+        if typing {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         if open.is_none() {
             if let Some(hit) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed, None) {
@@ -882,9 +896,9 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (sites, err, warning) = match shared.lock() {
-            Ok(g) => (g.sites.clone(), g.err.clone(), g.warning.clone()),
-            Err(_) => (Vec::new(), "the screen lost its link to the poller".to_string(), String::new()),
+        let (sites, err) = match shared.lock() {
+            Ok(g) => (g.sites.clone(), g.err.clone()),
+            Err(_) => (Vec::new(), "the screen lost its link to the poller".to_string()),
         };
         if at >= sites.len() {
             at = 0;
@@ -906,7 +920,6 @@ fn main() {
             needle: &needle,
             typing,
             err: &err,
-            warning: &warning,
             selected,
             now: tc::now(),
             busy: activity.tick(tick),
@@ -1127,6 +1140,8 @@ mod tests {
         d.days = Part { value: None, note: Some("read".into()), error: None, at: t };
         d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t };
         d.pages = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.queries = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t };
         d
     }
 
@@ -1241,6 +1256,25 @@ mod tests {
         assert!(site_totals(&d).is_some());
         // And with no daily reading there is nothing to say.
         assert!(site_totals(&SiteData::new("https://example.com/", &p)).is_none());
+    }
+
+    #[test]
+    fn a_failed_queries_or_terms_read_is_retried_though_pages_came_back() {
+        // Pages came back, then queries hit a 429, which stops the round
+        // before terms. Once the wait is over, both are due on the retry
+        // cadence - not left until the windows move or six hours pass.
+        let p = params();
+        let t = 100_000.0;
+        let mut d = read_at(t, &p);
+        d.queries = Part::failed("429 load quota");
+        d.terms = Part::default();
+        assert_eq!(plan_for(&d, &p, true, false, t + 60.0, 900.0).heavy, Heavy::Yes, "terms never read");
+        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t };
+        assert_eq!(plan_for(&d, &p, true, false, t + 60.0, 900.0).heavy, Heavy::No, "a minute after the failure");
+        assert_eq!(plan_for(&d, &p, true, false, t + 900.0, 900.0).heavy, Heavy::Yes);
+        let mut d = read_at(t, &p);
+        d.terms = Part::failed("HTTP 500");
+        assert_eq!(plan_for(&d, &p, true, false, t + 900.0, 900.0).heavy, Heavy::Yes);
     }
 
     #[test]
