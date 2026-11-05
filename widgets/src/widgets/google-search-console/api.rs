@@ -470,18 +470,35 @@ pub fn fetch_site(c: &Client, site: &str, p: &Params, today: NaiveDate, now: chr
     // any data ends, in one request.
     if plan.days {
         let span = 2 * p.days.max(1) + 14;
-        match query(c, site, &Query {
-            from: today - Duration::days(span),
-            to: today,
-            dimensions: &["date"],
-            kind: &p.kind,
-            state: "all",
-            rows: MOVER_ROWS,
-            filter: None,
-        }) {
+        let from = today - Duration::days(span);
+        let by_date = |from, to| Query { from, to, dimensions: &["date"], kind: &p.kind, state: "all", rows: MOVER_ROWS, filter: None };
+        match query(c, site, &by_date(from, today)) {
             Ok(a) => {
                 let (final_end, fresh_end) = last_days(&a);
-                d.days = Part::ok(Days { final_end, fresh_end, daily: daily(&a) }, at);
+                let mut rows = daily(&a);
+                // A quiet property's windows can end weeks back and reach
+                // behind this read: ask for those days rather than count
+                // them as zeros in its totals and its daily chart.
+                // If that read fails, the totals would be missing days, so
+                // the reading is not replaced: the last one stays behind
+                // the error, as for any failed read.
+                let end = if p.fresh { fresh_end } else { final_end };
+                let mut whole = true;
+                if let Some((gap_from, gap_to)) = end.and_then(|e| uncovered(e, p.days, from)) {
+                    match query(c, site, &by_date(gap_from, gap_to)) {
+                        Ok(b) => {
+                            rows.extend(daily(&b));
+                            rows.sort_by_key(|(day, _)| *day);
+                        }
+                        Err(f) => {
+                            whole = false;
+                            fail!(days, f);
+                        }
+                    }
+                }
+                if whole {
+                    d.days = Part::ok(Days { final_end, fresh_end, daily: rows }, at);
+                }
             }
             Err(f) => fail!(days, f),
         }

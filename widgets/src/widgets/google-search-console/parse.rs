@@ -532,6 +532,16 @@ pub fn windows(end: NaiveDate, days: i64) -> ((NaiveDate, NaiveDate), (NaiveDate
     ((cur_start, end), (prior_end - Duration::days(days - 1), prior_end))
 }
 
+/// The days both windows ending at `end` need and a read from `from` did
+/// not ask for. Without Google's incomplete-date marker the windows end on
+/// the last day with traffic, which for a quiet property can sit weeks
+/// back, so they can reach behind the read; a day never asked for must be
+/// asked, not counted as a zero.
+pub fn uncovered(end: NaiveDate, days: i64, from: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+    let (_, (start, _)) = windows(end, days);
+    (start < from).then(|| (start, from - Duration::days(1)))
+}
+
 /// `Oct 12–18`, or `Sep 28–Oct 4` across a month.
 pub fn span_label(from: NaiveDate, to: NaiveDate) -> String {
     if from.format("%b").to_string() == to.format("%b").to_string() {
@@ -1233,6 +1243,22 @@ mod tests {
         let a = dates(&["2026-10-20"], Some("2026-10-20"));
         assert_eq!(last_days(&a), (None, parse_date("2026-10-20")));
         assert_eq!(last_days(&dates(&[], None)), (None, None));
+    }
+
+    #[test]
+    fn a_quiet_propertys_windows_ask_for_the_days_the_read_did_not() {
+        let d = |s: &str| parse_date(s).unwrap();
+        // Nov 5, a seven-day window: the read starts Oct 8 (2 x 7 + 14 back).
+        let from = d("2026-11-05") - Duration::days(28);
+        assert_eq!(from, d("2026-10-08"));
+        // Last traffic Oct 10: Oct 4-10 against Sep 27-Oct 3, all of it
+        // before Oct 8 but the last three days. Those are asked for.
+        assert_eq!(uncovered(d("2026-10-10"), 7, from), Some((d("2026-09-27"), d("2026-10-07"))));
+        // A property with traffic to Nov 2 is inside the read already.
+        assert_eq!(uncovered(d("2026-11-02"), 7, from), None);
+        // The prior window starting on the read's first day needs nothing.
+        assert_eq!(uncovered(d("2026-10-21"), 7, from), None);
+        assert_eq!(uncovered(d("2026-10-20"), 7, from), Some((d("2026-10-07"), d("2026-10-07"))));
     }
 
     #[test]

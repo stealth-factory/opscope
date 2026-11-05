@@ -75,6 +75,7 @@ A round asks, per property:
 |---|---|
 | `searchAnalytics.query`, `dimensions: ["hour"]`, `dataState: hourly_all` | LAST 24 HOURS, and the same hours a week earlier from the same answer |
 | `searchAnalytics.query`, `dimensions: ["date"]`, `dataState: all` | where final data ends (`first_incomplete_date`), and the property's own daily totals for SITES |
+| the same, for the days before that read, only when needed | a quiet property with no `first_incomplete_date`, whose windows end on its last day of traffic weeks back: the days they reach behind the first read are asked for, not counted as zeros |
 | `searchAnalytics.query` by `page`, then by `query`, each for both windows, `rowLimit` 1000 | the movers - page and query are never grouped in one movers request, which Google says costs more |
 | `searchAnalytics.query` by `query` and `page`, both windows, `rowLimit` 25 | TOP SEARCH TERMS |
 | `sitemaps.list` | SITEMAPS |
