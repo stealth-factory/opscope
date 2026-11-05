@@ -912,9 +912,15 @@ pub fn inspection_set(movers: &[Mover], top: usize) -> (Vec<String>, usize, usiz
 /// `https://example.com/a/b/` and `https://example.com/a_b/` read alike and
 /// must not share a cache or its count.
 pub fn cache_name(site: &str) -> String {
+    // The readable part is cut to 120 bytes - every character in it is
+    // ASCII - so the whole name, with the `.tmp` a save writes first, stays
+    // well inside the 255 a file name may have. The hash is of the whole
+    // name, so a cut never makes two properties share a file, and a name
+    // short enough already is unchanged.
     let safe: String = site
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .take(120)
         .collect();
     // FNV-1a, spelled out: std's hasher may change between Rust releases,
     // and a file name has to stay the same across them.
@@ -1417,6 +1423,12 @@ mod tests {
         assert_ne!(cache_name("sc-domain:example.com"), cache_name("https://example.com/"));
         assert_ne!(cache_name("https://example.com/a/b/"), cache_name("https://example.com/a_b/"));
         assert!(cache_name("sc-domain:example.com").starts_with("sc-domain_example.com-"));
+        // A URL-prefix property with a long path still names a file the
+        // filesystem takes, its temporary copy included, and two that
+        // differ only past the cut still get files of their own.
+        let long = format!("https://example.com/{}/", "a".repeat(210));
+        assert!(cache_name(&long).len() + ".tmp".len() <= 255, "{}", cache_name(&long).len());
+        assert_ne!(cache_name(&long), cache_name(&format!("https://example.com/{}b/", "a".repeat(210))));
         assert_eq!(site_host("https://www.example.com/blog/"), "example.com");
         assert_eq!(site_host("sc-domain:Example.com"), "example.com");
     }
