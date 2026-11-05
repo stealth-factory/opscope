@@ -146,9 +146,9 @@ pub fn realtime_interval(
 ///
 /// `used` is what the property has spent today by every caller, `left`
 /// what remains, and `to_reset` the seconds until midnight Pacific. The
-/// rate so far, carried to the reset, is compared with nine tenths of
-/// what is left: a tenth stays spare for whatever else reads the
-/// property. Under 15 minutes into the day the rate is too noisy to act
+/// rate so far, carried to the reset, is compared with what is left above
+/// a tenth of the whole day's bucket, which stays spare for whatever else
+/// reads the property. Under 15 minutes into the day the rate is too noisy to act
 /// on, and `None` means read at the chosen pace.
 pub fn pace(used: f64, left: f64, to_reset: f64) -> Option<f64> {
     let elapsed = DAY_SECS - to_reset;
@@ -156,24 +156,29 @@ pub fn pace(used: f64, left: f64, to_reset: f64) -> Option<f64> {
         return None;
     }
     let need = used / elapsed * to_reset;
-    let have = left.max(1.0) * 0.9;
+    let have = (left - (used + left) * 0.1).max(1.0);
     (need > have).then(|| (need / have).min(10.0))
 }
 
 /// Seconds in GA's quota day.
 pub const DAY_SECS: f64 = 86_400.0;
 
-/// Seconds from `now` (Unix) to the next midnight Pacific, when GA
-/// refills every daily quota.
+/// Seconds from `now` (Unix) to the next midnight Pacific Standard
+/// Time, when GA documents that every daily quota refills. A fixed
+/// UTC-8 rather than Los Angeles time: during daylight saving that is an
+/// hour later than local midnight, which, if GA meant local time, only
+/// paces a little early.
 pub fn to_quota_reset(now: f64) -> f64 {
     use chrono::{Duration, TimeZone};
-    let la = chrono_tz::America::Los_Angeles;
+    let Some(pst) = chrono::FixedOffset::west_opt(8 * 3_600) else {
+        return DAY_SECS;
+    };
     let Some(here) = chrono::DateTime::from_timestamp(now as i64, 0) else {
         return DAY_SECS;
     };
-    let today = here.with_timezone(&la).date_naive();
+    let today = here.with_timezone(&pst).date_naive();
     let midnight = (today + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap_or_default();
-    match la.from_local_datetime(&midnight).earliest() {
+    match pst.from_local_datetime(&midnight).earliest() {
         Some(t) => (t.timestamp() as f64 - now).clamp(0.0, DAY_SECS + 3_600.0),
         None => DAY_SECS,
     }
@@ -1387,11 +1392,12 @@ mod tests {
     #[test]
     fn pace_compares_the_rate_so_far_with_what_is_left() {
         // Half the day gone, 100k spent by everyone, 100k left: the rest of
-        // the day needs 100k, more than nine tenths of what is left.
+        // the day needs 100k, and only 80k is above the 20k (a tenth of
+        // the day's 200k) kept spare.
         let f = pace(100_000.0, 100_000.0, 43_200.0).unwrap();
-        assert!((f - 100_000.0 / 90_000.0).abs() < 1e-9, "{}", f);
+        assert!((f - 100_000.0 / 80_000.0).abs() < 1e-9, "{}", f);
         // A quarter of the way with a quarter spent: 150k needed for the
-        // rest of the day against nine tenths of 150k left.
+        // rest of the day against 130k above the reserve.
         assert!(pace(50_000.0, 150_000.0, 64_800.0).is_some());
         // Light use never paces.
         assert_eq!(pace(10_000.0, 190_000.0, 43_200.0), None);
@@ -1407,8 +1413,11 @@ mod tests {
         // UTC-8): four hours to midnight.
         let now = 1_793_851_200.0;
         assert_eq!(to_quota_reset(now), 4.0 * 3_600.0);
-        // 2026-07-01 07:00 UTC is midnight PDT exactly: a whole day to go.
-        assert_eq!(to_quota_reset(1_782_889_200.0), DAY_SECS);
+        // 2026-07-01 08:00 UTC is midnight PST, though Los Angeles is on
+        // PDT: a whole day to go.
+        assert_eq!(to_quota_reset(1_782_892_800.0), DAY_SECS);
+        // An hour earlier is Los Angeles midnight, and still an hour to go.
+        assert_eq!(to_quota_reset(1_782_889_200.0), 3_600.0);
     }
 
     #[test]

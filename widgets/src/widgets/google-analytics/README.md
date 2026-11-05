@@ -243,8 +243,8 @@ reading it.
 
 The bucket that runs out on a wall display is the daily one: 200k realtime
 tokens a property, shared by every pane, machine and tool reading it, and
-refilled at midnight Pacific. So the widget plans for a whole day, with
-several panes on the same property:
+refilled at midnight Pacific Standard Time. So the widget plans for a whole
+day, with several panes on the same property:
 
 - **Only the property on screen is read in full**: realtime every 2, 5 or
   10 minutes (`l`), the breakdowns every 5 minutes, the processed reports
@@ -262,8 +262,8 @@ several panes on the same property:
   minutes and reports to twice their interval.
 
 At the defaults a pane costs about 108 realtime requests an hour for the
-property on screen (two every 2 minutes, four breakdowns every 5) and 24 for
-each other one - roughly 26k of the day's 200k for the property on screen at
+property on screen (two every 2 minutes, four breakdowns every 5) and 12 for
+each other one (totals only, every 5 minutes) - roughly 26k of the day's 200k for the property on screen at
 GA's usual 10 tokens a request, so three panes on one property stay near
 40%. The header says which slowdown is in force. A
 429 names the bucket and when it refills, pauses that kind of request for

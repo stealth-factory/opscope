@@ -400,6 +400,7 @@ fn run_live(
     let configured = !cfg.key_events.is_empty();
     let mut was_on_screen = true;
     let mut bd_owed = false;
+    let mut series_last = true;
     loop {
         let now = tc::now();
         let (chosen, force, forced_here, on_screen) = match shared.lock() {
@@ -421,17 +422,18 @@ fn run_live(
                 rt_paused = 0.0;
             }
         }
-        // Brought on screen: a realtime reading older than the interval
-        // it would have on screen - chosen, stretched by quota, pace and
-        // idle - is taken now rather than at the end of the background
-        // one. Switching back and forth cannot beat a quota slowdown.
+        // Brought on screen: the next realtime reading moves from the
+        // background clock to the interval the property has on screen -
+        // chosen, stretched by quota, pace and idle - counted from the
+        // last reading, so switching back and forth cannot beat a quota
+        // slowdown. A last reading that skipped the 30-minute series is
+        // replaced at once, because the series is what the screen draws.
         // Breakdowns kept their clock and are simply due.
         if on_screen && !was_on_screen {
             let (last, due) =
                 with(shared, i, |p| (p.rt_at, p.screen_interval.max(chosen))).unwrap_or((0.0, chosen));
-            if now - last >= due as f64 {
-                next_rt = pull_realtime(next_rt, rt_paused, now);
-            }
+            let at = if series_last { last + due as f64 } else { now };
+            next_rt = next_rt.min(at.max(now)).max(rt_paused);
         }
         was_on_screen = on_screen;
         // `l` changes `chosen` without touching `force`. Take one realtime
@@ -469,12 +471,21 @@ fn run_live(
 
         if next_rt <= now && rt_paused <= now {
             let work = activity.start();
-            let got = realtime(cred, &id, grant);
+            let got = realtime(cred, &id, grant, on_screen);
+            series_last = on_screen;
             let at = tc::now();
             let mut sample: Option<Sample> = None;
             with(shared, i, |p| {
                 match got {
-                    Ok((rt, quota)) => {
+                    Ok((mut rt, quota)) => {
+                        // A totals-only read keeps the last series; the
+                        // property reads it again as soon as it is shown.
+                        if !series_last {
+                            if let Some(old) = &p.rt {
+                                rt.minutes = old.minutes.clone();
+                                rt.views_minutes = old.views_minutes.clone();
+                            }
+                        }
                         if rt.active > 0.0 {
                             p.idle_since = None;
                         } else if p.idle_since.is_none() {
@@ -734,7 +745,10 @@ fn bad(e: String) -> Fail {
     }
 }
 
-fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quota>), Fail> {
+/// Realtime totals and, when `series` is set, the 30-minute series. A
+/// property off screen skips the series: nothing draws it there, and
+/// it is half of that property's realtime requests.
+fn realtime(cred: &Credential, id: &str, grant: &str, series: bool) -> Result<(Rt, Option<Quota>), Fail> {
     let totals = parse::parse_report(&api::realtime(
         cred,
         id,
@@ -742,6 +756,18 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
         grant,
     )?)
     .map_err(bad)?;
+    let (active, views, key) = model::realtime_totals(&totals);
+    if !series {
+        return Ok((
+            Rt {
+                active,
+                views,
+                key,
+                ..Rt::default()
+            },
+            totals.quota,
+        ));
+    }
     let minutes = parse::parse_report(&api::realtime(
         cred,
         id,
@@ -749,7 +775,6 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
         grant,
     )?)
     .map_err(bad)?;
-    let (active, views, key) = model::realtime_totals(&totals);
     Ok((
         Rt {
             active,
