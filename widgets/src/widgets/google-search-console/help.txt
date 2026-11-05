@@ -17,7 +17,7 @@ switch property when there is more than one, and Enter opens the selected
 row - 28 days of a page or query with its top queries or pages, the full
 inspection of a page, the pages a search term lands on, a sitemap's
 contents, or a property's permission and budget. m cycles the movers
-metric (impressions, clicks, CTR, position). w toggles the window between
+metric (impressions, clicks, CTR, and position except for Discover). w toggles the window between
 7 and 28 days. d toggles final and fresh data. t cycles the search type
 (web, image, video, news, discover). press i to inspect the selected page
 now, which spends one of the property's 2,000 daily inspections; Enter

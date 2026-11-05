@@ -114,7 +114,8 @@ words, which is a different screen from a complete hour with nothing in it.
 latest final date with the equal window before it, sorted by the size of the
 change in either direction, with `new` and `gone` rows. Impressions by
 default; `m` cycles impressions, clicks, CTR and position. Position falls as
-it improves, so `▲` means it got better. The `INDEX` column (wide panes) is
+it improves, so `▲` means it got better. Discover has no position, so Google
+reports none: there `m` skips it and no position is drawn anywhere. The `INDEX` column (wide panes) is
 the page's last inspection. When either window hit the 1,000-row limit the
 header says `top 1,000 of more`, and a row missing from that window is not
 taken as zero: it may sit just below the cut, so it shows `–` there and is
@@ -224,7 +225,7 @@ then say *Google may still change this*. `d` again goes back.
 | `tab` | jump to the next section |
 | `←` `→` | switch property, when there is more than one |
 | `↵` | open the selected row; a second click on a selected row does the same |
-| `m` | cycle the movers metric: impressions, clicks, CTR, position |
+| `m` | cycle the movers metric: impressions, clicks, CTR, position (not for Discover) |
 | `w` | window: 7 or 28 complete days |
 | `d` | data: final or fresh |
 | `t` | search type: web, image, video, news, discover |

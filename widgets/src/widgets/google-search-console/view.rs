@@ -755,7 +755,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     ));
     rows.extend(part_rows(&site.hours, s.now, p, w));
     if let Some(h) = &site.hours.value {
-        rows.extend(hours_rows(h, p, w));
+        rows.extend(hours_rows(h, site.params.has_position(), p, w));
     }
 
     // MOVERS · PAGES and MOVERS · QUERIES
@@ -796,7 +796,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         if list_.is_empty() {
             continue;
         }
-        let cols = mover_columns(s.metric, slot == 0, w);
+        let cols = mover_columns(s.metric, slot == 0, site.params.has_position(), w);
         let labels: Vec<(&str, usize)> = cols.iter().map(|c| (c.label, c.width)).collect();
         rows.extend(header_row("  ", if slot == 0 { "PAGE" } else { "QUERY" }, &labels, p, w));
         for (i, mv) in list_.iter().enumerate().take(to).skip(from) {
@@ -970,7 +970,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
 }
 
 /// The hatched strip, its axis and its comparison.
-pub fn hours_rows(h: &HourView, p: &Palette, w: usize) -> Vec<String> {
+pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<String> {
     let room = w.saturating_sub(1).max(1);
     let mut rows = Vec::new();
     if !h.any_rows {
@@ -1042,7 +1042,7 @@ pub fn hours_rows(h: &HourView, p: &Palette, w: usize) -> Vec<String> {
                 impr.push_str(&format!(" {}", signed_pct(x)));
             }
             cmp.push((p.dim.as_str(), impr));
-            if let (Some(a), Some(b)) = (h.now.position, prior.position) {
+            if let (Some(a), Some(b), true) = (h.now.position, prior.position, positions) {
                 cmp.push((p.dim.as_str(), format!("avg position {:.1} ({:.1})", a, b)));
             }
         }
@@ -1088,7 +1088,7 @@ fn absent(m: &Mover) -> String {
 /// Columns for a width: the metric and its change always, then the prior
 /// value, the other count, position and the index state as the pane
 /// allows. Extra width is spent on columns, never on padding.
-pub fn mover_columns(metric: Metric, pages: bool, w: usize) -> Vec<Col> {
+pub fn mover_columns(metric: Metric, pages: bool, positions: bool, w: usize) -> Vec<Col> {
     let label = match metric {
         Metric::Impressions => "IMPR",
         Metric::Clicks => "CLICKS",
@@ -1136,7 +1136,7 @@ pub fn mover_columns(metric: Metric, pages: bool, w: usize) -> Vec<Col> {
                 (tone(g), t)
             }),
         });
-        if metric != Metric::Position {
+        if metric != Metric::Position && positions {
             cols.push(Col {
                 label: "POS",
                 width: 5,
@@ -1327,7 +1327,7 @@ fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usi
             detail.push((c(&p.txt), format!("{} {}", name, compact(a))));
             detail.push((c(good_colour(g, p)), t));
         }
-        if let (Some(a), Some(b)) = (cur.position, prior.position) {
+        if let (Some(a), Some(b), true) = (cur.position, prior.position, d.params.has_position()) {
             let (t, g) = position_change(b - a);
             detail.push((c(&p.txt), format!("pos {:.1}", a)));
             detail.push((c(good_colour(g, p)), t));
@@ -1420,7 +1420,9 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
         rows.extend(spark_rows("clicks", &clicks, format!("total {}", thousands(clicks.iter().sum())), p, w));
         rows.extend(spark_rows("impr", &impr, format!("total {}", thousands(impr.iter().sum())), p, w));
         rows.extend(spark_rows("CTR", &ctr, range(&ctr, &|x| format!("{:.1}%", x)), p, w));
-        rows.extend(spark_rows("position", &pos, format!("{} (lower is better)", range(&pos, &|x| format!("{:.1}", x))), p, w));
+        if site.params.has_position() {
+            rows.extend(spark_rows("position", &pos, format!("{} (lower is better)", range(&pos, &|x| format!("{:.1}", x))), p, w));
+        }
     };
     let top_rows = |rows: &mut Vec<String>, d: &Detail, title: &str, pages: bool| {
         rows.push(String::new());
@@ -1462,7 +1464,7 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
             rows.extend(flow(" ", &[(p.txt.as_str(), url.clone())], "", w));
             window_fields(&mut rows);
             if let Some(mv) = site.pages.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *url)) {
-                mover_fields(&mut rows, mv, p, w);
+                mover_fields(&mut rows, mv, site.params.has_position(), p, w);
             }
             if let Some(d) = fetched_rows(&mut rows, fetched) {
                 series_rows(&mut rows, &d);
@@ -1490,7 +1492,7 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
             rows.extend(flow(" ", &[(p.txt.as_str(), q.clone())], "", w));
             window_fields(&mut rows);
             if let Some(mv) = site.queries.value.as_ref().and_then(|m| m.rows.iter().find(|r| r.key == *q)) {
-                mover_fields(&mut rows, mv, p, w);
+                mover_fields(&mut rows, mv, site.params.has_position(), p, w);
             }
             if let Some(d) = fetched_rows(&mut rows, fetched) {
                 series_rows(&mut rows, &d);
@@ -1614,8 +1616,8 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
     rows
 }
 
-fn mover_fields(rows: &mut Vec<String>, mv: &Mover, p: &Palette, w: usize) {
-    for metric in METRICS {
+fn mover_fields(rows: &mut Vec<String>, mv: &Mover, positions: bool, p: &Palette, w: usize) {
+    for metric in METRICS.into_iter().filter(|m| positions || *m != Metric::Position) {
         let (t, g) = moved(mv, metric);
         let missing = || if mv.unknown { format!("below the top {}", thousands(MOVER_ROWS as f64)) } else { "none".into() };
         let now = mv.cur.map(|c| value(metric, &c)).unwrap_or_else(missing);
@@ -2021,12 +2023,39 @@ mod tests {
             t += Duration::hours(1);
         }
         let h = hour_view(&Analytics { rows, first_incomplete_hour: Some("2026-10-21T09:00:00-07:00".into()), first_incomplete_date: None }, now);
-        let rows = hours_rows(&h, &palette(), 100);
+        let rows = hours_rows(&h, true, &palette(), 100);
         let clicks = plain(&rows[0]);
         let strip: String = clicks.chars().skip(8).collect();
         assert_eq!(strip.chars().filter(|c| *c == '░').count(), 3);
         assert_eq!(strip.chars().filter(|c| *c == '·').count(), 1);
         assert!(strip.ends_with("░░░"));
+    }
+
+    #[test]
+    fn discover_draws_no_position_because_google_reports_none() {
+        // Google leaves position out for Discover; read as 0 it would show a
+        // ranking nobody had. Every place a position is drawn stands down.
+        let web = params();
+        let discover = Params { kind: "discover".into(), ..params() };
+        assert!(web.has_position() && !discover.has_position());
+        // `m` steps past position for Discover, and only there.
+        assert_eq!(Metric::Ctr.next(false), Metric::Impressions);
+        assert_eq!(Metric::Ctr.next(true), Metric::Position);
+        assert_eq!(Metric::Impressions.next(false), Metric::Clicks);
+        // The movers lose their POS columns.
+        let labels = |positions| mover_columns(Metric::Impressions, true, positions, 140).iter().map(|c| c.label).collect::<Vec<_>>();
+        assert!(labels(true).contains(&"POS"));
+        assert!(!labels(false).contains(&"POS"));
+        // SITES says no `pos`, though the daily rows carry Google's absent 0.
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let daily: Vec<(chrono::NaiveDate, Metrics)> = (0..20).map(|i| (end - Duration::days(i), metrics(5.0, 50.0, 0.0))).collect();
+        let reading = |p: &Params| {
+            let mut d = SiteData::new("https://example.com/", p);
+            d.days = Part::ok(Days { final_end: Some(end), fresh_end: Some(end), daily: daily.clone() }, 1.0);
+            site_rows(&d, None, false, 25, 10.0, &palette(), 140).iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ")
+        };
+        assert!(reading(&web).contains("pos 0.0"), "{}", reading(&web));
+        assert!(!reading(&discover).contains("pos"), "{}", reading(&discover));
     }
 
     #[test]

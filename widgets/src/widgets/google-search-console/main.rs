@@ -869,7 +869,7 @@ fn main() {
                         oscroll = 0;
                     }
                 }
-                "m" | "M" => metric = tc::cycle(&METRICS, metric),
+                "m" | "M" => metric = metric.next(params.has_position()),
                 "w" | "W" => {
                     params.days = tc::cycle(WINDOWS, params.days);
                     if let Ok(mut a) = asked.lock() {
@@ -943,6 +943,10 @@ fn main() {
             .filter(|n| tc::now() < n.1)
             .map(|n| n.0.clone())
             .unwrap_or_default();
+        // Discover has no position: one chosen before `t` moved to it gives way.
+        if metric == Metric::Position && !params.has_position() {
+            metric = Metric::Impressions;
+        }
         let screen = Screen {
             sites: &sites,
             at,
@@ -1008,7 +1012,7 @@ fn main() {
         if !items.is_empty() && selected >= items.len() {
             selected = items.len() - 1;
         }
-        let next_metric = tc::cycle(&METRICS, metric).name();
+        let next_metric = metric.next(params.has_position()).name();
         let next_window = tc::cycle(WINDOWS, params.days);
         let next_kind = tc::cycle(KINDS, params.kind.as_str());
         let mut hints: Vec<Vec<(&str, String)>> = vec![

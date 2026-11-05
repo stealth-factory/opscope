@@ -563,6 +563,16 @@ impl Metric {
             Metric::Position => "position",
         }
     }
+    /// The metric `m` moves to: every one in turn, skipping position where
+    /// the search type has none.
+    pub fn next(self, positions: bool) -> Metric {
+        let at = |m: Metric| METRICS.iter().position(|x| *x == m).unwrap_or(0);
+        let mut next = METRICS[(at(self) + 1) % METRICS.len()];
+        if next == Metric::Position && !positions {
+            next = METRICS[(at(next) + 1) % METRICS.len()];
+        }
+        next
+    }
     pub fn of(self, m: &Metrics) -> f64 {
         match self {
             Metric::Impressions => m.impressions,

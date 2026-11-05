@@ -247,6 +247,12 @@ impl Params {
     pub fn state(&self) -> &'static str {
         if self.fresh { "all" } else { "final" }
     }
+    /// Whether Google reports an average position for this search type.
+    /// Discover has no ranking, so position is not a metric there: the API
+    /// leaves it out, and reading it as 0 would draw a position nobody had.
+    pub fn has_position(&self) -> bool {
+        self.kind != "discover"
+    }
 }
 
 /// Where final and fresh data end, and the property's daily totals.
