@@ -350,7 +350,16 @@ fn publish(shared: &Arc<Mutex<Shared>>, params: &Params, data: &SiteData) {
     if let Ok(mut g) = shared.lock() {
         if let Some(slot) = g.sites.iter_mut().find(|o| o.site == data.site) {
             let old = std::mem::replace(slot, SiteData::new(&data.site, params));
+            // A detail may have met a 429 and started a wait on the shared
+            // reading while this round was out: that wait is newer than
+            // this round's copy, so the later deadline stands. One that has
+            // passed holds nothing back.
+            let waiting = old.load_wait_until;
             *slot = data.clone().after(old);
+            slot.load_wait_until = match (slot.load_wait_until, waiting) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
         }
     }
 }
@@ -1640,6 +1649,12 @@ mod tests {
         // And the poller then asks it nothing, `r` included, until then.
         assert!(plan_for(&g.sites[0], &p, true, true, 1_060.0, 900.0).nothing());
         drop(g);
+        // A round that was out when the detail met the 429 publishes its own
+        // copy, with no wait in it: the detail's wait survives that.
+        let mut round = SiteData::new("https://example.com/", &p);
+        round.fetched = 1_010.0;
+        publish(&shared, &p, &round);
+        assert_eq!(shared.lock().unwrap().sites[0].load_wait_until, Some(1_000.0 + LOAD_WAIT));
         // A later wait already running is not shortened.
         shared.lock().unwrap().sites[0].load_wait_until = Some(9_999.0);
         hold_for_load_quota(&shared, "https://example.com/", 1_000.0);
