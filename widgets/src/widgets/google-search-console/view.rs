@@ -92,8 +92,11 @@ pub enum Item {
     /// onto another.
     Term(String),
     Inspected(String),
-    Sitemap(usize),
-    Site(usize),
+    /// By its path: a refresh that drops an earlier sitemap must not move
+    /// an open detail onto the next one.
+    Sitemap(String),
+    /// By its name, for the same reason across a discovery refresh.
+    Site(String),
 }
 
 /// Everything one frame is drawn from.
@@ -643,14 +646,13 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         if let Some(maps) = &site.sitemaps.value {
             entries[4] = maps
                 .iter()
-                .enumerate()
-                .filter(|(_, m)| wanted(s.needle, &[&m.path]))
-                .map(|(i, _)| Item::Sitemap(i))
+                .filter(|m| wanted(s.needle, &[&m.path]))
+                .map(|m| Item::Sitemap(m.path.clone()))
                 .collect();
         }
     }
     if s.sites.len() > 1 {
-        entries[5] = (0..s.sites.len()).map(Item::Site).collect();
+        entries[5] = s.sites.iter().map(|d| Item::Site(d.site.clone())).collect();
     }
     let items: Vec<(Item, Section)> = SECTIONS
         .iter()
@@ -971,7 +973,10 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     // SITEMAPS
     rows.push(String::new());
     let maps = site.sitemaps.value.clone().unwrap_or_default();
-    let shown_maps: Vec<usize> = entries[4].iter().filter_map(|i| if let Item::Sitemap(n) = i { Some(*n) } else { None }).collect();
+    let shown_maps: Vec<usize> = entries[4]
+        .iter()
+        .filter_map(|i| if let Item::Sitemap(path) = i { maps.iter().position(|m| m.path == *path) } else { None })
+        .collect();
     let (from, to) = slice(&mut starts[4], shown_maps.len(), at_in[4]);
     rows.extend(heading("SITEMAPS", vec![(p.dim.as_str(), showing(from, to, shown_maps.len()))], p, w));
     rows.extend(part_rows(&site.sitemaps, s.now, p, w));
@@ -2045,10 +2050,13 @@ fn detail_rows(
                 top_rows(&mut rows, &d, "PAGES RANKING", true);
             }
         }
-        Item::Sitemap(n) => {
-            let Some(m) = site.sitemaps.value.as_ref().and_then(|m| m.get(*n)) else { return rows };
+        Item::Sitemap(path) => {
             rows.extend(heading("SITEMAP", Vec::new(), p, w));
-            rows.extend(flow(" ", &[(p.txt.as_str(), m.path.clone())], "", w));
+            rows.extend(flow(" ", &[(p.txt.as_str(), path.clone())], "", w));
+            let Some(m) = site.sitemaps.value.as_ref().and_then(|m| m.iter().find(|m| m.path == *path)) else {
+                rows.extend(note_rows(&p.dim, "no longer listed: the newest sitemaps reading does not have it", w));
+                return rows;
+            };
             field(&mut rows, "kind", if m.index { "sitemap index".into() } else { "sitemap".into() }, &p.txt);
             let when = |t: &Option<String>| match t.as_deref().and_then(parse_rfc3339) {
                 Some(at) => format!("{} ago", tc::age(s.now - at)),
@@ -2086,8 +2094,13 @@ fn detail_rows(
                 }
             }
         }
-        Item::Site(n) => {
-            let Some(d) = s.sites.get(*n) else { return rows };
+        Item::Site(name) => {
+            let Some(d) = s.sites.iter().find(|d| d.site == *name) else {
+                rows.extend(heading("PROPERTY", Vec::new(), p, w));
+                rows.extend(flow(" ", &[(p.txt.as_str(), name.clone())], "", w));
+                rows.extend(note_rows(&p.dim, "no longer among the properties this account can see", w));
+                return rows;
+            };
             rows.extend(heading("PROPERTY", Vec::new(), p, w));
             rows.extend(flow(" ", &[(p.txt.as_str(), d.site.clone())], "", w));
             field(&mut rows, "permission", if d.permission.is_empty() { "not in sites.list".into() } else { d.permission.clone() }, &p.txt);
@@ -2437,7 +2450,7 @@ mod tests {
             children_error: None,
             span: Some((parse_date("2026-09-21").unwrap(), parse_date("2026-10-18").unwrap())),
         });
-        let items = [Item::Page(LONG.into()), Item::Inspected("https://example.com/docs/old-guide".into()), Item::Query("example".into()), Item::Term("example widget".into()), Item::Sitemap(0), Item::Site(1)];
+        let items = [Item::Page(LONG.into()), Item::Inspected("https://example.com/docs/old-guide".into()), Item::Query("example".into()), Item::Term("example widget".into()), Item::Sitemap("https://example.com/sitemap.xml".into()), Item::Site("https://example.org/".into())];
         for w in WIDTHS {
             for item in &items {
                 for f in [None, Some(&fetched), Some(&Err("429 quota: queries per minute exhausted (per-minute bucket, refills within a minute)".to_string()))] {
@@ -2503,6 +2516,29 @@ mod tests {
         // A term the refresh dropped says so, rather than an empty screen.
         let t = text(&fresh, Item::Term("a query no longer in the list".into()));
         assert!(t.contains("no longer among the top"), "{t}");
+    }
+
+    #[test]
+    fn an_open_sitemap_stays_on_its_own_path_across_a_refresh() {
+        let p = params();
+        let caches = BTreeMap::new();
+        let maps = |paths: &[&str]| {
+            let list: Vec<String> = paths.iter().map(|x| format!(r#"{{"path":"https://example.com/{x}.xml","errors":"0","warnings":"0"}}"#)).collect();
+            parse_sitemaps(&format!(r#"{{"sitemap":[{}]}}"#, list.join(","))).unwrap()
+        };
+        let text = |paths: &[&str]| {
+            let mut d = site("sc-domain:example.com");
+            d.sitemaps = Part::ok(maps(paths), 1.0);
+            let sites = vec![d];
+            let item = Item::Sitemap("https://example.com/b.xml".into());
+            detail(&screen(&sites, &caches, &p, "", 0), &item, None, &palette(), 100).rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ")
+        };
+        // B opened in [A, B, C]; A dropped: still B, never C.
+        let t = text(&["b", "c"]);
+        assert!(t.contains("b.xml") && !t.contains("c.xml") && !t.contains("no longer listed"), "{t}");
+        // B itself dropped: says so, rather than a blank detail.
+        let t = text(&["a", "c"]);
+        assert!(t.contains("b.xml") && t.contains("no longer listed") && !t.contains("c.xml"), "{t}");
     }
 
     #[test]

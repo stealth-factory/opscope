@@ -589,11 +589,11 @@ fn detail_job(site: &SiteData, item: &Item) -> Option<(String, String)> {
         Item::Page(u) | Item::Inspected(u) => Some(("page".into(), u.clone())),
         Item::Query(q) => Some(("query".into(), q.clone())),
         Item::Term(q) => Some(("query".into(), q.clone())),
-        Item::Sitemap(n) => site
+        Item::Sitemap(path) => site
             .sitemaps
             .value
             .as_ref()
-            .and_then(|m| m.get(*n))
+            .and_then(|m| m.iter().find(|m| m.path == *path))
             .filter(|m| m.index)
             .map(|m| ("sitemap".to_string(), m.path.clone())),
         Item::Site(_) => None,
@@ -617,17 +617,23 @@ fn detail_key(site: &SiteData, item: &Item) -> Option<String> {
     Some(format!("{}|{}|{}|{:?}|{}|{}|{}", site.site, kind, value, site.windows, p.fresh, p.days, p.kind))
 }
 
-/// What `c` copies for an item.
-fn copy_text(item: &Item, sites: &[SiteData], at: usize) -> Option<String> {
-    let site = sites.get(at)?;
-    Some(match item {
-        Item::Page(u) | Item::Inspected(u) => u.clone(),
-        Item::Query(q) => q.clone(),
-        Item::Term(q) => q.clone(),
-        Item::Sitemap(n) => site.sitemaps.value.as_ref()?.get(*n)?.path.clone(),
-        // The property the row names, which need not be the one on screen.
-        Item::Site(n) => sites.get(*n)?.site.clone(),
-    })
+/// Where the property on screen, `name`, now sits in `sites`, and whether
+/// it has gone from the list. Before any is named, or once it has gone,
+/// the place it held, kept inside the list.
+fn follow_site(sites: &[SiteData], at: usize, name: &str) -> (usize, bool) {
+    match sites.iter().position(|d| d.site == name) {
+        Some(i) => (i, false),
+        None => (at.min(sites.len().saturating_sub(1)), !name.is_empty()),
+    }
+}
+
+/// What `c` copies for an item: what it names. Every item holds that by
+/// value, so it is the same whichever property is on screen - a SITES row
+/// copies the property it names, not the one shown.
+fn copy_text(item: &Item) -> String {
+    match item {
+        Item::Page(v) | Item::Inspected(v) | Item::Query(v) | Item::Term(v) | Item::Sitemap(v) | Item::Site(v) => v.clone(),
+    }
 }
 
 /// The page an item is about, for `i`.
@@ -717,6 +723,10 @@ fn main() {
     let fetching: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut metric = Metric::Impressions;
     let mut at = 0usize;
+    // The property on screen by name as well as by place: discovery sorts
+    // the list again each refresh, so a property added or dropped before it
+    // would otherwise move the screen, open detail and all, onto another.
+    let mut at_site = String::new();
     let (mut selected, mut scroll, mut oscroll) = (0usize, 0usize, 0usize);
     let mut starts = [0usize; 6];
     let (mut needle, mut typing) = (String::new(), false);
@@ -739,6 +749,20 @@ fn main() {
             }
         }
         let snapshot = shared.lock().map(|g| g.sites.clone()).unwrap_or_default();
+        if !snapshot.is_empty() {
+            let (now_at, gone) = follow_site(&snapshot, at, &at_site);
+            // Gone from the list: say so, and leave what was open on it
+            // rather than show it against the property that took its place.
+            if gone {
+                open = None;
+                (selected, scroll, starts) = (0, 0, [0; 6]);
+                if let Ok(mut n) = note.lock() {
+                    *n = (format!("! {} is no longer listed", at_site), tc::now() + 6.0);
+                }
+            }
+            at = now_at;
+            at_site = snapshot[at].site.clone();
+        }
         // Tell the poller which site is on screen. A newly shown site wakes
         // it, so whatever of that site is due is read now, not next tick.
         let on_screen = snapshot.get(at.min(snapshot.len().saturating_sub(1))).map(|s| s.site.clone()).unwrap_or_default();
@@ -789,7 +813,8 @@ fn main() {
                     "home" => oscroll = 0,
                     "end" => oscroll = usize::MAX / 2,
                     "c" | "C" => {
-                        if let Some(text) = copy_text(&item, &snapshot, at) {
+                        {
+                            let text = copy_text(&item);
                             let ok = tc::clipboard(&text);
                             if let Ok(mut n) = note.lock() {
                                 *n = (if ok { "✓ copied".into() } else { "! no clipboard here; select the text instead".into() }, tc::now() + 3.0);
@@ -871,6 +896,7 @@ fn main() {
                 "left" | "right" if snapshot.len() > 1 => {
                     let n = snapshot.len();
                     at = if key == "right" { (at + 1) % n } else { (at + n - 1) % n };
+                    at_site = snapshot[at].site.clone();
                     selected = 0;
                     starts = [0; 6];
                     scroll = 0;
@@ -929,7 +955,7 @@ fn main() {
                     moved = true;
                 }
                 "c" | "C" => {
-                    if let Some(text) = items.get(selected).and_then(|(item, _)| copy_text(item, &snapshot, at)) {
+                    if let Some(text) = items.get(selected).map(|(item, _)| copy_text(item)) {
                         let ok = tc::clipboard(&text);
                         if let Ok(mut n) = note.lock() {
                             *n = (if ok { format!("✓ copied {}", text) } else { "! no clipboard here; select the text instead".into() }, tc::now() + 3.0);
@@ -1499,7 +1525,7 @@ mod tests {
         later.windows = Some(windows(parse_date("2026-10-18").unwrap(), 7));
         assert_ne!(detail_key(&d, &item), detail_key(&later, &item));
         // Nothing is fetched for a property, so there is nothing to file.
-        assert_eq!(detail_key(&d, &Item::Site(0)), None);
+        assert_eq!(detail_key(&d, &Item::Site("sc-domain:example.com".into())), None);
     }
 
     fn term(query: &str) -> Term {
@@ -1575,10 +1601,24 @@ mod tests {
     }
 
     #[test]
+    fn the_property_on_screen_is_followed_by_name_across_a_new_list() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let list = |names: &[&str]| names.iter().map(|n| SiteData::new(n, &p)).collect::<Vec<_>>();
+        // B on screen at 1; discovery adds A0 before it: B is now at 2.
+        assert_eq!(follow_site(&list(&["a", "a0", "b", "c"]), 1, "b"), (2, false));
+        // An earlier property dropped: B moves up rather than C taking its place.
+        assert_eq!(follow_site(&list(&["b", "c"]), 1, "b"), (0, false));
+        // B itself dropped: say so, and stay in the list.
+        assert_eq!(follow_site(&list(&["a", "c"]), 2, "b"), (1, true));
+        // Nothing named yet, at start: not a removal.
+        assert_eq!(follow_site(&list(&["a", "b"]), 0, ""), (0, false));
+    }
+
+    #[test]
     fn copying_a_site_row_copies_that_property() {
         let p = Params { fresh: false, days: 7, kind: "web".into() };
-        let sites = vec![SiteData::new("https://example.org/", &p), SiteData::new("sc-domain:example.com", &p)];
-        assert_eq!(copy_text(&Item::Site(1), &sites, 0).as_deref(), Some("sc-domain:example.com"));
-        assert_eq!(copy_text(&Item::Site(0), &sites, 1).as_deref(), Some("https://example.org/"));
+        let _ = p;
+        assert_eq!(copy_text(&Item::Site("sc-domain:example.com".into())), "sc-domain:example.com");
+        assert_eq!(copy_text(&Item::Site("https://example.org/".into())), "https://example.org/");
     }
 }
