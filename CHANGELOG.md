@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.7.0] - 2026-11-05
+
+### Bug Fixes
+
+- **google-analytics**: Keep inside GA's daily quota all day, with several properties and panes (OPS-251) (#565)
+
+### Features
+
+- **google-search-console**: New widget for search performance, top terms and index health (OPS-187) (#448)
+
 ## [2.6.0] - 2026-11-04
 
 ### Features
