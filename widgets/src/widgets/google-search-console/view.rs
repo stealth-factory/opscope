@@ -1766,6 +1766,11 @@ fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usi
     if let Some(maps) = &d.sitemaps.value {
         let errors: i64 = maps.iter().map(|m| m.errors).sum();
         detail.push((c(if errors > 0 { &p.down } else { &p.dim }), format!("{} sitemap errors", errors)));
+        // A kept reading behind a failed refresh: say so beside the count,
+        // or an old "0 sitemap errors" reads as healthy through an outage.
+        if let Some(err) = &d.sitemaps.error {
+            detail.push((c(&p.warn), format!("sitemaps from {} ago, because the newest read failed: {}", tc::age(now - d.sitemaps.at), err)));
+        }
     }
     let refs: Vec<(&str, String)> = detail.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
     out.extend(flow_on("    ", &refs, "  ", w, &tint));
@@ -1959,10 +1964,19 @@ fn detail_rows(
     };
     let fetched_rows = |rows: &mut Vec<String>, f: Option<&Result<Detail, String>>| -> Option<Detail> {
         match f {
-            None => {
-                rows.extend(note_rows(&p.dim, "asking Google for 28 days of this…", w));
-                None
-            }
+            None => match site.load_wait_until.filter(|until| *until > s.now && !matches!(item, Item::Sitemap(_))) {
+                // Not asked yet: the property is waiting out a 429, as
+                // the main screen says.
+                Some(until) => {
+                    let at = DateTime::<Utc>::from_timestamp(until as i64, 0).map(local_hour).unwrap_or_default();
+                    rows.extend(note_rows(&p.warn, &format!("waiting for Google's load quota (429): asking at {}", at), w));
+                    None
+                }
+                None => {
+                    rows.extend(note_rows(&p.dim, "asking Google for 28 days of this…", w));
+                    None
+                }
+            },
             Some(Err(e)) => {
                 rows.extend(said(&p.down, e, w));
                 None
@@ -2057,6 +2071,7 @@ fn detail_rows(
                 rows.extend(note_rows(&p.dim, "no longer listed: the newest sitemaps reading does not have it", w));
                 return rows;
             };
+            rows.extend(stale_rows(&site.sitemaps, s.now, p, w));
             field(&mut rows, "kind", if m.index { "sitemap index".into() } else { "sitemap".into() }, &p.txt);
             let when = |t: &Option<String>| match t.as_deref().and_then(parse_rfc3339) {
                 Some(at) => format!("{} ago", tc::age(s.now - at)),
@@ -2539,6 +2554,41 @@ mod tests {
         // B itself dropped: says so, rather than a blank detail.
         let t = text(&["a", "c"]);
         assert!(t.contains("b.xml") && t.contains("no longer listed") && !t.contains("c.xml"), "{t}");
+    }
+
+    #[test]
+    fn a_kept_sitemaps_reading_says_so_in_sites_and_in_its_detail() {
+        let p = params();
+        let caches = BTreeMap::new();
+        let mut d = site("sc-domain:example.com");
+        d.sitemaps = Part::failed("HTTP 500").after(d.sitemaps.clone());
+        let row = site_rows(&d, None, false, 25, 10.0, &palette(), 200).iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+        assert!(row.contains("sitemap errors") && row.contains("because the newest read failed: HTTP 500"), "{row}");
+        let sites = vec![d];
+        let item = Item::Sitemap("https://example.com/sitemap.xml".into());
+        let t = detail(&screen(&sites, &caches, &p, "", 0), &item, None, &palette(), 100).rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+        assert!(t.contains("because the newest failed: HTTP 500"), "{t}");
+        // A fresh reading says nothing of the kind.
+        let fresh = site("sc-domain:example.com");
+        let row = site_rows(&fresh, None, false, 25, 10.0, &palette(), 200).iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+        assert!(!row.contains("failed"), "{row}");
+    }
+
+    #[test]
+    fn a_detail_waits_out_the_propertys_429_and_says_so() {
+        let p = params();
+        let caches = BTreeMap::new();
+        let mut d = site("sc-domain:example.com");
+        let now = Utc.with_ymd_and_hms(2026, 10, 21, 18, 0, 0).unwrap().timestamp() as f64;
+        d.load_wait_until = Some(now + 600.0);
+        let sites = vec![d];
+        let t = detail(&screen(&sites, &caches, &p, "", 0), &Item::Query("example".into()), None, &palette(), 100)
+            .rows
+            .iter()
+            .map(|r| plain(r))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(t.contains("waiting for Google's load quota (429)") && !t.contains("asking Google for 28 days"), "{t}");
     }
 
     #[test]

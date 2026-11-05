@@ -1192,6 +1192,13 @@ fn start_detail(
     activity: &tc::Refresh,
 ) {
     let Some((dim, value)) = detail_job(site, item) else { return };
+    // Google's load quota refused this property (429): the poller waits it
+    // out, and so does a detail, which would otherwise spend two more
+    // Search Analytics requests against it. It is asked for once the wait
+    // ends - this is tried again each frame. Sitemaps are another API.
+    if dim != "sitemap" && site.load_wait_until.is_some_and(|until| until > tc::now()) {
+        return;
+    }
     if !fetching.lock().map(|mut g| g.insert(key.clone())).unwrap_or(false) {
         return;
     }
