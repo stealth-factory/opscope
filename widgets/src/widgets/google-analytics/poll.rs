@@ -16,10 +16,16 @@
 
 //! What the pollers hold, and the pollers.
 //!
-//! Two threads per property. One reads realtime every 15, 30 or 60
-//! seconds (stretched when idle or short of quota) and the realtime
-//! breakdowns every minute; the other reads the processed reports every
-//! `refresh`, so a slow report never delays a live reading.
+//! Two threads per property. One reads realtime every 2, 5 or 10
+//! minutes (stretched when idle, off screen or short of quota) and the
+//! realtime breakdowns every 5 minutes; the other reads the processed
+//! reports every `refresh`, so a slow report never delays a live reading.
+//!
+//! Only the property on screen (`Shared::focus`) is read in full. The
+//! others read realtime totals every `model::BACKGROUND_SECS`, so their
+//! baselines keep filling, and leave their breakdowns and processed
+//! reports on the clock they had: shown again, a property whose reads
+//! fell due while it was hidden reads them at once.
 //! Each records why it stopped, and every failure lands in a field the
 //! screen draws, because a poller that dies quietly leaves a pane that
 //! looks exactly like a site nobody is visiting.
@@ -181,8 +187,10 @@ pub struct Shared {
     pub chosen: u64,
     /// The movers window chosen with `w`.
     pub window: usize,
-    /// Bumped by `r`; every poller refetches when it moves.
+    /// Bumped by `r`; the property on screen refetches when it moves.
     pub force: u64,
+    /// The index of the property on screen. The only one read in full.
+    pub focus: usize,
     pub details: HashMap<String, Detail>,
 }
 
@@ -382,20 +390,36 @@ fn run_live(
     };
     let mut last_prune = tc::now();
     let configured = !cfg.key_events.is_empty();
+    let mut was_on_screen = true;
     loop {
         let now = tc::now();
-        let (chosen, force) = match shared.lock() {
-            Ok(g) => (g.chosen, g.force),
+        let (chosen, force, on_screen) = match shared.lock() {
+            Ok(g) => (g.chosen, g.force, g.focus == i),
             Err(_) => return,
         };
+        // `r` refetches what is on screen. A hidden property notes the
+        // press and keeps its clocks: refreshing every property at once
+        // would spend every property's quota for one look.
         if force != seen_force {
             seen_force = force;
-            (next_rt, next_bd) = (now, now);
-            if next_admin > now {
-                next_admin = now;
+            if on_screen {
+                (next_rt, next_bd) = (now, now);
+                if next_admin > now {
+                    next_admin = now;
+                }
+                rt_paused = 0.0;
             }
-            rt_paused = 0.0;
         }
+        // Brought on screen: a realtime reading older than the chosen
+        // interval is taken now rather than at the end of the background
+        // one. Breakdowns kept their clock and are simply due.
+        if on_screen && !was_on_screen {
+            let last = with(shared, i, |p| p.rt_at).unwrap_or(0.0);
+            if now - last >= chosen as f64 {
+                next_rt = pull_realtime(next_rt, rt_paused, now);
+            }
+        }
+        was_on_screen = on_screen;
         // `l` changes `chosen` without touching `force`. Take one realtime
         // reading on the new interval. A 429 pause stays in force, and
         // breakdowns, admin and the processed reports keep their clocks.
@@ -471,7 +495,12 @@ fn run_live(
                     .as_ref()
                     .and_then(|q| q.tightest(p.premium))
                     .map(|t| t.1);
-                let (secs, why) = model::realtime_interval(chosen, idle_for, left);
+                let pace = p
+                    .quota_rt
+                    .as_ref()
+                    .and_then(|q| q.level("tokensPerDay", p.premium))
+                    .and_then(|l| model::pace(l.used, l.left, model::to_quota_reset(at)));
+                let (secs, why) = model::realtime_interval(chosen, idle_for, left, pace, on_screen);
                 p.interval = secs;
                 p.interval_why = why;
                 next_rt = at + secs as f64;
@@ -493,7 +522,7 @@ fn run_live(
             drop(work);
         }
 
-        if next_bd <= now && rt_paused <= now {
+        if on_screen && next_bd <= now && rt_paused <= now {
             let work = activity.start();
             let got = breakdown(cred, &id, grant, &cfg.key_events);
             let at = tc::now();
@@ -535,7 +564,7 @@ fn run_live(
                 p.interval
             })
             .unwrap_or(60);
-            next_bd = at + (interval.max(60)) as f64;
+            next_bd = at + interval.max(model::BREAKDOWN_SECS) as f64;
             if let Some(s) = sample {
                 save(shared, i, &path, &s);
             }
@@ -574,20 +603,25 @@ fn run_reports(
     let mut seen_window = 0usize;
     loop {
         let now = tc::now();
-        let (window, force) = match shared.lock() {
-            Ok(g) => (g.window, g.force),
+        let (window, force, on_screen) = match shared.lock() {
+            Ok(g) => (g.window, g.force, g.focus == i),
             Err(_) => return,
         };
         if force != seen_force {
             seen_force = force;
-            next_core = now;
-            core_paused = 0.0;
+            if on_screen {
+                next_core = now;
+                core_paused = 0.0;
+            }
         }
         if window != seen_window {
             seen_window = window;
             next_core = now;
         }
-        if next_core <= now && core_paused <= now {
+        // A hidden property's reports wait: shown again, they read at
+        // once if `refresh` passed meanwhile, and the new window if `w`
+        // moved it.
+        if on_screen && next_core <= now && core_paused <= now {
             let work = activity.start();
             let (tz, previous) =
                 with(shared, i, |p| (p.time_zone.clone(), p.processed.clone())).unwrap_or_default();

@@ -521,7 +521,7 @@ pub fn status(shared: &Shared, v: &View, budget: usize, p: &Palette) -> Vec<Line
         chunks.push(vec![part(&p.dim, ago("realtime", prop.rt_at))]);
         chunks.push(vec![part(&p.dim, ago("breakdowns", prop.breakdown_at))]);
         chunks.push(vec![part(&p.dim, ago("reports", prop.core_at))]);
-        let mut live = vec![part(&p.accent, format!("live {}s", prop.interval.max(1)))];
+        let mut live = vec![part(&p.accent, format!("live {}", model::interval_words(prop.interval.max(1))))];
         if !prop.interval_why.is_empty() {
             live.push(part(&p.warn, format!(" ({})", prop.interval_why)));
         }
@@ -1784,7 +1784,7 @@ fn property_cells(prop: &Prop, v: &View) -> (String, String, String, String, Str
     {
         "error".into()
     } else if !prop.interval_why.is_empty() {
-        format!("{}s", prop.interval)
+        model::interval_words(prop.interval)
     } else if prop.rt.is_some() {
         "ok".into()
     } else {
@@ -2021,8 +2021,8 @@ pub fn property_detail(prop: &Prop, v: &View, w: usize) -> Vec<Line> {
     out.extend(prose(
         &p.dim,
         &format!(
-            "realtime every {}s{}",
-            prop.interval.max(1),
+            "realtime every {}{}",
+            model::interval_words(prop.interval.max(1)),
             if prop.interval_why.is_empty() {
                 String::new()
             } else {
@@ -2626,8 +2626,8 @@ mod tests {
             core_at: NOW - 180.0,
             quota_rt: Some(quota.clone()),
             quota_core: Some(quota),
-            interval: 60,
-            interval_why: "backed off: 0 active for 5m+".into(),
+            interval: 300,
+            interval_why: "backed off: 0 active for 10m+".into(),
             samples: vec![
                 Sample { t: NOW - 2.0 * WEEK, active: Some(48.0), views: Some(1.0), events: Some(vec![("purchase".into(), 2.0)]) },
                 Sample { t: NOW - WEEK, active: Some(50.0), views: Some(1.0), events: Some(vec![("purchase".into(), 0.0)]) },
@@ -2642,7 +2642,7 @@ mod tests {
     fn shared(props: Vec<Prop>) -> Shared {
         Shared {
             props,
-            chosen: 15,
+            chosen: 120,
             window: 7,
             ..Shared::default()
         }
@@ -2782,7 +2782,7 @@ mod tests {
             "google-search-console",
             "── MOVERS ── views · last 7 days vs prior 7",
             "sources: not in GA realtime",
-            "live 60s (backed off: 0 active for 5m+)",
+            "live 5m (backed off: 0 active for 10m+)",
             "quota realtime used 1.2k/14k h 31k/200k d",
             "429 quota: property tokens per hour exhausted",
             "realtime paused 5m, last reading kept below",

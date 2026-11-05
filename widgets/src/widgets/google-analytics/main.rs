@@ -151,8 +151,12 @@ fn main() {
         .cloned()
         .unwrap_or_default();
     let (ids, bad_ids) = property_ids(&raw_properties);
-    let chosen = model::realtime_choice(tc::cfg_f64(&cfg, "realtime_refresh", 15.0));
-    let refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 300.0), 300.0).max(60.0);
+    let chosen = model::realtime_choice(tc::cfg_f64(&cfg, "realtime_refresh", 120.0));
+    let refresh = tc::poll_secs(
+        tc::cfg_f64(&cfg, "refresh", model::REPORT_DEFAULT_SECS),
+        model::REPORT_DEFAULT_SECS,
+    )
+    .max(model::REPORT_MIN_SECS);
     let window = tc::cfg_usize(&cfg, "window_days", 7).clamp(1, 90);
     let weeks = tc::cfg_usize(&cfg, "baseline_weeks", 4).clamp(1, 12);
     let configured = configured_events(tc::cfg_strings(&cfg, "key_events", &[]));
@@ -506,7 +510,7 @@ fn main() {
             note = (String::new(), 0.0);
         }
         let title = tc::title_busy("google analytics", w, &p.head, activity.tick(tick));
-        let guard = match shared.lock() {
+        let mut guard = match shared.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
@@ -514,6 +518,9 @@ fn main() {
         if view.prop >= guard.props.len() {
             view.prop = 0;
         }
+        // The pollers read the property on screen in full and the rest
+        // sparingly; this is where they learn which one that is.
+        guard.focus = view.prop;
 
         if let Some(open) = detail.clone() {
             // A detail has no rows to pick, and the list's placements
@@ -692,7 +699,10 @@ fn main() {
             vec![(p.hint.as_str(), "[/]filter".to_string())],
             vec![(
                 p.hint.as_str(),
-                format!("[l]ive {}s", tc::cycle(model::LIVE_CHOICES, chosen_now)),
+                format!(
+                    "[l]ive {}",
+                    model::interval_words(tc::cycle(model::LIVE_CHOICES, chosen_now))
+                ),
             )],
             vec![(p.hint.as_str(), "[c]opy URL".to_string())],
             vec![(p.hint.as_str(), "[r]efresh".to_string())],
