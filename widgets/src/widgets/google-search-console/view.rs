@@ -1683,13 +1683,18 @@ fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usi
 
 // --------------------------------------------------------------- detail --
 
-fn spark_rows(label: &str, values: &[f64], summary: String, p: &Palette, w: usize) -> Vec<String> {
+/// A one-row strip, a cell a calendar day: `None` - a day with no CTR or
+/// position to give - is a blank cell, so a gap stays a gap.
+fn spark_rows(label: &str, values: &[Option<f64>], summary: String, p: &Palette, w: usize) -> Vec<String> {
     let room = w.saturating_sub(1).max(1);
-    let lo = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let hi = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let bar = |v: &f64| {
-        let f = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
-        tc::SPARK[((f * 7.99) as usize).min(7)]
+    let lo = values.iter().flatten().cloned().fold(f64::INFINITY, f64::min);
+    let hi = values.iter().flatten().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let bar = |v: &Option<f64>| match v {
+        None => ' ',
+        Some(v) => {
+            let f = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
+            tc::SPARK[((f * 7.99) as usize).min(7)]
+        }
     };
     let mut rows = Vec::new();
     if values.len() <= room.saturating_sub(10) {
@@ -1720,13 +1725,20 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
 /// axis: a day a slot, so a day with no row is a zero for the counts and a
 /// break in CTR and position, never a day squeezed out of the axis. `None`
 /// when the pane cannot give every day a column.
+/// One value a calendar day from the first day of `series` to its last:
+/// Google leaves out a day with no impressions, which is 0 clicks and 0
+/// impressions but no CTR or position at all.
+fn calendar(series: &[(chrono::NaiveDate, Metrics)], metric: Metric) -> Vec<Option<f64>> {
+    let (Some(first), Some(last)) = (series.first().map(|x| x.0), series.last().map(|x| x.0)) else { return Vec::new() };
+    let n = (last - first).num_days().max(0) as usize + 1;
+    let by_day: BTreeMap<chrono::NaiveDate, &Metrics> = series.iter().map(|(d, m)| (*d, m)).collect();
+    (0..n).map(|i| day_value(metric, by_day.get(&(first + chrono::Duration::days(i as i64))).copied())).collect()
+}
+
 fn series_charts(series: &[(chrono::NaiveDate, Metrics)], positions: bool, p: &Palette, w: usize) -> Option<Drawn> {
     let (first, last) = (series.first()?.0, series.last()?.0);
     let n = (last - first).num_days().max(0) as usize + 1;
-    let by_day: BTreeMap<chrono::NaiveDate, &Metrics> = series.iter().map(|(d, m)| (*d, m)).collect();
-    let pick = |metric: Metric| -> Vec<Option<f64>> {
-        (0..n).map(|i| day_value(metric, by_day.get(&(first + chrono::Duration::days(i as i64))).copied())).collect()
-    };
+    let pick = |metric: Metric| calendar(series, metric);
     // Google reports no position for Discover; read as 0 it would chart a
     // ranking nobody had.
     let all = [Metric::Clicks, Metric::Impressions, Metric::Ctr, Metric::Position];
@@ -1802,17 +1814,20 @@ fn detail_rows(
             put(rows, &mut plots.borrow_mut(), charts);
             return;
         }
-        let clicks: Vec<f64> = d.series.iter().map(|(_, m)| m.clicks).collect();
-        let impr: Vec<f64> = d.series.iter().map(|(_, m)| m.impressions).collect();
-        let ctr: Vec<f64> = d.series.iter().map(|(_, m)| m.ctr * 100.0).collect();
-        let pos: Vec<f64> = d.series.iter().map(|(_, m)| m.position).collect();
-        let range = |v: &[f64], f: &dyn Fn(f64) -> String| {
-            let lo = v.iter().cloned().fold(f64::INFINITY, f64::min);
-            let hi = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        // A cell a calendar day, as the charts have: a day Google left out
+        // is a zero or a gap, not a day that never happened.
+        let clicks = calendar(&d.series, Metric::Clicks);
+        let impr = calendar(&d.series, Metric::Impressions);
+        let ctr = calendar(&d.series, Metric::Ctr);
+        let pos = calendar(&d.series, Metric::Position);
+        let range = |v: &[Option<f64>], f: &dyn Fn(f64) -> String| {
+            let lo = v.iter().flatten().cloned().fold(f64::INFINITY, f64::min);
+            let hi = v.iter().flatten().cloned().fold(f64::NEG_INFINITY, f64::max);
             format!("{} to {}", f(lo), f(hi))
         };
-        rows.extend(spark_rows("clicks", &clicks, format!("total {}", thousands(clicks.iter().sum())), p, w));
-        rows.extend(spark_rows("impr", &impr, format!("total {}", thousands(impr.iter().sum())), p, w));
+        let total = |v: &[Option<f64>]| v.iter().flatten().sum::<f64>();
+        rows.extend(spark_rows("clicks", &clicks, format!("total {}", thousands(total(&clicks))), p, w));
+        rows.extend(spark_rows("impr", &impr, format!("total {}", thousands(total(&impr))), p, w));
         rows.extend(spark_rows("CTR", &ctr, range(&ctr, &|x| format!("{:.1}%", x)), p, w));
         if site.params.has_position() {
             rows.extend(spark_rows("position", &pos, format!("{} (lower is better)", range(&pos, &|x| format!("{:.1}", x))), p, w));
@@ -2520,8 +2535,28 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_detail_keeps_the_calendar_days_google_left_out() {
+        // Traffic on Oct 8 and Nov 4 only: 28 calendar days, not two cells
+        // side by side that make the activity look continuous.
+        let (a, b) = (chrono::NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(), chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap());
+        let series = vec![(a, metrics(5.0, 50.0, 3.0)), (b, metrics(9.0, 90.0, 2.0))];
+        let clicks = calendar(&series, Metric::Clicks);
+        let ctr = calendar(&series, Metric::Ctr);
+        assert_eq!(clicks.len(), 28);
+        assert_eq!(clicks.iter().filter(|v| **v == Some(0.0)).count(), 26, "a missing day is 0 clicks");
+        assert_eq!(ctr.iter().filter(|v| v.is_none()).count(), 26, "and no CTR at all");
+        let cell = |rows: &[String]| rows.iter().map(|r| plain(r).chars().filter(|c| tc::SPARK.contains(c)).count()).sum::<usize>();
+        assert_eq!(cell(&spark_rows("clicks", &clicks, String::new(), &palette(), 26)), 28);
+        // CTR draws its two days with the 26 between them blank.
+        let rows = spark_rows("CTR", &ctr, String::new(), &palette(), 60);
+        assert_eq!(cell(&rows), 2);
+        let strip: String = plain(&rows[0]).chars().skip(10).collect(); // " {:<9}" is ten wide
+        assert_eq!(strip.trim_end().chars().count(), 28, "{strip:?}");
+    }
+
+    #[test]
     fn a_long_daily_series_wraps_in_a_narrow_pane_instead_of_losing_its_start() {
-        let values: Vec<f64> = (0..28).map(|i| i as f64).collect();
+        let values: Vec<Option<f64>> = (0..28).map(|i| Some(i as f64)).collect();
         for w in [20, 26, 30, 38, 39, 40, 60] {
             let rows = spark_rows("clicks", &values, "total 378".into(), &palette(), w);
             assert_fits(&rows, w, "spark");
