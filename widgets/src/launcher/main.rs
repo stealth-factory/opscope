@@ -51,6 +51,7 @@ const WIDGETS: &[Widget] = &[
     widget!("github-actions"),
     widget!("github-prs"),
     widget!("google-analytics"),
+    widget!("google-search-console"),
     widget!("google-trends"),
     widget!("herdr-panes"),
     widget!("latency"),

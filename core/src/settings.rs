@@ -1297,12 +1297,40 @@ fn move_sel(app: &mut App, delta: isize) {
 /// narrow pane costs somebody a line break rather than the end of a thought.
 fn say(body: &mut Vec<String>, colour: &str, indent: &str, text: &str, w: usize) {
     let room = w.saturating_sub(crate::display_width(indent) + 2).max(8);
-    for line in wrap_help(text, room, usize::MAX) {
-        body.push(crate::seg(
-            &[(colour, format!("{indent}{line}"))],
-            w.saturating_sub(1),
-        ));
+    // Help a widget writes as paragraphs and numbered steps keeps that
+    // shape: each line of the source is wrapped on its own, a blank line
+    // stays a gap, and a list item's wrapped lines sit under its text
+    // rather than under its number. A newline left inside a wrapped line
+    // would reach the terminal mid-row and push the rest of the frame down.
+    for source in text.trim().split('\n') {
+        let source = source.trim_end();
+        if source.trim().is_empty() {
+            body.push(String::new());
+            continue;
+        }
+        let hang = list_marker_width(source);
+        let lines = wrap_help(source, room.saturating_sub(hang).max(8), usize::MAX);
+        for (i, line) in lines.into_iter().enumerate() {
+            let pad = if i == 0 { 0 } else { hang };
+            body.push(crate::seg(
+                &[(colour, format!("{indent}{}{line}", " ".repeat(pad)))],
+                w.saturating_sub(1),
+            ));
+        }
     }
+}
+
+/// How far a list item's continuation lines sit in: the width of a leading
+/// `1. `, `12. ` or `- `, or 0 for a line that is not a list item.
+fn list_marker_width(line: &str) -> usize {
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 && line[digits..].starts_with(". ") {
+        return digits + 2;
+    }
+    if line.starts_with("- ") {
+        return 2;
+    }
+    0
 }
 
 fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
@@ -5945,6 +5973,35 @@ mod tests {
             .find(|f| f.section == "tailnet" && f.key == "history")
             .unwrap();
         assert!(history.help.contains("rate samples"));
+    }
+
+    #[test]
+    fn help_keeps_its_paragraphs_and_hangs_its_numbered_steps() {
+        let text = "What this is.\n\n1. Open the console and pick a project for the key to live in.\n2. Enable the API.\n\nThe last word.";
+        let mut body = Vec::new();
+        say(&mut body, "", "  ", text, 30);
+        let plain: Vec<String> = body.iter().map(|r| crate::strip_escapes(r)).collect();
+        // Nothing reaches the terminal with a newline in it, and every row
+        // fits the pane.
+        assert!(plain.iter().all(|r| !r.contains('\n')), "{plain:?}");
+        assert!(plain.iter().all(|r| crate::display_width(r) <= 29), "{plain:?}");
+        // The blank lines stay gaps between the paragraphs.
+        assert_eq!(plain[0].trim(), "What this is.");
+        assert_eq!(plain[1], "");
+        // Step 1 wraps, and its second line sits under its text, not its
+        // number.
+        assert!(plain[2].starts_with("  1. Open"), "{plain:?}");
+        assert!(plain[3].starts_with("     "), "{plain:?}");
+        assert!(!plain[3].trim_start().starts_with(char::is_numeric), "{plain:?}");
+        assert!(plain.iter().any(|r| r.starts_with("  2. Enable the API.")), "{plain:?}");
+        assert_eq!(plain.last().unwrap().trim(), "The last word.");
+        // One paragraph with no newlines reads as it always did.
+        let mut flat = Vec::new();
+        say(&mut flat, "", "  ", "one two three", 30);
+        assert_eq!(flat.len(), 1);
+        assert_eq!(list_marker_width("12. twelve"), 4);
+        assert_eq!(list_marker_width("- a bullet"), 2);
+        assert_eq!(list_marker_width("2026 was a year"), 0);
     }
 
     #[test]

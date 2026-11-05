@@ -1,0 +1,25 @@
+{
+  "_comment": "Google Search Console through a service-account key: hourly search traffic, the pages and queries that moved, the search terms that land on the site, URL Inspection of the pages that matter, and sitemaps. Read-only (webmasters.readonly). docs/google-setup.md is the Google side.",
+  "_schema": {
+    "credentials": { "secret": true },
+    "sites": { "items": "string" },
+    "refresh": { "minimum": 300 },
+    "window_days": { "minimum": 1, "maximum": 180 },
+    "inspect_top": { "minimum": 0, "maximum": 200 },
+    "search_type": { "choices": ["web", "image", "video", "news", "discover"] }
+  },
+  "_credentials_comment": "The service-account JSON key itself: paste the whole downloaded file here. The widget signs in as that key's client_email, and shows only the Search Console properties that email has been added to.\n\n1. Open the Google Cloud console (console.cloud.google.com) and pick or create a project for the key.\n2. Under APIs & Services → Library, enable the Google Search Console API.\n3. Under IAM & Admin → Service accounts, create a service account. It needs no project role.\n4. Open the new service account and choose Keys → Add key → Create new key → JSON. A JSON file downloads.\n5. Paste that whole file here.\n6. In Search Console, pick a property, then Settings → Users and permissions → Add user. Enter the key's client_email and choose Restricted.\n7. Repeat step 6 for every property the widget should show.\n\nThe widget re-mints its hour-long token from the key on its own. When both credentials and credentials_file are set, this one wins. It is stored in config.json, which should be chmod 600, and is never shown again once written. Full steps: docs/google-setup.md.",
+  "credentials": "",
+  "_credentials_file_comment": "Path to the service-account JSON key (~/ is expanded), used when credentials is empty.\n\n1. Create the key and download it: steps 1 to 4 under credentials.\n2. Save the file outside any repository, and run chmod 600 on it.\n3. Enter its path here.\n4. In Search Console, add the key's client_email as a Restricted user under Settings → Users and permissions, on every property the widget should show.\n\nA [!] notice warns when the file is readable by anyone but you. Full steps: docs/google-setup.md.",
+  "credentials_file": "",
+  "_sites_comment": "Properties exactly as Search Console names them: sc-domain:example.com for a domain property, or https://example.com/ with its trailing slash for a URL prefix. Empty reads every property the account can see.",
+  "sites": [],
+  "_refresh_comment": "Seconds between reads of the site on screen's last 24 hours and daily totals, at least 300. Its pages, queries and terms are read when Google finalises another day, or every six hours; sites not on screen read only their daily totals, hourly.",
+  "refresh": 600.0,
+  "_window_days_comment": "Complete days in each movers window, compared with the equal window before it. w switches between 7 and 28 while running.",
+  "window_days": 7,
+  "_inspect_top_comment": "How many pages from the movers answer are inspected once a day, the ones with the most impressions, plus as many that dropped to zero. Search Analytics ranks by clicks and stops at 1,000; the INDEX HEALTH header says so when that cut the answer. 0 turns inspection off. Google allows 2,000 inspections a day per property.",
+  "inspect_top": 25,
+  "_search_type_comment": "Which Google results to read: web, image, video, news or discover. t steps through them while running.",
+  "search_type": "web"
+}

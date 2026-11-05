@@ -88,6 +88,13 @@ title = "google-analytics"
 placement = "split"
 command = ["./luvus/bin/opscope", "google-analytics"]
 
+# Google Search Console: what moved in Google Search, and what is broken in the index.
+[[panes]]
+id = "google-search-console"
+title = "google-search-console"
+placement = "split"
+command = ["./luvus/bin/opscope", "google-search-console"]
+
 # What a region is searching for right now, from Google's own Trending Now feed.
 [[panes]]
 id = "google-trends"

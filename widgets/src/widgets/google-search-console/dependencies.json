@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Every figure comes from Google's Search Console API over HTTPS, and the sign-in goes the same way."
+    }
+  },
+  "recommended": {}
+}
