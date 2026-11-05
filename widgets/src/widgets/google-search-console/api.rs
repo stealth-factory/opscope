@@ -594,7 +594,9 @@ pub const DETAIL_DAYS: i64 = 28;
 
 /// 28 days of one page or query, and what it pairs with: the queries a
 /// page ranks for, or the pages ranking for a query.
-pub fn fetch_detail(c: &Client, site: &str, p: &Params, dim: &str, key: &str, end: NaiveDate, window: (NaiveDate, NaiveDate)) -> Result<Detail, String> {
+/// The failure keeps Google's status, so a 429 here can start the
+/// property's wait as one from the poller does.
+pub fn fetch_detail(c: &Client, site: &str, p: &Params, dim: &str, key: &str, end: NaiveDate, window: (NaiveDate, NaiveDate)) -> Result<Detail, Fail> {
     let series = query(c, site, &Query {
         from: end - Duration::days(DETAIL_DAYS - 1),
         to: end,
@@ -604,7 +606,7 @@ pub fn fetch_detail(c: &Client, site: &str, p: &Params, dim: &str, key: &str, en
         rows: MOVER_ROWS,
         filter: Some((dim, key)),
     })
-    .map_err(|f| f.said)?;
+    ?;
     let other = if dim == "page" { "query" } else { "page" };
     let top = if p.kind == "discover" && other == "query" {
         Vec::new()
@@ -618,7 +620,7 @@ pub fn fetch_detail(c: &Client, site: &str, p: &Params, dim: &str, key: &str, en
             rows: 10,
             filter: Some((dim, key)),
         })
-        .map_err(|f| f.said)?
+        ?
         .rows
     };
     let mut days: Vec<(NaiveDate, Metrics)> = series

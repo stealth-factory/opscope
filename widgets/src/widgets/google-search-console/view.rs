@@ -1489,8 +1489,11 @@ fn tone(good: Option<bool>) -> &'static str {
 
 /// What a mover's missing side is drawn as: zero when Google's answer was
 /// whole, `–` when its row limit cut it and the row may sit just below.
-fn absent(m: &Mover) -> String {
-    if m.unknown { "–".into() } else { "0".into() }
+/// A window a row is missing from. For clicks and impressions that is a
+/// zero - unless the row limit may have cut it. CTR and position need
+/// impressions to exist at all, so a missing window has neither.
+fn absent(m: &Mover, metric: Metric) -> String {
+    if m.unknown || matches!(metric, Metric::Ctr | Metric::Position) { "–".into() } else { "0".into() }
 }
 
 /// Columns for a width: the metric and its change always, then the prior
@@ -1507,7 +1510,7 @@ pub fn mover_columns(metric: Metric, pages: bool, positions: bool, w: usize) -> 
         Col {
             label,
             width: 8,
-            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m)))),
+            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m, metric)))),
         },
         Col {
             label: "Δ",
@@ -1524,7 +1527,7 @@ pub fn mover_columns(metric: Metric, pages: bool, positions: bool, w: usize) -> 
             Col {
                 label: "PRIOR",
                 width: 8,
-                cell: Box::new(move |m, _, _| ("dim", m.prior.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m)))),
+                cell: Box::new(move |m, _, _| ("dim", m.prior.map(|c| value(metric, &c)).unwrap_or_else(|| absent(m, metric)))),
             },
         );
     }
@@ -1534,7 +1537,7 @@ pub fn mover_columns(metric: Metric, pages: bool, positions: bool, w: usize) -> 
         cols.push(Col {
             label: other_label,
             width: 8,
-            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(other, &c)).unwrap_or_else(|| absent(m)))),
+            cell: Box::new(move |m, _, _| ("txt", m.cur.map(|c| value(other, &c)).unwrap_or_else(|| absent(m, other)))),
         });
         cols.push(Col {
             label: "Δ",
@@ -2589,6 +2592,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(t.contains("waiting for Google's load quota (429)") && !t.contains("asking Google for 28 days"), "{t}");
+    }
+
+    #[test]
+    fn a_window_a_row_is_missing_from_has_no_ctr_or_position_but_zero_counts() {
+        let gone = Mover { key: "/old".into(), cur: None, prior: Some(metrics(5.0, 50.0, 4.0)), unknown: false };
+        let new = Mover { key: "/new".into(), cur: Some(metrics(5.0, 50.0, 4.0)), prior: None, unknown: false };
+        let cell = |metric: Metric, m: &Mover, label: &str| {
+            let cols = mover_columns(metric, true, true, 140);
+            let col = cols.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no {label} column"));
+            (col.cell)(m, None, 0.0).1
+        };
+        // Sorted by position or CTR: a gone row has no current value.
+        assert_eq!(cell(Metric::Position, &gone, "POS"), "–");
+        assert_eq!(cell(Metric::Ctr, &gone, "CTR"), "–");
+        // Clicks and impressions: gone is a real zero.
+        assert_eq!(cell(Metric::Clicks, &gone, "CLICKS"), "0");
+        assert_eq!(cell(Metric::Impressions, &gone, "IMPR"), "0");
+        // A new row's prior position is not zero either.
+        let prior = mover_columns(Metric::Position, true, true, 140);
+        let col = prior.iter().find(|c| c.label == "PRIOR").expect("a PRIOR column at 140");
+        assert_eq!((col.cell)(&new, None, 0.0).1, "–");
     }
 
     #[test]

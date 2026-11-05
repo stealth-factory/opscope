@@ -1010,7 +1010,7 @@ fn main() {
                 let key = detail_key(site, &item)?;
                 let held = details.lock().ok().and_then(|g| g.get(&key).cloned());
                 if held.is_none() {
-                    start_detail(&cfg, site, &item, key, &details, &fetching, &activity);
+                    start_detail(&cfg, site, &item, key, &details, &fetching, &shared, &activity);
                 }
                 held
             });
@@ -1182,6 +1182,18 @@ fn inspect_now(cfg: &Config, site: String, url: String, caches: &Caches, note: &
 
 /// Fetch a detail screen's data once, on a thread, for the parameters the
 /// site's reading was made with - the same ones its key and labels use.
+/// Start a property's wait after Google's load quota refused it (429),
+/// unless one already runs to a later time.
+fn hold_for_load_quota(shared: &Arc<Mutex<Shared>>, site: &str, now: f64) {
+    if let Ok(mut g) = shared.lock() {
+        if let Some(d) = g.sites.iter_mut().find(|d| d.site == site) {
+            let until = now + LOAD_WAIT;
+            d.load_wait_until = Some(d.load_wait_until.map_or(until, |u| u.max(until)));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn start_detail(
     cfg: &Config,
     site: &SiteData,
@@ -1189,6 +1201,7 @@ fn start_detail(
     key: String,
     details: &Arc<Mutex<HashMap<String, Result<Detail, String>>>>,
     fetching: &Arc<Mutex<HashSet<String>>>,
+    shared: &Arc<Mutex<Shared>>,
     activity: &tc::Refresh,
 ) {
     let Some((dim, value)) = detail_job(site, item) else { return };
@@ -1203,8 +1216,8 @@ fn start_detail(
         return;
     }
     let window = site.windows.map(|(cur, _)| cur);
-    let (cfg, site_name, params, details, fetching, activity) =
-        (cfg.clone(), site.site.clone(), site.params.clone(), Arc::clone(details), Arc::clone(fetching), activity.clone());
+    let (cfg, site_name, params, details, fetching, shared, activity) =
+        (cfg.clone(), site.site.clone(), site.params.clone(), Arc::clone(details), Arc::clone(fetching), Arc::clone(shared), activity.clone());
     std::thread::spawn(move || {
         let work = activity.start();
         let got = match signed_in(&cfg) {
@@ -1212,7 +1225,15 @@ fn start_detail(
             Ok((_, client)) if dim == "sitemap" => Ok(fetch_children(&client, &site_name, &value)),
             Ok((_, client)) => match window {
                 None => Err("no window to read yet: the main screen has not finished its first round".into()),
-                Some(cur) => fetch_detail(&client, &site_name, &params, &dim, &value, cur.1, cur),
+                Some(cur) => fetch_detail(&client, &site_name, &params, &dim, &value, cur.1, cur).map_err(|f| {
+                    // The load quota is the property's, not this detail's:
+                    // start its wait, which holds the poller and every
+                    // other detail too, as a 429 there would.
+                    if f.status == 429 {
+                        hold_for_load_quota(&shared, &site_name, tc::now());
+                    }
+                    f.said
+                }),
             },
         };
         drop(work);
@@ -1605,6 +1626,24 @@ mod tests {
         let on_screen = &shared.lock().unwrap().sites[0];
         assert_eq!(on_screen.sitemaps.value, Some(Vec::new()));
         assert_eq!(on_screen.inspect_error.as_deref(), Some("inspection stopped for this round: 429 quota"));
+    }
+
+    #[test]
+    fn a_429_on_a_detail_holds_the_whole_property() {
+        let p = Params { fresh: false, days: 7, kind: "web".into() };
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().sites = vec![SiteData::new("https://example.com/", &p), SiteData::new("https://example.org/", &p)];
+        hold_for_load_quota(&shared, "https://example.com/", 1_000.0);
+        let g = shared.lock().unwrap();
+        assert_eq!(g.sites[0].load_wait_until, Some(1_000.0 + LOAD_WAIT));
+        assert_eq!(g.sites[1].load_wait_until, None, "only the refused property");
+        // And the poller then asks it nothing, `r` included, until then.
+        assert!(plan_for(&g.sites[0], &p, true, true, 1_060.0, 900.0).nothing());
+        drop(g);
+        // A later wait already running is not shortened.
+        shared.lock().unwrap().sites[0].load_wait_until = Some(9_999.0);
+        hold_for_load_quota(&shared, "https://example.com/", 1_000.0);
+        assert_eq!(shared.lock().unwrap().sites[0].load_wait_until, Some(9_999.0));
     }
 
     #[test]
