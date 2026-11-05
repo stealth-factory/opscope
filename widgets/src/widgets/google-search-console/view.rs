@@ -998,6 +998,8 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
             .collect()
     };
     let inline = room >= 8 + h.hours.len();
+    // Hour cells a wrapped row holds, after its leading space.
+    let per = room.saturating_sub(1).max(1);
     for (label, f) in [("clicks", &(|x: &Hour| x.clicks()) as &dyn Fn(&Hour) -> f64), ("impr", &|x: &Hour| x.impressions())] {
         let cells = strip(f, peak(f));
         let mut parts: Vec<(String, String)> = Vec::new();
@@ -1007,17 +1009,35 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", label))], room));
             parts.push((String::new(), " ".into()));
         }
-        parts.extend(cells);
-        let refs: Vec<(&str, String)> = parts.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
-        rows.push(tc::seg(&refs, room));
+        if inline {
+            parts.extend(cells);
+            let refs: Vec<(&str, String)> = parts.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+            rows.push(tc::seg(&refs, room));
+        } else {
+            // Too narrow for every hour on one row: wrap the strip rather
+            // than let the clip drop the newest hours off its right end.
+            for chunk in cells.chunks(per) {
+                let mut row = parts.clone();
+                row.extend(chunk.iter().cloned());
+                let refs: Vec<(&str, String)> = row.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+                rows.push(tc::seg(&refs, room));
+            }
+        }
     }
     // The axis: first and last hour of the strip, in local time.
     let (first, last) = (h.hours.first(), h.hours.last());
     if let (Some(a), Some(b)) = (first, last) {
-        let indent = if inline { 8 } else { 1 };
         let (a, b) = (local_hour(a.start), local_hour(b.start));
-        let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
-        rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(indent), a, " ".repeat(gap), b))], room));
+        if inline {
+            let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(8), a, " ".repeat(gap), b))], room));
+        } else if h.hours.len() <= per {
+            let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}{}{}", a, " ".repeat(gap), b))], room));
+        } else {
+            let axis = vec![(p.dim.as_str(), format!("{} to {},", a, b)), (p.dim.as_str(), format!("{} hours a row", per))];
+            rows.extend(flow(" ", &axis, " ", w));
+        }
     }
     let key: Vec<(&str, String)> = vec![
         (p.grid.as_str(), "░".into()),
@@ -2029,6 +2049,21 @@ mod tests {
         assert_eq!(strip.chars().filter(|c| *c == '░').count(), 3);
         assert_eq!(strip.chars().filter(|c| *c == '·').count(), 1);
         assert!(strip.ends_with("░░░"));
+        // Too narrow for 24 cells and a label: the strip wraps, and every
+        // hour - the newest above all - is still drawn.
+        for w in [14, 20, 25, 26, 30, 40] {
+            let rows = hours_rows(&h, true, &palette(), w);
+            assert_fits(&rows, w, "hours");
+            // Strip rows only: they all come before the axis, whose hours
+            // carry a colon; the key below it also draws a ░ and a ·.
+            let cells: usize = rows
+                .iter()
+                .map(|r| plain(r))
+                .take_while(|r| !r.contains(':'))
+                .map(|r| r.chars().filter(|c| "░·▁▂▃▄▅▆▇█".contains(*c)).count())
+                .sum();
+            assert_eq!(cells, 2 * h.hours.len(), "{w}: {:#?}", rows.iter().map(|r| plain(r)).collect::<Vec<_>>());
+        }
     }
 
     #[test]
