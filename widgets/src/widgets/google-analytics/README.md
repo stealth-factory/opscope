@@ -261,10 +261,11 @@ several panes on the same property:
 - **Short**: under a tenth of any token bucket left, realtime goes to 10
   minutes and reports to twice their interval.
 
-At the defaults a pane costs about 168 realtime requests an hour for the
-property on screen and 24 for each other one - roughly 40k of the day's 200k
-for the property on screen at GA's usual 10 tokens a request, so three panes
-on one property stay near 60%. The header says which slowdown is in force. A
+At the defaults a pane costs about 108 realtime requests an hour for the
+property on screen (two every 2 minutes, four breakdowns every 5) and 24 for
+each other one - roughly 26k of the day's 200k for the property on screen at
+GA's usual 10 tokens a request, so three panes on one property stay near
+40%. The header says which slowdown is in force. A
 429 names the bucket and when it refills, pauses that kind of request for
 five minutes, and leaves the last data on screen under the banner.
 

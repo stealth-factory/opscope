@@ -387,6 +387,7 @@ fn main() {
                 "r" | "R" => {
                     if let Ok(mut g) = shared.lock() {
                         g.force += 1;
+                        g.force_prop = view.prop;
                         if let Some(open) = detail.as_ref().and_then(|d| detail_key(&prop_id, d)) {
                             g.details.remove(&open);
                             asked.remove(&open);
