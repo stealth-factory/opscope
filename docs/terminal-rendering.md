@@ -23,6 +23,8 @@ same. Higher resolution does not imply more samples or faster polling.
 `vercel-deployments`, and `linear` add discrete pixel bar charts.
 `github` and `agent-usage` use gapless calendar tiles.
 `github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
+`google-search-console` adds hourly bars, a daily window-against-window
+trace and a page or query's 28-day traces.
 These use shared text fallbacks: block bars, Braille traces and reference marks.
 
 Meters and stacked bars are text in every mode, Kitty included (OPS-203):

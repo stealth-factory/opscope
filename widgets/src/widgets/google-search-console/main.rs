@@ -992,16 +992,23 @@ fn main() {
             let flashed = flash_rows.len();
             foot.splice(0..0, flash_rows);
             let room = h.saturating_sub(foot.len()).max(1);
-            let rest = body.len().saturating_sub(1);
+            let rest = body.rows.len().saturating_sub(1);
             oscroll = oscroll.min(rest.saturating_sub(room.saturating_sub(1)));
-            let mut frame: Vec<String> = body.iter().take(1).cloned().collect();
-            frame.extend(body.iter().skip(1 + oscroll).take(room.saturating_sub(1)).cloned());
+            let mut frame: Vec<String> = body.rows.iter().take(1).cloned().collect();
+            frame.extend(body.rows.iter().skip(1 + oscroll).take(room.saturating_sub(1)).cloned());
             while frame.len() < room {
                 frame.push(String::new());
             }
             let foot_top = frame.len() + flashed;
             frame.extend(foot);
-            tc::draw(&frame, w, h);
+            // Charts scroll with the rows they sit on and are cropped, not
+            // rescaled, where the window cuts them.
+            let plots: Vec<tc::Plot> = body
+                .plots
+                .into_iter()
+                .filter_map(|plot| plot.in_viewport(oscroll, 1, room.saturating_sub(1)))
+                .collect();
+            tc::draw_plots(&frame, w, h, &plots);
             keyboard.footer_at(&packed, foot_top, 1);
             keyboard.wait(Duration::from_millis(200));
             continue;
@@ -1058,7 +1065,12 @@ fn main() {
         }
         let foot_top = frame.len() + flashed;
         frame.extend(foot);
-        tc::draw(&frame, w, h);
+        let plots: Vec<tc::Plot> = built
+            .plots
+            .into_iter()
+            .filter_map(|plot| plot.in_viewport(scroll, head, below))
+            .collect();
+        tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
     }

@@ -13,11 +13,25 @@ index.
 
  ── LAST 24 HOURS ── · clicks by hour, hourly_all · local time; Google reports Pacific
  Google marks hours from 12:00 as still collecting
- clicks  ▂▂▁▁▁▁▂▃▅▆▇█▇▆▆▅▅▄▃▃▃░░░
- impr    ▃▃▂▂▂▂▃▄▆▇██▇▇▆▆▅▅▄▄▄░░░
-         12:00                 11:00
+ clicks               ▂▅█▅▂▂
+ peak 148           ▁▇██████▇▇▄▁▁▁
+             ▆▆▃▃▃▃▆██████████████
+                                  ░░░
+ impressions          ▁▅█▅▁▁
+ peak 4,120         ▁▆██████▆▆▃▁▁▁
+             ▆▆▃▃▃▃▆██████████████
+                                  ░░░
+             12:00              11:00
  ░ still collecting or not reported · a complete hour with nothing
  21 complete hours:  1,284 clicks  same hours last week 1,190  +8%  impressions 38.2k vs 35.9k +6%
+
+ ── DAILY · IMPRESSIONS ── · Oct 12–18 vs the 7 days before · final data, 2-3 days behind
+ 5.2k          ⢀⣀⡠⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒
+     ⣀⣀⣀⣀⣀⡠⠤⠒⠊⠉⠁⠉⠁
+     ⠉⠉⠉⠉⠉⠁
+    0
+      Oct 12                Oct 18
+ ━━ Oct 12–18 total 29,000 ━━ Oct 5–11 total 26,100
 
  ── MOVERS · PAGES ── · impressions · 7 complete days (Oct 12–18) vs prior 7 (Oct 5–11)
  final data, 2-3 days behind · 1-10 of 184
@@ -93,12 +107,25 @@ kept and a line saying when it will be asked again - `r` included, since
 asking sooner only spends the next chunk on refusals. Opening a page or a
 query asks two more, once.
 
+## Charts
+
+The charts are core's: in a terminal that speaks the Kitty graphics
+protocol they are drawn as pixels, and everywhere else as the eighth-block
+bars and Braille lines above, from the same numbers. Labels, scales and
+legends are text in both. `OPSCOPE_GRAPHICS=text` keeps the text charts in a
+Kitty terminal; see [terminal rendering](../../../../docs/terminal-rendering.md).
+A pane too narrow to give each hour or day its own column falls back to a
+one-row strip. Every chart reads data the widget already holds: none of
+them asks Google anything.
+
 ## Sections
 
-**LAST 24 HOURS** is as close to live as the API gets. Hours at or after
-Google's `first_incomplete_hour` are drawn hatched (`░`) and labelled *still
-collecting*, so an hour Google has not finished counting never reads as a
-drop. A complete hour with no clicks is a dot (`·`), which is a real zero.
+**LAST 24 HOURS** is as close to live as the API gets: clicks and
+impressions as bars, a column an hour, each with its peak. Hours at or after
+Google's `first_incomplete_hour` have no bar; the row under the bars marks
+them hatched (`░`), labelled *still collecting*, so an hour Google has not
+finished counting never reads as a drop. A complete hour with no clicks is
+a dot (`·`) on that row, which is a real zero.
 The comparison uses complete hours only, against the same hours seven days
 earlier from the same answer - the same Pacific wall-clock hours a calendar
 week back, which across a clock change is not exactly 168 hours. When
@@ -109,6 +136,15 @@ hours in Pacific time; they are drawn in this machine's local time.
 
 A property with no hourly rows at all - usual for a new one - says so in
 words, which is a different screen from a complete hour with nothing in it.
+
+**DAILY** draws the window the movers compare, a day at a time, against the
+window before it, for the metric `m` sorts by: the current window in blue
+over the prior one in grey, both on one scale, each window's total in the
+legend. Counts and CTR are drawn from zero. Position is drawn from the best
+one seen, with the best at the top, so up is better on every chart. A day
+Google returned no row for had no impressions: a zero for the counts, and a
+break in the CTR and position lines, which have no value that day. It comes
+from the daily totals already read, so it moves when they do.
 
 **MOVERS · PAGES** compares a window of complete *final* days ending at the
 latest final date with the equal window before it, sorted by the size of the
@@ -181,7 +217,8 @@ then say *Google may still change this*. `d` again goes back.
 `↵` opens the selected row:
 
 - **a page**: its numbers in both windows, 28 days of clicks, impressions,
-  CTR and position, its top queries, and its full last inspection - verdict,
+  CTR and position as four line charts on one date axis (position with the
+  best at the top), its top queries, and its full last inspection - verdict,
   coverage, fetch, indexing, robots.txt, crawl time and crawler, both
   canonicals, the sitemaps and pages Google found it through, and rich-result
   issues. `l` copies the page's Search Console inspection link;

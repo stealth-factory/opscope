@@ -127,6 +127,29 @@ pub struct Built {
     pub items: Vec<(Item, Section)>,
     pub placed: Vec<(usize, usize)>,
     pub cursor: Option<usize>,
+    /// Charts over the rows, `y` being the row each starts on.
+    pub plots: Vec<tc::Plot>,
+}
+
+/// Rows and the charts drawn over them, `y` counted from the first row.
+///
+/// Core draws a chart as pixels in a terminal that speaks Kitty graphics
+/// and as Braille or block bars everywhere else, from the same values; the
+/// rows hold its labels and reserve its cells.
+#[derive(Default)]
+pub struct Drawn {
+    pub rows: Vec<String>,
+    pub plots: Vec<tc::Plot>,
+}
+
+/// Append `d` below `rows`, moving its charts down with it.
+fn put(rows: &mut Vec<String>, plots: &mut Vec<tc::Plot>, d: Drawn) {
+    let at = rows.len();
+    plots.extend(d.plots.into_iter().map(|mut plot| {
+        plot.y += at;
+        plot
+    }));
+    rows.extend(d.rows);
 }
 
 // ------------------------------------------------------------- numbers --
@@ -640,6 +663,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     let base = |slot: usize| entries[..slot].iter().map(|e| e.len()).sum::<usize>();
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut cursor = None;
+    let mut plots: Vec<tc::Plot> = Vec::new();
 
     // Status: which site, how old, how far Google's data reaches.
     let mut status: Vec<(&str, String)> = Vec::new();
@@ -728,10 +752,10 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     }
 
     let Some(site) = site else {
-        return Built { rows, items, placed, cursor };
+        return Built { rows, items, placed, cursor, plots };
     };
     if site.problem.is_some() {
-        return Built { rows, items, placed, cursor };
+        return Built { rows, items, placed, cursor, plots };
     }
 
     // LAST 24 HOURS
@@ -755,7 +779,13 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     ));
     rows.extend(part_rows(&site.hours, s.now, p, w));
     if let Some(h) = &site.hours.value {
-        rows.extend(hours_rows(h, site.params.has_position(), p, w));
+        put(&mut rows, &mut plots, hours_rows(h, site.params.has_position(), p, w));
+    }
+
+    // DAILY: the window against the one before it, day by day.
+    if let Some(d) = daily_chart(site, s.metric, p, w) {
+        rows.push(String::new());
+        put(&mut rows, &mut plots, d);
     }
 
     // MOVERS · PAGES and MOVERS · QUERIES
@@ -966,20 +996,28 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         }
     }
 
-    Built { rows, items, placed, cursor }
+    Built { rows, items, placed, cursor, plots }
 }
 
-/// The hatched strip, its axis and its comparison.
-pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<String> {
+/// Clicks and impressions by hour, their axis and their comparison.
+///
+/// Three rows of bars a metric, one column an hour, with the metric and
+/// its peak to the left: pixel bars in Kitty, eighth-block bars elsewhere.
+/// Under each, a row marks the hours that have no bar for a reason: `░`
+/// still collecting or not reported, `·` a complete hour with nothing. A
+/// pane too narrow for a column an hour keeps the one-row strip, wrapped
+/// when it does not fit on one row either.
+pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Drawn {
     let room = w.saturating_sub(1).max(1);
     let mut rows = Vec::new();
+    let mut plots = Vec::new();
     if !h.any_rows {
         rows.extend(note_rows(
             &p.warn,
             "no hourly rows yet: Google has no hourly data for this property, which is usual for a new one. This is not zero clicks.",
             w,
         ));
-        return rows;
+        return Drawn { rows, plots };
     }
     let peak = |f: &dyn Fn(&Hour) -> f64| {
         h.hours.iter().filter(|x| x.state == HourState::Complete).map(f).fold(0.0f64, f64::max)
@@ -997,10 +1035,54 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
             })
             .collect()
     };
-    let inline = room >= 8 + h.hours.len();
+    let metrics = [("clicks", &(|x: &Hour| x.clicks()) as &dyn Fn(&Hour) -> f64), ("impressions", &|x: &Hour| x.impressions())];
+    let n = h.hours.len();
+    let peaks: Vec<String> = metrics.iter().map(|(_, f)| format!(" peak {}", compact(peak(*f)))).collect();
+    let lw = metrics
+        .iter()
+        .map(|(l, _)| tc::display_width(l) + 1)
+        .chain(peaks.iter().map(|x| tc::display_width(x)))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let bars = n > 0 && lw + n <= room;
+    for (i, (label, f)) in metrics.iter().enumerate() {
+        if !bars {
+            break;
+        }
+        let hi = peak(*f);
+        let y0 = rows.len();
+        for text in [format!(" {}", label), peaks[i].clone(), String::new()] {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{:<lw$}", text)), ("", " ".repeat(n))], room));
+        }
+        let columns: Vec<(f64, String)> = h
+            .hours
+            .iter()
+            .map(|x| (if x.state == HourState::Complete { f(x) } else { 0.0 }, p.bar.clone()))
+            .collect();
+        plots.push(tc::Plot::bars(lw, y0, &columns, 3, hi, false));
+        let marks: Vec<(String, String)> = h
+            .hours
+            .iter()
+            .map(|x| match x.state {
+                HourState::Complete if f(x) <= 0.0 => (p.grid.clone(), "·".to_string()),
+                HourState::Complete => (String::new(), " ".to_string()),
+                _ => (p.grid.clone(), "░".to_string()),
+            })
+            .collect();
+        if marks.iter().any(|(_, m)| m != " ") {
+            let mut parts: Vec<(&str, String)> = vec![("", " ".repeat(lw))];
+            parts.extend(marks.iter().map(|(c, m)| (c.as_str(), m.clone())));
+            rows.push(tc::seg(&parts, room));
+        }
+    }
+    let inline = room >= 8 + n;
     // Hour cells a wrapped row holds, after its leading space.
     let per = room.saturating_sub(1).max(1);
     for (label, f) in [("clicks", &(|x: &Hour| x.clicks()) as &dyn Fn(&Hour) -> f64), ("impr", &|x: &Hour| x.impressions())] {
+        if bars {
+            break;
+        }
         let cells = strip(f, peak(f));
         let mut parts: Vec<(String, String)> = Vec::new();
         if inline {
@@ -1028,7 +1110,10 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
     let (first, last) = (h.hours.first(), h.hours.last());
     if let (Some(a), Some(b)) = (first, last) {
         let (a, b) = (local_hour(a.start), local_hour(b.start));
-        if inline {
+        if bars {
+            let gap = n.saturating_sub(a.len() + b.len()).max(1);
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(lw), a, " ".repeat(gap), b))], room));
+        } else if inline {
             let gap = h.hours.len().saturating_sub(a.len() + b.len()).max(1);
             rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(8), a, " ".repeat(gap), b))], room));
         } else if h.hours.len() <= per {
@@ -1048,7 +1133,7 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
     rows.extend(flow(" ", &key, " ", w));
     if h.now.hours == 0 {
         rows.extend(note_rows(&p.warn, "every hour in the last 24 is still collecting, so there is nothing complete to compare yet", w));
-        return rows;
+        return Drawn { rows, plots };
     }
     let mut cmp: Vec<(&str, String)> = vec![(p.dim.as_str(), format!("{} complete hours:", h.now.hours)), (p.txt.as_str(), format!("{} clicks", thousands(h.now.clicks)))];
     match &h.week_ago {
@@ -1079,7 +1164,189 @@ pub fn hours_rows(h: &HourView, positions: bool, p: &Palette, w: usize) -> Vec<S
         }
     }
     rows.extend(flow(" ", &cmp, "  ", w));
-    rows
+    Drawn { rows, plots }
+}
+
+// --------------------------------------------------------------- charts --
+
+/// A day's value of `metric`, as the chart scales it: CTR in percent.
+/// A day Google returned no row for had no impressions, so its counts are
+/// zero; its CTR and position do not exist and break the line.
+fn day_value(metric: Metric, m: Option<&Metrics>) -> Option<f64> {
+    match (metric, m) {
+        (Metric::Clicks | Metric::Impressions, None) => Some(0.0),
+        (_, None) => None,
+        (Metric::Ctr, Some(m)) => Some(m.ctr * 100.0),
+        (metric, Some(m)) => Some(metric.of(m)),
+    }
+}
+
+/// How a value of `metric` is written on an axis.
+fn axis_label(metric: Metric, v: f64) -> String {
+    match metric {
+        Metric::Clicks | Metric::Impressions => compact(v),
+        Metric::Ctr => format!("{:.1}%", v),
+        Metric::Position => format!("{:.1}", v),
+    }
+}
+
+/// The range a chart of `metric` is drawn on, and whether it is drawn
+/// upside down. Counts and CTR start at zero. Position starts at the best
+/// (lowest) one seen and is drawn with it at the top, so up is better on
+/// every chart; its zero means nothing.
+fn chart_scale(metric: Metric, values: &[&[Option<f64>]]) -> (f64, f64, bool) {
+    let seen: Vec<f64> = values.iter().flat_map(|v| v.iter().flatten()).cloned().collect();
+    let hi = seen.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min);
+    if !hi.is_finite() {
+        return (0.0, 1.0, false);
+    }
+    match metric {
+        Metric::Position => (lo, hi, true),
+        _ => (0.0, hi, false),
+    }
+}
+
+/// `height` rows of one line chart, `cw` columns wide, with the top and
+/// the bottom of its scale written in the `lw` columns to its left. The
+/// first series is the one being read and is drawn over the others.
+fn line_rows(metric: Metric, series: &[(&str, &[Option<f64>])], lw: usize, cw: usize, height: usize, p: &Palette) -> Drawn {
+    let values: Vec<&[Option<f64>]> = series.iter().map(|(_, v)| *v).collect();
+    let (lo, hi, invert) = chart_scale(metric, &values);
+    let (top, bottom) = if invert { (lo, hi) } else { (hi, lo) };
+    let any = values.iter().any(|v| v.iter().any(Option::is_some));
+    let mut rows = Vec::new();
+    for r in 0..height {
+        // An empty chart has no scale to name.
+        let text = match r {
+            0 if any => axis_label(metric, top),
+            r if r + 1 == height && any => axis_label(metric, bottom),
+            _ => String::new(),
+        };
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {:>w$} ", text, w = lw.saturating_sub(2))), ("", " ".repeat(cw))], lw + cw));
+    }
+    let span = if hi > lo { hi - lo } else { 1.0 };
+    let traces = series
+        .iter()
+        .map(|(colour, v)| tc::Trace {
+            values: v
+                .iter()
+                .map(|x| {
+                    x.map(|x| {
+                        let f = ((x - lo) / span).clamp(0.0, 1.0);
+                        if invert { 1.0 - f } else { f }
+                    })
+                })
+                .collect(),
+            positions: None,
+            colour: colour.to_string(),
+            baseline: None,
+        })
+        .collect();
+    let slots = values.iter().map(|v| v.len()).max().unwrap_or(0);
+    let chart = tc::LineChart { slots, traces, focus: Some(0) };
+    Drawn { rows, plots: vec![tc::Plot::new(lw, 0, cw, height, chart).on_axis(lo, hi)] }
+}
+
+/// The left label column for charts of these metrics over these values:
+/// wide enough for the widest top or bottom label, a space either side.
+fn label_width(sets: &[(Metric, Vec<&[Option<f64>]>)]) -> usize {
+    sets.iter()
+        .flat_map(|(metric, values)| {
+            let (lo, hi, _) = chart_scale(*metric, values);
+            [tc::display_width(&axis_label(*metric, lo)), tc::display_width(&axis_label(*metric, hi))]
+        })
+        .max()
+        .unwrap_or(1)
+        + 2
+}
+
+/// `Oct 12` at the chart's left edge and `Oct 18` at its right.
+fn date_axis(first: chrono::NaiveDate, last: chrono::NaiveDate, lw: usize, cw: usize, p: &Palette) -> String {
+    let (a, b) = (day(first), day(last));
+    let gap = cw.saturating_sub(tc::display_width(&a) + tc::display_width(&b)).max(1);
+    tc::seg(&[(p.dim.as_str(), format!("{}{}{}{}", " ".repeat(lw), a, " ".repeat(gap), b))], lw + cw)
+}
+
+/// Columns for a chart of `slots` days: a column a day at least, and up to
+/// four when the pane has them, past which a week is a wide flat band.
+fn chart_width(slots: usize, lw: usize, room: usize) -> Option<usize> {
+    (slots >= 2 && lw + slots <= room).then(|| room.saturating_sub(lw).min(slots * 4).max(slots))
+}
+
+/// The current window against the one before it, a day at a time, for the
+/// metric the movers are sorted by. Read from the daily totals the widget
+/// already holds, so it costs Google nothing. `None` when there are no
+/// daily totals or no final day to place the windows.
+pub fn daily_chart(site: &SiteData, metric: Metric, p: &Palette, w: usize) -> Option<Drawn> {
+    let days = site.days.value.as_ref()?;
+    let end = if site.params.fresh { days.fresh_end } else { days.final_end }?;
+    let ((a, b), (c, d)) = windows(end, site.params.days);
+    let by_day: BTreeMap<chrono::NaiveDate, &Metrics> = days.daily.iter().map(|(day, m)| (*day, m)).collect();
+    let n = (b - a).num_days().max(0) as usize + 1;
+    let pick = |from: chrono::NaiveDate| -> Vec<Option<f64>> {
+        (0..n).map(|i| day_value(metric, by_day.get(&(from + chrono::Duration::days(i as i64))).copied())).collect()
+    };
+    let (now, prior) = (pick(a), pick(c));
+    let room = w.saturating_sub(1).max(1);
+    let mut rows = Vec::new();
+    let mut plots = Vec::new();
+    let up = if metric == Metric::Position { ", best at the top" } else { "" };
+    rows.extend(heading(
+        &format!("DAILY · {}", metric.name().to_uppercase()),
+        vec![
+            (p.dim.as_str(), format!("{} vs the {} days before{}", span_label(a, b), site.params.days, up)),
+            if site.params.fresh {
+                (p.warn.as_str(), "fresh data: Google may still change this".to_string())
+            } else {
+                (p.dim.as_str(), "final data, 2-3 days behind".to_string())
+            },
+        ],
+        p,
+        w,
+    ));
+    let lw = label_width(&[(metric, vec![&now, &prior])]);
+    match chart_width(n, lw, room) {
+        Some(cw) => {
+            put(&mut rows, &mut plots, line_rows(metric, &[(p.bar.as_str(), &now), (p.grid.as_str(), &prior)], lw, cw, 4, p));
+            rows.push(date_axis(a, b, lw, cw, p));
+        }
+        None => {
+            // Too narrow for a column a day: a row each, on one scale.
+            let (lo, hi, invert) = chart_scale(metric, &[&now, &prior]);
+            for (name, v, colour) in [("now", &now, &p.bar), ("prior", &prior, &p.grid)] {
+                let cells: String = v
+                    .iter()
+                    .map(|x| match x {
+                        None => ' ',
+                        Some(x) => {
+                            let f = if hi > lo { (x - lo) / (hi - lo) } else { 0.0 };
+                            let f = if invert { 1.0 - f } else { f };
+                            tc::SPARK[((f * 7.99) as usize).min(7)]
+                        }
+                    })
+                    .collect();
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {:<6}", name)), (colour.as_str(), cells)], room));
+            }
+        }
+    }
+    let total = |from, to| window_totals(&days.daily, (from, to));
+    let sum = |t: &Totals| match metric {
+        Metric::Clicks => thousands(t.clicks),
+        Metric::Impressions => thousands(t.impressions),
+        Metric::Ctr if t.impressions > 0.0 => format!("{:.1}%", t.clicks / t.impressions * 100.0),
+        Metric::Ctr => "--".into(),
+        Metric::Position => t.position.map(|x| format!("{:.1}", x)).unwrap_or_else(|| "--".into()),
+    };
+    let what = if matches!(metric, Metric::Clicks | Metric::Impressions) { "total" } else { "overall" };
+    let legend: Vec<(&str, String)> = vec![
+        (p.bar.as_str(), "━━".into()),
+        (p.dim.as_str(), format!("{} {} {}", span_label(a, b), what, sum(&total(a, b)))),
+        (p.grid.as_str(), "━━".into()),
+        (p.dim.as_str(), format!("{} {} {}", span_label(c, d), what, sum(&total(c, d)))),
+    ];
+    rows.extend(flow(" ", &legend, " ", w));
+    Some(Drawn { rows, plots })
 }
 
 /// One column of the movers tables. A cell names its colour by palette
@@ -1393,8 +1660,62 @@ fn spark_rows(label: &str, values: &[f64], summary: String, p: &Palette, w: usiz
     rows
 }
 
-/// The rows of a detail screen, title first.
-pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>, p: &Palette, w: usize) -> Vec<String> {
+/// The rows of a detail screen, title first, and the charts over them.
+pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>, p: &Palette, w: usize) -> Drawn {
+    let plots = std::cell::RefCell::new(Vec::new());
+    let rows = detail_rows(s, item, fetched, p, w, &plots);
+    Drawn { rows, plots: plots.into_inner() }
+}
+
+/// A detail's last 28 days as four line charts, one a metric, on one date
+/// axis: a day a slot, so a day with no row is a zero for the counts and a
+/// break in CTR and position, never a day squeezed out of the axis. `None`
+/// when the pane cannot give every day a column.
+fn series_charts(series: &[(chrono::NaiveDate, Metrics)], positions: bool, p: &Palette, w: usize) -> Option<Drawn> {
+    let (first, last) = (series.first()?.0, series.last()?.0);
+    let n = (last - first).num_days().max(0) as usize + 1;
+    let by_day: BTreeMap<chrono::NaiveDate, &Metrics> = series.iter().map(|(d, m)| (*d, m)).collect();
+    let pick = |metric: Metric| -> Vec<Option<f64>> {
+        (0..n).map(|i| day_value(metric, by_day.get(&(first + chrono::Duration::days(i as i64))).copied())).collect()
+    };
+    // Google reports no position for Discover; read as 0 it would chart a
+    // ranking nobody had.
+    let all = [Metric::Clicks, Metric::Impressions, Metric::Ctr, Metric::Position];
+    let shown = &all[..if positions { 4 } else { 3 }];
+    let values: Vec<Vec<Option<f64>>> = shown.iter().map(|m| pick(*m)).collect();
+    let lw = label_width(&shown.iter().zip(&values).map(|(m, v)| (*m, vec![v.as_slice()])).collect::<Vec<_>>());
+    let room = w.saturating_sub(1).max(1);
+    let cw = chart_width(n, lw, room)?;
+    let mut rows = Vec::new();
+    let mut plots = Vec::new();
+    let sum = |v: &[Option<f64>]| v.iter().flatten().sum::<f64>();
+    let range = |v: &[Option<f64>], f: &dyn Fn(f64) -> String| {
+        let lo = v.iter().flatten().cloned().fold(f64::INFINITY, f64::min);
+        let hi = v.iter().flatten().cloned().fold(f64::NEG_INFINITY, f64::max);
+        if hi.is_finite() { format!("{} to {}", f(lo), f(hi)) } else { "no days with impressions".into() }
+    };
+    for (metric, v) in shown.iter().zip(&values) {
+        let (name, about) = match metric {
+            Metric::Clicks => ("clicks", format!("total {}", thousands(sum(v)))),
+            Metric::Impressions => ("impressions", format!("total {}", thousands(sum(v)))),
+            Metric::Ctr => ("CTR", range(v, &|x| format!("{:.1}%", x))),
+            Metric::Position => ("position", format!("{}, lower is better, drawn at the top", range(v, &|x| format!("{:.1}", x)))),
+        };
+        rows.extend(flow(" ", &[(p.lbl.as_str(), name.to_string()), (p.dim.as_str(), about)], "  ", w));
+        put(&mut rows, &mut plots, line_rows(*metric, &[(p.bar.as_str(), v)], lw, cw, 3, p));
+    }
+    rows.push(date_axis(first, last, lw, cw, p));
+    Some(Drawn { rows, plots })
+}
+
+fn detail_rows(
+    s: &Screen,
+    item: &Item,
+    fetched: Option<&Result<Detail, String>>,
+    p: &Palette,
+    w: usize,
+    plots: &std::cell::RefCell<Vec<tc::Plot>>,
+) -> Vec<String> {
     let mut rows = vec![tc::title_busy("search console", w, &p.accent, s.busy)];
     let Some(site) = s.site() else { return rows };
     let cache = s.cache();
@@ -1428,6 +1749,10 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
             p,
             w,
         ));
+        if let Some(charts) = series_charts(&d.series, site.params.has_position(), p, w) {
+            put(rows, &mut plots.borrow_mut(), charts);
+            return;
+        }
         let clicks: Vec<f64> = d.series.iter().map(|(_, m)| m.clicks).collect();
         let impr: Vec<f64> = d.series.iter().map(|(_, m)| m.impressions).collect();
         let ctr: Vec<f64> = d.series.iter().map(|(_, m)| m.ctr * 100.0).collect();
@@ -1945,8 +2270,12 @@ mod tests {
         for w in WIDTHS {
             for item in &items {
                 for f in [None, Some(&fetched), Some(&Err("429 quota: queries per minute exhausted (per-minute bucket, refills within a minute)".to_string()))] {
-                    let rows = detail(&screen(&sites, &caches, &p, "", 0), item, f, &palette(), w);
-                    assert_fits(&rows, w, &format!("{item:?}"));
+                    let d = detail(&screen(&sites, &caches, &p, "", 0), item, f, &palette(), w);
+                    assert_fits(&d.rows, w, &format!("{item:?}"));
+                    assert_plots_fit(&d, w, &format!("{item:?}"));
+                    if w >= 60 && matches!(item, Item::Page(_) | Item::Query(_)) && matches!(f, Some(Ok(_))) {
+                        assert_eq!(d.plots.len(), 4, "clicks, impressions, CTR and position at {w}");
+                    }
                 }
             }
         }
@@ -2043,17 +2372,33 @@ mod tests {
             t += Duration::hours(1);
         }
         let h = hour_view(&Analytics { rows, first_incomplete_hour: Some("2026-10-21T09:00:00-07:00".into()), first_incomplete_date: None }, now);
-        let rows = hours_rows(&h, true, &palette(), 100);
-        let clicks = plain(&rows[0]);
-        let strip: String = clicks.chars().skip(8).collect();
+        // Wide: three rows of bars, then the row that marks the hours with
+        // no bar - collecting, and the one complete hour with nothing.
+        let d = hours_rows(&h, true, &palette(), 100);
+        assert_eq!(d.plots.len(), 2, "a bar chart each for clicks and impressions");
+        assert_eq!((d.plots[0].y, d.plots[0].height, d.plots[0].width), (0, 3, h.hours.len()));
+        let marks = plain(&d.rows[3]);
+        assert_eq!(marks.chars().filter(|c| *c == '░').count(), 3, "{marks:?}");
+        assert_eq!(marks.chars().filter(|c| *c == '·').count(), 1, "{marks:?}");
+        assert!(marks.ends_with("░░░"), "{marks:?}");
+        // Too narrow for a column an hour beside the labels: the one-row
+        // strip, which says the same with no chart.
+        let d = hours_rows(&h, true, &palette(), h.hours.len() + 10);
+        assert!(d.plots.is_empty());
+        let strip: String = plain(&d.rows[0]).chars().skip(8).collect();
         assert_eq!(strip.chars().filter(|c| *c == '░').count(), 3);
         assert_eq!(strip.chars().filter(|c| *c == '·').count(), 1);
         assert!(strip.ends_with("░░░"));
         // Too narrow for 24 cells and a label: the strip wraps, and every
         // hour - the newest above all - is still drawn.
         for w in [14, 20, 25, 26, 30, 40] {
-            let rows = hours_rows(&h, true, &palette(), w);
-            assert_fits(&rows, w, "hours");
+            let drawn = hours_rows(&h, true, &palette(), w);
+            assert_fits(&drawn.rows, w, "hours");
+            if !drawn.plots.is_empty() {
+                // Wide enough for the bars, checked above.
+                continue;
+            }
+            let rows = drawn.rows;
             // Strip rows only: they all come before the axis, whose hours
             // carry a colon; the key below it also draws a ░ and a ·.
             let cells: usize = rows
@@ -2091,6 +2436,63 @@ mod tests {
         };
         assert!(reading(&web).contains("pos 0.0"), "{}", reading(&web));
         assert!(!reading(&discover).contains("pos"), "{}", reading(&discover));
+    }
+
+    /// Every chart inside the pane and on rows that exist, below the title.
+    fn assert_plots_fit(d: &Drawn, w: usize, what: &str) {
+        for plot in &d.plots {
+            assert!(plot.x + plot.width < w, "{what} at {w}: a chart {} + {} wide", plot.x, plot.width);
+            assert!(plot.y >= 1 && plot.y + plot.height <= d.rows.len(), "{what} at {w}: a chart on rows {}..{} of {}", plot.y, plot.y + plot.height, d.rows.len());
+        }
+    }
+
+    #[test]
+    fn the_charts_fit_every_width_and_appear_where_there_is_room() {
+        let sites = vec![site("sc-domain:example.com"), site("https://example.org/")];
+        let caches = BTreeMap::new();
+        let p = params();
+        for w in WIDTHS {
+            for metric in METRICS {
+                let mut sc = screen(&sites, &caches, &p, "", 0);
+                sc.metric = metric;
+                let mut starts = [0; 6];
+                let b = list(&sc, &mut starts, &palette(), w);
+                assert_fits(&b.rows, w, "list");
+                assert_plots_fit(&Drawn { rows: b.rows.clone(), plots: b.plots.clone() }, w, "list");
+                if w >= 60 {
+                    // Two bar charts of hours and the daily comparison.
+                    assert_eq!(b.plots.len(), 3, "at {w} with {metric:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_day_with_no_row_is_zero_clicks_but_no_position() {
+        assert_eq!(day_value(Metric::Clicks, None), Some(0.0));
+        assert_eq!(day_value(Metric::Impressions, None), Some(0.0));
+        assert_eq!(day_value(Metric::Ctr, None), None);
+        assert_eq!(day_value(Metric::Position, None), None);
+        assert_eq!(day_value(Metric::Ctr, Some(&metrics(5.0, 100.0, 3.0))), Some(5.0));
+    }
+
+    #[test]
+    fn position_is_drawn_with_the_best_at_the_top_and_labelled_so() {
+        let v = [Some(3.0), Some(9.5), None];
+        let d = line_rows(Metric::Position, &[("", &v)], 6, 10, 3, &palette());
+        assert_eq!(plain(&d.rows[0]).trim(), "3.0", "the best position labels the top");
+        assert_eq!(plain(&d.rows[2]).trim(), "9.5");
+        let t = &d.plots[0].chart.traces[0].values;
+        assert_eq!(t, &vec![Some(1.0), Some(0.0), None]);
+        // Discover has no position to chart: three charts, not four.
+        let start = parse_date("2026-10-01").unwrap();
+        let series: Vec<_> = (0..28).map(|i| (start + Duration::days(i), metrics(5.0, 50.0, 0.0))).collect();
+        assert_eq!(series_charts(&series, true, &palette(), 100).unwrap().plots.len(), 4);
+        assert_eq!(series_charts(&series, false, &palette(), 100).unwrap().plots.len(), 3);
+        // Counts start at zero, whatever the lowest day was.
+        let d = line_rows(Metric::Clicks, &[("", &[Some(50.0), Some(100.0)])], 6, 10, 3, &palette());
+        assert_eq!(plain(&d.rows[2]).trim(), "0");
+        assert_eq!(d.plots[0].chart.traces[0].values, vec![Some(0.5), Some(1.0)]);
     }
 
     #[test]
