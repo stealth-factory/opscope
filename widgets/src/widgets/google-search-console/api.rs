@@ -191,30 +191,35 @@ pub struct Part<T> {
     pub error: Option<String>,
     /// When the value was fetched, Unix seconds.
     pub at: f64,
+    /// When this part was last asked for, whatever came back. A failed
+    /// part keeps its old value's `at`, so its retry is timed from this,
+    /// not from the site's last read: other parts succeeding every
+    /// `refresh` must not keep putting it off.
+    pub tried: f64,
 }
 
 impl<T> Default for Part<T> {
     fn default() -> Self {
-        Part { value: None, note: None, error: None, at: 0.0 }
+        Part { value: None, note: None, error: None, at: 0.0, tried: 0.0 }
     }
 }
 
 impl<T> Part<T> {
     pub fn ok(value: T, at: f64) -> Self {
-        Part { value: Some(value), note: None, error: None, at }
+        Part { value: Some(value), note: None, error: None, at, tried: at }
     }
     pub fn failed(said: impl Into<String>) -> Self {
-        Part { value: None, note: None, error: Some(said.into()), at: 0.0 }
+        Part { value: None, note: None, error: Some(said.into()), at: 0.0, tried: 0.0 }
     }
     pub fn noted(said: impl Into<String>) -> Self {
-        Part { value: None, note: Some(said.into()), error: None, at: 0.0 }
+        Part { value: None, note: Some(said.into()), error: None, at: 0.0, tried: 0.0 }
     }
     /// A round that failed keeps the last value it replaced, so the pane
     /// shows that reading under a banner naming its age and the error,
     /// rather than blanking or passing it off as current.
     pub fn after(self, old: Part<T>) -> Part<T> {
         if self.value.is_none() && self.error.is_some() && old.value.is_some() {
-            return Part { value: old.value, note: None, error: self.error, at: old.at };
+            return Part { value: old.value, note: None, error: self.error, at: old.at, tried: self.tried };
         }
         self
     }
@@ -433,6 +438,7 @@ pub fn fetch_site(c: &Client, site: &str, p: &Params, today: NaiveDate, now: chr
                 return d;
             }
             d.$part = Part::failed(f.said.clone()).after(std::mem::take(&mut d.$part));
+            d.$part.tried = at;
             if f.status == 429 {
                 d.load_wait_until = Some(at + LOAD_WAIT);
                 return d;

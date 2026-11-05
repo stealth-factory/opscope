@@ -370,10 +370,17 @@ fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f6
     // when it last failed or was noted.
     fn due<T>(part: &Part<T>, fetched: f64, renewed: bool, now: f64, every: f64) -> bool {
         let never = part.value.is_none() && part.error.is_none() && part.note.is_none();
-        // A part that failed is timed from the attempt that failed. Its
-        // kept value's time is the last success, already overdue, and would
-        // make it due again every tick.
-        let last = if part.error.is_none() && part.at > 0.0 { part.at } else { fetched };
+        // Timed from this part's own last attempt. A failed part's kept
+        // value has the last success's time, already overdue, which would
+        // make it due every tick; and the site's `fetched` moves whenever
+        // any other part is read, which would put its retry off for ever.
+        let last = if part.tried > 0.0 {
+            part.tried
+        } else if part.error.is_none() && part.at > 0.0 {
+            part.at
+        } else {
+            fetched
+        };
         renewed || never || last <= 0.0 || now - last >= every
     }
     let (f, r) = (prev.fetched, renewed);
@@ -399,7 +406,11 @@ fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f6
     let heavy = if renewed || never {
         Heavy::Yes
     } else if failed {
-        if now - prev.fetched >= refresh { Heavy::Yes } else { Heavy::No }
+        // From the heavy reports' own attempt, not `fetched`, which the
+        // hourly and daily reads move every `refresh`.
+        let tried = prev.pages.tried.max(prev.queries.tried).max(prev.terms.tried);
+        let last = if tried > 0.0 { tried } else { prev.fetched };
+        if now - last >= refresh { Heavy::Yes } else { Heavy::No }
     } else if pages.at > 0.0 && now - pages.at >= HEAVY_EVERY {
         Heavy::Yes
     } else if days {
@@ -526,6 +537,11 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
         // Inspections for the site on screen: they have a budget of their
         // own, 2,000 a day per site, and a page is asked at most daily.
         if data.problem.is_none() && data.load_wait_until.is_none() && site == focus && cfg.inspect_top > 0 {
+            // `fetch_site` carries the last reading forward, its inspection
+            // error with it. That error was the last batch's: a refusal or
+            // a failed save must not stay on screen once inspecting and
+            // keeping work again. Whatever this batch meets, it sets.
+            data.inspect_error = None;
             inspect_due(&cred, &mut client, &mut data, caches, cfg.inspect_top);
             publish(shared, params, &data);
         }
@@ -1136,12 +1152,12 @@ mod tests {
         // in for the value here.
         let mut d = SiteData::new("https://example.com/", params);
         d.fetched = t;
-        d.hours = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.days = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.pages = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.queries = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.hours = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.days = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.pages = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.queries = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
         d
     }
 
@@ -1203,8 +1219,8 @@ mod tests {
         let t = 100_000.0;
         let mut d = SiteData::new("https://example.com/", &p);
         d.fetched = t;
-        d.days = Part { value: None, note: Some("read".into()), error: None, at: t };
-        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.days = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
+        d.sitemaps = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
         let shown = plan_for(&d, &p, true, false, t + 60.0, 900.0);
         assert!(shown.hours, "{shown:?}");
         assert_eq!(shown.heavy, Heavy::Yes, "never read: {shown:?}");
@@ -1236,12 +1252,49 @@ mod tests {
         // behind the error, carrying t as its time.
         d.fetched = t + 900.0;
         d.days = Part::failed("HTTP 500").after(Part::ok(Days::default(), t));
+        d.days.tried = t + 900.0;
         assert!(d.days.value.is_some() && d.days.error.is_some() && d.days.at == t);
         // Timed from the kept value, it would be overdue on every tick.
         let soon = plan_for(&d, &p, true, false, t + 960.0, 900.0);
         assert!(!soon.days, "a minute after the failure: {soon:?}");
         let later = plan_for(&d, &p, true, false, t + 1_800.0, 900.0);
         assert!(later.days, "{later:?}");
+    }
+
+    #[test]
+    fn a_failed_part_is_retried_though_other_parts_keep_succeeding() {
+        // Sitemaps failed once. Hours and daily totals then succeed every
+        // `refresh` on screen, and daily totals hourly off screen, each
+        // moving `fetched`. The sitemaps retry must still come six hours
+        // after its own failure, not six hours after the site's last read.
+        let p = params();
+        let t = 100_000.0;
+        for (focus, every) in [(true, 900.0), (false, OFF_SCREEN_EVERY)] {
+            let mut d = read_at(t, &p);
+            d.sitemaps = Part::failed("HTTP 500").after(Part::ok(Vec::new(), t - 60.0));
+            d.sitemaps.tried = t;
+            let mut retried = None;
+            let mut now = t;
+            while now < t + 24.0 * 3600.0 && retried.is_none() {
+                now += 60.0;
+                let plan = plan_for(&d, &p, focus, false, now, 900.0);
+                if plan.sitemaps {
+                    retried = Some(now);
+                }
+                if plan.hours || plan.days {
+                    // What fetch_site leaves after a read that worked.
+                    d.fetched = now;
+                    if plan.hours {
+                        d.hours = Part { value: None, note: Some("read".into()), error: None, at: now, tried: now };
+                    }
+                    if plan.days {
+                        d.days = Part { value: None, note: Some("read".into()), error: None, at: now, tried: now };
+                    }
+                }
+            }
+            let at = retried.unwrap_or_else(|| panic!("sitemaps never retried (on screen: {focus})"));
+            assert!(at - t >= SITEMAPS_EVERY && at - t < SITEMAPS_EVERY + every, "on screen {focus}: retried {}s on", at - t);
+        }
     }
 
     #[test]
@@ -1269,7 +1322,7 @@ mod tests {
         d.queries = Part::failed("429 load quota");
         d.terms = Part::default();
         assert_eq!(plan_for(&d, &p, true, false, t + 60.0, 900.0).heavy, Heavy::Yes, "terms never read");
-        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t };
+        d.terms = Part { value: None, note: Some("read".into()), error: None, at: t, tried: t };
         assert_eq!(plan_for(&d, &p, true, false, t + 60.0, 900.0).heavy, Heavy::No, "a minute after the failure");
         assert_eq!(plan_for(&d, &p, true, false, t + 900.0, 900.0).heavy, Heavy::Yes);
         let mut d = read_at(t, &p);
