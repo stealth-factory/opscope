@@ -458,6 +458,12 @@ struct Round {
 /// One tick: every part of every property that is due, and nothing else.
 fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches: &Caches, round: &mut Round, activity: &tc::Refresh) {
     let now = tc::now();
+    // Every tick, before anything can return early: the budget turns over
+    // at Pacific midnight whether or not this round asks Google anything.
+    if let Ok(mut c) = caches.lock() {
+        let today = google_today().format("%Y-%m-%d").to_string();
+        c.values_mut().for_each(|cache| cache.roll(&today, now));
+    }
     let (focus, forced) = match shared.lock() {
         Ok(mut g) => (g.focus.clone(), std::mem::take(&mut g.force)),
         Err(_) => return,
@@ -521,9 +527,12 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
     }
     // Every listed property's inspection results, from disk, so SITES can
     // say what they found before the property is shown or inspected again.
+    // Each is rolled onto Google's day here, not only when it inspects: a
+    // cache from yesterday would otherwise show yesterday's count as today's.
     if let Ok(mut c) = caches.lock() {
+        let today = google_today().format("%Y-%m-%d").to_string();
         for (site, _, _) in &targets {
-            c.entry(site.clone()).or_insert_with(|| load_cache(site));
+            c.entry(site.clone()).or_insert_with(|| load_cache(site)).roll(&today, now);
         }
     }
     for (site, permission, problem) in targets {

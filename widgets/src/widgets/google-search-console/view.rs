@@ -601,7 +601,7 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     let mut entries: Vec<Vec<Item>> = vec![Vec::new(); 6];
     let mut pages: Vec<Mover> = Vec::new();
     let mut queries: Vec<Mover> = Vec::new();
-    if let Some(site) = site {
+    if let Some(site) = site.filter(|d| d.problem.is_none()) {
         if let Some(m) = &site.pages.value {
             pages = m.rows.iter().filter(|r| wanted(s.needle, &[&r.key])).cloned().collect();
             sort_movers(&mut pages, s.metric);
@@ -754,7 +754,10 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
     let Some(site) = site else {
         return Built { rows, items, placed, cursor, plots };
     };
+    // A refused property has none of its own sections to draw - and so no
+    // items in them - but SITES is still the way to the other properties.
     if site.problem.is_some() {
+        sites_section(s, &mut starts[5], at_in[5], base(5), p, w, &mut rows, &mut placed, &mut cursor);
         return Built { rows, items, placed, cursor, plots };
     }
 
@@ -974,29 +977,45 @@ pub fn list(s: &Screen, starts: &mut [usize; 6], p: &Palette, w: usize) -> Built
         placed.extend((start..rows.len()).map(|r| (r, g)));
     }
 
-    // SITES
-    if s.sites.len() > 1 {
-        rows.push(String::new());
-        let (from, to) = slice(&mut starts[5], s.sites.len(), at_in[5]);
-        rows.extend(heading(
-            "SITES",
-            vec![(p.dim.as_str(), "each property's own totals, current window vs prior".into()), (p.dim.as_str(), showing(from, to, s.sites.len()))],
-            p,
-            w,
-        ));
-        for (i, d) in s.sites.iter().enumerate().take(to).skip(from) {
-            let here = at_in[5] == Some(i);
-            let start = rows.len();
-            rows.extend(site_rows(d, s.caches.get(&d.site), here, s.inspect_top, s.now, p, w));
-            if here {
-                cursor = Some(rows.len() - 1);
-            }
-            let g = base(5) + i;
-            placed.extend((start..rows.len()).map(|r| (r, g)));
-        }
-    }
-
+    sites_section(s, &mut starts[5], at_in[5], base(5), p, w, &mut rows, &mut placed, &mut cursor);
     Built { rows, items, placed, cursor, plots }
+}
+
+/// SITES: every property's own totals, current window against prior.
+/// Drawn whatever the property on screen holds - a refused one included -
+/// since it is the way to the others.
+#[allow(clippy::too_many_arguments)]
+fn sites_section(
+    s: &Screen,
+    start: &mut usize,
+    at: Option<usize>,
+    base: usize,
+    p: &Palette,
+    w: usize,
+    rows: &mut Vec<String>,
+    placed: &mut Vec<(usize, usize)>,
+    cursor: &mut Option<usize>,
+) {
+    if s.sites.len() <= 1 {
+        return;
+    }
+    rows.push(String::new());
+    let (from, to) = slice(start, s.sites.len(), at);
+    rows.extend(heading(
+        "SITES",
+        vec![(p.dim.as_str(), "each property's own totals, current window vs prior".into()), (p.dim.as_str(), showing(from, to, s.sites.len()))],
+        p,
+        w,
+    ));
+    for (i, d) in s.sites.iter().enumerate().take(to).skip(from) {
+        let here = at == Some(i);
+        let first = rows.len();
+        rows.extend(site_rows(d, s.caches.get(&d.site), here, s.inspect_top, s.now, p, w));
+        if here {
+            *cursor = Some(rows.len() - 1);
+        }
+        placed.extend((first..rows.len()).map(|r| (r, base + i)));
+    }
 }
 
 /// Clicks and impressions by hour, their axis and their comparison.
@@ -2313,6 +2332,27 @@ mod tests {
 
     /// Every failure the spec names, each producing its own row, and each
     /// row fitting.
+    #[test]
+    fn a_refused_property_still_draws_sites_and_only_items_it_draws() {
+        let p = params();
+        let mut refused = site("sc-domain:example.com");
+        refused.problem = Some("403 no access: add the key as a Restricted user".into());
+        let sites = vec![refused, site("https://example.org/")];
+        let caches = BTreeMap::new();
+        let mut starts = [0; 6];
+        let built = list(&screen(&sites, &caches, &p, "", 0), &mut starts, &palette(), 100);
+        let text = built.rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("403 no access") && text.contains("SITES") && text.contains("https://example.org/"), "{text}");
+        // Its kept pages are not drawn, so they are not items either: every
+        // item is a property, and every one of them has rows to click.
+        assert!(built.items.iter().all(|(it, _)| matches!(it, Item::Site(_))), "{:?}", built.items);
+        assert_eq!(built.items.len(), 2);
+        for g in 0..built.items.len() {
+            assert!(built.placed.iter().any(|(_, i)| *i == g), "item {g} has no row");
+        }
+        assert!(built.cursor.is_some());
+    }
+
     #[test]
     fn every_failure_state_has_a_named_row() {
         let p = params();
