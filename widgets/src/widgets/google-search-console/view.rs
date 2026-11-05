@@ -1286,9 +1286,14 @@ fn sitemap_rows(site: &str, m: &Sitemap, here: bool, now: f64, p: &Palette, w: u
 }
 
 /// One property's own totals over the two windows, from its daily rows.
+///
+/// The windows come from where that reading says data ends, not from the
+/// movers' windows: a site off screen reads its daily totals hourly but its
+/// movers only when shown, so `d.windows` can be missing or a day behind.
 pub fn site_totals(d: &SiteData) -> Option<(Totals, Totals)> {
-    let (cur, prior) = d.windows?;
     let days = d.days.value.as_ref()?;
+    let end = if d.params.fresh { days.fresh_end } else { days.final_end }?;
+    let (cur, prior) = windows(end, d.params.days);
     Some((window_totals(&days.daily, cur), window_totals(&days.daily, prior)))
 }
 

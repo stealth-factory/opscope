@@ -359,6 +359,13 @@ fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f6
     if prev.load_wait_until.is_some_and(|until| now < until) {
         return nothing;
     }
+    // Google refused the property (401 or 403): every request would be
+    // refused the same way until the grant changes, so wait `refresh` from
+    // the refusal rather than sending it again every tick. New settings and
+    // `r` still ask, in case the grant has just been fixed.
+    if prev.problem.is_some() && prev.params == *params && !forced && now - prev.fetched < refresh {
+        return nothing;
+    }
     let renewed = prev.params != *params || forced;
     // A part never asked for is due now - a site read while off screen has
     // its daily totals and no hours yet. Otherwise its own time when it
@@ -366,7 +373,10 @@ fn plan_for(prev: &SiteData, params: &Params, focus: bool, forced: bool, now: f6
     // when it last failed or was noted.
     fn due<T>(part: &Part<T>, fetched: f64, renewed: bool, now: f64, every: f64) -> bool {
         let never = part.value.is_none() && part.error.is_none() && part.note.is_none();
-        let last = if part.at > 0.0 { part.at } else { fetched };
+        // A part that failed is timed from the attempt that failed. Its
+        // kept value's time is the last success, already overdue, and would
+        // make it due again every tick.
+        let last = if part.error.is_none() && part.at > 0.0 { part.at } else { fetched };
         renewed || never || last <= 0.0 || now - last >= every
     }
     let (f, r) = (prev.fetched, renewed);
@@ -463,7 +473,10 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             .map(|(site, permission, problem)| {
                 let mut d = old.iter().find(|o| o.site == *site).cloned().unwrap_or_else(|| SiteData::new(site, params));
                 d.permission = permission.clone();
-                d.problem = problem.clone();
+                // The list's own problem when it names one; otherwise keep
+                // the refusal the last read met, so it neither flickers off
+                // nor is forgotten by plan_for. A read that succeeds clears it.
+                d.problem = problem.clone().or(d.problem.take());
                 d
             })
             .collect();
@@ -1195,6 +1208,52 @@ mod tests {
         assert!(!soon.hours && soon.heavy == Heavy::No, "{soon:?}");
         let later = plan_for(&d, &p, true, false, t + 900.0, 900.0);
         assert!(later.hours && later.heavy == Heavy::Yes, "{later:?}");
+    }
+
+    #[test]
+    fn a_failed_refresh_with_a_kept_value_waits_from_the_failure() {
+        // The value from the last success is kept behind the error, with
+        // that success's time; the retry is timed from the failure.
+        let p = params();
+        let t = 100_000.0;
+        let mut d = read_at(t, &p);
+        // The refresh at t + 900 failed: the reading from t stays on screen
+        // behind the error, carrying t as its time.
+        d.fetched = t + 900.0;
+        d.days = Part::failed("HTTP 500").after(Part::ok(Days::default(), t));
+        assert!(d.days.value.is_some() && d.days.error.is_some() && d.days.at == t);
+        // Timed from the kept value, it would be overdue on every tick.
+        let soon = plan_for(&d, &p, true, false, t + 960.0, 900.0);
+        assert!(!soon.days, "a minute after the failure: {soon:?}");
+        let later = plan_for(&d, &p, true, false, t + 1_800.0, 900.0);
+        assert!(later.days, "{later:?}");
+    }
+
+    #[test]
+    fn sites_shows_totals_for_a_site_whose_movers_were_never_read() {
+        // Off screen, only the daily totals are read: no movers, so no
+        // `windows`. The SITES row still has the two windows to compare.
+        let p = params();
+        let mut d = SiteData::new("https://example.com/", &p);
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        d.days = Part::ok(Days { final_end: Some(end), fresh_end: Some(end), daily: Vec::new() }, 1.0);
+        assert_eq!(d.windows, None);
+        assert!(site_totals(&d).is_some());
+        // And with no daily reading there is nothing to say.
+        assert!(site_totals(&SiteData::new("https://example.com/", &p)).is_none());
+    }
+
+    #[test]
+    fn a_refused_property_is_not_asked_again_every_minute() {
+        let p = params();
+        let t = 100_000.0;
+        let mut d = SiteData::new("https://example.com/", &p);
+        d.fetched = t;
+        d.problem = Some("403 the account is not a user of this property".into());
+        assert!(plan_for(&d, &p, true, false, t + 60.0, 900.0).nothing());
+        assert!(!plan_for(&d, &p, true, false, t + 900.0, 900.0).nothing());
+        // r asks now: the grant may just have been fixed.
+        assert!(!plan_for(&d, &p, true, true, t + 60.0, 900.0).nothing());
     }
 
     #[test]

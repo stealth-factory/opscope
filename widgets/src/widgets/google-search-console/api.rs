@@ -485,6 +485,15 @@ pub fn fetch_site(c: &Client, site: &str, p: &Params, today: NaiveDate, now: chr
         match end {
             Some(end) => {
                 let w = windows(end, p.days);
+                // Values read for another window must not sit behind an
+                // error - or a 429 that stops the round - under this one's
+                // dates. Dropped before asking, so whatever does not come
+                // back says so rather than showing the old window's rows.
+                if d.windows != Some(w) {
+                    d.pages = Part::default();
+                    d.queries = Part::default();
+                    d.terms = Part::default();
+                }
                 d.windows = Some(w);
                 match movers(c, site, "page", p, w) {
                     Ok(m) => d.pages = Part::ok(m, at),
