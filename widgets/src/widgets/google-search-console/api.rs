@@ -566,6 +566,10 @@ pub struct Detail {
     /// A sitemap index's children.
     pub children: Vec<Sitemap>,
     pub children_error: Option<String>,
+    /// The first and last day the series was asked for. Google leaves out
+    /// days with no impressions, at the ends as anywhere else, so the rows
+    /// alone cannot say where the window began or ended.
+    pub span: Option<(NaiveDate, NaiveDate)>,
 }
 
 /// Days the detail series covers.
@@ -606,7 +610,8 @@ pub fn fetch_detail(c: &Client, site: &str, p: &Params, dim: &str, key: &str, en
         .filter_map(|r| r.keys.first().and_then(|k| parse_date(k)).map(|d| (d, r.m)))
         .collect();
     days.sort_by_key(|(d, _)| *d);
-    Ok(Detail { series: days, top, ..Detail::default() })
+    let span = Some((end - Duration::days(DETAIL_DAYS - 1), end));
+    Ok(Detail { series: days, top, span, ..Detail::default() })
 }
 
 /// A sitemap index's children. A plain sitemap has none to ask for.

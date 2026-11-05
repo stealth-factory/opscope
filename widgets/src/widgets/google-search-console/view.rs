@@ -1795,24 +1795,32 @@ pub fn detail(s: &Screen, item: &Item, fetched: Option<&Result<Detail, String>>,
     Drawn { rows, plots: plots.into_inner() }
 }
 
-/// A detail's last 28 days as four line charts, one a metric, on one date
-/// axis: a day a slot, so a day with no row is a zero for the counts and a
-/// break in CTR and position, never a day squeezed out of the axis. `None`
-/// when the pane cannot give every day a column.
-/// One value a calendar day from the first day of `series` to its last:
-/// Google leaves out a day with no impressions, which is 0 clicks and 0
+/// The days a detail draws: the span it was asked for, or, without one,
+/// its first and last rows.
+type Span = (chrono::NaiveDate, chrono::NaiveDate);
+
+fn span_of(series: &[(chrono::NaiveDate, Metrics)], asked: Option<Span>) -> Option<Span> {
+    asked.or_else(|| Some((series.first()?.0, series.last()?.0)))
+}
+
+/// One value a calendar day across `span`: Google leaves out a day with no
+/// impressions - in the middle or at either end - which is 0 clicks and 0
 /// impressions but no CTR or position at all.
-fn calendar(series: &[(chrono::NaiveDate, Metrics)], metric: Metric) -> Vec<Option<f64>> {
-    let (Some(first), Some(last)) = (series.first().map(|x| x.0), series.last().map(|x| x.0)) else { return Vec::new() };
+fn calendar(series: &[(chrono::NaiveDate, Metrics)], span: Span, metric: Metric) -> Vec<Option<f64>> {
+    let (first, last) = span;
     let n = (last - first).num_days().max(0) as usize + 1;
     let by_day: BTreeMap<chrono::NaiveDate, &Metrics> = series.iter().map(|(d, m)| (*d, m)).collect();
     (0..n).map(|i| day_value(metric, by_day.get(&(first + chrono::Duration::days(i as i64))).copied())).collect()
 }
 
-fn series_charts(series: &[(chrono::NaiveDate, Metrics)], positions: bool, p: &Palette, w: usize) -> Option<Drawn> {
-    let (first, last) = (series.first()?.0, series.last()?.0);
+/// A detail's last 28 days as four line charts, one a metric, on one date
+/// axis: a day a slot, so a day with no row is a zero for the counts and a
+/// break in CTR and position, never a day squeezed out of the axis. `None`
+/// when the pane cannot give every day a column.
+fn series_charts(series: &[(chrono::NaiveDate, Metrics)], span: Span, positions: bool, p: &Palette, w: usize) -> Option<Drawn> {
+    let (first, last) = span;
     let n = (last - first).num_days().max(0) as usize + 1;
-    let pick = |metric: Metric| calendar(series, metric);
+    let pick = |metric: Metric| calendar(series, span, metric);
     // Google reports no position for Discover; read as 0 it would chart a
     // ranking nobody had.
     let all = [Metric::Clicks, Metric::Impressions, Metric::Ctr, Metric::Position];
@@ -1884,16 +1892,17 @@ fn detail_rows(
             p,
             w,
         ));
-        if let Some(charts) = series_charts(&d.series, site.params.has_position(), p, w) {
+        let Some(span) = span_of(&d.series, d.span) else { return };
+        if let Some(charts) = series_charts(&d.series, span, site.params.has_position(), p, w) {
             put(rows, &mut plots.borrow_mut(), charts);
             return;
         }
         // A cell a calendar day, as the charts have: a day Google left out
         // is a zero or a gap, not a day that never happened.
-        let clicks = calendar(&d.series, Metric::Clicks);
-        let impr = calendar(&d.series, Metric::Impressions);
-        let ctr = calendar(&d.series, Metric::Ctr);
-        let pos = calendar(&d.series, Metric::Position);
+        let clicks = calendar(&d.series, span, Metric::Clicks);
+        let impr = calendar(&d.series, span, Metric::Impressions);
+        let ctr = calendar(&d.series, span, Metric::Ctr);
+        let pos = calendar(&d.series, span, Metric::Position);
         let range = |v: &[Option<f64>], f: &dyn Fn(f64) -> String| {
             let lo = v.iter().flatten().cloned().fold(f64::INFINITY, f64::min);
             let hi = v.iter().flatten().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -2403,6 +2412,7 @@ mod tests {
             top: vec![Row { keys: vec![LONG.into()], m: metrics(5.0, 50.0, 3.0) }],
             children: parse_sitemaps(r#"{"sitemap":[{"path":"https://example.com/child.xml"}]}"#).unwrap(),
             children_error: None,
+            span: Some((parse_date("2026-09-21").unwrap(), parse_date("2026-10-18").unwrap())),
         });
         let items = [Item::Page(LONG.into()), Item::Inspected("https://example.com/docs/old-guide".into()), Item::Query("example".into()), Item::Term(0), Item::Sitemap(0), Item::Site(1)];
         for w in WIDTHS {
@@ -2624,8 +2634,8 @@ mod tests {
         // side by side that make the activity look continuous.
         let (a, b) = (chrono::NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(), chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap());
         let series = vec![(a, metrics(5.0, 50.0, 3.0)), (b, metrics(9.0, 90.0, 2.0))];
-        let clicks = calendar(&series, Metric::Clicks);
-        let ctr = calendar(&series, Metric::Ctr);
+        let clicks = calendar(&series, span_of(&series, None).unwrap(), Metric::Clicks);
+        let ctr = calendar(&series, span_of(&series, None).unwrap(), Metric::Ctr);
         assert_eq!(clicks.len(), 28);
         assert_eq!(clicks.iter().filter(|v| **v == Some(0.0)).count(), 26, "a missing day is 0 clicks");
         assert_eq!(ctr.iter().filter(|v| v.is_none()).count(), 26, "and no CTR at all");
@@ -2636,6 +2646,27 @@ mod tests {
         assert_eq!(cell(&rows), 2);
         let strip: String = plain(&rows[0]).chars().skip(10).collect(); // " {:<9}" is ten wide
         assert_eq!(strip.trim_end().chars().count(), 28, "{strip:?}");
+    }
+
+    #[test]
+    fn a_detail_keeps_the_empty_days_at_both_ends_of_the_window_it_asked_for() {
+        // Asked for Oct 8 to Nov 4, traffic on Oct 15 only: 28 days, the
+        // seven before it and the twenty after it drawn as zeros, not one
+        // cell under LAST 28 DAYS.
+        let (from, to) = (chrono::NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(), chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap());
+        let series = vec![(chrono::NaiveDate::from_ymd_opt(2026, 10, 15).unwrap(), metrics(5.0, 50.0, 3.0))];
+        let span = span_of(&series, Some((from, to))).unwrap();
+        let clicks = calendar(&series, span, Metric::Clicks);
+        assert_eq!(clicks.len(), 28);
+        assert_eq!(clicks[7], Some(5.0));
+        assert_eq!(clicks.iter().filter(|v| **v == Some(0.0)).count(), 27);
+        let cells = |rows: &[String]| rows.iter().map(|r| plain(r).chars().filter(|c| tc::SPARK.contains(c)).count()).sum::<usize>();
+        assert_eq!(cells(&spark_rows("clicks", &clicks, String::new(), &palette(), 26)), 28);
+        // Wide, the charts span the same 28 days.
+        let wide = series_charts(&series, span, true, &palette(), 120).expect("a chart");
+        assert_eq!(wide.plots.len(), 4);
+        // Without a span asked for, the rows still bound it, as before.
+        assert_eq!(span_of(&series, None), Some((series[0].0, series[0].0)));
     }
 
     #[test]
@@ -2710,7 +2741,7 @@ mod tests {
         let series: Vec<_> = (0..28).map(|i| (start + Duration::days(i), metrics(5.0 + i as f64, 50.0, 4.0))).collect();
         let mut last = (0, 0);
         for w in [30, 60, 100, 140, 200] {
-            let d = series_charts(&series, true, &palette(), w).expect("a chart at every width");
+            let d = series_charts(&series, span_of(&series, None).unwrap(), true, &palette(), w).expect("a chart at every width");
             let plot = &d.plots[0];
             // Every column after the labels, to the pane's last.
             assert_eq!(plot.x + plot.width, w - 1, "at {w}");
@@ -2722,8 +2753,8 @@ mod tests {
         }
         assert!(last.1 > 2, "a wide pane names days between the ends");
         // Half a column a day is the floor: below it, no chart.
-        assert!(series_charts(&series, true, &palette(), 8 + 14).is_some());
-        assert!(series_charts(&series, true, &palette(), 8 + 10).is_none());
+        assert!(series_charts(&series, span_of(&series, None).unwrap(), true, &palette(), 8 + 14).is_some());
+        assert!(series_charts(&series, span_of(&series, None).unwrap(), true, &palette(), 8 + 10).is_none());
     }
 
     #[test]
@@ -2746,8 +2777,8 @@ mod tests {
         // Discover has no position to chart: three charts, not four.
         let start = parse_date("2026-10-01").unwrap();
         let series: Vec<_> = (0..28).map(|i| (start + Duration::days(i), metrics(5.0, 50.0, 0.0))).collect();
-        assert_eq!(series_charts(&series, true, &palette(), 100).unwrap().plots.len(), 4);
-        assert_eq!(series_charts(&series, false, &palette(), 100).unwrap().plots.len(), 3);
+        assert_eq!(series_charts(&series, span_of(&series, None).unwrap(), true, &palette(), 100).unwrap().plots.len(), 4);
+        assert_eq!(series_charts(&series, span_of(&series, None).unwrap(), false, &palette(), 100).unwrap().plots.len(), 3);
         // Counts start at zero, whatever the lowest day was.
         let d = line_rows(Metric::Clicks, &[("", &[Some(50.0), Some(100.0)])], 6, 10, 3, &palette());
         assert_eq!(plain(&d.rows[2]).trim(), "0");
