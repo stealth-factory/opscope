@@ -102,34 +102,132 @@ pub fn short(n: f64) -> String {
 /// The interval in force for realtime polling, and why it is not the one
 /// chosen.
 ///
-/// Two reasons can stretch it, and the title names whichever applies.
-/// Under a tenth of a token bucket left, the widget slows to 120 s - at
-/// the defaults it spends roughly 0.8-2.5k tokens an hour per property
-/// against GA's 14k, so reading the quota and backing off is what keeps a
-/// wall display from emptying it. After five minutes at zero active users
-/// it backs off to 60 s; it comes back the first poll anybody is there.
-pub fn realtime_interval(chosen: u64, idle_for: f64, quota_left: Option<f64>) -> (u64, String) {
+/// GA's realtime quota is per property and per day: 200,000 tokens on a
+/// standard property, shared by every pane, machine and tool reading it,
+/// and refilled at midnight Pacific. A wall display runs all day, so the
+/// interval is planned against the day rather than the hour. In order:
+///
+/// - under a tenth of any token bucket left, it slows to 10 minutes;
+/// - `pace` stretches it when the property's spend so far today - by
+///   everyone, not only this pane - would empty the day's bucket before
+///   it refills;
+/// - a property that is not on screen reads every `BACKGROUND_SECS`;
+/// - after `IDLE_AFTER` at zero active users it backs off to `IDLE_SECS`,
+///   and comes back the first poll anybody is there.
+///
+/// The longest of these wins, and the title names it.
+pub fn realtime_interval(
+    chosen: u64,
+    idle_for: f64,
+    quota_left: Option<f64>,
+    pace: Option<f64>,
+    on_screen: bool,
+) -> (u64, String) {
     if quota_left.is_some_and(|f| f < 0.10) {
-        return (chosen.max(120), "slowed: under 10% of quota left".into());
+        return (chosen.max(LOW_QUOTA_SECS), "slowed: under 10% of quota left".into());
     }
-    if idle_for >= 300.0 && chosen < 60 {
-        return (60, "backed off: 0 active for 5m+".into());
+    let mut out = (chosen, String::new());
+    if let Some(f) = pace.filter(|f| *f > 1.0) {
+        let secs = ((chosen as f64 * f).ceil() as u64).min(LOW_QUOTA_SECS);
+        if secs > out.0 {
+            out = (secs, "paced: today's quota would run out before it refills".into());
+        }
     }
-    (chosen, String::new())
+    if !on_screen && BACKGROUND_SECS > out.0 {
+        out = (BACKGROUND_SECS, "not on screen".into());
+    }
+    if idle_for >= IDLE_AFTER && IDLE_SECS > out.0 {
+        out = (IDLE_SECS, "backed off: 0 active for 10m+".into());
+    }
+    out
 }
 
-/// The realtime interval config asks for: 15, 30 or 60 seconds, and 15
-/// for anything else.
+/// How much slower than chosen the property has to read to last the day.
+///
+/// `used` is what the property has spent today by every caller, `left`
+/// what remains, and `to_reset` the seconds until midnight Pacific. The
+/// rate so far, carried to the reset, is compared with what is left above
+/// a tenth of the whole day's bucket, which stays spare for whatever else
+/// reads the property. Under 15 minutes into the day the rate is too noisy to act
+/// on, and `None` means read at the chosen pace.
+pub fn pace(used: f64, left: f64, to_reset: f64) -> Option<f64> {
+    let elapsed = DAY_SECS - to_reset;
+    if elapsed < 900.0 || used <= 0.0 {
+        return None;
+    }
+    let need = used / elapsed * to_reset;
+    let have = (left - (used + left) * 0.1).max(1.0);
+    (need > have).then(|| (need / have).min(10.0))
+}
+
+/// Seconds in GA's quota day.
+pub const DAY_SECS: f64 = 86_400.0;
+
+/// Seconds from `now` (Unix) to the next midnight Pacific Standard
+/// Time, when GA documents that every daily quota refills. A fixed
+/// UTC-8 rather than Los Angeles time: during daylight saving that is an
+/// hour later than local midnight, which, if GA meant local time, only
+/// paces a little early.
+pub fn to_quota_reset(now: f64) -> f64 {
+    use chrono::{Duration, TimeZone};
+    let Some(pst) = chrono::FixedOffset::west_opt(8 * 3_600) else {
+        return DAY_SECS;
+    };
+    let Some(here) = chrono::DateTime::from_timestamp(now as i64, 0) else {
+        return DAY_SECS;
+    };
+    let today = here.with_timezone(&pst).date_naive();
+    let midnight = (today + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap_or_default();
+    match pst.from_local_datetime(&midnight).earliest() {
+        Some(t) => (t.timestamp() as f64 - now).clamp(0.0, DAY_SECS + 3_600.0),
+        None => DAY_SECS,
+    }
+}
+
+/// The realtime interval config asks for: 2, 5 or 10 minutes, and 2 for
+/// anything else - including the 15, 30 and 60 s an older config holds,
+/// which read a standard property's daily quota dry on a wall display.
 pub fn realtime_choice(asked: f64) -> u64 {
     match asked.round() as i64 {
-        30 => 30,
-        60 => 60,
-        _ => 15,
+        300 => 300,
+        600 => 600,
+        _ => 120,
     }
 }
 
 /// The realtime intervals `l` cycles through.
-pub const LIVE_CHOICES: &[u64] = &[15, 30, 60];
+pub const LIVE_CHOICES: &[u64] = &[120, 300, 600];
+
+/// Realtime breakdowns are read at most this often.
+pub const BREAKDOWN_SECS: u64 = 300;
+
+/// A property not on screen reads its realtime totals this often, so its
+/// baseline keeps filling, and nothing else until it is shown.
+pub const BACKGROUND_SECS: u64 = 300;
+
+/// At zero active users for `IDLE_AFTER` seconds, realtime reads every
+/// `IDLE_SECS`.
+pub const IDLE_AFTER: f64 = 600.0;
+pub const IDLE_SECS: u64 = 300;
+
+/// The interval under a tenth of any token bucket, and the longest `pace`
+/// stretches to.
+pub const LOW_QUOTA_SECS: u64 = 600;
+
+/// Processed reports: GA's processed data is hours behind, so 30 minutes
+/// is the floor and an hour the default.
+pub const REPORT_MIN_SECS: f64 = 1_800.0;
+pub const REPORT_DEFAULT_SECS: f64 = 3_600.0;
+
+/// An interval in the words the screen uses: `2m` on a whole minute,
+/// `90s` otherwise.
+pub fn interval_words(secs: u64) -> String {
+    if secs >= 60 && secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
 
 /// The windows `w` cycles through, in days.
 pub const WINDOW_CHOICES: &[usize] = &[7, 14, 28];
@@ -1253,35 +1351,92 @@ mod tests {
 
     #[test]
     fn the_interval_backs_off_when_idle_and_slows_on_quota() {
-        assert_eq!(realtime_interval(15, 0.0, Some(0.5)), (15, String::new()));
-        assert_eq!(realtime_interval(15, 299.0, None), (15, String::new()));
-        assert_eq!(realtime_interval(15, 300.0, None).0, 60);
-        assert!(realtime_interval(30, 900.0, None)
+        assert_eq!(realtime_interval(120, 0.0, Some(0.5), None, true), (120, String::new()));
+        assert_eq!(realtime_interval(120, 599.0, None, None, true), (120, String::new()));
+        assert_eq!(realtime_interval(120, 600.0, None, None, true).0, 300);
+        assert!(realtime_interval(120, 900.0, None, None, true)
             .1
-            .contains("0 active for 5m+"));
+            .contains("0 active for 10m+"));
         assert_eq!(
-            realtime_interval(60, 900.0, None),
-            (60, String::new()),
-            "already at 60, nothing to say"
+            realtime_interval(600, 900.0, None, None, true),
+            (600, String::new()),
+            "already slower than the backoff, nothing to say"
         );
-        let (secs, why) = realtime_interval(15, 0.0, Some(0.09));
-        assert_eq!(secs, 120);
+        let (secs, why) = realtime_interval(120, 0.0, Some(0.09), None, true);
+        assert_eq!(secs, 600);
         assert!(why.contains("under 10% of quota"));
         assert_eq!(
-            realtime_interval(15, 900.0, Some(0.05)).0,
-            120,
-            "quota wins over idle"
+            realtime_interval(120, 900.0, Some(0.05), Some(3.0), false).0,
+            600,
+            "quota wins over everything"
         );
     }
 
     #[test]
-    fn the_realtime_choice_is_fifteen_thirty_or_sixty() {
-        assert_eq!(realtime_choice(30.0), 30);
-        assert_eq!(realtime_choice(60.0), 60);
-        assert_eq!(realtime_choice(15.0), 15);
-        assert_eq!(realtime_choice(45.0), 15);
-        assert_eq!(realtime_choice(0.0), 15);
-        assert_eq!(realtime_choice(-30.0), 15);
+    fn a_property_off_screen_reads_every_five_minutes() {
+        let (secs, why) = realtime_interval(120, 0.0, None, None, false);
+        assert_eq!(secs, 300);
+        assert_eq!(why, "not on screen");
+        assert_eq!(realtime_interval(600, 0.0, None, None, false), (600, String::new()));
+    }
+
+    #[test]
+    fn pacing_stretches_the_interval_and_is_capped() {
+        let (secs, why) = realtime_interval(120, 0.0, Some(0.5), Some(2.0), true);
+        assert_eq!(secs, 240);
+        assert!(why.starts_with("paced"));
+        assert_eq!(realtime_interval(120, 0.0, None, Some(50.0), true).0, 600);
+        assert_eq!(realtime_interval(120, 0.0, None, Some(1.0), true), (120, String::new()));
+    }
+
+    #[test]
+    fn pace_compares_the_rate_so_far_with_what_is_left() {
+        // Half the day gone, 100k spent by everyone, 100k left: the rest of
+        // the day needs 100k, and only 80k is above the 20k (a tenth of
+        // the day's 200k) kept spare.
+        let f = pace(100_000.0, 100_000.0, 43_200.0).unwrap();
+        assert!((f - 100_000.0 / 80_000.0).abs() < 1e-9, "{}", f);
+        // A quarter of the way with a quarter spent: 150k needed for the
+        // rest of the day against 130k above the reserve.
+        assert!(pace(50_000.0, 150_000.0, 64_800.0).is_some());
+        // Light use never paces.
+        assert_eq!(pace(10_000.0, 190_000.0, 43_200.0), None);
+        // Too early in the day to judge.
+        assert_eq!(pace(5_000.0, 195_000.0, DAY_SECS - 600.0), None);
+        // An empty bucket caps at ten times slower.
+        assert_eq!(pace(200_000.0, 0.0, 43_200.0), Some(10.0));
+    }
+
+    #[test]
+    fn the_quota_day_ends_at_midnight_pacific() {
+        // 2026-11-05 04:00 UTC is 2026-11-04 20:00 in Los Angeles (PST,
+        // UTC-8): four hours to midnight.
+        let now = 1_793_851_200.0;
+        assert_eq!(to_quota_reset(now), 4.0 * 3_600.0);
+        // 2026-07-01 08:00 UTC is midnight PST, though Los Angeles is on
+        // PDT: a whole day to go.
+        assert_eq!(to_quota_reset(1_782_892_800.0), DAY_SECS);
+        // An hour earlier is Los Angeles midnight, and still an hour to go.
+        assert_eq!(to_quota_reset(1_782_889_200.0), 3_600.0);
+    }
+
+    #[test]
+    fn the_realtime_choice_is_two_five_or_ten_minutes() {
+        assert_eq!(realtime_choice(300.0), 300);
+        assert_eq!(realtime_choice(600.0), 600);
+        assert_eq!(realtime_choice(120.0), 120);
+        assert_eq!(realtime_choice(15.0), 120, "an old config's 15 s");
+        assert_eq!(realtime_choice(60.0), 120);
+        assert_eq!(realtime_choice(0.0), 120);
+        assert_eq!(realtime_choice(-30.0), 120);
+    }
+
+    #[test]
+    fn intervals_read_in_minutes_when_whole() {
+        assert_eq!(interval_words(120), "2m");
+        assert_eq!(interval_words(600), "10m");
+        assert_eq!(interval_words(90), "90s");
+        assert_eq!(interval_words(240), "4m");
     }
 
     #[test]

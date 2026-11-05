@@ -16,10 +16,16 @@
 
 //! What the pollers hold, and the pollers.
 //!
-//! Two threads per property. One reads realtime every 15, 30 or 60
-//! seconds (stretched when idle or short of quota) and the realtime
-//! breakdowns every minute; the other reads the processed reports every
-//! `refresh`, so a slow report never delays a live reading.
+//! Two threads per property. One reads realtime every 2, 5 or 10
+//! minutes (stretched when idle, off screen or short of quota) and the
+//! realtime breakdowns every 5 minutes; the other reads the processed
+//! reports every `refresh`, so a slow report never delays a live reading.
+//!
+//! Only the property on screen (`Shared::focus`) is read in full. The
+//! others read realtime totals every `model::BACKGROUND_SECS`, so their
+//! baselines keep filling, and leave their breakdowns and processed
+//! reports on the clock they had: shown again, a property whose reads
+//! fell due while it was hidden reads them at once.
 //! Each records why it stopped, and every failure lands in a field the
 //! screen draws, because a poller that dies quietly leaves a pane that
 //! looks exactly like a site nobody is visiting.
@@ -118,6 +124,10 @@ pub struct Prop {
     /// The realtime interval in force, and why it is not the chosen one.
     pub interval: u64,
     pub interval_why: String,
+    /// The interval this property would read at on screen - the quota,
+    /// pace and idle slowdowns without the off-screen one. Showing it
+    /// again reads at once only if this long has passed.
+    pub screen_interval: u64,
     pub idle_since: Option<f64>,
     pub samples: Vec<Sample>,
     pub sample_path: String,
@@ -181,8 +191,14 @@ pub struct Shared {
     pub chosen: u64,
     /// The movers window chosen with `w`.
     pub window: usize,
-    /// Bumped by `r`; every poller refetches when it moves.
+    /// Bumped by `r`; property `force_prop` refetches when it moves.
     pub force: u64,
+    /// The property on screen when `r` was pressed. Recorded with the
+    /// press, so a switch before the pollers wake cannot move the
+    /// refresh onto another property.
+    pub force_prop: usize,
+    /// The index of the property on screen. The only one read in full.
+    pub focus: usize,
     pub details: HashMap<String, Detail>,
 }
 
@@ -382,20 +398,44 @@ fn run_live(
     };
     let mut last_prune = tc::now();
     let configured = !cfg.key_events.is_empty();
+    let mut was_on_screen = true;
+    let mut bd_owed = false;
+    let mut series_last = true;
     loop {
         let now = tc::now();
-        let (chosen, force) = match shared.lock() {
-            Ok(g) => (g.chosen, g.force),
+        let (chosen, force, forced_here, on_screen) = match shared.lock() {
+            Ok(g) => (g.chosen, g.force, g.force_prop == i, g.focus == i),
             Err(_) => return,
         };
+        // `r` refetches the property it was pressed on. The others note
+        // the press and keep their clocks: refreshing every property at
+        // once would spend every property's quota for one look.
         if force != seen_force {
             seen_force = force;
-            (next_rt, next_bd) = (now, now);
-            if next_admin > now {
-                next_admin = now;
+            if forced_here {
+                (next_rt, next_bd) = (now, now);
+                // Read even if a switch hid it before this woke.
+                bd_owed = true;
+                if next_admin > now {
+                    next_admin = now;
+                }
+                rt_paused = 0.0;
             }
-            rt_paused = 0.0;
         }
+        // Brought on screen: the next realtime reading moves from the
+        // background clock to the interval the property has on screen -
+        // chosen, stretched by quota, pace and idle - counted from the
+        // last reading, so switching back and forth cannot beat a quota
+        // slowdown. A last reading that skipped the 30-minute series is
+        // replaced at once, because the series is what the screen draws.
+        // Breakdowns kept their clock and are simply due.
+        if on_screen && !was_on_screen {
+            let (last, due) =
+                with(shared, i, |p| (p.rt_at, p.screen_interval.max(chosen))).unwrap_or((0.0, chosen));
+            let at = if series_last { last + due as f64 } else { now };
+            next_rt = next_rt.min(at.max(now)).max(rt_paused);
+        }
+        was_on_screen = on_screen;
         // `l` changes `chosen` without touching `force`. Take one realtime
         // reading on the new interval. A 429 pause stays in force, and
         // breakdowns, admin and the processed reports keep their clocks.
@@ -431,11 +471,15 @@ fn run_live(
 
         if next_rt <= now && rt_paused <= now {
             let work = activity.start();
-            let got = realtime(cred, &id, grant);
+            let got = realtime(cred, &id, grant, on_screen);
+            series_last = on_screen;
             let at = tc::now();
             let mut sample: Option<Sample> = None;
             with(shared, i, |p| {
                 match got {
+                    // A totals-only read carries no series, and an older
+                    // one is not kept under the newer totals' timestamp:
+                    // the screen says the series is not read yet instead.
                     Ok((rt, quota)) => {
                         if rt.active > 0.0 {
                             p.idle_since = None;
@@ -471,7 +515,13 @@ fn run_live(
                     .as_ref()
                     .and_then(|q| q.tightest(p.premium))
                     .map(|t| t.1);
-                let (secs, why) = model::realtime_interval(chosen, idle_for, left);
+                let pace = p
+                    .quota_rt
+                    .as_ref()
+                    .and_then(|q| q.level("tokensPerDay", p.premium))
+                    .and_then(|l| model::pace(l.used, l.left, model::to_quota_reset(at)));
+                let (secs, why) = model::realtime_interval(chosen, idle_for, left, pace, on_screen);
+                p.screen_interval = model::realtime_interval(chosen, idle_for, left, pace, true).0;
                 p.interval = secs;
                 p.interval_why = why;
                 next_rt = at + secs as f64;
@@ -493,7 +543,8 @@ fn run_live(
             drop(work);
         }
 
-        if next_bd <= now && rt_paused <= now {
+        if (on_screen || bd_owed) && next_bd <= now && rt_paused <= now {
+            bd_owed = false;
             let work = activity.start();
             let got = breakdown(cred, &id, grant, &cfg.key_events);
             let at = tc::now();
@@ -535,7 +586,7 @@ fn run_live(
                 p.interval
             })
             .unwrap_or(60);
-            next_bd = at + (interval.max(60)) as f64;
+            next_bd = at + interval.max(model::BREAKDOWN_SECS) as f64;
             if let Some(s) = sample {
                 save(shared, i, &path, &s);
             }
@@ -572,22 +623,30 @@ fn run_reports(
     let mut core_paused = 0.0f64;
     let mut seen_force = 0u64;
     let mut seen_window = 0usize;
+    let mut core_owed = false;
     loop {
         let now = tc::now();
-        let (window, force) = match shared.lock() {
-            Ok(g) => (g.window, g.force),
+        let (window, force, forced_here, on_screen) = match shared.lock() {
+            Ok(g) => (g.window, g.force, g.force_prop == i, g.focus == i),
             Err(_) => return,
         };
         if force != seen_force {
             seen_force = force;
-            next_core = now;
-            core_paused = 0.0;
+            if forced_here {
+                next_core = now;
+                core_owed = true;
+                core_paused = 0.0;
+            }
         }
         if window != seen_window {
             seen_window = window;
             next_core = now;
         }
-        if next_core <= now && core_paused <= now {
+        // A hidden property's reports wait: shown again, they read at
+        // once if `refresh` passed meanwhile, and the new window if `w`
+        // moved it.
+        if (on_screen || core_owed) && next_core <= now && core_paused <= now {
+            core_owed = false;
             let work = activity.start();
             let (tz, previous) =
                 with(shared, i, |p| (p.time_zone.clone(), p.processed.clone())).unwrap_or_default();
@@ -681,7 +740,10 @@ fn bad(e: String) -> Fail {
     }
 }
 
-fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quota>), Fail> {
+/// Realtime totals and, when `series` is set, the 30-minute series. A
+/// property off screen skips the series: nothing draws it there, and
+/// it is half of that property's realtime requests.
+fn realtime(cred: &Credential, id: &str, grant: &str, series: bool) -> Result<(Rt, Option<Quota>), Fail> {
     let totals = parse::parse_report(&api::realtime(
         cred,
         id,
@@ -689,6 +751,18 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
         grant,
     )?)
     .map_err(bad)?;
+    let (active, views, key) = model::realtime_totals(&totals);
+    if !series {
+        return Ok((
+            Rt {
+                active,
+                views,
+                key,
+                ..Rt::default()
+            },
+            totals.quota,
+        ));
+    }
     let minutes = parse::parse_report(&api::realtime(
         cred,
         id,
@@ -696,7 +770,6 @@ fn realtime(cred: &Credential, id: &str, grant: &str) -> Result<(Rt, Option<Quot
         grant,
     )?)
     .map_err(bad)?;
-    let (active, views, key) = model::realtime_totals(&totals);
     Ok((
         Rt {
             active,

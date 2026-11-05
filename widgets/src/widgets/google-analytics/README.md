@@ -8,7 +8,7 @@ change hurt key events?
 ```text
 ╺━ GOOGLE ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  Example Site (properties/123)   ←→ 1 of 2   realtime 9s ago   breakdowns 40s ago   reports 3m ago
- live 15s   quota realtime used 1.2k/14k h 31k/200k d
+ live 2m    quota realtime used 1.2k/14k h 31k/200k d
 
  ── RIGHT NOW ── last 30 min · GA realtime · hits land within seconds
  active users 71   baseline 48 · from 2 of 4 weeks   +48% ▲
@@ -65,7 +65,7 @@ change hurt key events?
  /docs/getting-started                      2,210    2,890  −24% ▼
  /blog/launch                                 890        0  new
  ↑↓ row  tab section  ←→ property  ↵ detail  [m]etric users  [w]indow 14d  [s]ort size  [/]filter
- [l]ive 30s  [c]opy URL  [r]efresh  [,] settings  [q]uit
+ [l]ive 5m  [c]opy URL  [r]efresh  [,] settings  [q]uit
 ```
 
 Every figure is Google's - realtime, processed reports, or the property's own
@@ -208,15 +208,15 @@ for again after five minutes or on `r`. `esc` goes back.
 | `w` | window: 7 → 14 → 28 days |
 | `s` | movers sort: change → size → percent |
 | `/` | filter rows by text - `enter` keeps it, `esc` clears it |
-| `l` | realtime interval: 15 → 30 → 60 s |
+| `l` | realtime interval: 2 → 5 → 10 min |
 | `c` | copy the property's GA realtime URL (OSC 52) |
-| `r` | refresh every reading now |
+| `r` | refresh every reading of the property on screen now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time - the pane moves, the selection stays where it is |
 | `,` | open settings |
 | `q` | quit |
 
-Each footer hint names what the next press moves to: `[l]ive 30s` while
-realtime is every 15 s, `[w]indow 14d` while the window is 7 days. What is in
+Each footer hint names what the next press moves to: `[l]ive 5m` while
+realtime is every 2 minutes, `[w]indow 14d` while the window is 7 days. What is in
 force is in the body - the interval in the header, the window and sort in
 the movers heading, and a filter as `n of m shown · /text`.
 
@@ -239,13 +239,35 @@ and what is left after it, so the bucket's size comes from Google's
 documented limits (200k a day, 40k an hour, 14k an hour per project for a
 standard property, ten times that for Analytics 360), and *used* is that
 limit less what is left - everything the property has spent, by every app
-reading it. At the defaults a property costs about 720 realtime requests and 24
-batches of reports an hour - roughly 0.8-2.5k of GA's 14k tokens an hour -
-which is why the widget reads the quota and slows down: under a tenth of a
-token bucket left, realtime goes to 120 s and reports to twice their
-interval. A 429 names the bucket and when it refills, pauses that kind of
-request for five minutes, and leaves the last data on screen under the
-banner.
+reading it.
+
+The bucket that runs out on a wall display is the daily one: 200k realtime
+tokens a property, shared by every pane, machine and tool reading it, and
+refilled at midnight Pacific Standard Time. So the widget plans for a whole
+day, with several panes on the same property:
+
+- **Only the property on screen is read in full**: realtime every 2, 5 or
+  10 minutes (`l`), the breakdowns every 5 minutes, the processed reports
+  every `refresh` (an hour by default). Every other property reads its
+  realtime totals every 5 minutes, so its baseline keeps filling, and
+  nothing else. Shown again with `←→`, it reads whatever fell due while it
+  was hidden at once. `r` refreshes only the property on screen.
+- **Paced against the day.** The day bucket's balance is the property's,
+  not the pane's, so it counts every other pane and tool. When the rate
+  spent so far today would empty it before midnight Pacific, realtime
+  stretches - up to 10 minutes - to keep a tenth spare.
+- **Idle**: after 10 minutes at 0 active users, realtime backs off to 5
+  minutes, and comes back the first reading anybody is there.
+- **Short**: under a tenth of any token bucket left, realtime goes to 10
+  minutes and reports to twice their interval.
+
+At the defaults a pane costs about 108 realtime requests an hour for the
+property on screen (two every 2 minutes, four breakdowns every 5) and 12 for
+each other one (totals only, every 5 minutes) - roughly 26k of the day's 200k for the property on screen at
+GA's usual 10 tokens a request, so three panes on one property stay near
+40%. The header says which slowdown is in force. A
+429 names the bucket and when it refills, pauses that kind of request for
+five minutes, and leaves the last data on screen under the banner.
 
 ## Configuration
 
@@ -254,8 +276,8 @@ banner.
   "credentials": "",
   "credentials_file": "~/.config/opscope/google-key.json",
   "properties": ["123"],
-  "realtime_refresh": 15,
-  "refresh": 300,
+  "realtime_refresh": 120,
+  "refresh": 3600,
   "window_days": 7,
   "baseline_weeks": 4,
   "key_events": []
@@ -267,8 +289,8 @@ banner.
 | `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set |
 | `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; a notice (`!`) warns if it is not `chmod 600` |
 | `properties` | `[]` | numeric GA4 property ids; empty lists every property the account can see |
-| `realtime_refresh` | `15` | 15, 30 or 60 seconds; anything else means 15 |
-| `refresh` | `300` | seconds between processed reports, at least 60 |
+| `realtime_refresh` | `120` | 120, 300 or 600 seconds; anything else means 120 |
+| `refresh` | `3600` | seconds between processed reports, at least 1800 |
 | `window_days` | `7` | movers and organic landing page window |
 | `baseline_weeks` | `4` | weeks the realtime baseline is the median of |
 | `key_events` | `[]` | event names to count; empty uses every event GA flags as a key event |

@@ -15,11 +15,15 @@ replaces it before that hour runs out. Setup on Google's side - one Cloud
 project, the Analytics APIs, the service account as Viewer on each property
 - is docs/google-setup.md.
 
-Realtime is read every 15 s by default, backing off to 60 s after five
-minutes with nobody on the site and slowing to 120 s when under a tenth of
-the property's quota is left; the header says which. Processed reports come
-every 5 minutes and run 2-6 hours behind, so an hour GA has not processed is
-drawn hatched, never as zero. Every request reads GA's property quota back.
+Only the property on screen is read in full: realtime every 2 minutes by
+default (l: 2, 5, 10), breakdowns every 5, processed reports every hour.
+Other properties read realtime totals every 5 minutes and nothing else.
+Realtime backs off to 5 minutes after ten with nobody on the site, stretches
+when today's spend on the property - by every pane and tool - would empty its
+daily quota before midnight Pacific, and slows to 10 minutes under a tenth
+of any bucket left; the header says which. Processed reports run 2-6 hours
+behind, so an hour GA has not processed is drawn hatched, never as zero.
+Every request reads GA's property quota back.
 
 The baseline is the median of active users at this minute of the week over
 the last 4 weeks, from samples this widget wrote to
