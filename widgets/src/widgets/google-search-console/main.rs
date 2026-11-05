@@ -519,6 +519,13 @@ fn poll_round(cfg: &Config, params: &Params, shared: &Arc<Mutex<Shared>>, caches
             })
             .collect();
     }
+    // Every listed property's inspection results, from disk, so SITES can
+    // say what they found before the property is shown or inspected again.
+    if let Ok(mut c) = caches.lock() {
+        for (site, _, _) in &targets {
+            c.entry(site.clone()).or_insert_with(|| load_cache(site));
+        }
+    }
     for (site, permission, problem) in targets {
         if problem.is_some() {
             continue;

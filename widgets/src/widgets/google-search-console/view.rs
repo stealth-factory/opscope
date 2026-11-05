@@ -1628,9 +1628,20 @@ fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usi
             detail.push((c(if kept { &p.warn } else { &p.down }), why));
         }
     }
-    let (inspected, _, _, _) = inspected_rows(d, cache, top, now);
-    let bad = inspected.iter().filter(|(_, e)| !matches!(&e.result, Ok(i) if i.verdict == "PASS")).count();
-    detail.push((c(if bad > 0 { &p.down } else { &p.dim }), format!("{} not PASS", bad)));
+    // Not-PASS among the pages inspected. Without this site's pages read
+    // (off screen) there is no inspection set, so every cached result
+    // counts. Nothing inspected says so: an empty cache is not zero failures.
+    let verdicts: Vec<&Inspected> = match (cache, &d.pages.value) {
+        (None, _) => Vec::new(),
+        (Some(_), Some(_)) => inspected_rows(d, cache, top, now).0.into_iter().map(|(_, e)| e).collect(),
+        (Some(c), None) => c.pages.values().collect(),
+    };
+    if verdicts.is_empty() {
+        detail.push((c(&p.dim), "none inspected".into()));
+    } else {
+        let bad = verdicts.iter().filter(|e| !matches!(&e.result, Ok(i) if i.verdict == "PASS")).count();
+        detail.push((c(if bad > 0 { &p.down } else { &p.dim }), format!("{} not PASS", bad)));
+    }
     if let Some(maps) = &d.sitemaps.value {
         let errors: i64 = maps.iter().map(|m| m.errors).sum();
         detail.push((c(if errors > 0 { &p.down } else { &p.dim }), format!("{} sitemap errors", errors)));
@@ -1646,16 +1657,24 @@ fn spark_rows(label: &str, values: &[f64], summary: String, p: &Palette, w: usiz
     let room = w.saturating_sub(1).max(1);
     let lo = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let hi = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let fits = room.saturating_sub(10).max(1);
-    let shown = &values[values.len().saturating_sub(fits)..];
-    let bars: String = shown
-        .iter()
-        .map(|v| {
-            let f = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
-            tc::SPARK[((f * 7.99) as usize).min(7)]
-        })
-        .collect();
-    let mut rows = vec![tc::seg(&[(p.dim.as_str(), format!(" {:<9}", label)), (p.bar.as_str(), bars)], room)];
+    let bar = |v: &f64| {
+        let f = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
+        tc::SPARK[((f * 7.99) as usize).min(7)]
+    };
+    let mut rows = Vec::new();
+    if values.len() <= room.saturating_sub(10) {
+        let bars: String = values.iter().map(bar).collect();
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {:<9}", label)), (p.bar.as_str(), bars)], room));
+    } else {
+        // Too narrow for every day beside the label: the label goes above
+        // and the days wrap, oldest first, rather than the oldest being
+        // cut from a chart that still says how many days it covers.
+        rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", label))], room));
+        for chunk in values.chunks(room.saturating_sub(1).max(1)) {
+            let bars: String = chunk.iter().map(bar).collect();
+            rows.push(tc::seg(&[("", " ".to_string()), (p.bar.as_str(), bars)], room));
+        }
+    }
     rows.extend(flow("           ", &[(p.dim.as_str(), summary)], "", w));
     rows
 }
@@ -2408,6 +2427,34 @@ mod tests {
                 .map(|r| r.chars().filter(|c| "░·▁▂▃▄▅▆▇█".contains(*c)).count())
                 .sum();
             assert_eq!(cells, 2 * h.hours.len(), "{w}: {:#?}", rows.iter().map(|r| plain(r)).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn sites_counts_what_was_inspected_and_says_when_nothing_was() {
+        let p = params();
+        let text = |d: &SiteData, c: Option<&InspectionCache>| {
+            site_rows(d, c, false, 25, 10.0, &palette(), 140).iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ")
+        };
+        // Off screen: no pages read, so no inspection set, but the cache
+        // loaded from disk still says what was found.
+        let unread = SiteData::new("https://example.com/", &p);
+        let c = cache();
+        assert!(text(&unread, Some(&c)).contains("2 not PASS"), "{}", text(&unread, Some(&c)));
+        // Nothing inspected, or nothing loaded, is not zero failures.
+        for t in [text(&unread, None), text(&unread, Some(&InspectionCache::default()))] {
+            assert!(t.contains("none inspected") && !t.contains("not PASS"), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_long_daily_series_wraps_in_a_narrow_pane_instead_of_losing_its_start() {
+        let values: Vec<f64> = (0..28).map(|i| i as f64).collect();
+        for w in [20, 26, 30, 38, 39, 40, 60] {
+            let rows = spark_rows("clicks", &values, "total 378".into(), &palette(), w);
+            assert_fits(&rows, w, "spark");
+            let cells: usize = rows.iter().map(|r| plain(r).chars().filter(|c| tc::SPARK.contains(c)).count()).sum();
+            assert_eq!(cells, values.len(), "{w}: {:#?}", rows.iter().map(|r| plain(r)).collect::<Vec<_>>());
         }
     }
 
