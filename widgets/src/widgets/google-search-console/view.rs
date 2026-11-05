@@ -1913,7 +1913,10 @@ fn detail_rows(
         rows.extend(spark_rows("impr", &impr, format!("total {}", thousands(total(&impr))), p, w));
         rows.extend(spark_rows("CTR", &ctr, range(&ctr, &|x| format!("{:.1}%", x)), p, w));
         if site.params.has_position() {
-            rows.extend(spark_rows("position", &pos, format!("{} (lower is better)", range(&pos, &|x| format!("{:.1}", x))), p, w));
+            // Best is tallest, as the charts draw it best at the top, so a
+            // ranking trend reads the same way at every width.
+            let up: Vec<Option<f64>> = pos.iter().map(|v| v.map(|x| -x)).collect();
+            rows.extend(spark_rows("position", &up, format!("{} (lower is better, drawn tallest)", range(&pos, &|x| format!("{:.1}", x))), p, w));
         }
     };
     let top_rows = |rows: &mut Vec<String>, d: &Detail, title: &str, pages: bool| {
@@ -2667,6 +2670,27 @@ mod tests {
         assert_eq!(wide.plots.len(), 4);
         // Without a span asked for, the rows still bound it, as before.
         assert_eq!(span_of(&series, None), Some((series[0].0, series[0].0)));
+    }
+
+    #[test]
+    fn the_narrow_detail_draws_a_better_position_taller_as_the_charts_do() {
+        // Position 2 then 20 is a fall in ranking: the wide charts draw it
+        // descending, and so must the strip a narrow pane falls back to.
+        let a = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let series = vec![(a, metrics(5.0, 50.0, 2.0)), (a + Duration::days(1), metrics(5.0, 50.0, 20.0))];
+        let mut sites = vec![site("sc-domain:example.com")];
+        sites[0].params = params();
+        let caches = BTreeMap::new();
+        let p = params();
+        let fetched: Result<Detail, String> = Ok(Detail { series, span: Some((a, a + Duration::days(27))), ..Detail::default() });
+        let d = detail(&screen(&sites, &caches, &p, "", 0), &Item::Query("example".into()), Some(&fetched), &palette(), 16);
+        assert!(d.plots.is_empty(), "16 columns should take the strip");
+        let rows: Vec<String> = d.rows.iter().map(|r| plain(r)).collect();
+        let at = rows.iter().rposition(|r| r.trim() == "position").expect("a position strip"); // the strip, not the mover field
+        let cells: Vec<char> = rows[at + 1].chars().filter(|c| tc::SPARK.contains(c)).collect();
+        assert!(cells.len() >= 2, "{rows:#?}");
+        let height = |c: char| tc::SPARK.iter().position(|x| *x == c).unwrap();
+        assert!(height(cells[0]) > height(cells[1]), "position 2 must stand taller than 20: {cells:?}");
     }
 
     #[test]
