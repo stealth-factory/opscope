@@ -411,13 +411,38 @@ notices are listed on the screen, with how long each lasts, and can be
 restored. A warning that explains a missing or partial number is
 never a notice — it stays beside the number.
 
+### The command palette
+
+**Press `ctrl-t` in any widget** for the command palette: a box over the
+middle of the pane with a fuzzy-search line and the widget-wide actions
+under it. `↑↓` choose, `↵` runs, `esc` backs out one level, and typing
+filters. The footer of every widget says so (`[ctrl-t]cmds`), beside
+`[,] settings` — and the actions that already have keys show them on
+their rows, so the palette teaches the keys it is the route around.
+
+The actions, all of them core's so every widget gets them with no widget
+code:
+
+- **Theme…** — the theme picker, in the same box. Type to filter, and as
+  `↑↓` move through the list the widget behind repaints in that theme,
+  so you see it in place before keeping it; `↵` keeps it, `esc` puts
+  back what you had — and returns to the palette's commands.
+- **Settings…** — this widget's `,` screen; a save restarts the widget,
+  as saving from the screen itself does.
+- **Switch widget…** — the other widgets, in the same box; `↵` starts
+  one in this pane, and when it quits the palette is still here.
+- **Notices** — the `!` screen.
+
+esc pops one level at a time, the way a palette does: the theme list
+back to the commands, the commands back to the widget. Each mode redraws
+over the frame the palette was opened on, so the modes read as one box
+that changes, not a stack that grows.
+
 ### Themes
 
-Every widget draws in one theme, chosen once for all of them. **Press
-`ctrl-t` in any widget** for the theme picker: type to filter, and as `↑↓`
-move through the list the widget behind repaints in that theme, so you see
-it in place before keeping it; `↵` keeps it, `esc` puts back what you had.
-The footer of every widget says so (`[ctrl-t]heme`), beside `[,] settings`.
+Every widget draws in one theme, chosen once for all of them. The theme
+picker is the palette's Theme action, opened with `ctrl-t` then `↵` on
+**Theme…** — or straight to it by typing `the` first.
 
 The choice is one setting in the main `config.json`, `"opscope": { "theme":
 "…" }` - also the THEME row on any widget's `,` screen, and a top-level

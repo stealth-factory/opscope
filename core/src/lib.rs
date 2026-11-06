@@ -26,6 +26,7 @@ mod dependencies;
 pub mod theme;
 mod termtheme;
 mod picker;
+pub mod palette;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -45,11 +46,11 @@ pub use dependencies::{
     unsatisfied_required,
 };
 pub use aliases::{alias_problems, resolve_widget};
-pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use settings::{register_settings, run_settings, Catalogue, SettingsSpec};
 pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
-/// The footer hint for the theme picker, beside `[,] settings` in every
-/// widget: one wording, kept here.
-pub const THEME_HINT: &str = picker::HINT;
+/// The footer hint for the command palette, beside `[,] settings` in
+/// every widget: one wording, kept here.
+pub const PALETTE_HINT: &str = palette::HINT;
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -4946,12 +4947,13 @@ impl Keyboard {
         // once, from the colours it asked for at start, so it starts again
         // and asks again - the way saving its settings does. Only when the
         // theme in force is the terminal's own: a named theme did not change.
-        // Not while the picker is open: its preview has put another theme
-        // in force. Nor under an unsaved edit - a field being typed in, the
+        // Not while a modal with a captured frame is up: the picker, the
+        // palette. Nor under an unsaved edit - a field being typed in, the
         // settings screen - which a restart would throw away. The switch is
         // kept for the poll after they close rather than taken and dropped.
         if !typing
             && !picker::OPEN.load(Ordering::Acquire)
+            && !palette::OPEN.load(Ordering::Acquire)
             && !settings::SCREEN_OPEN.load(Ordering::Acquire)
             && terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel)
             && theme::current().id == "terminal"
@@ -4960,12 +4962,14 @@ impl Keyboard {
         }
         // The theme was changed - in the picker in another pane, or in
         // config.json by hand - so this widget starts again in it. Never
-        // under something that holds an unsaved edit: a field being typed
-        // in, the settings screen, the picker. The check waits for them,
+        // under something that holds an unsaved edit or a captured frame:
+        // a field being typed in, the settings screen, the picker, the
+        // palette. The check waits for them,
         // and `changed()` is not even asked until then, so the change is
         // still there to find when they close.
         if !typing
             && !picker::OPEN.load(Ordering::Acquire)
+            && !palette::OPEN.load(Ordering::Acquire)
             && !settings::SCREEN_OPEN.load(Ordering::Acquire)
             && theme::changed()
         {
@@ -4976,10 +4980,15 @@ impl Keyboard {
         if opens {
             notices::run(self);
         }
-        // ctrl-t opens the theme picker over whatever widget this is.
-        if !picker::OPEN.load(Ordering::Acquire) && keys.iter().any(|k| k == picker::KEY) {
-            keys.retain(|k| k != picker::KEY);
-            picker::run(self);
+        // ctrl-t opens the command palette over whatever widget this is.
+        // Its Theme action is the picker, so the picker's key is the
+        // palette's: not beside it but behind it, one entry point.
+        if !palette::OPEN.load(Ordering::Acquire)
+            && !picker::OPEN.load(Ordering::Acquire)
+            && keys.iter().any(|k| k == palette::KEY)
+        {
+            keys.retain(|k| k != palette::KEY);
+            palette::run(self);
         }
         keys
     }
@@ -6189,7 +6198,7 @@ mod bang_tests {
 mod tests {
     #[test]
     fn a_bracketed_key_name_is_the_key_a_click_on_its_hint_means() {
-        assert_eq!(hint_key(picker::HINT).as_deref(), Some(picker::KEY));
+        assert_eq!(hint_key(palette::HINT).as_deref(), Some(palette::KEY));
         assert_eq!(hint_key("[esc] back").as_deref(), Some("esc"));
         assert_eq!(hint_key("[tab] next").as_deref(), Some("tab"));
         assert_eq!(hint_key("ctrl-u clear").as_deref(), Some("ctrl-u"));

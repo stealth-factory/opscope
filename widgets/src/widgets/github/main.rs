@@ -1145,7 +1145,7 @@ fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
         vec![(p.dim.as_str(), "[w]indow".into())],
         vec![(p.dim.as_str(), "[r]efresh".into())],
         vec![(p.dim.as_str(), "[,] settings".into())],
-        vec![(p.dim.as_str(), tc::THEME_HINT.into())],
+        vec![(p.dim.as_str(), tc::PALETTE_HINT.into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]);
     out
@@ -2893,6 +2893,7 @@ fn publish(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available("github", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -3243,7 +3244,7 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
-            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
+            hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -3824,7 +3825,7 @@ fn main() {
                 ];
                 let mut hints = hints;
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
-                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
+                hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3980,8 +3981,9 @@ mod tests {
             }
         }
         // The band that was wrong, named so a regression points at itself.
-        // Fourteen columns on from where it was found, at 81-84: the footer
-        // has since gained `ctrl-t theme`.
+        // First found at 81-84, before the footer gained its ctrl-t hint;
+        // the palette hint that replaced it is the same width, and the
+        // band stayed where it was.
         for w in 95..=98 {
             assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
         }
@@ -4013,7 +4015,8 @@ mod tests {
         }
         // The one Codex found, at 81 columns before the footer gained
         // `ctrl-t theme`: the whole footer fits 95 columns on one line, and
-        // only with a wording that leaves room for the rest.
+        // only with a wording that leaves room for the rest. The palette
+        // hint that replaced it is the same width, so it still does.
         let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 93, "  ").len();
         assert_eq!(foot(info_hint(false, &p, 95)), 1);
     }

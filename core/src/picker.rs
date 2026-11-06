@@ -14,31 +14,29 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The theme picker: `ctrl-t` in any widget.
+//! The theme picker: the Theme action of the command palette.
 //!
 //! A modal over the middle of the pane - a filter line and the themes
 //! under it, framed, with a shadow - drawn as text, and in Kitty with its
-//! frame and shadow as pixels. Typing filters them, fuzzily; ↑↓ move through them and the
-//! widget behind repaints in the one under the cursor straight away - its
-//! last frame, drawn in that theme - so a theme is seen in place before it
-//! is kept. ↵ keeps it: `opscope.theme` in the main config file, which
-//! every other running widget picks up within two seconds. esc puts back
-//! the theme there was.
+//! frame and shadow as pixels. It is the same box the palette's commands
+//! live in ([`crate::palette`]): the palette hands over its base frame and
+//! the picker takes the box, so the two read as one surface with a mode
+//! changed rather than a second box over the first. Typing filters them,
+//! fuzzily; ↑↓ move through them and the widget behind repaints in the
+//! one under the cursor straight away - its last frame, drawn in that
+//! theme - so a theme is seen in place before it is kept. ↵ keeps it:
+//! `opscope.theme` in the main config file, which every other running
+//! widget picks up within two seconds. esc puts back the theme there was
+//! and returns to the palette's commands.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::theme::{self, Role, Theme, Wanted};
 
-/// Open, so the key that opens it is not answered again inside it, and so
-/// its own frames are not taken for the widget's.
+/// Open, so a second entry while the picker is up is not answered, and
+/// so its own frames are not taken for the widget's.
 pub(crate) static OPEN: AtomicBool = AtomicBool::new(false);
-
-/// The key that opens it, and the hint every footer carries for it.
-pub const KEY: &str = "ctrl-t";
-/// In the footer's own form, `[q]uit` - the key in brackets, fused onto
-/// the word - and a click on it is `ctrl-t`.
-pub const HINT: &str = "[ctrl-t]heme";
 
 /// One thing the picker offers: a setting value, what to call it, and the
 /// words it is matched against.
@@ -159,7 +157,7 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i32> {
 /// The modal's own background: the theme's `dark`, or none under NO_COLOR,
 /// where every background is reverse video and a modal drawn in one would
 /// leave the highlighted row nothing to stand out from.
-fn modal_ground() -> String {
+pub(crate) fn modal_ground() -> String {
     if theme::no_color() {
         String::new()
     } else {
@@ -595,8 +593,15 @@ pub fn splice(base: &str, x: usize, piece: &str, width: usize, w: usize) -> Stri
     format!("{left}{}{piece}{right}", " ".repeat(pad))
 }
 
-/// Run the picker over the widget's last frame until ↵ or esc.
-pub(crate) fn run(keyboard: &mut crate::Keyboard) {
+/// Run the picker over `base_rows` and `base_plots` until ↵ or esc.
+///
+/// `base` is the frame the palette was opened on - the widget's own last
+/// frame - so the picker redraws over it in place, one mode of the
+/// palette's box rather than a second box over the first. On ↵ that
+/// keeps a theme that draws differently from the one the widget built
+/// its frame in, the widget is started again in it. On esc the theme
+/// there was is put back, and what returns is the palette's commands.
+pub(crate) fn run_over(keyboard: &mut crate::Keyboard, base_rows: &[String], base_plots: &[crate::Plot]) {
     if OPEN.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -605,11 +610,6 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
     // previewed theme, where it is outside the modal and means cancel.
     keyboard.forget_footer();
     let original = theme::current();
-    let (base_rows, base_plots) = crate::LAST_FRAME
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_default();
     let all = choices();
     let kept = saved();
     let mut query = String::new();

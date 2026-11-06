@@ -419,6 +419,7 @@ fn store_poll(state: &mut State, reading: Result<Reading, String>, history_len: 
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available("link", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -905,7 +906,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), tc::THEME_HINT.into())],
+            vec![(p.dim.as_str(), tc::PALETTE_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         drop(guard);

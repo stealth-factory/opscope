@@ -1657,6 +1657,7 @@ fn info_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available(
         "github-actions",
         include_str!("dependencies.json"),
@@ -2344,7 +2345,7 @@ fn main() {
                 p.dim.as_str(),
                 "[,] settings".into(),
             )]);
-            hints.insert(hints.len() - 1, vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
+            hints.insert(hints.len() - 1, vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         }
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The hints, built before the list so the list is sized with them

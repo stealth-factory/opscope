@@ -445,6 +445,17 @@ Google sign-in, scopes and wording
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only
 their section name, optional legacy alias, and owned `settings.json`.
+And it owns the command palette (`tc::palette`, `ctrl-t` in every
+widget): one box whose modes — commands, theme picker, widgets — swap in
+place over the frame it was opened on, esc popping one level at a time.
+Core wires it from `Keyboard::poll` for every binary, as it does `!` and
+`,`; a widget registers its settings spec at startup
+(`tc::register_settings(SETTINGS)`) and the palette's Settings action
+opens it, a widget that registers none gets no Settings command, and
+the Switch action lists the binaries from the build manifest — the same
+file the launcher's own test checks its list against. The footer hint
+for it is `tc::PALETTE_HINT`, twelve cells: `pack_hints` will not split
+a hint, and twelve columns is the floor every frame is measured from.
 
 A widget that acquires per OS lives in its package folder
 `widgets/src/widgets/<widget>/{main,parse,linux,macos}.rs` — the same

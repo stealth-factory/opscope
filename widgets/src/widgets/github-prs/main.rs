@@ -1883,6 +1883,7 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available(
         "github-prs",
         include_str!("dependencies.json"),
@@ -2464,7 +2465,7 @@ fn main() {
             ]);
             hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
-            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
+            hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints
         } else {
@@ -2540,7 +2541,7 @@ fn main() {
                 vec![(p.dim.as_str(), "[r]efresh".into())],
             ];
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
-            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
+            hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints
         };

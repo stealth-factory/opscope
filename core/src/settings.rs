@@ -4478,6 +4478,28 @@ impl Drop for ScreenOpen {
     }
 }
 
+/// This binary's settings, registered once at startup so the command
+/// palette can open them without the widget in the loop.
+///
+/// A widget already owns its [`SettingsSpec`] as a const - it passes the
+/// same one to `run_settings` when `,` is pressed - and this is where
+/// the palette reads it from. A binary that registers nothing (the
+/// launcher, `matrix`) gets no Settings command rather than one that
+/// opens nothing.
+static REGISTERED: std::sync::OnceLock<SettingsSpec> = std::sync::OnceLock::new();
+
+/// Say what this binary's settings are, for the palette's Settings
+/// command to open. Call once, at startup, with the same const handed to
+/// [`run_settings`].
+pub fn register_settings(spec: SettingsSpec) {
+    let _ = REGISTERED.set(spec);
+}
+
+/// What [`register_settings`] last said, if anything.
+pub(crate) fn registered() -> Option<SettingsSpec> {
+    REGISTERED.get().copied()
+}
+
 pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
     SCREEN_OPEN.store(true, std::sync::atomic::Ordering::Release);
     let _open = ScreenOpen;
