@@ -173,6 +173,13 @@ pub const HUES: [Role; 7] = [Role::Red, Role::Green, Role::Yellow, Role::Blue, R
 pub const TOWARD: f64 = 0.18;
 
 impl Theme {
+    /// Whether a widget drawn in `self` would look the same in `other`: the
+    /// same theme and the same colours, which is when a change between them
+    /// needs no restart.
+    pub(crate) fn draws_like(&self, other: &Theme) -> bool {
+        self.id == other.id && self.colours == other.colours
+    }
+
     pub fn colour(&self, role: Role) -> Rgb {
         self.colours[role.index()]
     }
@@ -491,8 +498,8 @@ fn active() -> &'static RwLock<Arc<Theme>> {
 }
 
 /// The theme in force when a widget built its palette: the first one
-/// resolved. Widgets build their colours once; [`recolour`] draws them in
-/// whatever theme is in force now.
+/// resolved. Widgets build their colours once; [`recolour`] puts them into
+/// the theme the picker is previewing.
 static BUILT: OnceLock<Arc<Theme>> = OnceLock::new();
 
 fn built() -> Arc<Theme> {
@@ -545,10 +552,11 @@ type RecolourMap = (Arc<Theme>, Arc<Theme>, std::collections::HashMap<String, St
 
 /// `text` drawn in the theme in force now, though it was built in the theme
 /// a widget started in: every role colour of the one becomes the same role
-/// of the other. How a running widget follows a theme change, and how the
-/// picker previews one, without any widget building its colours again. A
-/// colour that is no role's - a mix, a ramp step - is left as it is; the
-/// ramp is worked out each frame from the theme in force anyway.
+/// of the other. How the picker previews a theme over the widget's last
+/// frame, without the widget drawing again. Close, not exact: a colour that
+/// is no role's - a mix, a gradient end - is left as it is. That is why a
+/// theme actually kept, or changed in another pane, restarts the widget in
+/// it (`changed`) instead of being drawn this way.
 pub fn recolour(text: &str) -> String {
     translate(text, &built(), &current())
 }
@@ -622,11 +630,15 @@ fn translate(text: &str, from: &Arc<Theme>, to: &Arc<Theme>) -> String {
     out
 }
 
-/// Look at the theme setting again - at most every two seconds - and put
-/// a changed one in force. Every widget calls this as it draws, so a theme
-/// picked in one pane, or written into config.json by hand, reaches every
-/// other pane on its next frame. True when the theme changed.
-pub fn watch() -> bool {
+/// Whether the theme the config asks for now draws differently from the
+/// one in force: checked at most every two seconds, as `Keyboard::poll`
+/// runs. A running widget does not repaint itself in a new theme - a
+/// widget works some colours out itself (a mix, a gradient end, a palette
+/// for the selected row) and no translation of a finished frame can tell
+/// those apart from role colours - so `poll` restarts it in place instead,
+/// the way saving settings and a light/dark switch already do. Every colour
+/// is then built in the one theme.
+pub fn changed() -> bool {
     static LAST: std::sync::Mutex<Option<(std::time::Instant, Wanted)>> = std::sync::Mutex::new(None);
     if cfg!(test) {
         return false;
@@ -642,9 +654,7 @@ pub fn watch() -> bool {
     drop(last);
     if changed {
         let next = resolve();
-        let same = current().colours == next.colours && current().id == next.id;
-        set(next);
-        return !same;
+        return !current().draws_like(&next);
     }
     false
 }

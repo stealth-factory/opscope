@@ -4144,7 +4144,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         // composed inline would not outlive the slice it is put in. The tint
         // has to lead each one or the foreground that follows resets the
         // background and the highlight stops halfway across.
-        let q = if here { &lit } else { &p };
+        let q = if here { &lit } else { p };
         let lead = format!("{tint}{}", if here { &q.accent } else { &q.dim });
         let name = format!("{tint}{}", if *on { &q.txt } else { &q.dim });
         let note = format!("{tint}{}", q.dim);
@@ -4465,7 +4465,22 @@ fn typing_in(mode: &Mode) -> bool {
 ///
 /// The caller keeps ownership of the already-active keyboard so entering
 /// settings never stacks a second raw-mode guard over the widget's.
+/// Set while the settings screen is open, so a theme change made elsewhere
+/// waits for it rather than restarting the widget under an unsaved edit.
+pub(crate) static SCREEN_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`SCREEN_OPEN`] however the screen is left.
+struct ScreenOpen;
+
+impl Drop for ScreenOpen {
+    fn drop(&mut self) {
+        SCREEN_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
+    SCREEN_OPEN.store(true, std::sync::atomic::Ordering::Release);
+    let _open = ScreenOpen;
     let mut app = load(spec);
     // This screen borrows the caller's keyboard, so it inherits wherever
     // the caller said its footer hints were - and this loop polls before it
@@ -4545,7 +4560,6 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         // lifted palette a selected row takes is built here too, and the
         // two have to agree on which theme they are in. Recolouring a frame
         // already in the theme in force maps one role onto another.
-        let _ = crate::theme::watch();
         let p = palette();
         let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),

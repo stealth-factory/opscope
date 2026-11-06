@@ -703,7 +703,25 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                 "enter" => {
                     if let Some(c) = list.get(selected) {
                         match theme::save(&c.value) {
-                            Ok(()) => return close(),
+                            // The preview was the widget's last frame put
+                            // into the new theme, close but not exact: a
+                            // colour the widget works out itself is no
+                            // role's, and stays as it was. So a theme that
+                            // draws differently starts the widget again in
+                            // it, and every colour is built in the one
+                            // theme. `relaunch` returns only when that
+                            // failed; then the widget goes on in the theme
+                            // it was built in, rather than half in each.
+                            Ok(()) => {
+                                let kept = theme::current();
+                                let differs = !kept.draws_like(&original);
+                                theme::set((*original).clone());
+                                close();
+                                if differs {
+                                    crate::settings::relaunch(keyboard);
+                                }
+                                return;
+                            }
                             Err(why) => said = format!("could not save: {why}"),
                         }
                     }

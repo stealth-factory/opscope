@@ -1125,15 +1125,10 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // picker in another pane, or config.json edited by hand - is picked up
     // here, and every colour this widget built in the theme it started in
     // is drawn in the theme in force: rows and charts alike.
-    if theme::watch() {
-        forget_frame();
-    }
     if !picker::OPEN.load(Ordering::Acquire) {
         *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some((rows.to_vec(), plots.to_vec()));
     }
-    let rows: Vec<String> = rows.iter().map(|r| theme::recolour(r)).collect();
-    let plots: Vec<Plot> = plots.iter().cloned().map(|p| p.recoloured(&theme::recolour)).collect();
-    draw_current(&rows, w, h, &plots);
+    draw_current(rows, w, h, plots);
 }
 
 /// [`draw_plots`] for a frame already in the theme in force: nothing is
@@ -4951,7 +4946,26 @@ impl Keyboard {
         // once, from the colours it asked for at start, so it starts again
         // and asks again - the way saving its settings does. Only when the
         // theme in force is the terminal's own: a named theme did not change.
-        if terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel) && theme::current().id == "terminal" {
+        // Not while the picker is open: its preview has put another theme
+        // in force, and the switch is kept for the poll after it closes
+        // rather than taken and dropped here.
+        if !picker::OPEN.load(Ordering::Acquire)
+            && terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel)
+            && theme::current().id == "terminal"
+        {
+            settings::relaunch(self);
+        }
+        // The theme was changed - in the picker in another pane, or in
+        // config.json by hand - so this widget starts again in it. Never
+        // under something that holds an unsaved edit: a field being typed
+        // in, the settings screen, the picker. The check waits for them,
+        // and `changed()` is not even asked until then, so the change is
+        // still there to find when they close.
+        if !typing
+            && !picker::OPEN.load(Ordering::Acquire)
+            && !settings::SCREEN_OPEN.load(Ordering::Acquire)
+            && theme::changed()
+        {
             settings::relaunch(self);
         }
         self.held.extend(fresh);
