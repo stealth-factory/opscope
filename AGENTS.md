@@ -464,6 +464,10 @@ are `tc::PALETTE_HINT` and, beside it, `tc::THEME_HINT` for the picker's
 own key - twelve cells each: `pack_hints` will not split a hint, and
 twelve columns is the floor every frame is measured from.
 
+`cgroup` (`tc::cgroup`) walks the cgroup v2 tree and gives each cgroup its
+own `io`, `cpu` or `memory` reading with its nearest controller-enabled
+descendants subtracted, so `disk` and `procs` never count a byte twice.
+
 A widget that acquires per OS lives in its package folder
 `widgets/src/widgets/<widget>/{main,parse,linux,macos}.rs` — the same
 folder that holds `help.txt`. Parsers always compiled (`mod parse`);

@@ -80,6 +80,12 @@ mux-activity's Herdr memory figure right on a 16 KiB-page kernel. The
 Linux, because netwatch and ports have macOS counterparts of their own.
 `Resolver` is netwatch's reverse-DNS thread over `getent hosts`.
 
+`core/src/cgroup.rs`, used as `tc::cgroup`, parses cgroup v2's
+`io.stat`, `cpu.stat`, `memory.current` and `cgroup.procs`, walks the tree
+in one pass, and attributes each reading to the deepest cgroup with the
+controller enabled, its enabled descendants subtracted (saturating, with an
+`inconsistent` flag) and the depth reached said in one `depth_sentence()`.
+
 ### Notices
 
 `core/src/notices.rs`, used as `tc::notices`, is the one place a warning
