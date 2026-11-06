@@ -4024,7 +4024,13 @@ fn opens_proc(src: &str) -> bool {
         // A string that is a /proc path, not a mention of the word in
         // prose. github.rs talks about cmdline leaking; that string does
         // not start with /proc inside the quotes.
-        line.contains("\"/proc") || line.contains("format!(\"/proc")
+        //
+        // Or a call into core's /proc readers. Since they moved into
+        // `tc::procfs`, a widget can read /proc without spelling the path,
+        // and a check that looked only for the string lost sight of
+        // tailnet the day it moved - while on a Mac its uptime is still
+        // simply absent.
+        line.contains("\"/proc") || line.contains("format!(\"/proc") || line.contains("procfs::")
     })
 }
 
@@ -4034,6 +4040,8 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
         r#"let t = std::fs::read_to_string("/proc/net/tcp");"#
     ));
     assert!(opens_proc(r#"format!("/proc/{}/fd", pid)"#));
+    assert!(opens_proc(r#"let up = tc::procfs::read_uptime();"#));
+    assert!(!opens_proc(r#"// tc::procfs::read_uptime() is the reader"#));
     assert!(!opens_proc(
         r#"// /proc/<pid>/cmdline is readable by anyone"#
     ));
@@ -4048,6 +4056,7 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
 /// new `/proc` reader with no explanation looks on macOS like a source
 /// with nothing in it.
 const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
+    ("tailnet", "process table is /proc (through tc::procfs); no macOS source yet"),
     ("agent-usage", "Antigravity's port discovery walks /proc"),
 ];
 
