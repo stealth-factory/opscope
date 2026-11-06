@@ -85,6 +85,10 @@ const DAY_W: usize = 8;
 const FULL_W: usize = 13;
 const BAR_MAX: usize = 11;
 const BAR_MIN: usize = 4;
+/// How far the bar grows into width nothing else wants. Past this the
+/// spare columns stay after the last figure, at the pane's right edge,
+/// rather than opening a gap between a mount point and its figures.
+const BAR_WIDE: usize = 30;
 /// Hours of samples the window rate, FULL IN and the trace fit. The
 /// longest is a day: a projection from last week says little about today.
 const WINDOWS: [u64; 3] = [6, 12, 24];
@@ -160,14 +164,18 @@ fn layout_for(width: usize, longest: usize) -> Columns {
         for bar in (BAR_MIN..=BAR_MAX).rev() {
             let need = column_need(hour, inodes, typ, size, bar) - MOUNT_MIN + mount;
             if need <= width {
+                // The mount column is as wide as the longest mount point
+                // and no wider. Spare width widens the bar, which shows
+                // more, and whatever is left over trails the last figure.
+                let grow = (width - need).min(BAR_WIDE.saturating_sub(bar));
                 return Columns {
-                    mount: mount + width - need,
+                    mount,
                     stacked: false,
                     typ,
                     size,
                     inodes,
                     hour,
-                    bar,
+                    bar: bar + grow,
                 };
             }
         }
@@ -283,7 +291,11 @@ struct DiskCols {
     queue: bool,
 }
 
-fn disk_columns(width: usize) -> DiskCols {
+/// `longest` is the widest disk name. The DISK column holds it and its
+/// marker and no more, so on a wide pane the figures sit beside the name
+/// instead of at the far edge of the pane.
+fn disk_columns(width: usize, longest: usize) -> DiskCols {
+    let name = (longest + 2).max(DISK_MIN);
     // (iops, size, typ, await, queue) — the reverse of the drop order.
     let sets = [
         (true, true, true, true, true),
@@ -297,7 +309,7 @@ fn disk_columns(width: usize) -> DiskCols {
         let need = disk_need(iops, size, typ, await_ms, queue);
         if need <= width {
             return DiskCols {
-                disk: DISK_MIN + width - need,
+                disk: (DISK_MIN + width - need).min(name),
                 typ,
                 size,
                 iops,
@@ -2535,7 +2547,18 @@ fn paint_disks(
     plots: &mut Vec<tc::Plot>,
 ) -> usize {
     let combined = view.board.is_some_and(|board| board.combined);
-    let cols = disk_columns(width);
+    let longest = view
+        .board
+        .map(|board| {
+            board
+                .rows
+                .iter()
+                .map(|row| tc::display_width(&row.disk.name))
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let cols = disk_columns(width, longest);
     let heading = disks_heading(view, combined, cols.queue);
     for line in wrap(&heading, width.saturating_sub(1)) {
         rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
@@ -4056,7 +4079,7 @@ mod tests {
     #[test]
     fn disk_columns_drop_queue_then_await_then_type_then_size_then_iops() {
         let flags = |width| {
-            let cols = disk_columns(width);
+            let cols = disk_columns(width, 4);
             (cols.queue, cols.await_ms, cols.typ, cols.size, cols.iops)
         };
         assert_eq!(flags(140), (true, true, true, true, true));
@@ -4624,6 +4647,44 @@ mod tests {
         // Short mount points stay beside their figures once the figures fit.
         assert!(!layout_for(80, 2).stacked);
         assert!(layout_for(40, 2).stacked);
+    }
+
+    #[test]
+    fn a_wide_pane_keeps_each_name_beside_its_figures() {
+        // At 400 columns the name columns used to take every spare cell,
+        // which put / at the left edge and its figures at the right one.
+        let rows = vec![
+            row("/", "ext4", Figures::Ready(space(80, 20, 100, 90)), 0),
+            row("/boot/efi", "vfat", Figures::Ready(space(10, 90, 0, 0)), 1),
+            row("/mnt/slow", "nfs4", Figures::NoAnswer, 2),
+        ];
+        let snap = snap(rows, Hidden::default());
+        let board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("loop10", 1, 1, 8.0)]);
+        let p = palette();
+        let mut frame = view(Some(&snap), "/");
+        frame.board = Some(&board);
+        for width in [160usize, 400] {
+            let cols = layout_for(width, "/boot/efi".len());
+            assert_eq!(cols.mount, "/boot/efi".len() + 2, "{width}");
+            assert!(cols.bar <= BAR_WIDE, "{width}");
+            assert_eq!(disk_columns(width, "loop10".len()).disk, DISK_MIN, "{width}");
+            let drawn = draw_body(&frame, width, &p, None);
+            let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+            for line in &drawn.rows {
+                assert!(tc::display_width(line) <= width, "{width}: {line:?}");
+            }
+            // The first figure follows the name after the column's own
+            // padding, not after the rest of the pane.
+            for name in ["/boot/efi", "/mnt/slow", "sda", "loop10"] {
+                let line = lines
+                    .iter()
+                    .find(|line| line.trim_start_matches(['▸', ' ']).starts_with(name))
+                    .unwrap_or_else(|| panic!("{width}: no row for {name}: {lines:?}"));
+                let after = &line[line.find(name).unwrap() + name.len()..];
+                let gap = after.len() - after.trim_start().len();
+                assert!(gap <= 12, "{width}: {gap} blank cells after {name}: {line:?}");
+            }
+        }
     }
 
     #[test]
