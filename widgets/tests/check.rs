@@ -98,6 +98,16 @@ fn shared_helpers_are_not_redefined_by_widgets() {
         "const SPARK:",
         "const BRAILLE:",
         "const SPINNER:",
+        // tc::procfs (OPS-194): /proc and `ss` are read one way, in core.
+        "fn parse_pid_stat(",
+        "fn parse_proc_stat(",
+        "fn parse_proc_pid_io(",
+        "fn proc_io(",
+        "fn unit_name(",
+        "fn parse_ss_sockets(",
+        "fn socket_owners(",
+        "fn open_files(",
+        "fn clock_ticks(",
     ];
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
@@ -4038,7 +4048,6 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
 /// new `/proc` reader with no explanation looks on macOS like a source
 /// with nothing in it.
 const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
-    ("tailnet", "process table is /proc; no macOS source yet"),
     ("agent-usage", "Antigravity's port discovery walks /proc"),
 ];
 

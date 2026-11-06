@@ -64,6 +64,22 @@ its quota bucket. It goes through `post_answer()`, the sibling of
 200-character line `post_json()` makes of it. The setup it needs on
 Google's side is [Google setup](google-setup.md).
 
+`core/src/procfs.rs` (`tc::procfs`) reads processes the same way for every
+widget. Its parsers - `parse_pid_stat` (split on the last `)`, so a `comm`
+holding brackets is safe), `parse_proc_pid_io`, `parse_proc_pid_cgroup`,
+`unit_name`, `parse_proc_uptime`, `parse_ss_sockets` with each socket's
+`rtt`, and `parse_ip_addresses` - compile and run their tests on every
+target. `pids()`, `read_pid()` and the single-file `read_stat` / `read_io` /
+`read_comm` / `read_cmdline` / `read_cwd` / `read_uptime` are plain file
+reads that hand back `Err("<path>: <error>")` for a file they could not
+read, never a zero, so on a Mac they fail rather than describe an empty
+process. `rss_bytes()` uses `_SC_PAGESIZE`, which is what made
+mux-activity's Herdr memory figure right on a 16 KiB-page kernel. The
+`/proc/<pid>/fd` walks (`socket_pids`, `socket_owners`, `open_files`),
+`process_name`, `running`, `process_facts` and `own_addresses` are gated to
+Linux, because netwatch and ports have macOS counterparts of their own.
+`Resolver` is netwatch's reverse-DNS thread over `getent hosts`.
+
 ### Notices
 
 `core/src/notices.rs`, used as `tc::notices`, is the one place a warning

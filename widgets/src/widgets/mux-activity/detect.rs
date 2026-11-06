@@ -216,21 +216,6 @@ pub fn outside() -> String {
     .join("\n")
 }
 
-/// `/proc/<pid>/stat`: the command name and the parent pid. The name sits
-/// in parentheses and may itself hold spaces and parentheses, so the
-/// fields after it are counted from the last `)`.
-/// Read on one platform, compiled and tested on every one.
-#[allow(dead_code)]
-pub fn parse_stat_parent(text: &str) -> Option<(String, i64)> {
-    let open = text.find('(')?;
-    let close = text.rfind(')')?;
-    let name = text.get(open + 1..close)?.to_string();
-    let mut rest = text.get(close + 1..)?.split_whitespace();
-    let _state = rest.next()?;
-    let ppid = rest.next()?.parse().ok()?;
-    Some((name, ppid))
-}
-
 /// `ps -o ppid=,comm= -p <pid>`: the parent pid and the command, which on
 /// macOS is the full path.
 /// Read on one platform, compiled and tested on every one.
@@ -324,11 +309,14 @@ mod tests {
 
     #[test]
     fn process_parents_are_read_from_proc_and_from_ps() {
-        assert_eq!(
-            parse_stat_parent("4012 (my (odd) name) S 977 4012 4012 0 -1"),
-            Some(("my (odd) name".into(), 977))
-        );
-        assert_eq!(parse_stat_parent("garbage"), None);
+        // Linux's half is `tc::procfs::parse_pid_stat`, which the host reads
+        // the name and the parent out of.
+        let stat = opscope_core::procfs::parse_pid_stat(
+            "4012 (my (odd) name) S 977 4012 4012 0 -1 0 0 0 0 0 1 1 0 0 20 0 1 0 100 0 10 0",
+        )
+        .expect("a stat line");
+        assert_eq!((stat.comm.as_str(), stat.ppid), ("my (odd) name", 977));
+        assert_eq!(opscope_core::procfs::parse_pid_stat("garbage"), None);
         assert_eq!(parse_ps_parent("  977 /usr/local/bin/rex\n"), Some(("/usr/local/bin/rex".into(), 977)));
         assert_eq!(parse_ps_parent(""), None);
         assert_eq!(mux_of_process("/opt/homebrew/bin/herdr"), Some(Mux::Herdr));

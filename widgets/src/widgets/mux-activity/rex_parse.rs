@@ -605,19 +605,6 @@ pub fn parse_event_line(line: &str) -> StreamEvent {
     }
 }
 
-/// (cpu ticks used, resident bytes) out of one /proc/<pid>/stat line.
-///
-/// The command sits in brackets and may itself contain spaces and
-/// brackets, so the split starts after the last one.
-pub fn parse_proc_stat(text: &str, page: u64) -> Option<(u64, u64)> {
-    let rest = text.rsplit_once(')')?.1;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-    let rss: u64 = fields.get(21)?.parse().ok()?;
-    Some((utime + stime, rss * page))
-}
-
 /// `ps -o pid=,pcpu=,rss=` lines as pid → (cpu %, resident bytes).
 ///
 /// macOS's `pcpu` is the kernel's own decaying recent average, not a
@@ -898,7 +885,8 @@ mod tests {
     #[test]
     fn proc_stat_and_ps_read_the_same_two_numbers() {
         let line = "1234 (my (odd) prog) S 1 1234 1234 0 -1 4194304 100 0 0 0 250 50 0 0 20 0 1 0 100 1000000 300 18446744073709551615";
-        assert_eq!(parse_proc_stat(line, 4096), Some((300, 300 * 4096)));
+        let stat = opscope_core::procfs::parse_pid_stat(line).expect("a stat line");
+        assert_eq!((stat.utime + stat.stime, stat.rss_pages), (300, 300));
         let ps = "  1234   12.5  20480\n  99 0.0 4\nnot a line\n";
         let read = parse_ps(ps);
         assert_eq!(read.get(&1234), Some(&(12.5, 20480 * 1024)));

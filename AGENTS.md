@@ -471,6 +471,13 @@ folder that holds `help.txt`. Parsers always compiled (`mod parse`);
 is the worked example; drop the same three files beside `main.rs` to give
 another widget a second source.
 
+`tc::procfs` (`core/src/procfs.rs`) is where `/proc/<pid>/{stat,io,cgroup,
+cmdline,comm,cwd,fd}`, `/proc/uptime` and `ss -tine` are read: `parse_*`
+for each, ungated; `pids()` / `read_pid()` returning `Err` per unreadable
+file; `rss_bytes()` at this kernel's page size and `clock_ticks()`; and,
+Linux-only, the socket-owner and open-file walks netwatch and ports share.
+A widget that needs a process list starts there, not at `"/proc"`.
+
 Line charts belong to core: `LineChart`, `Trace`, `Plot`, and `draw_plots`
 choose pixels or Braille from the same data. Widgets own axis transforms,
 gaps, time slots and labels, but never branch on Kitty or emit graphics escapes.

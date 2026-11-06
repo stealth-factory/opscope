@@ -244,35 +244,12 @@ fn command_label(argv: &[String], name: &str) -> String {
     head
 }
 
-/// (cpu ticks used, resident bytes) out of one /proc/<pid>/stat line.
-///
-/// Split from the read so it can be tested on a line rather than on a live
-/// process. Its test used to re-implement this parse in the test body and
-/// assert on the copy, which meant the shipped one was never run.
-fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
-    // The command is in brackets and may itself contain spaces and brackets,
-    // so the split starts after the last one rather than at the second field.
-    let rest = text.rsplit_once(')')?.1;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-    let rss: u64 = fields.get(21)?.parse().ok()?;
-    Some((utime + stime, rss * 4096))
-}
-
-/// (cpu ticks used, resident bytes) for a pid.
+/// (cpu ticks used, resident bytes) for a pid, from `/proc/<pid>/stat`
+/// through `tc::procfs`, which counts resident pages at this kernel's page
+/// size rather than at 4096.
 fn proc_stats(pid: i32) -> Option<(u64, u64)> {
-    let text = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    parse_proc_stat(&text)
-}
-
-fn clock_ticks() -> f64 {
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if hz > 0 {
-        hz as f64
-    } else {
-        100.0
-    }
+    let stat = tc::procfs::read_stat(pid).ok()?;
+    Some((stat.utime + stat.stime, tc::procfs::rss_bytes(stat.rss_pages)))
 }
 
 /// A recognised coding agent, and what its process is costing.
@@ -524,7 +501,7 @@ enum Front {
 /// What one `pane process-info` answer says the pane is doing.
 ///
 /// Split from the request so all three answers can be tested on a value
-/// rather than on a live Herdr, the way `parse_proc_stat` is.
+/// rather than on a live Herdr, the way `tc::procfs::parse_pid_stat` is.
 fn classify(info: &serde_json::Value) -> Front {
     let process = &info["process_info"];
     let Some(front) = process["foreground_processes"]
@@ -904,7 +881,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let stop = Arc::new(AtomicBool::new(false));
     let poller_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
-        let hz = clock_ticks();
+        let hz = tc::procfs::clock_ticks();
         let mut seen = Seen {
             first_poll: true,
             ..Default::default()
@@ -2122,11 +2099,11 @@ mod tests {
             "42 (my (odd) proc) S 1 42 42 0 -1 4194304 100 0 0 0 {} {} 0 0 20 0 8 0 900 0 {} 0",
             310, 90, 4096
         );
-        let (ticks, rss) = parse_proc_stat(&line).expect("a well-formed line should parse");
-        assert_eq!(ticks, 400, "utime and stime are summed");
-        assert_eq!(rss, 4096 * 4096, "rss is in pages, reported in bytes");
+        let stat = tc::procfs::parse_pid_stat(&line).expect("a well-formed line should parse");
+        assert_eq!(stat.utime + stat.stime, 400, "utime and stime are summed");
+        assert_eq!(stat.rss_pages, 4096, "rss is in pages, turned into bytes by rss_bytes");
         // A truncated line has no fields to find and must not be guessed at.
-        assert_eq!(parse_proc_stat("42 (short) S 1 2 3"), None);
+        assert_eq!(tc::procfs::parse_pid_stat("42 (short) S 1 2 3"), None);
     }
 
     #[test]

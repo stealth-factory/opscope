@@ -97,6 +97,10 @@ If an OS has no truthful source, do not draw an empty table. Return
 different from a supported source returning no rows. A source that exists
 on this OS but failed to open is still an error, not `unsupported()`.
 
+A widget that needs a process list, or any of `/proc/<pid>/stat`, `io`,
+`cgroup`, `cmdline` or `fd`, takes it from `tc::procfs` before it opens
+`/proc` itself.
+
 `ports` is the worked example: its package contains `parse.rs`, `linux.rs`,
 and `macos.rs`. Linux reads `/proc/net/tcp` and `/proc/net/tcp6`; macOS runs
 `lsof` (and `ps` / `nettop` for the rest). Both hosts pass that text to
