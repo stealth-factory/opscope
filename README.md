@@ -464,8 +464,10 @@ notice (`!`) and left out; it never stops a widget.
 **Sharing a theme:** a theme file stays yours and needs nobody's review. To
 offer one to everyone, open a pull request adding it to
 [`core/themes.json`](core/themes.json), where the bundled themes live. The
-tests measure every bundled theme's contrast, so the pull request says
-whether it reads.
+tests check every entry's fields and measure its contrast, so the pull
+request says whether it reads. **[Making a theme](wiki/making-a-theme.md)**
+has both routes step by step, what each role is for, and the checklist for
+the pull request.
 
 ### Editing `config.json` by hand
 

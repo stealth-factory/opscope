@@ -12,6 +12,7 @@ would have to be copied into fourteen of those to be useful belongs here.
 | | |
 |---|---|
 | [Making a widget](making-a-widget.md) | the ordered fresh-checkout path from an empty folder to tests, launcher smoke test and release handoff, plus the contracts those steps defend |
+| [Making a theme](making-a-theme.md) | your own theme file, what each of the 16 colour roles is for, and offering a theme to everyone through `core/themes.json` |
 | [Model prices](model-prices.md) | published API list prices per million tokens, with sources and as-of dates — what `agent-usage` multiplies by |
 
 ## Elsewhere

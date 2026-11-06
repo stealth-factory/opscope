@@ -308,6 +308,82 @@ pub fn parse_theme(value: &serde_json::Value) -> Result<Theme, String> {
 pub const THEMES_JSON: &str = include_str!("../themes.json");
 
 /// Every built-in theme, in the order the picker shows them.
+/// Every problem with a `themes.json`, one line each, naming the theme and
+/// the field: what a pull request adding a theme is checked against.
+/// `builtin()` leaves out a theme it cannot read, so without this a
+/// malformed submission would merge and simply never appear.
+pub fn check_bundled(text: &str) -> Vec<String> {
+    let file: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => return vec![format!("themes.json is not JSON: {e}")],
+    };
+    let mut problems = Vec::new();
+    let groups: Vec<&str> = file["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|g| g["id"].as_str())
+        .collect();
+    let Some(themes) = file["themes"].as_array() else {
+        return vec!["themes.json has no \"themes\" list".into()];
+    };
+    let known = |k: &str| {
+        ["id", "name", "group", "film", "light", "paintsBackground"].contains(&k) || Role::ALL.iter().any(|r| r.key() == k)
+    };
+    let mut seen: Vec<String> = Vec::new();
+    for (n, t) in themes.iter().enumerate() {
+        let id = t["id"].as_str().unwrap_or_default().to_string();
+        let who = if id.is_empty() { format!("theme #{}", n + 1) } else { id.clone() };
+        if !t.is_object() {
+            problems.push(format!("{who}: is not an object"));
+            continue;
+        }
+        if id.is_empty() {
+            problems.push(format!("{who}: no id"));
+        } else if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            problems.push(format!("{who}: id is not lowercase letters, digits and dashes"));
+        } else if ["auto", "terminal"].contains(&id.as_str()) {
+            problems.push(format!("{who}: id is a theme setting's name, not free for a theme"));
+        } else if seen.contains(&id) {
+            problems.push(format!("{who}: id is used twice"));
+        }
+        seen.push(id.clone());
+        if t["name"].as_str().is_none_or(str::is_empty) {
+            problems.push(format!("{who}: no name"));
+        }
+        match t["group"].as_str() {
+            None => problems.push(format!("{who}: no group")),
+            Some(g) if !groups.contains(&g) => problems.push(format!("{who}: group {g:?} is not in \"groups\"")),
+            _ => {}
+        }
+        for flag in ["light", "paintsBackground"] {
+            if t.get(flag).is_some_and(|v| !v.is_boolean()) {
+                problems.push(format!("{who}: {flag} is not true or false"));
+            }
+        }
+        for role in Role::ALL {
+            match t.get(role.key()).map(|v| v.as_str()) {
+                None => problems.push(format!("{who}: no {}", role.key())),
+                Some(None) => problems.push(format!("{who}: {} is not a string", role.key())),
+                Some(Some(raw)) if parse_hex(raw).is_none() => {
+                    problems.push(format!("{who}: {} is {raw:?}, not #rrggbb", role.key()))
+                }
+                _ => {}
+            }
+        }
+        if let Some(map) = t.as_object() {
+            for k in map.keys().filter(|k| !known(k)) {
+                problems.push(format!("{who}: {k:?} is not a theme field"));
+            }
+        }
+    }
+    match file["default"].as_str() {
+        Some(d) if seen.iter().any(|s| s == d) => {}
+        other => problems.push(format!("default {other:?} is not a theme in the file")),
+    }
+    problems
+}
+
 pub fn builtin() -> &'static [Theme] {
     static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
     THEMES.get_or_init(|| {
@@ -815,6 +891,53 @@ pub fn heat_in(theme: &Theme, frac: f64, tinted: bool) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bundled_themes_file_is_well_formed() {
+        let problems = check_bundled(THEMES_JSON);
+        assert!(problems.is_empty(), "core/themes.json:\n  {}", problems.join("\n  "));
+    }
+
+    #[test]
+    fn a_malformed_theme_is_named_with_its_field() {
+        let mut file: serde_json::Value = serde_json::from_str(THEMES_JSON).unwrap();
+        let mut good = file["themes"][0].clone();
+        good["id"] = "fresh".into();
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut t = good.clone();
+            edit(&mut t);
+            t
+        };
+        file["themes"] = serde_json::json!([
+            good,
+            bad(&|t| t["red"] = "red".into()),
+            bad(&|t| {
+                t["id"] = "missing-role".into();
+                t.as_object_mut().unwrap().remove("onAccent");
+            }),
+            bad(&|t| {
+                t["id"] = "typo".into();
+                t["onaccent"] = "#000000".into();
+            }),
+            bad(&|t| {
+                t["id"] = "no-group".into();
+                t["group"] = "nowhere".into();
+            }),
+            bad(&|t| t["id"] = "Bad Id".into()),
+            bad(&|t| t["id"] = "auto".into()),
+        ]);
+        let problems = check_bundled(&file.to_string());
+        let has = |p: &str| problems.iter().any(|x| x == p);
+        assert!(has("fresh: id is used twice"), "{problems:#?}");
+        assert!(has("fresh: red is \"red\", not #rrggbb"), "{problems:#?}");
+        assert!(has("missing-role: no onAccent"), "{problems:#?}");
+        assert!(has("typo: \"onaccent\" is not a theme field"), "{problems:#?}");
+        assert!(has("no-group: group \"nowhere\" is not in \"groups\""), "{problems:#?}");
+        assert!(has("Bad Id: id is not lowercase letters, digits and dashes"), "{problems:#?}");
+        assert!(has("auto: id is a theme setting's name, not free for a theme"), "{problems:#?}");
+        assert!(has("default Some(\"dusk\") is not a theme in the file"), "{problems:#?}");
+        assert_eq!(check_bundled("{"), vec!["themes.json is not JSON: EOF while parsing an object at line 1 column 1"]);
+    }
 
     #[test]
     fn every_built_in_theme_loads_with_all_sixteen_roles() {
