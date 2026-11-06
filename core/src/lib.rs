@@ -4924,6 +4924,15 @@ impl Keyboard {
         self.typing = true;
     }
 
+    /// Hold `tail` for the next poll, ahead of anything already waiting.
+    ///
+    /// A screen opened from inside a modal's own loop reads `held` first,
+    /// so the rest of the batch that pressed ↵ reaches that screen rather
+    /// than the modal that opened it.
+    pub(crate) fn hold(&mut self, tail: Vec<String>) {
+        hold_ahead(&mut self.held, tail);
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
     ///
     /// `!` is answered here, for every widget: it opens the notices screen
@@ -4982,17 +4991,20 @@ impl Keyboard {
         }
         // ctrl-k opens the command palette over whatever widget this is;
         // ctrl-t opens the theme picker directly. Both are answered here
-        // for every widget, and neither opens over another modal - not
-        // while the picker or palette is up, and not from the settings
-        // screen, where a second screen would clear the outer one's flag
-        // when it closed.
-        let free = !palette::OPEN.load(Ordering::Acquire)
-            && !picker::OPEN.load(Ordering::Acquire)
-            && !settings::SCREEN_OPEN.load(Ordering::Acquire);
-        if free && split_at(&mut keys, &mut self.held, palette::KEY) {
+        // for every widget, and neither opens over another screen - not
+        // over the picker or palette, and not from the settings or
+        // notices screen, where a second screen would clear the outer
+        // one's flag when it closed.
+        let free = || {
+            !palette::OPEN.load(Ordering::Acquire)
+                && !picker::OPEN.load(Ordering::Acquire)
+                && !settings::SCREEN_OPEN.load(Ordering::Acquire)
+                && !notices::screen_open()
+        };
+        if free() && split_at(&mut keys, &mut self.held, palette::KEY) {
             palette::run(self);
         }
-        if free && split_at(&mut keys, &mut self.held, picker::KEY) {
+        if free() && split_at(&mut keys, &mut self.held, picker::KEY) {
             let (base_rows, base_plots) = LAST_FRAME
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -5039,6 +5051,18 @@ impl Keyboard {
     }
 }
 
+/// Put `tail` at the front of `held`, ahead of anything already waiting.
+///
+/// `held` is read by the next `poll` first, so keys put here reach
+/// whatever runs next - a screen opened from inside `run`, or the keyboard
+/// after this poll returns. Ahead of the rest because these keys arrived
+/// earlier than anything already waiting.
+fn hold_ahead(held: &mut Vec<String>, tail: Vec<String>) {
+    let mut rest = std::mem::take(held);
+    held.extend(tail);
+    held.append(&mut rest);
+}
+
 /// Take `key` out of `keys` and hold everything after it for the screen
 /// that key opens.
 ///
@@ -5052,10 +5076,7 @@ fn split_at(keys: &mut Vec<String>, held: &mut Vec<String>, key: &str) -> bool {
     };
     let tail: Vec<String> = keys.split_off(at + 1);
     keys.pop();
-    // Ahead of whatever was already held: these keys arrived earlier.
-    let mut rest = std::mem::take(held);
-    held.extend(tail);
-    held.append(&mut rest);
+    hold_ahead(held, tail);
     true
 }
 

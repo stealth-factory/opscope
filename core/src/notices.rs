@@ -1002,6 +1002,13 @@ pub(crate) fn chrome(w: usize) -> Option<Chrome> {
         .cloned()
 }
 
+/// Whether the notices screen is up, for the modal-entry guard: a palette
+/// opened over it would open a second screen whose guard clears this one's
+/// flag when it closes.
+pub(crate) fn screen_open() -> bool {
+    SCREEN_OPEN.load(Ordering::Relaxed)
+}
+
 /// Whether `!` should open the screen: the channel is running and the
 /// screen is not already up - on it, `!` is the key that closes it.
 pub(crate) fn answers_bang() -> bool {

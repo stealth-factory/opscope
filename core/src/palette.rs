@@ -478,7 +478,16 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         // nothing else, or scrolling to look at a command would drag
         // the view straight back to the highlight.
         let mut moved = false;
-        for key in keys {
+        // The batch walked by index, so a command that opens a screen can
+        // hand that screen the rest of the batch first. Those keys were
+        // typed for the screen - `\rdrac` means "theme picker, filtered to
+        // drac" - and would otherwise sit here and land on the commands
+        // filter after the screen closed.
+        let mut pending = keys;
+        let mut at = 0;
+        while at < pending.len() {
+            let key = pending[at].clone();
+            at += 1;
             // The mode can change inside the batch (Switch widget…), so
             // the state and the rows are taken again for every key
             // rather than once per poll.
@@ -533,27 +542,45 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                         return close();
                     }
                 }
-                "enter" => match list.get(selected).map(|r| r.runs) {
-                    Some(Runs::Theme) => picker::run_over(keyboard, &base_rows, &base_plots),
-                    Some(Runs::Settings) => {
-                        if let Some(spec) = settings::registered() {
-                            // Relaunches itself by exec on a save; what
-                            // returns here is a save not made.
-                            settings::run_settings(keyboard, spec);
+                "enter" => {
+                    let mut opened = false;
+                    match list.get(selected).map(|r| r.runs) {
+                        Some(Runs::Theme) => {
+                            keyboard.hold(pending[at..].to_vec());
+                            picker::run_over(keyboard, &base_rows, &base_plots);
+                            opened = true;
                         }
-                    }
-                    Some(Runs::Notices) => crate::notices::run(keyboard),
-                    Some(Runs::Widgets) => {
-                        on_commands = false;
-                        changed = true;
-                    }
-                    Some(Runs::Widget) => {
-                        if let Some(stem) = list.get(selected).map(|r| r.label.clone()) {
-                            start(keyboard, &stem);
+                        Some(Runs::Settings) => {
+                            if let Some(spec) = settings::registered() {
+                                keyboard.hold(pending[at..].to_vec());
+                                // Relaunches itself by exec on a save;
+                                // what returns here is a save not made.
+                                settings::run_settings(keyboard, spec);
+                                opened = true;
+                            }
                         }
+                        Some(Runs::Notices) => {
+                            keyboard.hold(pending[at..].to_vec());
+                            crate::notices::run(keyboard);
+                            opened = true;
+                        }
+                        Some(Runs::Widgets) => {
+                            on_commands = false;
+                            changed = true;
+                        }
+                        Some(Runs::Widget) => {
+                            if let Some(stem) = list.get(selected).map(|r| r.label.clone()) {
+                                start(keyboard, &stem);
+                            }
+                        }
+                        None => {}
                     }
-                    None => {}
-                },
+                    if opened {
+                        // The screen took what it wanted from the batch;
+                        // the rest was typed for it and is spent.
+                        pending.clear();
+                    }
+                }
                 "up" => {
                     state.selected = state.selected.saturating_sub(1);
                     moved = true;
