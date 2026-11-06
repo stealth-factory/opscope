@@ -558,9 +558,9 @@ struct Palette {
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
-    /// `dim` measures 3.81 against `bg(38, 56, 76)`, under the 4.5 the
-    /// repository asks for against the tint as well as the background.
-    /// This is the same grey lifted until it clears — 4.94 — used *only*
+    /// `dim` once measured 3.81 against the selected-row tint, under the 4.5
+    /// the repository asks for against the tint as well as the background.
+    /// This is the same role lifted — `ink_on(Muted, true)` — used *only*
     /// where a tint is on, so an untinted row is the colour it always was.
     /// The substitution happens inside the closure that composes the tint
     /// rather than at each call site, because most sites reach `dim`
@@ -572,26 +572,47 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The lifted form of every other role this palette draws in, for text
+    /// on a selected or tinted row: the named `_lit` twins above are swapped
+    /// in by the tint closure first, and anything else it is handed goes
+    /// through [`Palette::on_tint`].
+    lifts: Vec<(String, String)>,
+}
+
+impl Palette {
+    /// `colour` as it should be drawn on a tinted row: its role's lifted
+    /// form when it is one of this palette's, otherwise `colour` itself.
+    fn on_tint<'a>(&'a self, colour: &'a str) -> &'a str {
+        self.lifts
+            .iter()
+            .find(|(plain, _)| plain == colour)
+            .map(|(_, lifted)| lifted.as_str())
+            .unwrap_or(colour)
+    }
 }
 
 fn palette() -> Palette {
     Palette {
-        blocked: tc::rgb(255, 105, 115),
-        blocked_lit: tc::rgb(255, 128, 136),
-        done: tc::rgb(90, 240, 160),
-        working: tc::rgb(255, 200, 90),
-        idle: tc::rgb(128, 148, 172),
-        idle_lit: tc::rgb(152, 168, 188),
-        unknown: tc::rgb(150, 150, 165),
-        unknown_lit: tc::rgb(165, 165, 178),
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        proc: tc::rgb(170, 190, 215),
-        idle_c: tc::rgb(122, 138, 160),
-        idle_c_lit: tc::rgb(155, 167, 184),
+        blocked: tc::ink(tc::Role::Red),
+        blocked_lit: tc::ink_on(tc::Role::Red, true),
+        done: tc::ink(tc::Role::Green),
+        working: tc::ink(tc::Role::Yellow),
+        idle: tc::ink(tc::Role::Muted),
+        idle_lit: tc::ink_on(tc::Role::Muted, true),
+        unknown: tc::ink(tc::Role::Muted),
+        unknown_lit: tc::ink_on(tc::Role::Muted, true),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        proc: tc::ink(tc::Role::Muted),
+        idle_c: tc::ink(tc::Role::Muted),
+        idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
+            .into_iter()
+            .map(|role| (tc::ink(role), tc::ink_on(role, true)))
+            .collect(),
     }
 }
 
@@ -1617,6 +1638,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -1968,11 +1990,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // looked for.
                 let loud = a.state == "blocked" || a.state == "done";
                 let tint = if here {
-                    tc::bg(38, 56, 76)
+                    tc::tint(tc::Role::Slot)
                 } else if a.state == "blocked" {
-                    tc::bg(46, 26, 30)
+                    tc::tint_toward(tc::Role::Red)
                 } else if a.state == "done" {
-                    tc::bg(22, 46, 34)
+                    tc::tint_toward(tc::Role::Green)
                 } else {
                     String::new()
                 };
@@ -1993,7 +2015,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if colour == p.idle_c {
                         p.idle_c_lit.as_str()
                     } else {
-                        colour
+                        p.on_tint(colour)
                     };
                     format!("{}{}", tint, colour)
                 };
@@ -2132,7 +2154,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
-                    tc::bg(38, 56, 76)
+                    tc::tint(tc::Role::Slot)
                 } else {
                     String::new()
                 };
@@ -2150,7 +2172,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if colour == p.idle_c {
                         p.idle_c_lit.as_str()
                     } else {
-                        colour
+                        p.on_tint(colour)
                     };
                     format!("{}{}", tint, colour)
                 };
@@ -2202,7 +2224,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
-                    tc::bg(38, 56, 76)
+                    tc::tint(tc::Role::Slot)
                 } else {
                     String::new()
                 };
@@ -2220,7 +2242,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if colour == p.idle_c {
                         p.idle_c_lit.as_str()
                     } else {
-                        colour
+                        p.on_tint(colour)
                     };
                     format!("{}{}", tint, colour)
                 };
@@ -2292,7 +2314,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
-                    tc::bg(38, 56, 76)
+                    tc::tint(tc::Role::Slot)
                 } else {
                     String::new()
                 };
@@ -2310,7 +2332,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if colour == p.idle_c {
                         p.idle_c_lit.as_str()
                     } else {
-                        colour
+                        p.on_tint(colour)
                     };
                     format!("{}{}", tint, colour)
                 };
@@ -2417,7 +2439,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
-                    tc::bg(38, 56, 76)
+                    tc::tint(tc::Role::Slot)
                 } else {
                     String::new()
                 };
@@ -2435,7 +2457,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if colour == p.idle_c {
                         p.idle_c_lit.as_str()
                     } else {
-                        colour
+                        p.on_tint(colour)
                     };
                     format!("{}{}", tint, colour)
                 };
@@ -2533,7 +2555,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     let here = at == selected_row;
                     let start = body.len();
                     let tint = if here {
-                        tc::bg(38, 56, 76)
+                        tc::tint(tc::Role::Slot)
                     } else {
                         String::new()
                     };
@@ -2551,7 +2573,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         } else if colour == p.idle_c {
                             p.idle_c_lit.as_str()
                         } else {
-                            colour
+                            p.on_tint(colour)
                         };
                         format!("{}{}", tint, colour)
                     };

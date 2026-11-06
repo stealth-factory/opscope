@@ -998,7 +998,7 @@ fn codex_calendar_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc
         *totals.entry(at).or_insert(0.0) += models.values().map(total_tokens).sum::<f64>();
     }
     let peak = totals.values().cloned().fold(0.0f64, f64::max);
-    let Some(cal) = day_calendar(&totals, w, CODEX_STEPS, None, p) else {
+    let Some(cal) = day_calendar(&totals, w, codex_steps(), None, p) else {
         return Vec::new();
     };
     let mut rows = vec![tc::seg(
@@ -1026,7 +1026,7 @@ fn codex_calendar_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc
         rows.push(tc::seg(&refs, w - 1));
     }
     let mut legend: Vec<(&str, String)> = vec![(p.dim.as_str(), "  Less ".into())];
-    let swatches: Vec<String> = CODEX_STEPS
+    let swatches: Vec<String> = codex_steps()
         .iter()
         .map(|(r, g, b)| tc::rgb(*r, *g, *b))
         .collect();

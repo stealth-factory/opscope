@@ -792,8 +792,13 @@ fn summary(v: &Value, secret: bool) -> String {
 
 /// The new section wins. A legacy section is consulted only when its
 /// owning widget explicitly declares it and the new section is absent.
+///
+/// The section every widget shares is never a widget's to alias: its
+/// readers know only its own name, so a theme written under a widget's old
+/// section - `pr.theme` for want of an `opscope` section - would be saved,
+/// reported as saved, and never read.
 fn live_section<'a>(live: &Value, canonical: &'a str, legacy: Option<&'a str>) -> &'a str {
-    if live.get(canonical).is_some() {
+    if live.get(canonical).is_some() || canonical == crate::theme::SECTION {
         return canonical;
     }
     if let Some(old) = legacy {
@@ -835,16 +840,51 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette, plain or lifted to read on the selected-row tint. Plain
+/// `Muted` measures 3.68 on Night Owl's selection and Horizon's accent
+/// 4.33, so every colour a selected row carries comes from the lifted one.
+fn palette_on(here: bool) -> Palette {
+    let ink = |role| crate::ink_on(role, here);
     Palette {
         // dim 3.81 on bg(38,56,76); dim_lit 4.74. Measured, not eyeballed.
-        dim: crate::rgb(127, 147, 172),
-        dim_lit: crate::rgb(140, 170, 195),
-        txt: crate::rgb(225, 235, 245),
-        lbl: crate::rgb(130, 165, 200),
-        accent: crate::rgb(150, 210, 255),
-        ok: crate::rgb(90, 240, 160),
-        warn: crate::rgb(255, 200, 90),
-        bad: crate::rgb(255, 100, 110),
+        // dim_lit is the same grey lifted to read on the selected-row tint.
+        dim: ink(crate::Role::Muted),
+        dim_lit: crate::ink_on(crate::Role::Muted, true),
+        txt: ink(crate::Role::Fg),
+        lbl: ink(crate::Role::Muted),
+        accent: ink(crate::Role::Accent),
+        ok: ink(crate::Role::Green),
+        warn: ink(crate::Role::Yellow),
+        bad: ink(crate::Role::Red),
+    }
+}
+
+impl Palette {
+    /// `colour`, which must be one of this palette's own fields, as `lit`
+    /// has it. Matched by address, not by text: two roles can share an RGB
+    /// in a theme, and the text alone cannot say which one was meant.
+    fn lifted<'a>(&self, lit: &'a Palette, colour: &'a str) -> &'a str {
+        let at = |field: &String| std::ptr::eq(field.as_str(), colour);
+        if at(&self.dim) {
+            &lit.dim_lit
+        } else if at(&self.txt) {
+            &lit.txt
+        } else if at(&self.lbl) {
+            &lit.lbl
+        } else if at(&self.accent) {
+            &lit.accent
+        } else if at(&self.ok) {
+            &lit.ok
+        } else if at(&self.warn) {
+            &lit.warn
+        } else if at(&self.bad) {
+            &lit.bad
+        } else {
+            colour
+        }
     }
 }
 
@@ -952,7 +992,24 @@ fn load(spec: SettingsSpec) -> App {
     // Reporting is unconditional now: the option was right by default and
     // only ever turned off by mistake, so every screen here shows the
     // keys the widget itself owns and no others.
-    let wrapped = format!("{{{section}:{}}}", spec.schema);
+    // And the section every widget shares, which holds the theme: the same
+    // choice is offered from every widget's screen, and saving it restarts
+    // this widget in the new colours like any other setting.
+    let shared = crate::theme::settings_schema();
+    let mut constraints = constraints;
+    if let Some(rules) = serde_json::from_str::<Value>(&shared)
+        .ok()
+        .and_then(|v| v.get("_schema").and_then(Value::as_object).cloned())
+    {
+        for (key, rule) in rules {
+            constraints.entry(key).or_insert(rule);
+        }
+    }
+    let wrapped = if spec.section == crate::theme::SECTION {
+        format!("{{{section}:{}}}", spec.schema)
+    } else {
+        format!("{{{section}:{},{:?}:{shared}}}", spec.schema, crate::theme::SECTION)
+    };
     let fields = fields_from_example(&wrapped).expect("the baked-in settings schema is valid JSON");
     let mut skipped = Vec::new();
     let mut found = None;
@@ -3353,6 +3410,7 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
 }
 
 fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+    let lit = palette_on(true);
     // Pinned: it names the widget whose settings these are, which is the one
     // thing that must not scroll away from somebody halfway down a long list.
     let head = crate::title(&format!("{} settings", app.widget), w, &p.accent);
@@ -3449,17 +3507,15 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
         rows_at.push((body.len(), i));
         let here = i == app.selected;
         let tint = if here {
-            crate::bg(38, 56, 76)
+            crate::tint(crate::Role::Slot)
         } else {
             String::new()
         };
         let c_of = |colour: &str| {
             let colour = if tint.is_empty() {
                 colour
-            } else if colour == p.dim {
-                p.dim_lit.as_str()
             } else {
-                colour
+                p.lifted(&lit, colour)
             };
             format!("{}{}", tint, colour)
         };
@@ -3763,7 +3819,7 @@ fn input_row(
         .iter()
         .collect();
 
-    let field = crate::bg(24, 36, 50);
+    let field = crate::tint(crate::Role::Dark);
     let ink = format!("{field}{}", p.txt);
     let ghost = format!("{field}{}", p.dim);
     let edge = format!("{field}{}", p.accent);
@@ -3802,6 +3858,7 @@ fn input_row(
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+    let lit = palette_on(true);
     let Mode::Pick {
         index,
         query,
@@ -4078,7 +4135,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         let focused = !matches!(kind, PickKind::Free | PickKind::Map) || *on_list;
         let here = focused && i == *sel;
         let tint = if here {
-            crate::bg(28, 44, 62)
+            crate::tint(crate::Role::Slot)
         } else {
             String::new()
         };
@@ -4087,9 +4144,10 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         // composed inline would not outlive the slice it is put in. The tint
         // has to lead each one or the foreground that follows resets the
         // background and the highlight stops halfway across.
-        let lead = format!("{tint}{}", if here { &p.accent } else { &p.dim });
-        let name = format!("{tint}{}", if *on { &p.txt } else { &p.dim });
-        let note = format!("{tint}{}", p.dim);
+        let q = if here { &lit } else { p };
+        let lead = format!("{tint}{}", if here { &q.accent } else { &q.dim });
+        let name = format!("{tint}{}", if *on { &q.txt } else { &q.dim });
+        let note = format!("{tint}{}", q.dim);
         body.push(crate::seg(
             &[
                 (
@@ -4407,8 +4465,22 @@ fn typing_in(mode: &Mode) -> bool {
 ///
 /// The caller keeps ownership of the already-active keyboard so entering
 /// settings never stacks a second raw-mode guard over the widget's.
+/// Set while the settings screen is open, so a theme change made elsewhere
+/// waits for it rather than restarting the widget under an unsaved edit.
+pub(crate) static SCREEN_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`SCREEN_OPEN`] however the screen is left.
+struct ScreenOpen;
+
+impl Drop for ScreenOpen {
+    fn drop(&mut self) {
+        SCREEN_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
-    let p = palette();
+    SCREEN_OPEN.store(true, std::sync::atomic::Ordering::Release);
+    let _open = ScreenOpen;
     let mut app = load(spec);
     // This screen borrows the caller's keyboard, so it inherits wherever
     // the caller said its footer hints were - and this loop polls before it
@@ -4484,12 +4556,17 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
             }
         }
         let (w, h) = crate::size();
+        // Built each frame in the theme in force, and drawn as it is: the
+        // lifted palette a selected row takes is built here too, and the
+        // two have to agree on which theme they are in. Recolouring a frame
+        // already in the theme in force maps one role onto another.
+        let p = palette();
         let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
             Mode::Pick { .. } => draw_pick(&app, w, h, &p),
         };
-        crate::draw(&body, w, h);
+        crate::draw_current(&body, w, h, &[]);
         keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
         click = next;
         keyboard.wait(Duration::from_millis(80));
@@ -4511,7 +4588,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
 /// the terminal is put back the way the widget expects and the caller
 /// carries on with the config it started with, which is exactly where it
 /// was before.
-fn relaunch(keyboard: &mut crate::Keyboard) {
+pub(crate) fn relaunch(keyboard: &mut crate::Keyboard) {
     use std::os::unix::process::CommandExt;
 
     let Ok(exe) = std::env::current_exe() else {
@@ -5466,6 +5543,19 @@ mod tests {
         );
         // Coming back out is not leaving the screen.
         assert_eq!(app.stack.len(), 1);
+    }
+
+    /// A widget's old section stands in for its own, never for the one
+    /// every widget shares: `theme::wanted()` reads only `opscope`, so a
+    /// theme saved under `pr` would be reported saved and never applied.
+    #[test]
+    fn the_shared_section_never_takes_a_widgets_legacy_name() {
+        let live = serde_json::json!({ "pr": { "repos": [] } });
+        assert_eq!(live_section(&live, "github-prs", Some("pr")), "pr");
+        assert_eq!(
+            live_section(&live, crate::theme::SECTION, Some("pr")),
+            crate::theme::SECTION
+        );
     }
 
     /// A field a row already carries that this screen has no opinion about

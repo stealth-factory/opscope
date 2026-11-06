@@ -351,10 +351,15 @@ fn mode_for(requested: Option<&str>, host_relays_images: bool) -> GraphicsMode {
 /// Query only after cbreak is active, so replies are never echoed as text.
 /// No wait here: the first frames use text while normal input polling negotiates.
 pub(crate) fn start() {
-    let mode = mode_for(
-        std::env::var("OPSCOPE_GRAPHICS").ok().as_deref(),
-        super::shm::host_relays_images(|key| std::env::var(key).ok()),
-    );
+    // `NO_COLOR` is text: a chart drawn as pixels would be in colour.
+    let mode = if super::theme::no_color() {
+        GraphicsMode::Text
+    } else {
+        mode_for(
+            std::env::var("OPSCOPE_GRAPHICS").ok().as_deref(),
+            super::shm::host_relays_images(|key| std::env::var(key).ok()),
+        )
+    };
     // Resume and a fresh start both drop the previous probe. A shared-memory
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();
@@ -429,7 +434,7 @@ pub(crate) fn start() {
     };
     let cell_query = if query_cells { "\x1b[16t" } else { "" };
     let mut query = format!(
-        "{leading}{NOTIFY_QUERY}{STATUS_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}"
+        "{leading}{NOTIFY_QUERY}{STATUS_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}{SCHEME_REPORTS_ON}"
     );
     if let Some(probe) = probe {
         query.push_str(&probe);
@@ -816,6 +821,10 @@ fn frame_refused(message: &str) -> bool {
 }
 
 pub(crate) fn reply(sequence: &str) {
+    if super::termtheme::parse_scheme_change(sequence).is_some() {
+        SCHEME_CHANGED.store(true, Ordering::Release);
+        return;
+    }
     // Outside the 800 ms capability window on purpose: a font change asks
     // again on SIGWINCH, long after startup, and the reply is still a cell size.
     if let Some(report) = cell_report(sequence) {
@@ -2222,3 +2231,20 @@ mod tests {
     }
 
 }
+
+/// The theme the terminal described, from its replies to the colour
+/// queries: asked once, the first time it is wanted, and remembered.
+/// `None` when it is not a terminal or it did not say.
+pub(crate) fn terminal_theme() -> Option<crate::theme::Theme> {
+    static ASKED: std::sync::OnceLock<Option<crate::theme::Theme>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(super::termtheme::query).clone()
+}
+
+/// Set when the terminal says its colours changed (mode 2031); the next
+/// keyboard poll restarts the widget so it asks again.
+pub(crate) static SCHEME_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Ask the terminal to report light/dark switches (mode 2031). Harmless
+/// where it is not known; turned off again in `restore_screen`.
+pub(crate) const SCHEME_REPORTS_ON: &str = "\x1b[?2031h";
+pub(crate) const SCHEME_REPORTS_OFF: &str = "\x1b[?2031l";

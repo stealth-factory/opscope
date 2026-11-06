@@ -2704,11 +2704,31 @@ fn underline_colours_clear_aa_on_the_background_and_a_tint() {
     );
 
     let widgets = widgets();
-    let mut colours = underline_calls(&std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap());
+    let core = std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap();
+    let mut colours = underline_calls(&core);
     for src in widgets.values() {
         colours.extend(underline_calls(src));
     }
-    assert!(!colours.is_empty(), "no underline(r, g, b) call to measure");
+    // Core's threshold underline is the theme's lifted yellow, measured in
+    // every built-in theme against that theme's background and row tint.
+    assert!(
+        core.contains("lifted(Role::Yellow)"),
+        "the threshold underline no longer names the lifted theme yellow, so this check measures nothing"
+    );
+    let mut themed = Vec::new();
+    for t in opscope_core::theme::builtin() {
+        use opscope_core::Role;
+        let c = t.lifted(Role::Yellow);
+        let c = (c.0 as f64, c.1 as f64, c.2 as f64);
+        for ground in [Role::Bg, Role::Slot] {
+            let g = t.colour(ground);
+            let r = contrast(c, (g.0 as f64, g.1 as f64, g.2 as f64));
+            if r < 4.5 {
+                themed.push(format!("{}: threshold underline {c:?} on {ground:?} measures {r:.2}", t.id));
+            }
+        }
+    }
+    assert!(themed.is_empty(), "underline colours:\n{}", themed.join("\n"));
 
     let mut surfaces = vec![("background", background)];
     for (name, src) in &widgets {
@@ -2838,8 +2858,17 @@ fn ramp_steps(lifted: bool) -> Vec<(f64, (f64, f64, f64))> {
 /// This walks the ramp itself and measures every step, which is the half
 /// that stops it recurring - a later retune of the stops is measured here
 /// the same day it is written, rather than by eye two releases later.
+/// The ramp checks measure core's ramp against the tints widget source
+/// names, which are opscope Classic's; so they draw in Classic, whatever
+/// theme the machine running them has set.
+fn pin_classic() {
+    let classic = opscope_core::theme::find("classic").expect("opscope Classic is built in");
+    opscope_core::theme::set(classic.clone());
+}
+
 #[test]
 fn the_lifted_ramp_clears_aa_on_a_selection_tint() {
+    pin_classic();
     let tint = (38.0, 56.0, 76.0);
     let mut wrong = Vec::new();
     for (frac, c) in ramp_steps(true) {
@@ -2975,6 +3004,7 @@ fn let_binding_ident(line: &str) -> Option<String> {
 /// called `heat` in a second file would be blamed for the tint in its first.
 #[test]
 fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
+    pin_classic();
     let mut wrong = Vec::new();
     for (name, whole) in widgets() {
         let src = without_tests(&whole);
@@ -5498,5 +5528,61 @@ local c = rex.call; c("session.destroy")
     assert!(
         reaches.iter().any(|r| r.starts_with("rex.call 3 times, 2 of them")),
         "an alias leaves a call the reader cannot name: {reaches:?}"
+    );
+}
+
+/// Every colour literal `(r, g, b)` call or raw truecolor escape in `src`:
+/// `rgb(1, 2, 3)`, `bg(…)`, `underline(…)` with a number first, and the
+/// `\x1b[38;2;` / `\x1b[48;2;` escape spelled out in a string.
+fn colour_literals(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (n, line) in src.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or(line);
+        for call in ["rgb(", "bg(", "underline("] {
+            let mut rest = code;
+            while let Some(at) = rest.find(call) {
+                let before = rest[..at].chars().last();
+                let after = rest[at + call.len()..].trim_start().chars().next();
+                let named = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                if named && after.is_some_and(|c| c.is_ascii_digit()) {
+                    found.push(format!("line {}: {}", n + 1, line.trim()));
+                }
+                rest = &rest[at + call.len()..];
+            }
+        }
+        if code.contains("\\x1b[38;2;") || code.contains("\\x1b[48;2;") {
+            found.push(format!("line {}: {}", n + 1, line.trim()));
+        }
+    }
+    found
+}
+
+/// A widget asks the theme for a role - `tc::ink(Role::Muted)`,
+/// `tc::tint(Role::Slot)` - and never names an RGB value. A literal is a
+/// colour tuned for one background: it is what made every widget unreadable
+/// on a light terminal, and it is invisible to the per-theme contrast tests
+/// in `core/src/theme.rs`, which can only measure roles. Tests may keep
+/// literal colours as data; `widgets()` has already dropped them.
+#[test]
+fn no_widget_names_a_colour_literal() {
+    // The pattern first, on lines it must and must not catch.
+    assert_eq!(colour_literals("let x = tc::rgb(1, 2, 3);").len(), 1);
+    assert_eq!(colour_literals("let x = tc::bg( 38,56,76);").len(), 1);
+    assert_eq!(colour_literals(r#"let e = "\x1b[38;2;1;2;3m";"#).len(), 1);
+    assert!(colour_literals("let x = tc::ink(tc::Role::Fg); // was rgb(225, 235, 245)").is_empty());
+    assert!(colour_literals("let x = tc::bg(r, g, b); let y = hue_rgb(t);").is_empty());
+
+    let mut wrong = Vec::new();
+    let mut sources: Vec<(String, String)> = widgets().into_iter().collect();
+    sources.push(("launcher".into(), without_tests(&launcher_source())));
+    for (name, src) in sources {
+        for hit in colour_literals(&src) {
+            wrong.push(format!("{name}: {hit}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "colour literals in widget code - ask the theme for a role (tc::ink, tc::ink_on, tc::tint, tc::tint_toward):\n{}",
+        wrong.join("\n")
     );
 }

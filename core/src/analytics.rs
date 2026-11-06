@@ -656,12 +656,12 @@ struct Palette {
 impl Palette {
     fn new() -> Self {
         Self {
-            accent: crate::rgb(150, 210, 255),
-            text: crate::rgb(225, 235, 245),
-            dim: crate::rgb(127, 147, 172),
-            ok: crate::rgb(130, 220, 160),
-            warn: crate::rgb(255, 200, 120),
-            accept: format!("{}{}", crate::bg(28, 72, 56), crate::rgb(190, 255, 215)),
+            accent: crate::ink(crate::Role::Accent),
+            text: crate::ink(crate::Role::Fg),
+            dim: crate::ink(crate::Role::Muted),
+            ok: crate::ink(crate::Role::Green),
+            warn: crate::ink(crate::Role::Yellow),
+            accept: format!("{}{}", crate::tint(crate::Role::Accent), crate::ink(crate::Role::OnAccent)),
         }
     }
 }
@@ -1039,7 +1039,8 @@ fn show_unsaved(keyboard: &mut crate::Keyboard, error: &str) {
         let (w, h) = crate::size();
         let f = unsaved_frame(error, w, h, scroll);
         scroll = clamped_scroll(scroll, f.body_len, f.window);
-        crate::draw(&f.rows, w, h);
+        // Built in the theme in force this frame; nothing to recolour.
+        crate::draw_current(&f.rows, w, h, &[]);
         keyboard.wait(std::time::Duration::from_millis(200));
         let overflows = f.body_len > f.window;
         for key in keyboard.poll() {
@@ -1073,7 +1074,11 @@ fn ask_loop(keyboard: &mut crate::Keyboard, name: &str) -> bool {
         let (w, h) = crate::size();
         let f = frame(name, w, h, scroll, note.as_ref());
         scroll = clamped_scroll(scroll, f.body_len, f.window);
-        crate::draw(&f.rows, w, h);
+        // Built in the theme in force this frame, so it is drawn as it is:
+        // recolouring it from the theme the process started in maps one
+        // role onto another, and a theme changed while this screen was up
+        // turned its text into its background.
+        crate::draw_current(&f.rows, w, h, &[]);
         keyboard.footer_at(&f.footer, f.foot_top, 1);
         keyboard.wait(std::time::Duration::from_millis(200));
         for key in keyboard.poll() {
@@ -1598,34 +1603,19 @@ mod tests {
         (n[0], n[1], n[2])
     }
 
-    /// Every colour the splash declares, measured: the palette checks in
-    /// check.rs read widget sources and never see this screen.
+    /// Every colour the splash uses is a theme role, so it is readable in
+    /// every theme: core's theme tests hold each role to AA 4.5 on the
+    /// background and the selected-row tint, and `onAccent` on `accent`.
+    /// A literal colour here would be measured against nothing.
     #[test]
-    fn every_splash_colour_clears_aa() {
+    fn every_splash_colour_is_a_theme_role() {
         let src = include_str!("analytics.rs");
         let body = src.split("impl Palette {").nth(1).unwrap();
         let body = body.split("\n}\n").next().unwrap();
-        let background = (0.0, 0.0, 0.0);
-        let tint = triple(body, "crate::bg(");
-        let mut measured = 0;
-        let mut wrong = Vec::new();
-        for line in body.lines() {
-            let Some((field, _)) = line.trim().split_once(':') else { continue };
-            if !line.contains("crate::rgb(") {
-                continue;
-            }
-            let c = triple(line, "crate::rgb(");
-            measured += 1;
-            let on = if field == "accept" { tint } else { background };
-            let r = contrast(c, on);
-            if r < 4.5 {
-                wrong.push(format!("{field} {c:?} on {on:?} measures {r:.2}"));
-            }
-        }
-        assert_eq!(measured, 6, "a palette field was not measured");
-        assert!(wrong.is_empty(), "under AA 4.5:\n{}", wrong.join("\n"));
-        // A deliberately bad pair has to fail, or this cannot.
-        assert!(contrast((80.0, 30.0, 30.0), background) < 4.5);
+        assert!(!body.contains("crate::rgb(") && !body.contains("crate::bg("), "a literal colour in the splash palette");
+        assert_eq!(body.matches("crate::ink(").count() + body.matches("crate::tint(").count(), 7, "a palette field is not a role");
+        assert!(body.contains("crate::tint(crate::Role::Accent), crate::ink(crate::Role::OnAccent)"), "accept is onAccent on accent");
+        let _ = (luminance((0.0, 0.0, 0.0)), contrast((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), triple("x(1, 2, 3)", "x("));
     }
 
     #[test]

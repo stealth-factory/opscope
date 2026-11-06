@@ -23,6 +23,9 @@
 mod aliases;
 mod analytics;
 mod dependencies;
+pub mod theme;
+mod termtheme;
+mod picker;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -43,6 +46,10 @@ pub use dependencies::{
 };
 pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
+/// The footer hint for the theme picker, beside `[,] settings` in every
+/// widget: one wording, kept here.
+pub const THEME_HINT: &str = picker::HINT;
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -248,10 +255,12 @@ fn apply_mark(colour: &str, marks: Marks, caps: terminal::UnderlineCaps) -> Stri
         _ => out.push_str("\x1b[4m"),
     }
     if marks.threshold && caps.colour {
-        // (255, 214, 140) clears AA 4.5 on black and on the selected-row tints.
-        // A darker red at (80, 30, 30) measures about 1.55 on black and 1.13
-        // on bg(38, 56, 76), which is how the contrast check can fail.
-        out.push_str(&underline(255, 214, 140));
+        // The theme's yellow, lifted: marks sit on selected rows too, and
+        // the lifted form clears AA 4.5 on the background and every row
+        // tint. A darker red measured about 1.55 on black, which is how an
+        // underline colour can fail to be seen at all.
+        let (r, g, b) = theme::current().lifted(Role::Yellow);
+        out.push_str(&underline(r, g, b));
     }
     out
 }
@@ -772,7 +781,7 @@ fn title_short_of(text: &str, w: usize, colour: &str, tick: Option<usize>, room:
         colour,
         left,
         RST,
-        rgb(220, 255, 240),
+        ink(Role::Fg),
         t,
         RST,
         colour,
@@ -1099,11 +1108,36 @@ pub fn append_plot_rows(
     rows.extend(body);
 }
 
+/// The widget's last frame as it built it, before any recolouring: what the
+/// theme picker repaints in each theme it previews.
+pub(crate) static LAST_FRAME: std::sync::Mutex<Option<(Vec<String>, Vec<Plot>)>> =
+    std::sync::Mutex::new(None);
+
 /// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // A stopped tty would block this write, and this is the thread that
     // reads keys. Hold the frame; the next draw after the start character
     // paints it. `SCREEN_LOST` stays set until that draw.
+    if output_held() {
+        return;
+    }
+    // The theme is one setting for every widget. A change to it - from the
+    // picker in another pane, or config.json edited by hand - is picked up
+    // here, and every colour this widget built in the theme it started in
+    // is drawn in the theme in force: rows and charts alike.
+    if !picker::OPEN.load(Ordering::Acquire) {
+        *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some((rows.to_vec(), plots.to_vec()));
+    }
+    draw_current(rows, w, h, plots);
+}
+
+/// [`draw_plots`] for a frame already in the theme in force: nothing is
+/// recoloured. The theme picker builds its modal in the theme it previews,
+/// and recolouring that as though it were in the theme the widget started
+/// in maps one role onto another - GitHub Light's white `Bg` is Cobalt2's
+/// white `Fg`, so the labels came out in Cobalt2's background and vanished.
+/// It recolours the widget's frame itself and hands the whole lot here.
+pub(crate) fn draw_current(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
@@ -1118,7 +1152,8 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         Some(c) if !c.banner.is_empty() && c.h == h + c.banner.len() => {
             let mut full: Vec<String> = rows.iter().take(h).cloned().collect();
             full.resize(h, String::new());
-            full.extend(c.banner.iter().cloned());
+            // Laid on after the recolour, so put into the theme here.
+            full.extend(c.banner.iter().map(|row| theme::classic_now(row)));
             with_banner = full;
             (with_banner.as_slice(), c.h)
         }
@@ -1286,7 +1321,12 @@ fn paint(
     lost: bool,
     counter: Option<&(&'static str, String)>,
 ) -> String {
-    let lines = lines_with(rows, w, h, counter);
+    let mut lines = lines_with(rows, w, h, counter);
+    // `NO_COLOR`: every row, the counter and the version included, without
+    // a colour, the tints as reverse video.
+    if theme::no_color() {
+        lines = lines.iter().map(|l| theme::mono(l)).collect();
+    }
     let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
@@ -1314,9 +1354,11 @@ fn paint(
     buf
 }
 
-/// The grey the version is drawn in: the launcher's dim, which is where
-/// the version was first shown.
-const VERSION_INK: (u8, u8, u8) = (127, 147, 172);
+/// The grey the version is drawn in: the theme's secondary text, which is
+/// what the launcher drew it in when it was first shown there.
+fn version_ink() -> (u8, u8, u8) {
+    theme::colour(Role::Muted)
+}
 
 /// What a title keeps for itself before the version gives way to it:
 /// `╺━`, a space, a name of eight cells, a space, `╸`, and two cells of
@@ -1422,6 +1464,7 @@ fn lines_with(
     counter: Option<&(&'static str, String)>,
 ) -> Vec<String> {
     let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
+    let ground = theme::background();
     (0..h)
         .map(|i| {
             let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
@@ -1432,7 +1475,7 @@ fn lines_with(
             {
                 line = without_sizing(&line);
             }
-            if i == 0 {
+            let line = if i == 0 {
                 let line = match graphics_notice() {
                     Some(notice) => with_notice(&line, notice, w, room),
                     None => line,
@@ -1440,7 +1483,14 @@ fn lines_with(
                 stamped_with(&line, w, counter)
             } else {
                 line
-            }
+            };
+            // A theme with its own background paints it under every cell:
+            // from the start of the row, and again after every reset -
+            // the widget's, and the ones the notice and the version stamp
+            // put on the top row, which would otherwise drop those cells
+            // back to the terminal's. A tint a widget sets still wins
+            // until its reset.
+            if ground.is_empty() { line } else { on_ground(&line, &ground) }
         })
         .collect()
 }
@@ -1449,6 +1499,72 @@ fn lines_with(
 #[cfg(test)]
 fn frame(rows: &[String], w: usize, h: usize) -> String {
     painted(&lines(rows, w, h))
+}
+
+/// `line` with the theme's background `ground` under it: set at the start,
+/// and set again after each reset or default-background escape the row
+/// carries.
+fn on_ground(line: &str, ground: &str) -> String {
+    let mut out = String::with_capacity(line.len() + ground.len() * 4);
+    out.push_str(ground);
+    let mut rest = line;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = tail.find('m').map(|e| e + 1).filter(|e| tail[2..*e - 1].bytes().all(|b| b.is_ascii_digit() || b == b';' || b == b':'));
+        match end {
+            Some(e) => {
+                let seq = &tail[..e];
+                out.push_str(seq);
+                if drops_background(&seq[2..seq.len() - 1]) {
+                    out.push_str(ground);
+                }
+                rest = &tail[e..];
+            }
+            None => {
+                out.push_str("\x1b[");
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether an SGR with these parameters leaves the background at the
+/// terminal's default: its last word on the background is a full reset or
+/// `49`. The parameters are read in order, and the arguments of an extended
+/// colour (`38;2;r;g;b`, `48;5;n`, ...) are skipped as a unit, so a channel
+/// that happens to be `49` or `0` - Dusk's selection tint is
+/// `48;2;39;42;49` - is never read as a command of its own.
+fn drops_background(params: &str) -> bool {
+    if params.is_empty() {
+        return true;
+    }
+    let words: Vec<&str> = params.split(';').collect();
+    let mut dropped = None;
+    let mut i = 0;
+    while i < words.len() {
+        // A colon form (`48:2::r:g:b`) carries its arguments in one word.
+        let head = words[i].split(':').next().unwrap_or("");
+        let colon = words[i].contains(':');
+        match head {
+            "" | "0" => dropped = Some(true),
+            "49" => dropped = Some(true),
+            "48" => dropped = Some(false),
+            _ => {}
+        }
+        if !colon && matches!(head, "38" | "48" | "58") {
+            i += match words.get(i + 1).copied() {
+                Some("2") => 5,
+                Some("5") => 3,
+                _ => 1,
+            };
+            continue;
+        }
+        i += 1;
+    }
+    dropped.unwrap_or(false)
 }
 
 /// Every one of `lines`, from home.
@@ -1483,6 +1599,9 @@ fn put_line(buf: &mut String, line: &str) {
     // its `╸` without anyone noticing. Erasing from column 0 before the
     // row is written cannot reach anything the row puts down.
     buf.push_str(RST);
+    // The erase fills with the background in force, so a themed pane is
+    // painted to its right edge, past the end of the row's text.
+    buf.push_str(&theme::background());
     buf.push_str(EL);
     if line.contains("\x1b]777;opscope-link;") {
         if let Some(marker) = link_marker() {
@@ -1515,6 +1634,9 @@ fn covering_row(lines: &[String], i: usize) -> Option<&str> {
 /// touch it, and the gaps between blocks are spaces.
 fn put_covered(buf: &mut String, origin: &str) {
     buf.push_str(RST);
+    // As in `put_line`: the spaces and the erase take the background in
+    // force, which has to be the theme's for a themed pane.
+    buf.push_str(&theme::background());
     let ranges = covered_ranges(origin);
     if ranges.is_empty() {
         buf.push_str(EL);
@@ -1822,10 +1944,12 @@ fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -
         rest = &rest[c.len_utf8()..];
     }
     let cut = close_dangling_link(&cut);
-    let (r, g, b) = VERSION_INK;
+    let (r, g, b) = version_ink();
     let mut tail = String::new();
     let mut taken = 0;
     if let Some((colour, text)) = counter {
+        // The counter's colour is Classic's, as every notice colour is.
+        let colour = theme::classic_now(colour);
         tail.push_str(&format!("{}{colour}{text}{RST}", " ".repeat(COUNTER_GAP)));
         taken = display_width(text) + COUNTER_GAP;
     }
@@ -1898,6 +2022,9 @@ pub fn claim_screen() {
 const SCREEN_RESTORE: &str = concat!(
     "\x1b[?1006l",
     "\x1b[?1000l",
+    // Light/dark reports (mode 2031), which outlive the process the same
+    // way: the next switch would be typed at the shell.
+    "\x1b[?2031l",
     "\x1b[?25h",
     "\x1b[0m",
     "\x1b[2J",
@@ -1976,7 +2103,7 @@ pub fn restore_screen() {
     graphics::cleanup();
     terminal::release_terminal();
     terminal::cleanup_signal();
-    out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
+    out(&format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
 
@@ -2114,6 +2241,12 @@ fn hint_key(plain: &str) -> Option<String> {
         "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
     ];
     let first = plain.split_whitespace().next()?;
+    // A named key in brackets is the same key: `[ctrl-t]heme`, `[esc] back`.
+    // The bracket closes the name, so the word fused onto it is not read.
+    let first = match first.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
+        Some((inside, _)) => inside,
+        None => first,
+    };
     let lowered = first.to_lowercase();
     let known = NAMED.contains(&lowered.as_str())
         || (lowered.strip_prefix("ctrl-")).is_some_and(|rest| {
@@ -2619,14 +2752,8 @@ fn base64(data: &[u8]) -> String {
 /// finished - calls that instead. A fraction where high is good belongs
 /// on [`health`] / [`health_on`].
 pub fn heat(frac: f64) -> String {
-    let frac = frac.clamp(0.0, 1.0);
-    if frac < 0.5 {
-        let t = frac / 0.5;
-        rgb((40.0 + 200.0 * t) as u8, 255, (120.0 - 100.0 * t) as u8)
-    } else {
-        let t = (frac - 0.5) / 0.5;
-        rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
-    }
+    let (r, g, b) = theme::heat_colour(frac, false);
+    rgb(r, g, b)
 }
 
 /// [`heat`] with its hot end lifted far enough to be read on a tinted row.
@@ -2656,12 +2783,8 @@ pub fn heat(frac: f64) -> String {
 /// `heat_on(frac, false)` is `heat` itself rather than a copy of its
 /// arithmetic, so the ramp everyone recognises cannot drift from this one.
 pub fn heat_on(frac: f64, tinted: bool) -> String {
-    let frac = frac.clamp(0.0, 1.0);
-    if !tinted || frac < 0.5 {
-        return heat(frac);
-    }
-    let t = (frac - 0.5) / 0.5;
-    rgb(255, (240.0 - 110.0 * t) as u8, (20.0 + 10.0 * t) as u8)
+    let (r, g, b) = theme::heat_colour(frac, tinted);
+    rgb(r, g, b)
 }
 
 /// The same ramp as [`heat`], for a fraction where **high is good**.
@@ -2925,9 +3048,9 @@ fn cannot_start_inner(
     install: &str,
     settings: Option<SettingsSpec>,
 ) {
-    let bad = rgb(255, 100, 110);
-    let dim = rgb(127, 147, 172);
-    let txt = rgb(225, 235, 245);
+    let bad = ink(Role::Red);
+    let dim = ink(Role::Muted);
+    let txt = ink(Role::Fg);
     setup();
     let mut keyboard = Keyboard::new();
     loop {
@@ -4211,7 +4334,7 @@ pub fn guard_frame(
     let mut rows = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
         Ok(rows) => return rows,
         Err(_) => {
-            let mut rows = vec![title(widget, w, &rgb(150, 210, 255)), String::new()];
+            let mut rows = vec![title(widget, w, &ink(Role::Accent)), String::new()];
             rows.extend(fault_rows(widget, w));
             rows
         }
@@ -4247,7 +4370,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
     let mut rows = vec![
         seg(
             &[(
-                rgb(255, 120, 110).as_str(),
+                ink(Role::Red).as_str(),
                 format!(" {widget} could not draw this frame."),
             )],
             width,
@@ -4255,7 +4378,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
         String::new(),
     ];
     for line in wrap(&said, w.saturating_sub(3).max(12)) {
-        rows.push(seg(&[(rgb(180, 190, 205).as_str(), format!("  {line}"))], width));
+        rows.push(seg(&[(ink(Role::Fg).as_str(), format!("  {line}"))], width));
     }
     rows.push(String::new());
     for line in wrap(
@@ -4263,7 +4386,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
          its own. [r] tries again now, [q] quits.",
         w.saturating_sub(3).max(12),
     ) {
-        rows.push(seg(&[(rgb(127, 147, 172).as_str(), format!("  {line}"))], width));
+        rows.push(seg(&[(ink(Role::Muted).as_str(), format!("  {line}"))], width));
     }
     rows
 }
@@ -4590,12 +4713,21 @@ impl Keyboard {
         // A test that builds a Keyboard to hit-test a footer must not start
         // the session: the query goes to stdout, and a reply in that process
         // can push flag 1 onto a stream the test never captured.
+        //
+        // The terminal's colours are asked for first, and to the end. The
+        // colour query reads stdin on its own and stops at a Device
+        // Attributes reply; started after `terminal::start`, it read the
+        // capability queries' DA as its own, gave up before the colours
+        // came, and `auto` was Dusk for the life of the process. Asked
+        // here, it is also never asked on the draw path later, where a
+        // theme changed to `auto` would otherwise have it eat keys.
         #[cfg(not(test))]
         if saved.is_some() {
+            let _ = terminal::terminal_theme();
             terminal::start();
         }
         Keyboard {
-            pending: String::new(),
+            pending: termtheme::take_typed(),
             lone_esc: false,
             string_since: None,
             fd,
@@ -4629,6 +4761,7 @@ impl Keyboard {
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
             out(MOUSE_OFF);
+            out(terminal::SCHEME_REPORTS_OFF);
             if capabilities().synchronized_updates {
                 out(terminal::SYNC_END);
             }
@@ -4809,10 +4942,44 @@ impl Keyboard {
     pub fn poll(&mut self) -> Vec<String> {
         let typing = std::mem::take(&mut self.typing);
         let fresh = self.poll_keys();
+        // The terminal switched light and dark. A widget built its palette
+        // once, from the colours it asked for at start, so it starts again
+        // and asks again - the way saving its settings does. Only when the
+        // theme in force is the terminal's own: a named theme did not change.
+        // Not while the picker is open: its preview has put another theme
+        // in force. Nor under an unsaved edit - a field being typed in, the
+        // settings screen - which a restart would throw away. The switch is
+        // kept for the poll after they close rather than taken and dropped.
+        if !typing
+            && !picker::OPEN.load(Ordering::Acquire)
+            && !settings::SCREEN_OPEN.load(Ordering::Acquire)
+            && terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel)
+            && theme::current().id == "terminal"
+        {
+            settings::relaunch(self);
+        }
+        // The theme was changed - in the picker in another pane, or in
+        // config.json by hand - so this widget starts again in it. Never
+        // under something that holds an unsaved edit: a field being typed
+        // in, the settings screen, the picker. The check waits for them,
+        // and `changed()` is not even asked until then, so the change is
+        // still there to find when they close.
+        if !typing
+            && !picker::OPEN.load(Ordering::Acquire)
+            && !settings::SCREEN_OPEN.load(Ordering::Acquire)
+            && theme::changed()
+        {
+            settings::relaunch(self);
+        }
         self.held.extend(fresh);
-        let (keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
+        let (mut keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
         if opens {
             notices::run(self);
+        }
+        // ctrl-t opens the theme picker over whatever widget this is.
+        if !picker::OPEN.load(Ordering::Acquire) && keys.iter().any(|k| k == picker::KEY) {
+            keys.retain(|k| k != picker::KEY);
+            picker::run(self);
         }
         keys
     }
@@ -5190,6 +5357,7 @@ fn name_byte(ch: char) -> String {
         '\u{19}' => "ctrl-y".to_string(),
         '\u{5}' => "ctrl-e".to_string(),
         '\u{15}' => "ctrl-u".to_string(),
+        '\u{14}' => "ctrl-t".to_string(),
         c => c.to_string(),
     }
 }
@@ -6019,6 +6187,17 @@ mod bang_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bracketed_key_name_is_the_key_a_click_on_its_hint_means() {
+        assert_eq!(hint_key(picker::HINT).as_deref(), Some(picker::KEY));
+        assert_eq!(hint_key("[esc] back").as_deref(), Some("esc"));
+        assert_eq!(hint_key("[tab] next").as_deref(), Some("tab"));
+        assert_eq!(hint_key("ctrl-u clear").as_deref(), Some("ctrl-u"));
+        // Not a key with a name: a bracketed word stays nothing.
+        assert_eq!(hint_key("[all] shown"), None);
+        assert_eq!(hint_key("[q]uit").as_deref(), Some("q"));
+    }
+
     use super::hung_up;
 
     /// A pseudo-terminal pair: the master, and the slave's descriptor.
@@ -6453,7 +6632,7 @@ mod tests {
             assert!(top.ends_with(&format!(" {tag}")), "{what}: {top:?}");
             // Drawn in core's grey after a reset, so no colour the widget
             // set carries into it.
-            let (r, g, b) = super::VERSION_INK;
+            let (r, g, b) = super::version_ink();
             let ink = format!("{} {tag}", super::rgb(r, g, b));
             let at = on_screen[0].rfind(&ink).expect("the version in core's own colour");
             let before = &on_screen[0][..at];
@@ -7472,12 +7651,64 @@ mod tests {
     }
 
     #[test]
+    fn a_painted_theme_background_survives_every_reset_in_a_row() {
+        let ground = "\x1b[48;2;34;37;43m";
+        let row = format!("a{}b\x1b[0mc\x1b[mdd\x1b[1;49me\x1b[38;2;1;2;3mf", bg(9, 9, 9));
+        let out = on_ground(&row, ground);
+        assert!(out.starts_with(ground), "{out:?}");
+        // After each full reset and each default-background escape, the
+        // ground again; a colour escape alone does not need it.
+        assert_eq!(out.matches(ground).count(), 4, "{out:?}");
+        assert!(out.contains(&format!("{}b", bg(9, 9, 9))), "the widget's own tint is kept");
+        // Text is untouched, and an escape that is not SGR passes as it was.
+        assert_eq!(on_ground("plain", ground), format!("{ground}plain"));
+        assert!(on_ground("x\x1b[2Ky", ground).ends_with("x\x1b[2Ky"));
+    }
+
+    #[test]
+    fn a_colour_channel_is_never_read_as_a_background_reset() {
+        let ground = "\x1b[48;2;34;37;43m";
+        // Dusk's selection tint ends in a blue channel of 49.
+        let row = format!("{}sel\x1b[38;2;0;49;0mx\x1b[38;5;49my", bg(39, 42, 49));
+        let out = on_ground(&row, ground);
+        assert_eq!(out.matches(ground).count(), 1, "only the ground at the start: {out:?}");
+        assert!(drops_background("0"));
+        assert!(drops_background(""));
+        assert!(drops_background("1;49"));
+        assert!(drops_background("48;2;1;2;3;0"));
+        assert!(!drops_background("48;2;39;42;49"));
+        assert!(!drops_background("38;2;49;0;0"));
+        assert!(!drops_background("49;48;5;49"));
+        assert!(!drops_background("48:2::39:42:49"));
+    }
+
+    #[test]
+    fn the_ground_reaches_the_cells_the_version_stamp_reset() {
+        let ground = "\x1b[48;2;255;255;255m";
+        let stamped = stamped_with("title", 60, None);
+        let out = on_ground(&stamped, ground);
+        // Every reset the stamp wrote is followed by the ground, so the
+        // padding and the version sit on the theme's background.
+        assert_eq!(out.matches(RST).count(), stamped.matches(RST).count());
+        assert_eq!(
+            out.matches(&format!("{RST}{ground}")).count(),
+            stamped.matches(RST).count(),
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn heat_runs_green_to_red_through_amber() {
         // The ends and the middle, since every widget reads the same scale
         // and a drift in it would make one pane disagree with the next.
-        assert_eq!(heat(0.0), rgb(40, 255, 120));
-        assert_eq!(heat(0.5), rgb(255, 240, 20));
-        assert_eq!(heat(1.0), rgb(255, 40, 30));
+        // The theme's own green, yellow and red: here opscope Classic.
+        let at = |role: Role| {
+            let (r, g, b) = theme::colour(role);
+            rgb(r, g, b)
+        };
+        assert_eq!(heat(0.0), at(Role::Green));
+        assert_eq!(heat(0.5), at(Role::Yellow));
+        assert_eq!(heat(1.0), at(Role::Red));
         // Out of range is clamped rather than wrapped: a CPU reading over
         // 100% on a multicore box must not come back green.
         assert_eq!(heat(2.0), heat(1.0));
@@ -7676,6 +7907,12 @@ mod tests {
         assert_eq!(LEGACY_DIR, "terminal-toys");
     }
 
+    /// The threshold underline: the theme's yellow.
+    fn yellow_underline() -> String {
+        let (r, g, b) = theme::current().lifted(Role::Yellow);
+        underline(r, g, b)
+    }
+
     #[test]
     fn a_mark_keeps_the_text_and_names_the_style() {
         let ink = "\x1b[38;2;1;2;3m";
@@ -7700,7 +7937,7 @@ mod tests {
             caps(terminal::UnderlineSupport::Styled, true),
         );
         assert!(over.contains("\x1b[4m"), "{over:?}");
-        assert!(over.contains("\x1b[58;2;255;214;140m"), "{over:?}");
+        assert!(over.contains(&yellow_underline()), "{over:?}");
         assert!(!over.contains("\x1b[4:3m") && !over.contains("\x1b[4:5m"), "{over:?}");
         // Stale wins the style; the threshold colour still rides on it.
         let both = apply_mark(
@@ -7708,7 +7945,7 @@ mod tests {
             Marks { stale: true, threshold: true, partial: true },
             caps(terminal::UnderlineSupport::Styled, true),
         );
-        assert!(both.contains("\x1b[4:3m") && both.contains("\x1b[58;2;255;214;140m"));
+        assert!(both.contains("\x1b[4:3m") && both.contains(&yellow_underline()));
         assert!(!both.contains("\x1b[4:5m"));
         let plain = apply_mark(
             ink,
@@ -8786,7 +9023,7 @@ mod tests {
         // something that already exited. This assertion is what stops the
         // handler and the normal exit disagreeing about that.
         assert_eq!(
-            format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME),
+            format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME),
             SCREEN_RESTORE
         );
         assert!(SCREEN_RESTORE.starts_with(MOUSE_OFF), "mouse-off must lead");

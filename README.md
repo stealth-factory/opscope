@@ -411,6 +411,80 @@ notices are listed on the screen, with how long each lasts, and can be
 restored. A warning that explains a missing or partial number is
 never a notice — it stays beside the number.
 
+### Themes
+
+Every widget draws in one theme, chosen once for all of them. **Press
+`ctrl-t` in any widget** for the theme picker: type to filter, and as `↑↓`
+move through the list the widget behind repaints in that theme, so you see
+it in place before keeping it; `↵` keeps it, `esc` puts back what you had.
+The footer of every widget says so (`[ctrl-t]heme`), beside `[,] settings`.
+
+The choice is one setting in the main `config.json`, `"opscope": { "theme":
+"…" }` - also the THEME row on any widget's `,` screen, and a top-level
+`"theme"` works too. **Every running widget follows it**: each looks at the
+setting again at most every two seconds and, when it has changed, restarts
+itself in place in the new theme, as saving its settings does - so a theme
+kept in one pane reaches all of them. A widget with its settings screen or a
+text field open waits until that closes, so no edit is lost. The picker's
+preview is the widget's last frame repainted, close but not exact; `↵`
+restarts the widget so every colour is right. `OPSCOPE_THEME=…` overrides it
+for one run. A name opscope does not know falls back to the default, `auto`,
+and a notice (`!`) names it.
+
+| Value | Colours |
+|---|---|
+| `auto` (default) | The terminal's own, when it says what they are; opscope Dusk when it does not |
+| `terminal` | Always the terminal's own |
+| `classic` | opscope's colours from before themes, on the terminal's own background |
+| any theme id | One of the 51 built-in themes — the same ones as [opscope.stealth-factory.co](https://opscope.stealth-factory.co): `dusk`, `dracula`, `nord`, `tokyo-night`, `github-light`, … |
+
+The terminal's colours are asked for once, as a widget starts (OSC 10, 11
+and 4, ended by a Device Attributes request so a terminal that does not
+answer costs nothing). A terminal that reports light/dark switches (mode
+2031) restarts the widget in its new colours. A named theme paints its own
+background, so a light theme reads on a dark terminal and the other way
+round; `classic` and the terminal's own do not.
+
+**`NO_COLOR` is honoured.** Set to anything but empty, as
+[no-color.org](https://no-color.org) has it, every widget draws without
+colour:
+- **Selected rows and bars:** the selected row, the title bars and rows
+  tinted by meaning are drawn in reverse video, so the cursor stays visible.
+- **Charts:** drawn as text, since pixels would be in colour.
+- **Picker:** `ctrl-t` still saves a theme, for terminals where `NO_COLOR`
+  isn't set, but doesn't preview it.
+- **Overrides:** `OPSCOPE_THEME` beats `NO_COLOR` for that run. The theme in
+  `config.json` doesn't, because one config is shared by every machine and
+  terminal, and `NO_COLOR` is what this one says.
+
+**Every text colour clears WCAG AA 4.5** on the theme's background, its
+title bars, the selected row and the rows tinted red or green by meaning. A
+theme colour that does not is moved, just far enough, when the theme loads.
+
+**Your own themes:** drop a JSON file in `~/.config/opscope/themes/` (or
+`$XDG_CONFIG_HOME/opscope/themes/`), the folder beside your `config.json`;
+make the `themes` folder if it is not there. Its file name is its id. The
+picker lists it in a section of its own, **your themes**, after `auto` and
+`terminal` and before the bundled themes, with the folder named on the
+section's rule. Only `fg` and `bg` are required; any of the other roles —
+`dark`, `slot` (the selected row), `muted`, `dim`, `border`, `accent`,
+`onAccent`, `green`, `blue`, `yellow`, `red`, `cyan`, `magenta`, `orange` —
+can be given, and the rest are worked out from those. A file with the same
+id as a built-in theme replaces it. A file that cannot be read is named in a
+notice (`!`) and left out; it never stops a widget.
+
+```json
+{ "name": "Mine", "fg": "#e0e0e0", "bg": "#101418", "accent": "#7aa2f7", "red": "#ff6b6b" }
+```
+
+**Sharing a theme:** a theme file stays yours and needs nobody's review. To
+offer one to everyone, open a pull request adding it to
+[`core/themes.json`](core/themes.json), where the bundled themes live. The
+tests check every entry's fields and measure its contrast, so the pull
+request says whether it reads. **[Making a theme](wiki/making-a-theme.md)**
+has both routes step by step, what each role is for, and the checklist for
+the pull request.
+
 ### Editing `config.json` by hand
 
 [`config.example.json`](config.example.json) is the reference, and it is

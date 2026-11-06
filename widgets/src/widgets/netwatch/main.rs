@@ -1205,7 +1205,15 @@ fn endpoint_rows(
         .enumerate()
         .map(|(i, spot)| {
             let here = focused && i == at;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            // Text on the selected row is drawn in the lifted palette.
+            let lit;
+            let p = if here {
+                lit = palette_on(true);
+                &lit
+            } else {
+                p
+            };
             let name = endpoint_name(spot, names);
             let ports: Vec<String> = spot
                 .ports
@@ -1262,7 +1270,15 @@ fn connection_rows(
         .enumerate()
         .map(|(i, conn)| {
             let here = focused && i == at;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            // Text on the selected row is drawn in the lifted palette.
+            let lit;
+            let p = if here {
+                lit = palette_on(true);
+                &lit
+            } else {
+                p
+            };
             let where_ = format!("{}:{}", conn.peer, conn.port);
             let c = |colour: &str| format!("{}{}", tint, colour);
             tc::seg(
@@ -1320,7 +1336,15 @@ fn file_rows(
         .enumerate()
         .map(|(i, item)| {
             let here = focused && i == at;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            // Text on the selected row is drawn in the lifted palette.
+            let lit;
+            let p = if here {
+                lit = palette_on(true);
+                &lit
+            } else {
+                p
+            };
             let (grew, span) = match sizes.get(&item.path) {
                 Some((was, when)) => (item.size.saturating_sub(*was), tc::now() - when),
                 None => (0, 0.0),
@@ -2381,6 +2405,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), tc::THEME_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
@@ -2820,7 +2845,15 @@ fn table(
         let live = row.up_rate + row.down_rate;
         let total = (row.up + row.down) as f64;
         let here = first + i == selected;
-        let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+        let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+        // Text on the selected row is drawn in the lifted palette.
+        let lit;
+        let p = if here {
+            lit = palette_on(true);
+            &lit
+        } else {
+            p
+        };
         let name_c = format!(
             "{}{}",
             tint,
@@ -2878,17 +2911,25 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        down: tc::rgb(120, 200, 255),
-        up: tc::rgb(255, 170, 120),
+        ok: c(Role::Green),
+        warn: c(Role::Yellow),
+        bad: c(Role::Red),
+        dim: c(Role::Muted),
+        grid: c(Role::Dim),
+        txt: c(Role::Fg),
+        lbl: c(Role::Muted),
+        accent: c(Role::Accent),
+        down: c(Role::Blue),
+        up: c(Role::Orange),
     }
 }
 

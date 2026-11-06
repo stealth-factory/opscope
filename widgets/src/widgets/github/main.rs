@@ -1145,6 +1145,7 @@ fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
         vec![(p.dim.as_str(), "[w]indow".into())],
         vec![(p.dim.as_str(), "[r]efresh".into())],
         vec![(p.dim.as_str(), "[,] settings".into())],
+        vec![(p.dim.as_str(), tc::THEME_HINT.into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]);
     out
@@ -1375,7 +1376,7 @@ fn by_account_row(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let (show_r24, show_t2d, wide) = by_account_cols(w);
-    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
     let c = |colour: &str| {
         // Same shape as the other widgets that do this, so one rule
         // reads them all: a guard per colour, each reaching its own
@@ -1385,7 +1386,7 @@ fn by_account_row(
         } else if colour == p.dim {
             p.dim_lit.as_str()
         } else {
-            colour
+            return format!("{}{}", tint, tc::lift(colour));
         };
         format!("{}{}", tint, colour)
     };
@@ -1557,9 +1558,6 @@ const DAY_CHUNK: usize = 20;
 const FRESH_DAYS: usize = 2;
 const SETTLE_FRAMES: usize = 8;
 const WEEKDAYS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const GHOST: (u8, u8, u8) = (96, 106, 124);
-const PR_RGB: (u8, u8, u8) = (180, 160, 255);
-const OK_RGB: (u8, u8, u8) = (90, 240, 160);
 
 /// A GitHub token from config.json or the environment.
 ///
@@ -2010,7 +2008,7 @@ fn account_detail(
                         title
                     };
                     let title = tc::link(&pr_url(node), &title);
-                    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
                     let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
                 // reads them all: a guard per colour, each reaching its own
@@ -2020,7 +2018,7 @@ fn account_detail(
                 } else if colour == p.dim {
                     p.dim_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };
@@ -2518,9 +2516,10 @@ struct Palette {
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
-    /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
-    /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// `dim` measured 3.81 against the old selected-row tint, under the 4.5
+    /// CLAUDE.md asks for against the tint as well as the background. This is
+    /// the same role lifted until it clears - `ink_on(Muted, true)` - and it is
+    /// used *only* where a tint is on, so an
     /// untinted row is exactly the colour it always was. Not quite the same as
     /// "unselected": herdr-panes tints a blocked or done row whether or not it
     /// is selected, and those get the lighter colours too.
@@ -2542,16 +2541,16 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        pr: tc::rgb(180, 160, 255),
+        ok: tc::ink(tc::Role::Green),
+        warn: tc::ink(tc::Role::Yellow),
+        bad: tc::ink(tc::Role::Red),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        grid: tc::ink(tc::Role::Dim),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        pr: tc::ink(tc::Role::Magenta),
     }
 }
 
@@ -3244,6 +3243,7 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -3447,8 +3447,8 @@ fn main() {
             (
                 hu,
                 hd,
-                tc::mix(GHOST, PR_RGB, 0.45),
-                tc::mix(GHOST, OK_RGB, 0.45),
+                tc::ink_between(tc::Role::Dim, tc::Role::Magenta, 0.45, false),
+                tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.45, false),
             )
         } else {
             let real_u: Vec<f64> = up.iter().map(|v| v / span_hi).collect();
@@ -3462,8 +3462,8 @@ fn main() {
                     (
                         fu.iter().zip(&real_u).map(|(a, b)| a + (b - a) * q).collect(),
                         fd.iter().zip(&real_d).map(|(a, b)| a + (b - a) * q).collect(),
-                        tc::mix(GHOST, PR_RGB, 0.45 + 0.55 * q),
-                        tc::mix(GHOST, OK_RGB, 0.45 + 0.55 * q),
+                        tc::ink_between(tc::Role::Dim, tc::Role::Magenta, 0.45 + 0.55 * q, false),
+                        tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.45 + 0.55 * q, false),
                     )
                 }
                 _ => (real_u, real_d, p.pr.clone(), p.ok.clone()),
@@ -3527,7 +3527,14 @@ fn main() {
                 p.lbl.as_str(),
                 p.dim.as_str(),
             ));
-            let shades = [tc::rgb(58, 66, 80), tc::rgb(60, 130, 95), tc::rgb(65, 170, 110), tc::rgb(80, 215, 130), p.ok.clone()];
+            // Empty days in the decoration role, then steps toward `ok`.
+            let shades = [
+                tc::ink(tc::Role::Dim),
+                tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.35, false),
+                tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.6, false),
+                tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.85, false),
+                p.ok.clone(),
+            ];
             let cols = grid.first().map_or(0, |r| r.chars().count());
             let mut cells = vec![vec![None; cols]; 7];
             let weeks: Vec<_> = cal["weeks"].as_array().into_iter().flatten().collect();
@@ -3670,7 +3677,7 @@ fn main() {
             if here {
                 cursor = Some(rows.len());
             }
-            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
             let land = land_of(s, &overlay, want);
             let mut line = by_account_row(s, land.as_ref(), want, w, here, &spark_days, name_w, &p);
             if here {
@@ -3817,6 +3824,7 @@ fn main() {
                 ];
                 let mut hints = hints;
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3972,12 +3980,14 @@ mod tests {
             }
         }
         // The band that was wrong, named so a regression points at itself.
-        for w in 81..=84 {
+        // Fourteen columns on from where it was found, at 81-84: the footer
+        // has since gained `ctrl-t theme`.
+        for w in 95..=98 {
             assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
         }
         // And the band either side of it keeps the fuller wording it had.
-        assert_eq!(info_hint(false, &p, 80), "[i] show column legend");
-        assert_eq!(info_hint(false, &p, 85), "[i] show legend");
+        assert_eq!(info_hint(false, &p, 94), "[i] show column legend");
+        assert_eq!(info_hint(false, &p, 99), "[i] show legend");
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that
@@ -4001,10 +4011,11 @@ mod tests {
                 );
             }
         }
-        // The one Codex found: the whole footer fits 81 columns on one
-        // line, and only with a wording that leaves room for the rest.
-        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 79, "  ").len();
-        assert_eq!(foot(info_hint(false, &p, 81)), 1);
+        // The one Codex found, at 81 columns before the footer gained
+        // `ctrl-t theme`: the whole footer fits 95 columns on one line, and
+        // only with a wording that leaves room for the rest.
+        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 93, "  ").len();
+        assert_eq!(foot(info_hint(false, &p, 95)), 1);
     }
 
     /// Shortened, never truncated: `pack_hints` wraps a footer without

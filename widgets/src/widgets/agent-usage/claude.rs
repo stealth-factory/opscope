@@ -2101,7 +2101,7 @@ fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
         totals.insert(at, total);
     }
     let peak = totals.values().cloned().fold(0.0f64, f64::max);
-    let cal = day_calendar(&totals, w, HEAT_STEPS, None, p);
+    let cal = day_calendar(&totals, w, heat_steps(), None, p);
 
     let fav = mu
         .as_object()
@@ -2354,7 +2354,7 @@ fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Pl
             rows.push(tc::seg(&refs, w - 1));
         }
         let mut legend: Vec<(&str, String)> = vec![(p.dim.as_str(), "  Less ".into())];
-        let swatches: Vec<String> = HEAT_STEPS.iter().map(|(r, g, b)| tc::rgb(*r, *g, *b)).collect();
+        let swatches: Vec<String> = heat_steps().iter().map(|(r, g, b)| tc::rgb(*r, *g, *b)).collect();
         for colour in &swatches {
             legend.push((colour.as_str(), "█".into()));
         }

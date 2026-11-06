@@ -124,19 +124,19 @@ where
     }
 }
 
-const FOCUS_HUE: (u8, u8, u8) = (255, 130, 120);
-const REST_HUE: (u8, u8, u8) = (120, 235, 170);
-const PAUSED_HUE: (u8, u8, u8) = (160, 172, 190);
+const FOCUS_HUE: tc::Role = tc::Role::Red;
+const REST_HUE: tc::Role = tc::Role::Green;
+const PAUSED_HUE: tc::Role = tc::Role::Muted;
 
 fn bar(
     plots: &mut Vec<tc::Plot>,
     row: usize,
     frac: f64,
     width: usize,
-    hue: (u8, u8, u8),
+    hue: tc::Role,
     p: &Palette,
 ) -> String {
-    let colour = tc::rgb(hue.0, hue.1, hue.2);
+    let colour = tc::ink(hue);
     let plot = tc::Plot::gradient_meter(1, row, width, frac, None, &colour, &p.dim, &p.txt);
     let parts: Vec<_> = plot.text_row(0).iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     // Also keep the text row for the pomodoro's flash, which draws without
@@ -153,7 +153,7 @@ struct Countdown {
     /// Its own colour: the three are different clocks, not three readings
     /// of one, and a single hue makes them look like a stack of the same
     /// thing.
-    hue: (u8, u8, u8),
+    hue: tc::Role,
 }
 
 /// Which days are working days, and between which hours.
@@ -250,7 +250,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: "Next Hour".into(),
         left: 3600 - into_hour,
         frac: into_hour as f64 / 3600.0,
-        hue: (90, 220, 255),
+        hue: tc::Role::Blue,
     });
 
     // Inside working hours this counts to the close; outside them, to the
@@ -276,7 +276,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: label.into(),
         left,
         frac: 1.0 - (left as f64 / span as f64),
-        hue: (255, 200, 90),
+        hue: tc::Role::Yellow,
     });
 
     let (into_day, day_len) = day_bounds(&now);
@@ -284,7 +284,7 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         label: "End of Day".into(),
         left: day_len - into_day,
         frac: into_day as f64 / day_len as f64,
-        hue: (175, 130, 255),
+        hue: tc::Role::Magenta,
     });
     out
 }
@@ -406,10 +406,19 @@ fn strip_ansi(text: &str) -> String {
 /// unreadable at the moment it is trying to get your attention.
 fn flash_ink(rgb: (u8, u8, u8)) -> String {
     let lum = (0.299 * rgb.0 as f64 + 0.587 * rgb.1 as f64 + 0.114 * rgb.2 as f64) / 255.0;
-    if lum > 0.5 {
-        tc::rgb(18, 20, 26)
+    let (dark, light) = flash_pair();
+    tc::ink(if lum > 0.5 { dark } else { light })
+}
+
+/// The theme's darkest and lightest of its text and its background: on a
+/// dark theme the background and the text, on a light one the other way
+/// round.
+fn flash_pair() -> (tc::Role, tc::Role) {
+    use tc::theme::{colour, luminance};
+    if luminance(colour(tc::Role::Fg)) < luminance(colour(tc::Role::Bg)) {
+        (tc::Role::Fg, tc::Role::Bg)
     } else {
-        tc::rgb(255, 240, 240)
+        (tc::Role::Bg, tc::Role::Fg)
     }
 }
 
@@ -1689,6 +1698,7 @@ fn main() {
             )]);
         }
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
 
@@ -2204,28 +2214,30 @@ struct Palette {
 }
 
 fn palette() -> Palette {
-    // clocks.py's own palette, value for value. Its DIM is a green-grey
-    // rather than the blue-grey the other widgets use, and the difference
-    // is visible the moment the two sit side by side.
+    // clocks.py's own palette, folded into the theme's roles. Its green
+    // title and green clock are the theme's green; its green-grey DIM is
+    // the theme's secondary text, like every other widget's grey.
     Palette {
-        focus: tc::rgb(FOCUS_HUE.0, FOCUS_HUE.1, FOCUS_HUE.2),
-        rest: tc::rgb(REST_HUE.0, REST_HUE.1, REST_HUE.2),
-        paused: tc::rgb(PAUSED_HUE.0, PAUSED_HUE.1, PAUSED_HUE.2),
-        over: tc::rgb(255, 80, 90),
-        work: tc::rgb(130, 255, 180),
-        eve: tc::rgb(255, 200, 90),
-        night: tc::rgb(95, 130, 175),
-        weekend: tc::rgb(150, 150, 170),
-        dim: tc::rgb(70, 130, 110),
-        txt: tc::rgb(220, 255, 240),
-        lbl: tc::rgb(70, 130, 110),
-        accent: tc::rgb(90, 220, 255),
-        head: tc::rgb(0, 255, 170),
-        big_top: tc::rgb(120, 255, 200),
-        big_base: tc::rgb(40, 150, 120),
-        bar: tc::rgb(90, 220, 255),
-        sun: tc::rgb(255, 210, 120),
-        moon: tc::rgb(150, 170, 210),
+        focus: tc::ink(FOCUS_HUE),
+        rest: tc::ink(REST_HUE),
+        paused: tc::ink(PAUSED_HUE),
+        // Overtime is drawn beside and after the focus red, in the same
+        // stacked bar, so it takes a hue of its own.
+        over: tc::ink(tc::Role::Magenta),
+        work: tc::ink(tc::Role::Green),
+        eve: tc::ink(tc::Role::Yellow),
+        night: tc::ink(tc::Role::Blue),
+        weekend: tc::ink(tc::Role::Muted),
+        dim: tc::ink(tc::Role::Muted),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        head: tc::ink(tc::Role::Green),
+        big_top: tc::ink(tc::Role::Green),
+        big_base: tc::ink(tc::Role::Cyan),
+        bar: tc::ink(tc::Role::Blue),
+        sun: tc::ink(tc::Role::Yellow),
+        moon: tc::ink(tc::Role::Muted),
     }
 }
 
@@ -2589,7 +2601,7 @@ mod tests {
     fn each_countdown_gets_its_own_colour() {
         let now = Local.with_ymd_and_hms(2026, 8, 22, 14, 30, 0).unwrap();
         let items = countdowns(now, &Office::from_config(&serde_json::json!({})));
-        let inks: std::collections::HashSet<(u8, u8, u8)> =
+        let inks: std::collections::HashSet<tc::Role> =
             items.iter().map(|c| c.hue).collect();
         assert_eq!(inks.len(), 3, "three clocks, three colours");
     }
@@ -2616,8 +2628,8 @@ mod tests {
         // colour loses the weight of the digits entirely.
         let p = palette();
         assert_ne!(p.big_top, p.big_base);
-        assert_eq!(p.big_top, tc::rgb(120, 255, 200));
-        assert_eq!(p.big_base, tc::rgb(40, 150, 120));
+        assert_eq!(p.big_top, tc::ink(tc::Role::Green));
+        assert_eq!(p.big_base, tc::ink(tc::Role::Cyan));
     }
 
     #[test]
@@ -3162,8 +3174,10 @@ mod tests {
     #[test]
     fn the_flash_picks_ink_it_can_be_read_through() {
         // Near-white wants dark text; a dark colour wants light.
-        assert_eq!(flash_ink((246, 248, 252)), tc::rgb(18, 20, 26));
-        assert_eq!(flash_ink((20, 20, 30)), tc::rgb(255, 240, 240));
+        let (dark, light) = flash_pair();
+        assert_ne!(dark, light);
+        assert_eq!(flash_ink((246, 248, 252)), tc::ink(dark));
+        assert_eq!(flash_ink((20, 20, 30)), tc::ink(light));
     }
 
     #[test]
@@ -3257,7 +3271,7 @@ mod tests {
 
     #[test]
     fn the_gradient_spans_the_fill_in_each_countdowns_hue() {
-        for hue in [(90, 220, 255), (255, 200, 90), (175, 130, 255), FOCUS_HUE, REST_HUE, PAUSED_HUE] {
+        for hue in [tc::Role::Blue, tc::Role::Yellow, tc::Role::Magenta, FOCUS_HUE, REST_HUE, PAUSED_HUE] {
             let mut plots = Vec::new();
             let text = bar(&mut plots, 0, 0.5, 20, hue, &palette());
             let ramp: Vec<_> = plots[0].text_row(0).iter()

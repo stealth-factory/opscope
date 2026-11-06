@@ -1378,7 +1378,7 @@ mod tests {
         assert!(!text.contains("not reported"), "{text}");
         assert!(!reads_as_zero_percent(&text), "{text}");
         assert!(!text.contains("published no limit"), "{text}");
-        let warn = tc::rgb(255, 200, 90);
+        let warn = tc::ink(tc::Role::Yellow);
         assert!(
             !gone_rows.iter().any(|row| row.contains(&warn) && row.contains("5-hour")),
             "a live plan with no session window was drawn as a failure:\n{text}"

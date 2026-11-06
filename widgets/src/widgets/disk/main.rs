@@ -465,14 +465,36 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
-        txt: tc::rgb(225, 235, 245),
-        // 127,147,172 measures 3.81 on the selected-row tint. The lighter
+        txt: tc::ink(tc::Role::Fg),
+        // The plain grey measured 3.81 on the selected-row tint. The lifted
         // twin is what the tint closure reaches for.
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        down: tc::rgb(255, 176, 110),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        down: tc::ink(tc::Role::Orange),
+    }
+}
+
+impl Palette {
+    /// `colour` as it is drawn on the selected-row tint: each role in its
+    /// lifted form, so every one of them stays readable there. A colour
+    /// that is not one of the palette's (the heat ramp, already asked for
+    /// in its tinted form) is handed back as it came.
+    fn lit(&self, colour: &str) -> String {
+        if colour == self.dim || colour == self.lbl {
+            return self.dim_lit.clone();
+        }
+        for (plain, role) in [
+            (&self.txt, tc::Role::Fg),
+            (&self.accent, tc::Role::Accent),
+            (&self.down, tc::Role::Orange),
+        ] {
+            if colour == plain.as_str() {
+                return tc::ink_on(role, true);
+            }
+        }
+        colour.to_string()
     }
 }
 
@@ -1577,21 +1599,18 @@ fn data_rows(
     p: &Palette,
 ) -> Vec<String> {
     let tint = if here {
-        tc::bg(38, 56, 76)
+        tc::tint(tc::Role::Slot)
     } else {
         String::new()
     };
     let c = |colour: &str| {
-        // Any colour that would not clear AA on this tint is swapped for
-        // its lighter twin. `dim` is 3.81 against bg(38, 56, 76).
-        let colour = if tint.is_empty() {
-            colour
-        } else if colour == p.dim {
-            p.dim_lit.as_str()
+        // Every colour on this tint is swapped for its lifted twin, so it
+        // clears AA there. The plain grey measured 3.81 on Classic's tint.
+        if tint.is_empty() {
+            format!("{}{}", tint, colour)
         } else {
-            colour
-        };
-        format!("{}{}", tint, colour)
+            format!("{}{}", tint, p.lit(colour))
+        }
     };
     let mut out = Vec::new();
     let name_ink = c(if here {
@@ -2639,19 +2658,16 @@ fn disk_data_rows(
     p: &Palette,
 ) -> Vec<String> {
     let tint = if here {
-        tc::bg(38, 56, 76)
+        tc::tint(tc::Role::Slot)
     } else {
         String::new()
     };
     let c = |colour: &str| {
-        let colour = if tint.is_empty() {
-            colour
-        } else if colour == p.dim {
-            p.dim_lit.as_str()
+        if tint.is_empty() {
+            format!("{}{}", tint, colour)
         } else {
-            colour
-        };
-        format!("{}{}", tint, colour)
+            format!("{}{}", tint, p.lit(colour))
+        }
     };
     let room = cols.disk.saturating_sub(2).max(1);
     let chunks = chunks(&row.disk.name, room);
@@ -2991,11 +3007,11 @@ fn paint_pressure(
         )
     };
     let tint = if focus == 2 {
-        tc::bg(38, 56, 76)
+        tc::tint(tc::Role::Slot)
     } else {
         String::new()
     };
-    let colour = if focus == 2 { &p.accent } else { &p.txt };
+    let colour = if focus == 2 { p.lit(&p.accent) } else { p.txt.clone() };
     for (index, line) in wrap(&text, width.saturating_sub(1)).into_iter().enumerate() {
         let ink = format!("{tint}{colour}");
         rows.push(tc::seg(&[(ink.as_str(), format!(" {line}"))], width));
@@ -3379,6 +3395,7 @@ fn footer(
     }
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+    hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
     hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
     let widest = hints
         .iter()

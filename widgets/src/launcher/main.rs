@@ -187,12 +187,20 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
     Palette {
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
+        dim: c(Role::Muted),
+        grid: c(Role::Dim),
+        txt: c(Role::Fg),
+        lbl: c(Role::Muted),
+        accent: c(Role::Accent),
     }
 }
 
@@ -322,7 +330,15 @@ fn rows_for(w: usize, selected: usize, p: &Palette) -> Vec<String> {
         .enumerate()
         .map(|(i, item)| {
             let here = i == selected;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            // Text on the selected row is drawn in the lifted palette.
+            let lit;
+            let p = if here {
+                lit = palette_on(true);
+                &lit
+            } else {
+                p
+            };
             let c = |colour: &str| format!("{}{}", tint, colour);
             let mut line = vec![
                 (

@@ -809,23 +809,31 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette, lifted for the selected row when `tinted`: every colour is
+/// the same role through `ink_on`, so text on the selected-row tint stays
+/// readable in every theme.
+fn palette_on(tinted: bool) -> Palette {
+    let ink = |role| tc::ink_on(role, tinted);
     Palette {
-        ready: tc::rgb(80, 235, 150),
-        build: tc::rgb(255, 200, 90),
-        error: tc::rgb(255, 95, 105),
-        queue: tc::rgb(120, 160, 220),
-        cancel: tc::rgb(140, 145, 160),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(71, 91, 116),
-        msg: tc::rgb(158, 174, 196),
-        url: tc::rgb(130, 200, 255),
-        hint: tc::rgb(126, 148, 173),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        prod: tc::rgb(120, 180, 255),
-        sha: tc::rgb(190, 170, 255),
-        branch: tc::rgb(150, 210, 255),
-        accent: tc::rgb(150, 210, 255),
+        ready: ink(tc::Role::Green),
+        build: ink(tc::Role::Yellow),
+        error: ink(tc::Role::Red),
+        queue: ink(tc::Role::Blue),
+        cancel: ink(tc::Role::Muted),
+        dim: ink(tc::Role::Muted),
+        grid: ink(tc::Role::Dim),
+        msg: ink(tc::Role::Muted),
+        url: ink(tc::Role::Accent),
+        hint: ink(tc::Role::Muted),
+        txt: ink(tc::Role::Fg),
+        lbl: ink(tc::Role::Muted),
+        prod: ink(tc::Role::Blue),
+        sha: ink(tc::Role::Magenta),
+        branch: ink(tc::Role::Accent),
+        accent: ink(tc::Role::Accent),
     }
 }
 
@@ -1187,6 +1195,7 @@ fn copy_overlay(
     hints.push(vec![(p.hint.as_str(), "← or esc to close".into())]);
     hints.extend([
         vec![(p.hint.as_str(), "[,] settings".into())],
+        vec![(p.hint.as_str(), tc::THEME_HINT.into())],
         vec![(p.hint.as_str(), "[q]uit".into())],
     ]);
     let packed = tc::pack_hints_placed(&hints, w - 2, " · ");
@@ -1259,6 +1268,8 @@ fn main() {
     };
 
     let p = palette();
+    // The same colours lifted for the selected row's tint.
+    let p_lit = palette_on(true);
     let (tok, _) = token(&cfg);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
@@ -1691,6 +1702,7 @@ fn main() {
                 ];
                 hints.extend([
                     vec![(p.hint.as_str(), "[,] settings".into())],
+                    vec![(p.hint.as_str(), tc::THEME_HINT.into())],
                     vec![(p.hint.as_str(), "[q]uit".into())],
                 ]);
                 let base_foot = tc::pack_hints(&hints, w - 2, " · ");
@@ -1949,7 +1961,8 @@ fn main() {
         for (i, d) in shown.iter().enumerate() {
             let from = rows.len();
             let here = i == selected;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            let p = if here { &p_lit } else { &p };
             let meta = &d["meta"];
             let state = text(d, "state");
             let colour = state_colour(&state, &p);
@@ -2044,6 +2057,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), tc::THEME_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");

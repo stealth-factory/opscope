@@ -828,9 +828,10 @@ struct Palette {
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
-    /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
-    /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// `dim` measured 3.81 against the old selected-row tint, under the 4.5
+    /// CLAUDE.md asks for against the tint as well as the background. This is
+    /// the same role lifted until it clears - `ink_on(Muted, true)` - and it is
+    /// used *only* where a tint is on, so an
     /// untinted row is exactly the colour it always was. Not quite the same as
     /// "unselected": herdr-panes tints a blocked or done row whether or not it
     /// is selected, and those get the lighter colours too.
@@ -850,23 +851,20 @@ struct Palette {
     new: String,
 }
 
-const GHOST: (u8, u8, u8) = (96, 106, 124);
-const NEW_RGB: (u8, u8, u8) = (180, 160, 255);
-const OK_RGB: (u8, u8, u8) = (90, 240, 160);
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        bad_lit: tc::rgb(255, 128, 136),
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        new: tc::rgb(180, 160, 255),
+        ok: tc::ink(tc::Role::Green),
+        warn: tc::ink(tc::Role::Yellow),
+        bad: tc::ink(tc::Role::Red),
+        bad_lit: tc::ink_on(tc::Role::Red, true),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        grid: tc::ink(tc::Role::Dim),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        new: tc::ink(tc::Role::Magenta),
     }
 }
 
@@ -2324,6 +2322,7 @@ fn main() {
             drop(s);
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -2509,7 +2508,7 @@ fn main() {
             let name = cycle_name(c);
             let [pct, pts, left, added] = cycle_tail(c);
             let on = focus == Some(cycles_pane) && ci == sel[cycles_pane];
-            let tint = if on { tc::bg(38, 56, 76) } else { String::new() };
+            let tint = if on { tc::tint(tc::Role::Slot) } else { String::new() };
             let c_of = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2522,7 +2521,7 @@ fn main() {
                 } else if colour == p.bad {
                     p.bad_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };
@@ -2646,8 +2645,8 @@ fn main() {
             (
                 hu,
                 hd,
-                tc::mix(GHOST, NEW_RGB, 0.45),
-                tc::mix(GHOST, OK_RGB, 0.45),
+                tc::ink_between(tc::Role::Dim, tc::Role::Magenta, 0.45, false),
+                tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.45, false),
             )
         } else {
             let real_u: Vec<f64> = up.iter().map(|v| v / span_hi).collect();
@@ -2661,8 +2660,8 @@ fn main() {
                     (
                         fu.iter().zip(&real_u).map(|(a, b)| a + (b - a) * q).collect(),
                         fd.iter().zip(&real_d).map(|(a, b)| a + (b - a) * q).collect(),
-                        tc::mix(GHOST, NEW_RGB, 0.45 + 0.55 * q),
-                        tc::mix(GHOST, OK_RGB, 0.45 + 0.55 * q),
+                        tc::ink_between(tc::Role::Dim, tc::Role::Magenta, 0.45 + 0.55 * q, false),
+                        tc::ink_between(tc::Role::Dim, tc::Role::Green, 0.45 + 0.55 * q, false),
                     )
                 }
                 _ => (real_u, real_d, p.new.clone(), p.ok.clone()),
@@ -2781,7 +2780,7 @@ fn main() {
             let c = s.by_team.get(key).unwrap_or(&empty);
             let count = |k: &str| c.get(k).copied().unwrap_or(0);
             let here = on_teams && i == sel[teams_pane];
-            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
             let c_of = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2794,7 +2793,7 @@ fn main() {
                 } else if colour == p.bad {
                     p.bad_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };
@@ -2908,7 +2907,7 @@ fn main() {
                 if here {
                     cursor = Some(rows.len());
                 }
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
                 let c_of = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2921,7 +2920,7 @@ fn main() {
                 } else if colour == p.bad {
                     p.bad_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };
@@ -3150,6 +3149,7 @@ fn main() {
                 ]);
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3234,6 +3234,7 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[w]indow".into())]);
         hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();

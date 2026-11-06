@@ -132,6 +132,7 @@ impl Level {
     fn colour_on_tint(self) -> &'static str {
         match self {
             Level::Error => BAD_LIT,
+            Level::Info => INFO_LIT,
             other => other.colour(),
         }
     }
@@ -800,16 +801,25 @@ pub fn when(cond: bool, notice: impl FnOnce() -> Notice) {
 }
 
 /// The colours. All measured in the tests, on black and on the tint.
-const BAD: &str = "\x1b[38;2;255;100;110m";
-const BAD_LIT: &str = "\x1b[38;2;255;130;140m";
-const WARN: &str = "\x1b[38;2;255;200;90m";
-const INFO: &str = "\x1b[38;2;110;210;235m";
-const TXT: &str = "\x1b[38;2;225;235;245m";
-const LBL: &str = "\x1b[38;2;130;165;200m";
-const DIM: &str = "\x1b[38;2;127;147;172m";
-const DIM_LIT: &str = "\x1b[38;2;140;170;195m";
-const ACCENT: &str = "\x1b[38;2;150;210;255m";
-const TINT: (u8, u8, u8) = (38, 56, 76);
+///
+/// Each is a role of opscope Classic, plain or lifted, and nothing else -
+/// `a_notice_colour_is_a_classic_role` holds them to it. That is what lets
+/// them be drawn in any theme: the screen and the counter and banner are
+/// put through `theme::from_classic` / `theme::classic_now`, which turn
+/// Classic's red into the theme's red. A colour that is no role would be
+/// left as it is, and Classic's near-white text on a light theme's white
+/// measured 1.21.
+const BAD: &str = "\x1b[38;2;255;100;110m"; // red
+const BAD_LIT: &str = "\x1b[38;2;255;178;183m"; // red, lifted
+const WARN: &str = "\x1b[38;2;255;200;90m"; // yellow
+const INFO: &str = "\x1b[38;2;120;196;250m"; // blue
+const INFO_LIT: &str = "\x1b[38;2;140;205;251m"; // blue, lifted
+const TXT: &str = "\x1b[38;2;225;235;245m"; // fg
+const LBL: &str = "\x1b[38;2;130;165;200m"; // muted
+const DIM: &str = "\x1b[38;2;130;165;200m"; // muted
+const DIM_LIT: &str = "\x1b[38;2;179;200;221m"; // muted, lifted
+const ACCENT: &str = "\x1b[38;2;150;210;255m"; // accent
+const TINT: (u8, u8, u8) = (38, 56, 76); // slot
 
 /// The counter, or `None` when nothing is outstanding.
 ///
@@ -1117,6 +1127,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
             r.reload_if_stale(now);
             frame(r, &mut screen, now, w, h)
         });
+        let rows: Vec<String> = rows.iter().map(|r| crate::theme::from_classic(r)).collect();
         crate::draw(&rows, w, h);
         keyboard.footer_at(&footer, foot_top, 1);
         keyboard.wait(Duration::from_millis(80));
@@ -2139,11 +2150,28 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_colour_is_a_classic_role() {
+        // Anything else would be left as it is by `from_classic` and drawn
+        // in Classic's colours on whatever theme is in force.
+        let classic = crate::theme::find("classic").unwrap();
+        let roles: Vec<String> = crate::theme::Role::ALL
+            .into_iter()
+            .flat_map(|r| [classic.colour(r), classic.lifted(r)])
+            .map(|(r, g, b)| format!("\x1b[38;2;{r};{g};{b}m"))
+            .collect();
+        for colour in [BAD, BAD_LIT, WARN, INFO, INFO_LIT, TXT, LBL, DIM, DIM_LIT, ACCENT] {
+            assert!(roles.iter().any(|r| r == colour), "{colour:?} is no Classic role");
+        }
+        let (r, g, b) = classic.colour(crate::theme::Role::Slot);
+        assert_eq!(TINT, (r, g, b));
+    }
+
+    #[test]
     fn every_colour_clears_aa_on_black_and_on_the_tint() {
         let black = (0.0, 0.0, 0.0);
         let tint = (TINT.0 as f64, TINT.1 as f64, TINT.2 as f64);
         // On the background: everything drawn there.
-        for colour in [BAD, BAD_LIT, WARN, INFO, TXT, LBL, DIM, DIM_LIT, ACCENT] {
+        for colour in [BAD, BAD_LIT, WARN, INFO, INFO_LIT, TXT, LBL, DIM, DIM_LIT, ACCENT] {
             let c = contrast(channels(colour), black);
             assert!(c >= 4.5, "{colour:?} is {c:.2} on black");
         }

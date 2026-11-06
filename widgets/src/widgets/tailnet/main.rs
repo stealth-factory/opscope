@@ -537,7 +537,6 @@ fn sample_rates(state: &mut State, data: &serde_json::Value, history: usize) {
 struct Palette {
     online: String,
     offline: String,
-    offline_lit: String,
     direct: String,
     relay: String,
     dim: String,
@@ -549,18 +548,25 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
     Palette {
-        online: tc::rgb(90, 240, 160),
-        offline: tc::rgb(120, 130, 150),
-        offline_lit: tc::rgb(144, 152, 169),
-        direct: tc::rgb(90, 240, 160),
-        relay: tc::rgb(255, 190, 90),
-        dim: tc::rgb(127, 147, 172),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(120, 200, 255),
-        route: tc::rgb(200, 160, 255),
-        exit: tc::rgb(255, 140, 200),
+        online: c(Role::Green),
+        offline: c(Role::Muted),
+        direct: c(Role::Green),
+        relay: c(Role::Yellow),
+        dim: c(Role::Muted),
+        txt: c(Role::Fg),
+        lbl: c(Role::Muted),
+        accent: c(Role::Accent),
+        route: c(Role::Magenta),
+        exit: c(Role::Orange),
     }
 }
 
@@ -759,6 +765,7 @@ fn main() {
     }
 
     let p = palette();
+    let lit = palette_on(true);
     let state = Arc::new(Mutex::new(State::default()));
     let prober = Arc::new(Mutex::new(Prober::default()));
     let activity = tc::Refresh::default();
@@ -1018,6 +1025,7 @@ fn main() {
             ));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let (packed, indent) = pack_footer(&hints, w);
             let foot: Vec<String> = packed.lines.to_vec();
@@ -1305,6 +1313,7 @@ fn main() {
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         // The footer is built before the body, not after it, because it
         // wraps: how many rows it takes depends on the width, and nothing
@@ -1351,17 +1360,12 @@ fn main() {
             let mine = peer["_self"].as_bool().unwrap_or(false);
             let up = mine || peer["Online"].as_bool().unwrap_or(false);
             let here = idx == selected;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-            let c = |colour: &str| {
-                // offline is what a peer that is not up is drawn in, and it
-                // measured 3.67 on this tint - the worst in the widget.
-                let colour = if !tint.is_empty() && colour == p.offline {
-                    p.offline_lit.as_str()
-                } else {
-                    colour
-                };
-                format!("{}{}", tint, colour)
-            };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+            // The selected row draws every colour in its lifted form: the
+            // offline grey a peer that is not up is drawn in measured 3.67
+            // on this tint before it had one - the worst in the widget.
+            let p: &Palette = if here { &lit } else { &p };
+            let c = |colour: &str| format!("{}{}", tint, colour);
             let path_direct = !text(peer, "CurAddr").is_empty();
             // "this" rather than DIRECT or a relay name: the path column
             // answers how the traffic gets there, and for this machine it
