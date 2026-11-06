@@ -351,10 +351,15 @@ fn mode_for(requested: Option<&str>, host_relays_images: bool) -> GraphicsMode {
 /// Query only after cbreak is active, so replies are never echoed as text.
 /// No wait here: the first frames use text while normal input polling negotiates.
 pub(crate) fn start() {
-    let mode = mode_for(
-        std::env::var("OPSCOPE_GRAPHICS").ok().as_deref(),
-        super::shm::host_relays_images(|key| std::env::var(key).ok()),
-    );
+    // `NO_COLOR` is text: a chart drawn as pixels would be in colour.
+    let mode = if super::theme::no_color() {
+        GraphicsMode::Text
+    } else {
+        mode_for(
+            std::env::var("OPSCOPE_GRAPHICS").ok().as_deref(),
+            super::shm::host_relays_images(|key| std::env::var(key).ok()),
+        )
+    };
     // Resume and a fresh start both drop the previous probe. A shared-memory
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();

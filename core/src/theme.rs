@@ -750,10 +750,87 @@ pub fn read_user_themes(dir: &std::path::Path) -> (Vec<Theme>, Vec<String>) {
     (found, wrong)
 }
 
+/// Whether `NO_COLOR` turns colour off: set to anything but empty, as
+/// no-color.org has it, and not overridden by `OPSCOPE_THEME`, which is a
+/// choice made for this one pane. A theme saved in `config.json` does not
+/// override it: one config is shared by every machine and terminal, and
+/// `NO_COLOR` is what this one says.
+pub fn no_color_from(no_color: Option<&str>, opscope_theme: Option<&str>) -> bool {
+    no_color.is_some_and(|v| !v.is_empty()) && opscope_theme.is_none_or(|v| v.trim().is_empty())
+}
+
+/// `no_color_from` for this process, read once.
+pub fn no_color() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        !cfg!(test)
+            && no_color_from(
+                std::env::var("NO_COLOR").ok().as_deref(),
+                std::env::var("OPSCOPE_THEME").ok().as_deref(),
+            )
+    })
+}
+
+/// `line` with every colour taken out, for `NO_COLOR`. Bold, dim, italic
+/// and underline stay. A background - the selected row, a title bar, a row
+/// tinted by meaning - becomes reverse video, so what a tint marked is
+/// still marked: the cursor would otherwise vanish with the colour.
+pub fn mono(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 2..];
+        let Some(end) = body.find(|c: char| ('@'..='~').contains(&c)) else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let (params, kind) = (&body[..end], &body[end..end + 1]);
+        rest = &body[end + 1..];
+        if kind != "m" {
+            out.push_str("\x1b[");
+            out.push_str(params);
+            out.push_str(kind);
+            continue;
+        }
+        let codes: Vec<&str> = params.split(';').collect();
+        let mut kept: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < codes.len() {
+            let n: u32 = codes[i].parse().unwrap_or(0);
+            match n {
+                // 38/48/58 take `5;n` or `2;r;g;b`.
+                38 | 48 | 58 => {
+                    let skip = if codes.get(i + 1) == Some(&"5") { 2 } else { 4 };
+                    if n == 48 {
+                        kept.push("7".into());
+                    }
+                    i += skip;
+                }
+                30..=37 | 39 | 90..=97 => {}
+                40..=47 | 100..=107 => kept.push("7".into()),
+                49 => kept.push("27".into()),
+                _ => kept.push(codes[i].to_string()),
+            }
+            i += 1;
+        }
+        if !kept.is_empty() {
+            out.push_str(&format!("\x1b[{}m", kept.join(";")));
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn resolve() -> Theme {
     // Tests compare frames byte for byte: they draw in Classic, which
     // paints no background, whatever the machine running them has set.
     if cfg!(test) {
+        return find("classic").cloned().expect("opscope Classic is built in");
+    }
+    // No colour: Classic, which paints no background, and `mono` takes
+    // the colour out of every row on its way to the terminal.
+    if no_color() {
         return find("classic").cloned().expect("opscope Classic is built in");
     }
     let (_, wrong) = user_themes();
@@ -891,6 +968,30 @@ pub fn heat_in(theme: &Theme, frac: f64, tinted: bool) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_color_is_any_value_but_empty_and_opscope_theme_overrides_it() {
+        assert!(no_color_from(Some("1"), None));
+        assert!(no_color_from(Some("0"), None), "any value, even 0, per no-color.org");
+        assert!(!no_color_from(Some(""), None));
+        assert!(!no_color_from(None, None));
+        assert!(!no_color_from(Some("1"), Some("dracula")));
+        assert!(no_color_from(Some("1"), Some("  ")));
+    }
+
+    #[test]
+    fn mono_takes_the_colour_out_and_keeps_what_a_tint_marked() {
+        let fg = "\x1b[38;2;200;10;10m";
+        let bg = "\x1b[48;2;40;50;60m";
+        assert_eq!(mono(&format!("{fg}red\x1b[0m")), "red\x1b[0m");
+        assert_eq!(mono(&format!("{bg}{fg}picked\x1b[0m")), "\x1b[7mpicked\x1b[0m");
+        assert_eq!(mono("\x1b[1;38;5;196mbold\x1b[22m"), "\x1b[1mbold\x1b[22m");
+        assert_eq!(mono("\x1b[41mx\x1b[49my"), "\x1b[7mx\x1b[27my");
+        assert_eq!(mono("\x1b[4;58;2;1;2;3mu"), "\x1b[4mu");
+        // Cursor moves and erases pass through untouched.
+        assert_eq!(mono("\x1b[3H\x1b[K\x1b[93mz"), "\x1b[3H\x1b[Kz");
+        assert_eq!(mono("plain"), "plain");
+    }
 
     #[test]
     fn the_bundled_themes_file_is_well_formed() {

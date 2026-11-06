@@ -156,6 +156,17 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i32> {
 
 /// The choices that match `query`, best first; in their own order when
 /// the query is empty.
+/// The modal's own background: the theme's `dark`, or none under NO_COLOR,
+/// where every background is reverse video and a modal drawn in one would
+/// leave the highlighted row nothing to stand out from.
+fn modal_ground() -> String {
+    if theme::no_color() {
+        String::new()
+    } else {
+        theme::tint(Role::Dark)
+    }
+}
+
 /// The modal's last row. A click on `↵ keep` or `esc cancel` is that key.
 const KEYS_ROW: &str = " ↑↓ preview · ↵ keep · esc cancel";
 
@@ -339,7 +350,7 @@ pub fn inside_from(
     iw: usize,
     ih: usize,
 ) -> Vec<String> {
-    let bar = theme::tint(Role::Dark);
+    let bar = modal_ground();
     let line = |parts: &[(String, String)], ground: &str| -> String {
         let used: usize = parts.iter().map(|(_, t)| crate::display_width(t)).sum();
         let mut segs: Vec<(String, String)> = parts.to_vec();
@@ -352,7 +363,9 @@ pub fn inside_from(
     };
     let mut rows = Vec::new();
     let count = format!("{} of {} ", list.len(), choices().len());
-    let title = " Theme";
+    // Under NO_COLOR a theme is still saved, for the panes where it isn't
+    // set; this one stays uncoloured whatever is picked.
+    let title = if theme::no_color() { " Theme · NO_COLOR is set here" } else { " Theme" };
     let gap = iw.saturating_sub(crate::display_width(title) + crate::display_width(&count)).max(1);
     rows.push(line(
         &[
@@ -421,7 +434,7 @@ pub fn inside_from(
 /// the theme's accent. This is the whole picture in a text terminal; Kitty
 /// draws the frame and a shadow over it as pixels too (`chrome`).
 pub fn framed(inner: &[String], iw: usize) -> Vec<String> {
-    let edge = format!("{}{}", theme::ink(Role::Accent), theme::tint(Role::Dark));
+    let edge = format!("{}{}", theme::ink(Role::Accent), modal_ground());
     let mut rows = vec![format!("{edge}╭{}╮\x1b[0m", "─".repeat(iw))];
     for row in inner {
         rows.push(format!("{edge}│\x1b[0m{row}{edge}│\x1b[0m"));
@@ -435,7 +448,7 @@ pub fn framed(inner: &[String], iw: usize) -> Vec<String> {
 /// `framed` already put there, with a half-block shadow.
 pub fn chrome(m: Modal, w: usize, h: usize) -> Vec<crate::Plot> {
     use crate::Plot;
-    let edge = format!("{}{}", theme::ink(Role::Accent), theme::tint(Role::Dark));
+    let edge = format!("{}{}", theme::ink(Role::Accent), modal_ground());
     let accent = theme::ink(Role::Accent);
     let dark = theme::tint(Role::Dark);
     let t = 0.12;
@@ -603,7 +616,10 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
     let mut moved = true;
     loop {
         if let Some(c) = list.get(selected) {
-            if shown.as_deref() != Some(c.value.as_str()) {
+            // No preview under NO_COLOR: this pane draws no theme's colours,
+            // and a theme that paints its background would come out as a
+            // whole screen in reverse video.
+            if shown.as_deref() != Some(c.value.as_str()) && !theme::no_color() {
                 theme::set(preview_of(&c.value));
                 shown = Some(c.value.clone());
             }

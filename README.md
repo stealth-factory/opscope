@@ -441,6 +441,18 @@ answer costs nothing). A terminal that reports light/dark switches (mode
 background, so a light theme reads on a dark terminal and the other way
 round; `classic` and the terminal's own do not.
 
+**`NO_COLOR` is honoured.** Set to anything but empty, as
+[no-color.org](https://no-color.org) has it, every widget draws without
+colour:
+- **Selected rows and bars:** the selected row, the title bars and rows
+  tinted by meaning are drawn in reverse video, so the cursor stays visible.
+- **Charts:** drawn as text, since pixels would be in colour.
+- **Picker:** `ctrl-t` still saves a theme, for terminals where `NO_COLOR`
+  isn't set, but doesn't preview it.
+- **Overrides:** `OPSCOPE_THEME` beats `NO_COLOR` for that run. The theme in
+  `config.json` doesn't, because one config is shared by every machine and
+  terminal, and `NO_COLOR` is what this one says.
+
 **Every text colour clears WCAG AA 4.5** on the theme's background, its
 title bars, the selected row and the rows tinted red or green by meaning. A
 theme colour that does not is moved, just far enough, when the theme loads.

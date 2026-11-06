@@ -1314,7 +1314,12 @@ fn paint(
     lost: bool,
     counter: Option<&(&'static str, String)>,
 ) -> String {
-    let lines = lines_with(rows, w, h, counter);
+    let mut lines = lines_with(rows, w, h, counter);
+    // `NO_COLOR`: every row, the counter and the version included, without
+    // a colour, the tints as reverse video.
+    if theme::no_color() {
+        lines = lines.iter().map(|l| theme::mono(l)).collect();
+    }
     let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
