@@ -1461,13 +1461,6 @@ fn lines_with(
     (0..h)
         .map(|i| {
             let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
-            // A theme with its own background paints it under every cell:
-            // from the start of the row, and again after every reset a
-            // widget wrote, which would otherwise drop it back to the
-            // terminal's. A tint a widget sets still wins until its reset.
-            if !ground.is_empty() {
-                line = on_ground(&line, &ground);
-            }
             // The title row is measured as ordinary text. A sized block
             // there would move the cursor under the version.
             if i == 0 || occupied_columns(&line) > w
@@ -1475,7 +1468,7 @@ fn lines_with(
             {
                 line = without_sizing(&line);
             }
-            if i == 0 {
+            let line = if i == 0 {
                 let line = match graphics_notice() {
                     Some(notice) => with_notice(&line, notice, w, room),
                     None => line,
@@ -1483,7 +1476,14 @@ fn lines_with(
                 stamped_with(&line, w, counter)
             } else {
                 line
-            }
+            };
+            // A theme with its own background paints it under every cell:
+            // from the start of the row, and again after every reset -
+            // the widget's, and the ones the notice and the version stamp
+            // put on the top row, which would otherwise drop those cells
+            // back to the terminal's. A tint a widget sets still wins
+            // until its reset.
+            if ground.is_empty() { line } else { on_ground(&line, &ground) }
         })
         .collect()
 }
@@ -1509,8 +1509,7 @@ fn on_ground(line: &str, ground: &str) -> String {
             Some(e) => {
                 let seq = &tail[..e];
                 out.push_str(seq);
-                let params = &seq[2..seq.len() - 1];
-                if params.is_empty() || params == "0" || params.split(';').any(|p| p == "49") {
+                if drops_background(&seq[2..seq.len() - 1]) {
                     out.push_str(ground);
                 }
                 rest = &tail[e..];
@@ -1523,6 +1522,42 @@ fn on_ground(line: &str, ground: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Whether an SGR with these parameters leaves the background at the
+/// terminal's default: its last word on the background is a full reset or
+/// `49`. The parameters are read in order, and the arguments of an extended
+/// colour (`38;2;r;g;b`, `48;5;n`, ...) are skipped as a unit, so a channel
+/// that happens to be `49` or `0` - Dusk's selection tint is
+/// `48;2;39;42;49` - is never read as a command of its own.
+fn drops_background(params: &str) -> bool {
+    if params.is_empty() {
+        return true;
+    }
+    let words: Vec<&str> = params.split(';').collect();
+    let mut dropped = None;
+    let mut i = 0;
+    while i < words.len() {
+        // A colon form (`48:2::r:g:b`) carries its arguments in one word.
+        let head = words[i].split(':').next().unwrap_or("");
+        let colon = words[i].contains(':');
+        match head {
+            "" | "0" => dropped = Some(true),
+            "49" => dropped = Some(true),
+            "48" => dropped = Some(false),
+            _ => {}
+        }
+        if !colon && matches!(head, "38" | "48" | "58") {
+            i += match words.get(i + 1).copied() {
+                Some("2") => 5,
+                Some("5") => 3,
+                _ => 1,
+            };
+            continue;
+        }
+        i += 1;
+    }
+    dropped.unwrap_or(false)
 }
 
 /// Every one of `lines`, from home.
@@ -1592,6 +1627,9 @@ fn covering_row(lines: &[String], i: usize) -> Option<&str> {
 /// touch it, and the gaps between blocks are spaces.
 fn put_covered(buf: &mut String, origin: &str) {
     buf.push_str(RST);
+    // As in `put_line`: the spaces and the erase take the background in
+    // force, which has to be the theme's for a themed pane.
+    buf.push_str(&theme::background());
     let ranges = covered_ranges(origin);
     if ranges.is_empty() {
         buf.push_str(EL);
@@ -7581,6 +7619,38 @@ mod tests {
         // Text is untouched, and an escape that is not SGR passes as it was.
         assert_eq!(on_ground("plain", ground), format!("{ground}plain"));
         assert!(on_ground("x\x1b[2Ky", ground).ends_with("x\x1b[2Ky"));
+    }
+
+    #[test]
+    fn a_colour_channel_is_never_read_as_a_background_reset() {
+        let ground = "\x1b[48;2;34;37;43m";
+        // Dusk's selection tint ends in a blue channel of 49.
+        let row = format!("{}sel\x1b[38;2;0;49;0mx\x1b[38;5;49my", bg(39, 42, 49));
+        let out = on_ground(&row, ground);
+        assert_eq!(out.matches(ground).count(), 1, "only the ground at the start: {out:?}");
+        assert!(drops_background("0"));
+        assert!(drops_background(""));
+        assert!(drops_background("1;49"));
+        assert!(drops_background("48;2;1;2;3;0"));
+        assert!(!drops_background("48;2;39;42;49"));
+        assert!(!drops_background("38;2;49;0;0"));
+        assert!(!drops_background("49;48;5;49"));
+        assert!(!drops_background("48:2::39:42:49"));
+    }
+
+    #[test]
+    fn the_ground_reaches_the_cells_the_version_stamp_reset() {
+        let ground = "\x1b[48;2;255;255;255m";
+        let stamped = stamped_with("title", 60, None);
+        let out = on_ground(&stamped, ground);
+        // Every reset the stamp wrote is followed by the ground, so the
+        // padding and the version sit on the theme's background.
+        assert_eq!(out.matches(RST).count(), stamped.matches(RST).count());
+        assert_eq!(
+            out.matches(&format!("{RST}{ground}")).count(),
+            stamped.matches(RST).count(),
+            "{out:?}"
+        );
     }
 
     #[test]

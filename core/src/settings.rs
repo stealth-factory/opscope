@@ -792,8 +792,13 @@ fn summary(v: &Value, secret: bool) -> String {
 
 /// The new section wins. A legacy section is consulted only when its
 /// owning widget explicitly declares it and the new section is absent.
+///
+/// The section every widget shares is never a widget's to alias: its
+/// readers know only its own name, so a theme written under a widget's old
+/// section - `pr.theme` for want of an `opscope` section - would be saved,
+/// reported as saved, and never read.
 fn live_section<'a>(live: &Value, canonical: &'a str, legacy: Option<&'a str>) -> &'a str {
-    if live.get(canonical).is_some() {
+    if live.get(canonical).is_some() || canonical == crate::theme::SECTION {
         return canonical;
     }
     if let Some(old) = legacy {
@@ -835,17 +840,51 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette, plain or lifted to read on the selected-row tint. Plain
+/// `Muted` measures 3.68 on Night Owl's selection and Horizon's accent
+/// 4.33, so every colour a selected row carries comes from the lifted one.
+fn palette_on(here: bool) -> Palette {
+    let ink = |role| crate::ink_on(role, here);
     Palette {
         // dim 3.81 on bg(38,56,76); dim_lit 4.74. Measured, not eyeballed.
         // dim_lit is the same grey lifted to read on the selected-row tint.
-        dim: crate::ink(crate::Role::Muted),
+        dim: ink(crate::Role::Muted),
         dim_lit: crate::ink_on(crate::Role::Muted, true),
-        txt: crate::ink(crate::Role::Fg),
-        lbl: crate::ink(crate::Role::Muted),
-        accent: crate::ink(crate::Role::Accent),
-        ok: crate::ink(crate::Role::Green),
-        warn: crate::ink(crate::Role::Yellow),
-        bad: crate::ink(crate::Role::Red),
+        txt: ink(crate::Role::Fg),
+        lbl: ink(crate::Role::Muted),
+        accent: ink(crate::Role::Accent),
+        ok: ink(crate::Role::Green),
+        warn: ink(crate::Role::Yellow),
+        bad: ink(crate::Role::Red),
+    }
+}
+
+impl Palette {
+    /// `colour`, which must be one of this palette's own fields, as `lit`
+    /// has it. Matched by address, not by text: two roles can share an RGB
+    /// in a theme, and the text alone cannot say which one was meant.
+    fn lifted<'a>(&self, lit: &'a Palette, colour: &'a str) -> &'a str {
+        let at = |field: &String| std::ptr::eq(field.as_str(), colour);
+        if at(&self.dim) {
+            &lit.dim_lit
+        } else if at(&self.txt) {
+            &lit.txt
+        } else if at(&self.lbl) {
+            &lit.lbl
+        } else if at(&self.accent) {
+            &lit.accent
+        } else if at(&self.ok) {
+            &lit.ok
+        } else if at(&self.warn) {
+            &lit.warn
+        } else if at(&self.bad) {
+            &lit.bad
+        } else {
+            colour
+        }
     }
 }
 
@@ -3371,6 +3410,7 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
 }
 
 fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+    let lit = palette_on(true);
     // Pinned: it names the widget whose settings these are, which is the one
     // thing that must not scroll away from somebody halfway down a long list.
     let head = crate::title(&format!("{} settings", app.widget), w, &p.accent);
@@ -3474,10 +3514,8 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
         let c_of = |colour: &str| {
             let colour = if tint.is_empty() {
                 colour
-            } else if colour == p.dim {
-                p.dim_lit.as_str()
             } else {
-                colour
+                p.lifted(&lit, colour)
             };
             format!("{}{}", tint, colour)
         };
@@ -3820,6 +3858,7 @@ fn input_row(
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+    let lit = palette_on(true);
     let Mode::Pick {
         index,
         query,
@@ -4105,9 +4144,10 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         // composed inline would not outlive the slice it is put in. The tint
         // has to lead each one or the foreground that follows resets the
         // background and the highlight stops halfway across.
-        let lead = format!("{tint}{}", if here { &p.accent } else { &p.dim });
-        let name = format!("{tint}{}", if *on { &p.txt } else { &p.dim });
-        let note = format!("{tint}{}", p.dim);
+        let q = if here { &lit } else { &p };
+        let lead = format!("{tint}{}", if here { &q.accent } else { &q.dim });
+        let name = format!("{tint}{}", if *on { &q.txt } else { &q.dim });
+        let note = format!("{tint}{}", q.dim);
         body.push(crate::seg(
             &[
                 (
@@ -5484,6 +5524,19 @@ mod tests {
         );
         // Coming back out is not leaving the screen.
         assert_eq!(app.stack.len(), 1);
+    }
+
+    /// A widget's old section stands in for its own, never for the one
+    /// every widget shares: `theme::wanted()` reads only `opscope`, so a
+    /// theme saved under `pr` would be reported saved and never applied.
+    #[test]
+    fn the_shared_section_never_takes_a_widgets_legacy_name() {
+        let live = serde_json::json!({ "pr": { "repos": [] } });
+        assert_eq!(live_section(&live, "github-prs", Some("pr")), "pr");
+        assert_eq!(
+            live_section(&live, crate::theme::SECTION, Some("pr")),
+            crate::theme::SECTION
+        );
     }
 
     /// A field a row already carries that this screen has no opinion about
