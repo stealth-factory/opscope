@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.9.2] - 2026-11-06
+
+### Bug Fixes
+
+- **disk**: Keep each name beside its figures on a wide pane (OPS-267) (#592)
+
 ## [2.9.1] - 2026-11-06
 
 ### Bug Fixes
