@@ -1961,10 +1961,9 @@ struct ClockColumns {
 
 fn clock_columns(width: usize, weather_cells: usize, longest: usize) -> ClockColumns {
     const NAME_MIN: usize = 16;
-    // As drawn, not as reserved: ` Thu  UTC+5:30` is 15 cells and a `+1d`
-    // rollover is 7. Counting the full 16 a half-hour offset was reserved
-    // for drops a column while it still fits.
-    const DAY_OFFSET: usize = 15;
+    // As drawn: ` Thu  UTC+12:45` is 16 cells (the widest real offset,
+    // Chatham's +12:45) and a `+1d` rollover is 7.
+    const DAY_OFFSET: usize = 16;
     const SHIFT: usize = 7;
     let room = width.saturating_sub(1);
     // The time and the condition column stay; the day/night mark (a space,
@@ -2063,24 +2062,44 @@ fn world_clock_lines(
                 .into_iter()
                 .map(|line| tc::seg(&[(p.txt.as_str(), format!(" {line}"))], room))
                 .collect();
-        let weather = if weather_col {
+        // The time is never cut, even in the narrowest pane the terminal
+        // layer allows. Give up the condition column first, then the mark,
+        // and only then the one-cell indent around the time.
+        let mut lead = lead;
+        let mut lead_w = lead_w;
+        let mut weather = if weather_col {
             format!("{cell} ")
         } else {
             String::new()
         };
-        let core_w = lead_w + tc::display_width(&weather) + tc::display_width(&time);
+        let mut core_w = lead_w + tc::display_width(&weather) + tc::display_width(&time);
+        if core_w > room && !weather.is_empty() {
+            weather.clear();
+            core_w = lead_w + tc::display_width(&time);
+        }
+        if core_w > room {
+            lead = " ".to_string();
+            lead_w = 1;
+            core_w = lead_w + tc::display_width(&time);
+        }
+        if core_w > room {
+            lead = String::new();
+            lead_w = 0;
+            core_w = tc::display_width(&time);
+        }
         let indent = " ".repeat(room.saturating_sub(core_w));
         let weather_x = tc::display_width(&indent) + lead_w;
         let mut parts: Vec<(&str, String)> = vec![(p.dim.as_str(), indent)];
         parts.push((ink.as_str(), lead));
-        if weather_col {
+        let has_weather = !weather.is_empty();
+        if has_weather {
             parts.push((p.accent.as_str(), weather));
         }
         parts.push((p.txt.as_str(), time));
         lines.push(tc::seg(&parts, room));
         let spot = code.and_then(|code| {
             let cols = tc::display_width(parse::condition_glyph(code)).max(1);
-            (weather_col && weather_x + cols <= room).then_some((weather_x, code))
+            (has_weather && weather_x + cols <= room).then_some((weather_x, code))
         });
         return (lines, spot);
     }
@@ -2957,6 +2976,16 @@ mod tests {
         }
     }
 
+    fn sample_weather(name: &str, zone: &str, code: i64) -> weather::CityWeather {
+        weather::CityWeather {
+            name: name.into(),
+            zone: zone.into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Ready { code },
+        }
+    }
+
     fn clock_time_column(row: &str) -> Option<usize> {
         let plain = strip_ansi(row);
         let chars: Vec<char> = plain.chars().collect();
@@ -3415,6 +3444,161 @@ mod tests {
         assert!(strip_ansi(&rows[2]).contains('◑'));
         for row in &rows {
             assert!(tc::display_width(row) <= 15, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_two_digit_fractional_offset_keeps_its_last_digit() {
+        let p = palette();
+        // 12:00 UTC is 00:45 the next day in Chatham, whose +12:45 is the
+        // widest offset a real zone has.
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let city = sample_city("Chatham", "Pacific/Chatham", None, None);
+        let mut scroll = 0usize;
+        let mut saw_offset = false;
+        for width in 16..=80 {
+            let rows = world_clock_rows(
+                &[&city],
+                &[],
+                &mut scroll,
+                4,
+                width,
+                &now,
+                &p,
+                &mut Vec::new(),
+            );
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= width - 1,
+                    "a {width}-column pane drew {} cells: {}",
+                    tc::display_width(row),
+                    strip_ansi(row)
+                );
+            }
+            let text = rows
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.contains("UTC") {
+                saw_offset = true;
+                assert!(
+                    text.contains("UTC+12:45"),
+                    "the offset lost a digit at {width} columns: {text}"
+                );
+            }
+            assert!(
+                text.contains("00:45"),
+                "the time is cut at {width} columns: {text}"
+            );
+        }
+        assert!(saw_offset, "the sweep never reached an offset-bearing row");
+    }
+
+    #[test]
+    fn the_narrowest_pane_keeps_the_stacked_time_whole() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let city = sample_city("San Francisco", "Asia/Tokyo", Some((35.68, 139.69)), None);
+        let ready = [sample_weather("San Francisco", "Asia/Tokyo", 2)];
+        for slots in [&[][..], &ready[..]] {
+            let mut scroll = 0usize;
+            let rows = world_clock_rows(&[&city], slots, &mut scroll, 8, 8, &now, &p, &mut Vec::new());
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= 7,
+                    "an 8-column pane drew {} cells: {}",
+                    tc::display_width(row),
+                    strip_ansi(row)
+                );
+            }
+            let text = rows
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let compact: String = text.split_whitespace().collect();
+            assert!(compact.contains("SanFrancisco"), "the name is cut: {text}");
+            assert!(text.contains("21:00"), "the time is cut: {text}");
+        }
+    }
+
+    #[test]
+    fn a_long_name_survives_the_stacked_layout() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let city = sample_city(
+            "Ouagadougou-Centre",
+            "Asia/Tokyo",
+            Some((35.68, 139.69)),
+            None,
+        );
+        let slots = [sample_weather("Ouagadougou-Centre", "Asia/Tokyo", 2)];
+        for width in 16..=20 {
+            let mut scroll = 0usize;
+            let rows =
+                world_clock_rows(&[&city], &slots, &mut scroll, 6, width, &now, &p, &mut Vec::new());
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= width - 1,
+                    "a {width}-column pane drew {} cells: {}",
+                    tc::display_width(row),
+                    strip_ansi(row)
+                );
+            }
+            let text = rows
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let compact: String = text.split_whitespace().collect();
+            assert!(
+                compact.contains("Ouagadougou-Centre"),
+                "the name is cut at {width} columns: {text}"
+            );
+            assert!(
+                text.contains("21:00"),
+                "the time is cut at {width} columns: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_weather_column_survives_the_width_sweep() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let city = sample_city("San Francisco", "Asia/Tokyo", Some((35.68, 139.69)), None);
+        let slots = [sample_weather("San Francisco", "Asia/Tokyo", 2)];
+        for width in 16..=80 {
+            let mut scroll = 0usize;
+            let rows =
+                world_clock_rows(&[&city], &slots, &mut scroll, 6, width, &now, &p, &mut Vec::new());
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= width - 1,
+                    "a {width}-column pane drew {} cells: {}",
+                    tc::display_width(row),
+                    strip_ansi(row)
+                );
+            }
+            let text = rows
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let compact: String = text.split_whitespace().collect();
+            assert!(
+                text.contains('◑'),
+                "the condition glyph is missing at {width} columns: {text}"
+            );
+            assert!(
+                compact.contains("SanFrancisco"),
+                "the name is missing at {width} columns: {text}"
+            );
+            assert!(
+                text.contains("21:00"),
+                "the time is cut at {width} columns: {text}"
+            );
         }
     }
 
