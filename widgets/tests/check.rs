@@ -2838,8 +2838,17 @@ fn ramp_steps(lifted: bool) -> Vec<(f64, (f64, f64, f64))> {
 /// This walks the ramp itself and measures every step, which is the half
 /// that stops it recurring - a later retune of the stops is measured here
 /// the same day it is written, rather than by eye two releases later.
+/// The ramp checks measure core's ramp against the tints widget source
+/// names, which are opscope Classic's; so they draw in Classic, whatever
+/// theme the machine running them has set.
+fn pin_classic() {
+    let classic = opscope_core::theme::find("classic").expect("opscope Classic is built in");
+    opscope_core::theme::set(classic.clone());
+}
+
 #[test]
 fn the_lifted_ramp_clears_aa_on_a_selection_tint() {
+    pin_classic();
     let tint = (38.0, 56.0, 76.0);
     let mut wrong = Vec::new();
     for (frac, c) in ramp_steps(true) {
@@ -2975,6 +2984,7 @@ fn let_binding_ident(line: &str) -> Option<String> {
 /// called `heat` in a second file would be blamed for the tint in its first.
 #[test]
 fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
+    pin_classic();
     let mut wrong = Vec::new();
     for (name, whole) in widgets() {
         let src = without_tests(&whole);

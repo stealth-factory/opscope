@@ -2222,3 +2222,9 @@ mod tests {
     }
 
 }
+
+/// The theme the terminal described, from its replies to the colour
+/// queries; `None` until it has answered, or when it never does.
+pub(crate) fn terminal_theme() -> Option<crate::theme::Theme> {
+    None
+}

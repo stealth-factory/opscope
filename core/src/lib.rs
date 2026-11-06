@@ -23,6 +23,7 @@
 mod aliases;
 mod analytics;
 mod dependencies;
+pub mod theme;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -43,6 +44,7 @@ pub use dependencies::{
 };
 pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use theme::{ink, ink_between, tint, Role};
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -1422,9 +1424,17 @@ fn lines_with(
     counter: Option<&(&'static str, String)>,
 ) -> Vec<String> {
     let room = top_room_with(w, counter.map(|(_, text)| text.as_str()));
+    let ground = theme::background();
     (0..h)
         .map(|i| {
             let mut line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+            // A theme with its own background paints it under every cell:
+            // from the start of the row, and again after every reset a
+            // widget wrote, which would otherwise drop it back to the
+            // terminal's. A tint a widget sets still wins until its reset.
+            if !ground.is_empty() {
+                line = on_ground(&line, &ground);
+            }
             // The title row is measured as ordinary text. A sized block
             // there would move the cursor under the version.
             if i == 0 || occupied_columns(&line) > w
@@ -1449,6 +1459,37 @@ fn lines_with(
 #[cfg(test)]
 fn frame(rows: &[String], w: usize, h: usize) -> String {
     painted(&lines(rows, w, h))
+}
+
+/// `line` with the theme's background `ground` under it: set at the start,
+/// and set again after each reset or default-background escape the row
+/// carries.
+fn on_ground(line: &str, ground: &str) -> String {
+    let mut out = String::with_capacity(line.len() + ground.len() * 4);
+    out.push_str(ground);
+    let mut rest = line;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = tail.find('m').map(|e| e + 1).filter(|e| tail[2..*e - 1].bytes().all(|b| b.is_ascii_digit() || b == b';' || b == b':'));
+        match end {
+            Some(e) => {
+                let seq = &tail[..e];
+                out.push_str(seq);
+                let params = &seq[2..seq.len() - 1];
+                if params.is_empty() || params == "0" || params.split(';').any(|p| p == "49") {
+                    out.push_str(ground);
+                }
+                rest = &tail[e..];
+            }
+            None => {
+                out.push_str("\x1b[");
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Every one of `lines`, from home.
@@ -1483,6 +1524,9 @@ fn put_line(buf: &mut String, line: &str) {
     // its `╸` without anyone noticing. Erasing from column 0 before the
     // row is written cannot reach anything the row puts down.
     buf.push_str(RST);
+    // The erase fills with the background in force, so a themed pane is
+    // painted to its right edge, past the end of the row's text.
+    buf.push_str(&theme::background());
     buf.push_str(EL);
     if line.contains("\x1b]777;opscope-link;") {
         if let Some(marker) = link_marker() {
@@ -2619,14 +2663,8 @@ fn base64(data: &[u8]) -> String {
 /// finished - calls that instead. A fraction where high is good belongs
 /// on [`health`] / [`health_on`].
 pub fn heat(frac: f64) -> String {
-    let frac = frac.clamp(0.0, 1.0);
-    if frac < 0.5 {
-        let t = frac / 0.5;
-        rgb((40.0 + 200.0 * t) as u8, 255, (120.0 - 100.0 * t) as u8)
-    } else {
-        let t = (frac - 0.5) / 0.5;
-        rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
-    }
+    let (r, g, b) = theme::heat_colour(frac, false);
+    rgb(r, g, b)
 }
 
 /// [`heat`] with its hot end lifted far enough to be read on a tinted row.
@@ -2656,12 +2694,8 @@ pub fn heat(frac: f64) -> String {
 /// `heat_on(frac, false)` is `heat` itself rather than a copy of its
 /// arithmetic, so the ramp everyone recognises cannot drift from this one.
 pub fn heat_on(frac: f64, tinted: bool) -> String {
-    let frac = frac.clamp(0.0, 1.0);
-    if !tinted || frac < 0.5 {
-        return heat(frac);
-    }
-    let t = (frac - 0.5) / 0.5;
-    rgb(255, (240.0 - 110.0 * t) as u8, (20.0 + 10.0 * t) as u8)
+    let (r, g, b) = theme::heat_colour(frac, tinted);
+    rgb(r, g, b)
 }
 
 /// The same ramp as [`heat`], for a fraction where **high is good**.
@@ -7472,12 +7506,32 @@ mod tests {
     }
 
     #[test]
+    fn a_painted_theme_background_survives_every_reset_in_a_row() {
+        let ground = "\x1b[48;2;34;37;43m";
+        let row = format!("a{}b\x1b[0mc\x1b[mdd\x1b[1;49me\x1b[38;2;1;2;3mf", bg(9, 9, 9));
+        let out = on_ground(&row, ground);
+        assert!(out.starts_with(ground), "{out:?}");
+        // After each full reset and each default-background escape, the
+        // ground again; a colour escape alone does not need it.
+        assert_eq!(out.matches(ground).count(), 4, "{out:?}");
+        assert!(out.contains(&format!("{}b", bg(9, 9, 9))), "the widget's own tint is kept");
+        // Text is untouched, and an escape that is not SGR passes as it was.
+        assert_eq!(on_ground("plain", ground), format!("{ground}plain"));
+        assert!(on_ground("x\x1b[2Ky", ground).ends_with("x\x1b[2Ky"));
+    }
+
+    #[test]
     fn heat_runs_green_to_red_through_amber() {
         // The ends and the middle, since every widget reads the same scale
         // and a drift in it would make one pane disagree with the next.
-        assert_eq!(heat(0.0), rgb(40, 255, 120));
-        assert_eq!(heat(0.5), rgb(255, 240, 20));
-        assert_eq!(heat(1.0), rgb(255, 40, 30));
+        // The theme's own green, yellow and red: here opscope Classic.
+        let at = |role: Role| {
+            let (r, g, b) = theme::colour(role);
+            rgb(r, g, b)
+        };
+        assert_eq!(heat(0.0), at(Role::Green));
+        assert_eq!(heat(0.5), at(Role::Yellow));
+        assert_eq!(heat(1.0), at(Role::Red));
         // Out of range is clamped rather than wrapped: a CPU reading over
         // 100% on a multicore box must not come back green.
         assert_eq!(heat(2.0), heat(1.0));
