@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.9.0] - 2026-11-06
+
+### Documentation
+
+- **settings**: Break long field help into paragraphs and numbered steps (OPS-259) (#581)
+
+### Features
+
+- Themes - follow the terminal's colours, 51 built-in themes, your own theme files (OPS-260) (#582)
+
 ## [2.8.0] - 2026-11-06
 
 ### Features
