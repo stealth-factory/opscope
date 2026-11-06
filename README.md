@@ -446,8 +446,11 @@ title bars, the selected row and the rows tinted red or green by meaning. A
 theme colour that does not is moved, just far enough, when the theme loads.
 
 **Your own themes:** drop a JSON file in `~/.config/opscope/themes/` (or
-`$XDG_CONFIG_HOME/opscope/themes/`); its file name is its id, and it appears
-in the picker. Only `fg` and `bg` are required; any of the other roles —
+`$XDG_CONFIG_HOME/opscope/themes/`), the folder beside your `config.json`;
+make the `themes` folder if it is not there. Its file name is its id. The
+picker lists it in a section of its own, **your themes**, after `auto` and
+`terminal` and before the bundled themes, with the folder named on the
+section's rule. Only `fg` and `bg` are required; any of the other roles —
 `dark`, `slot` (the selected row), `muted`, `dim`, `border`, `accent`,
 `onAccent`, `green`, `blue`, `yellow`, `red`, `cyan`, `magenta`, `orange` —
 can be given, and the rest are worked out from those. A file with the same
@@ -457,6 +460,12 @@ notice (`!`) and left out; it never stops a widget.
 ```json
 { "name": "Mine", "fg": "#e0e0e0", "bg": "#101418", "accent": "#7aa2f7", "red": "#ff6b6b" }
 ```
+
+**Sharing a theme:** a theme file stays yours and needs nobody's review. To
+offer one to everyone, open a pull request adding it to
+[`core/themes.json`](core/themes.json), where the bundled themes live. The
+tests measure every bundled theme's contrast, so the pull request says
+whether it reads.
 
 ### Editing `config.json` by hand
 

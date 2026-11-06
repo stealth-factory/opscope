@@ -47,6 +47,37 @@ pub struct Choice {
     pub value: String,
     pub label: String,
     pub detail: String,
+    pub kind: Kind,
+}
+
+/// The picker's three sections, in the order they are listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    /// `auto` and `terminal`: settings that follow the terminal rather than
+    /// themes of their own.
+    Setting,
+    /// A file in the user's themes folder.
+    Yours,
+    /// One of the themes in the binary.
+    Bundled,
+}
+
+/// One row of the list as drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Row {
+    /// A theme or setting: its index in the list.
+    Item(usize),
+    /// A section's heading rule, with its label.
+    Rule(String),
+}
+
+/// The themes folder as someone would type it: under `~` when it is.
+pub fn folder() -> String {
+    let dir = theme::themes_dir().display().to_string();
+    match std::env::var("HOME").ok().filter(|h| !h.is_empty()) {
+        Some(home) if dir.starts_with(&home) => format!("~{}", &dir[home.len()..]),
+        _ => dir,
+    }
 }
 
 /// Everything there is to pick: auto, the terminal's own, then every theme
@@ -58,21 +89,28 @@ pub fn choices() -> Vec<Choice> {
             value: "auto".into(),
             label: "auto".into(),
             detail: "the terminal's own colours, else opscope Dusk".into(),
+            kind: Kind::Setting,
         },
         Choice {
             value: "terminal".into(),
             label: "terminal".into(),
             detail: "always the terminal's own colours".into(),
+            kind: Kind::Setting,
         },
     ];
     let all = theme::all();
-    for (group, label) in &groups {
+    // Yours first, named by the file each came from, then the bundled
+    // themes group by group.
+    for t in all.iter().filter(|t| t.group == "user") {
+        out.push(Choice { value: t.id.clone(), label: t.name.clone(), detail: format!("{}.json", t.id), kind: Kind::Yours });
+    }
+    for (group, label) in groups.iter().filter(|(g, _)| g != "user") {
         for t in all.iter().filter(|t| &t.group == group) {
             let mut detail = label.clone();
             if let Some(film) = &t.film {
                 detail = format!("{label} · {film}");
             }
-            out.push(Choice { value: t.id.clone(), label: t.name.clone(), detail });
+            out.push(Choice { value: t.id.clone(), label: t.name.clone(), detail, kind: Kind::Bundled });
         }
     }
     out
@@ -157,14 +195,10 @@ pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Choice], fi
     }
     let drawn = drawn(list);
     let first = first.min(drawn.len().saturating_sub(slots(ih)));
-    let index = (*drawn.get(first + slot)?)?;
-    Some(format!("pick:{index}"))
-}
-
-/// `auto` and `terminal`: settings that follow the terminal rather than
-/// themes of their own.
-fn is_special(value: &str) -> bool {
-    value == "auto" || value == "terminal"
+    match drawn.get(first + slot)? {
+        Row::Item(index) => Some(format!("pick:{index}")),
+        _ => None,
+    }
 }
 
 pub fn filtered(all: &[Choice], query: &str) -> Vec<Choice> {
@@ -241,17 +275,28 @@ pub fn slots(ih: usize) -> usize {
     ih.saturating_sub(3).max(1)
 }
 
-/// The list as drawn, one entry per row: an index into `list`, or `None`
-/// for the rule under the settings that follow the terminal - between them
-/// and the named themes, so `auto` and `terminal` read as a different kind
-/// of choice.
-pub fn drawn(list: &[Choice]) -> Vec<Option<usize>> {
+/// The list as drawn, one entry per row: `auto` and `terminal`, your
+/// themes if there are any, then the bundled ones. A section after the
+/// first opens with a rule naming it, so a setting reads as a different
+/// kind of choice from a theme, and your themes as yours - with the folder
+/// they were read from.
+pub fn drawn(list: &[Choice]) -> Vec<Row> {
+    drawn_with(list, &folder())
+}
+
+fn drawn_with(list: &[Choice], folder: &str) -> Vec<Row> {
     let mut out = Vec::new();
+    let mut last: Option<Kind> = None;
     for (i, c) in list.iter().enumerate() {
-        out.push(Some(i));
-        if is_special(&c.value) && list.get(i + 1).is_some_and(|n| !is_special(&n.value)) {
-            out.push(None);
+        if last.is_some_and(|k| k != c.kind) {
+            out.push(match c.kind {
+                Kind::Yours => Row::Rule(format!("your themes · {folder}")),
+                Kind::Bundled => Row::Rule("bundled".into()),
+                Kind::Setting => Row::Rule(String::new()),
+            });
         }
+        out.push(Row::Item(i));
+        last = Some(c.kind);
     }
     out
 }
@@ -259,7 +304,7 @@ pub fn drawn(list: &[Choice]) -> Vec<Option<usize>> {
 /// The first drawn row of a window `slots` tall that keeps `selected` in
 /// view, moving from `first` no further than it has to.
 pub fn follow_list(list: &[Choice], selected: usize, slots: usize, first: usize) -> usize {
-    let at = drawn(list).iter().position(|d| *d == Some(selected)).unwrap_or(0);
+    let at = drawn(list).iter().position(|d| *d == Row::Item(selected)).unwrap_or(0);
     let slots = slots.max(1);
     if at < first {
         at
@@ -331,9 +376,22 @@ pub fn inside_from(
         listed.push(line(&[(theme::ink(Role::Muted), "   no theme matches".into())], &bar));
     }
     for d in drawn.iter().skip(first).take(slots) {
-        let Some(i) = *d else {
-            listed.push(line(&[(theme::ink(Role::Dim), format!(" {}", "─".repeat(iw.saturating_sub(2))))], &bar));
-            continue;
+        let i = match d {
+            Row::Item(i) => *i,
+            Row::Rule(label) => {
+                // ` ── label ───…`, the rule to the modal's edge.
+                let head = if label.is_empty() { String::new() } else { format!("{label} ") };
+                let used = 4 + crate::display_width(&head);
+                listed.push(line(
+                    &[
+                        (theme::ink(Role::Muted), " ── ".into()),
+                        (theme::ink(Role::Muted), head),
+                        (theme::ink(Role::Muted), "─".repeat(iw.saturating_sub(used + 1))),
+                    ],
+                    &bar,
+                ));
+                continue;
+            }
         };
         let c = &list[i];
         let here = i == selected;
@@ -751,7 +809,7 @@ mod tests {
         // In view: the window stays where the wheel left it.
         assert_eq!(follow_list(&all, 5, 10, 2), 2);
         // Below it: just far enough that it is on the last row.
-        let at = drawn(&all).iter().position(|d| *d == Some(20)).unwrap();
+        let at = drawn(&all).iter().position(|d| *d == Row::Item(20)).unwrap();
         assert_eq!(follow_list(&all, 20, 10, 0), at + 1 - 10);
         // Above it: it becomes the first row.
         assert_eq!(follow_list(&all, 0, 10, 8), 0);
@@ -762,12 +820,44 @@ mod tests {
     }
 
     #[test]
+    fn your_themes_sit_between_the_settings_and_the_bundled_ones() {
+        let c = |v: &str, kind| Choice { value: v.into(), label: v.into(), detail: String::new(), kind };
+        let list = vec![
+            c("auto", Kind::Setting),
+            c("terminal", Kind::Setting),
+            c("mine", Kind::Yours),
+            c("dusk", Kind::Bundled),
+        ];
+        let rows = drawn_with(&list, "~/.config/opscope/themes");
+        assert_eq!(
+            rows,
+            vec![
+                Row::Item(0),
+                Row::Item(1),
+                Row::Rule("your themes · ~/.config/opscope/themes".into()),
+                Row::Item(2),
+                Row::Rule("bundled".into()),
+                Row::Item(3),
+            ]
+        );
+        // Filtered to yours and the bundled: still headed apart.
+        let rows = drawn_with(&list[2..], "~/t");
+        assert_eq!(rows, vec![Row::Item(0), Row::Rule("bundled".into()), Row::Item(1)]);
+        // In the real list, a user theme lands after terminal and before Dusk.
+        let all = choices();
+        assert_eq!(all[0].kind, Kind::Setting);
+        assert!(all.windows(2).all(|w| w[0].kind <= w[1].kind), "sections out of order");
+    }
+
+    #[test]
     fn a_rule_parts_the_terminal_settings_from_the_themes() {
         let all = choices();
+        // Tests read no themes folder: with none of yours, no section for them.
         let rows = inside(&all, 0, "", "dusk", "", 60, 12);
         assert!(rows[3].contains("terminal"), "{:?}", rows[3]);
-        assert!(rows[4].contains("──────"), "{:?}", rows[4]);
+        assert!(rows[4].contains("bundled") && rows[4].contains("──"), "{:?}", rows[4]);
         assert!(rows[5].contains("opscope Dusk"), "{:?}", rows[5]);
+        assert!(!rows.iter().any(|r| r.contains("your themes")));
         // Only between the two kinds: none when a filter leaves one kind.
         let themes = filtered(&all, "nord");
         assert!(!inside(&themes, 0, "nord", "dusk", "", 60, 12).iter().any(|r| r.contains("──────")));
