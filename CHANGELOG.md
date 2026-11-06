@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.8.0] - 2026-11-06
+
+### Features
+
+- **mux-activity**: One widget for Rex, Herdr and Luvus, and widget aliases (OPS-252) (#575)
+
 ## [2.7.0] - 2026-11-05
 
 ### Bug Fixes
