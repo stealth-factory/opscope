@@ -23,13 +23,18 @@
 //! a theme picked on opscope.stealth-factory.co looks the same here; both
 //! read `core/themes.json`.
 //!
-//! **Contrast is enforced when a theme is loaded, not trusted.** Every text
-//! role is moved, just far enough, to AA 4.5 against `bg`, `dark` and
-//! `slot` - lightened on a dark theme, darkened on a light one - so a
-//! widget can put any text role on any of those backgrounds. That is the
-//! rule the site's themes were written to, and it is checked again here so
-//! a theme added later, or one built from the terminal's replies, cannot
-//! slip under it.
+//! **Contrast is enforced when a theme is loaded, not trusted.** Each text
+//! role comes in two strengths. [`ink`] is moved, just far enough, to AA
+//! 4.5 on `bg` and `dark` - lightened on a dark theme, darkened on a light
+//! one. [`ink_on`] with `tinted` set is lifted further, to AA 4.5 on the
+//! selected-row tint and every hue tint as well, which is what a row that
+//! is selected or tinted by meaning draws its text in. Two strengths and
+//! not one because one that cleared every tint would make a theme's own red
+//! a pale pink everywhere, to be readable on the one row that needs it -
+//! the same trade `heat_on` makes for the ramp, made for every role. That
+//! is the rule the site's themes were written to, checked again here so a
+//! theme added later, or one built from the terminal's replies, cannot slip
+//! under it.
 //!
 //! Output stays truecolor whatever the theme: Kitty charts recover RGB from
 //! the escape, and the contrast arithmetic needs real values.
@@ -150,15 +155,47 @@ pub struct Theme {
     /// background is already the one they were made for.
     pub paints_background: bool,
     colours: [Rgb; 16],
+    /// Each role lifted to read on the selected-row tint and every hue
+    /// tint too; the same as `colours` for a role that is not text.
+    lifted: [Rgb; 16],
+    /// The selected-row tint moved toward each hue, for a row tinted by
+    /// what it is - a blocked agent, a finished one - rather than by being
+    /// selected. Worked out from the theme's own hues before contrast is
+    /// enforced, and enforced against like `bg`.
+    toward: [Rgb; 7],
 }
+
+/// The hues a row can be tinted toward.
+pub const HUES: [Role; 7] = [Role::Red, Role::Green, Role::Yellow, Role::Blue, Role::Cyan, Role::Magenta, Role::Orange];
+
+/// How far a hue tint moves from the selected-row tint toward its hue:
+/// enough to read as that colour, little enough to stay a background.
+pub const TOWARD: f64 = 0.18;
 
 impl Theme {
     pub fn colour(&self, role: Role) -> Rgb {
         self.colours[role.index()]
     }
 
+    /// A role's colour for text on a tinted row: readable on the selected-row
+    /// tint and every hue tint.
+    pub fn lifted(&self, role: Role) -> Rgb {
+        self.lifted[role.index()]
+    }
+
+    /// The selected-row tint moved toward `hue`; the plain selected-row
+    /// tint for a role that is not one of [`HUES`].
+    pub fn toward(&self, hue: Role) -> Rgb {
+        match HUES.iter().position(|h| *h == hue) {
+            Some(i) => self.toward[i],
+            None => self.colour(Role::Slot),
+        }
+    }
+
     /// A theme from sixteen colours, contrast enforced.
     pub fn new(id: &str, name: &str, light: bool, paints_background: bool, colours: [Rgb; 16]) -> Theme {
+        let slot = colours[Role::Slot.index()];
+        let toward = HUES.map(|hue| mix(slot, colours[hue.index()], TOWARD));
         let mut theme = Theme {
             id: id.into(),
             name: name.into(),
@@ -167,6 +204,8 @@ impl Theme {
             light,
             paints_background,
             colours,
+            lifted: colours,
+            toward,
         };
         theme.enforce_contrast();
         theme
@@ -175,10 +214,13 @@ impl Theme {
     /// Move each text role just far enough to clear AA 4.5 on `bg`, `dark`
     /// and `slot`, and `onAccent` on `accent`.
     fn enforce_contrast(&mut self) {
-        let grounds = [self.colour(Role::Bg), self.colour(Role::Dark), self.colour(Role::Slot)];
+        let plain = [self.colour(Role::Bg), self.colour(Role::Dark)];
+        let mut tinted = vec![self.colour(Role::Slot)];
+        tinted.extend(self.toward);
         for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
-            let fixed = nudge(self.colour(role), &grounds, self.light);
+            let fixed = nudge(self.colour(role), &plain, self.light);
             self.colours[role.index()] = fixed;
+            self.lifted[role.index()] = nudge(fixed, &tinted, self.light);
         }
         let on = nudge(self.colour(Role::OnAccent), &[self.colour(Role::Accent)], !self.light);
         self.colours[Role::OnAccent.index()] = on;
@@ -412,15 +454,32 @@ pub fn tint(role: Role) -> String {
     format!("\x1b[48;2;{};{};{}m", r, g, b)
 }
 
-/// Text part-way between two roles, still readable: a shade the sixteen do
-/// not name, such as a softer label. Nudged like the roles themselves when
-/// `readable` is set.
+/// Text in `role` on a row that may be tinted: [`ink`] when it is not, and
+/// the lifted form, readable on the selected-row tint and every hue tint,
+/// when it is. The call every selected or tinted row makes.
+pub fn ink_on(role: Role, tinted: bool) -> String {
+    let theme = current();
+    let (r, g, b) = if tinted { theme.lifted(role) } else { theme.colour(role) };
+    format!("\x1b[38;2;{};{};{}m", r, g, b)
+}
+
+/// A row tinted toward `hue` - [`Role::Red`] for a blocked agent,
+/// [`Role::Green`] for a finished one. Text on it is drawn with
+/// [`ink_on`] `(role, true)`, as on the selected-row tint. Needs a reset
+/// afterwards.
+pub fn tint_toward(hue: Role) -> String {
+    let (r, g, b) = current().toward(hue);
+    format!("\x1b[48;2;{};{};{}m", r, g, b)
+}
+
+/// Text part-way between two roles: a shade the sixteen do not name, such
+/// as a softer label. When `readable` is set it is nudged like the roles
+/// themselves, to AA 4.5 on the background and the bars.
 pub fn ink_between(a: Role, b: Role, t: f64, readable: bool) -> String {
     let theme = current();
     let mut c = mix(theme.colour(a), theme.colour(b), t);
     if readable {
-        let grounds = [theme.colour(Role::Bg), theme.colour(Role::Dark), theme.colour(Role::Slot)];
-        c = nudge(c, &grounds, theme.light);
+        c = nudge(c, &[theme.colour(Role::Bg), theme.colour(Role::Dark)], theme.light);
     }
     format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
 }
@@ -451,6 +510,7 @@ pub fn heat_in(theme: &Theme, frac: f64, tinted: bool) -> Rgb {
     let mut grounds = vec![theme.colour(Role::Bg)];
     if tinted {
         grounds.push(theme.colour(Role::Slot));
+        grounds.extend(theme.toward);
     }
     nudge(c, &grounds, theme.light)
 }
@@ -477,13 +537,37 @@ mod tests {
     #[test]
     fn every_text_role_of_every_theme_clears_aa_on_every_background() {
         for t in builtin() {
-            for ground in [Role::Bg, Role::Dark, Role::Slot] {
+            for ground in [Role::Bg, Role::Dark] {
                 for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
                     let ratio = contrast(t.colour(role), t.colour(ground));
                     assert!(ratio >= AA, "{}: {:?} on {:?} is {ratio:.2}", t.id, role, ground);
+                    let ratio = contrast(t.lifted(role), t.colour(ground));
+                    assert!(ratio >= AA, "{}: lifted {:?} on {:?} is {ratio:.2}", t.id, role, ground);
                 }
             }
+            for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
+                let ratio = contrast(t.lifted(role), t.colour(Role::Slot));
+                assert!(ratio >= AA, "{}: lifted {:?} on the selected-row tint is {ratio:.2}", t.id, role);
+            }
             assert!(contrast(t.colour(Role::OnAccent), t.colour(Role::Accent)) >= AA, "{}: onAccent", t.id);
+        }
+    }
+
+    #[test]
+    fn every_text_role_reads_on_every_hue_tinted_row_in_every_theme() {
+        for t in builtin() {
+            for hue in HUES {
+                let ground = t.toward(hue);
+                for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
+                    let ratio = contrast(t.lifted(role), ground);
+                    assert!(ratio >= AA, "{}: lifted {:?} on a row tinted toward {:?} is {ratio:.2}", t.id, role, hue);
+                }
+            }
+            // And the tint is a background, not the hue: it stays nearer
+            // the selected-row tint than the hue itself.
+            let slot = t.colour(Role::Slot);
+            let red = t.toward(Role::Red);
+            assert!(contrast(red, slot) < contrast(t.colour(Role::Red), slot), "{}", t.id);
         }
     }
 
@@ -496,6 +580,10 @@ mod tests {
                 for ground in [Role::Bg, Role::Slot] {
                     let ratio = contrast(c, t.colour(ground));
                     assert!(ratio >= AA, "{} heat({frac}) on {:?} is {ratio:.2}", t.id, ground);
+                }
+                for hue in HUES {
+                    let ratio = contrast(c, t.toward(hue));
+                    assert!(ratio >= AA, "{} heat({frac}) on the {:?} row tint is {ratio:.2}", t.id, hue);
                 }
             }
         }
@@ -528,6 +616,24 @@ mod tests {
         assert_eq!(choose(&Wanted::Named("nord".into()), None).unwrap().id, "nord");
         let why = choose(&Wanted::Named("nope".into()), None).unwrap_err();
         assert!(why.contains("nope") && why.contains("opscope Dusk"), "{why}");
+    }
+
+    #[test]
+    fn classic_is_todays_colours_on_the_plain_background() {
+        // Only the lifted forms move: on a plain row opscope Classic draws
+        // what the widgets drew before themes existed.
+        let classic = find("classic").unwrap();
+        for (role, today) in [
+            (Role::Fg, (225, 235, 245)),
+            (Role::Muted, (130, 165, 200)),
+            (Role::Accent, (150, 210, 255)),
+            (Role::Green, (90, 240, 160)),
+            (Role::Yellow, (255, 200, 90)),
+            (Role::Red, (255, 100, 110)),
+            (Role::Cyan, (30, 220, 180)),
+        ] {
+            assert_eq!(classic.colour(role), today, "{role:?}");
+        }
     }
 
     #[test]

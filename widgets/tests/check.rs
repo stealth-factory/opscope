@@ -2704,11 +2704,31 @@ fn underline_colours_clear_aa_on_the_background_and_a_tint() {
     );
 
     let widgets = widgets();
-    let mut colours = underline_calls(&std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap());
+    let core = std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap();
+    let mut colours = underline_calls(&core);
     for src in widgets.values() {
         colours.extend(underline_calls(src));
     }
-    assert!(!colours.is_empty(), "no underline(r, g, b) call to measure");
+    // Core's threshold underline is the theme's lifted yellow, measured in
+    // every built-in theme against that theme's background and row tint.
+    assert!(
+        core.contains("lifted(Role::Yellow)"),
+        "the threshold underline no longer names the lifted theme yellow, so this check measures nothing"
+    );
+    let mut themed = Vec::new();
+    for t in opscope_core::theme::builtin() {
+        use opscope_core::Role;
+        let c = t.lifted(Role::Yellow);
+        let c = (c.0 as f64, c.1 as f64, c.2 as f64);
+        for ground in [Role::Bg, Role::Slot] {
+            let g = t.colour(ground);
+            let r = contrast(c, (g.0 as f64, g.1 as f64, g.2 as f64));
+            if r < 4.5 {
+                themed.push(format!("{}: threshold underline {c:?} on {ground:?} measures {r:.2}", t.id));
+            }
+        }
+    }
+    assert!(themed.is_empty(), "underline colours:\n{}", themed.join("\n"));
 
     let mut surfaces = vec![("background", background)];
     for (name, src) in &widgets {

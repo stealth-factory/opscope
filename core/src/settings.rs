@@ -837,14 +837,15 @@ struct Palette {
 fn palette() -> Palette {
     Palette {
         // dim 3.81 on bg(38,56,76); dim_lit 4.74. Measured, not eyeballed.
-        dim: crate::rgb(127, 147, 172),
-        dim_lit: crate::rgb(140, 170, 195),
-        txt: crate::rgb(225, 235, 245),
-        lbl: crate::rgb(130, 165, 200),
-        accent: crate::rgb(150, 210, 255),
-        ok: crate::rgb(90, 240, 160),
-        warn: crate::rgb(255, 200, 90),
-        bad: crate::rgb(255, 100, 110),
+        // dim_lit is the same grey lifted to read on the selected-row tint.
+        dim: crate::ink(crate::Role::Muted),
+        dim_lit: crate::ink_on(crate::Role::Muted, true),
+        txt: crate::ink(crate::Role::Fg),
+        lbl: crate::ink(crate::Role::Muted),
+        accent: crate::ink(crate::Role::Accent),
+        ok: crate::ink(crate::Role::Green),
+        warn: crate::ink(crate::Role::Yellow),
+        bad: crate::ink(crate::Role::Red),
     }
 }
 
@@ -3449,7 +3450,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
         rows_at.push((body.len(), i));
         let here = i == app.selected;
         let tint = if here {
-            crate::bg(38, 56, 76)
+            crate::tint(crate::Role::Slot)
         } else {
             String::new()
         };
@@ -3763,7 +3764,7 @@ fn input_row(
         .iter()
         .collect();
 
-    let field = crate::bg(24, 36, 50);
+    let field = crate::tint(crate::Role::Dark);
     let ink = format!("{field}{}", p.txt);
     let ghost = format!("{field}{}", p.dim);
     let edge = format!("{field}{}", p.accent);
@@ -4078,7 +4079,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         let focused = !matches!(kind, PickKind::Free | PickKind::Map) || *on_list;
         let here = focused && i == *sel;
         let tint = if here {
-            crate::bg(28, 44, 62)
+            crate::tint(crate::Role::Slot)
         } else {
             String::new()
         };

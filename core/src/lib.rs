@@ -44,7 +44,7 @@ pub use dependencies::{
 };
 pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
-pub use theme::{ink, ink_between, tint, Role};
+pub use theme::{ink, ink_between, ink_on, tint, tint_toward, Role};
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -250,10 +250,12 @@ fn apply_mark(colour: &str, marks: Marks, caps: terminal::UnderlineCaps) -> Stri
         _ => out.push_str("\x1b[4m"),
     }
     if marks.threshold && caps.colour {
-        // (255, 214, 140) clears AA 4.5 on black and on the selected-row tints.
-        // A darker red at (80, 30, 30) measures about 1.55 on black and 1.13
-        // on bg(38, 56, 76), which is how the contrast check can fail.
-        out.push_str(&underline(255, 214, 140));
+        // The theme's yellow, lifted: marks sit on selected rows too, and
+        // the lifted form clears AA 4.5 on the background and every row
+        // tint. A darker red measured about 1.55 on black, which is how an
+        // underline colour can fail to be seen at all.
+        let (r, g, b) = theme::current().lifted(Role::Yellow);
+        out.push_str(&underline(r, g, b));
     }
     out
 }
@@ -774,7 +776,7 @@ fn title_short_of(text: &str, w: usize, colour: &str, tick: Option<usize>, room:
         colour,
         left,
         RST,
-        rgb(220, 255, 240),
+        ink(Role::Fg),
         t,
         RST,
         colour,
@@ -1316,9 +1318,11 @@ fn paint(
     buf
 }
 
-/// The grey the version is drawn in: the launcher's dim, which is where
-/// the version was first shown.
-const VERSION_INK: (u8, u8, u8) = (127, 147, 172);
+/// The grey the version is drawn in: the theme's secondary text, which is
+/// what the launcher drew it in when it was first shown there.
+fn version_ink() -> (u8, u8, u8) {
+    theme::colour(Role::Muted)
+}
 
 /// What a title keeps for itself before the version gives way to it:
 /// `╺━`, a space, a name of eight cells, a space, `╸`, and two cells of
@@ -1866,7 +1870,7 @@ fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -
         rest = &rest[c.len_utf8()..];
     }
     let cut = close_dangling_link(&cut);
-    let (r, g, b) = VERSION_INK;
+    let (r, g, b) = version_ink();
     let mut tail = String::new();
     let mut taken = 0;
     if let Some((colour, text)) = counter {
@@ -2959,9 +2963,9 @@ fn cannot_start_inner(
     install: &str,
     settings: Option<SettingsSpec>,
 ) {
-    let bad = rgb(255, 100, 110);
-    let dim = rgb(127, 147, 172);
-    let txt = rgb(225, 235, 245);
+    let bad = ink(Role::Red);
+    let dim = ink(Role::Muted);
+    let txt = ink(Role::Fg);
     setup();
     let mut keyboard = Keyboard::new();
     loop {
@@ -4245,7 +4249,7 @@ pub fn guard_frame(
     let mut rows = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
         Ok(rows) => return rows,
         Err(_) => {
-            let mut rows = vec![title(widget, w, &rgb(150, 210, 255)), String::new()];
+            let mut rows = vec![title(widget, w, &ink(Role::Accent)), String::new()];
             rows.extend(fault_rows(widget, w));
             rows
         }
@@ -4281,7 +4285,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
     let mut rows = vec![
         seg(
             &[(
-                rgb(255, 120, 110).as_str(),
+                ink(Role::Red).as_str(),
                 format!(" {widget} could not draw this frame."),
             )],
             width,
@@ -4289,7 +4293,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
         String::new(),
     ];
     for line in wrap(&said, w.saturating_sub(3).max(12)) {
-        rows.push(seg(&[(rgb(180, 190, 205).as_str(), format!("  {line}"))], width));
+        rows.push(seg(&[(ink(Role::Fg).as_str(), format!("  {line}"))], width));
     }
     rows.push(String::new());
     for line in wrap(
@@ -4297,7 +4301,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
          its own. [r] tries again now, [q] quits.",
         w.saturating_sub(3).max(12),
     ) {
-        rows.push(seg(&[(rgb(127, 147, 172).as_str(), format!("  {line}"))], width));
+        rows.push(seg(&[(ink(Role::Muted).as_str(), format!("  {line}"))], width));
     }
     rows
 }
@@ -6487,7 +6491,7 @@ mod tests {
             assert!(top.ends_with(&format!(" {tag}")), "{what}: {top:?}");
             // Drawn in core's grey after a reset, so no colour the widget
             // set carries into it.
-            let (r, g, b) = super::VERSION_INK;
+            let (r, g, b) = super::version_ink();
             let ink = format!("{} {tag}", super::rgb(r, g, b));
             let at = on_screen[0].rfind(&ink).expect("the version in core's own colour");
             let before = &on_screen[0][..at];
@@ -7730,6 +7734,12 @@ mod tests {
         assert_eq!(LEGACY_DIR, "terminal-toys");
     }
 
+    /// The threshold underline: the theme's yellow.
+    fn yellow_underline() -> String {
+        let (r, g, b) = theme::current().lifted(Role::Yellow);
+        underline(r, g, b)
+    }
+
     #[test]
     fn a_mark_keeps_the_text_and_names_the_style() {
         let ink = "\x1b[38;2;1;2;3m";
@@ -7754,7 +7764,7 @@ mod tests {
             caps(terminal::UnderlineSupport::Styled, true),
         );
         assert!(over.contains("\x1b[4m"), "{over:?}");
-        assert!(over.contains("\x1b[58;2;255;214;140m"), "{over:?}");
+        assert!(over.contains(&yellow_underline()), "{over:?}");
         assert!(!over.contains("\x1b[4:3m") && !over.contains("\x1b[4:5m"), "{over:?}");
         // Stale wins the style; the threshold colour still rides on it.
         let both = apply_mark(
@@ -7762,7 +7772,7 @@ mod tests {
             Marks { stale: true, threshold: true, partial: true },
             caps(terminal::UnderlineSupport::Styled, true),
         );
-        assert!(both.contains("\x1b[4:3m") && both.contains("\x1b[58;2;255;214;140m"));
+        assert!(both.contains("\x1b[4:3m") && both.contains(&yellow_underline()));
         assert!(!both.contains("\x1b[4:5m"));
         let plain = apply_mark(
             ink,
