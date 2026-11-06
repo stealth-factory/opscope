@@ -2024,6 +2024,9 @@ pub fn claim_screen() {
 const SCREEN_RESTORE: &str = concat!(
     "\x1b[?1006l",
     "\x1b[?1000l",
+    // Light/dark reports (mode 2031), which outlive the process the same
+    // way: the next switch would be typed at the shell.
+    "\x1b[?2031l",
     "\x1b[?25h",
     "\x1b[0m",
     "\x1b[2J",
@@ -2102,7 +2105,7 @@ pub fn restore_screen() {
     graphics::cleanup();
     terminal::release_terminal();
     terminal::cleanup_signal();
-    out(&format!("{}{}{}{}{}{}", terminal::SCHEME_REPORTS_OFF, MOUSE_OFF, SHOW, RST, CLEAR, HOME));
+    out(&format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
 
@@ -4751,6 +4754,7 @@ impl Keyboard {
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
             out(MOUSE_OFF);
+            out(terminal::SCHEME_REPORTS_OFF);
             if capabilities().synchronized_updates {
                 out(terminal::SYNC_END);
             }
@@ -8990,7 +8994,7 @@ mod tests {
         // something that already exited. This assertion is what stops the
         // handler and the normal exit disagreeing about that.
         assert_eq!(
-            format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME),
+            format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME),
             SCREEN_RESTORE
         );
         assert!(SCREEN_RESTORE.starts_with(MOUSE_OFF), "mouse-off must lead");

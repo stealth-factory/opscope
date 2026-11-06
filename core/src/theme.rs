@@ -256,21 +256,38 @@ pub const AA: f64 = 4.5;
 /// `colour`, moved toward white (or black on a light theme) in small steps
 /// until it clears [`AA`] on every one of `grounds`. Unmoved when it
 /// already does: a theme's own colours are kept wherever they are readable.
+///
+/// A mid-grey ground can be one white never clears on - `#aaaaaa` is 2.3
+/// against white and 9.1 against black - so when the way `light` points
+/// cannot get there the other way is tried. Where neither can, the end
+/// that reads best on the worst of the grounds is the answer: never a
+/// colour picked for its direction alone.
 pub fn nudge(colour: Rgb, grounds: &[Rgb], light: bool) -> Rgb {
-    let toward = if light { (0, 0, 0) } else { (255, 255, 255) };
     // A hair over AA, so a check computing luminance with the other
     // published threshold (0.04045 for 0.03928) agrees at the boundary.
     let clears = |c: Rgb| grounds.iter().all(|g| contrast(c, *g) >= AA + 0.02);
     if clears(colour) {
         return colour;
     }
-    for step in 1..=100 {
-        let c = mix(colour, toward, step as f64 / 100.0);
-        if clears(c) {
-            return c;
+    let (first, second) = if light { ((0, 0, 0), (255, 255, 255)) } else { ((255, 255, 255), (0, 0, 0)) };
+    for toward in [first, second] {
+        for step in 1..=100 {
+            let c = mix(colour, toward, step as f64 / 100.0);
+            if clears(c) {
+                return c;
+            }
         }
     }
-    toward
+    let worst = |c: Rgb| grounds.iter().map(|g| contrast(c, *g)).fold(f64::INFINITY, f64::min);
+    if worst(second) > worst(first) { second } else { first }
+}
+
+/// Whether text on `bg` reads better dark than light: the side a theme's
+/// contrast corrections lean to. Decided by which of black and white
+/// contrasts more with it - about luminance 0.18, not 0.5, which called
+/// `#aaaaaa` dark and pushed its text toward a white that cannot read on it.
+pub fn reads_dark_on(bg: Rgb) -> bool {
+    contrast((0, 0, 0), bg) > contrast((255, 255, 255), bg)
 }
 
 fn parse_hex(text: &str) -> Option<Rgb> {
@@ -602,9 +619,20 @@ pub fn watch() -> bool {
 /// config file, the one the settings screen writes, keeping the rest of the
 /// file as it is. Every running widget picks it up within two seconds.
 pub fn save(choice: &str) -> Result<(), String> {
-    let path = crate::config_paths()
-        .into_iter()
-        .find(|p| p.is_file())
+    // The file the readers use: the first that parses, as `wanted()` and
+    // the settings screen take it. Writing to an empty file ahead of it
+    // would make that one the config and hide every other setting. With
+    // none parsing, the first that exists, so a broken file is reported
+    // rather than written over.
+    let paths = crate::config_paths();
+    let parses = |p: &std::path::PathBuf| {
+        std::fs::read_to_string(p).is_ok_and(|t| serde_json::from_str::<serde_json::Value>(&t).is_ok())
+    };
+    let path = paths
+        .iter()
+        .find(|p| parses(p))
+        .or_else(|| paths.iter().find(|p| p.is_file()))
+        .cloned()
         .unwrap_or_else(crate::default_config_path);
     let raw = std::fs::read_to_string(&path).unwrap_or_default();
     let base = if raw.trim().is_empty() { "{}" } else { raw.as_str() };
@@ -1167,6 +1195,29 @@ mod tests {
         ] {
             assert_eq!(classic.colour(role), today, "{role:?}");
         }
+    }
+
+    #[test]
+    fn a_mid_grey_background_gets_text_that_reads_on_it() {
+        // White reaches only 2.3 on #aaaaaa; the text has to go dark.
+        let t = parse_user_theme("grey", r##"{"fg": "#000000", "bg": "#aaaaaa"}"##).unwrap();
+        for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
+            assert!(contrast(t.colour(role), t.colour(Role::Bg)) >= AA, "{role:?} on bg");
+            assert!(contrast(t.lifted(role), t.colour(Role::Slot)) >= AA, "{role:?} lifted on slot");
+        }
+        // And a direction that cannot get there tries the other one.
+        let c = nudge((255, 255, 255), &[(170, 170, 170)], false);
+        assert!(contrast(c, (170, 170, 170)) >= AA, "{c:?}");
+    }
+
+    #[test]
+    fn a_user_themes_selected_tab_reads_even_with_a_white_accent_and_slot() {
+        let t = parse_user_theme(
+            "snow",
+            r##"{"fg": "#ffffff", "bg": "#101010", "accent": "#ffffff", "slot": "#ffffff", "light": false}"##,
+        )
+        .unwrap();
+        assert!(contrast(t.lifted(Role::Accent), t.colour(Role::Slot)) >= AA);
     }
 
     #[test]

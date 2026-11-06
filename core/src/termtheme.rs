@@ -30,7 +30,7 @@
 //! widget in place, the way saving its settings does, and the new process
 //! asks again.
 
-use crate::theme::{luminance, mix, Rgb, Role, Theme};
+use crate::theme::{mix, Rgb, Role, Theme};
 
 /// The longest the query waits for a terminal that answers nothing.
 pub const WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
@@ -114,7 +114,7 @@ pub fn parse_colour_answers(text: &str) -> Vec<Said> {
 /// dark blue on black is common. It paints no background: the terminal's
 /// own is the one it describes.
 pub fn theme_from(fg: Rgb, bg: Rgb, palette: &[Option<Rgb>; 16]) -> Theme {
-    let light = luminance(bg) > 0.5;
+    let light = crate::theme::reads_dark_on(bg);
     let ansi = |n: usize, fallback: Rgb| palette[n].or(palette[n + 8]).unwrap_or(fallback);
     let red = ansi(1, (205, 49, 49));
     let green = ansi(2, (13, 188, 121));
@@ -291,7 +291,7 @@ mod tests {
             assert!(r >= AA, "{role:?} on the terminal's own white is {r:.2}");
         }
         // The yellow was moved, darker, to read on white.
-        assert!(luminance(t.colour(Role::Yellow)) < luminance((205, 205, 0)));
+        assert!(crate::theme::luminance(t.colour(Role::Yellow)) < crate::theme::luminance((205, 205, 0)));
     }
 
     #[test]
