@@ -538,10 +538,10 @@ through the `luvus` CLI. Nothing here writes:
 - `luvus uhp snapshot` — the whole session in one call: workspaces (name, cwd,
   branch) → tabs → panes (id, cwd, focused, what is in it, its state and the
   authority behind it). The pane inventory and the session's own identity.
-- `luvus agent list --json` — **which panes hold an agent**, with the branch,
+- `luvus agent list` — **which panes hold an agent**, with the branch,
   project, worktree flag and `state_source` the snapshot does not carry.
-- `luvus task list --json` — the tasks.
-- `luvus lease list --json` — the leases.
+- `luvus task list` — the tasks.
+- `luvus lease list` — the leases.
 - `luvus task next` — whether anything is ready to claim.
 - `luvus agent sessions` — resumable sessions on the machine, not just this
   session.
@@ -553,6 +553,10 @@ through the `luvus` CLI. Nothing here writes:
   This requires the widget and Luvus session to run on the same machine.
   If the scan fails, a warning says command filtering is unavailable and
   only Luvus's reported command labels are matched.
+
+The list commands print JSON on their own since Luvus 0.14, which refuses
+`--json` on `agent list`; an older Luvus that prints a table is asked again
+with `--json`.
 
 **`agent list` is what decides who is an agent.** A plain shell sitting at a
 prompt looks enough like an agent from the outside that taking the wider
