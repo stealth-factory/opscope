@@ -887,6 +887,55 @@ pub fn last_flat(len: usize, slots: usize) -> usize {
     len.saturating_sub(slots.max(1))
 }
 
+/// Where the window starts once a key has moved the highlight, and on the
+/// frame the box opens. [`follow_flat`] keeps the chosen command in view.
+/// A section heading just above that command comes with it, but only when
+/// the window has a row spare for it: a one-row list that steps back onto
+/// the heading hides the command, and ↵ then runs what is not on screen.
+pub fn follow_command(list: &[Row], selected: usize, slots: usize, first: usize) -> usize {
+    let slots = slots.max(1);
+    let mut first = follow_flat(selected, slots, first);
+    if slots > 1
+        && first == selected
+        && first > 0
+        && list.get(first - 1).is_some_and(|r| r.runs == Runs::Header)
+    {
+        first -= 1;
+    }
+    first.min(last_flat(list.len(), slots))
+}
+
+/// Key names already read, handed to the widget that replaces this one.
+/// Newline-separated. The new process reads them once, at start, and
+/// removes the variable, so a later restart does not play them again and
+/// a failed switch - which stays in this process - never sees them.
+const HANDOFF_KEYS: &str = "OPSCOPE_HANDOFF_KEYS";
+
+/// `keys` joined for [`HANDOFF_KEYS`]. `None` when there is nothing to
+/// hand over, so the variable is not set at all. A name containing a
+/// newline cannot travel this way and is dropped rather than split.
+pub(crate) fn encode_handoff(keys: &[String]) -> Option<String> {
+    let joined: Vec<&str> = keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| !k.is_empty() && !k.contains('\n'))
+        .collect();
+    (!joined.is_empty()).then(|| joined.join("\n"))
+}
+
+/// The keys [`encode_handoff`] wrote, in the order they were read.
+pub(crate) fn decode_handoff(raw: &str) -> Vec<String> {
+    raw.split('\n').filter(|k| !k.is_empty()).map(str::to_string).collect()
+}
+
+/// Take [`HANDOFF_KEYS`] out of the environment. Called once, when the
+/// keyboard is built, so the keys are this process's and nobody else's.
+pub(crate) fn take_handoff_keys() -> Vec<String> {
+    let raw = std::env::var(HANDOFF_KEYS).unwrap_or_default();
+    std::env::remove_var(HANDOFF_KEYS);
+    decode_handoff(&raw)
+}
+
 /// One mode's list state: what was typed, where the highlight is, and
 /// where its window sits. Kept per mode, so esc back to the commands
 /// finds them where they were left rather than reset.
@@ -908,8 +957,10 @@ struct List {
 ///
 /// `exec` returns only when it failed - the binary is not beside this one,
 /// or cannot run. Then the reason is shown, the terminal is taken back,
-/// and the palette is still open over this widget.
-fn switch_to(keyboard: &mut crate::Keyboard, stem: &str) {
+/// and the palette is still open over this widget. `keys` were already
+/// read from the terminal, so they go with the new process; a failed
+/// switch drops them rather than typing them into this filter afterwards.
+fn switch_to(keyboard: &mut crate::Keyboard, stem: &str, keys: &[String]) {
     use std::os::unix::process::CommandExt;
 
     let beside = std::env::current_exe()
@@ -919,7 +970,11 @@ fn switch_to(keyboard: &mut crate::Keyboard, stem: &str) {
     crate::restore_screen();
     let why = match beside {
         Some(path) => {
-            let err = std::process::Command::new(&path).exec();
+            let mut command = std::process::Command::new(&path);
+            if let Some(held) = encode_handoff(keys) {
+                command.env(HANDOFF_KEYS, held);
+            }
+            let err = command.exec();
             format!("{}: {}", path.display(), err)
         }
         None => "cannot find where this binary lives".to_string(),
@@ -973,6 +1028,9 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
     // What the last command did, when it has nothing else to show: the
     // copies say so here, in the title.
     let mut note: Option<String> = None;
+    // The first frame puts the highlight in the window. Later frames
+    // follow only when a key moved it, so the wheel can leave it off screen.
+    let mut placed = false;
     loop {
         let (w, h) = crate::size();
         let m = Modal::place(w, h);
@@ -1005,6 +1063,10 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
         }
         current.selected = settle(&list, current.selected, true);
         current.first = current.first.min(last_flat(list.len(), window));
+        if !placed {
+            current.first = follow_command(&list, current.selected, window, current.first);
+            placed = true;
+        }
         let (selected_now, first_now) = (current.selected, current.first);
         let title = match (mode, &note) {
             (Mode::Commands, Some(n)) => format!("Commands · {n}"),
@@ -1157,7 +1219,13 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                         }
                         Some(Runs::Widget) => {
                             if let Some(r) = &row {
-                                switch_to(keyboard, &r.label);
+                                // Already read, so the new process cannot
+                                // see them on the terminal. Handed across,
+                                // and cleared here so a failed switch does
+                                // not type them into this filter.
+                                let rest = pending[at..].to_vec();
+                                pending.clear();
+                                switch_to(keyboard, &r.label, &rest);
                             }
                         }
                         Some(Runs::Send) => {
@@ -1252,15 +1320,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
             Mode::Help => &mut help_list,
         };
         if moved {
-            current.first = follow_flat(current.selected, window, current.first);
-            // The first command of a section brings its heading into view
-            // with it, rather than leaving the heading just above the top.
-            if current.first == current.selected
-                && current.first > 0
-                && list.get(current.first - 1).is_some_and(|r| r.runs == Runs::Header)
-            {
-                current.first -= 1;
-            }
+            current.first = follow_command(&list, current.selected, window, current.first);
         }
         current.first = current.first.min(last_flat(list.len(), window));
         keyboard.wait(Duration::from_millis(60));
@@ -1569,6 +1629,37 @@ mod tests {
         assert_eq!(follow_flat(20, 10, 0), 11);
         assert_eq!(follow_flat(0, 10, 8), 0);
         assert_eq!(last_flat(53, 10), 43);
+    }
+
+    #[test]
+    fn a_one_row_window_keeps_the_command_and_not_the_heading_above_it() {
+        let rows = commands(&[], Charts::ToText);
+        let list = sectioned(&rows, &[]);
+        assert_eq!(list[0].runs, Runs::Header);
+        let selected = settle(&list, 0, true);
+        assert_ne!(list[selected].runs, Runs::Header);
+        // Opens, and Home from further down, on the command itself.
+        assert_eq!(follow_command(&list, selected, 1, 0), selected);
+        assert_eq!(follow_command(&list, selected, 1, 8), selected);
+        // Two rows: the heading comes along, and the command stays in view.
+        let first = follow_command(&list, selected, 2, selected);
+        assert_eq!(first, selected - 1);
+        assert_eq!(list[first].runs, Runs::Header);
+        assert!(selected >= first && selected < first + 2);
+        // A command that is not the first of its section does not step back.
+        let later = settle(&list, selected + 1, true);
+        assert_ne!(list[later - 1].runs, Runs::Header);
+        assert_eq!(follow_command(&list, later, 2, later), later);
+    }
+
+    #[test]
+    fn keys_read_before_a_switch_travel_with_the_new_widget() {
+        assert_eq!(encode_handoff(&[]), None);
+        assert_eq!(encode_handoff(&[String::new()]), None);
+        let held = encode_handoff(&["q".into(), "enter".into()]).unwrap();
+        assert_eq!(decode_handoff(&held), ["q", "enter"]);
+        // A newline cannot be a separator and part of a name.
+        assert_eq!(encode_handoff(&["has\nnewline".into(), "q".into()]).as_deref(), Some("q"));
     }
 
     #[test]

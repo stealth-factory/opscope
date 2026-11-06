@@ -4762,7 +4762,9 @@ impl Keyboard {
             hints: Vec::new(),
             actions: Vec::new(),
             typing: false,
-            held: Vec::new(),
+            // Keys the palette had already read when it switched to this
+            // widget. Taken once, so they are not still there for a restart.
+            held: palette::take_handoff_keys(),
         }
     }
 
