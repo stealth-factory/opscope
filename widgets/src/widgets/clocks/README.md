@@ -96,14 +96,18 @@ shows elapsed time; the digits show time remaining.
 the offset as it stands this frame (name as tie-break; the order in
 `config.json` is discarded), coloured by what people there are plausibly
 doing: green at work, amber evening, blue asleep, grey weekend. Half-hour
-offsets (`UTC+5:30`) and `+1d` / `-1d` date rollovers are handled. Scroll with
-the arrow keys when the list is taller than the pane; everything else stays
-pinned. The order is recomputed every frame so a pane left up across a DST
-change keeps being a map: London is west of a UTC+1 neighbour in winter and
-level with it in summer. The leading sun or moon is day and night. A
-condition glyph in the next column is that city's current weather, and only
-when the row carries a latitude and longitude that returned a reading. The
-same cell is a picture when graphics are on.
+offsets (`UTC+5:30`) and `+1d` / `-1d` date rollovers are handled. A pane too
+narrow for every column drops the rollover first, then the UTC offset, then
+the weekday, and then the sun or moon mark; if the name and time still will
+not share a line, the city moves onto its own line with the time
+right-aligned under it. The time is never cut. Scroll with the arrow keys
+when the list is taller than the pane; everything else stays pinned. The
+order is recomputed every frame so a pane left up across a DST change keeps
+being a map: London is west of a UTC+1 neighbour in winter and level with it
+in summer. The leading sun or moon is day and night. A condition glyph in the
+next column is that city's current weather, and only when the row carries a
+latitude and longitude that returned a reading. The same cell is a picture
+when graphics are on.
 
 ## Pomodoro
 
