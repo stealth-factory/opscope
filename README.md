@@ -433,8 +433,10 @@ settings screen (the launcher and `matrix` have none):
   back what you had — and returns to the palette's commands.
 - **Settings…** (`[ , ]`) — this widget's settings screen; a save
   restarts the widget, as saving from the screen itself does.
-- **Switch widget…** — the other widgets, in the same box; `↵` starts
-  one in this pane, and when it quits the palette is still here.
+- **Switch widget…** — the other widgets, in the same box; `↵` switches
+  this pane to one. The widget you were in ends and the new one takes its
+  place, so quitting it leaves the pane - or goes back to the `opscope`
+  menu, if that is what you started from. Switching never stacks widgets.
 - **Notices** (`!`) — the notices screen.
 - **Keys & help…** — this widget's `--help`, in the same box, wrapped to
   it and filterable: type `pomo` and only what it says about the pomodoro

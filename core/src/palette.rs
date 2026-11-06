@@ -32,8 +32,8 @@
 //! The commands are the widget-wide actions core owns, so every widget
 //! gets all of them with no widget code: the theme picker, this
 //! widget's settings (a widget registers its settings spec at startup
-//! with [`settings::register_settings`]), notices, and starting another
-//! widget in this pane. A command that already has a key shows it - `,`
+//! with [`settings::register_settings`]), notices, and switching this
+//! pane to another widget. A command that already has a key shows it - `,`
 //! settings, `!` notices - so the palette teaches the footer's keys
 //! while it is the route around them.
 //!
@@ -100,7 +100,8 @@ pub enum Runs {
     Notices,
     /// The other widgets, in this same box.
     Widgets,
-    /// Start the widget named by the row, in this pane.
+    /// Switch this pane to the widget named by the row: this one ends and
+    /// that one takes its place.
     Widget,
     /// One of this widget's own footer actions: close the palette and hand
     /// the widget the key, as if it were typed.
@@ -172,7 +173,7 @@ pub fn commands(actions: &[(String, String)], charts: Charts) -> Vec<Row> {
     if settings::registered().is_some() {
         rows.push(row("Settings…", "this widget's settings", Some(","), Runs::Settings));
     }
-    rows.push(row("Switch widget…", "start another widget in this pane", None, Runs::Widgets));
+    rows.push(row("Switch widget…", "replace this widget with another", None, Runs::Widgets));
     rows.push(row("Notices", "warnings this widget raised", Some("!"), Runs::Notices));
     rows.push(row("Keys & help…", "every key this widget answers", None, Runs::Help));
     match charts {
@@ -648,37 +649,39 @@ struct List {
     first: usize,
 }
 
-/// Hand the terminal to the widget `stem` beside this one, and take it
-/// back when that widget exits - the launcher's own handoff, made core
-/// so the palette can start a widget from any pane. The child runs in
-/// this pane; when it quits, the palette is still here, over the frame
-/// it had, and esc is one press away.
-fn start(keyboard: &mut crate::Keyboard, stem: &str) {
-    keyboard.restore();
-    crate::restore_screen();
+/// Switch this pane to the widget `stem` beside this one: this widget ends
+/// and that one takes its place, by `exec`, the way a restart does.
+///
+/// Not a child it waits for. Running the other widget as a child put this
+/// one back on screen when it quit - a stack of widgets, one more each
+/// switch, that quitting peeled one at a time. Replaced, quitting the new
+/// widget leaves the pane, or goes back to the `opscope` menu when that
+/// is what started this one, the same as quitting this widget would.
+///
+/// `exec` returns only when it failed - the binary is not beside this one,
+/// or cannot run. Then the reason is shown, the terminal is taken back,
+/// and the palette is still open over this widget.
+fn switch_to(keyboard: &mut crate::Keyboard, stem: &str) {
+    use std::os::unix::process::CommandExt;
+
     let beside = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(stem)));
-    match beside {
-        Some(path) => match std::process::Command::new(&path).status() {
-            Ok(_) => {}
-            Err(e) => {
-                crate::out(&format!("{}: {}\r\n", path.display(), e));
-                crate::flush();
-                std::thread::sleep(Duration::from_secs(2));
-            }
-        },
-        None => {
-            crate::out("cannot find where this binary lives\r\n");
-            crate::flush();
-            std::thread::sleep(Duration::from_secs(2));
+    keyboard.restore();
+    crate::restore_screen();
+    let why = match beside {
+        Some(path) => {
+            let err = std::process::Command::new(&path).exec();
+            format!("{}: {}", path.display(), err)
         }
-    }
-    // The widget left the terminal however it left it, so take it back
-    // rather than assuming: cbreak again, cursor away again, screen
-    // clear, mouse reporting on again - the same reclaim the launcher
-    // makes after a launch, without which the wheel does nothing on
-    // the way back in.
+        None => "cannot find where this binary lives".to_string(),
+    };
+    crate::out(&format!("{why}\r\n"));
+    crate::flush();
+    std::thread::sleep(Duration::from_secs(2));
+    // Take the terminal back rather than assuming: cbreak again, cursor
+    // away again, screen clear, mouse reporting on again, without which
+    // the wheel does nothing on the way back in.
     keyboard.reclaim();
     crate::claim_screen();
 }
@@ -902,7 +905,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                         }
                         Some(Runs::Widget) => {
                             if let Some(r) = &row {
-                                start(keyboard, &r.label);
+                                switch_to(keyboard, &r.label);
                             }
                         }
                         Some(Runs::Send) => {
@@ -1058,7 +1061,7 @@ mod tests {
         let rows = vec![
             row("Theme…", "pick a theme for this pane", None, Runs::Theme),
             row("Settings…", "this widget's settings", Some(","), Runs::Settings),
-            row("Switch widget…", "start another widget in this pane", None, Runs::Widgets),
+            row("Switch widget…", "replace this widget with another", None, Runs::Widgets),
             row("Notices", "warnings this widget raised", Some("!"), Runs::Notices),
         ];
         let set = |q: &str| matching(&rows, q).iter().map(|r| r.label.clone()).collect::<Vec<_>>();
