@@ -426,16 +426,13 @@ pub const SECTION: &str = "opscope";
 pub fn settings_schema() -> String {
     let mut choices = vec!["auto".to_string(), "terminal".to_string()];
     choices.extend(all().iter().map(|t| t.id.clone()));
-    let names: Vec<String> = all()
-        .iter()
-        .map(|t| format!("{} ({})", t.id, t.name))
-        .collect();
     serde_json::json!({
         "_comment": "Settings every widget shares.",
         "_schema": { "theme": { "choices": choices } },
         "_theme_comment": format!(
-            "Colours for every widget. auto uses the terminal's own colours when it says what they are, and opscope Dusk when it does not. terminal always uses the terminal's own. classic is opscope's colours from before themes. OPSCOPE_THEME overrides this for one run. Themes: {}.",
-            names.join(", ")
+            "Colours for every widget. auto uses the terminal's own colours when it says what they are, and opscope Dusk when it does not. terminal always uses the terminal's own. classic is opscope's colours from before themes. The rest are the {} themes of opscope.stealth-factory.co and any in {}. OPSCOPE_THEME overrides this for one run.",
+            builtin().len(),
+            themes_dir().display()
         ),
         "theme": "auto",
     })
