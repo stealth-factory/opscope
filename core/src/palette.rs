@@ -85,6 +85,8 @@ pub struct Row {
     /// key.
     pub key: Option<&'static str>,
     pub runs: Runs,
+    /// For [`Runs::Send`]: the key handed to the widget.
+    pub sends: Option<String>,
 }
 
 /// What ↵ does on a row.
@@ -100,17 +102,71 @@ pub enum Runs {
     Widgets,
     /// Start the widget named by the row, in this pane.
     Widget,
+    /// One of this widget's own footer actions: close the palette and hand
+    /// the widget the key, as if it were typed.
+    Send,
+    /// This widget's `--help` text, in this same box.
+    Help,
+    /// A line of that text: nothing to run.
+    Line,
+    /// Start this widget again with its charts drawn the other way, text
+    /// or pixels.
+    Graphics,
+    /// Start this widget again, as saving its settings does.
+    Restart,
+    /// Put what identifies this build and terminal on the clipboard.
+    CopyDiagnostics,
+    /// Put this widget's documentation link on the clipboard.
+    CopyDocs,
 }
 
-/// The commands on offer. Settings only when this binary registered a
-/// settings spec - the launcher and `matrix` do not, and a Settings
-/// command that answered with nothing would be a hint bound to nothing.
-pub fn commands() -> Vec<Row> {
+/// The keys core answers for every widget, which have rows of their own
+/// here, so a footer hint naming one is not listed twice.
+const CORE_KEYS: &[&str] = &[KEY, picker::KEY, ",", "!"];
+
+/// Which way the chart switch can go from here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Charts {
+    /// Charts are pixels, or pixels were asked for: the switch goes to text.
+    ToText,
+    /// Text was asked for: the switch goes to pixels.
+    ToPixels,
+    /// Nothing to switch: `NO_COLOR` keeps them text, or the terminal draws
+    /// no images and nobody asked for any.
+    Neither,
+}
+
+impl Charts {
+    /// The switch for this run. Pixels asked for count as pixels even where
+    /// the terminal drew none, so there is always a way back to text from a
+    /// switch that did not take.
+    pub fn now() -> Charts {
+        if theme::no_color() {
+            Charts::Neither
+        } else if crate::terminal::text_requested() {
+            Charts::ToPixels
+        } else if crate::capabilities().kitty_graphics || crate::terminal::pixels_requested() {
+            Charts::ToText
+        } else {
+            Charts::Neither
+        }
+    }
+}
+
+/// The commands on offer: core's own, then this widget's footer actions
+/// (`actions`, each its key and the text its footer drew).
+///
+/// Settings only when this binary registered a settings spec - the
+/// launcher and `matrix` do not, and a Settings command that answered with
+/// nothing would be a hint bound to nothing. The chart switch only where
+/// it has somewhere to go ([`Charts`]).
+pub fn commands(actions: &[(String, String)], charts: Charts) -> Vec<Row> {
     let row = |label: &str, detail: &str, key: Option<&'static str>, runs: Runs| Row {
         label: label.into(),
         detail: detail.into(),
         key,
         runs,
+        sends: None,
     };
     let mut rows = vec![row("Theme…", "pick a theme for this pane", Some("ctrl-t"), Runs::Theme)];
     if settings::registered().is_some() {
@@ -118,7 +174,230 @@ pub fn commands() -> Vec<Row> {
     }
     rows.push(row("Switch widget…", "start another widget in this pane", None, Runs::Widgets));
     rows.push(row("Notices", "warnings this widget raised", Some("!"), Runs::Notices));
+    rows.push(row("Keys & help…", "every key this widget answers", None, Runs::Help));
+    match charts {
+        Charts::ToText => rows.push(row("Charts as text", "restart with text charts: less to send over SSH", None, Runs::Graphics)),
+        Charts::ToPixels => rows.push(row("Charts as pixels", "restart with image charts, where the terminal can", None, Runs::Graphics)),
+        Charts::Neither => {}
+    }
+    rows.push(row("Restart widget", "start again, as saving settings does", None, Runs::Restart));
+    rows.push(row("Copy diagnostics", "version, theme, terminal: for a bug report", None, Runs::CopyDiagnostics));
+    rows.push(row("Copy docs link", "this widget's docs, to the clipboard", None, Runs::CopyDocs));
+    let mut seen: Vec<&str> = Vec::new();
+    for (key, text) in actions {
+        if CORE_KEYS.contains(&key.as_str()) || seen.contains(&key.as_str()) {
+            continue;
+        }
+        seen.push(key);
+        rows.push(Row {
+            label: text.clone(),
+            detail: "this widget".into(),
+            key: None,
+            runs: Runs::Send,
+            sends: Some(key.clone()),
+        });
+    }
     rows
+}
+
+impl Row {
+    /// What the recent list remembers a row by: a widget action by its key,
+    /// since its text can change with the state it toggles (`[p]omodoro`
+    /// becomes `[p]omodoro off`), and anything else by its label.
+    pub fn id(&self) -> String {
+        match &self.sends {
+            Some(key) => format!("key:{key}"),
+            None => self.label.clone(),
+        }
+    }
+}
+
+/// `rows` with the ones in `recent` first, most recent first, and the rest
+/// in their own order: the commands somebody reaches for sit at the top.
+pub fn by_recent(rows: Vec<Row>, recent: &[String]) -> Vec<Row> {
+    let mut out: Vec<Row> = recent
+        .iter()
+        .filter_map(|id| rows.iter().find(|r| &r.id() == id).cloned())
+        .collect();
+    out.extend(rows.into_iter().filter(|r| !recent.contains(&r.id())));
+    out
+}
+
+/// How many commands are remembered as recent.
+const RECENT: usize = 5;
+
+/// The file the recent commands are kept in, shared by every widget: a
+/// command is a command whichever pane it was run in.
+fn recent_path() -> std::path::PathBuf {
+    crate::statefile::state_dir().join("palette-recent.json")
+}
+
+/// The recent commands, most recent first. Nothing when there is no file
+/// or it cannot be read: the order is a convenience, never a failure.
+pub fn recent() -> Vec<String> {
+    std::fs::read_to_string(recent_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .unwrap_or_default()
+}
+
+/// `recent` with `id` moved to the front, kept to [`RECENT`].
+pub fn remembered(mut recent: Vec<String>, id: &str) -> Vec<String> {
+    recent.retain(|l| l != id);
+    recent.insert(0, id.to_string());
+    recent.truncate(RECENT);
+    recent
+}
+
+/// Note the row `id` as just run. A failed write is ignored for the same
+/// reason a failed read is.
+fn remember(id: &str) {
+    let next = remembered(recent(), id);
+    if let Ok(text) = serde_json::to_string(&next) {
+        let path = recent_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = crate::statefile::write_atomic(&path, &text);
+    }
+}
+
+/// The help text's lines as written, with prose rejoined: `help.txt` is
+/// already wrapped for an 80-column terminal, and wrapping those lines
+/// again for a narrower box leaves a word or two stranded on a row of its
+/// own. A line that starts at the margin continues the one before it when
+/// that one did too; an indented line - a key table, a list - keeps its
+/// own line, since its breaks are the layout.
+fn paragraphs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut joining = false;
+    for raw in text.lines().map(str::trim_end) {
+        if raw.trim().is_empty() {
+            joining = false;
+            continue;
+        }
+        let prose = !raw.starts_with(char::is_whitespace);
+        match out.last_mut() {
+            Some(last) if joining && prose => {
+                last.push(' ');
+                last.push_str(raw.trim());
+            }
+            _ => out.push(raw.to_string()),
+        }
+        joining = prose;
+    }
+    out
+}
+
+/// The help text as rows to read and filter, wrapped to `width` cells -
+/// never cut, which would teach half a sentence - with a line's own indent
+/// kept on the lines it wraps onto. Blank lines are dropped, since a
+/// filtered list has no paragraphs to keep apart.
+pub fn help_rows(text: &str, width: usize) -> Vec<Row> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    for raw in paragraphs(text).iter().map(String::as_str) {
+        // A line that fits is kept as written: its spacing is the
+        // alignment of a key table.
+        if crate::display_width(raw) <= width {
+            out.push(raw.to_string());
+            continue;
+        }
+        let indent = raw.len() - raw.trim_start().len();
+        let lead = " ".repeat(indent.min(width / 2));
+        let mut line = lead.clone();
+        for word in raw.split_whitespace() {
+            let room = width.saturating_sub(crate::display_width(&line));
+            let need = crate::display_width(word) + usize::from(line.trim().len() > 0);
+            if need > room && !line.trim().is_empty() {
+                out.push(line);
+                line = lead.clone();
+            }
+            if !line.trim().is_empty() {
+                line.push(' ');
+            }
+            // A single word wider than the box is broken by hand: the
+            // one case where there is nowhere else for it to go.
+            let mut word = word.to_string();
+            while crate::display_width(&line) + crate::display_width(&word) > width {
+                let fit = width.saturating_sub(crate::display_width(&line)).max(1);
+                let head: String = word.chars().take(fit).collect();
+                word = word.chars().skip(fit).collect();
+                line.push_str(&head);
+                out.push(line);
+                line = lead.clone();
+            }
+            line.push_str(&word);
+        }
+        if !line.trim().is_empty() {
+            out.push(line);
+        }
+    }
+    out.into_iter()
+        .map(|l| Row {
+            label: l,
+            detail: String::new(),
+            key: None,
+            runs: Runs::Line,
+            sends: None,
+        })
+        .collect()
+}
+
+/// What identifies this build, theme, terminal and multiplexer, as text for
+/// a bug report. Nothing from the config or the file system: no path, no
+/// host, nothing that would need taking out before it is pasted.
+pub fn diagnostics(var: impl Fn(&str) -> Option<String>, w: usize, h: usize) -> String {
+    let t = theme::current();
+    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
+    let mux = if set("HERDR_ENV") {
+        "Herdr"
+    } else if set("LUVUS_ENV") {
+        "Luvus"
+    } else if set("REX_SESSION") || set("REX_BLOCK") {
+        "Rex"
+    } else if set("TMUX") {
+        "tmux"
+    } else {
+        "none"
+    };
+    let charts = if crate::capabilities().kitty_graphics && !crate::terminal::text_requested() {
+        "pixels"
+    } else {
+        "text"
+    };
+    let or = |k: &str| var(k).filter(|v| !v.is_empty()).unwrap_or_else(|| "-".into());
+    format!(
+        "{}\ntheme: {} ({})\ncharts: {charts}\nterminal: TERM={} TERM_PROGRAM={} {}\nmultiplexer: {mux}\npane: {w}x{h}\nos: {} {}",
+        crate::version(),
+        t.id,
+        t.name,
+        or("TERM"),
+        or("TERM_PROGRAM"),
+        or("TERM_PROGRAM_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+/// Where this widget's documentation is: its folder in the repository,
+/// where its README sits, or the repository's own README for the launcher
+/// and anything the manifest does not name.
+pub fn docs_link(stem: &str) -> String {
+    const REPO: &str = "https://github.com/stealth-factory/opscope";
+    if stem != "opscope" && built().iter().any(|b| b == stem) {
+        format!("{REPO}/tree/main/widgets/src/widgets/{stem}")
+    } else {
+        format!("{REPO}#readme")
+    }
+}
+
+/// The name this binary runs under, without a path.
+fn this_stem() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .unwrap_or_default()
 }
 
 /// The binaries the manifest builds. Names come from there rather than
@@ -154,10 +433,7 @@ pub fn built() -> Vec<String> {
 /// this pane's own menu and not a widget to start, and the one already
 /// running here.
 pub fn others() -> Vec<String> {
-    let here = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
-        .unwrap_or_default();
+    let here = this_stem();
     built()
         .into_iter()
         .filter(|name| name != "opscope" && *name != here)
@@ -173,6 +449,7 @@ pub fn switch_rows() -> Vec<Row> {
             detail: String::new(),
             key: None,
             runs: Runs::Widget,
+            sends: None,
         })
         .collect()
 }
@@ -209,8 +486,15 @@ pub fn matching(rows: &[Row], query: &str) -> Vec<Row> {
 /// mode, rather than trusting the list the batch opened with - a paste
 /// of `not` and ↵ arrives as one `poll`, and ↵ has to run the row the
 /// `not` the reader typed is showing them.
-pub fn refilter(commands: &[Row], switch: &[Row], on_commands: bool, query: &str) -> Vec<Row> {
-    matching(if on_commands { commands } else { switch }, query)
+pub fn refilter(commands: &[Row], switch: &[Row], help: &[Row], mode: Mode, query: &str) -> Vec<Row> {
+    matching(
+        match mode {
+            Mode::Commands => commands,
+            Mode::Widgets => switch,
+            Mode::Help => help,
+        },
+        query,
+    )
 }
 
 /// The box's inside, `iw` cells wide and `ih` rows tall: the mode's
@@ -268,12 +552,17 @@ pub fn inside(
         let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
         let mark = if here { "▸ " } else { "  " };
         let key = r.key.map(|k| format!("  [{k}]")).unwrap_or_default();
+        // The description is the column a narrow box drops, whole: one cut
+        // mid-word reads as a different sentence.
+        let detail = if r.detail.is_empty() { String::new() } else { format!("  {}", r.detail) };
+        let used = 3 + crate::display_width(&r.label) + crate::display_width(&key);
+        let detail = if used + crate::display_width(&detail) <= iw { detail } else { String::new() };
         listed.push(line(
             &[
                 (theme::ink_on(Role::Accent, here), format!(" {mark}")),
                 (theme::ink_on(Role::Fg, here), r.label.clone()),
                 (theme::ink_on(Role::Muted, here), key),
-                (theme::ink_on(Role::Muted, here), format!("  {}", r.detail)),
+                (theme::ink_on(Role::Muted, here), detail),
             ],
             &ground,
         ));
@@ -395,13 +684,18 @@ fn start(keyboard: &mut crate::Keyboard, stem: &str) {
 }
 
 /// Run the palette over the widget's last frame until it is escaped out
-/// of. Every mode redraws over that same frame, so the theme picker and
-/// the widget list swap into this box in place - one surface, the way a
-/// palette mode changes - never a stack of boxes.
-pub(crate) fn run(keyboard: &mut crate::Keyboard) {
+/// of. Every mode redraws over that same frame, so the theme picker, the
+/// widget list and the help swap into this box in place - one surface, the
+/// way a palette mode changes - never a stack of boxes.
+///
+/// Returns a key when the command run was one of the widget's own footer
+/// actions: `poll` hands it to the widget as if it were typed.
+pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
     if OPEN.swap(true, Ordering::AcqRel) {
-        return;
+        return None;
     }
+    // The widget's own actions, read before its footer is forgotten.
+    let actions = keyboard.footer_actions();
     // The widget's footer is under the box now. Left bound, a click on
     // where its `↵ open` was would come back as that key, where it is
     // outside the box and means esc.
@@ -411,38 +705,64 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_default();
-    let commands = commands();
+    let charts = Charts::now();
+    let commands = by_recent(commands(&actions, charts), &recent());
     let switch = switch_rows();
+    let help_text = crate::HELP_TEXT.get().map(String::as_str).unwrap_or("No help text for this binary.");
+    let mut help = help_rows(help_text, 40);
+    let mut help_width = 0usize;
     let mut commands_list = List::default();
     let mut switch_list = List::default();
-    // Which mode the box is in: the commands, or the widgets to switch
-    // to. The theme picker is a mode too, but it runs as itself, over
-    // the same base, and returns here when it is escaped out of.
-    let mut on_commands = true;
+    let mut help_list = List::default();
+    // Which mode the box is in. The theme picker is a mode too, but it
+    // runs as itself, over the same base, and returns here when it is
+    // escaped out of.
+    let mut mode = Mode::Commands;
+    // What the last command did, when it has nothing else to show: the
+    // copies say so here, in the title.
+    let mut note: Option<String> = None;
     loop {
-        let (all, mut list) = if on_commands {
-            (&commands, matching(&commands, &commands_list.query))
-        } else {
-            (&switch, matching(&switch, &switch_list.query))
-        };
         let (w, h) = crate::size();
         let m = Modal::place(w, h);
+        // The help is wrapped to the box, and the box follows the pane.
+        let inner = m.w.saturating_sub(2);
+        if inner != help_width {
+            help_width = inner;
+            help = help_rows(help_text, inner.saturating_sub(4));
+        }
+        let query = match mode {
+            Mode::Commands => commands_list.query.clone(),
+            Mode::Widgets => switch_list.query.clone(),
+            Mode::Help => help_list.query.clone(),
+        };
+        let mut list = refilter(&commands, &switch, &help, mode, &query);
+        let total = match mode {
+            Mode::Commands => commands.len(),
+            Mode::Widgets => switch.len(),
+            Mode::Help => help.len(),
+        };
         let room = m.h.saturating_sub(2);
         let window = slots(room);
-        let current = if on_commands {
-            &mut commands_list
-        } else {
-            &mut switch_list
+        let current = match mode {
+            Mode::Commands => &mut commands_list,
+            Mode::Widgets => &mut switch_list,
+            Mode::Help => &mut help_list,
         };
         if current.selected >= list.len() {
             current.selected = list.len().saturating_sub(1);
         }
         current.first = current.first.min(last_flat(list.len(), window));
+        let title = match (mode, &note) {
+            (Mode::Commands, Some(n)) => format!("Commands · {n}"),
+            (Mode::Commands, None) => "Commands".to_string(),
+            (Mode::Widgets, _) => "Widgets".to_string(),
+            (Mode::Help, _) => "Keys & help".to_string(),
+        };
         let boxed = picker::framed(
             &inside(
-                if on_commands { "Commands" } else { "Widgets" },
+                &title,
                 &list,
-                all.len(),
+                total,
                 current.selected,
                 current.first,
                 &current.query,
@@ -491,10 +811,10 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
             // The mode can change inside the batch (Switch widget…), so
             // the state and the rows are taken again for every key
             // rather than once per poll.
-            let state = if on_commands {
-                &mut commands_list
-            } else {
-                &mut switch_list
+            let state = match mode {
+                Mode::Commands => &mut commands_list,
+                Mode::Widgets => &mut switch_list,
+                Mode::Help => &mut help_list,
             };
             let selected = state.selected;
             let first = state.first;
@@ -531,20 +851,28 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                 "wheel-down" => state.first = (state.first + 3).min(last_flat(list.len(), window)),
                 "ctrl-y" => state.first = state.first.saturating_sub(1),
                 "ctrl-e" => state.first = (state.first + 1).min(last_flat(list.len(), window)),
-                // esc pops one level: the widgets back to the commands,
-                // the commands back to the widget. ctrl-k is esc here -
-                // the key that opened the palette closing it.
+                // esc pops one level: the widgets or the help back to the
+                // commands, the commands back to the widget. ctrl-k is esc
+                // here - the key that opened the palette closing it.
                 "esc" | "ctrl-k" => {
-                    if !on_commands {
-                        on_commands = true;
+                    if mode != Mode::Commands {
+                        mode = Mode::Commands;
                         changed = true;
                     } else {
-                        return close();
+                        close();
+                        return None;
                     }
                 }
                 "enter" => {
+                    let row = list.get(selected).cloned();
+                    if mode == Mode::Commands {
+                        if let Some(r) = &row {
+                            remember(&r.id());
+                        }
+                        note = None;
+                    }
                     let mut opened = false;
-                    match list.get(selected).map(|r| r.runs) {
+                    match row.as_ref().map(|r| r.runs) {
                         Some(Runs::Theme) => {
                             keyboard.hold(pending[at..].to_vec());
                             picker::run_over(keyboard, &base_rows, &base_plots);
@@ -565,15 +893,46 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                             opened = true;
                         }
                         Some(Runs::Widgets) => {
-                            on_commands = false;
+                            mode = Mode::Widgets;
+                            changed = true;
+                        }
+                        Some(Runs::Help) => {
+                            mode = Mode::Help;
                             changed = true;
                         }
                         Some(Runs::Widget) => {
-                            if let Some(stem) = list.get(selected).map(|r| r.label.clone()) {
-                                start(keyboard, &stem);
+                            if let Some(r) = &row {
+                                start(keyboard, &r.label);
                             }
                         }
-                        None => {}
+                        Some(Runs::Send) => {
+                            // The rest of the batch was typed after the
+                            // action, so it is the widget's too.
+                            keyboard.hold(pending[at..].to_vec());
+                            close();
+                            return row.and_then(|r| r.sends);
+                        }
+                        Some(Runs::Graphics) => {
+                            let to = if charts == Charts::ToPixels { "kitty" } else { "text" };
+                            close();
+                            // Returns only when the restart failed: the
+                            // widget goes on as it was.
+                            settings::relaunch_with(keyboard, &[("OPSCOPE_GRAPHICS", to)]);
+                            return None;
+                        }
+                        Some(Runs::Restart) => {
+                            close();
+                            settings::relaunch(keyboard);
+                            return None;
+                        }
+                        Some(Runs::CopyDiagnostics) => {
+                            let text = diagnostics(|k| std::env::var(k).ok(), w, h);
+                            note = Some(copied(crate::clipboard(&text), "diagnostics"));
+                        }
+                        Some(Runs::CopyDocs) => {
+                            note = Some(copied(crate::clipboard(&docs_link(&this_stem())), "docs link"));
+                        }
+                        Some(Runs::Line) | None => {}
                     }
                     if opened {
                         // The screen took what it wanted from the batch;
@@ -621,26 +980,44 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                 _ => {}
             }
             if changed {
-                let state = if on_commands {
-                    &mut commands_list
-                } else {
-                    &mut switch_list
+                let state = match mode {
+                    Mode::Commands => &mut commands_list,
+                    Mode::Widgets => &mut switch_list,
+                    Mode::Help => &mut help_list,
                 };
-                list = refilter(&commands, &switch, on_commands, &state.query);
+                list = refilter(&commands, &switch, &help, mode, &state.query);
                 state.selected = state.selected.min(list.len().saturating_sub(1));
             }
         }
         // On the pass a key moved the highlight, the window follows it.
-        let current = if on_commands {
-            &mut commands_list
-        } else {
-            &mut switch_list
+        let current = match mode {
+            Mode::Commands => &mut commands_list,
+            Mode::Widgets => &mut switch_list,
+            Mode::Help => &mut help_list,
         };
         if moved {
             current.first = follow_flat(current.selected, window, current.first);
         }
         current.first = current.first.min(last_flat(list.len(), window));
         keyboard.wait(Duration::from_millis(60));
+    }
+}
+
+/// Which list the box is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Commands,
+    Widgets,
+    Help,
+}
+
+/// What the title says after a copy: that it was sent, and to where. OSC 52
+/// is the terminal's to honour, so "sent" is as far as this can know.
+fn copied(sent: bool, what: &str) -> String {
+    if sent {
+        format!("{what} sent to the clipboard")
+    } else {
+        format!("{what} not copied: not a terminal")
     }
 }
 
@@ -655,7 +1032,7 @@ mod tests {
 
     #[test]
     fn the_commands_are_the_widget_wide_actions() {
-        let rows = commands();
+        let rows = commands(&[], Charts::ToText);
         assert_eq!(rows[0].label, "Theme…");
         assert_eq!(rows[0].runs, Runs::Theme);
         assert!(rows.iter().any(|r| r.label == "Switch widget…" && r.runs == Runs::Widgets));
@@ -676,6 +1053,7 @@ mod tests {
             detail: detail.into(),
             key,
             runs,
+            sends: None,
         };
         let rows = vec![
             row("Theme…", "pick a theme for this pane", None, Runs::Theme),
@@ -690,6 +1068,112 @@ mod tests {
         assert!(set("not").contains(&"Notices".to_string()));
         assert!(matching(&rows, "zzzz").is_empty());
         assert_eq!(matching(&rows, "").len(), rows.len());
+    }
+
+    #[test]
+    fn a_widgets_footer_actions_are_commands_that_send_their_key() {
+        let actions = vec![
+            ("r".to_string(), "[r]estart".to_string()),
+            ("b".to_string(), "[b]reak start".to_string()),
+            // Core's own keys have rows already; a hint for one is not
+            // listed again, and a key twice in a footer is listed once.
+            (",".to_string(), "[,] settings".to_string()),
+            ("ctrl-k".to_string(), "[ctrl-k]cmds".to_string()),
+            ("ctrl-t".to_string(), "[ctrl-t]heme".to_string()),
+            ("r".to_string(), "[r]estart".to_string()),
+        ];
+        let rows = commands(&actions, Charts::ToText);
+        let sent: Vec<(&str, &str)> = rows
+            .iter()
+            .filter(|r| r.runs == Runs::Send)
+            .map(|r| (r.label.as_str(), r.sends.as_deref().unwrap()))
+            .collect();
+        assert_eq!(sent, vec![("[r]estart", "r"), ("[b]reak start", "b")]);
+        // Typing a word of the hint finds it.
+        assert_eq!(matching(&rows, "break")[0].label, "[b]reak start");
+    }
+
+    #[test]
+    fn the_chart_switch_names_where_it_goes_and_only_where_it_can() {
+        let has = |rows: &[Row], l: &str| rows.iter().any(|r| r.label == l);
+        let pixels = commands(&[], Charts::ToText);
+        assert!(has(&pixels, "Charts as text") && !has(&pixels, "Charts as pixels"));
+        let asked_text = commands(&[], Charts::ToPixels);
+        assert!(has(&asked_text, "Charts as pixels") && !has(&asked_text, "Charts as text"));
+        // Text only because the terminal draws no images, or NO_COLOR:
+        // nothing to switch to.
+        let cannot = commands(&[], Charts::Neither);
+        assert!(!has(&cannot, "Charts as pixels") && !has(&cannot, "Charts as text"));
+        for r in ["Keys & help…", "Restart widget", "Copy diagnostics", "Copy docs link"] {
+            assert!(has(&pixels, r), "{r}");
+        }
+    }
+
+    #[test]
+    fn recent_commands_come_first_and_the_rest_keep_their_order() {
+        let rows = commands(&[], Charts::ToText);
+        let recent = remembered(remembered(Vec::new(), "Notices"), "Restart widget");
+        // A widget action is remembered by its key, so a toggle whose text
+        // changed is still found.
+        let p_on = Row { label: "[p]omodoro".into(), detail: String::new(), key: None, runs: Runs::Send, sends: Some("p".into()) };
+        let p_off = Row { label: "[p]omodoro off".into(), ..p_on.clone() };
+        assert_eq!(by_recent(vec![p_off.clone()], &[p_on.id()])[0].label, "[p]omodoro off");
+        assert_eq!(recent, vec!["Restart widget".to_string(), "Notices".to_string()]);
+        let ordered = by_recent(rows.clone(), &recent);
+        assert_eq!(ordered[0].label, "Restart widget");
+        assert_eq!(ordered[1].label, "Notices");
+        let rest: Vec<&str> = ordered[2..].iter().map(|r| r.label.as_str()).collect();
+        let expected: Vec<&str> = rows
+            .iter()
+            .map(|r| r.label.as_str())
+            .filter(|l| *l != "Restart widget" && *l != "Notices")
+            .collect();
+        assert_eq!(rest, expected);
+        // A label no longer offered is skipped, and the list is kept short.
+        assert_eq!(by_recent(rows.clone(), &["Gone".to_string()]).len(), rows.len());
+        let mut many = Vec::new();
+        for i in 0..9 {
+            many = remembered(many, &format!("c{i}"));
+        }
+        assert_eq!(many.len(), RECENT);
+        assert_eq!(many[0], "c8");
+    }
+
+    #[test]
+    fn help_is_its_lines_and_diagnostics_hold_no_path() {
+        let rows = help_rows("clocks - a clock\n\n  q  quit\n  r  restart\n", 60);
+        assert_eq!(rows.len(), 3);
+        // Wrapped, never cut, with the indent kept on the lines it wraps onto.
+        let long = "  the pomodoro persists across restarts so relaunching the panel does not cost you a session";
+        let wrapped = help_rows(long, 30);
+        assert!(wrapped.len() > 1);
+        for r in &wrapped {
+            assert!(crate::display_width(&r.label) <= 30, "{:?}", r.label);
+            assert!(r.label.starts_with("  "), "{:?}", r.label);
+        }
+        let words: Vec<&str> = wrapped.iter().flat_map(|r| r.label.split_whitespace()).collect();
+        assert_eq!(words, long.split_whitespace().collect::<Vec<_>>());
+        // Prose wrapped for 80 columns is rejoined before it is wrapped
+        // again, so no word is left alone on a row; a key table is not.
+        let text = "A big clock and countdown bars for the next\nhour, and the end of day.\n\n  q  quit\n  r  restart\n";
+        let rows = help_rows(text, 70);
+        assert_eq!(rows[0].label, "A big clock and countdown bars for the next hour, and the end of day.");
+        assert_eq!(rows[1].label, "  q  quit");
+        assert_eq!(rows[2].label, "  r  restart");
+        assert!(rows.iter().all(|r| r.runs == Runs::Line));
+        assert_eq!(matching(&rows, "restart").len(), 1);
+        let env = |k: &str| match k {
+            "TERM" => Some("xterm-256color".to_string()),
+            "REX_SESSION" => Some("s".to_string()),
+            "HOME" => Some("/home/someone".to_string()),
+            _ => None,
+        };
+        let d = diagnostics(env, 90, 34);
+        assert!(d.contains("theme: ") && d.contains("multiplexer: Rex") && d.contains("pane: 90x34"), "{d}");
+        assert!(d.contains("TERM=xterm-256color"), "{d}");
+        assert!(!d.contains("/home"), "a path in the diagnostics: {d}");
+        assert_eq!(docs_link("clocks"), "https://github.com/stealth-factory/opscope/tree/main/widgets/src/widgets/clocks");
+        assert_eq!(docs_link("opscope"), "https://github.com/stealth-factory/opscope#readme");
     }
 
     #[test]
@@ -722,21 +1206,24 @@ mod tests {
     fn a_query_and_enter_in_one_batch_run_the_filtered_row() {
         // `not` and ↵ can arrive in one poll. The list ↵ acts on is the
         // one refiltered after `not`, not the list the batch opened on.
-        let commands = commands();
+        let commands = commands(&[], Charts::ToText);
         let switch = switch_rows();
-        let before = refilter(&commands, &switch, true, "");
+        let help = help_rows("q quit", 40);
+        let before = refilter(&commands, &switch, &help, Mode::Commands, "");
         assert_eq!(before.first().map(|r| r.label.clone()), Some("Theme…".to_string()));
-        let after = refilter(&commands, &switch, true, "not");
+        let after = refilter(&commands, &switch, &help, Mode::Commands, "not");
         assert_eq!(after.first().map(|r| r.label.clone()), Some("Notices".to_string()));
         // A mode change refilters too, against the other list.
-        let widgets = refilter(&commands, &switch, false, "");
+        let widgets = refilter(&commands, &switch, &help, Mode::Widgets, "");
         assert!(widgets.iter().all(|r| r.runs == Runs::Widget));
         assert_eq!(widgets.len(), switch.len());
+        let lines = refilter(&commands, &switch, &help, Mode::Help, "quit");
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
     fn the_box_fits_every_pane_and_answers_clicks() {
-        let rows = commands();
+        let rows = commands(&[], Charts::ToText);
         for (w, h) in [(30, 10), (40, 12), (80, 24), (140, 50), (24, 8)] {
             let m = Modal::place(w, h);
             assert!(m.x + m.w < w && m.y >= 1 && m.y + m.h <= h, "{w}x{h}: {m:?}");
@@ -766,7 +1253,7 @@ mod tests {
 
     #[test]
     fn the_options_sit_one_a_row_as_the_theme_list_does() {
-        let rows = commands();
+        let rows = commands(&[], Charts::ToText);
         let inner = inside("Commands", &rows, rows.len(), 0, 0, "", 60, 20);
         // A row as it reaches the terminal, without the colour escapes.
         fn plain(row: &str) -> String {
@@ -803,6 +1290,22 @@ mod tests {
         assert_eq!(follow_flat(20, 10, 0), 11);
         assert_eq!(follow_flat(0, 10, 8), 0);
         assert_eq!(last_flat(53, 10), 43);
+    }
+
+    #[test]
+    fn a_description_that_does_not_fit_is_dropped_not_cut() {
+        let rows = commands(&[], Charts::ToText);
+        for iw in [30, 44, 60, 74] {
+            let inner = inside("Commands", &rows, rows.len(), 0, 0, "", iw, 20);
+            for (r, row) in rows.iter().zip(inner.iter().skip(2)) {
+                let shown = crate::strip_escapes(row);
+                // Either the whole description is there or none of it.
+                let whole = shown.contains(&r.detail);
+                let opening: String = r.detail.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+                let none = !shown.contains(&opening);
+                assert!(whole || none, "iw={iw}: {shown:?} cut {:?}", r.detail);
+            }
+        }
     }
 
     #[test]

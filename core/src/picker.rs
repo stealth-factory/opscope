@@ -43,6 +43,11 @@ pub(crate) static OPEN: AtomicBool = AtomicBool::new(false);
 /// palette's Theme action reaches the same picker; esc then returns to
 /// the commands rather than to the widget.
 pub const KEY: &str = "ctrl-t";
+/// The hint every footer carries for it, beside the palette's: in the
+/// footer's own form, `[q]uit`, and a click on it is `ctrl-t`. Twelve
+/// cells, as `[ctrl-k]cmds` and `[,] settings` are, so it fits the
+/// narrowest pane `pack_hints` lays out without being split.
+pub const HINT: &str = "[ctrl-t]heme";
 
 /// One thing the picker offers: a setting value, what to call it, and the
 /// words it is matched against.

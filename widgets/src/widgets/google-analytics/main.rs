@@ -626,6 +626,7 @@ fn main() {
                 vec![(p.hint.as_str(), "[c]opy URL".into())],
                 vec![(p.hint.as_str(), "[,] settings".into())],
                 vec![(p.hint.as_str(), tc::PALETTE_HINT.into())],
+                vec![(p.hint.as_str(), tc::THEME_HINT.into())],
                 vec![(p.hint.as_str(), "[q]uit".into())],
             ];
             if !note.0.is_empty() {
@@ -711,6 +712,7 @@ fn main() {
             vec![(p.hint.as_str(), "[r]efresh".to_string())],
             vec![(p.hint.as_str(), "[,] settings".to_string())],
             vec![(p.hint.as_str(), tc::PALETTE_HINT.into())],
+            vec![(p.hint.as_str(), tc::THEME_HINT.into())],
             vec![(p.hint.as_str(), "[q]uit".to_string())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");

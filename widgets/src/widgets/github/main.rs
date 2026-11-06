@@ -1146,6 +1146,7 @@ fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
         vec![(p.dim.as_str(), "[r]efresh".into())],
         vec![(p.dim.as_str(), "[,] settings".into())],
         vec![(p.dim.as_str(), tc::PALETTE_HINT.into())],
+        vec![(p.dim.as_str(), tc::THEME_HINT.into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]);
     out
@@ -3245,6 +3246,7 @@ fn main() {
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
             hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -3826,6 +3828,7 @@ fn main() {
                 let mut hints = hints;
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
+                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3926,9 +3929,9 @@ mod tests {
         let p = palette();
         // Wide enough that the whole footer sits on one line with the
         // longest wording in it, which is where that wording belongs.
-        let closed = info_hint(false, &p, 110);
+        let closed = info_hint(false, &p, 124);
         assert_eq!(closed, "[i] show column legend");
-        let open = info_hint(true, &p, 110);
+        let open = info_hint(true, &p, 124);
         assert_eq!(open, "[i] hide column legend");
         // A legend, not a key: this footer is a list of keyboard keys, so
         // "column key" in it reads as the key that opens a column.
@@ -3981,15 +3984,15 @@ mod tests {
             }
         }
         // The band that was wrong, named so a regression points at itself.
-        // First found at 81-84, before the footer gained its ctrl-k hint;
-        // the palette hint that replaced it is the same width, and the
-        // band stayed where it was.
-        for w in 95..=98 {
+        // First found at 81-84. The footer has since gained two 12-cell
+        // hints, `[ctrl-k]cmds` and `[ctrl-t]heme`, each with its separator,
+        // and the band moved 14 columns with each.
+        for w in 109..=112 {
             assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
         }
         // And the band either side of it keeps the fuller wording it had.
-        assert_eq!(info_hint(false, &p, 94), "[i] show column legend");
-        assert_eq!(info_hint(false, &p, 99), "[i] show legend");
+        assert_eq!(info_hint(false, &p, 108), "[i] show column legend");
+        assert_eq!(info_hint(false, &p, 113), "[i] show legend");
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that
@@ -4013,12 +4016,11 @@ mod tests {
                 );
             }
         }
-        // The one Codex found, at 81 columns before the footer gained its
-        // theme-picker hint: the whole footer fits 95 columns on one line,
-        // and only with a wording that leaves room for the rest. The
-        // palette hint that replaced it is the same width, so it still does.
-        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 93, "  ").len();
-        assert_eq!(foot(info_hint(false, &p, 95)), 1);
+        // The one Codex found, at 81 columns, before the footer gained its
+        // palette and theme hints: the whole footer now fits 109 columns on
+        // one line, and only with a wording that leaves room for the rest.
+        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 107, "  ").len();
+        assert_eq!(foot(info_hint(false, &p, 109)), 1);
     }
 
     /// Shortened, never truncated: `pack_hints` wraps a footer without

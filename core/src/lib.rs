@@ -51,6 +51,10 @@ pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
 /// The footer hint for the command palette, beside `[,] settings` in
 /// every widget: one wording, kept here.
 pub const PALETTE_HINT: &str = palette::HINT;
+/// The theme picker's footer hint, which goes beside [`PALETTE_HINT`] in
+/// every footer: the picker has a key of its own as well as a row in the
+/// palette.
+pub const THEME_HINT: &str = picker::HINT;
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -359,6 +363,24 @@ pub fn parse_source_json(s: &str) -> Result<serde_json::Value, serde_json::Error
 /// `s` with every escape removed and the characters that were text left
 /// in order. An escape that never terminates takes the rest of the string
 /// with it: those bytes have not been shown.
+/// The cells `from..from + width` of plain text, by display width: a
+/// footer hint cut out of the line it was packed into.
+fn cells_of(plain: &str, from: usize, width: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for ch in plain.chars() {
+        let w = display_width(&ch.to_string());
+        if col >= from && col + w <= from + width {
+            out.push(ch);
+        }
+        col += w;
+        if col >= from + width {
+            break;
+        }
+    }
+    out
+}
+
 fn strip_escapes(s: &str) -> String {
     let mut visible = String::with_capacity(s.len());
     let mut rest = s;
@@ -4684,6 +4706,9 @@ pub struct Keyboard {
     /// something a widget opts into rather than something that happens to
     /// it.
     hints: Vec<(String, usize, usize, usize)>,
+    /// Each registered hint as the palette lists it: its key, and its text
+    /// as the footer drew it - `[r]estart`, `[↵] open`.
+    actions: Vec<(String, String)>,
     /// Set by `typing` and spent by the next `poll`: a text field is open,
     /// so `!` is a character for it rather than the notices screen.
     typing: bool,
@@ -4735,6 +4760,7 @@ impl Keyboard {
             saved,
             buf: Vec::new(),
             hints: Vec::new(),
+            actions: Vec::new(),
             typing: false,
             held: Vec::new(),
         }
@@ -4823,6 +4849,16 @@ impl Keyboard {
     /// Registering nothing is how a widget turns hint clicks back off:
     /// pass a footer with no spots, or simply never call this.
     pub fn footer_at(&mut self, footer: &Footer, top: usize, indent: usize) {
+        self.actions = footer
+            .spots
+            .iter()
+            .filter_map(|spot| {
+                let line = footer.lines.get(spot.line)?;
+                let text = cells_of(&strip_escapes(line), spot.col, spot.width);
+                let text = text.trim();
+                (!text.is_empty()).then(|| (spot.key.clone(), text.to_string()))
+            })
+            .collect();
         self.hints = footer
             .spots
             .iter()
@@ -4848,6 +4884,14 @@ impl Keyboard {
     /// `footer_at` warns about, arriving through a door it left open.
     pub fn forget_footer(&mut self) {
         self.hints.clear();
+        self.actions.clear();
+    }
+
+    /// The widget's footer hints, each as its key and the text the footer
+    /// drew for it: what the palette offers as this widget's own actions.
+    /// Read before `forget_footer`, which the palette calls on the way in.
+    pub(crate) fn footer_actions(&self) -> Vec<(String, String)> {
+        self.actions.clone()
     }
 
     /// A click on a registered hint, as the key that hint names.
@@ -5002,7 +5046,11 @@ impl Keyboard {
                 && !notices::screen_open()
         };
         if free() && split_at(&mut keys, &mut self.held, palette::KEY) {
-            palette::run(self);
+            // A footer action run from the palette is its key, handed to
+            // the widget as if it were typed: the widget's own arm runs it.
+            if let Some(key) = palette::run(self) {
+                keys.push(key);
+            }
         }
         if free() && split_at(&mut keys, &mut self.held, picker::KEY) {
             let (base_rows, base_plots) = LAST_FRAME
@@ -6124,7 +6172,11 @@ pub fn maybe_help(doc: &str) {
 ///
 /// The guide is embedded in the binary, so npm and release-tarball users
 /// carry the same instructions as a source checkout.
+/// This binary's `--help` text, kept for the palette's Keys & help.
+pub(crate) static HELP_TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
+    let _ = HELP_TEXT.set(doc.trim().to_string());
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--configure-help") {
         println!("{}", configure.trim());
@@ -6276,6 +6328,8 @@ mod tests {
     #[test]
     fn a_bracketed_key_name_is_the_key_a_click_on_its_hint_means() {
         assert_eq!(hint_key(palette::HINT).as_deref(), Some(palette::KEY));
+        assert_eq!(hint_key(picker::HINT).as_deref(), Some(picker::KEY));
+        assert_eq!(display_width(picker::HINT), display_width(palette::HINT));
         assert_eq!(hint_key("[esc] back").as_deref(), Some("esc"));
         assert_eq!(hint_key("[tab] next").as_deref(), Some("tab"));
         assert_eq!(hint_key("ctrl-u clear").as_deref(), Some("ctrl-u"));

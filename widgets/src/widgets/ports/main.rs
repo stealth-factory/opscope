@@ -3001,6 +3001,7 @@ fn main() {
         hints.extend([
             vec![(ok.dim.clone(), "[,] settings".into())],
             vec![(ok.dim.clone(), tc::PALETTE_HINT.into())],
+            vec![(ok.dim.clone(), tc::THEME_HINT.into())],
             vec![(ok.dim.clone(), "[q]uit".into())],
         ]);
         let hint_rows = footer(&confirm, &watch, &working, &notice, w, &hints, &ok);
