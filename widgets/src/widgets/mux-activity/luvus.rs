@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! The Luvus backend of `mux-activity`, which was luvus-panes.
+//!
 //! Everything running under a Luvus session, and who needs a human.
 //!
 //! A Luvus client rather than a general agent monitor. Every figure comes
@@ -29,30 +31,15 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-#[path = "../../process_filter.rs"]
-mod process_filter;
-
-#[path = "parse.rs"]
-mod parse;
-
-#[path = "events.rs"]
-mod events;
-
-#[path = "../refresh_wake.rs"]
-mod refresh_wake;
+use super::luvus_events as events;
+use super::luvus_parse as parse;
+use super::{process_filter, refresh_wake};
 
 use parse::{
     Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
     Worktree,
 };
 
-const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "luvus-panes",
-    section: "luvus_panes",
-    legacy_section: None,
-    schema: include_str!("settings.json"),
-    catalogues: &[],
-};
 
 /// Seconds before a luvus command is given up on.
 ///
@@ -82,7 +69,39 @@ fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
     }
     let mut argv = vec!["luvus", "--session", session];
     argv.extend_from_slice(args);
-    tc::run(&argv, RUN_TIMEOUT).map_err(|why| parse::sanitize_error(&why))
+    let out = tc::run_full(&argv, RUN_TIMEOUT).map_err(|why| parse::sanitize_error(&why))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    // Luvus puts its reason in a JSON error on stdout and exits 1; the exit
+    // status alone said "luvus exited exit status: 1" and nothing else.
+    let why = parse::parse_command_error(&stdout, &String::from_utf8_lossy(&out.stderr))
+        .unwrap_or_else(|| format!("luvus exited {}", out.status));
+    Err(parse::sanitize_error(&why))
+}
+
+/// A list command's JSON answer, on whichever Luvus is installed.
+///
+/// Luvus 0.14 prints JSON on its own and refuses `--json` on `agent list`
+/// ("unexpected agent list argument --json"); earlier releases printed a
+/// table unless asked for JSON. So ask plainly first, and only when the
+/// answer is not a JSON object ask again with `--json`. Current Luvus costs
+/// one call, an older one two, and neither is told it is wrong.
+fn luvus_json(session: &str, args: &[&str]) -> Result<String, String> {
+    let plain = luvus_text(session, args);
+    if plain.as_deref().is_ok_and(|text| text.trim_start().starts_with('{')) {
+        return plain;
+    }
+    let mut flagged = args.to_vec();
+    flagged.push("--json");
+    match luvus_text(session, &flagged) {
+        Ok(text) => Ok(text),
+        // The flag was not the answer either: say what the plain call
+        // said, since that is the form current Luvus expects.
+        Err(_) if plain.is_err() => plain,
+        Err(why) => Err(why),
+    }
 }
 
 /// Focus a pane. `pane focus` jumps to the pane's workspace and tab too,
@@ -210,14 +229,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         parse::mark_opscope_processes(snapshot, processes.as_deref().map_err(String::from));
     }
 
-    let agents = luvus_text(session, &["agent", "list", "--json"])
-        .and_then(|text| parse::parse_agents(&text));
-    let tasks =
-        luvus_text(session, &["task", "list", "--json"]).and_then(|text| parse::parse_tasks(&text));
-    let leases = luvus_text(session, &["lease", "list", "--json"])
-        .and_then(|text| parse::parse_leases(&text));
-    let next =
-        luvus_text(session, &["task", "next"]).and_then(|text| parse::parse_next_task(&text));
+    let agents = luvus_json(session, &["agent", "list"]).and_then(|text| parse::parse_agents(&text));
+    let tasks = luvus_json(session, &["task", "list"]).and_then(|text| parse::parse_tasks(&text));
+    let leases = luvus_json(session, &["lease", "list"]).and_then(|text| parse::parse_leases(&text));
+    // Worked out from the list, never asked for: `task next` claims.
+    let next = tasks.as_ref().map(|t| parse::next_ready(t)).map_err(|why| why.clone());
     // Marked against the session's own workspaces, because `agent sessions`
     // answers for the whole machine: nine of ten on the box this was built
     // against were in directories no open workspace covers. A snapshot
@@ -981,24 +997,16 @@ fn checkout_line<'a>(
     }
 }
 
-fn main() {
-    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    if !tc::dependencies_available(
-        "luvus-panes",
-        include_str!("dependencies.json"),
-        Some(SETTINGS),
-    ) {
-        return;
-    }
-    // The section is spelled with an underscore while everything else about
-    // this widget is hyphenated. A mismatched key is read as absent rather
-    // than as an error, so it is worth saying out loud.
-    let cfg = tc::load_config("luvus_panes");
-    let session = tc::cfg_str(&cfg, "session", "default");
-    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0);
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
+/// Run the board against a Luvus session until `q`. `why` is the line
+/// under the title saying what chose Luvus; `comma` opens the shared
+/// settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
+    let session = tc::cfg_str(cfg, "luvus_session", "default");
+    let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
+    if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
+        if let Some(n) = args.get(at + 1) {
+            refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
+        }
     }
 
     let p = palette();
@@ -1119,7 +1127,7 @@ fn main() {
                     return;
                 }
                 "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
+                    comma(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1419,11 +1427,12 @@ fn main() {
 
         // ---- the pinned header ----
         let mut head = vec![tc::title_busy(
-            "luvus panes",
+            "mux activity · luvus",
             w,
             &p.accent,
             activity.tick(tc::animation_tick()),
         )];
+        head.extend(super::mux_rows(why, &p.dim, w));
         let mut counts: HashMap<&str, usize> = HashMap::new();
         if let Ok(listed) = &agents {
             for a in listed {
@@ -1559,7 +1568,7 @@ fn main() {
                 }
             }
         }
-        // `others`, not `panes`: a pane holding a recognised agent is in
+        // `others`, not `mux-activity`: a pane holding a recognised agent is in
         // AGENTS rather than in this list, and counting it here would
         // report it as something the filter had hidden.
         // Held out of `head` until after the prune: that loop pops from
@@ -2698,6 +2707,54 @@ mod tests {
             };
         }
         Err("fixture command has no answer".into())
+    }
+
+    const AGENTS: &str = r#"{"id":"1","result":{"agents":[{"agent":"claude","status":"done","pane":"2","workspace_name":"projects"}],"revision":300,"type":"agent_list"}}"#;
+
+    /// Luvus 0.14: JSON by default, and `--json` refused outright.
+    fn luvus_0_14(_session: &str, args: &[&str]) -> Result<String, String> {
+        match args {
+            ["agent", "list"] => Ok(AGENTS.into()),
+            ["agent", "list", "--json"] => {
+                Err("Error: unexpected agent list argument --json, Try luvus help agent.".into())
+            }
+            _ => Err("fixture command has no answer".into()),
+        }
+    }
+
+    /// Before 0.14: a table unless asked for JSON.
+    fn luvus_before_0_14(_session: &str, args: &[&str]) -> Result<String, String> {
+        match args {
+            ["agent", "list"] => Ok("PANE  AGENT   STATUS\n2     claude  done\n".into()),
+            ["agent", "list", "--json"] => Ok(AGENTS.into()),
+            _ => Err("fixture command has no answer".into()),
+        }
+    }
+
+    #[test]
+    fn agents_are_read_from_luvus_before_and_after_it_dropped_the_json_flag() {
+        for (hook, which) in [
+            (luvus_0_14 as fn(&str, &[&str]) -> Result<String, String>, "0.14"),
+            (luvus_before_0_14, "before 0.14"),
+        ] {
+            LUVUS_TEXT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(hook));
+            let _clear = ClearLuvusOverride;
+            let agents = luvus_json("fixture", &["agent", "list"])
+                .and_then(|text| parse::parse_agents(&text))
+                .unwrap_or_else(|why| panic!("{which}: {why}"));
+            assert_eq!(agents.len(), 1, "{which}");
+            assert_eq!(agents[0].state, "done", "{which}");
+        }
+    }
+
+    #[test]
+    fn a_list_neither_form_can_read_says_what_the_plain_call_said() {
+        fn down(_session: &str, args: &[&str]) -> Result<String, String> {
+            Err(if args.contains(&"--json") { "flag refused" } else { "no luvus server running" }.into())
+        }
+        LUVUS_TEXT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(down));
+        let _clear = ClearLuvusOverride;
+        assert_eq!(luvus_json("fixture", &["agent", "list"]), Err("no luvus server running".into()));
     }
 
     #[test]

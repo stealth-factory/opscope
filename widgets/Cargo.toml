@@ -38,8 +38,8 @@ name = "ports"
 path = "src/widgets/ports/main.rs"
 
 [[bin]]
-name = "rex-panes"
-path = "src/widgets/rex-panes/main.rs"
+name = "mux-activity"
+path = "src/widgets/mux-activity/main.rs"
 
 [[bin]]
 name = "netwatch"
@@ -71,10 +71,6 @@ path = "src/widgets/disk/main.rs"
 [[bin]]
 name = "months"
 path = "src/widgets/months/main.rs"
-
-[[bin]]
-name = "herdr-panes"
-path = "src/widgets/herdr-panes/main.rs"
 
 [[bin]]
 name = "vercel-deployments"
@@ -109,10 +105,6 @@ path = "src/widgets/tailnet/main.rs"
 [[bin]]
 name = "agent-usage"
 path = "src/widgets/agent-usage/main.rs"
-
-[[bin]]
-name = "luvus-panes"
-path = "src/widgets/luvus-panes/main.rs"
 
 # Google Analytics 4. Signs in through core's Google helper (src/google.rs),
 # whose rsa and sha2 are pure Rust, so the binary still links only libc,

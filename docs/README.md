@@ -18,8 +18,6 @@ navigation, not itself a widget.
 | [`latency`](../widgets/src/widgets/latency/README.md) | Continuous latency to a list of hosts, with the statistics that actually explain a bad connection. |
 | [`vercel-deployments`](../widgets/src/widgets/vercel-deployments/README.md) | Vercel deployments — how they are going over time, not just what shipped last. |
 | [`tailnet`](../widgets/src/widgets/tailnet/README.md) | Tailscale peers, and — the part plain `tailscale status` buries — *how* you are reaching each one. |
-| [`herdr-panes`](../widgets/src/widgets/herdr-panes/README.md) | Everything running under [Herdr](https://herdr.dev), across every workspace — and one keypress to get to any of it. |
-| [`luvus-panes`](../widgets/src/widgets/luvus-panes/README.md) | Everything running under a [Luvus](https://luvus.dev) session, read over UHP 1.0 — agents by who needs a human, plus the tasks and path leases they coordinate with. |
 | [`github`](../widgets/src/widgets/github/README.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |
 | [`github-actions`](../widgets/src/widgets/github-actions/README.md) | GitHub Actions across those same accounts — what is running, what is failing, and how long it sat in the queue. |
 | [`github-prs`](../widgets/src/widgets/github-prs/README.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
@@ -28,7 +26,7 @@ navigation, not itself a widget.
 | [`google-analytics`](../widgets/src/widgets/google-analytics/README.md) | Google Analytics 4: is traffic normal right now against a baseline this widget records itself, and did key events hold up against the same weekday. |
 | [`agent-usage`](../widgets/src/widgets/agent-usage/README.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
 | [`ports`](../widgets/src/widgets/ports/README.md) | What is listening on this machine, what started it, and who can reach it. |
-| [`rex-panes`](../widgets/src/widgets/rex-panes/README.md) | Everything running under a [Rex](https://www.superlogical.com/rex/docs/) server, across every session — agents by the state they report themselves, blocked first, and one key to focus any pane. |
+| [`mux-activity`](../widgets/src/widgets/mux-activity/README.md) | Everything running in the multiplexer it runs in — [Rex](https://www.superlogical.com/rex/docs/), [Herdr](https://herdr.dev) or [Luvus](https://luvus.dev) — agents by who needs a human, blocked first, and one key to get to any pane. Under Luvus, also the tasks and path leases agents coordinate with. |
 | [`netwatch`](../widgets/src/widgets/netwatch/README.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
 | [`disk`](../widgets/src/widgets/disk/README.md) | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling. |
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |

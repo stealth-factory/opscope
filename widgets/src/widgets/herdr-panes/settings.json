@@ -1,9 +1,0 @@
-{
-  "_schema": {
-    "refresh": {
-      "minimum": 0.1
-    }
-  },
-  "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
-  "refresh": 4.0
-}

@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{parse, refresh_wake, State};
+use super::herdr::State;
+use super::herdr_parse as parse;
+use super::refresh_wake;
 
 #[derive(Debug, PartialEq, Eq)]
 enum WindowResult {
@@ -368,7 +370,7 @@ fn watch_unix(
     let mut backoff = Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
         let attempt = (|| {
-            let raw_status = super::herdr_text(&["status", "server", "--json"])?;
+            let raw_status = super::herdr::herdr_text(&["status", "server", "--json"])?;
             let target = parse::parse_status(&raw_status)?;
             let (generation, pane_ids) = current_inventory(&state)?;
             let Some(mut stream) = connect_unix(&target.path, &stop)? else {

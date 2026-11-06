@@ -1,0 +1,21 @@
+{
+  "required": {},
+  "recommended": {
+    "rex": {
+      "version": "*",
+      "why": "Required inside Rex: every pane, state and process comes from the running Rex server, read through its CLI."
+    },
+    "herdr": {
+      "version": "*",
+      "why": "Required inside Herdr: the pane and agent inventory comes from the running Herdr session through its CLI."
+    },
+    "luvus": {
+      "version": "*",
+      "why": "Required inside Luvus: every figure comes from the running Luvus session's own UHP answers, reached through its CLI."
+    },
+    "ps": {
+      "version": "*",
+      "why": "Inside Luvus, reads local process names and commands for the Opscope filter; without it, only Luvus's reported command labels can be matched."
+    }
+  }
+}

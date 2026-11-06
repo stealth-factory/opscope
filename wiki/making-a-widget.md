@@ -361,6 +361,49 @@ ships; `every_binary_is_on_the_menu` and
 is registered as a widget, while `the_list_is_in_a_settled_order`
 enforces the alphabetical launcher order.
 
+#### Other names it answers to: aliases
+
+A widget that is renamed, or that replaces other widgets, keeps the old names
+working by declaring them as aliases where it is registered:
+
+```rust
+widget!("mux-activity", aliases: ["rex-panes", "herdr-panes", "luvus-panes"]),
+widget!("vercel-deployments", aliases: ["deployments"]),
+```
+
+`opscope herdr-panes` then starts `mux-activity`, with every argument passed
+through, exactly as `opscope mux-activity` would. A widget with no old names
+takes no `aliases` at all: `widget!("example-widget")`.
+
+- **Core resolves them, and only core.** `tc::resolve_widget(name, widgets)`
+  turns a typed name into a widget - its own name first, then any alias, with
+  or without the old `.py` - and the launcher calls nothing else to do it.
+  Anything that later needs to answer "which widget does this name mean"
+  calls the same function rather than matching names itself.
+- **An alias is a name, not a mode.** It starts the widget exactly as its own
+  name would. Do not make a widget read which name it was started by: a
+  behaviour worth having belongs on a flag the new name can use too. The
+  three old pane widgets alias `mux-activity`, which then finds its
+  multiplexer from the pane like any other start; `--mux` is how to choose.
+- **Collisions fail the build.** `tc::alias_problems` refuses an alias that
+  is another widget's name (it would hide that widget), one claimed by two
+  widgets, and one that is not lowercase words joined by hyphens.
+  `no_alias_hides_a_widget_or_is_claimed_twice` in the launcher's tests runs
+  it over `WIDGETS`.
+- **Nothing to install.** Only `opscope` is on the PATH in every package -
+  npm, Homebrew and Debian put the widget binaries beside it - so an alias
+  lives entirely in the launcher. There is no `[[bin]]`, folder or symlink
+  for one, and the widget and binary counts do not change.
+- **Config moves with the widget, not the alias.** An alias does not make
+  the old config section readable. A widget that replaced others reads their
+  old sections itself and raises a notice asking for the rename;
+  `mux-activity` reads `rex_panes`, `herdr_panes` and `luvus_panes` that way.
+
+When renaming a widget: rename its folder, `[[bin]]`, `widget!` stem, settings
+`section` and docs, then add the old name to `aliases`. Keep the alias for as
+long as anyone might still type the old name; removing one is a breaking
+change and goes in the release notes.
+
 Nothing to bump. `npm/test.js` (`the packer takes every [[bin]], including
 opscope`) counts the folders under `widgets/src/widgets` and expects one
 `[[bin]]` for each, plus `opscope`. That is still a gate rather than a
@@ -470,7 +513,7 @@ cargo build --workspace --bins
 `cargo test` compiles every parser on the current target, runs widget and core
 unit tests, runs the source-contract checks below, and runs the npm packaging
 tests. CI repeats it on Linux and macOS. `cargo build --workspace --bins`
-separately proves all twenty-two executable targets build as binaries.
+separately proves all twenty executable targets build as binaries.
 
 ### 8. Smoke-test the built widget
 
@@ -799,7 +842,7 @@ on the blank under a short list selects nothing rather than the last item.
 `(section, index)` pairs beside it; `item_at` hands back the slot and you look
 it up. Clicking into a section focuses it as well as moving its cursor,
 because that is what walking into it with the arrows does. If your sections
-share one index — `herdr-panes` and `luvus-panes` do — there is nothing extra.
+share one index — `mux-activity` does, under every multiplexer — there is nothing extra.
 
 **A screen that draws without a list of its own must clear the placements**,
 the same way a screen with no packed footer calls `forget_footer()`. Otherwise

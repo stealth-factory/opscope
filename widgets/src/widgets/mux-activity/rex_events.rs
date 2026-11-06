@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::State;
-use super::parse::{self, StreamEvent};
+use super::rex::State;
+use super::rex_parse::{self as parse, StreamEvent};
 use super::refresh_wake;
 
 /// Seconds to wait before each reconnect, then the last one for good.

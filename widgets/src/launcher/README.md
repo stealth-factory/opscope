@@ -6,7 +6,7 @@ The front door: every widget, what it does, and a preview before it runs.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v0.17.0
- 21 widgets   ↵ or → starts one, q leaves
+ 19 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
    clocks       Server clock, countdowns, a pomodoro…
@@ -23,7 +23,7 @@ The front door: every widget, what it does, and a preview before it runs.
  ↑↓ select  ↵ launch  [q]uit
 ```
 
-Twenty-one widget binaries in a directory are a list you have to already know. Pick one
+Nineteen widget binaries in a directory are a list you have to already know. Pick one
 and it runs; quit it and you are back here.
 
 ## Nothing is described twice
@@ -199,9 +199,23 @@ opscope link --help        # including --help
 A widget is looked for beside the launcher's own binary, so a release
 unpacked anywhere works without a path being configured.
 
-`opscope netwatch.py` is still accepted, and only for that: every widget here
-answered to that name for years and the muscle memory outlives the files.
-The suffix is stripped and the binary of the same stem runs.
+A widget also answers to the aliases it declares - the names it had before,
+or the widgets it replaced:
+
+```sh
+opscope herdr-panes        # starts mux-activity, which replaced it
+opscope deployments        # starts vercel-deployments, its old name
+```
+
+An alias starts the widget exactly as its own name would, arguments and all.
+The names are resolved in one place, `tc::resolve_widget`, from the `aliases`
+each widget declares where it is registered; [the widget
+guide](../../../wiki/making-a-widget.md#other-names-it-answers-to-aliases)
+says how to add one.
+
+`opscope netwatch.py` is still accepted as well, on a name or an alias: every
+widget here answered to that name for years and the muscle memory outlives
+the files. The suffix is stripped and the widget it names runs.
 
 ## Keys
 

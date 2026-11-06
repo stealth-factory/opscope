@@ -82,6 +82,23 @@ pub fn sanitize_error(message: &str) -> String {
         .to_string()
 }
 
+/// Why a `luvus` command failed, in Luvus' own words: the `error.message`
+/// of the JSON it prints on stdout, else the first line of stderr. `None`
+/// when it said nothing, and the caller falls back to the exit status.
+pub fn parse_command_error(stdout: &str, stderr: &str) -> Option<String> {
+    let said = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .filter(|m| !m.trim().is_empty());
+    said.or_else(|| {
+        stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// The `result` object out of one UHP answer, or why there is none.
 ///
 /// Split from the running of the command, because the running is not where
@@ -295,7 +312,7 @@ pub struct Agent {
     pub exact: bool,
 }
 
-/// Every agent in `luvus agent list --json`.
+/// Every agent in `luvus agent list`.
 ///
 /// `agent list` is what decides who is an agent, and the snapshot is not.
 /// Every pane in a snapshot carries an `agent` field, and a plain shell at
@@ -492,7 +509,7 @@ pub fn mark_opscope_processes(snapshot: &mut Snapshot, processes: Result<&str, S
     }
 }
 
-/// A claimable unit of work, from `luvus task list --json`.
+/// A claimable unit of work, from `luvus task list`.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Task {
     pub id: String,
@@ -501,9 +518,11 @@ pub struct Task {
     pub holder: String,
     pub pane: String,
     pub paths: Vec<String>,
+    /// The ids of the tasks this one waits on.
+    pub deps: Vec<String>,
 }
 
-/// Every task in `luvus task list --json`.
+/// Every task in `luvus task list`.
 ///
 /// An empty list is a reading — most sessions coordinate nothing — and the
 /// caller must draw it as *no tasks*. Only a `Err` here is a failure.
@@ -518,6 +537,7 @@ pub fn parse_tasks(text: &str) -> Result<Vec<Task>, String> {
             holder: any_of(entry, &["agent", "assignee", "claimed_by", "owner"]),
             pane: any_of(entry, &["pane", "pane_id"]),
             paths: list_at(entry, &["paths", "globs"]),
+            deps: list_at(entry, &["deps", "depends_on", "dependencies"]),
         });
     }
     Ok(found)
@@ -533,7 +553,7 @@ pub struct Lease {
     pub paths: Vec<String>,
 }
 
-/// Every lease in `luvus lease list --json`.
+/// Every lease in `luvus lease list`.
 pub fn parse_leases(text: &str) -> Result<Vec<Lease>, String> {
     let result = parse_result(text)?;
     let mut found = Vec::new();
@@ -643,32 +663,35 @@ fn shorten_home(path: &str, home: &str) -> String {
 pub struct NextTask {
     pub id: String,
     pub title: String,
-    /// Luvus answered `type: "none"` — nothing is ready. An answer, not an
-    /// absence, and the only shape this has been seen in on a live session.
+    /// Nothing is ready to claim. An answer, not an absence.
     pub none: bool,
 }
 
-/// The claimable task out of `luvus task next`.
-pub fn parse_next_task(text: &str) -> Result<NextTask, String> {
-    let result = parse_result(text)?;
-    if text_at(&result, "type") == "none" {
-        return Ok(NextTask {
-            none: true,
-            ..Default::default()
-        });
-    }
-    // Never seen populated on a live session, so the same several-spellings
-    // rule the task list uses applies here.
-    let task = if result["task"].is_object() {
-        &result["task"]
-    } else {
-        &result
+/// The task that is ready to claim, worked out from `luvus task list`.
+///
+/// Not `luvus task next`: since Luvus 0.14 that claims the task it names,
+/// and a read-only board polling it every few seconds would take work off
+/// the queue. Ready is the rule `task claim` enforces: not started, held by
+/// nobody, and every task it depends on done. Status words are matched
+/// loosely because a populated list has not been seen on a live session;
+/// an unknown status is not ready, so a guess never offers work.
+pub fn next_ready(tasks: &[Task]) -> NextTask {
+    let done = |id: &str| {
+        tasks
+            .iter()
+            .find(|t| t.id == id)
+            .is_some_and(|t| matches!(t.status.to_ascii_lowercase().as_str(), "done" | "complete" | "completed" | "merged"))
     };
-    Ok(NextTask {
-        id: any_of(task, &["id", "task", "task_id"]),
-        title: any_of(task, &["title", "name", "description"]),
-        none: false,
-    })
+    let waiting = |t: &Task| {
+        matches!(t.status.to_ascii_lowercase().as_str(), "ready" | "queued" | "pending" | "open" | "todo" | "new")
+    };
+    match tasks
+        .iter()
+        .find(|t| waiting(t) && t.holder.is_empty() && t.pane.is_empty() && t.deps.iter().all(|d| done(d)))
+    {
+        Some(t) => NextTask { id: t.id.clone(), title: t.title.clone(), none: false },
+        None => NextTask { none: true, ..Default::default() },
+    }
 }
 
 /// One checkout of a repository, as `worktree list` reports it.
@@ -1420,24 +1443,47 @@ mod tests {
     }
 
     #[test]
-    fn nothing_ready_to_claim_is_an_answer() {
-        let none = r#"{"id":"1","result":{"message":"no ready tasks","revision":7,"type":"none"}}"#;
-        let next = parse_next_task(none).expect("next");
-        assert!(next.none);
-        assert!(next.id.is_empty());
-        // And a real one is read whichever spelling arrives, as the task
-        // list is, because neither has been seen on a live session.
-        let ready = r#"{"id":"1","result":{"type":"task","id":"t-1","title":"Port it"}}"#;
-        let next = parse_next_task(ready).expect("next");
+    fn a_failed_command_says_what_luvus_said_not_its_exit_status() {
+        let json = r#"{"error":{"code":"git_error","message":"fatal: not a git repository (or any of the parent directories): .git"},"id":"1"}"#;
+        assert_eq!(
+            parse_command_error(json, "").as_deref(),
+            Some("fatal: not a git repository (or any of the parent directories): .git")
+        );
+        assert_eq!(
+            parse_command_error("", "\nError: unexpected agent list argument --json, Try luvus help agent.\n").as_deref(),
+            Some("Error: unexpected agent list argument --json, Try luvus help agent.")
+        );
+        assert_eq!(parse_command_error("", ""), None);
+        assert_eq!(parse_command_error(r#"{"error":{"message":""}}"#, ""), None);
+    }
+
+    #[test]
+    fn the_next_ready_task_is_worked_out_from_the_list_never_claimed() {
+        let task = |id: &str, status: &str, holder: &str, deps: &[&str]| Task {
+            id: id.into(),
+            title: format!("task {id}"),
+            status: status.into(),
+            holder: holder.into(),
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+            ..Default::default()
+        };
+        // Nothing at all, and nothing waiting, are both "none".
+        assert!(next_ready(&[]).none);
+        assert!(next_ready(&[task("a", "done", "", &[])]).none);
+        // Held, or waiting on an unfinished dependency: not ready.
+        assert!(next_ready(&[task("a", "ready", "claude", &[])]).none);
+        let blocked = [task("a", "running", "codex", &[]), task("b", "ready", "", &["a"])];
+        assert!(next_ready(&blocked).none);
+        // Its dependency done: ready, whichever status spelling arrives.
+        let freed = [task("a", "Done", "codex", &[]), task("b", "Queued", "", &["a"])];
+        let next = next_ready(&freed);
         assert!(!next.none);
-        assert_eq!(next.id, "t-1");
-        assert_eq!(next.title, "Port it");
-        let nested =
-            r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
-        let next = parse_next_task(nested).expect("next");
-        assert_eq!(next.id, "t-2");
-        assert_eq!(next.title, "Other");
-        assert!(parse_next_task(r#"{"id":"1","error":{"message":"nope"}}"#).is_err());
+        assert_eq!((next.id.as_str(), next.title.as_str()), ("b", "task b"));
+        // A status nobody has seen is not taken for ready.
+        assert!(next_ready(&[task("a", "mystery", "", &[])]).none);
+        // And the list's own spellings of the dependency field are read.
+        let listed = parse_tasks(r#"{"id":"1","result":{"tasks":[{"id":"t-2","status":"ready","depends_on":["t-1"]}]}}"#).unwrap();
+        assert_eq!(listed[0].deps, vec!["t-1"]);
     }
 
     /// Shaped from a live `luvus agent explain`, with the paths replaced.

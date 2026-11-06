@@ -46,8 +46,6 @@ you are back. It is the launcher, not another widget.
 | **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · Linux, macOS | [read →](widgets/src/widgets/latency/README.md) |
 | **`vercel-deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/vercel-deployments/README.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](widgets/src/widgets/tailnet/README.md) |
-| **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](widgets/src/widgets/herdr-panes/README.md) |
-| **`luvus-panes`** | The same question asked of a Luvus session over UHP 1.0 — agents ordered by who needs a human, plus the tasks they are coordinating and the file paths those have reserved. Enter jumps you there. | `luvus` | [read →](widgets/src/widgets/luvus-panes/README.md) |
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](widgets/src/widgets/github/README.md) |
 | **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-actions/README.md) |
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
@@ -56,7 +54,7 @@ you are back. It is the launcher, not another widget.
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](widgets/src/widgets/linear/README.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or to publish it over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
-| **`rex-panes`** | Every pane on a Rex server, across every session — agents by the state they report over OSC 7501 (blocked on what, how far along, and their message), every other running process, and the idle shells. Enter focuses it, `z` zooms it, `e` explains it. | `rex` | [read →](widgets/src/widgets/rex-panes/README.md) |
+| **`mux-activity`** | Every agent and process in the multiplexer it runs in — Rex, Herdr or Luvus, found out from the pane itself — ordered by which one needs a human. Enter jumps you there. Under Rex, the state each program reports over OSC 7501, `z` zoom and `e` explain; under Herdr, every workspace; under Luvus, the tasks agents coordinate and the file paths those reserve. Outside a multiplexer it says so and exits. | `rex`, `herdr` or `luvus` | [read →](widgets/src/widgets/mux-activity/README.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ip` + `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
 | **`disk`** | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling — space and inodes from the kernel, per-disk I/O (macOS needs `iostat`), and Linux I/O pressure. | Linux, macOS | [read →](widgets/src/widgets/disk/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
@@ -65,7 +63,7 @@ you are back. It is the launcher, not another widget.
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-All twenty-one widgets run on Linux and macOS.
+All nineteen widgets run on Linux and macOS.
 
 Each is a single self-contained binary — every library it needs is compiled
 in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
@@ -129,7 +127,7 @@ any release. It is for trying a fix or a new widget early, and it can break;
 `--version` names the commit it was built from. Plain `npx opscope` and
 `@latest` are never moved by a canary.
 
-It fetches the launcher and twenty-one widget binaries for this machine into
+It fetches the launcher and nineteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -187,7 +185,7 @@ opscope doctor              # check optional external tools
 ```
 
 Apple Silicon and Intel Macs use the same release binaries as npm and the
-tarball download. Only `opscope` goes on `PATH`; all twenty-two binaries
+tarball download. Only `opscope` goes on `PATH`; all twenty binaries
 ship together, with the widgets kept private beside the launcher.
 No Node or Rust installation is needed.
 
@@ -195,7 +193,7 @@ Upgrade with `brew update && brew upgrade opscope`. Settings stay in
 `~/.config/opscope/config.json` (or the location selected by `OPSCOPE_CONFIG`
 or `XDG_CONFIG_HOME`), outside Homebrew's versioned installation.
 
-You can also download a release or build all twenty-two binaries below.
+You can also download a release or build all twenty binaries below.
 
 ### Inside Luvus
 
@@ -239,7 +237,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The twenty-two binaries are right there, beside `config.example.json` and a
+The twenty binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -266,13 +264,13 @@ xattr -dr com.apple.quarantine opscope-*-apple-darwin
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + twenty-one widgets in ./target/release
+cargo build --release   # launcher + nineteen widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the twenty-one widgets, with a live preview of
+`opscope` is the front door — a menu of the nineteen widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -282,7 +280,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and twenty-one
+The launcher looks for each widget beside itself, so the launcher and nineteen
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -433,7 +431,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read twenty-one widget pages to find out what you can
+**So you do not have to read nineteen widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The

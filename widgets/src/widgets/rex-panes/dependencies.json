@@ -1,9 +1,0 @@
-{
-  "required": {
-    "rex": {
-      "version": "*",
-      "why": "Every pane, state and process comes from the running Rex server, read through its CLI."
-    }
-  },
-  "recommended": {}
-}

@@ -102,13 +102,6 @@ title = "google-trends"
 placement = "split"
 command = ["./luvus/bin/opscope", "google-trends"]
 
-# Everything running in Herdr, across every workspace.
-[[panes]]
-id = "herdr-panes"
-title = "herdr-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "herdr-panes"]
-
 # Multi-target latency monitor.
 [[panes]]
 id = "latency"
@@ -130,13 +123,6 @@ title = "link"
 placement = "split"
 command = ["./luvus/bin/opscope", "link"]
 
-# Everything running under a Luvus session, and who needs a human.
-[[panes]]
-id = "luvus-panes"
-title = "luvus-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "luvus-panes"]
-
 # Digital rain.
 [[panes]]
 id = "matrix"
@@ -151,6 +137,13 @@ title = "months"
 placement = "split"
 command = ["./luvus/bin/opscope", "months"]
 
+# Every pane of the multiplexer it runs in, ordered by who needs you.
+[[panes]]
+id = "mux-activity"
+title = "mux-activity"
+placement = "split"
+command = ["./luvus/bin/opscope", "mux-activity"]
+
 # Which processes are using the network, how much, and how fast.
 [[panes]]
 id = "netwatch"
@@ -164,13 +157,6 @@ id = "ports"
 title = "ports"
 placement = "split"
 command = ["./luvus/bin/opscope", "ports"]
-
-# Everything running in Rex, across every session, ordered by who needs you.
-[[panes]]
-id = "rex-panes"
-title = "rex-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "rex-panes"]
 
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]

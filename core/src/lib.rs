@@ -20,6 +20,7 @@
 //! a time, and while both versions ran they had to agree on screen, so
 //! where a choice existed this kept the earlier behaviour.
 
+mod aliases;
 mod analytics;
 mod dependencies;
 pub mod google;
@@ -40,6 +41,7 @@ pub use dependencies::{
     parse_dependencies, parse_os_release, tool_available, unsatisfied_recommended,
     unsatisfied_required,
 };
+pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
 pub use statefile::state_dir;
 
@@ -5878,8 +5880,8 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: twenty-two binaries that disagree about how to say their own version
-    // are twenty-two answers to one question. netwatch used to answer this
+    // is: twenty binaries that disagree about how to say their own version
+    // are twenty answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {
