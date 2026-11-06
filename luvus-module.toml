@@ -102,13 +102,6 @@ title = "google-trends"
 placement = "split"
 command = ["./luvus/bin/opscope", "google-trends"]
 
-# Everything running in Herdr, across every workspace.
-[[panes]]
-id = "herdr-panes"
-title = "herdr-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "herdr-panes"]
-
 # Multi-target latency monitor.
 [[panes]]
 id = "latency"
@@ -129,13 +122,6 @@ id = "link"
 title = "link"
 placement = "split"
 command = ["./luvus/bin/opscope", "link"]
-
-# Everything running under a Luvus session, and who needs a human.
-[[panes]]
-id = "luvus-panes"
-title = "luvus-panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "luvus-panes"]
 
 # Digital rain.
 [[panes]]

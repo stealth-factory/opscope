@@ -244,8 +244,8 @@ A widget with sections whose cursors are separate — `linear` — records
 `(row, slot)` and keeps the `(section, index)` pairs beside it, so
 `item_at` stays as it is. Clicking into a section focuses it as well as
 moving its cursor, because that is what walking into it with the arrows
-does. Where the sections share one index — `herdr-panes`, `luvus-panes` —
-there is nothing extra to do.
+does. Where the sections share one index — `panes`, under every
+multiplexer — there is nothing extra to do.
 
 **The shared settings screen is clickable too.** Its three modes each hand
 back what the frame offers a click — where each row landed, what the window

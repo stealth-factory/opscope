@@ -1,4 +1,4 @@
-use super::parse;
+use super::luvus_parse as parse;
 use serde_json::json;
 
 pub fn reconcile_result(

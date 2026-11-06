@@ -4005,10 +4005,6 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
 /// with nothing in it.
 const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
     ("tailnet", "process table is /proc; no macOS source yet"),
-    (
-        "herdr-panes",
-        "CPU samples are /proc/<pid>/stat; no macOS source yet",
-    ),
     ("agent-usage", "Antigravity's port discovery walks /proc"),
 ];
 

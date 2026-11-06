@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! The Luvus backend of `panes`, which was luvus-panes.
+//!
 //! Everything running under a Luvus session, and who needs a human.
 //!
 //! A Luvus client rather than a general agent monitor. Every figure comes
@@ -29,30 +31,15 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-#[path = "../../process_filter.rs"]
-mod process_filter;
-
-#[path = "parse.rs"]
-mod parse;
-
-#[path = "events.rs"]
-mod events;
-
-#[path = "../refresh_wake.rs"]
-mod refresh_wake;
+use super::luvus_events as events;
+use super::luvus_parse as parse;
+use super::{process_filter, refresh_wake};
 
 use parse::{
     Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
     Worktree,
 };
 
-const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "luvus-panes",
-    section: "luvus_panes",
-    legacy_section: None,
-    schema: include_str!("settings.json"),
-    catalogues: &[],
-};
 
 /// Seconds before a luvus command is given up on.
 ///
@@ -981,24 +968,15 @@ fn checkout_line<'a>(
     }
 }
 
-fn main() {
-    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    if !tc::dependencies_available(
-        "luvus-panes",
-        include_str!("dependencies.json"),
-        Some(SETTINGS),
-    ) {
-        return;
-    }
-    // The section is spelled with an underscore while everything else about
-    // this widget is hyphenated. A mismatched key is read as absent rather
-    // than as an error, so it is worth saying out loud.
-    let cfg = tc::load_config("luvus_panes");
-    let session = tc::cfg_str(&cfg, "session", "default");
-    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0);
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
+/// Run the board against a Luvus session until `q`. `comma` opens the
+/// shared settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::Keyboard)) {
+    let session = tc::cfg_str(cfg, "luvus_session", "default");
+    let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
+    if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
+        if let Some(n) = args.get(at + 1) {
+            refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
+        }
     }
 
     let p = palette();
@@ -1119,7 +1097,7 @@ fn main() {
                     return;
                 }
                 "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
+                    comma(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1419,7 +1397,7 @@ fn main() {
 
         // ---- the pinned header ----
         let mut head = vec![tc::title_busy(
-            "luvus panes",
+            "panes · luvus",
             w,
             &p.accent,
             activity.tick(tc::animation_tick()),

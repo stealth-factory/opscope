@@ -250,10 +250,6 @@
     "_refresh_comment": "Seconds between fetches of each region's feed; minimum 60. Google refreshes the feed every few minutes, so faster polling shows nothing new.",
     "refresh": 300
   },
-  "herdr_panes": {
-    "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
-    "refresh": 4.0
-  },
   "latency": {
     "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently. Anything ping accepts works — \"1.1.1.1\", \"db1.internal\", \"example.com\" — and a name that does not resolve shows as DOWN rather than being dropped, so a typo is visible instead of silent.",
     "hosts": [
@@ -302,13 +298,6 @@
       3600
     ]
   },
-  "luvus_panes": {
-    "_comment": "What luvus-panes reads: one Luvus session's agents, tasks, leases and panes over UHP.",
-    "_session_comment": "Which Luvus server session to read. `luvus session list` names the ones on this machine; `default` is the one `luvus` starts on its own.",
-    "session": "default",
-    "_refresh_comment": "Maximum idle delay in seconds; agent status events wake a full read sooner.",
-    "refresh": 4.0
-  },
   "months": {
     "_week_start_comment": "Which day a week begins on. Sunday by default. It moves where the row breaks and nothing else: week numbers stay ISO 8601, which is Monday-reckoned whatever the grid does and says so on the pane, and the weekend stays Saturday and Sunday.",
     "week_start": "sunday",
@@ -331,14 +320,16 @@
     "mine": true
   },
   "panes": {
-    "_comment": "What panes reads: every pane of the multiplexer it runs in, through that multiplexer's CLI, read-only. Rex today; Herdr and Luvus still use herdr-panes and luvus-panes.",
+    "_comment": "What panes reads: every pane of the multiplexer it runs in - Rex, Herdr or Luvus - through that multiplexer's CLI, read-only. A rex_panes, herdr_panes or luvus_panes section from before is read when there is no panes section.",
     "_backend_comment": "Which multiplexer to read. auto finds out from the pane panes runs in: REX_SESSION and REX_BLOCK for Rex, HERDR_ENV=1 for Herdr, LUVUS_ENV=1 for Luvus, and the nearest of them in the process tree when several are set. The --mux flag overrides this.",
     "backend": "auto",
     "_rex_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. Set, it is read from anywhere, inside a multiplexer or not. CPU and memory are shown only for this machine's server.",
     "rex_server": "",
+    "_luvus_session_comment": "Under Luvus, which Luvus server session to read. `luvus session list` names the ones on this machine; `default` is the one `luvus` starts on its own.",
+    "luvus_session": "default",
     "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
     "refresh": 4.0,
-    "_agents_comment": "Command names that count as coding agents. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
+    "_agents_comment": "Under Rex, command names that count as coding agents; Herdr and Luvus name their agents themselves. Matched against the pane's foreground program, and against the app name a program reports with OSC 7501 (claude also matches a report from claude-code or claude-cli).",
     "agents": [
       "claude",
       "codex",

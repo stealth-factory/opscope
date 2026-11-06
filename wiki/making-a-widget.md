@@ -470,7 +470,7 @@ cargo build --workspace --bins
 `cargo test` compiles every parser on the current target, runs widget and core
 unit tests, runs the source-contract checks below, and runs the npm packaging
 tests. CI repeats it on Linux and macOS. `cargo build --workspace --bins`
-separately proves all twenty-two executable targets build as binaries.
+separately proves all twenty executable targets build as binaries.
 
 ### 8. Smoke-test the built widget
 
@@ -799,7 +799,7 @@ on the blank under a short list selects nothing rather than the last item.
 `(section, index)` pairs beside it; `item_at` hands back the slot and you look
 it up. Clicking into a section focuses it as well as moving its cursor,
 because that is what walking into it with the arrows does. If your sections
-share one index — `herdr-panes` and `luvus-panes` do — there is nothing extra.
+share one index — `panes` does, under every multiplexer — there is nothing extra.
 
 **A screen that draws without a list of its own must clear the placements**,
 the same way a screen with no packed footer calls `forget_footer()`. Otherwise

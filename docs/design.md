@@ -2,7 +2,7 @@
 
 [← all docs](README.md)
 
-A few rules hold across all twenty-one widgets. They are here rather than in
+A few rules hold across all nineteen widgets. They are here rather than in
 the README because they are for whoever changes one, not for whoever runs
 one — and because each of them was paid for by something that shipped
 wrong first.

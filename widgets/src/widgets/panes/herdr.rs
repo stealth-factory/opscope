@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! The Herdr backend of `panes`, which was herdr-panes.
+//!
 //! Everything running in Herdr, across every workspace.
 //!
 //! A port of herdr-panes.py. A Herdr client rather than a general agent
@@ -28,25 +30,10 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-#[path = "../../process_filter.rs"]
-mod process_filter;
+use super::herdr_events as events;
+use super::herdr_parse as parse;
+use super::{process_filter, refresh_wake};
 
-#[path = "parse.rs"]
-mod parse;
-
-#[path = "events.rs"]
-mod events;
-
-#[path = "../refresh_wake.rs"]
-mod refresh_wake;
-
-const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "herdr-panes",
-    section: "herdr_panes",
-    legacy_section: None,
-    schema: include_str!("settings.json"),
-    catalogues: &[],
-};
 
 /// Worst first: the states that want a human are the reason to look.
 const RANK: &[&str] = &["blocked", "done", "working", "idle", "unknown"];
@@ -129,7 +116,7 @@ fn result_of(text: &str) -> Result<serde_json::Value, String> {
     parse::parse_result(text)
 }
 
-fn herdr_text(args: &[&str]) -> Result<String, String> {
+pub fn herdr_text(args: &[&str]) -> Result<String, String> {
     let mut argv = vec!["herdr"];
     argv.extend_from_slice(args);
     tc::run(&argv, RUN_TIMEOUT)
@@ -290,7 +277,7 @@ fn clock_ticks() -> f64 {
 
 /// A recognised coding agent, and what its process is costing.
 #[derive(Clone, Default)]
-struct Agent {
+pub(crate) struct Agent {
     name: String,
     pane_id: String,
     tab_id: String,
@@ -426,7 +413,7 @@ fn doing_rank(doing: Doing) -> usize {
 
 /// A pane with no agent in it: running something, at a prompt, or unread.
 #[derive(Clone, Default)]
-struct Panel {
+pub(crate) struct Panel {
     pane_id: String,
     tab_id: String,
     workspace_id: String,
@@ -443,16 +430,16 @@ struct Panel {
 }
 
 #[derive(Default)]
-struct State {
-    agents: Vec<Agent>,
-    panels: Vec<Panel>,
-    labels: HashMap<String, String>,
-    err: String,
-    watcher_err: String,
-    inventory_err: String,
-    pane_ids: Vec<String>,
-    inventory_generation: u64,
-    inventory_ready: bool,
+pub(crate) struct State {
+    pub(crate) agents: Vec<Agent>,
+    pub(crate) panels: Vec<Panel>,
+    pub(crate) labels: HashMap<String, String>,
+    pub(crate) err: String,
+    pub(crate) watcher_err: String,
+    pub(crate) inventory_err: String,
+    pub(crate) pane_ids: Vec<String>,
+    pub(crate) inventory_generation: u64,
+    pub(crate) inventory_ready: bool,
 }
 
 fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
@@ -874,23 +861,14 @@ fn homely(path: &str) -> String {
     }
 }
 
-fn main() {
-    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    if !tc::dependencies_available(
-        "herdr-panes",
-        include_str!("dependencies.json"),
-        Some(SETTINGS),
-    ) {
-        return;
-    }
-    // The section is spelled with an underscore while everything else about
-    // this widget is hyphenated. A mismatched key is read as absent rather
-    // than as an error, so it is worth saying out loud.
-    let cfg = tc::load_config("herdr_panes");
-    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0);
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
+/// Run the board against the Herdr session until `q`. `comma` opens the
+/// shared settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::Keyboard)) {
+    let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
+    if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
+        if let Some(n) = args.get(at + 1) {
+            refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
+        }
     }
 
     let p = palette();
@@ -991,7 +969,7 @@ fn main() {
                     return;
                 }
                 "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
+                    comma(&mut keyboard);
                     continue;
                 }
                 "r" | "R" => {
@@ -1134,7 +1112,7 @@ fn main() {
 
         let mut plots = Vec::new();
         let mut rows = vec![tc::title_busy(
-            "herdr panes",
+            "panes · herdr",
             w,
             &p.accent,
             activity.tick(tc::animation_tick()),

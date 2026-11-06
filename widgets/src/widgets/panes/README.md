@@ -39,17 +39,17 @@ everything running on the server, across every session.
  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
 
-
 ## Where it runs
 
 `panes` reads the multiplexer whose pane it was started in. Each one marks
-its panes in their environment, and that is what decides:
+its panes in their environment, and that is what decides. Only the detected
+multiplexer's CLI runs, so a read costs what it did in the widget it replaced:
 
-| Multiplexer | Marker | Read by |
+| Multiplexer | Marker | Board |
 |---|---|---|
-| Rex | `REX_SESSION` and `REX_BLOCK` set | `panes` |
-| Herdr | `HERDR_ENV=1` | [`herdr-panes`](../herdr-panes/README.md), until its backend moves in |
-| Luvus | `LUVUS_ENV=1` | [`luvus-panes`](../luvus-panes/README.md), until its backend moves in |
+| Rex | `REX_SESSION` and `REX_BLOCK` set | [Under Rex](#under-rex) |
+| Herdr | `HERDR_ENV=1` | [Under Herdr](#under-herdr) |
+| Luvus | `LUVUS_ENV=1` | [Under Luvus](#under-luvus) |
 
 A program started inside a pane inherits that pane's markers, so Herdr run
 from a Rex pane has both. When several are set, the nearest multiplexer above
@@ -75,7 +75,12 @@ that name a server: `rex_server`, for watching another machine's Rex server,
 is used only when `panes` is in no multiplexer at all, as rex-panes always
 allowed.
 
-## Why it is ordered this way
+## Under Rex
+
+The preview at the top is the Rex board. Every session on the server, read
+with one `rex do` script and woken by `rex events`.
+
+### Why it is ordered this way
 
 On a server with a dozen sessions, an agent finishes or gets stuck where
 nobody is looking. **Every section is sorted by who needs a human**, worst
@@ -113,11 +118,11 @@ was not keeps the failure on its own `⚠` row - an unread status is never
 drawn as `no status reported`, and never lets a shell rest under IDLE.
 `[i]` hides only panes known to be at a prompt.
 
-## How it knows
+### How it knows
 
-It reads like `herdr-panes` on purpose — the same state bar, the same two-row
-agent (state, then directory and title), the same footer — so the two sit
-side by side. What only Rex knows goes on the rows under an agent: what it is
+It reads like the Herdr board on purpose — the same state bar, the same
+two-row agent (state, then directory and title), the same footer — so a Rex
+pane and a Herdr pane look alike side by side. What only Rex knows goes on the rows under an agent: what it is
 blocked on, how far along it is, its message, and its child records. The
 server, its version and how many Rex apps are attached are on the explain
 screen.
@@ -174,7 +179,7 @@ The widget **never starts a Rex server**: every call carries
 It never shows a socket path, an address or a login, because the pane gets
 screenshotted.
 
-## Keys
+### Keys
 
 | Key | Action |
 |---|---|
@@ -199,20 +204,443 @@ attempt; when no app is attached to the pane's session, the note says so.
 A detached block is in no window and cannot be focused, and the note says
 that too.
 
+## Under Herdr
+
+Everything running under [Herdr](https://herdr.dev), across every workspace —
+and one keypress to get to any of it.
+
+```
+╺━ PANES · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 5 agents · 3 workspaces   1 done   1 working   3 idle
+ ▸ 1 agent waiting for you
+
+ ── AGENTS ── 5
+ AGENT    STATE    FOR    CPU   MEM   WORKSPACE
+ ✓ grok   DONE     ≥16s     6%  231M  some-cli
+   you/some-cli    Investigate the failing test
+▸◐ claude working  ≥16s    14%  763M  infra
+   work            ◐ Refactor the schedule module
+ · claude idle     ≥16s     1%  491M  site
+   work/site       Plan the repository structure
+
+ ── PROCESSES ── 7 panes running something
+ COMMAND              CPU   MEM   WORKSPACE
+ ▪ tailnet              3%   16M  infra
+ ▪ pnpm                 0%  116M  some-cli
+
+ ── IDLE ── 13 panes at a prompt
+ ▫ work/site                  site
+ ▫ …/another-monorepo         monorepo
+
+ ↑↓ select   ↵ switch to this pane   [i]dle hide [l]abels [r]efresh [q]uit
+```
+
+### Why it is ordered this way
+
+On a server with a dozen workspaces, agents finish or get stuck where nobody is
+looking. **AGENTS is sorted by who needs a human**, not by name:
+
+| State | Meaning |
+|---|---|
+| `blocked` | waiting on an approval or a question, right now |
+| `done` | finished background work you have not looked at yet |
+| `working` | busy |
+| `idle` | ready for input |
+| `unknown` | an agent is present but Herdr cannot classify it — **not** the same as idle |
+
+A headline counts how many are waiting on you, so pressing `Enter` on the top
+row is the whole workflow: the blocked agent surfaces, one key puts you in front
+of it.
+
+**PROCESSES** covers every other pane actually running something — dev servers,
+monitors, builds — with the command, CPU and memory. **IDLE** lists panes at a
+shell prompt by directory, because the panel is also how you navigate: a shell
+sitting in a repo is somewhere you want to jump to even with nothing running.
+
+There is a third answer, and PROCESSES carries it too. A pane the CLI could
+not be asked about is neither running something nor resting: it sorts to the
+top with `⚠ could not be read` and the reason on its own row, and the heading
+counts it apart — `3 panes running something · 29 could not be read`. It is
+kept visible on purpose, and `[i]` hides only panes known to be at a prompt,
+because an unreadable pane filtered out of sight is exactly the shape this
+widget exists to avoid: a failure that looks like an empty list.
+
+### How it knows
+
+Everything comes from the Herdr CLI, so this is a Herdr client rather than a
+general agent monitor:
+
+- `herdr agent list` — the agent inventory and lifecycle states
+- `herdr workspace list` — labels, so you see `site` and not `w6`
+- `herdr pane list` + `herdr pane process-info` — what every other pane runs,
+  paired with `/proc` for real CPU and RSS
+
+**Any agent kind Herdr recognises appears with no code change** — around twenty
+of them, including claude, codex, copilot, cursor, antigravity, gemini and grok.
+State quality depends on the per-agent integration hook being installed; check
+with `herdr integration status`.
+
+**Idle panes are detected exactly**, not guessed: a busy pane's foreground pid
+differs from its own shell pid. Command names come from `argv`, so a pane shows
+`tailnet` rather than `python3`.
+
+**Durations are marked `≥`** when the state was already in place before the
+widget started — we did not see it begin, so it is only a lower bound. Herdr
+does not timestamp state changes, so transitions are tracked here.
+
+### When it does not all fit
+
+The three lists read as one under the arrows, and the pane is a window onto
+that one list. The header above them is pinned — the counts and the
+`▸ N agents waiting for you` line are the reason to have the widget open, and
+they never scroll away.
+
+The window follows the cursor: it holds still while the cursor moves inside
+it, and moves by as little as it takes when the cursor would leave. It is
+measured in **rows**, not entries, because an agent takes two rows — its
+second carries the directory and the pane title — while a process takes one.
+Counted in entries it admits more rows than the pane has, they are cut off the
+bottom, and the cursor goes with them: it kept moving past the last drawn row
+and disappeared, while `Enter` still switched to whatever it was invisibly
+sitting on.
+
+A heading whose section is not all on screen says so — `── IDLE ── 15 panes at
+a prompt · showing 4-15` — and one the window has scrolled clean past says
+`none on screen` rather than standing over nothing, which reads as a section
+that has failed to load. A section entirely on screen says nothing: a range on
+a list you can see all of is noise.
+
+The idle heading is drawn whenever there are idle panes, at every height. It
+used to be rationed — granted a heading only if the lists above had left room
+— and dropping it silently left the footer offering `[i]dle` with nothing
+behind it.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `↑` `↓` `Home` `End` | select, across all three sections; the window follows |
+| `Tab` | jump to the head of the next section, wrapping past the last |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the window; the selection stays where it is |
+| `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
+| `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
+| `i` | show/hide the idle section |
+| `l` | workspace labels vs pane ids |
+| `r` | refresh now |
+| `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
+| `q` | quit |
+
+Agents have a focus-by-id command; other panes do not, so those focus their
+*tab* — which brings the pane into view, since a tab tiles its panes.
+
+### Refresh
+
+`refresh` is the maximum idle delay before another authoritative CLI read.
+A Unix-domain socket subscription covers workspace lifecycle and rename
+events, pane lifecycle events, and agent-status changes on every known pane,
+including panes that are not agents. A new pane or a changed inventory
+renews those filters; events wake the next full read but never update rows
+directly. Acknowledgements, reconnects and finite-window renewal all request
+a reconciliation read. CPU and memory sampling stays periodic, and `r`
+wakes the CLI poller independently of any socket wait. Socket failures are
+shown separately from CLI read failures.
+
+## Under Luvus
+
+Everything running under a [Luvus](https://luvus.dev) session — the agents, the
+work they are coordinating, the paths they have reserved, and one keypress to
+get to any of it.
+
+```text
+╺━ PANES · LUVUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 4 agents · 9 panes   1 blocked   1 done   1 working   1 idle
+ session default · uhp 1.0 · 3 workspaces · seq 4186 · focused on pane 2
+ ▸ 2 agents waiting for you
+
+ ── AGENTS ── 4
+ AGENT    STATE    FOR    WORKSPACE      BRANCH
+▸⚠ claude   BLOCKED  4m     some-cli       feature/port-the-parser
+   some-cli  state via integration_report · id via process_tree
+ ✓ codex    DONE     ≥16m   site           main
+   work/site  state via manifest_rule · id via osc_title
+ ⠙ claude   working  2m     infra          feature/schedule-module
+   work/infra  state via screen_text · id via process_tree
+ · gemini   idle     ≥16m   docs           main
+   work/docs  state via no_positive_state_evidence · id via command_fallback
+
+ ── TASKS ── 2
+ ◆ t-014      claimed     Port the parser to the new envelope  (claude)
+ ◆ t-015      ready       Rewrite the lease conflict message
+
+ ── LEASES ── 1
+ ⛒ t-014      widgets/src/widgets/ports/**  (claude)
+
+ ── PANES ── 2 panes not at a prompt
+ IN THE PANE  STATE    WORKSPACE      DIRECTORY
+ ▪ pnpm         working  site           work/site
+ ▪ bash         done     infra          work/infra
+
+ ── IDLE ── 3 panes at a prompt
+ ▫ work/docs                      docs
+ ▫ ~                              home
+
+ ↑↓ select  ↵ focus  tab section  [i]dle hide  [r]efresh  [,] settings  [q]uit
+```
+
+### Why it is ordered this way
+
+On a machine hosting several workspaces, agents finish or get stuck where
+nobody is looking. **AGENTS is sorted by who needs a human**, not by name:
+
+| State | Meaning |
+|---|---|
+| `blocked` | waiting on an approval or a question, right now |
+| `done` | finished work you have not looked at yet |
+| `working` | busy |
+| `idle` | ready for input |
+| `unknown` | an agent is present and Luvus classified it as none of those — **not** the same as idle |
+
+Those four are the states the protocol itself declares, so they are Luvus's
+words rather than this widget's. `blocked` sits above `done` because blocked
+is waiting on you *now* while done is waiting to be noticed.
+
+A headline counts how many are waiting on you, so pressing `↵` on the top row
+is the whole workflow: the blocked agent surfaces, one key puts you in front of
+it.
+
+### The claim behind each state
+
+Every agent row carries a second line saying **how** the state was decided, and
+that is not decoration. Luvus declares seven authorities, and they are not
+equally strong: `integration_report` is the agent itself saying what it is
+doing, `process_tree` is an inference from what is running, `screen_text` is a
+guess read off the terminal, and `command_fallback` is little more than the
+name of the command in the pane. A screen already flattens four states into one
+word; flattening the evidence behind them too would make a guess and a report
+look identical.
+
+So the row says `state via manifest_rule · id via process_tree` — the left half
+is how the *state* was decided (`state_source`), the right half is how the
+*identity* was (`agent_authority`). The right half appears once the pane is
+wide enough for it.
+
+### What a blocked agent is waiting for
+
+`blocked` is the row the widget sorts to the top and the one it used to say
+least about. The row carries the state, how long it has held it, and how it
+was decided — but never *what the agent is asking*, which is the question that
+sends you out of the widget.
+
+**`e`** opens the evidence behind the selected **agent**, from `luvus
+agent explain`. A task, a lease or a pane that is not an agent is told
+so rather than sent to a command that cannot explain it:
+
+```text
+ ── EXPLAIN ── codex · pane 4
+
+ ⚠ waiting on  approve edit to src/main.rs?
+   state       blocked · via integration_report · high confidence
+   identity    codex · via integration_report · authoritative
+   rule        matched in the body, priority 200
+   authority   integration_report
+
+ ── WHAT THE PANE SHOWS ──
+ …the tail of the pane, from `luvus agent read`
+```
+
+The `authority` row is the one worth reading twice. An integration
+*reporting* a state and a rule *guessing* at one from screen text are
+different strengths of claim, and where nothing holds authority the row says
+`none — the state was inferred, not reported` rather than leaving the field
+looking answered.
+
+An agent that is blocked with no hint to give says so too — drawing nothing
+there would look like a panel that failed to load rather than a server with
+nothing to add.
+
+The panel is **read-only**. It shows you the prompt; it never answers it. `↵`
+still focuses the pane this panel is about — not whichever row a hidden
+selection would now pick — and nothing here prompts an agent, sends it keys,
+claims a task or releases a lease. It fills in off the input loop, so `esc`
+and `q` still answer while it is waiting. `esc` closes it, as does a second
+`e`.
+
+### Resumable sessions, and whose count it is
+
+RESUMABLE answers for the **machine**, not for this session: a machine with
+ten resumable sessions can easily have one workspace open that any of them
+are in, the other nine being agents left in directories not covered by any
+currently open workspace.
+
+So the total and the in-a-workspace figure beside it count different
+populations, and neither is wrong. RESUMABLE draws the full list, because an
+agent you left somewhere is exactly the one you have forgotten, and its
+heading says how many are in a workspace this session has open so the total
+is never mistaken for the session's own. A session whose directory is under
+an open workspace counts as inside it. If the snapshot did not come back,
+membership is unknown rather than "not open here".
+
+### The focused workspace's checkout
+
+The line under the session says what the checkout looks like: branch, how far
+from upstream, how many entries are changed, how many stashes, and how many
+worktrees the repository has.
+
+It covers **one** workspace and names it. `luvus git status` and
+`luvus worktree list` take no workspace argument — only the UHP methods
+behind them do — so they answer for whichever workspace the session is
+focused on. Drawing those figures without naming the workspace would make
+them read as a claim about the whole session that none of them support.
+
+*Entries*, not *files*: git reports a wholly untracked directory as a single
+entry, so the count is of what git listed rather than of what is on disk. A
+source that did not come back says so on this line, and a directory that is
+not a repository is a dash rather than a failure.
+
+### Tasks and leases
+
+Luvus coordinates work across agents in a way Herdr has no equivalent for, and
+these are the two sections that show it:
+
+- **TASKS** — claimable units of work (`luvus task add/claim/next/start/done`),
+  with whoever has claimed one.
+- **LEASES** — the file paths an unfinished task has reserved. This is what you
+  want on screen when two agents are about to collide.
+
+**Both are empty on most sessions, and empty is a reading.** `no tasks —
+nothing is being coordinated` is an answer; a source that did not come back
+says `⚠ could not be read` and the reason instead, on its own row. Those are
+opposite readings and the widget will not draw one as the other.
+
+### Three ways there is nothing to show, and it says which
+
+An empty board is the same picture for three completely different situations,
+so each one is named:
+
+| What happened | What the pane says |
+|---|---|
+| no `luvus` on `PATH` | `cannot start · needs luvus`, with where to get it — the shared dependency screen, before the terminal is taken over |
+| a binary, no server for this session | `⚠ no luvus server` / `nothing is serving the session named <name>` / `start one with luvus, or name another session with ,` |
+| a server with nothing under it | `▪ session <name> is open and empty` / how many panes it does hold / `start one with luvus agent start` — only when there are no agents, tasks, leases, *or* busy non-agent panes; a running shell is listed under PANES, not called empty |
+
+The second never shows the socket path Luvus names in its own error, because
+this repository is public and screenshots of it are not.
+
+### How it knows
+
+Session data comes from its own Universal Harness Protocol 1.0 answers,
+through the `luvus` CLI. Nothing here writes:
+
+- `luvus uhp snapshot` — the whole session in one call: workspaces (name, cwd,
+  branch) → tabs → panes (id, cwd, focused, what is in it, its state and the
+  authority behind it). The pane inventory and the session's own identity.
+- `luvus agent list --json` — **which panes hold an agent**, with the branch,
+  project, worktree flag and `state_source` the snapshot does not carry.
+- `luvus task list --json` — the tasks.
+- `luvus lease list --json` — the leases.
+- `luvus task next` — whether anything is ready to claim.
+- `luvus agent sessions` — resumable sessions on the machine, not just this
+  session.
+- `luvus git status` — the focused workspace's checkout.
+- `luvus worktree list` — every checkout of that repository.
+- A bounded local `ps` scan joins process names and full commands to the
+  snapshot's root PIDs, including descendants, to identify Opscope panes.
+  Argument text is used only for matching; it is not displayed or saved.
+  This requires the widget and Luvus session to run on the same machine.
+  If the scan fails, a warning says command filtering is unavailable and
+  only Luvus's reported command labels are matched.
+
+**`agent list` is what decides who is an agent.** A plain shell sitting at a
+prompt looks enough like an agent from the outside that taking the wider
+reading would list every idle shell as an idle agent; PANES is what is left
+once the real agents are taken out of it.
+
+**Durations are marked `≥`** when the state was already in place before the
+widget started. UHP does not timestamp a state change, so a duration is
+measured here from the first poll that saw it, and one that began before we
+were looking is only a lower bound.
+
+### When it does not all fit
+
+The four lists read as one under the arrows, and the pane is a window onto the
+body built at whatever height it needs. The header is pinned — the counts and
+the `▸ N agents waiting for you` line are the reason to have the widget open.
+A note line under the body says `rows 12-30 of 46` whenever there is more than
+one pane's worth, so a section you have scrolled past never reads as a section
+that failed to load.
+
+On a pane too short for both, the header gives its last lines back from the
+bottom rather than leaving the body with no rows: a body with nothing in it
+looks exactly like a session with nothing in it, and those are opposite
+readings of the same screen. The title and the counts never go.
+
+### Refresh
+
+`refresh` is the maximum idle delay before another authoritative full read.
+One bounded `events.wait` prioritizes `pane.agent_status_changed`, so blocked
+or finished agents can appear sooner without spawning a waiter per pane.
+Task, lease, pane, Git and worktree-only changes use the configured idle
+ceiling instead. The event wait has a one-second minimum and a thirty-second
+maximum; the separate poller honors the configured ceiling even below one
+second. `r` wakes the poller independently of the event wait.
+
+Events only wake a read: their payloads never patch the board. A lost,
+malformed or disconnected event response is visible and requests a fresh
+snapshot before its cursor is reset.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `↑` `↓` `j` `k` `Home` `End` | select, across the four sections and IDLE when it is shown; the window follows |
+| `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
+| `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
+| `Enter` / `f` | **go there** — focus the selected pane |
+| `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
+| `i` | show/hide the idle section; hiding it also drops it from tab order |
+| `r` | refresh now |
+| `,` | open settings |
+| `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
+| `q` | quit |
+
+`luvus pane focus` jumps to the pane's workspace and tab as well, so one
+command covers everything. A row that names no pane — an unclaimed task — says
+so rather than focusing something arbitrary.
+
 ## Configuration
 
 ```json
-"panes": { "backend": "auto", "rex_server": "", "refresh": 4, "agents": ["claude", "codex"] }
+"panes": {
+  "backend": "auto",
+  "rex_server": "",
+  "luvus_session": "default",
+  "refresh": 4,
+  "agents": ["claude", "codex"]
+}
 ```
 
 `backend` is `auto`, or `rex`, `herdr` or `luvus` to read that one wherever
-`panes` starts. `rex_server` picks a Rex server — a host label from
-`rex hosts`, or an address; empty is the CLI's own default. A second `panes`
-with `rex_server` set is how to watch another machine. A `rex_panes` section
-from before the rename is still read when there is no `panes` section, its
-`server` as `rex_server`, and a notice asks for it to be renamed. `refresh` is the maximum idle delay between reads;
-events wake one sooner. `agents` is the list of command names that count as
-coding agents — a program reporting under any other app name still shows,
-with its state, in PROCESSES.
+`panes` starts; `--mux` does the same for one run. `refresh` is the maximum
+idle delay between reads under every multiplexer; events wake one sooner.
 
-Requires `rex` on `PATH`. Works on Linux and macOS.
+- **Rex:** `rex_server` picks a Rex server — a host label from `rex hosts`,
+  or an address; empty is the CLI's own default. A second `panes` with
+  `rex_server` set is how to watch another machine, and it is only used when
+  `panes` is in no multiplexer at all. `agents` is the list of command names
+  that count as coding agents — a program reporting under any other app name
+  still shows, with its state, in PROCESSES.
+- **Herdr:** nothing to set. Herdr names its agents itself.
+- **Luvus:** `luvus_session` is which Luvus server session to read;
+  `luvus session list` names them, and `default` is the one `luvus` starts on
+  its own.
+
+A `rex_panes`, `herdr_panes` or `luvus_panes` section from before `panes` is
+still read when there is no `panes` section — `server` as `rex_server`,
+`session` as `luvus_session` — and a notice asks for it to be renamed. Press
+`,` for the settings screen, which writes the `panes` section.
+
+Requires `rex`, `herdr` or `luvus` on `PATH`: whichever multiplexer it runs
+in. Works on Linux and macOS. Under Herdr, CPU and memory are read from
+`/proc`, so on macOS those two columns stay empty, as they did in
+herdr-panes.
