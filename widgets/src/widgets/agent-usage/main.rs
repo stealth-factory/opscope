@@ -3073,6 +3073,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), tc::THEME_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         // The footer is packed once, with the scroll hint always counted, so

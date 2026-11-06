@@ -1195,6 +1195,7 @@ fn copy_overlay(
     hints.push(vec![(p.hint.as_str(), "← or esc to close".into())]);
     hints.extend([
         vec![(p.hint.as_str(), "[,] settings".into())],
+        vec![(p.hint.as_str(), tc::THEME_HINT.into())],
         vec![(p.hint.as_str(), "[q]uit".into())],
     ]);
     let packed = tc::pack_hints_placed(&hints, w - 2, " · ");
@@ -1701,6 +1702,7 @@ fn main() {
                 ];
                 hints.extend([
                     vec![(p.hint.as_str(), "[,] settings".into())],
+                    vec![(p.hint.as_str(), tc::THEME_HINT.into())],
                     vec![(p.hint.as_str(), "[q]uit".into())],
                 ]);
                 let base_foot = tc::pack_hints(&hints, w - 2, " · ");
@@ -2055,6 +2057,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), tc::THEME_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");

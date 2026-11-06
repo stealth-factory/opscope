@@ -378,7 +378,10 @@ pub fn choose(wanted: &Wanted, terminal: Option<&Theme>) -> Result<Theme, String
         })),
         Wanted::Named(id) => match lookup(id) {
             Some(theme) => Ok(theme),
-            None => Err(format!("theme {id:?} is not one opscope knows - drawing {}", fallback().name)),
+            None => Err(format!(
+                "theme {id:?} is not one opscope knows - using the default, auto ({})",
+                terminal.map(|t| t.name.clone()).unwrap_or_else(|| fallback().name)
+            )),
         },
     }
 }
@@ -387,7 +390,141 @@ pub fn choose(wanted: &Wanted, terminal: Option<&Theme>) -> Result<Theme, String
 /// top-level `theme` in config.json, else `auto`.
 fn active() -> &'static RwLock<Arc<Theme>> {
     static ACTIVE: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
-    ACTIVE.get_or_init(|| RwLock::new(Arc::new(resolve())))
+    ACTIVE.get_or_init(|| {
+        let first = Arc::new(resolve());
+        let _ = BUILT.set(first.clone());
+        RwLock::new(first)
+    })
+}
+
+/// The theme in force when a widget built its palette: the first one
+/// resolved. Widgets build their colours once; [`recolour`] draws them in
+/// whatever theme is in force now.
+static BUILT: OnceLock<Arc<Theme>> = OnceLock::new();
+
+fn built() -> Arc<Theme> {
+    let _ = active();
+    BUILT.get().cloned().unwrap_or_else(current)
+}
+
+fn fg((r, g, b): Rgb) -> String {
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+fn bgc((r, g, b): Rgb) -> String {
+    format!("\x1b[48;2;{r};{g};{b}m")
+}
+
+fn ulc((r, g, b): Rgb) -> String {
+    format!("\x1b[58;2;{r};{g};{b}m")
+}
+
+/// Every escape `from` can produce, to the same role's escape in `to`:
+/// text, lifted text, backgrounds, hue tints and the threshold underline.
+/// Where two roles share a colour in `from`, the plain form of the first
+/// in [`Role::ALL`] wins - the same choice [`lift`] makes.
+pub fn escape_map(from: &Theme, to: &Theme) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for role in Role::ALL {
+        map.entry(fg(from.colour(role))).or_insert_with(|| fg(to.colour(role)));
+        map.entry(bgc(from.colour(role))).or_insert_with(|| bgc(to.colour(role)));
+    }
+    for role in Role::ALL {
+        map.entry(fg(from.lifted(role))).or_insert_with(|| fg(to.lifted(role)));
+        map.entry(ulc(from.lifted(role))).or_insert_with(|| ulc(to.lifted(role)));
+    }
+    for hue in HUES {
+        map.entry(bgc(from.toward(hue))).or_insert_with(|| bgc(to.toward(hue)));
+    }
+    map.retain(|k, v| k != v);
+    map
+}
+
+/// `text` drawn in the theme in force now, though it was built in the theme
+/// a widget started in: every role colour of the one becomes the same role
+/// of the other. How a running widget follows a theme change, and how the
+/// picker previews one, without any widget building its colours again. A
+/// colour that is no role's - a mix, a ramp step - is left as it is; the
+/// ramp is worked out each frame from the theme in force anyway.
+pub fn recolour(text: &str) -> String {
+    let (from, to) = (built(), current());
+    if Arc::ptr_eq(&from, &to) || (from.colours == to.colours && from.toward == to.toward && from.lifted == to.lifted) {
+        return text.to_string();
+    }
+    if !text.contains("\x1b[") {
+        return text.to_string();
+    }
+    static CACHE: std::sync::Mutex<Option<(usize, usize, std::collections::HashMap<String, String>)>> =
+        std::sync::Mutex::new(None);
+    let key = (Arc::as_ptr(&from) as usize, Arc::as_ptr(&to) as usize);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.as_ref().is_none_or(|(a, b, _)| (*a, *b) != key) {
+        *cache = Some((key.0, key.1, escape_map(&from, &to)));
+    }
+    let map = &cache.as_ref().expect("just filled").2;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match tail.find('m') {
+            Some(end) if end < 24 => {
+                let seq = &tail[..=end];
+                out.push_str(map.get(seq).map(String::as_str).unwrap_or(seq));
+                rest = &tail[end + 1..];
+            }
+            _ => {
+                out.push_str("\x1b[");
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Look at the theme setting again - at most every two seconds - and put
+/// a changed one in force. Every widget calls this as it draws, so a theme
+/// picked in one pane, or written into config.json by hand, reaches every
+/// other pane on its next frame. True when the theme changed.
+pub fn watch() -> bool {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Wanted)>> = std::sync::Mutex::new(None);
+    if cfg!(test) {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < std::time::Duration::from_secs(2)) {
+        return false;
+    }
+    let asked = wanted();
+    let changed = last.as_ref().is_some_and(|(_, was)| *was != asked);
+    *last = Some((now, asked));
+    drop(last);
+    if changed {
+        let next = resolve();
+        let same = current().colours == next.colours && current().id == next.id;
+        set(next);
+        return !same;
+    }
+    false
+}
+
+/// Keep `choice` as the theme for every widget: `opscope.theme` in the main
+/// config file, the one the settings screen writes, keeping the rest of the
+/// file as it is. Every running widget picks it up within two seconds.
+pub fn save(choice: &str) -> Result<(), String> {
+    let path = crate::config_paths()
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(crate::default_config_path);
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let base = if raw.trim().is_empty() { "{}" } else { raw.as_str() };
+    let next = crate::settings::set_json_path(base, &[SECTION, "theme"], &serde_json::Value::String(choice.into()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    crate::statefile::write_atomic_if(&path, &next, &raw)
 }
 
 /// What the person asked for, before the terminal has answered anything.
@@ -554,9 +691,11 @@ fn resolve() -> Theme {
     };
     match choose(&wanted, terminal.as_ref()) {
         Ok(theme) => theme,
+        // A name opscope does not know is the default, auto, and a notice
+        // says which name it was.
         Err(why) => {
             crate::notices::when(true, || crate::notices::Notice::warn("theme-unknown", why.clone()));
-            find(FALLBACK).cloned().expect("opscope Dusk is built in")
+            choose(&Wanted::Auto, terminal.as_ref()).expect("auto always has a theme")
         }
     }
 }
@@ -773,7 +912,7 @@ mod tests {
         assert_eq!(choose(&Wanted::Auto, Some(&mine)).unwrap().id, "terminal");
         assert_eq!(choose(&Wanted::Named("nord".into()), None).unwrap().id, "nord");
         let why = choose(&Wanted::Named("nope".into()), None).unwrap_err();
-        assert!(why.contains("nope") && why.contains("opscope Dusk"), "{why}");
+        assert!(why.contains("nope") && why.contains("default, auto") && why.contains("opscope Dusk"), "{why}");
     }
 
     #[test]
@@ -837,6 +976,23 @@ mod tests {
         assert_eq!(lift(&ink(Role::Muted)), ink_on(Role::Muted, true));
         let shade = "\x1b[38;2;1;2;3m";
         assert_eq!(lift(shade), shade);
+    }
+
+    #[test]
+    fn a_frame_built_in_one_theme_is_drawn_in_another_role_for_role() {
+        let (classic, nord) = (find("classic").unwrap(), find("nord").unwrap());
+        let map = escape_map(classic, nord);
+        let row = format!("{}ok {}x{} {}", fg(classic.colour(Role::Red)), bgc(classic.colour(Role::Slot)), fg(classic.lifted(Role::Muted)), bgc(classic.toward(Role::Green)));
+        let mut out = row.clone();
+        for (from, to) in &map {
+            out = out.replace(from.as_str(), to.as_str());
+        }
+        assert!(out.contains(&fg(nord.colour(Role::Red))));
+        assert!(out.contains(&bgc(nord.colour(Role::Slot))));
+        assert!(out.contains(&fg(nord.lifted(Role::Muted))));
+        assert!(out.contains(&bgc(nord.toward(Role::Green))));
+        // A theme to itself changes nothing.
+        assert!(escape_map(nord, nord).is_empty());
     }
 
     #[test]

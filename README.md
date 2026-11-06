@@ -413,9 +413,19 @@ never a notice — it stays beside the number.
 
 ### Themes
 
-Every widget draws in one theme, chosen once for all of them: the THEME row
-on any widget's `,` screen, `"opscope": { "theme": "…" }` in `config.json`
-(a top-level `"theme"` works too), or `OPSCOPE_THEME=…` for one run.
+Every widget draws in one theme, chosen once for all of them. **Press
+`ctrl-t` in any widget** for the theme picker: type to filter, and as `↑↓`
+move through the list the widget behind repaints in that theme, so you see
+it in place before keeping it; `↵` keeps it, `esc` puts back what you had.
+The footer of every widget says so (`ctrl-t theme`), beside `[,] settings`.
+
+The choice is one setting in the main `config.json`, `"opscope": { "theme":
+"…" }` - also the THEME row on any widget's `,` screen, and a top-level
+`"theme"` works too. **Every running widget follows it**: each looks at the
+setting again as it draws, at most every two seconds, so a theme kept in one
+pane recolours all of them without a restart. `OPSCOPE_THEME=…` overrides it
+for one run. A name opscope does not know falls back to the default, `auto`,
+and a notice (`!`) names it.
 
 | Value | Colours |
 |---|---|

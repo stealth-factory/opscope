@@ -2322,6 +2322,7 @@ fn main() {
             drop(s);
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -3148,6 +3149,7 @@ fn main() {
                 ]);
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3232,6 +3234,7 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[w]indow".into())]);
         hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();

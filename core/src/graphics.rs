@@ -629,6 +629,25 @@ impl Plot {
         plot
     }
 
+    /// Every colour this plot carries, passed through `f`: how a chart built
+    /// in one theme is drawn in another (`theme::recolour`).
+    pub fn recoloured(mut self, f: &dyn Fn(&str) -> String) -> Plot {
+        for trace in &mut self.chart.traces {
+            trace.colour = f(&trace.colour);
+        }
+        if let Some(fill) = &mut self.fill {
+            for rect in &mut fill.rects {
+                rect.colour = f(&rect.colour);
+            }
+            for row in &mut fill.text {
+                for (colour, _) in row.iter_mut() {
+                    *colour = f(colour);
+                }
+            }
+        }
+        self
+    }
+
     /// `top` is the pinned header height; `room` excludes the footer.
     pub fn in_viewport(mut self, scroll: usize, top: usize, room: usize) -> Option<Self> {
         let start = top.saturating_add(scroll);

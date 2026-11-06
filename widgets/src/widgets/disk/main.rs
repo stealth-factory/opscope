@@ -3395,6 +3395,7 @@ fn footer(
     }
     hints.push(vec![(p.dim.as_str(), pause_hint(paused).into())]);
     hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+    hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
     hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
     let widest = hints
         .iter()

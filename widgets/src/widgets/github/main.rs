@@ -1145,6 +1145,7 @@ fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
         vec![(p.dim.as_str(), "[w]indow".into())],
         vec![(p.dim.as_str(), "[r]efresh".into())],
         vec![(p.dim.as_str(), "[,] settings".into())],
+        vec![(p.dim.as_str(), tc::THEME_HINT.into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]);
     out
@@ -3242,6 +3243,7 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
             let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
@@ -3822,6 +3824,7 @@ fn main() {
                 ];
                 let mut hints = hints;
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+                hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
                 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3977,12 +3980,14 @@ mod tests {
             }
         }
         // The band that was wrong, named so a regression points at itself.
-        for w in 81..=84 {
+        // Fourteen columns on from where it was found, at 81-84: the footer
+        // has since gained `ctrl-t theme`.
+        for w in 95..=98 {
             assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
         }
         // And the band either side of it keeps the fuller wording it had.
-        assert_eq!(info_hint(false, &p, 80), "[i] show column legend");
-        assert_eq!(info_hint(false, &p, 85), "[i] show legend");
+        assert_eq!(info_hint(false, &p, 94), "[i] show column legend");
+        assert_eq!(info_hint(false, &p, 99), "[i] show legend");
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that
@@ -4006,10 +4011,11 @@ mod tests {
                 );
             }
         }
-        // The one Codex found: the whole footer fits 81 columns on one
-        // line, and only with a wording that leaves room for the rest.
-        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 79, "  ").len();
-        assert_eq!(foot(info_hint(false, &p, 81)), 1);
+        // The one Codex found, at 81 columns before the footer gained
+        // `ctrl-t theme`: the whole footer fits 95 columns on one line, and
+        // only with a wording that leaves room for the rest.
+        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 93, "  ").len();
+        assert_eq!(foot(info_hint(false, &p, 95)), 1);
     }
 
     /// Shortened, never truncated: `pack_hints` wraps a footer without

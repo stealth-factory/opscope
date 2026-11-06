@@ -1297,6 +1297,7 @@ fn list_hints(p: &Palette, several: bool, view: &View) -> Vec<Vec<(&'static str,
     hints.push(vec![("", "[c] copy link".to_string())]);
     hints.push(vec![("", "[r] refresh".to_string())]);
     hints.push(vec![("", "[,] settings".to_string())]);
+    hints.push(vec![("", tc::THEME_HINT.into())]);
     hints.push(vec![("", "[q]uit".to_string())]);
     hints
 }

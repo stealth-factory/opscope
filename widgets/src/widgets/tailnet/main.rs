@@ -1025,6 +1025,7 @@ fn main() {
             ));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let (packed, indent) = pack_footer(&hints, w);
             let foot: Vec<String> = packed.lines.to_vec();
@@ -1312,6 +1313,7 @@ fn main() {
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         // The footer is built before the body, not after it, because it
         // wraps: how many rows it takes depends on the width, and nothing

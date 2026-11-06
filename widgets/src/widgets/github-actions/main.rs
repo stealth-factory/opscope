@@ -2344,6 +2344,7 @@ fn main() {
                 p.dim.as_str(),
                 "[,] settings".into(),
             )]);
+            hints.insert(hints.len() - 1, vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         }
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         // The hints, built before the list so the list is sized with them

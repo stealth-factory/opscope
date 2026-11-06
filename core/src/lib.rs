@@ -25,6 +25,7 @@ mod analytics;
 mod dependencies;
 pub mod theme;
 mod termtheme;
+mod picker;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -46,6 +47,9 @@ pub use dependencies::{
 pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
 pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
+/// The footer hint for the theme picker, beside `[,] settings` in every
+/// widget: one wording, kept here.
+pub const THEME_HINT: &str = picker::HINT;
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -1104,6 +1108,11 @@ pub fn append_plot_rows(
     rows.extend(body);
 }
 
+/// The widget's last frame as it built it, before any recolouring: what the
+/// theme picker repaints in each theme it previews.
+pub(crate) static LAST_FRAME: std::sync::Mutex<Option<(Vec<String>, Vec<Plot>)>> =
+    std::sync::Mutex::new(None);
+
 /// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // A stopped tty would block this write, and this is the thread that
@@ -1112,6 +1121,20 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // The theme is one setting for every widget. A change to it - from the
+    // picker in another pane, or config.json edited by hand - is picked up
+    // here, and every colour this widget built in the theme it started in
+    // is drawn in the theme in force: rows and charts alike.
+    if theme::watch() {
+        forget_frame();
+    }
+    if !picker::OPEN.load(Ordering::Acquire) {
+        *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some((rows.to_vec(), plots.to_vec()));
+    }
+    let rows: Vec<String> = rows.iter().map(|r| theme::recolour(r)).collect();
+    let rows = rows.as_slice();
+    let plots: Vec<Plot> = plots.iter().cloned().map(|p| p.recoloured(&theme::recolour)).collect();
+    let plots = plots.as_slice();
     // What core adds: the counter on the top row and the banner under the
     // widget's frame, both as `size()` decided them for this frame. The
     // banner goes on only when the widget drew at the height `size()`
@@ -4856,9 +4879,14 @@ impl Keyboard {
             settings::relaunch(self);
         }
         self.held.extend(fresh);
-        let (keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
+        let (mut keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
         if opens {
             notices::run(self);
+        }
+        // ctrl-t opens the theme picker over whatever widget this is.
+        if !picker::OPEN.load(Ordering::Acquire) && keys.iter().any(|k| k == picker::KEY) {
+            keys.retain(|k| k != picker::KEY);
+            picker::run(self);
         }
         keys
     }
@@ -5236,6 +5264,7 @@ fn name_byte(ch: char) -> String {
         '\u{19}' => "ctrl-y".to_string(),
         '\u{5}' => "ctrl-e".to_string(),
         '\u{15}' => "ctrl-u".to_string(),
+        '\u{14}' => "ctrl-t".to_string(),
         c => c.to_string(),
     }
 }
