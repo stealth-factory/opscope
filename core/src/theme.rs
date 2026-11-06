@@ -550,8 +550,35 @@ type RecolourMap = (Arc<Theme>, Arc<Theme>, std::collections::HashMap<String, St
 /// colour that is no role's - a mix, a ramp step - is left as it is; the
 /// ramp is worked out each frame from the theme in force anyway.
 pub fn recolour(text: &str) -> String {
-    let (from, to) = (built(), current());
-    if Arc::ptr_eq(&from, &to) || (from.colours == to.colours && from.toward == to.toward && from.lifted == to.lifted) {
+    translate(text, &built(), &current())
+}
+
+/// opscope Classic, held, for [`translate`] to key its cache on.
+fn classic() -> Arc<Theme> {
+    static CLASSIC: OnceLock<Arc<Theme>> = OnceLock::new();
+    CLASSIC
+        .get_or_init(|| Arc::new(find("classic").cloned().expect("opscope Classic is built in")))
+        .clone()
+}
+
+/// `text` written in opscope Classic's colours, put into the theme a widget
+/// started in - for core text that is handed to `draw` and recoloured
+/// there with everything else. The notices screen keeps its colours as
+/// constants, and those are Classic's roles.
+pub fn from_classic(text: &str) -> String {
+    translate(text, &classic(), &built())
+}
+
+/// `text` written in Classic's colours, put into the theme in force now:
+/// for what core lays on a frame after it has been recoloured - the
+/// notices counter and banner.
+pub fn classic_now(text: &str) -> String {
+    translate(text, &classic(), &current())
+}
+
+/// `text` built in `from`, every role colour of it as the same role in `to`.
+fn translate(text: &str, from: &Arc<Theme>, to: &Arc<Theme>) -> String {
+    if Arc::ptr_eq(from, to) || (from.colours == to.colours && from.toward == to.toward && from.lifted == to.lifted) {
         return text.to_string();
     }
     if !text.contains("\x1b[") {
@@ -559,14 +586,21 @@ pub fn recolour(text: &str) -> String {
     }
     // Keyed on the themes themselves, held: an address alone could be
     // freed and handed to the next theme `set`, and that one would be
-    // drawn with the map of the theme before it.
-    static CACHE: std::sync::Mutex<Option<RecolourMap>> = std::sync::Mutex::new(None);
+    // drawn with the map of the theme before it. A few pairs, since the
+    // widget's frame and core's Classic text are translated each frame.
+    static CACHE: std::sync::Mutex<Vec<RecolourMap>> = std::sync::Mutex::new(Vec::new());
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.as_ref().is_none_or(|(a, b, _)| !Arc::ptr_eq(a, &from) || !Arc::ptr_eq(b, &to)) {
-        let map = escape_map(&from, &to);
-        *cache = Some((from.clone(), to.clone(), map));
-    }
-    let map = &cache.as_ref().expect("just filled").2;
+    let at = match cache.iter().position(|(a, b, _)| Arc::ptr_eq(a, from) && Arc::ptr_eq(b, to)) {
+        Some(at) => at,
+        None => {
+            if cache.len() >= 4 {
+                cache.remove(0);
+            }
+            cache.push((from.clone(), to.clone(), escape_map(from, to)));
+            cache.len() - 1
+        }
+    };
+    let map = &cache[at].2;
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("\x1b[") {
@@ -878,9 +912,13 @@ fn resolve() -> Theme {
         crate::notices::Notice::warn("theme-file-bad", wrong.join("; "))
     });
     let wanted = wanted();
-    let terminal = match wanted {
-        Wanted::Named(_) => None,
-        Wanted::Auto | Wanted::Terminal => crate::terminal::terminal_theme(),
+    // A name opscope does not know falls back to `auto`, which is the
+    // terminal's own colours when it gave them - so it is asked then too.
+    // `Keyboard::new` has already asked, so this is never a first query
+    // on the draw path.
+    let terminal = match &wanted {
+        Wanted::Named(id) if lookup(id).is_some() => None,
+        _ => crate::terminal::terminal_theme(),
     };
     match choose(&wanted, terminal.as_ref()) {
         Ok(theme) => theme,

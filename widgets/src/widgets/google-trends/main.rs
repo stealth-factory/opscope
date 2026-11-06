@@ -67,7 +67,7 @@ struct Palette {
     bad: String,
     accent: String,
     /// The selected-row tint. Every colour above, in the lifted form
-    /// `on_tint` gives it, measures at least 4.5:1 against it -
+    /// `on` gives it, measures at least 4.5:1 against it -
     /// `palette_clears_aa_on_the_tint` holds that.
     tint: String,
 }

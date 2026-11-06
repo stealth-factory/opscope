@@ -44,7 +44,8 @@ pub struct Palette {
 
 /// Every colour is a theme role, so it clears AA 4.5 on the background;
 /// on the selected-row tint each is drawn in its lifted form through
-/// `on_tint`. `every_colour_clears_aa_on_the_tint` measures both.
+/// `tc::lift`, in `table_row`'s colour closure.
+/// `every_colour_clears_aa_on_the_tint` measures both.
 pub fn palette() -> Palette {
     Palette {
         txt: tc::ink(tc::Role::Fg),

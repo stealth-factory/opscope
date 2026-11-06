@@ -226,7 +226,55 @@ pub fn query() -> Option<Theme> {
         }
     }
     unsafe { libc::tcsetattr(input, libc::TCSANOW, &saved) };
-    theme_from_answers(&String::from_utf8_lossy(&got))
+    let got = String::from_utf8_lossy(&got).to_string();
+    // A key pressed while the terminal was answering is the person's, not
+    // the query's: kept for the keyboard, which reads it first.
+    let typed = parse_typed_between_answers(&got);
+    if !typed.is_empty() {
+        TYPED.lock().unwrap_or_else(|e| e.into_inner()).push_str(&typed);
+    }
+    theme_from_answers(&got)
+}
+
+/// What was typed while the colour query waited, for `Keyboard` to take.
+static TYPED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The keys typed during the colour query, once.
+pub(crate) fn take_typed() -> String {
+    std::mem::take(&mut *TYPED.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// `text` read during the colour query with every answer to it taken out:
+/// the OSC colour replies, whichever terminator they end in, and the
+/// Device Attributes reply. What is left is what somebody typed.
+pub fn parse_typed_between_answers(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        let osc = rest.find("\x1b]");
+        let da = rest.find("\x1b[?").filter(|at| {
+            let tail = &rest[at + 3..];
+            let digits = tail.bytes().take_while(|b| b.is_ascii_digit() || *b == b';').count();
+            digits > 0 && tail.as_bytes().get(digits) == Some(&b'c')
+        });
+        let Some(at) = [osc, da].into_iter().flatten().min() else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = if Some(at) == osc {
+            let st = tail.find("\x1b\\").map(|e| e + 2);
+            let bel = tail.find('\x07').map(|e| e + 1);
+            match [st, bel].into_iter().flatten().min() {
+                Some(end) => end,
+                None => return out,
+            }
+        } else {
+            tail.find('c').map(|e| e + 1).unwrap_or(tail.len())
+        };
+        rest = &tail[end..];
+    }
 }
 
 #[cfg(not(unix))]
@@ -258,6 +306,13 @@ mod tests {
         assert_eq!(parse_colour_spec("#22252b"), Some((34, 37, 43)));
         assert_eq!(parse_colour_spec("rgb:zz/00/00"), None);
         assert_eq!(parse_colour_spec("blue"), None);
+    }
+
+    #[test]
+    fn a_key_typed_while_the_terminal_answered_is_kept() {
+        let got = "q\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b[A\x1b]11;rgb:0000/0000/0000\x07j\x1b[?62;22cx";
+        assert_eq!(parse_typed_between_answers(got), "q\x1b[Ajx");
+        assert_eq!(parse_typed_between_answers("\x1b]10;rgb:1/1/1\x07\x1b[?1;2c"), "");
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub struct Palette {
 }
 
 /// Every colour is a theme role. On a selected row each is drawn in its
-/// lifted form through `on_tint`, which clears AA 4.5 on the
+/// lifted form through `on`, which clears AA 4.5 on the
 /// `tint(Role::Slot)` behind it.
 pub fn palette() -> Palette {
     Palette {

@@ -1037,9 +1037,11 @@ fn show_unsaved(keyboard: &mut crate::Keyboard, error: &str) {
     let mut scroll = 0usize;
     loop {
         let (w, h) = crate::size();
+        let _ = crate::theme::watch();
         let f = unsaved_frame(error, w, h, scroll);
         scroll = clamped_scroll(scroll, f.body_len, f.window);
-        crate::draw(&f.rows, w, h);
+        // Built in the theme in force this frame; nothing to recolour.
+        crate::draw_current(&f.rows, w, h, &[]);
         keyboard.wait(std::time::Duration::from_millis(200));
         let overflows = f.body_len > f.window;
         for key in keyboard.poll() {
@@ -1071,9 +1073,14 @@ fn ask_loop(keyboard: &mut crate::Keyboard, name: &str) -> bool {
     let mut note: Option<Note> = None;
     loop {
         let (w, h) = crate::size();
+        let _ = crate::theme::watch();
         let f = frame(name, w, h, scroll, note.as_ref());
         scroll = clamped_scroll(scroll, f.body_len, f.window);
-        crate::draw(&f.rows, w, h);
+        // Built in the theme in force this frame, so it is drawn as it is:
+        // recolouring it from the theme the process started in maps one
+        // role onto another, and a theme changed while this screen was up
+        // turned its text into its background.
+        crate::draw_current(&f.rows, w, h, &[]);
         keyboard.footer_at(&f.footer, f.foot_top, 1);
         keyboard.wait(std::time::Duration::from_millis(200));
         for key in keyboard.poll() {

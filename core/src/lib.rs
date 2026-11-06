@@ -1157,7 +1157,8 @@ pub(crate) fn draw_current(rows: &[String], w: usize, h: usize, plots: &[Plot]) 
         Some(c) if !c.banner.is_empty() && c.h == h + c.banner.len() => {
             let mut full: Vec<String> = rows.iter().take(h).cloned().collect();
             full.resize(h, String::new());
-            full.extend(c.banner.iter().cloned());
+            // Laid on after the recolour, so put into the theme here.
+            full.extend(c.banner.iter().map(|row| theme::classic_now(row)));
             with_banner = full;
             (with_banner.as_slice(), c.h)
         }
@@ -1952,6 +1953,8 @@ fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -
     let mut tail = String::new();
     let mut taken = 0;
     if let Some((colour, text)) = counter {
+        // The counter's colour is Classic's, as every notice colour is.
+        let colour = theme::classic_now(colour);
         tail.push_str(&format!("{}{colour}{text}{RST}", " ".repeat(COUNTER_GAP)));
         taken = display_width(text) + COUNTER_GAP;
     }
@@ -4715,12 +4718,21 @@ impl Keyboard {
         // A test that builds a Keyboard to hit-test a footer must not start
         // the session: the query goes to stdout, and a reply in that process
         // can push flag 1 onto a stream the test never captured.
+        //
+        // The terminal's colours are asked for first, and to the end. The
+        // colour query reads stdin on its own and stops at a Device
+        // Attributes reply; started after `terminal::start`, it read the
+        // capability queries' DA as its own, gave up before the colours
+        // came, and `auto` was Dusk for the life of the process. Asked
+        // here, it is also never asked on the draw path later, where a
+        // theme changed to `auto` would otherwise have it eat keys.
         #[cfg(not(test))]
         if saved.is_some() {
+            let _ = terminal::terminal_theme();
             terminal::start();
         }
         Keyboard {
-            pending: String::new(),
+            pending: termtheme::take_typed(),
             lone_esc: false,
             string_since: None,
             fd,

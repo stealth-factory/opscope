@@ -4466,7 +4466,6 @@ fn typing_in(mode: &Mode) -> bool {
 /// The caller keeps ownership of the already-active keyboard so entering
 /// settings never stacks a second raw-mode guard over the widget's.
 pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
-    let p = palette();
     let mut app = load(spec);
     // This screen borrows the caller's keyboard, so it inherits wherever
     // the caller said its footer hints were - and this loop polls before it
@@ -4542,12 +4541,18 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
             }
         }
         let (w, h) = crate::size();
+        // Built each frame in the theme in force, and drawn as it is: the
+        // lifted palette a selected row takes is built here too, and the
+        // two have to agree on which theme they are in. Recolouring a frame
+        // already in the theme in force maps one role onto another.
+        let _ = crate::theme::watch();
+        let p = palette();
         let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
             Mode::Pick { .. } => draw_pick(&app, w, h, &p),
         };
-        crate::draw(&body, w, h);
+        crate::draw_current(&body, w, h, &[]);
         keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
         click = next;
         keyboard.wait(Duration::from_millis(80));
