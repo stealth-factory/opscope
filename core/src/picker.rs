@@ -118,6 +118,55 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i32> {
 
 /// The choices that match `query`, best first; in their own order when
 /// the query is empty.
+/// The modal's last row. A click on `↵ keep` or `esc cancel` is that key.
+const KEYS_ROW: &str = " ↑↓ preview · ↵ keep · esc cancel";
+
+/// What a click at `col`, `row` of a pane `w` by `h` means while the picker
+/// shows `list` scrolled to `first`: the key it stands for. On a theme it
+/// is `pick:<index>`, which `run` turns into a move or, on the theme already
+/// highlighted, into `enter` - the same as a click on a widget's row.
+pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Choice], first: usize) -> Option<String> {
+    let m = Modal::place(w, h);
+    if col < m.x || col >= m.x + m.w || row < m.y || row >= m.y + m.h {
+        return Some("esc".into());
+    }
+    let ih = m.h.saturating_sub(2);
+    let inner_row = row.checked_sub(m.y + 1)?;
+    let inner_col = col.checked_sub(m.x + 1)?;
+    if inner_row >= ih {
+        return None;
+    }
+    if inner_row + 1 == ih {
+        let span = |word: &str| {
+            KEYS_ROW.find(word).map(|b| {
+                let at = crate::display_width(&KEYS_ROW[..b]);
+                at..at + crate::display_width(word)
+            })
+        };
+        if span("↵ keep")?.contains(&inner_col) {
+            return Some("enter".into());
+        }
+        if span("esc cancel")?.contains(&inner_col) {
+            return Some("esc".into());
+        }
+        return None;
+    }
+    let slot = inner_row.checked_sub(2)?;
+    if slot >= slots(ih) {
+        return None;
+    }
+    let drawn = drawn(list);
+    let first = first.min(drawn.len().saturating_sub(slots(ih)));
+    let index = (*drawn.get(first + slot)?)?;
+    Some(format!("pick:{index}"))
+}
+
+/// `auto` and `terminal`: settings that follow the terminal rather than
+/// themes of their own.
+fn is_special(value: &str) -> bool {
+    value == "auto" || value == "terminal"
+}
+
 pub fn filtered(all: &[Choice], query: &str) -> Vec<Choice> {
     let mut scored: Vec<(i32, usize, &Choice)> = all
         .iter()
@@ -186,7 +235,65 @@ impl Modal {
 /// The modal's inside, `iw` cells wide and `ih` rows tall: a title with the
 /// count, the filter line, the list, and the keys - in the theme in force,
 /// which is the one being previewed.
+/// How many rows of the list the modal's inside shows, `ih` rows tall: all
+/// but the title, the filter line and the keys.
+pub fn slots(ih: usize) -> usize {
+    ih.saturating_sub(3).max(1)
+}
+
+/// The list as drawn, one entry per row: an index into `list`, or `None`
+/// for the rule under the settings that follow the terminal - between them
+/// and the named themes, so `auto` and `terminal` read as a different kind
+/// of choice.
+pub fn drawn(list: &[Choice]) -> Vec<Option<usize>> {
+    let mut out = Vec::new();
+    for (i, c) in list.iter().enumerate() {
+        out.push(Some(i));
+        if is_special(&c.value) && list.get(i + 1).is_some_and(|n| !is_special(&n.value)) {
+            out.push(None);
+        }
+    }
+    out
+}
+
+/// The first drawn row of a window `slots` tall that keeps `selected` in
+/// view, moving from `first` no further than it has to.
+pub fn follow_list(list: &[Choice], selected: usize, slots: usize, first: usize) -> usize {
+    let at = drawn(list).iter().position(|d| *d == Some(selected)).unwrap_or(0);
+    let slots = slots.max(1);
+    if at < first {
+        at
+    } else if at >= first + slots {
+        at + 1 - slots
+    } else {
+        first
+    }
+}
+
+/// The furthest the list can be scrolled: its last row on the window's last.
+pub fn last_first(list: &[Choice], slots: usize) -> usize {
+    drawn(list).len().saturating_sub(slots.max(1))
+}
+
+/// `inside_from` with the window wherever keeps `selected` in view.
+#[cfg(test)]
 pub fn inside(list: &[Choice], selected: usize, query: &str, kept: &str, said: &str, iw: usize, ih: usize) -> Vec<String> {
+    let first = follow_list(list, selected, slots(ih), 0);
+    inside_from(list, selected, first, query, kept, said, iw, ih)
+}
+
+/// The modal's inside with its list scrolled to drawn row `first`.
+#[allow(clippy::too_many_arguments)]
+pub fn inside_from(
+    list: &[Choice],
+    selected: usize,
+    first: usize,
+    query: &str,
+    kept: &str,
+    said: &str,
+    iw: usize,
+    ih: usize,
+) -> Vec<String> {
     let bar = theme::tint(Role::Dark);
     let line = |parts: &[(String, String)], ground: &str| -> String {
         let used: usize = parts.iter().map(|(_, t)| crate::display_width(t)).sum();
@@ -216,13 +323,19 @@ pub fn inside(list: &[Choice], selected: usize, query: &str, kept: &str, said: &
         vec![(theme::ink(Role::Red), format!(" {said}"))]
     };
     rows.push(line(&typed, &bar));
-    let slots = ih.saturating_sub(3).max(1);
-    let first = selected.saturating_sub(slots.saturating_sub(1));
+    let slots = slots(ih);
+    let drawn = drawn(list);
+    let first = first.min(drawn.len().saturating_sub(slots));
     let mut listed = Vec::new();
     if list.is_empty() {
         listed.push(line(&[(theme::ink(Role::Muted), "   no theme matches".into())], &bar));
     }
-    for (i, c) in list.iter().enumerate().skip(first).take(slots) {
+    for d in drawn.iter().skip(first).take(slots) {
+        let Some(i) = *d else {
+            listed.push(line(&[(theme::ink(Role::Dim), format!(" {}", "─".repeat(iw.saturating_sub(2))))], &bar));
+            continue;
+        };
+        let c = &list[i];
         let here = i == selected;
         let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
         let mark = if here { "▸ " } else { "  " };
@@ -241,7 +354,7 @@ pub fn inside(list: &[Choice], selected: usize, query: &str, kept: &str, said: &
         listed.push(line(&[], &bar));
     }
     rows.extend(listed);
-    rows.push(line(&[(theme::ink(Role::Muted), " ↑↓ preview · ↵ keep · esc cancel".into())], &bar));
+    rows.push(line(&[(theme::ink(Role::Muted), KEYS_ROW.into())], &bar));
     rows.truncate(ih);
     rows
 }
@@ -426,6 +539,10 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
     let mut selected = list.iter().position(|c| c.value == kept).unwrap_or(0);
     let mut shown: Option<String> = None;
     let mut said = String::new();
+    // Where the list's window starts. The wheel moves it and nothing else;
+    // a key that moves the highlight brings it along, on that frame only.
+    let mut first = 0usize;
+    let mut moved = true;
     loop {
         if let Some(c) = list.get(selected) {
             if shown.as_deref() != Some(c.value.as_str()) {
@@ -436,7 +553,16 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         let (w, h) = crate::size();
         let m = Modal::place(w, h);
         let room = m.h.saturating_sub(2);
-        let boxed = framed(&inside(&list, selected, &query, &kept, &said, m.w.saturating_sub(2), room), m.w.saturating_sub(2));
+        let window = slots(room);
+        if moved {
+            first = follow_list(&list, selected, window, first);
+            moved = false;
+        }
+        first = first.min(last_first(&list, window));
+        let boxed = framed(
+            &inside_from(&list, selected, first, &query, &kept, &said, m.w.saturating_sub(2), room),
+            m.w.saturating_sub(2),
+        );
         let mut rows: Vec<String> = base_rows.iter().take(h).cloned().collect();
         rows.resize(h, String::new());
         for (i, row) in boxed.iter().enumerate() {
@@ -457,7 +583,32 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         keyboard.typing();
         let keys = keyboard.poll();
         for key in keys {
+            let before = (selected, query.clone());
+            // A click is the key it stands for: outside the modal it is
+            // esc, on the keys row the key it names, and on a theme a move
+            // there - or ↵, when that theme is already the one shown.
+            let key = match crate::click_at(&key) {
+                Some((col, row)) => match click_key(col, row, w, h, &list, first) {
+                    Some(k) => match k.strip_prefix("pick:").and_then(|i| i.parse::<usize>().ok()) {
+                        Some(i) if i == selected => "enter".to_string(),
+                        Some(i) => {
+                            // Already in view, so the window stays put.
+                            selected = i;
+                            continue;
+                        }
+                        None => k,
+                    },
+                    None => continue,
+                },
+                None => key,
+            };
             match key.as_str() {
+                // The wheel and ctrl-y/ctrl-e move the view, never the
+                // highlight, so scrolling never changes the preview.
+                "wheel-up" => first = first.saturating_sub(3),
+                "wheel-down" => first = (first + 3).min(last_first(&list, window)),
+                "ctrl-y" => first = first.saturating_sub(1),
+                "ctrl-e" => first = (first + 1).min(last_first(&list, window)),
                 "esc" | "ctrl-t" => {
                     theme::set((*original).clone());
                     return close();
@@ -487,6 +638,9 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                     selected = 0;
                 }
                 _ => {}
+            }
+            if (selected, query.clone()) != before {
+                moved = true;
             }
         }
         keyboard.wait(Duration::from_millis(60));
@@ -562,6 +716,66 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("opscope Dusk") && r.contains('✓')));
         assert!(rows[0].contains("Theme") && rows[0].contains("of 53"));
         assert!(inside(&[], 0, "zz", "dusk", "", 40, 8).iter().any(|r| r.contains("no theme matches")));
+    }
+
+    #[test]
+    fn a_click_is_the_key_it_stands_for() {
+        let all = choices();
+        let (w, h) = (100, 30);
+        let m = Modal::place(w, h);
+        let ih = m.h - 2;
+        let col = m.x + 5;
+        // The first list row is auto, the third the rule, the fourth Dusk.
+        assert_eq!(click_key(col, m.y + 3, w, h, &all, 0).as_deref(), Some("pick:0"));
+        assert_eq!(click_key(col, m.y + 5, w, h, &all, 0), None);
+        assert_eq!(click_key(col, m.y + 6, w, h, &all, 0).as_deref(), Some("pick:2"));
+        // Scrolled, the same row is a later theme.
+        assert_eq!(click_key(col, m.y + 3, w, h, &all, 4).as_deref(), Some("pick:3"));
+        // The keys row: each hint is its key, the arrows nothing.
+        let keys_row = m.y + ih;
+        let at = |word: &str| m.x + 1 + crate::display_width(&KEYS_ROW[..KEYS_ROW.find(word).unwrap()]);
+        assert_eq!(click_key(at("↵ keep") + 1, keys_row, w, h, &all, 0).as_deref(), Some("enter"));
+        assert_eq!(click_key(at("esc cancel") + 2, keys_row, w, h, &all, 0).as_deref(), Some("esc"));
+        assert_eq!(click_key(at("↑↓"), keys_row, w, h, &all, 0), None);
+        // The title, the filter line and the frame are nothing; outside is esc.
+        assert_eq!(click_key(col, m.y + 1, w, h, &all, 0), None);
+        assert_eq!(click_key(col, m.y + 2, w, h, &all, 0), None);
+        assert_eq!(click_key(m.x, m.y + 6, w, h, &all, 0), None);
+        assert_eq!(click_key(0, 0, w, h, &all, 0).as_deref(), Some("esc"));
+        assert_eq!(click_key(col, m.y + m.h, w, h, &all, 0).as_deref(), Some("esc"));
+    }
+
+    #[test]
+    fn the_window_follows_the_highlight_only_as_far_as_it_must() {
+        let all = choices();
+        // In view: the window stays where the wheel left it.
+        assert_eq!(follow_list(&all, 5, 10, 2), 2);
+        // Below it: just far enough that it is on the last row.
+        let at = drawn(&all).iter().position(|d| *d == Some(20)).unwrap();
+        assert_eq!(follow_list(&all, 20, 10, 0), at + 1 - 10);
+        // Above it: it becomes the first row.
+        assert_eq!(follow_list(&all, 0, 10, 8), 0);
+        // The wheel stops with the last theme on the last row.
+        assert_eq!(last_first(&all, 10), drawn(&all).len() - 10);
+        let rows = inside_from(&all, 0, 999, "", "dusk", "", 60, 13);
+        assert!(rows.iter().any(|r| r.contains(&all.last().unwrap().label)));
+    }
+
+    #[test]
+    fn a_rule_parts_the_terminal_settings_from_the_themes() {
+        let all = choices();
+        let rows = inside(&all, 0, "", "dusk", "", 60, 12);
+        assert!(rows[3].contains("terminal"), "{:?}", rows[3]);
+        assert!(rows[4].contains("──────"), "{:?}", rows[4]);
+        assert!(rows[5].contains("opscope Dusk"), "{:?}", rows[5]);
+        // Only between the two kinds: none when a filter leaves one kind.
+        let themes = filtered(&all, "nord");
+        assert!(!inside(&themes, 0, "nord", "dusk", "", 60, 12).iter().any(|r| r.contains("──────")));
+        // The rule takes a row, and the selection still stays in view.
+        for sel in [0, 1, 2, 9, all.len() - 1] {
+            let rows = inside(&all, sel, "", "dusk", "", 60, 8);
+            assert!(rows.iter().any(|r| r.contains('▸')), "selection {sel} scrolled off");
+        }
     }
 
     #[test]
