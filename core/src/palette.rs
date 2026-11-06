@@ -68,26 +68,11 @@ pub const HINT: &str = "[ctrl-k]cmds";
 /// The box's last row. A click on `↵ run` or `esc back` is that key.
 const KEYS_ROW: &str = " ↑↓ choose · ↵ run · esc back";
 
-/// Blank rows between one option and the next.
-///
-/// A terminal has no half-line, so line spacing can only be a whole row
-/// between items - twice the leading, which is what the tall box wants:
-/// four commands on four consecutive rows read as a paragraph, not as a
-/// list of things you can pick. One, not two, so a pane that showed a
-/// dozen options still shows half of them rather than a third.
-const GAP: usize = 1;
-
-/// How many options a list window `room` rows tall shows, leaving `GAP`
-/// blank rows between them.
-fn visible(room: usize) -> usize {
-    (room + GAP) / (GAP + 1)
-}
-
 /// How many options the box's list shows, with the title, the filter line
-/// and the keys row around it. The palette's counterpart to the picker's
-/// `slots`, with the spacing taken out.
+/// and the keys row around it: one option a row, as the theme list has
+/// them, so every mode of the box reads with the same line height.
 pub fn slots(ih: usize) -> usize {
-    visible(ih.saturating_sub(3)).max(1)
+    ih.saturating_sub(3).max(1)
 }
 
 /// One row of whichever list the box is showing.
@@ -266,12 +251,7 @@ pub fn inside(
     if list.is_empty() {
         listed.push(line(&[(theme::ink(Role::Muted), "   nothing matches".into())], &bar));
     }
-    for (k, (i, r)) in list.iter().enumerate().skip(first).take(slots).enumerate() {
-        // A blank row between options, never before the first: the list
-        // opens on its first row, and the gaps are what air the rest out.
-        if k > 0 {
-            listed.push(line(&[], &bar));
-        }
+    for (i, r) in list.iter().enumerate().skip(first).take(slots) {
         let here = i == selected;
         let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
         let mark = if here { "▸ " } else { "  " };
@@ -327,14 +307,7 @@ pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Row], first
         }
         return None;
     }
-    let list_row = inner_row.checked_sub(2)?;
-    // A gap row between two options is not an option; only a slot's own
-    // row answers a click.
-    let stride = GAP + 1;
-    if list_row % stride != 0 {
-        return None;
-    }
-    let slot = list_row / stride;
+    let slot = inner_row.checked_sub(2)?;
     let slots = slots(ih);
     if slot >= slots {
         return None;
@@ -693,14 +666,12 @@ mod tests {
             for r in picker::framed(&inner, m.w - 2) {
                 assert_eq!(crate::display_width(&r), m.w, "{w}x{h}");
             }
-            // A click on the first option picks it, the gap under it
-            // answers nothing, and - where the box has room for two -
-            // the next option is two rows down.
+            // A click on the first option picks it and - where the box
+            // has room for two - the next option is on the row under it.
             let col = m.x + 3;
             assert_eq!(click_key(col, m.y + 3, w, h, &rows, 0).as_deref(), Some("pick:0"));
-            assert_eq!(click_key(col, m.y + 4, w, h, &rows, 0), None, "{w}x{h}: a gap answered a click");
             if slots(m.h - 2) >= 2 {
-                assert_eq!(click_key(col, m.y + 5, w, h, &rows, 0).as_deref(), Some("pick:1"));
+                assert_eq!(click_key(col, m.y + 4, w, h, &rows, 0).as_deref(), Some("pick:1"));
             }
             assert_eq!(click_key(0, 0, w, h, &rows, 0).as_deref(), Some("esc"));
             // The keys row answers the keys it names.
@@ -712,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn the_options_are_spaced_one_blank_row_apart() {
+    fn the_options_sit_one_a_row_as_the_theme_list_does() {
         let rows = commands();
         let inner = inside("Commands", &rows, rows.len(), 0, 0, "", 60, 20);
         // A row as it reaches the terminal, without the colour escapes.
@@ -732,17 +703,14 @@ mod tests {
             }
             out
         }
-        // Title, filter, then the first option; every following option
-        // sits two rows down from the one above it.
+        // Title, filter, then one option a row, with the same line height
+        // as the theme list.
         assert!(plain(&inner[2]).contains("Theme…"), "{:?}", inner[2]);
-        assert!(plain(&inner[3]).trim().is_empty(), "the row under Theme is not blank: {:?}", plain(&inner[3]));
-        assert!(plain(&inner[4]).contains("Switch widget…"), "{:?}", inner[4]);
-        assert!(plain(&inner[5]).trim().is_empty(), "the row under Switch is not blank: {:?}", plain(&inner[5]));
-        assert!(plain(&inner[6]).contains("Notices"), "{:?}", inner[6]);
-        assert_eq!(slots(20), visible(17));
-        assert!(slots(20) >= 4, "a twenty-row box must still show four options: {}", slots(20));
-        // The selected option's row is the one tinted; the gap under it
-        // is not.
+        assert!(plain(&inner[3]).contains("Switch widget…"), "{:?}", inner[3]);
+        assert!(plain(&inner[4]).contains("Notices"), "{:?}", inner[4]);
+        assert_eq!(slots(20), 17);
+        assert_eq!(slots(20), picker::slots(20), "the palette and the theme list space their rows alike");
+        // Only the selected option's row is tinted.
         assert!(plain(&inner[2]).contains("▸"));
         assert!(!plain(&inner[3]).contains("▸"));
     }
