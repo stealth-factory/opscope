@@ -2191,6 +2191,12 @@ fn hint_key(plain: &str) -> Option<String> {
         "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
     ];
     let first = plain.split_whitespace().next()?;
+    // A named key in brackets is the same key: `[ctrl-t]heme`, `[esc] back`.
+    // The bracket closes the name, so the word fused onto it is not read.
+    let first = match first.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
+        Some((inside, _)) => inside,
+        None => first,
+    };
     let lowered = first.to_lowercase();
     let known = NAMED.contains(&lowered.as_str())
         || (lowered.strip_prefix("ctrl-")).is_some_and(|rest| {
@@ -6099,6 +6105,17 @@ mod bang_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bracketed_key_name_is_the_key_a_click_on_its_hint_means() {
+        assert_eq!(hint_key(picker::HINT).as_deref(), Some(picker::KEY));
+        assert_eq!(hint_key("[esc] back").as_deref(), Some("esc"));
+        assert_eq!(hint_key("[tab] next").as_deref(), Some("tab"));
+        assert_eq!(hint_key("ctrl-u clear").as_deref(), Some("ctrl-u"));
+        // Not a key with a name: a bracketed word stays nothing.
+        assert_eq!(hint_key("[all] shown"), None);
+        assert_eq!(hint_key("[q]uit").as_deref(), Some("q"));
+    }
+
     use super::hung_up;
 
     /// A pseudo-terminal pair: the master, and the slave's descriptor.

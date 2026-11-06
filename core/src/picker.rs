@@ -36,9 +36,9 @@ pub(crate) static OPEN: AtomicBool = AtomicBool::new(false);
 
 /// The key that opens it, and the hint every footer carries for it.
 pub const KEY: &str = "ctrl-t";
-/// `ctrl-t` leads the hint so a click on it is that key, as `ctrl-y`
-/// is in the footers that name it.
-pub const HINT: &str = "ctrl-t theme";
+/// In the footer's own form, `[q]uit` - the key in brackets, fused onto
+/// the word - and a click on it is `ctrl-t`.
+pub const HINT: &str = "[ctrl-t]heme";
 
 /// One thing the picker offers: a setting value, what to call it, and the
 /// words it is matched against.

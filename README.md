@@ -417,7 +417,7 @@ Every widget draws in one theme, chosen once for all of them. **Press
 `ctrl-t` in any widget** for the theme picker: type to filter, and as `↑↓`
 move through the list the widget behind repaints in that theme, so you see
 it in place before keeping it; `↵` keeps it, `esc` puts back what you had.
-The footer of every widget says so (`ctrl-t theme`), beside `[,] settings`.
+The footer of every widget says so (`[ctrl-t]heme`), beside `[,] settings`.
 
 The choice is one setting in the main `config.json`, `"opscope": { "theme":
 "…" }` - also the THEME row on any widget's `,` screen, and a top-level
