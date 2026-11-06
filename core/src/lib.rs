@@ -20,6 +20,7 @@
 //! a time, and while both versions ran they had to agree on screen, so
 //! where a choice existed this kept the earlier behaviour.
 
+mod aliases;
 mod analytics;
 mod dependencies;
 pub mod google;
@@ -40,6 +41,7 @@ pub use dependencies::{
     parse_dependencies, parse_os_release, tool_available, unsatisfied_recommended,
     unsatisfied_required,
 };
+pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
 pub use statefile::state_dir;
 

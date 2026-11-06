@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The Herdr backend of `panes`, which was herdr-panes.
+//! The Herdr backend of `mux-activity`, which was herdr-panes.
 //!
 //! Everything running in Herdr, across every workspace.
 //!
@@ -1113,7 +1113,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         let mut plots = Vec::new();
         let mut rows = vec![tc::title_busy(
-            "panes · herdr",
+            "mux activity · herdr",
             w,
             &p.accent,
             activity.tick(tc::animation_tick()),

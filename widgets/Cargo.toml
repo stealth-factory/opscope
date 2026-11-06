@@ -38,8 +38,8 @@ name = "ports"
 path = "src/widgets/ports/main.rs"
 
 [[bin]]
-name = "panes"
-path = "src/widgets/panes/main.rs"
+name = "mux-activity"
+path = "src/widgets/mux-activity/main.rs"
 
 [[bin]]
 name = "netwatch"

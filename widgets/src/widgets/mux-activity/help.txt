@@ -1,6 +1,6 @@
 Every pane of the multiplexer it runs in, ordered by who needs you.
 
-panes finds out where it is from the pane it was started in: REX_SESSION
+mux-activity finds out where it is from the pane it was started in: REX_SESSION
 and REX_BLOCK mean Rex, HERDR_ENV=1 Herdr, LUVUS_ENV=1 Luvus. When several
 are set - Herdr started inside a Rex pane inherits Rex's - the nearest
 multiplexer above it in the process tree decides: Herdr inside Rex is read
@@ -8,7 +8,7 @@ as Herdr. Outside all three it prints why and exits with status 2 before
 taking the terminal. --mux rex, herdr or luvus, or the backend setting,
 chooses regardless. Only the detected multiplexer's CLI is run.
 
-    panes [--mux rex|herdr|luvus] [-n SECONDS]
+    mux-activity [--mux rex|herdr|luvus] [-n SECONDS]
 
 Every board has the same shape: a state bar and counts pinned at the top,
 AGENTS worst first, then what else is running, then the panes at a prompt.
@@ -61,7 +61,7 @@ shows a socket path, an address or a login.
 Keys under Rex: j and k select too, and pgup and pgdn scroll a page.
 Enter (or f) focuses the selected pane on the server, z zooms it to fill its
 window or undoes that, e explains it - every status record, the program's
-identity, the last lines its screen shows and why panes read Rex - and esc
+identity, the last lines its screen shows and why mux-activity read Rex - and esc
 or e goes back.
 
 Focus is the server's: Rex makes the window active and the pane focused, and
@@ -84,7 +84,7 @@ A Herdr client, not a general agent monitor: the inventory and the lifecycle
 states come from `herdr agent list`, the workspace labels from
 `herdr workspace list`, and the pid behind each pane from
 `herdr pane process-info`. Any agent kind Herdr recognises appears here with
-no change to panes.
+no change to mux-activity.
 
     blocked   waiting on an approval or a question, right now
     done      finished background work you have not looked at yet
@@ -157,8 +157,8 @@ the pane currently has on screen. The panel is read-only; it never answers
 the prompt it is showing you. esc closes it, as does a second e.
 
 Opscope's own panes are matched by local process name and command: a local
-ps scan joins the snapshot's root PIDs to their process trees, so run panes
-on the same machine as the Luvus session. A failed scan warns that only
+ps scan joins the snapshot's root PIDs to their process trees, so run
+mux-activity on the same machine as the Luvus session. A failed scan warns that only
 Luvus's reported command labels can be filtered.
 
 Refresh: agent status events wake a full read; task, lease, pane, Git and

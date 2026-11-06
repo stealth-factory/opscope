@@ -29,7 +29,7 @@ These use shared text fallbacks: block bars, Braille traces and reference marks.
 
 Meters and stacked bars are text in every mode, Kitty included (OPS-203):
 `linear`'s progress and milestone meters and state distributions, every
-`agent-usage` quota meter, `panes`' agent-state
+`agent-usage` quota meter, `mux-activity`'s agent-state
 distributions under Herdr and Luvus, and `clocks`' countdown and pomodoro bars. See
 [Always text](#always-text-meters-and-stacked-bars).
 
@@ -547,7 +547,7 @@ and intentional text presentation, not unimplemented widget migrations.
 | `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
 | `vercel-deployments` | Pixel deployment activity and recent-build-duration bars; elapsed-time build indicators | Preserve scrolling and text logs; a spinner does not imply measured build progress |
 | `agent-usage` | Eighth-cell text quota meters on summary and all vendor detail quota views; Claude/Codex/Grok gapless daily heatmaps | Preserve missing days, freshness, overages and pace labels; unmeasured allowances remain text |
-| `panes` | Measured agent-state distribution bar; elapsed-time working indicators, under every multiplexer | Keep status, selection and navigation as text; no invented progress. Under Luvus, retain coordination/evidence tables as text |
+| `mux-activity` | Measured agent-state distribution bar; elapsed-time working indicators, under every multiplexer | Keep status, selection and navigation as text; no invented progress. Under Luvus, retain coordination/evidence tables as text |
 | `clocks` | Eighth-cell text countdown and pomodoro progress/overtime bars; OSC 66 clock face when the block fits | Block digits stay the fallback. A pane too narrow or too short for 2× keeps them, and the time is never cut to make a larger size fit |
 | `months` | Synchronized text presentation; OSC 66 month headings when every heading in the band fits | Date cells stay text. One scale for the band, so a long name such as September keeps the row at ordinary size rather than overlapping the next month |
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |

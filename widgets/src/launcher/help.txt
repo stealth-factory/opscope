@@ -6,6 +6,10 @@ front door: pick one and it runs, quit it and you are back here.
     opscope [WIDGET] [ARGS...]
     opscope doctor
 
+A widget also answers to its old names: opscope herdr-panes starts
+mux-activity, which replaced it, and opscope deployments starts
+vercel-deployments.
+
 Nothing is described twice. The summary and note come from each widget's
 own help.txt, and the preview comes from the README beside its code. The
 folder contract is checked by widgets/tests/check.rs.

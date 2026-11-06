@@ -16,7 +16,7 @@
 
 //! Every pane of the multiplexer this runs in, ordered by who needs you.
 //!
-//! `panes` finds out whether it is inside Rex, Herdr or Luvus from the
+//! `mux-activity` finds out whether it is inside Rex, Herdr or Luvus from the
 //! markers each puts in its panes' environment, and draws that
 //! multiplexer's board: `rex.rs`, `herdr.rs` and `luvus.rs`, each with its
 //! own reader and event stream, and only the detected one runs. Outside all
@@ -70,8 +70,8 @@ mod host;
 use detect::{Ask, Markers, Mux};
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "panes",
-    section: "panes",
+    widget: "mux-activity",
+    section: "mux_activity",
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
@@ -81,10 +81,10 @@ fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let file = first_config().unwrap_or_else(|| serde_json::json!({}));
-    let has_panes = file.get("panes").is_some();
+    let has_section = file.get("mux_activity").is_some();
     // What decides the backend is read before there is one: the panes
     // section, or the rex_panes one that held `server` before the rename.
-    let deciding = if has_panes { tc::load_config("panes") } else { old_section(Mux::Rex, &file) };
+    let deciding = if has_section { tc::load_config("mux_activity") } else { old_section(Mux::Rex, &file) };
     let flag = args
         .iter()
         .position(|a| a == "--mux")
@@ -105,15 +105,15 @@ fn main() {
     let chosen = match detect::choose(&ask) {
         Ok(chosen) => chosen,
         // Plain text on stderr and a failing status, before the terminal is
-        // taken: a script that started `panes` in the wrong place hears why.
+        // taken: a script that started `mux-activity` in the wrong place hears why.
         Err(why) => {
             eprintln!("{}", why);
             std::process::exit(2);
         }
     };
-    let cfg = if has_panes { deciding } else { old_section(chosen.mux, &file) };
+    let cfg = if has_section { deciding } else { old_section(chosen.mux, &file) };
     let needs = dependencies_for(chosen.mux, include_str!("dependencies.json"));
-    if !tc::dependencies_available("panes", &needs, Some(SETTINGS)) {
+    if !tc::dependencies_available("mux-activity", &needs, Some(SETTINGS)) {
         return;
     }
     // `,` opens one screen for every backend: they share one section.
@@ -141,7 +141,7 @@ pub fn mux_rows(line: &str, colour: &str, w: usize) -> Vec<String> {
 /// backend talks to, made required, and what it alone recommends.
 ///
 /// `dependencies.json` lists all three as recommended, so `opscope doctor`
-/// does not call `panes` broken on a machine with only one of them; a pane
+/// does not call `mux-activity` broken on a machine with only one of them; a pane
 /// inside Herdr with no `herdr` on PATH still gets the shared "cannot start ·
 /// needs herdr" screen.
 fn dependencies_for(mux: Mux, all: &str) -> String {
@@ -169,8 +169,8 @@ fn only_for(tool: &str) -> Option<Mux> {
     }
 }
 
-/// A section left from before `panes`: rex_panes, herdr_panes or
-/// luvus_panes, read when there is no `panes` section. Keys that were
+/// A section left from before `mux-activity`: rex_panes, herdr_panes or
+/// luvus_panes, read when there is no `mux_activity` section. Keys that were
 /// renamed are carried over - `server` is now `rex_server`, `session`
 /// `luvus_session` - and a notice asks for the rename. `load_config` returns
 /// `{}` for a missing section, so presence is read off the file itself, as
@@ -193,8 +193,8 @@ fn old_section(mux: Mux, file: &serde_json::Value) -> serde_json::Value {
     }
     tc::notices::when(true, || {
         tc::notices::Notice::info(
-            "panes-old-section",
-            "config: an old rex_panes, herdr_panes or luvus_panes section is read because there is no panes section - rename it to panes, server to rex_server and session to luvus_session",
+            "mux-activity-old-section",
+            "config: an old rex_panes, herdr_panes or luvus_panes section is read because there is no mux_activity section - rename it to mux_activity, server to rex_server and session to luvus_session",
         )
     });
     old

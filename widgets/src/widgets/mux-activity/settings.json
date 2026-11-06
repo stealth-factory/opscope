@@ -1,5 +1,5 @@
 {
-  "_comment": "What panes reads: every pane of the multiplexer it runs in - Rex, Herdr or Luvus - through that multiplexer's CLI, read-only. A rex_panes, herdr_panes or luvus_panes section from before is read when there is no panes section.",
+  "_comment": "What mux-activity reads: every pane of the multiplexer it runs in - Rex, Herdr or Luvus - through that multiplexer's CLI, read-only. A rex_panes, herdr_panes or luvus_panes section from before is read when there is no mux_activity section.",
   "_schema": {
     "backend": {
       "choices": ["auto", "rex", "herdr", "luvus"]
@@ -11,7 +11,7 @@
       "items": "string"
     }
   },
-  "_backend_comment": "Which multiplexer to read. auto finds out from the pane panes runs in: REX_SESSION and REX_BLOCK for Rex, HERDR_ENV=1 for Herdr, LUVUS_ENV=1 for Luvus, and the nearest of them in the process tree when several are set. The --mux flag overrides this.",
+  "_backend_comment": "Which multiplexer to read. auto finds out from the pane mux-activity runs in: REX_SESSION and REX_BLOCK for Rex, HERDR_ENV=1 for Herdr, LUVUS_ENV=1 for Luvus, and the nearest of them in the process tree when several are set. The --mux flag overrides this.",
   "backend": "auto",
   "_rex_server_comment": "Which Rex server to read: a host label from `rex hosts`, or an address. Empty means the CLI's own default - REX_SERVER when it is set, else this machine's server. Set, it is read from anywhere, inside a multiplexer or not. CPU and memory are shown only for this machine's server.",
   "rex_server": "",

@@ -1,18 +1,18 @@
-# Configure `panes`
+# Configure `mux-activity`
 
 This is configuration guidance for people and AI assistants. It is documentation, not an executable skill and not permission to change files or external services.
 
 ## Real source
 
-The multiplexer `panes` runs in, found from the pane's environment (`REX_SESSION` and `REX_BLOCK`, `HERDR_ENV=1`, `LUVUS_ENV=1`); when several are set, the nearest multiplexer above it in the process tree. Only that multiplexer's CLI runs.
+The multiplexer `mux-activity` runs in, found from the pane's environment (`REX_SESSION` and `REX_BLOCK`, `HERDR_ENV=1`, `LUVUS_ENV=1`); when several are set, the nearest multiplexer above it in the process tree. Only that multiplexer's CLI runs.
 
 - **Herdr:** the local `herdr` command's pane and process state.
-- **Luvus:** a running [Luvus](https://luvus.dev) session, read over Universal Harness Protocol 1.0 through the local `luvus` command. Eight read-only calls: `uhp snapshot`, `agent list`, `task list`, `lease list`, `task next`, `agent sessions`, `git status`, and `worktree list`. A bounded local `ps` scan also joins process names and full commands to the snapshot's root PIDs for the Opscope filter. Argument text is not displayed or saved. Run `panes` on the same machine as the session; if `ps` fails, the pane warns and filters only reported command labels.
+- **Luvus:** a running [Luvus](https://luvus.dev) session, read over Universal Harness Protocol 1.0 through the local `luvus` command. Eight read-only calls: `uhp snapshot`, `agent list`, `task list`, `lease list`, `task next`, `agent sessions`, `git status`, and `worktree list`. A bounded local `ps` scan also joins process names and full commands to the snapshot's root PIDs for the Opscope filter. Argument text is not displayed or saved. Run `mux-activity` on the same machine as the session; if `ps` fails, the pane warns and filters only reported command labels.
 - **Rex:** the running Rex server, read through the local `rex` command: `rex do` with a read-only script for the inventory, `rex events --all --json` for wake-ups, and `rex block focus`, `rex zoom` and `rex capture` for the three keys that act or read on demand.
 
 ## Settings owned here
 
-The owned section is `panes`. A `rex_panes`, `herdr_panes` or `luvus_panes` section left from before is read when there is no `panes` section — `server` taken as `rex_server`, `session` as `luvus_session` — and a notice asks for it to be renamed.
+The owned section is `mux-activity`. A `rex_panes`, `herdr_panes` or `luvus_panes` section left from before is read when there is no `mux-activity` section — `server` taken as `rex_server`, `session` as `luvus_session` — and a notice asks for it to be renamed.
 
 Declared fields: `backend`, `rex_server`, `luvus_session`, `refresh`, `agents`
 
@@ -20,8 +20,8 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Confirm the multiplexer the user runs `panes` in answers, read-only: `rex server status` under Rex, `herdr status` under Herdr, `luvus ping` and `luvus session list` under Luvus. Do not start a server on the user's behalf; `panes` deliberately never starts one. No hostname, socket path, token, or workspace name belongs in a tracked file.
-2. Leave `backend` at `auto`: it follows the pane `panes` runs in. Set it only when the user wants one multiplexer read wherever `panes` starts.
+1. Confirm the multiplexer the user runs `mux-activity` in answers, read-only: `rex server status` under Rex, `herdr status` under Herdr, `luvus ping` and `luvus session list` under Luvus. Do not start a server on the user's behalf; `mux-activity` deliberately never starts one. No hostname, socket path, token, or workspace name belongs in a tracked file.
+2. Leave `backend` at `auto`: it follows the pane `mux-activity` runs in. Set it only when the user wants one multiplexer read wherever `mux-activity` starts.
 3. Leave `rex_server` empty unless the user names another Rex server. A non-empty value is a host label from `rex hosts` or an address the user gives you; never guess one, and never write a hostname or address into a tracked file.
 4. `luvus_session` matters only under Luvus, and only on a machine running more than one Luvus server. The name must be one `luvus session list` reports; a name with no server behind it draws the "no luvus server" screen rather than an empty board.
 5. `refresh` is the maximum idle delay between full reads; events wake a read sooner. Keep the default unless the user has a concrete reason.

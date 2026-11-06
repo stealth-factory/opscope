@@ -26,7 +26,7 @@
 //! choice and the reason for it come out. Reading `/proc` or `ps` is the
 //! host module's job.
 
-/// The multiplexers `panes` can read.
+/// The multiplexers `mux-activity` can read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mux {
     Rex,
@@ -117,7 +117,7 @@ pub struct Chosen {
     pub why: String,
 }
 
-/// What `panes` was told and what it found.
+/// What `mux-activity` was told and what it found.
 pub struct Ask<'a> {
     /// `--mux`, when given.
     pub flag: Option<&'a str>,
@@ -141,7 +141,7 @@ pub fn choose(ask: &Ask) -> Result<Chosen, String> {
         return match parse_mux(flag) {
             Some(mux) => Ok(Chosen { mux, why: format!("--mux {}", mux.key()) }),
             None => Err(format!(
-                "panes: --mux takes rex, herdr or luvus, not {:?}",
+                "mux-activity: --mux takes rex, herdr or luvus, not {:?}",
                 flag
             )),
         };
@@ -151,7 +151,7 @@ pub fn choose(ask: &Ask) -> Result<Chosen, String> {
         return match parse_mux(setting) {
             Some(mux) => Ok(Chosen { mux, why: format!("backend setting is {}", mux.key()) }),
             None => Err(format!(
-                "panes: the backend setting takes auto, rex, herdr or luvus, not {:?}",
+                "mux-activity: the backend setting takes auto, rex, herdr or luvus, not {:?}",
                 setting
             )),
         };
@@ -207,11 +207,11 @@ pub fn choose(ask: &Ask) -> Result<Chosen, String> {
 /// The error outside every multiplexer, before the terminal is taken.
 pub fn outside() -> String {
     [
-        "panes runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:",
-        "  Rex    start rex, then run panes in one of its panes",
-        "  Herdr  start herdr, then run panes in one of its panes",
-        "  Luvus  start luvus, then run panes in one of its panes",
-        "To choose one regardless of where this runs: panes --mux rex|herdr|luvus",
+        "mux-activity runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:",
+        "  Rex    start rex, then run mux-activity in one of its panes",
+        "  Herdr  start herdr, then run mux-activity in one of its panes",
+        "  Luvus  start luvus, then run mux-activity in one of its panes",
+        "To choose one regardless of where this runs: mux-activity --mux rex|herdr|luvus",
     ]
     .join("\n")
 }

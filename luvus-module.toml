@@ -137,19 +137,19 @@ title = "months"
 placement = "split"
 command = ["./luvus/bin/opscope", "months"]
 
+# Every pane of the multiplexer it runs in, ordered by who needs you.
+[[panes]]
+id = "mux-activity"
+title = "mux-activity"
+placement = "split"
+command = ["./luvus/bin/opscope", "mux-activity"]
+
 # Which processes are using the network, how much, and how fast.
 [[panes]]
 id = "netwatch"
 title = "netwatch"
 placement = "split"
 command = ["./luvus/bin/opscope", "netwatch"]
-
-# Every pane of the multiplexer it runs in, ordered by who needs you.
-[[panes]]
-id = "panes"
-title = "panes"
-placement = "split"
-command = ["./luvus/bin/opscope", "panes"]
 
 # What is listening on this machine, what started it, and who can reach it.
 [[panes]]

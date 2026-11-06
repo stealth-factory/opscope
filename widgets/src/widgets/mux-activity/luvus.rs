@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The Luvus backend of `panes`, which was luvus-panes.
+//! The Luvus backend of `mux-activity`, which was luvus-panes.
 //!
 //! Everything running under a Luvus session, and who needs a human.
 //!
@@ -1427,7 +1427,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         // ---- the pinned header ----
         let mut head = vec![tc::title_busy(
-            "panes · luvus",
+            "mux activity · luvus",
             w,
             &p.accent,
             activity.tick(tc::animation_tick()),
@@ -1568,7 +1568,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 }
             }
         }
-        // `others`, not `panes`: a pane holding a recognised agent is in
+        // `others`, not `mux-activity`: a pane holding a recognised agent is in
         // AGENTS rather than in this list, and counting it here would
         // report it as something the filter had hidden.
         // Held out of `head` until after the prune: that loop pops from

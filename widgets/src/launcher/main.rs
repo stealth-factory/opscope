@@ -27,6 +27,10 @@ use opscope_core as tc;
 /// Each widget's own words, taken from that widget's folder.
 struct Widget {
     stem: &'static str,
+    /// Other names it answers to - names it had before, or widgets it
+    /// replaced. `tc::resolve_widget` reads them; see the alias section of
+    /// wiki/making-a-widget.md.
+    aliases: &'static [&'static str],
     help: &'static str,
     readme: &'static str,
     dependencies: &'static str,
@@ -34,8 +38,12 @@ struct Widget {
 
 macro_rules! widget {
     ($stem:literal) => {
+        widget!($stem, aliases: [])
+    };
+    ($stem:literal, aliases: [$($alias:literal),* $(,)?]) => {
         Widget {
             stem: $stem,
+            aliases: &[$($alias),*],
             help: include_str!(concat!("../widgets/", $stem, "/help.txt")),
             readme: include_str!(concat!("../widgets/", $stem, "/README.md")),
             dependencies: include_str!(concat!("../widgets/", $stem, "/dependencies.json")),
@@ -58,12 +66,17 @@ const WIDGETS: &[Widget] = &[
     widget!("link"),
     widget!("matrix"),
     widget!("months"),
+    widget!("mux-activity", aliases: ["rex-panes", "herdr-panes", "luvus-panes"]),
     widget!("netwatch"),
-    widget!("panes"),
     widget!("ports"),
     widget!("tailnet"),
-    widget!("vercel-deployments"),
+    widget!("vercel-deployments", aliases: ["deployments"]),
 ];
+
+/// Every widget's name with the aliases it declares, as core reads them.
+fn names() -> Vec<(&'static str, &'static [&'static str])> {
+    WIDGETS.iter().map(|w| (w.stem, w.aliases)).collect()
+}
 
 impl Widget {
     /// The row: this widget's own first line.
@@ -387,16 +400,10 @@ fn child_exit(status: std::process::ExitStatus) -> i32 {
     1
 }
 
-/// The widget stem a command-line name refers to.
-///
-/// `.py` is the old Python invocation. `deployments` is the name that
-/// binary answered to before it was renamed; the file is gone, the habit
-/// is not.
-fn resolve_stem(name: &str) -> &str {
-    match name.strip_suffix(".py").unwrap_or(name) {
-        "deployments" => "vercel-deployments",
-        other => other,
-    }
+/// The widget stem a command-line name refers to: its own name, an alias
+/// it declares, or either with the old `.py`. `None` for anything else.
+fn resolve_stem(name: &str) -> Option<&'static str> {
+    tc::resolve_widget(name, &names())
 }
 
 fn doctor() -> i32 {
@@ -436,13 +443,10 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(doctor() as u8);
         }
         if !first.starts_with('-') {
-            // `.py` is still accepted, and only for that: every widget here
-            // answered to that name for years and the muscle memory outlives
-            // the files. It resolves to the binary of the same stem.
-            // `deployments` is the name that binary answered to before it
-            // was renamed; the file is gone, the habit is not.
-            let wanted = resolve_stem(first);
-            let Some(found) = WIDGETS.iter().find(|w| w.stem == wanted) else {
+            // A widget's own name, or one of the aliases it declares - an
+            // old name, or a widget it replaced - with or without the old
+            // `.py`. An alias starts the widget exactly as its name would.
+            let Some(found) = resolve_stem(first).and_then(|wanted| WIDGETS.iter().find(|w| w.stem == wanted)) else {
                 eprintln!(
                     "no widget called {:?} - try: {}",
                     first,
@@ -726,11 +730,21 @@ mod tests {
     }
 
     #[test]
+    fn no_alias_hides_a_widget_or_is_claimed_twice() {
+        let wrong = tc::alias_problems(&names());
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
     fn the_old_deployments_name_still_starts_the_widget() {
-        assert_eq!(resolve_stem("deployments"), "vercel-deployments");
-        assert_eq!(resolve_stem("deployments.py"), "vercel-deployments");
-        assert_eq!(resolve_stem("vercel-deployments"), "vercel-deployments");
-        assert_eq!(resolve_stem("latency.py"), "latency");
+        assert_eq!(resolve_stem("deployments"), Some("vercel-deployments"));
+        assert_eq!(resolve_stem("deployments.py"), Some("vercel-deployments"));
+        assert_eq!(resolve_stem("vercel-deployments"), Some("vercel-deployments"));
+        assert_eq!(resolve_stem("latency.py"), Some("latency"));
+        for old in ["rex-panes", "herdr-panes", "luvus-panes"] {
+            assert_eq!(resolve_stem(old), Some("mux-activity"), "{old}");
+        }
+        assert_eq!(resolve_stem("no-such-widget"), None);
     }
 
     #[test]

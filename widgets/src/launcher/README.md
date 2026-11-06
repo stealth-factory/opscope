@@ -199,9 +199,23 @@ opscope link --help        # including --help
 A widget is looked for beside the launcher's own binary, so a release
 unpacked anywhere works without a path being configured.
 
-`opscope netwatch.py` is still accepted, and only for that: every widget here
-answered to that name for years and the muscle memory outlives the files.
-The suffix is stripped and the binary of the same stem runs.
+A widget also answers to the aliases it declares - the names it had before,
+or the widgets it replaced:
+
+```sh
+opscope herdr-panes        # starts mux-activity, which replaced it
+opscope deployments        # starts vercel-deployments, its old name
+```
+
+An alias starts the widget exactly as its own name would, arguments and all.
+The names are resolved in one place, `tc::resolve_widget`, from the `aliases`
+each widget declares where it is registered; [the widget
+guide](../../../wiki/making-a-widget.md#other-names-it-answers-to-aliases)
+says how to add one.
+
+`opscope netwatch.py` is still accepted as well, on a name or an alias: every
+widget here answered to that name for years and the muscle memory outlives
+the files. The suffix is stripped and the widget it names runs.
 
 ## Keys
 

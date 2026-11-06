@@ -16,7 +16,7 @@
 
 //! The Rex backend: everything running under a Rex server, across every
 //! session. This was rex-panes, and its board is the one every backend of
-//! `panes` draws into.
+//! `mux-activity` draws into.
 //!
 //! A Rex client, read-only, and honest about where each fact came from.
 //! State is what a program reported with OSC 7501 and nothing else; the
@@ -1432,7 +1432,7 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -
             plural(board.apps)
         ),
     ));
-    out.push(("dim".into(), format!(" panes reads {}", why)));
+    out.push(("dim".into(), format!(" multiplexer: {}", why)));
     out
 }
 
@@ -1757,7 +1757,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             };
             let board = board.clone().unwrap_or_default();
             let mut rows = vec![tc::title_busy(
-                "panes · rex · explain",
+                "mux activity · rex · explain",
                 w,
                 &p.accent,
                 activity.tick(tick),
@@ -1867,7 +1867,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         // ── the board ──
         let mut rows = vec![tc::title_busy(
-            "panes · rex",
+            "mux activity · rex",
             w,
             &p.accent,
             activity.tick(tick),

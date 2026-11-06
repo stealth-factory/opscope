@@ -1,4 +1,4 @@
-# `panes`
+# `mux-activity`
 
 [← all widgets](../../../../docs/README.md)
 
@@ -6,8 +6,12 @@ Every pane of the multiplexer it runs in — ordered by who needs you, with one
 key to get there. Under [Rex](https://www.superlogical.com/rex/docs/), that is
 everything running on the server, across every session.
 
+It replaced `rex-panes`, `herdr-panes` and `luvus-panes`, and those names are
+aliases of it: `opscope herdr-panes` starts `mux-activity`, which then reads
+whichever multiplexer the pane is in.
+
 ```text
-╺━ PANES · REX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ MUX ACTIVITY · REX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  in Rex · REX_SESSION and REX_BLOCK are set
  3 agents · 2 sessions · 9 panes  1 blocked  1 done  1 unknown
  ███████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░
@@ -42,7 +46,7 @@ everything running on the server, across every session.
 
 ## Where it runs
 
-`panes` reads the multiplexer whose pane it was started in. Each one marks
+`mux-activity` reads the multiplexer whose pane it was started in. Each one marks
 its panes in their environment, and that is what decides. Only the detected
 multiplexer's CLI runs, so a read costs what it did in the widget it replaced:
 
@@ -54,26 +58,26 @@ multiplexer's CLI runs, so a read costs what it did in the widget it replaced:
 
 A program started inside a pane inherits that pane's markers, so Herdr run
 from a Rex pane has both. When several are set, the nearest multiplexer above
-`panes` in the process tree is the one whose pane it is, and the explain
+`mux-activity` in the process tree is the one whose pane it is, and the explain
 screen (`e`) says which was picked and why. When the tree names none of them,
-`panes` takes Herdr, then Luvus, then Rex, and says to use `--mux`.
+`mux-activity` takes Herdr, then Luvus, then Rex, and says to use `--mux`.
 
-Outside all three, `panes` prints which multiplexers it reads and how to
+Outside all three, `mux-activity` prints which multiplexers it reads and how to
 start each, and exits with status 2 before taking over the terminal:
 
 ```console
-$ panes
-panes runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:
-  Rex    start rex, then run panes in one of its panes
-  Herdr  start herdr, then run panes in one of its panes
-  Luvus  start luvus, then run panes in one of its panes
-To choose one regardless of where this runs: panes --mux rex|herdr|luvus
+$ mux-activity
+mux-activity runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:
+  Rex    start rex, then run mux-activity in one of its panes
+  Herdr  start herdr, then run mux-activity in one of its panes
+  Luvus  start luvus, then run mux-activity in one of its panes
+To choose one regardless of where this runs: mux-activity --mux rex|herdr|luvus
 ```
 
 `--mux rex|herdr|luvus` or the `backend` setting chooses regardless of the
 markers, the flag first. The pane's own markers always win over settings
 that name a server: `rex_server`, for watching another machine's Rex server,
-is used only when `panes` is in no multiplexer at all, as rex-panes always
+is used only when `mux-activity` is in no multiplexer at all, as rex-panes always
 allowed.
 
 ## Under Rex
@@ -211,7 +215,7 @@ Everything running under [Herdr](https://herdr.dev), across every workspace —
 and one keypress to get to any of it.
 
 ```
-╺━ PANES · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ MUX ACTIVITY · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  in Herdr · HERDR_ENV=1 is set
  5 agents · 3 workspaces   1 done   1 working   3 idle
  ▸ 1 agent waiting for you
@@ -355,7 +359,7 @@ work they are coordinating, the paths they have reserved, and one keypress to
 get to any of it.
 
 ```text
-╺━ PANES · LUVUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ MUX ACTIVITY · LUVUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  in Luvus · LUVUS_ENV=1 is set
  4 agents · 9 panes   1 blocked   1 done   1 working   1 idle
  session default · uhp 1.0 · 3 workspaces · seq 4186 · focused on pane 2
@@ -618,7 +622,7 @@ so rather than focusing something arbitrary.
 ## Configuration
 
 ```json
-"panes": {
+"mux_activity": {
   "backend": "auto",
   "rex_server": "",
   "luvus_session": "default",
@@ -628,13 +632,13 @@ so rather than focusing something arbitrary.
 ```
 
 `backend` is `auto`, or `rex`, `herdr` or `luvus` to read that one wherever
-`panes` starts; `--mux` does the same for one run. `refresh` is the maximum
+`mux-activity` starts; `--mux` does the same for one run. `refresh` is the maximum
 idle delay between reads under every multiplexer; events wake one sooner.
 
 - **Rex:** `rex_server` picks a Rex server — a host label from `rex hosts`,
-  or an address; empty is the CLI's own default. A second `panes` with
+  or an address; empty is the CLI's own default. A second `mux-activity` with
   `rex_server` set is how to watch another machine, and it is only used when
-  `panes` is in no multiplexer at all. `agents` is the list of command names
+  `mux-activity` is in no multiplexer at all. `agents` is the list of command names
   that count as coding agents — a program reporting under any other app name
   still shows, with its state, in PROCESSES.
 - **Herdr:** nothing to set. Herdr names its agents itself.
@@ -642,10 +646,10 @@ idle delay between reads under every multiplexer; events wake one sooner.
   `luvus session list` names them, and `default` is the one `luvus` starts on
   its own.
 
-A `rex_panes`, `herdr_panes` or `luvus_panes` section from before `panes` is
-still read when there is no `panes` section — `server` as `rex_server`,
+A `rex_panes`, `herdr_panes` or `luvus_panes` section from before `mux-activity` is
+still read when there is no `mux-activity` section — `server` as `rex_server`,
 `session` as `luvus_session` — and a notice asks for it to be renamed. Press
-`,` for the settings screen, which writes the `panes` section.
+`,` for the settings screen, which writes the `mux-activity` section.
 
 Requires `rex`, `herdr` or `luvus` on `PATH`: whichever multiplexer it runs
 in. Works on Linux and macOS. Under Herdr, CPU and memory are read from
