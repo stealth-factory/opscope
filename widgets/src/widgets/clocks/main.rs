@@ -1847,40 +1847,44 @@ fn world_clock_rows<Z: TimeZone>(
     // The name grows with the pane rather than being cut at 16. The
     // day/night glyph, the optional condition glyph, the time, the day
     // with a UTC+5:30 offset and a day shift are the fixed cells, and one
-    // more keeps a full-length name off the time.
+    // more keeps a full-length name off the time. A pane too narrow for
+    // all of them drops the optional columns instead of clipping the row.
     let longest = ordered
         .iter()
         .map(|city| tc::display_width(&city.name) + 1)
         .max()
         .unwrap_or(0);
-    let name_w = tc::fit_columns(
-        width.saturating_sub(1).saturating_sub(3 + weather_cells + 5 + 16 + 7),
-        &[(16, longest)],
-    )[0];
+    let columns = clock_columns(width, weather_cells, longest);
     // Misses first, then the clocks. Same order a tall pane already used,
     // so a short one reveals the rest of it instead of a different list.
     let mut body = city_weather_note_blocks(ordered, slots, width, p)
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let note_rows = body.len();
     let mut pending = Vec::new();
+    // Where each city starts and how many rows it took, so the heading can
+    // still count cities when a narrow pane stacks one over two lines.
+    let mut blocks = Vec::new();
     for city in ordered {
         let there = now.with_timezone(&city.zone);
-        if let Some((x, code)) = glyph_column(city, &there, slots, weather_col, width, p) {
-            pending.push((body.len(), x, code));
-        }
-        body.push(world_clock_line(
+        let start = body.len();
+        let (lines, glyph) = world_clock_lines(
             city,
             &there,
             now.date_naive(),
             slots,
             weather_col,
             glyph_w,
-            name_w,
+            columns,
             width,
             p,
-        ));
+        );
+        let rows = lines.len();
+        if let Some((x, code)) = glyph {
+            pending.push((start + rows - 1, x, code));
+        }
+        body.extend(lines);
+        blocks.push((start, rows));
     }
     let window = (room - 1).min(body.len());
     if window == 0 {
@@ -1894,7 +1898,7 @@ fn world_clock_rows<Z: TimeZone>(
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-            (p.dim.as_str(), city_span(*scroll, window, note_rows, ordered.len())),
+            (p.dim.as_str(), city_span(*scroll, window, &blocks)),
         ],
         width.saturating_sub(1),
     )];
@@ -1908,88 +1912,217 @@ fn world_clock_rows<Z: TimeZone>(
     rows
 }
 
-/// The condition glyph's column on a world-clock row, when that row has a
-/// reading and the pane still has room for it.
-fn glyph_column(
-    city: &City,
-    there: &chrono::DateTime<Tz>,
-    slots: &[weather::CityWeather],
-    weather_col: bool,
-    width: usize,
-    p: &Palette,
-) -> Option<(usize, i64)> {
-    if !weather_col {
-        return None;
-    }
-    let code = city_code(city, slots)?;
-    let (_, phase) = phase_of(there, p);
-    let x = tc::display_width(&format!(" {} ", phase));
-    let cols = tc::display_width(parse::condition_glyph(code)).max(1);
-    if x + cols > width.saturating_sub(1) {
-        return None;
-    }
-    Some((x, code))
-}
-
-/// Which clocks this window is showing. The number is cities, not note
-/// lines: a miss sitting above them must not make the slice look longer
-/// than the list. A window that has not reached a clock yet says so,
-/// rather than claiming a range that is not on screen.
-fn city_span(scroll: usize, window: usize, note_rows: usize, cities: usize) -> String {
+/// Which clocks this window is showing. The number is cities, not rows: a
+/// miss sitting above them, or a city stacked over two lines, must not make
+/// the slice look longer than the list. A window that has not reached a
+/// clock yet says so, rather than claiming a range that is not on screen.
+fn city_span(scroll: usize, window: usize, blocks: &[(usize, usize)]) -> String {
     let view_end = scroll + window;
-    let first = scroll.max(note_rows).saturating_sub(note_rows);
-    let last = view_end
-        .min(note_rows + cities)
-        .saturating_sub(note_rows);
-    if first < last {
-        format!(" {}-{} of {}  ↑↓", first + 1, last, cities)
-    } else {
-        // No middle dot. A `·` beside an arrow is a footer to the hint
-        // check, and a one-character word in one would be a key.
-        format!(
-            " {} below  ↑↓",
-            if cities == 1 { "clock" } else { "clocks" }
-        )
+    let mut first = None;
+    let mut last = 0;
+    for (index, &(start, rows)) in blocks.iter().enumerate() {
+        if start < view_end && start + rows > scroll {
+            first.get_or_insert(index);
+            last = index;
+        }
+    }
+    match first {
+        Some(first) => format!(" {}-{} of {}  ↑↓", first + 1, last + 1, blocks.len()),
+        None => {
+            // No middle dot. A `·` beside an arrow is a footer to the hint
+            // check, and a one-character word in one would be a key.
+            format!(
+                " {} below  ↑↓",
+                if blocks.len() == 1 { "clock" } else { "clocks" }
+            )
+        }
     }
 }
 
-fn world_clock_line(
+/// Which of a world-clock row's columns a pane this wide can hold.
+///
+/// The time and the city name are what the row exists to show, so neither
+/// is ever cut. Below the width where every column fits, the optional ones
+/// go in the order that costs least: the date rollover, then the exact UTC
+/// offset, then the weekday. The day/night mark goes next, because a name
+/// beside the time is worth more than the mark; only when even those two
+/// will not share a line does the city move onto its own line, with the
+/// time stacked under it. A dropped column is not drawn, rather than a row
+/// cut at the pane edge.
+#[derive(Clone, Copy)]
+struct ClockColumns {
+    name_w: usize,
+    day: bool,
+    offset: bool,
+    shift: bool,
+    glyph: bool,
+    wrap: bool,
+}
+
+fn clock_columns(width: usize, weather_cells: usize, longest: usize) -> ClockColumns {
+    const NAME_MIN: usize = 16;
+    // As drawn, not as reserved: ` Thu  UTC+5:30` is 15 cells and a `+1d`
+    // rollover is 7. Counting the full 16 a half-hour offset was reserved
+    // for drops a column while it still fits.
+    const DAY_OFFSET: usize = 15;
+    const SHIFT: usize = 7;
+    let room = width.saturating_sub(1);
+    // The time and the condition column stay; the day/night mark (a space,
+    // the glyph and a space) is the first thing after the weekday to go.
+    // The condition column is optional by config, but it is not one of the
+    // columns a narrow pane drops.
+    let with_glyph = 3 + weather_cells + 5;
+    let bare = 1 + weather_cells + 5;
+    // A name keeps the old 16-cell minimum when the pane has room to spare,
+    // so a wide pane is unchanged. With no room for that padding the whole
+    // name still gets drawn; only a name that will not fit at all wraps.
+    let name = |available: usize| {
+        if available >= longest.max(NAME_MIN) {
+            Some(longest.max(NAME_MIN))
+        } else if available >= longest {
+            Some(longest)
+        } else {
+            None
+        }
+    };
+    for (fixed, day, offset, shift, glyph) in [
+        (with_glyph + DAY_OFFSET + SHIFT, true, true, true, true),
+        (with_glyph + DAY_OFFSET, true, true, false, true),
+        (with_glyph + 5, true, false, false, true),
+        (with_glyph, false, false, false, true),
+        (bare, false, false, false, false),
+    ] {
+        if let Some(name_w) = name(room.saturating_sub(fixed)) {
+            return ClockColumns {
+                name_w,
+                day,
+                offset,
+                shift,
+                glyph,
+                wrap: false,
+            };
+        }
+    }
+    ClockColumns {
+        name_w: 0,
+        day: false,
+        offset: false,
+        shift: false,
+        glyph: true,
+        wrap: true,
+    }
+}
+
+/// The rows one city takes: one line when everything fits, or the name
+/// stacked over the time when the pane is too narrow for both. Also returns
+/// where the condition glyph goes on the time row, when it has a reading.
+fn world_clock_lines(
     city: &City,
     there: &chrono::DateTime<Tz>,
     here: chrono::NaiveDate,
     slots: &[weather::CityWeather],
     weather_col: bool,
     glyph_w: usize,
-    name_w: usize,
+    columns: ClockColumns,
     width: usize,
     p: &Palette,
-) -> String {
+) -> (Vec<String>, Option<(usize, i64)>) {
+    let room = width.saturating_sub(1);
     // Sun or moon by the local hour, which is the fastest way to read
     // "is it a reasonable time to message them". The condition glyph, when
     // there is one, sits in its own column: the leading mark stays day
     // and night.
     let (ink, phase) = phase_of(there, p);
     let day_shift = there.date_naive().signed_duration_since(here).num_days();
-    let mut parts: Vec<(&str, String)> = vec![(ink.as_str(), format!(" {} ", phase))];
+    let time = there.format("%H:%M").to_string();
+    let code = if weather_col {
+        city_code(city, slots)
+    } else {
+        None
+    };
+    let cell = if weather_col {
+        tc::pad(city_glyph(city, slots).unwrap_or(""), glyph_w)
+    } else {
+        String::new()
+    };
+    // The day/night mark is a leading ` glyph `; when it has been dropped a
+    // single space keeps every row starting at the same column.
+    let lead = if columns.glyph {
+        format!(" {} ", phase)
+    } else {
+        " ".to_string()
+    };
+    let lead_w = tc::display_width(&lead);
+
+    if columns.wrap {
+        // The city keeps its whole name; one wider than the pane is broken
+        // by whole words rather than cut. The time row is right-aligned
+        // under it, so the times form one column down the block.
+        let mut lines: Vec<String> =
+            tc::wrap_words(&city.name, width.saturating_sub(2).max(1))
+                .into_iter()
+                .map(|line| tc::seg(&[(p.txt.as_str(), format!(" {line}"))], room))
+                .collect();
+        let weather = if weather_col {
+            format!("{cell} ")
+        } else {
+            String::new()
+        };
+        let core_w = lead_w + tc::display_width(&weather) + tc::display_width(&time);
+        let indent = " ".repeat(room.saturating_sub(core_w));
+        let weather_x = tc::display_width(&indent) + lead_w;
+        let mut parts: Vec<(&str, String)> = vec![(p.dim.as_str(), indent)];
+        parts.push((ink.as_str(), lead));
+        if weather_col {
+            parts.push((p.accent.as_str(), weather));
+        }
+        parts.push((p.txt.as_str(), time));
+        lines.push(tc::seg(&parts, room));
+        let spot = code.and_then(|code| {
+            let cols = tc::display_width(parse::condition_glyph(code)).max(1);
+            (weather_col && weather_x + cols <= room).then_some((weather_x, code))
+        });
+        return (lines, spot);
+    }
+
+    let mut parts: Vec<(&str, String)> = vec![(
+        if columns.glyph {
+            ink.as_str()
+        } else {
+            p.txt.as_str()
+        },
+        lead,
+    )];
     if weather_col {
-        let cell = tc::pad(city_glyph(city, slots).unwrap_or(""), glyph_w);
         parts.push((p.accent.as_str(), format!("{cell} ")));
     }
-    parts.push((p.txt.as_str(), tc::pad(&city.name, name_w)));
-    parts.push((p.txt.as_str(), there.format("%H:%M").to_string()));
-    parts.push((
-        p.dim.as_str(),
-        format!("  {}  {}", there.format("%a"), offset_str(there)),
-    ));
-    parts.push((
-        p.dim.as_str(),
-        match day_shift {
-            0 => String::new(),
-            d if d > 0 => format!("    +{d}d"),
-            d => format!("    {d}d"),
-        },
-    ));
-    tc::seg(&parts, width.saturating_sub(1))
+    if columns.name_w > 0 {
+        parts.push((p.txt.as_str(), tc::pad(&city.name, columns.name_w)));
+    }
+    parts.push((p.txt.as_str(), time));
+    if columns.offset {
+        parts.push((
+            p.dim.as_str(),
+            format!("  {}  {}", there.format("%a"), offset_str(there)),
+        ));
+    } else if columns.day {
+        parts.push((p.dim.as_str(), format!("  {}", there.format("%a"))));
+    }
+    if columns.shift {
+        parts.push((
+            p.dim.as_str(),
+            match day_shift {
+                0 => String::new(),
+                d if d > 0 => format!("    +{d}d"),
+                d => format!("    {d}d"),
+            },
+        ));
+    }
+    let spot = code.and_then(|code| {
+        let cols = tc::display_width(parse::condition_glyph(code)).max(1);
+        (weather_col && lead_w + cols <= room).then_some((lead_w, code))
+    });
+    (vec![tc::seg(&parts, room)], spot)
 }
 
 /// Widest condition glyph, so a clear row and a rain row share a column.
@@ -2942,6 +3075,157 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_world_clock_drops_columns_before_cutting_the_time() {
+        let p = palette();
+        // 23:30 UTC is 08:30 the next day in Tokyo, so this row has a UTC
+        // offset, a weekday and a +1d rollover to drop, in that order.
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 23, 30, 0).unwrap();
+        let city = sample_city("San Francisco", "Asia/Tokyo", None, None);
+        let mut scroll = 0usize;
+
+        let mut seen: Vec<(usize, bool, bool, bool)> = Vec::new();
+        for width in 16..=80 {
+            let rows = world_clock_rows(
+                &[&city],
+                &[],
+                &mut scroll,
+                4,
+                width,
+                &now,
+                &p,
+                &mut Vec::new(),
+            );
+            for row in &rows {
+                assert!(
+                    tc::display_width(row) <= width - 1,
+                    "a {width}-column pane drew {} cells: {}",
+                    tc::display_width(row),
+                    strip_ansi(row)
+                );
+            }
+            let row = rows
+                .iter()
+                .find(|row| clock_time_column(row).is_some())
+                .unwrap_or_else(|| panic!("no clock at {width} columns: {rows:?}"));
+            let plain = strip_ansi(row);
+            assert!(
+                plain.contains("08:30"),
+                "the time is cut at {width} columns: {plain}"
+            );
+            let text = rows
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("San Francisco"),
+                "the city name is missing at {width} columns\n{text}"
+            );
+            seen.push((
+                width,
+                plain.contains("UTC"),
+                plain.contains("Thu"),
+                plain.contains("+1d"),
+            ));
+        }
+
+        // Widening the pane gives columns back, never takes one away, and
+        // the order is the rollover first, then the offset, then the day.
+        let mut last = (false, false, false);
+        for &(width, offset, day, shift) in &seen {
+            assert!(
+                offset >= last.0 && day >= last.1 && shift >= last.2,
+                "a column came back out of order at {width} columns: {last:?} then {:?}",
+                (offset, day, shift)
+            );
+            assert!(
+                shift <= offset && offset <= day,
+                "the drop order is shift, offset, day at {width} columns: {:?}",
+                (offset, day, shift)
+            );
+            last = (offset, day, shift);
+        }
+        let at = |width: usize| {
+            seen.iter()
+                .find(|(w, ..)| *w == width)
+                .map(|&(_, offset, day, shift)| (offset, day, shift))
+                .unwrap()
+        };
+        assert_eq!(at(80), (true, true, true), "a wide pane keeps every column");
+        assert_eq!(
+            at(24),
+            (false, false, false),
+            "a pane this narrow has dropped every optional column"
+        );
+
+        let render = |width: usize| {
+            let mut scroll = 0usize;
+            world_clock_rows(
+                &[&city],
+                &[],
+                &mut scroll,
+                4,
+                width,
+                &now,
+                &p,
+                &mut Vec::new(),
+            )
+            .iter()
+            .map(|row| strip_ansi(row))
+            .collect::<Vec<_>>()
+        };
+        // 24 columns still has room for the name beside the time once the
+        // optional columns are gone; the name is not what gives way.
+        let narrow = render(24);
+        let clock = narrow.iter().find(|row| row.contains("08:30")).unwrap();
+        assert!(
+            clock.contains("San Francisco"),
+            "the name stays beside the time at 24 columns: {clock}"
+        );
+        // With the day/night mark gone, both still share a line even at 21.
+        let bare = render(21);
+        let clock = bare.iter().find(|row| row.contains("08:30")).unwrap();
+        assert!(
+            clock.contains("San Francisco") && !clock.contains('☀'),
+            "the name and time share a line at 21 columns: {clock}"
+        );
+        // Below that the name gets its own line, and the time is stacked
+        // under it instead of being cut or the name being dropped.
+        let stacked = render(20);
+        let time_row = stacked.iter().find(|row| row.contains("08:30")).unwrap();
+        assert!(
+            !time_row.contains("San Francisco"),
+            "the time row is its own line at 20 columns: {time_row}"
+        );
+        assert!(
+            stacked.iter().any(|row| row.trim() == "San Francisco"),
+            "the name line is whole at 20 columns: {stacked:?}"
+        );
+
+        // Every width where all four columns fit is untouched: 60 columns
+        // draws exactly the row `main` drew before the narrow-pane fix.
+        let rows = world_clock_rows(
+            &[&city],
+            &[],
+            &mut scroll,
+            4,
+            60,
+            &now,
+            &p,
+            &mut Vec::new(),
+        );
+        let row = rows
+            .iter()
+            .find(|row| clock_time_column(row).is_some())
+            .unwrap();
+        assert_eq!(
+            strip_ansi(row),
+            " ☀ San Francisco   08:30  Thu  UTC+9    +1d",
+            "the full-column row changed"
+        );
+    }
+
+    #[test]
     fn a_short_pane_scrolls_to_a_weather_miss_and_a_city_miss() {
         let p = palette();
         let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
@@ -3095,6 +3379,43 @@ mod tests {
         assert_eq!(spots[0].code, 2);
         assert_eq!(spots[0].x, tc::display_width(" ☀ "));
         assert!(strip_ansi(&rows[spots[0].row]).contains('◑'));
+    }
+
+    #[test]
+    fn a_stacked_world_clock_puts_the_picture_on_the_time_row() {
+        let p = palette();
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 23, 30, 0).unwrap();
+        let city = sample_city(
+            "San Francisco",
+            "Asia/Tokyo",
+            Some((35.68, 139.69)),
+            None,
+        );
+        let slots = vec![weather::CityWeather {
+            name: "San Francisco".into(),
+            zone: "Asia/Tokyo".into(),
+            latitude: 35.68,
+            longitude: 139.69,
+            outcome: weather::CityOutcome::Ready { code: 2 },
+        }];
+        let mut scroll = 0usize;
+        let mut spots = Vec::new();
+        let rows = world_clock_rows(&[&city], &slots, &mut scroll, 4, 16, &now, &p, &mut spots);
+
+        // Heading, the name on its own row, then the time.
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(spots.len(), 1);
+        assert_eq!(spots[0].row, 2, "the picture belongs to the time row");
+        assert_eq!(spots[0].code, 2);
+        // The time row is right-aligned; the condition cell follows the
+        // day/night mark, wherever the indent put it.
+        let core = 3 + condition_cell_width() + 1 + 5;
+        let indent = 15usize.saturating_sub(core);
+        assert_eq!(spots[0].x, indent + 3);
+        assert!(strip_ansi(&rows[2]).contains('◑'));
+        for row in &rows {
+            assert!(tc::display_width(row) <= 15, "{row}");
+        }
     }
 
     #[test]
