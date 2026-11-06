@@ -322,6 +322,15 @@ rules under the top-level `_schema`, beside the defaults:
 }
 ```
 
+A help text longer than a sentence or two is read as a shape rather than as
+one paragraph: each line is wrapped on its own, a blank line stays a gap, and
+a `1. ` or `- ` item's wrapped lines hang under its text rather than under its
+number. Write a procedure as numbered steps, one step per line, and give a
+separate concern (precedence between fields, storage and file permissions, a
+caveat) a paragraph of its own. The two Google widgets' `credentials` help is
+the worked example, and a text written as one line still reads exactly as it
+did before.
+
 Every array must declare `items` (or a picker), including one that already
 ships a non-empty default. The settings screen can infer a list editor from
 that default, but `every_array_declares_what_it_holds` still requires the

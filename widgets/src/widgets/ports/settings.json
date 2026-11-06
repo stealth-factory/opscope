@@ -6,7 +6,7 @@
       "minimum": 1
     }
   },
-  "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
+  "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one.\n\nIt is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
   "system_ports": [
     22,
     53,
