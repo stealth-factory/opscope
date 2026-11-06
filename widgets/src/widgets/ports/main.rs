@@ -2208,6 +2208,7 @@ impl Store {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available("ports", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -2999,6 +3000,7 @@ fn main() {
         ];
         hints.extend([
             vec![(ok.dim.clone(), "[,] settings".into())],
+            vec![(ok.dim.clone(), tc::PALETTE_HINT.into())],
             vec![(ok.dim.clone(), tc::THEME_HINT.into())],
             vec![(ok.dim.clone(), "[q]uit".into())],
         ]);

@@ -445,6 +445,24 @@ Google sign-in, scopes and wording
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only
 their section name, optional legacy alias, and owned `settings.json`.
+And it owns the command palette (`tc::palette`, `ctrl-k` in every
+widget): one box whose modes — commands, theme picker, widgets — swap in
+place over the frame it was opened on, esc popping one level at a time.
+The theme picker also keeps its own `ctrl-t` in every widget, the same
+picker over the widget's frame with esc back to the widget.
+Core wires it from `Keyboard::poll` for every binary, as it does `!`.
+A widget registers its settings spec at startup
+(`tc::register_settings(SETTINGS)`) and the palette's Settings action
+opens it, a widget that registers none gets no Settings command, and
+the Switch action lists the binaries from the build manifest — the same
+file the launcher's own test checks its list against. A widget's footer
+hints are commands too, with no widget code: `footer_at` keeps each
+hint's text beside its key, the palette reads them before it forgets the
+footer, and running one returns the key from `palette::run` for `poll` to
+hand to the widget - so the palette cannot do anything a key does not. The footer hints
+are `tc::PALETTE_HINT` and, beside it, `tc::THEME_HINT` for the picker's
+own key - twelve cells each: `pack_hints` will not split a hint, and
+twelve columns is the floor every frame is measured from.
 
 A widget that acquires per OS lives in its package folder
 `widgets/src/widgets/<widget>/{main,parse,linux,macos}.rs` — the same

@@ -411,13 +411,70 @@ notices are listed on the screen, with how long each lasts, and can be
 restored. A warning that explains a missing or partial number is
 never a notice — it stays beside the number.
 
+### The command palette
+
+**Press `ctrl-k` in any widget** for the command palette: a box over the
+middle of the pane with a fuzzy-search line and the widget-wide actions
+under it. `↑↓` choose, `↵` runs, `esc` backs out one level, and typing
+filters. The footer of every widget says so (`[ctrl-k]cmds`), beside
+`[,] settings` — and the actions that already have keys show them on
+their rows, so the palette teaches the keys it is the route around.
+`ctrl-t` skips the palette and opens the theme picker directly, and every
+footer carries that too (`[ctrl-t]heme`), next to `[ctrl-k]cmds`.
+
+The actions, all of them core's so every widget gets them with no widget
+code — except Settings, which appears only where the widget has a
+settings screen (the launcher and `matrix` have none):
+
+- **Theme…** (`ctrl-t` directly) — the theme picker, in the same box.
+  Type to filter, and as
+  `↑↓` move through the list the widget behind repaints in that theme,
+  so you see it in place before keeping it; `↵` keeps it, `esc` puts
+  back what you had — and returns to the palette's commands.
+- **Settings…** (`[ , ]`) — this widget's settings screen; a save
+  restarts the widget, as saving from the screen itself does.
+- **Switch widget…** — the other widgets, in the same box; `↵` switches
+  this pane to one. The widget you were in ends and the new one takes its
+  place, so quitting it leaves the pane - or goes back to the `opscope`
+  menu, if that is what you started from. Switching never stacks widgets.
+- **Notices** (`!`) — the notices screen.
+- **Keys & help…** — this widget's `--help`, in the same box, wrapped to
+  it and filterable: type `pomo` and only what it says about the pomodoro
+  is left.
+- **Charts as text** / **Charts as pixels** — starts the widget again
+  with its charts drawn the other way (`OPSCOPE_GRAPHICS`). Text is far
+  less to send over SSH. The row names where it goes and appears only
+  when there is somewhere to go: under `NO_COLOR`, or in a terminal that
+  draws no images and was never asked for any, there is none.
+- **Restart widget** — starts the widget again in place, as saving its
+  settings does.
+- **Copy diagnostics** — puts the version, theme, chart mode, terminal,
+  multiplexer, pane size and OS on the clipboard (OSC 52), for a bug
+  report. Nothing from the config or the file system: no path, no host.
+- **Copy docs link** — this widget's folder in the repository, where its
+  README is, to the clipboard.
+- **This widget's own actions** — every hint in its footer, by the text
+  the footer drew (`[r]estart`, `[b]reak start`). Running one hands the
+  widget that key, so it does exactly what pressing it does: the palette
+  is a third route to a key, beside the key and a click on its hint,
+  never an action of its own.
+
+The commands run most recently come first - the last five, remembered
+across every widget in `palette-recent.json` under the state directory. A
+widget's own action is remembered by its key, so `[p]omodoro` is found
+again as `[p]omodoro off`. A description that does not fit a narrow box is
+left out whole rather than cut.
+
+esc pops one level at a time, the way a palette does: the theme list
+back to the commands, the commands back to the widget. Each mode redraws
+over the frame the palette was opened on, so the modes read as one box
+that changes, not a stack that grows.
+
 ### Themes
 
-Every widget draws in one theme, chosen once for all of them. **Press
-`ctrl-t` in any widget** for the theme picker: type to filter, and as `↑↓`
-move through the list the widget behind repaints in that theme, so you see
-it in place before keeping it; `↵` keeps it, `esc` puts back what you had.
-The footer of every widget says so (`[ctrl-t]heme`), beside `[,] settings`.
+Every widget draws in one theme, chosen once for all of them. The theme
+picker opens on its own key, `ctrl-t` in any widget — or from the
+command palette (`ctrl-k`), on **Theme…**.
 
 The choice is one setting in the main `config.json`, `"opscope": { "theme":
 "…" }` - also the THEME row on any widget's `,` screen, and a top-level

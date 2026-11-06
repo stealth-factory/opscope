@@ -610,6 +610,7 @@ fn hints(p: &Palette, neighbours: bool) -> Vec<Vec<(&str, String)>> {
             },
         )],
         vec![(p.dim.as_str(), "[,] settings".into())],
+        vec![(p.dim.as_str(), tc::PALETTE_HINT.into())],
         vec![(p.dim.as_str(), tc::THEME_HINT.into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]
@@ -862,6 +863,7 @@ fn frame(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available("months", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }

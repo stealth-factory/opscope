@@ -1782,8 +1782,12 @@ fn hinted_keys(src: &str) -> BTreeSet<String> {
 fn handled_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     // `Keyboard::poll` answers `!` for every widget before the widget sees
-    // a key, so every widget answers it without an arm of its own.
+    // a key, so every widget answers it without an arm of its own. The
+    // palette's `ctrl-k` and the picker's `ctrl-t` are the same: `poll`
+    // opens them for every widget, and no widget has an arm of its own.
     found.insert("!".to_string());
+    found.insert("ctrl-k".to_string());
+    found.insert("ctrl-t".to_string());
     for line in src.lines() {
         if line.trim_start().starts_with("//") {
             continue;

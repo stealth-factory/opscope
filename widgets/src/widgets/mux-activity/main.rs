@@ -79,6 +79,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let file = first_config().unwrap_or_else(|| serde_json::json!({}));
     let has_section = file.get("mux_activity").is_some();

@@ -1297,6 +1297,7 @@ fn list_hints(p: &Palette, several: bool, view: &View) -> Vec<Vec<(&'static str,
     hints.push(vec![("", "[c] copy link".to_string())]);
     hints.push(vec![("", "[r] refresh".to_string())]);
     hints.push(vec![("", "[,] settings".to_string())]);
+    hints.push(vec![("", tc::PALETTE_HINT.into())]);
     hints.push(vec![("", tc::THEME_HINT.into())]);
     hints.push(vec![("", "[q]uit".to_string())]);
     hints
@@ -1369,6 +1370,7 @@ fn window(body: &[String], scroll: usize, room: usize) -> (Vec<String>, usize) {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available(
         "google-trends",
         include_str!("dependencies.json"),

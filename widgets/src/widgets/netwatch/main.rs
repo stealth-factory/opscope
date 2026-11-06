@@ -1696,6 +1696,7 @@ fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available(
         "netwatch",
         include_str!("dependencies.json"),
@@ -2405,6 +2406,7 @@ fn main() {
         ];
         hints.extend([
             vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), tc::PALETTE_HINT.into())],
             vec![(p.dim.as_str(), tc::THEME_HINT.into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ]);

@@ -753,6 +753,7 @@ fn trace_cells(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::register_settings(SETTINGS);
     if !tc::dependencies_available("tailnet", include_str!("dependencies.json"), Some(SETTINGS)) {
         return;
     }
@@ -1025,6 +1026,7 @@ fn main() {
             ));
             let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
             hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+            hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             let (packed, indent) = pack_footer(&hints, w);
@@ -1313,6 +1315,7 @@ fn main() {
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
+        hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         // The footer is built before the body, not after it, because it

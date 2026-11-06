@@ -26,6 +26,7 @@ mod dependencies;
 pub mod theme;
 mod termtheme;
 mod picker;
+pub mod palette;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -45,10 +46,14 @@ pub use dependencies::{
     unsatisfied_required,
 };
 pub use aliases::{alias_problems, resolve_widget};
-pub use settings::{run_settings, Catalogue, SettingsSpec};
+pub use settings::{register_settings, run_settings, Catalogue, SettingsSpec};
 pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
-/// The footer hint for the theme picker, beside `[,] settings` in every
-/// widget: one wording, kept here.
+/// The footer hint for the command palette, beside `[,] settings` in
+/// every widget: one wording, kept here.
+pub const PALETTE_HINT: &str = palette::HINT;
+/// The theme picker's footer hint, which goes beside [`PALETTE_HINT`] in
+/// every footer: the picker has a key of its own as well as a row in the
+/// palette.
 pub const THEME_HINT: &str = picker::HINT;
 pub use statefile::state_dir;
 
@@ -358,6 +363,24 @@ pub fn parse_source_json(s: &str) -> Result<serde_json::Value, serde_json::Error
 /// `s` with every escape removed and the characters that were text left
 /// in order. An escape that never terminates takes the rest of the string
 /// with it: those bytes have not been shown.
+/// The cells `from..from + width` of plain text, by display width: a
+/// footer hint cut out of the line it was packed into.
+fn cells_of(plain: &str, from: usize, width: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for ch in plain.chars() {
+        let w = display_width(&ch.to_string());
+        if col >= from && col + w <= from + width {
+            out.push(ch);
+        }
+        col += w;
+        if col >= from + width {
+            break;
+        }
+    }
+    out
+}
+
 fn strip_escapes(s: &str) -> String {
     let mut visible = String::with_capacity(s.len());
     let mut rest = s;
@@ -2241,7 +2264,7 @@ fn hint_key(plain: &str) -> Option<String> {
         "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
     ];
     let first = plain.split_whitespace().next()?;
-    // A named key in brackets is the same key: `[ctrl-t]heme`, `[esc] back`.
+    // A named key in brackets is the same key: `[ctrl-k]cmds`, `[esc] back`.
     // The bracket closes the name, so the word fused onto it is not read.
     let first = match first.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
         Some((inside, _)) => inside,
@@ -4683,6 +4706,9 @@ pub struct Keyboard {
     /// something a widget opts into rather than something that happens to
     /// it.
     hints: Vec<(String, usize, usize, usize)>,
+    /// Each registered hint as the palette lists it: its key, and its text
+    /// as the footer drew it - `[r]estart`, `[↵] open`.
+    actions: Vec<(String, String)>,
     /// Set by `typing` and spent by the next `poll`: a text field is open,
     /// so `!` is a character for it rather than the notices screen.
     typing: bool,
@@ -4734,8 +4760,11 @@ impl Keyboard {
             saved,
             buf: Vec::new(),
             hints: Vec::new(),
+            actions: Vec::new(),
             typing: false,
-            held: Vec::new(),
+            // Keys the palette had already read when it switched to this
+            // widget. Taken once, so they are not still there for a restart.
+            held: palette::take_handoff_keys(),
         }
     }
 
@@ -4822,6 +4851,16 @@ impl Keyboard {
     /// Registering nothing is how a widget turns hint clicks back off:
     /// pass a footer with no spots, or simply never call this.
     pub fn footer_at(&mut self, footer: &Footer, top: usize, indent: usize) {
+        self.actions = footer
+            .spots
+            .iter()
+            .filter_map(|spot| {
+                let line = footer.lines.get(spot.line)?;
+                let text = cells_of(&strip_escapes(line), spot.col, spot.width);
+                let text = text.trim();
+                (!text.is_empty()).then(|| (spot.key.clone(), text.to_string()))
+            })
+            .collect();
         self.hints = footer
             .spots
             .iter()
@@ -4847,6 +4886,14 @@ impl Keyboard {
     /// `footer_at` warns about, arriving through a door it left open.
     pub fn forget_footer(&mut self) {
         self.hints.clear();
+        self.actions.clear();
+    }
+
+    /// The widget's footer hints, each as its key and the text the footer
+    /// drew for it: what the palette offers as this widget's own actions.
+    /// Read before `forget_footer`, which the palette calls on the way in.
+    pub(crate) fn footer_actions(&self) -> Vec<(String, String)> {
+        self.actions.clone()
     }
 
     /// A click on a registered hint, as the key that hint names.
@@ -4923,6 +4970,15 @@ impl Keyboard {
         self.typing = true;
     }
 
+    /// Hold `tail` for the next poll, ahead of anything already waiting.
+    ///
+    /// A screen opened from inside a modal's own loop reads `held` first,
+    /// so the rest of the batch that pressed ↵ reaches that screen rather
+    /// than the modal that opened it.
+    pub(crate) fn hold(&mut self, tail: Vec<String>) {
+        hold_ahead(&mut self.held, tail);
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
     ///
     /// `!` is answered here, for every widget: it opens the notices screen
@@ -4946,12 +5002,13 @@ impl Keyboard {
         // once, from the colours it asked for at start, so it starts again
         // and asks again - the way saving its settings does. Only when the
         // theme in force is the terminal's own: a named theme did not change.
-        // Not while the picker is open: its preview has put another theme
-        // in force. Nor under an unsaved edit - a field being typed in, the
+        // Not while a modal with a captured frame is up: the picker, the
+        // palette. Nor under an unsaved edit - a field being typed in, the
         // settings screen - which a restart would throw away. The switch is
         // kept for the poll after they close rather than taken and dropped.
         if !typing
             && !picker::OPEN.load(Ordering::Acquire)
+            && !palette::OPEN.load(Ordering::Acquire)
             && !settings::SCREEN_OPEN.load(Ordering::Acquire)
             && terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel)
             && theme::current().id == "terminal"
@@ -4960,12 +5017,14 @@ impl Keyboard {
         }
         // The theme was changed - in the picker in another pane, or in
         // config.json by hand - so this widget starts again in it. Never
-        // under something that holds an unsaved edit: a field being typed
-        // in, the settings screen, the picker. The check waits for them,
+        // under something that holds an unsaved edit or a captured frame:
+        // a field being typed in, the settings screen, the picker, the
+        // palette. The check waits for them,
         // and `changed()` is not even asked until then, so the change is
         // still there to find when they close.
         if !typing
             && !picker::OPEN.load(Ordering::Acquire)
+            && !palette::OPEN.load(Ordering::Acquire)
             && !settings::SCREEN_OPEN.load(Ordering::Acquire)
             && theme::changed()
         {
@@ -4976,10 +5035,32 @@ impl Keyboard {
         if opens {
             notices::run(self);
         }
-        // ctrl-t opens the theme picker over whatever widget this is.
-        if !picker::OPEN.load(Ordering::Acquire) && keys.iter().any(|k| k == picker::KEY) {
-            keys.retain(|k| k != picker::KEY);
-            picker::run(self);
+        // ctrl-k opens the command palette over whatever widget this is;
+        // ctrl-t opens the theme picker directly. Both are answered here
+        // for every widget, and neither opens over another screen - not
+        // over the picker or palette, and not from the settings or
+        // notices screen, where a second screen would clear the outer
+        // one's flag when it closed.
+        let free = || {
+            !palette::OPEN.load(Ordering::Acquire)
+                && !picker::OPEN.load(Ordering::Acquire)
+                && !settings::SCREEN_OPEN.load(Ordering::Acquire)
+                && !notices::screen_open()
+        };
+        if free() && split_at(&mut keys, &mut self.held, palette::KEY) {
+            // A footer action run from the palette is its key, handed to
+            // the widget as if it were typed: the widget's own arm runs it.
+            if let Some(key) = palette::run(self) {
+                keys.push(key);
+            }
+        }
+        if free() && split_at(&mut keys, &mut self.held, picker::KEY) {
+            let (base_rows, base_plots) = LAST_FRAME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
+            picker::run_over(self, &base_rows, &base_plots);
         }
         keys
     }
@@ -5018,6 +5099,35 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+/// Put `tail` at the front of `held`, ahead of anything already waiting.
+///
+/// `held` is read by the next `poll` first, so keys put here reach
+/// whatever runs next - a screen opened from inside `run`, or the keyboard
+/// after this poll returns. Ahead of the rest because these keys arrived
+/// earlier than anything already waiting.
+fn hold_ahead(held: &mut Vec<String>, tail: Vec<String>) {
+    let mut rest = std::mem::take(held);
+    held.extend(tail);
+    held.append(&mut rest);
+}
+
+/// Take `key` out of `keys` and hold everything after it for the screen
+/// that key opens.
+///
+/// The screen runs inside the poll that saw the key, and its own `poll`
+/// reads `held` first - the same split [`next_turn`] makes for `!`. So a
+/// paste of `ctrl-k`, `not`, ↵ reaches the palette with `not` and ↵ still
+/// to come, instead of handing them to the widget once the box closes.
+fn split_at(keys: &mut Vec<String>, held: &mut Vec<String>, key: &str) -> bool {
+    let Some(at) = keys.iter().position(|k| k == key) else {
+        return false;
+    };
+    let tail: Vec<String> = keys.split_off(at + 1);
+    keys.pop();
+    hold_ahead(held, tail);
+    true
 }
 
 /// What a click on the notices counter arrives as inside `Keyboard`, until
@@ -5340,14 +5450,15 @@ fn release_stale_string(
 }
 
 /// The name a single legacy byte already has, shared with `CSI u` so the
-/// two forms cannot drift. vim's scroll pair and readline's kill-line are
-/// named rather than left as control bytes: a widget matching `"\x05"`
-/// reads as a typo, and a control byte in a match arm is invisible to
-/// anyone scanning the file for its keys. Those three are safe to take.
-/// The terminal is in cbreak with the saved `ISIG` and `IXON` still on, so
-/// the bytes those modes intercept never arrive here as themselves. Flag 1
-/// sends the same chords as `CSI u`, and [`legacy_named`] turns them back
-/// into the signals or the flow control the saved termios describes.
+/// two forms cannot drift. vim's scroll pair, readline's kill-line and
+/// kill-to-end, and the palette's key are named rather than left as
+/// control bytes: a widget matching `"\x05"` reads as a typo, and a
+/// control byte in a match arm is invisible to anyone scanning the file
+/// for its keys. Those are safe to take. The terminal is in cbreak with
+/// the saved `ISIG` and `IXON` still on, so the bytes those modes
+/// intercept never arrive here as themselves. Flag 1 sends the same
+/// chords as `CSI u`, and [`legacy_named`] turns them back into the
+/// signals or the flow control the saved termios describes.
 fn name_byte(ch: char) -> String {
     match ch {
         '\r' | '\n' => "enter".to_string(),
@@ -5358,6 +5469,7 @@ fn name_byte(ch: char) -> String {
         '\u{5}' => "ctrl-e".to_string(),
         '\u{15}' => "ctrl-u".to_string(),
         '\u{14}' => "ctrl-t".to_string(),
+        '\u{b}' => "ctrl-k".to_string(),
         c => c.to_string(),
     }
 }
@@ -6062,7 +6174,11 @@ pub fn maybe_help(doc: &str) {
 ///
 /// The guide is embedded in the binary, so npm and release-tarball users
 /// carry the same instructions as a source checkout.
+/// This binary's `--help` text, kept for the palette's Keys & help.
+pub(crate) static HELP_TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
+    let _ = HELP_TEXT.set(doc.trim().to_string());
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--configure-help") {
         println!("{}", configure.trim());
@@ -6131,10 +6247,34 @@ pub(crate) fn binary_name() -> String {
 
 #[cfg(test)]
 mod bang_tests {
-    use super::{next_turn, COUNTER_CLICK};
+    use super::{next_turn, split_at, COUNTER_CLICK};
 
     fn keys(k: &[&str]) -> Vec<String> {
         k.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn keys_after_an_opener_wait_for_the_screen_it_opens() {
+        // `ctrl-k` + `not` + ↵ in one read: the opener is consumed, the
+        // tail waits in `held` for the palette's own poll, and only what
+        // came before the opener is handed to the widget.
+        let mut pressed = keys(&["q", "ctrl-k", "n", "o", "t", "enter"]);
+        let mut held = keys(&[]);
+        assert!(split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert_eq!(pressed, keys(&["q"]));
+        assert_eq!(held, keys(&["n", "o", "t", "enter"]));
+        // Ahead of what an earlier `!` already held: later keys come last.
+        let mut pressed = keys(&["ctrl-k", "a"]);
+        let mut held = keys(&["b"]);
+        assert!(split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert!(pressed.is_empty());
+        assert_eq!(held, keys(&["a", "b"]));
+        // No opener, nothing touched.
+        let mut pressed = keys(&["a", "b"]);
+        let mut held = keys(&[]);
+        assert!(!split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert_eq!(pressed, keys(&["a", "b"]));
+        assert!(held.is_empty());
     }
 
     #[test]
@@ -6189,7 +6329,9 @@ mod bang_tests {
 mod tests {
     #[test]
     fn a_bracketed_key_name_is_the_key_a_click_on_its_hint_means() {
+        assert_eq!(hint_key(palette::HINT).as_deref(), Some(palette::KEY));
         assert_eq!(hint_key(picker::HINT).as_deref(), Some(picker::KEY));
+        assert_eq!(display_width(picker::HINT), display_width(palette::HINT));
         assert_eq!(hint_key("[esc] back").as_deref(), Some("esc"));
         assert_eq!(hint_key("[tab] next").as_deref(), Some("tab"));
         assert_eq!(hint_key("ctrl-u clear").as_deref(), Some("ctrl-u"));
@@ -8294,6 +8436,8 @@ mod tests {
         assert_eq!(keys("\x19"), vec!["ctrl-y"]);
         assert_eq!(keys("\x05"), vec!["ctrl-e"]);
         assert_eq!(keys("\x15"), vec!["ctrl-u"]);
+        // The palette's key, by both encodings.
+        assert_eq!(keys("\x0b"), vec!["ctrl-k"]);
     }
 
     #[test]
@@ -8682,6 +8826,8 @@ mod tests {
             ("\u{19}", "\u{1b}[121;5u", "ctrl-y"),
             ("\u{5}", "\u{1b}[101;5u", "ctrl-e"),
             ("\u{15}", "\u{1b}[117;5u", "ctrl-u"),
+            ("\u{b}", "\u{1b}[107;5u", "ctrl-k"),
+            ("\u{14}", "\u{1b}[116;5u", "ctrl-t"),
             // Alt is an ESC prefix in legacy, and that prefix is not part of the name.
             ("\u{1b}a", "\u{1b}[97;3u", "a"),
             ("\u{1b}I", "\u{1b}[105;4u", "I"),

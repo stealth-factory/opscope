@@ -1241,6 +1241,19 @@ impl Drop for HeldSignals {
     }
 }
 
+/// Whether this run was asked for text charts - `OPSCOPE_GRAPHICS=text`, a
+/// host that relays images, or `NO_COLOR` - rather than merely landing on
+/// text because the terminal draws no images.
+pub(crate) fn text_requested() -> bool {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).mode == GraphicsMode::Text
+}
+
+/// Whether this run was asked for pixels outright, `OPSCOPE_GRAPHICS=kitty`,
+/// whatever the terminal turned out to draw.
+pub(crate) fn pixels_requested() -> bool {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).mode == GraphicsMode::Kitty
+}
+
 pub fn capabilities() -> Capabilities {
     let mut caps = SESSION
         .lock()
