@@ -775,24 +775,24 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(80, 235, 150),
-        run: tc::rgb(255, 200, 90),
-        fail: tc::rgb(255, 95, 105),
-        fail_lit: tc::rgb(255, 128, 136),
-        queue: tc::rgb(150, 190, 255),
-        cancel: tc::rgb(170, 175, 190),
-        // 127,147,172 measures 3.81 on the selected-row tint; the lighter
+        ok: tc::ink(tc::Role::Green),
+        run: tc::ink(tc::Role::Yellow),
+        fail: tc::ink(tc::Role::Red),
+        fail_lit: tc::ink_on(tc::Role::Red, true),
+        queue: tc::ink(tc::Role::Blue),
+        cancel: tc::ink(tc::Role::Muted),
+        // `Muted` measured 3.81 on the old selected-row tint; the lifted
         // twin is what the tint closure reaches for.
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        grid: tc::rgb(71, 91, 116),
-        msg: tc::rgb(158, 174, 196),
-        hint: tc::rgb(126, 148, 173),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        branch: tc::rgb(150, 210, 255),
-        sha: tc::rgb(190, 170, 255),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        grid: tc::ink(tc::Role::Dim),
+        msg: tc::ink(tc::Role::Muted),
+        hint: tc::ink(tc::Role::Muted),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        branch: tc::ink(tc::Role::Accent),
+        sha: tc::ink(tc::Role::Magenta),
     }
 }
 
@@ -2384,11 +2384,12 @@ fn main() {
             }
             let from = rows.len();
             let here = i == selected;
-            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+            let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
             let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
-                // for its lighter twin. `dim` is 3.81 and `fail` is 4.05
-                // against bg(38, 56, 76); the twins are what reach the row.
+                // for its lighter twin. `dim` measured 3.81 and `fail` 4.05
+                // against the old selected-row tint; the twins, the same
+                // roles through `ink_on(.., true)`, are what reach the row.
                 let colour = if tint.is_empty() {
                     colour
                 } else if colour == p.dim {
@@ -2396,7 +2397,7 @@ fn main() {
                 } else if colour == p.fail {
                     p.fail_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };

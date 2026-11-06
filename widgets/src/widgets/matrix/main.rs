@@ -84,10 +84,12 @@ impl Drop {
     }
 }
 
-/// The trail's colour at a given distance from the head, 1 being closest.
+/// The trail's colour at a given distance from the head, 1 being closest:
+/// the theme's green, fading three quarters of the way into the
+/// background at the far end. Decoration, not text, so it is not nudged
+/// to be readable - a tail you can barely see is the effect.
 fn shade(level: f64) -> String {
-    let g = (60.0 + 175.0 * level) as u8;
-    tc::rgb((10.0 + 20.0 * level) as u8, g, (30.0 + 50.0 * level) as u8)
+    tc::ink_between(tc::Role::Green, tc::Role::Bg, 0.75 * (1.0 - level.clamp(0.0, 1.0)), false)
 }
 
 fn main() {
@@ -95,8 +97,10 @@ fn main() {
     if !tc::dependencies_available("matrix", include_str!("dependencies.json"), None) {
         return;
     }
-    let head = tc::rgb(210, 255, 225);
-    let near = tc::rgb(120, 255, 170);
+    // The head glows nearly white, the glyph behind it a lighter green
+    // than the trail: both are the theme's green moved toward its text.
+    let head = tc::ink_between(tc::Role::Green, tc::Role::Fg, 0.7, false);
+    let near = tc::ink_between(tc::Role::Green, tc::Role::Fg, 0.3, false);
     let glyphs: Vec<char> = GLYPHS.chars().collect();
     let mut rng = Rng::new();
 
@@ -199,7 +203,7 @@ fn main() {
             let last = h - 1;
             rows[last] = tc::seg(
                 &[
-                    (tc::rgb(70, 100, 80).as_str(), " [q]uit".to_string()),
+                    (tc::ink(tc::Role::Muted).as_str(), " [q]uit".to_string()),
                     (String::new().as_str(), " ".repeat(w.saturating_sub(7))),
                 ],
                 w,
@@ -216,12 +220,18 @@ mod tests {
 
     #[test]
     fn the_trail_fades_from_the_head() {
-        // Closer to the head is brighter; the far end is nearly dark.
+        // Closer to the head is the theme's green; the far end has faded
+        // most of the way into the background.
         let bright = shade(1.0);
         let faint = shade(0.0);
         assert_ne!(bright, faint);
-        assert!(bright.contains("235"), "head shade was {:?}", bright);
-        assert!(faint.contains("60"), "tail shade was {:?}", faint);
+        assert_eq!(bright, tc::ink(tc::Role::Green), "head shade was {:?}", bright);
+        assert_eq!(
+            faint,
+            tc::ink_between(tc::Role::Green, tc::Role::Bg, 0.75, false),
+            "tail shade was {:?}",
+            faint
+        );
     }
 
     #[test]

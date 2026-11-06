@@ -411,6 +411,43 @@ notices are listed on the screen, with how long each lasts, and can be
 restored. A warning that explains a missing or partial number is
 never a notice — it stays beside the number.
 
+### Themes
+
+Every widget draws in one theme, chosen once for all of them: the THEME row
+on any widget's `,` screen, `"opscope": { "theme": "…" }` in `config.json`
+(a top-level `"theme"` works too), or `OPSCOPE_THEME=…` for one run.
+
+| Value | Colours |
+|---|---|
+| `auto` (default) | The terminal's own, when it says what they are; opscope Dusk when it does not |
+| `terminal` | Always the terminal's own |
+| `classic` | opscope's colours from before themes, on the terminal's own background |
+| any theme id | One of the 51 built-in themes — the same ones as [opscope.stealth-factory.co](https://opscope.stealth-factory.co): `dusk`, `dracula`, `nord`, `tokyo-night`, `github-light`, … |
+
+The terminal's colours are asked for once, as a widget starts (OSC 10, 11
+and 4, ended by a Device Attributes request so a terminal that does not
+answer costs nothing). A terminal that reports light/dark switches (mode
+2031) restarts the widget in its new colours. A named theme paints its own
+background, so a light theme reads on a dark terminal and the other way
+round; `classic` and the terminal's own do not.
+
+**Every text colour clears WCAG AA 4.5** on the theme's background, its
+title bars, the selected row and the rows tinted red or green by meaning. A
+theme colour that does not is moved, just far enough, when the theme loads.
+
+**Your own themes:** drop a JSON file in `~/.config/opscope/themes/` (or
+`$XDG_CONFIG_HOME/opscope/themes/`); its file name is its id, and it appears
+in the picker. Only `fg` and `bg` are required; any of the other roles —
+`dark`, `slot` (the selected row), `muted`, `dim`, `border`, `accent`,
+`onAccent`, `green`, `blue`, `yellow`, `red`, `cyan`, `magenta`, `orange` —
+can be given, and the rest are worked out from those. A file with the same
+id as a built-in theme replaces it. A file that cannot be read is named in a
+notice (`!`) and left out; it never stops a widget.
+
+```json
+{ "name": "Mine", "fg": "#e0e0e0", "bg": "#101418", "accent": "#7aa2f7", "red": "#ff6b6b" }
+```
+
 ### Editing `config.json` by hand
 
 [`config.example.json`](config.example.json) is the reference, and it is

@@ -646,26 +646,47 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The lifted form of every other role this palette draws in, for text
+    /// on a selected or tinted row: the named `_lit` twins above are swapped
+    /// in by the tint closure first, and anything else it is handed goes
+    /// through [`Palette::on_tint`].
+    lifts: Vec<(String, String)>,
+}
+
+impl Palette {
+    /// `colour` as it should be drawn on a tinted row: its role's lifted
+    /// form when it is one of this palette's, otherwise `colour` itself.
+    fn on_tint<'a>(&'a self, colour: &'a str) -> &'a str {
+        self.lifts
+            .iter()
+            .find(|(plain, _)| plain == colour)
+            .map(|(_, lifted)| lifted.as_str())
+            .unwrap_or(colour)
+    }
 }
 
 fn palette() -> Palette {
     Palette {
-        blocked: tc::rgb(255, 105, 115),
-        blocked_lit: tc::rgb(255, 128, 136),
-        done: tc::rgb(90, 240, 160),
-        working: tc::rgb(255, 200, 90),
-        idle: tc::rgb(128, 148, 172),
-        idle_lit: tc::rgb(152, 168, 188),
-        unknown: tc::rgb(150, 150, 165),
-        unknown_lit: tc::rgb(165, 165, 178),
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        proc: tc::rgb(170, 190, 215),
-        idle_c: tc::rgb(122, 138, 160),
-        idle_c_lit: tc::rgb(155, 167, 184),
+        blocked: tc::ink(tc::Role::Red),
+        blocked_lit: tc::ink_on(tc::Role::Red, true),
+        done: tc::ink(tc::Role::Green),
+        working: tc::ink(tc::Role::Yellow),
+        idle: tc::ink(tc::Role::Muted),
+        idle_lit: tc::ink_on(tc::Role::Muted, true),
+        unknown: tc::ink(tc::Role::Muted),
+        unknown_lit: tc::ink_on(tc::Role::Muted, true),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        proc: tc::ink(tc::Role::Muted),
+        idle_c: tc::ink(tc::Role::Muted),
+        idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
+            .into_iter()
+            .map(|role| (tc::ink(role), tc::ink_on(role, true)))
+            .collect(),
     }
 }
 
@@ -782,11 +803,11 @@ fn render_pane(
     // Blocked and done keep a tint of their own even unselected: the whole
     // point is that they are visible without being looked for.
     let tint = if here {
-        tc::bg(38, 56, 76)
+        tc::tint(tc::Role::Slot)
     } else if matches!(state.as_str(), "blocked" | "error") {
-        tc::bg(46, 26, 30)
+        tc::tint_toward(tc::Role::Red)
     } else if state == "done" {
-        tc::bg(22, 46, 34)
+        tc::tint_toward(tc::Role::Green)
     } else {
         String::new()
     };
@@ -806,7 +827,7 @@ fn render_pane(
         } else if colour == p.idle_c {
             p.idle_c_lit.as_str()
         } else {
-            colour
+            p.on_tint(colour)
         };
         format!("{}{}", tint, colour)
     };

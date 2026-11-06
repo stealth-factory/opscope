@@ -953,7 +953,24 @@ fn load(spec: SettingsSpec) -> App {
     // Reporting is unconditional now: the option was right by default and
     // only ever turned off by mistake, so every screen here shows the
     // keys the widget itself owns and no others.
-    let wrapped = format!("{{{section}:{}}}", spec.schema);
+    // And the section every widget shares, which holds the theme: the same
+    // choice is offered from every widget's screen, and saving it restarts
+    // this widget in the new colours like any other setting.
+    let shared = crate::theme::settings_schema();
+    let mut constraints = constraints;
+    if let Some(rules) = serde_json::from_str::<Value>(&shared)
+        .ok()
+        .and_then(|v| v.get("_schema").and_then(Value::as_object).cloned())
+    {
+        for (key, rule) in rules {
+            constraints.entry(key).or_insert(rule);
+        }
+    }
+    let wrapped = if spec.section == crate::theme::SECTION {
+        format!("{{{section}:{}}}", spec.schema)
+    } else {
+        format!("{{{section}:{},{:?}:{shared}}}", spec.schema, crate::theme::SECTION)
+    };
     let fields = fields_from_example(&wrapped).expect("the baked-in settings schema is valid JSON");
     let mut skipped = Vec::new();
     let mut found = None;
@@ -4512,7 +4529,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
 /// the terminal is put back the way the widget expects and the caller
 /// carries on with the config it started with, which is exactly where it
 /// was before.
-fn relaunch(keyboard: &mut crate::Keyboard) {
+pub(crate) fn relaunch(keyboard: &mut crate::Keyboard) {
     use std::os::unix::process::CommandExt;
 
     let Ok(exe) = std::env::current_exe() else {

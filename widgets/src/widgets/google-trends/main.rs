@@ -66,24 +66,25 @@ struct Palette {
     warn: String,
     bad: String,
     accent: String,
-    /// The selected-row tint. Every colour above measures at least 4.5:1
-    /// against it - `palette_clears_aa_on_the_tint` holds that.
+    /// The selected-row tint. Every colour above, in the lifted form
+    /// `on_tint` gives it, measures at least 4.5:1 against it -
+    /// `palette_clears_aa_on_the_tint` holds that.
     tint: String,
 }
 
 fn palette() -> Palette {
     Palette {
-        title: tc::rgb(150, 210, 255),
-        head: tc::rgb(120, 220, 255),
-        text: tc::rgb(225, 235, 245),
-        dim: tc::rgb(160, 175, 190),
-        traffic: tc::rgb(255, 190, 110),
-        fresh: tc::rgb(255, 220, 120),
-        ok: tc::rgb(120, 230, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 140, 130),
-        accent: tc::rgb(150, 210, 255),
-        tint: tc::bg(38, 56, 76),
+        title: tc::ink(tc::Role::Accent),
+        head: tc::ink(tc::Role::Blue),
+        text: tc::ink(tc::Role::Fg),
+        dim: tc::ink(tc::Role::Muted),
+        traffic: tc::ink(tc::Role::Orange),
+        fresh: tc::ink(tc::Role::Yellow),
+        ok: tc::ink(tc::Role::Green),
+        warn: tc::ink(tc::Role::Yellow),
+        bad: tc::ink(tc::Role::Red),
+        accent: tc::ink(tc::Role::Accent),
+        tint: tc::tint(tc::Role::Slot),
     }
 }
 
@@ -830,7 +831,7 @@ fn push_item(b: &mut Body, section: usize, index: usize, rows: Vec<String>, sele
 /// Colour on the tint when selected, plain otherwise.
 fn on(p: &Palette, colour: &str, selected: bool) -> String {
     if selected {
-        format!("{}{}", p.tint, colour)
+        format!("{}{}", p.tint, tc::lift(colour))
     } else {
         colour.to_string()
     }
@@ -1829,7 +1830,7 @@ fn main() {
             tabs_at.clear();
             Vec::new()
         } else {
-            let open = format!("{}{}", p.tint, p.accent);
+            let open = format!("{}{}", p.tint, tc::lift(&p.accent));
             let (lines, at) = tc::tab_strip(
                 view.region,
                 &region_tabs(&snapshot, &p),
@@ -2739,9 +2740,9 @@ mod tests {
             &p.title, &p.head, &p.text, &p.dim, &p.traffic, &p.fresh, &p.ok, &p.warn, &p.bad,
             &p.accent,
         ] {
-            let l = lum(channels(c));
+            let l = lum(channels(&tc::lift(c)));
             let ratio = (l.max(tint) + 0.05) / (l.min(tint) + 0.05);
-            assert!(ratio >= 4.5, "{:?} measures {ratio:.2}", channels(c));
+            assert!(ratio >= 4.5, "{:?} measures {ratio:.2}", channels(&tc::lift(c)));
         }
     }
 }

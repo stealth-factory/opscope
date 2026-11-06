@@ -2241,6 +2241,7 @@ fn main() {
     let traffic_available = host::traffic_available();
 
     let ok = rgb_ok();
+    let lit = palette_on(true);
     let store = Arc::new(Store {
         rows: Mutex::new(Vec::new()),
         ready: AtomicBool::new(false),
@@ -3014,11 +3015,13 @@ fn main() {
         for (i, row) in shown.iter().enumerate().skip(scroll).take(visible) {
             let here = i == selected;
             let tint = if here {
-                tc::bg(28, 44, 62)
+                tc::tint(tc::Role::Slot)
             } else {
                 String::new()
             };
-            let (note, note_colour) = bind_note(row, &ok);
+            // Text on the selected row is drawn in the lifted palette.
+            let ok: &Palette = if here { &lit } else { &ok };
+            let (note, note_colour) = bind_note(row, ok);
             // Another user's row names its owner rather than its project,
             // which it has none of that we can read. That is the whole of
             // what is knowable about it.
@@ -3211,18 +3214,26 @@ struct Palette {
 }
 
 fn rgb_ok() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        lbl: tc::rgb(130, 165, 200),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        accent: tc::rgb(150, 210, 255),
-        port: tc::rgb(160, 220, 255),
-        open: tc::rgb(255, 170, 120),
-        local: tc::rgb(120, 200, 160),
+        ok: c(Role::Green),
+        lbl: c(Role::Muted),
+        warn: c(Role::Yellow),
+        bad: c(Role::Red),
+        dim: c(Role::Muted),
+        grid: c(Role::Dim),
+        txt: c(Role::Fg),
+        accent: c(Role::Accent),
+        port: c(Role::Blue),
+        open: c(Role::Orange),
+        local: c(Role::Green),
     }
 }
 

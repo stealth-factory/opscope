@@ -5530,3 +5530,59 @@ local c = rex.call; c("session.destroy")
         "an alias leaves a call the reader cannot name: {reaches:?}"
     );
 }
+
+/// Every colour literal `(r, g, b)` call or raw truecolor escape in `src`:
+/// `rgb(1, 2, 3)`, `bg(…)`, `underline(…)` with a number first, and the
+/// `\x1b[38;2;` / `\x1b[48;2;` escape spelled out in a string.
+fn colour_literals(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (n, line) in src.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or(line);
+        for call in ["rgb(", "bg(", "underline("] {
+            let mut rest = code;
+            while let Some(at) = rest.find(call) {
+                let before = rest[..at].chars().last();
+                let after = rest[at + call.len()..].trim_start().chars().next();
+                let named = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                if named && after.is_some_and(|c| c.is_ascii_digit()) {
+                    found.push(format!("line {}: {}", n + 1, line.trim()));
+                }
+                rest = &rest[at + call.len()..];
+            }
+        }
+        if code.contains("\\x1b[38;2;") || code.contains("\\x1b[48;2;") {
+            found.push(format!("line {}: {}", n + 1, line.trim()));
+        }
+    }
+    found
+}
+
+/// A widget asks the theme for a role - `tc::ink(Role::Muted)`,
+/// `tc::tint(Role::Slot)` - and never names an RGB value. A literal is a
+/// colour tuned for one background: it is what made every widget unreadable
+/// on a light terminal, and it is invisible to the per-theme contrast tests
+/// in `core/src/theme.rs`, which can only measure roles. Tests may keep
+/// literal colours as data; `widgets()` has already dropped them.
+#[test]
+fn no_widget_names_a_colour_literal() {
+    // The pattern first, on lines it must and must not catch.
+    assert_eq!(colour_literals("let x = tc::rgb(1, 2, 3);").len(), 1);
+    assert_eq!(colour_literals("let x = tc::bg( 38,56,76);").len(), 1);
+    assert_eq!(colour_literals(r#"let e = "\x1b[38;2;1;2;3m";"#).len(), 1);
+    assert!(colour_literals("let x = tc::ink(tc::Role::Fg); // was rgb(225, 235, 245)").is_empty());
+    assert!(colour_literals("let x = tc::bg(r, g, b); let y = hue_rgb(t);").is_empty());
+
+    let mut wrong = Vec::new();
+    let mut sources: Vec<(String, String)> = widgets().into_iter().collect();
+    sources.push(("launcher".into(), without_tests(&launcher_source())));
+    for (name, src) in sources {
+        for hit in colour_literals(&src) {
+            wrong.push(format!("{name}: {hit}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "colour literals in widget code - ask the theme for a role (tc::ink, tc::ink_on, tc::tint, tc::tint_toward):\n{}",
+        wrong.join("\n")
+    );
+}

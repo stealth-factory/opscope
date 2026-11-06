@@ -24,6 +24,7 @@ mod aliases;
 mod analytics;
 mod dependencies;
 pub mod theme;
+mod termtheme;
 pub mod google;
 pub mod notices;
 mod settings;
@@ -44,7 +45,7 @@ pub use dependencies::{
 };
 pub use aliases::{alias_problems, resolve_widget};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
-pub use theme::{ink, ink_between, ink_on, tint, tint_toward, Role};
+pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};
@@ -2024,7 +2025,7 @@ pub fn restore_screen() {
     graphics::cleanup();
     terminal::release_terminal();
     terminal::cleanup_signal();
-    out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
+    out(&format!("{}{}{}{}{}{}", terminal::SCHEME_REPORTS_OFF, MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
 
@@ -4847,6 +4848,13 @@ impl Keyboard {
     pub fn poll(&mut self) -> Vec<String> {
         let typing = std::mem::take(&mut self.typing);
         let fresh = self.poll_keys();
+        // The terminal switched light and dark. A widget built its palette
+        // once, from the colours it asked for at start, so it starts again
+        // and asks again - the way saving its settings does. Only when the
+        // theme in force is the terminal's own: a named theme did not change.
+        if terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel) && theme::current().id == "terminal" {
+            settings::relaunch(self);
+        }
         self.held.extend(fresh);
         let (keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
         if opens {

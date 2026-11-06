@@ -1776,9 +1776,10 @@ struct Palette {
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
-    /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
-    /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// `dim` measured 3.81 against the old selected-row tint, under the 4.5
+    /// CLAUDE.md asks for against the tint as well as the background. This is
+    /// the same role lifted until it clears - `ink_on(Muted, true)` - and it is
+    /// used *only* where a tint is on, so an
     /// untinted row is exactly the colour it always was. Not quite the same as
     /// "unselected": herdr-panes tints a blocked or done row whether or not it
     /// is selected, and those get the lighter colours too.
@@ -1800,17 +1801,17 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        bad_lit: tc::rgb(255, 128, 136),
-        dim: tc::rgb(127, 147, 172),
-        dim_lit: tc::rgb(140, 170, 195),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        pr: tc::rgb(180, 160, 255),
+        ok: tc::ink(tc::Role::Green),
+        warn: tc::ink(tc::Role::Yellow),
+        bad: tc::ink(tc::Role::Red),
+        bad_lit: tc::ink_on(tc::Role::Red, true),
+        dim: tc::ink(tc::Role::Muted),
+        dim_lit: tc::ink_on(tc::Role::Muted, true),
+        grid: tc::ink(tc::Role::Dim),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        pr: tc::ink(tc::Role::Magenta),
     }
 }
 
@@ -3453,7 +3454,7 @@ fn list_view(
         if here {
             cursor = Some(rows.len());
         }
-        let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+        let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
         let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -3466,7 +3467,7 @@ fn list_view(
                 } else if colour == p.bad {
                     p.bad_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };
@@ -3955,7 +3956,7 @@ fn detail_view(
             if on_cursor {
                 cursor = Some(rows.len());
             }
-            let tint = if on_cursor { tc::bg(38, 56, 76) } else { String::new() };
+            let tint = if on_cursor { tc::tint(tc::Role::Slot) } else { String::new() };
             let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -3968,7 +3969,7 @@ fn detail_view(
                 } else if colour == p.bad {
                     p.bad_lit.as_str()
                 } else {
-                    colour
+                    return format!("{}{}", tint, tc::lift(colour));
                 };
                 format!("{}{}", tint, colour)
             };

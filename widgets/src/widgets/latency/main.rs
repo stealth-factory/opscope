@@ -22,26 +22,49 @@
 
 mod parse;
 
-/// The hues targets are drawn in, kept as numbers rather than escapes so
-/// that a faded set can be mixed from the same nine.
-const HUES: &[(u8, u8, u8)] = &[
-    (90, 220, 255),
-    (255, 170, 80),
-    (140, 255, 160),
-    (230, 140, 255),
-    (255, 110, 130),
-    (255, 230, 110),
-    (120, 160, 255),
-    (255, 140, 200),
-    (150, 255, 240),
+/// The hues targets are drawn in, as pairs of theme roles: each is the
+/// colour halfway between the two, so a pair naming one role twice is that
+/// role. A theme names seven hues and there are nine targets' worth here,
+/// so the last two are mixed. Kept as roles rather than escapes so that a
+/// faded set can be mixed from the same nine.
+const HUES: &[(tc::Role, tc::Role)] = &[
+    (tc::Role::Cyan, tc::Role::Cyan),
+    (tc::Role::Orange, tc::Role::Orange),
+    (tc::Role::Green, tc::Role::Green),
+    (tc::Role::Magenta, tc::Role::Magenta),
+    (tc::Role::Red, tc::Role::Red),
+    (tc::Role::Yellow, tc::Role::Yellow),
+    (tc::Role::Blue, tc::Role::Blue),
+    (tc::Role::Red, tc::Role::Magenta),
+    (tc::Role::Cyan, tc::Role::Green),
 ];
 
-/// The dark these widgets are drawn against.
+/// One of [`HUES`] as a colour from the theme in force; `lit` takes each
+/// role in the form that reads on the selected-row tint.
+fn hue_rgb((a, b): (tc::Role, tc::Role), lit: bool) -> (u8, u8, u8) {
+    let theme = tc::theme::current();
+    let pick = |role| if lit { theme.lifted(role) } else { theme.colour(role) };
+    if a == b {
+        return pick(a);
+    }
+    let mixed = tc::theme::mix(pick(a), pick(b), 0.5);
+    let grounds = if lit {
+        vec![theme.colour(tc::Role::Slot)]
+    } else {
+        vec![theme.colour(tc::Role::Bg), theme.colour(tc::Role::Dark)]
+    };
+    tc::theme::nudge(mixed, &grounds, theme.light)
+}
+
+/// The dark these widgets are drawn against: the theme's background, and
+/// what a trace is mixed toward when it is not the one being looked at.
 ///
-/// Not the terminal's real background - that cannot be asked for - but the
-/// one the palette was chosen for, and what a trace is mixed toward when it
-/// is not the one being looked at.
-const BACKDROP: (u8, u8, u8) = (16, 22, 30);
+/// Not the terminal's real background when the theme leaves the terminal's
+/// own - that cannot always be asked for - but the one the theme was chosen
+/// for.
+fn backdrop() -> (u8, u8, u8) {
+    tc::theme::colour(tc::Role::Bg)
+}
 
 /// How far an unlooked-at trace is mixed toward the backdrop.
 ///
@@ -967,6 +990,7 @@ fn main() {
     let hosts = if named.is_empty() { hosts } else { named };
 
     let p = palette();
+    let lit = palette_on(true);
     let dialect = ping_dialect();
     let targets: Vec<Target> = hosts
         .iter()
@@ -1217,10 +1241,12 @@ fn main() {
             // that says "this one" in the table is the same thing that says
             // it in the chart: one target at full strength, the rest behind.
             let tint = if here {
-                tc::bg(28, 44, 62)
+                tc::tint(tc::Role::Slot)
             } else {
                 String::new()
             };
+            // Text on the selected row is drawn in the lifted palette.
+            let p: &Palette = if here { &lit } else { &p };
             let raw_hue = p.hues[i % p.hues.len()].clone();
             let loss_c = if st.loss == 0.0 {
                 &p.ok
@@ -1251,9 +1277,9 @@ fn main() {
                 &tinted(loss_c),
                 tc::Marks { threshold: st.loss > 0.0, ..tc::Marks::default() },
             );
-            // MIN and MAX are drawn in `dim`, which does not clear AA on the
-            // tint. On the selected row they get the lighter one.
-            let dim = if here { &p.dim_lit } else { &p.dim };
+            // MIN and MAX are drawn in `dim`, which did not clear AA on the
+            // tint. On the selected row the palette is the lifted one.
+            let dim = &p.dim;
             // Owned colours rather than borrowed: the row is assembled
             // before it is measured, so a `&format!(...)` temporary would not
             // outlive the vector it was put in.
@@ -1304,7 +1330,7 @@ fn main() {
                         if here {
                             &p.txt
                         } else {
-                            &p.dim_lit
+                            &p.dim
                         }
                     } else {
                         &p.bad
@@ -1530,11 +1556,6 @@ struct Palette {
     grid: String,
     txt: String,
     lbl: String,
-    /// The readable dim, used wherever `dim` would fail: on the selected
-    /// row's tint, where (70,100,120) measures 2.27 against AA's 4.5, and
-    /// for every host name, which is grey until its row is the one selected.
-    /// This clears AA on the tint at 4.83 and on the backdrop at 6.18.
-    dim_lit: String,
     head: String,
     hues: Vec<String>,
     /// The same nine, mixed toward the backdrop, for traces that are not
@@ -1543,21 +1564,32 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
+    let hues: Vec<(u8, u8, u8)> = HUES.iter().map(|pair| hue_rgb(*pair, lit)).collect();
     Palette {
-        ok: tc::rgb(110, 255, 170),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 95, 105),
-        dim: tc::rgb(70, 100, 120),
-        grid: tc::rgb(38, 58, 74),
-        txt: tc::rgb(215, 235, 250),
-        lbl: tc::rgb(120, 170, 200),
-        dim_lit: tc::rgb(120, 155, 180),
-        head: tc::rgb(90, 220, 255),
+        ok: c(Role::Green),
+        warn: c(Role::Yellow),
+        bad: c(Role::Red),
+        // Grey text - MIN, MAX and every host name until its row is the
+        // one selected - so the readable grey. It was a darker grey that
+        // needed a lighter twin on the tint, at 2.27 against AA's 4.5.
+        dim: c(Role::Muted),
+        grid: c(Role::Dim),
+        txt: c(Role::Fg),
+        lbl: c(Role::Muted),
+        head: c(Role::Accent),
         // latency.py's own nine, not the six the other widgets share: the
         // traces are told apart by hue alone now that the glyphs are gone,
         // so more targets than six needs more than six colours.
-        hues: HUES.iter().map(|c| tc::rgb(c.0, c.1, c.2)).collect(),
-        faded: HUES.iter().map(|c| tc::mix(*c, BACKDROP, FADE)).collect(),
+        hues: hues.iter().map(|h| tc::rgb(h.0, h.1, h.2)).collect(),
+        faded: hues.iter().map(|h| tc::mix(*h, backdrop(), FADE)).collect(),
     }
 }
 

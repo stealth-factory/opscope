@@ -321,10 +321,10 @@ pub fn builtin() -> &'static [Theme] {
     })
 }
 
-/// The picker's groups, in order: (id, label).
+/// The picker's groups, in order: (id, label). Your own themes come last.
 pub fn groups() -> Vec<(String, String)> {
     let file: serde_json::Value = serde_json::from_str(THEMES_JSON).unwrap_or_default();
-    file["groups"]
+    let mut out: Vec<(String, String)> = file["groups"]
         .as_array()
         .into_iter()
         .flatten()
@@ -332,7 +332,9 @@ pub fn groups() -> Vec<(String, String)> {
             let s = |k: &str| g[k].as_str().unwrap_or_default().to_string();
             (s("id"), s("label"))
         })
-        .collect()
+        .collect();
+    out.push(("user".into(), "your themes".into()));
+    out
 }
 
 /// A built-in theme by id.
@@ -374,8 +376,8 @@ pub fn choose(wanted: &Wanted, terminal: Option<&Theme>) -> Result<Theme, String
         Wanted::Terminal => Ok(terminal.cloned().unwrap_or_else(|| {
             find("classic").cloned().expect("opscope Classic is built in")
         })),
-        Wanted::Named(id) => match find(id) {
-            Some(theme) => Ok(theme.clone()),
+        Wanted::Named(id) => match lookup(id) {
+            Some(theme) => Ok(theme),
             None => Err(format!("theme {id:?} is not one opscope knows - drawing {}", fallback().name)),
         },
     }
@@ -399,10 +401,143 @@ pub fn wanted() -> Wanted {
         .into_iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .find_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    match file.as_ref().and_then(|f| f.get("theme")).and_then(|v| v.as_str()) {
-        Some(text) => parse_wanted(text),
+    // `opscope.theme` is what the settings screen writes; a top-level
+    // `theme` is the shorter spelling for a config written by hand.
+    let set = file.as_ref().and_then(|f| {
+        f.get(SECTION)
+            .and_then(|s| s.get("theme"))
+            .or_else(|| f.get("theme"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+    match set {
+        Some(text) => parse_wanted(&text),
         None => Wanted::Auto,
     }
+}
+
+/// The config section every widget shares: where the theme is kept.
+pub const SECTION: &str = "opscope";
+
+/// The shared section's settings schema, in the shape a widget's
+/// `settings.json` has, for the settings screen to show beside the widget's
+/// own. Built here rather than shipped as a file because its choices are
+/// every theme there is, user themes included.
+pub fn settings_schema() -> String {
+    let mut choices = vec!["auto".to_string(), "terminal".to_string()];
+    choices.extend(all().iter().map(|t| t.id.clone()));
+    let names: Vec<String> = all()
+        .iter()
+        .map(|t| format!("{} ({})", t.id, t.name))
+        .collect();
+    serde_json::json!({
+        "_comment": "Settings every widget shares.",
+        "_schema": { "theme": { "choices": choices } },
+        "_theme_comment": format!(
+            "Colours for every widget. auto uses the terminal's own colours when it says what they are, and opscope Dusk when it does not. terminal always uses the terminal's own. classic is opscope's colours from before themes. OPSCOPE_THEME overrides this for one run. Themes: {}.",
+            names.join(", ")
+        ),
+        "theme": "auto",
+    })
+    .to_string()
+}
+
+/// Every theme a person can pick: the built-in ones, with a user theme of
+/// the same id in place of the built-in, then the user's others.
+pub fn all() -> Vec<Theme> {
+    let (mine, _) = user_themes();
+    let mut out: Vec<Theme> = builtin()
+        .iter()
+        .map(|t| mine.iter().find(|m| m.id == t.id).cloned().unwrap_or_else(|| t.clone()))
+        .collect();
+    out.extend(mine.iter().filter(|m| find(&m.id).is_none()).cloned());
+    out
+}
+
+/// A theme by id, the user's own first.
+pub fn lookup(id: &str) -> Option<Theme> {
+    all().into_iter().find(|t| t.id == id)
+}
+
+/// Where a person's own themes go: `opscope/themes/` beside config.json,
+/// one theme a file, the file name as its id.
+pub fn themes_dir() -> std::path::PathBuf {
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok().filter(|s| !s.is_empty());
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(xdg.unwrap_or(format!("{home}/.config"))).join("opscope/themes")
+}
+
+/// One user theme file. `fg` and `bg` are required; every other role is
+/// optional and, when absent, worked out from those two and the hues the
+/// file does give, as the terminal's own theme is. Contrast is enforced
+/// like every theme's, so a hand-made colour that does not read is moved
+/// until it does.
+pub fn parse_user_theme(id: &str, text: &str) -> Result<Theme, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("is not JSON ({e})"))?;
+    if !value.is_object() {
+        return Err("is not a JSON object".into());
+    }
+    let colour = |role: Role| -> Result<Option<Rgb>, String> {
+        match value.get(role.key()) {
+            None => Ok(None),
+            Some(v) => {
+                let raw = v.as_str().ok_or_else(|| format!("{} is not a string", role.key()))?;
+                parse_hex(raw).map(Some).ok_or_else(|| format!("{} is {raw:?}, not #rrggbb", role.key()))
+            }
+        }
+    };
+    let fg = colour(Role::Fg)?.ok_or("has no fg")?;
+    let bg = colour(Role::Bg)?.ok_or("has no bg")?;
+    let mut palette = [None; 16];
+    for (n, role) in [(1, Role::Red), (2, Role::Green), (3, Role::Yellow), (4, Role::Blue), (5, Role::Magenta), (6, Role::Cyan)] {
+        palette[n] = colour(role)?;
+    }
+    let derived = crate::termtheme::theme_from(fg, bg, &palette);
+    let mut colours = [(0, 0, 0); 16];
+    for role in Role::ALL {
+        colours[role.index()] = colour(role)?.unwrap_or_else(|| derived.colour(role));
+    }
+    let light = value.get("light").and_then(|v| v.as_bool()).unwrap_or(derived.light);
+    let paints = value.get("paintsBackground").and_then(|v| v.as_bool()).unwrap_or(true);
+    let name = value.get("name").and_then(|v| v.as_str()).unwrap_or(id).to_string();
+    let mut theme = Theme::new(id, &name, light, paints, colours);
+    theme.group = "user".into();
+    Ok(theme)
+}
+
+/// The person's own themes, and a line for each file that could not be
+/// read as one. Read once.
+pub fn user_themes() -> &'static (Vec<Theme>, Vec<String>) {
+    static MINE: OnceLock<(Vec<Theme>, Vec<String>)> = OnceLock::new();
+    MINE.get_or_init(|| {
+        if cfg!(test) {
+            return (Vec::new(), Vec::new());
+        }
+        read_user_themes(&themes_dir())
+    })
+}
+
+/// [`user_themes`] from `dir`.
+pub fn read_user_themes(dir: &std::path::Path) -> (Vec<Theme>, Vec<String>) {
+    let (mut found, mut wrong) = (Vec::new(), Vec::new());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (found, wrong);
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+        let file = path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        match std::fs::read_to_string(&path).map_err(|e| format!("cannot be read ({e})")).and_then(|t| parse_user_theme(&id, &t)) {
+            Ok(theme) => found.push(theme),
+            Err(why) => wrong.push(format!("theme file {file} {why} - it is left out")),
+        }
+    }
+    (found, wrong)
 }
 
 fn resolve() -> Theme {
@@ -411,8 +546,16 @@ fn resolve() -> Theme {
     if cfg!(test) {
         return find("classic").cloned().expect("opscope Classic is built in");
     }
+    let (_, wrong) = user_themes();
+    crate::notices::when(!wrong.is_empty(), || {
+        crate::notices::Notice::warn("theme-file-bad", wrong.join("; "))
+    });
     let wanted = wanted();
-    match choose(&wanted, crate::terminal::terminal_theme().as_ref()) {
+    let terminal = match wanted {
+        Wanted::Named(_) => None,
+        Wanted::Auto | Wanted::Terminal => crate::terminal::terminal_theme(),
+    };
+    match choose(&wanted, terminal.as_ref()) {
         Ok(theme) => theme,
         Err(why) => {
             crate::notices::when(true, || crate::notices::Notice::warn("theme-unknown", why.clone()));
@@ -461,6 +604,24 @@ pub fn ink_on(role: Role, tinted: bool) -> String {
     let theme = current();
     let (r, g, b) = if tinted { theme.lifted(role) } else { theme.colour(role) };
     format!("\x1b[38;2;{};{};{}m", r, g, b)
+}
+
+/// `colour` as it is drawn on a tinted row: a text role's [`ink`] becomes
+/// that role's lifted form, and anything that is not a role's ink - the
+/// heat ramp, which lifts itself through `heat_on`, or a mixed shade - is
+/// left as it is. For a widget that builds its row colours once and puts
+/// them on a selected or tinted row later.
+pub fn lift(colour: &str) -> String {
+    let theme = current();
+    Role::ALL
+        .into_iter()
+        .filter(|r| r.is_text())
+        .find(|r| {
+            let (red, g, b) = theme.colour(*r);
+            format!("\x1b[38;2;{};{};{}m", red, g, b) == colour
+        })
+        .map(|r| ink_on(r, true))
+        .unwrap_or_else(|| colour.to_string())
 }
 
 /// A row tinted toward `hue` - [`Role::Red`] for a blocked agent,
@@ -634,6 +795,51 @@ mod tests {
         ] {
             assert_eq!(classic.colour(role), today, "{role:?}");
         }
+    }
+
+    #[test]
+    fn a_user_theme_needs_only_fg_and_bg_and_a_bad_file_is_named() {
+        let dir = std::env::temp_dir().join(format!("opscope-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Mine.json"), r##"{"name": "Mine", "fg": "#e0e0e0", "bg": "#101418", "red": "#ff0000"}"##).unwrap();
+        std::fs::write(dir.join("broken.json"), "{ not json").unwrap();
+        std::fs::write(dir.join("nofg.json"), r##"{"bg": "#000000"}"##).unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let (found, wrong) = read_user_themes(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(found.len(), 1);
+        let mine = &found[0];
+        assert_eq!((mine.id.as_str(), mine.name.as_str(), mine.group.as_str()), ("mine", "Mine", "user"));
+        assert!(mine.paints_background && !mine.light);
+        assert_eq!(mine.colour(Role::Bg), (16, 20, 24));
+        // Every role is there, readable, whether the file gave it or not.
+        for role in Role::ALL.into_iter().filter(|r| r.is_text()) {
+            assert!(contrast(mine.colour(role), mine.colour(Role::Bg)) >= AA, "{role:?}");
+        }
+        assert_eq!(wrong.len(), 2, "{wrong:?}");
+        assert!(wrong.iter().any(|w| w.contains("broken.json") && w.contains("not JSON")));
+        assert!(wrong.iter().any(|w| w.contains("nofg.json") && w.contains("has no fg")));
+        // A folder that is not there is no themes, and no complaint.
+        assert_eq!(read_user_themes(std::path::Path::new("/nonexistent/opscope/themes")), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn the_shared_section_offers_every_theme() {
+        let schema: serde_json::Value = serde_json::from_str(&settings_schema()).unwrap();
+        let choices = schema["_schema"]["theme"]["choices"].as_array().unwrap();
+        assert_eq!(choices[0], "auto");
+        assert_eq!(choices[1], "terminal");
+        assert_eq!(choices.len(), 2 + all().len());
+        assert_eq!(schema["theme"], "auto");
+        assert!(schema["_theme_comment"].as_str().unwrap().contains("opscope Dusk"));
+    }
+
+    #[test]
+    fn lift_turns_a_role_into_its_lifted_form_and_leaves_the_rest() {
+        assert_eq!(lift(&ink(Role::Red)), ink_on(Role::Red, true));
+        assert_eq!(lift(&ink(Role::Muted)), ink_on(Role::Muted, true));
+        let shade = "\x1b[38;2;1;2;3m";
+        assert_eq!(lift(shade), shade);
     }
 
     #[test]

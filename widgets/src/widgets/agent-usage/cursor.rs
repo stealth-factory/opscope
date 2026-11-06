@@ -758,10 +758,10 @@ fn product_hue(name: &str) -> (u8, u8, u8) {
     match name {
         "Cursor" => agent_hue("cursor").unwrap(),
         "Grok Bot" => agent_hue("grok").unwrap(),
-        "Grok Build" => (186, 166, 255),
-        "Grok Chat" => (240, 200, 110),
-        "Grok Imagine" => (232, 158, 200),
-        _ => (206, 214, 228),
+        "Grok Build" => tc::theme::colour(tc::Role::Magenta),
+        "Grok Chat" => tc::theme::colour(tc::Role::Yellow),
+        "Grok Imagine" => hue_between(tc::Role::Magenta, tc::Role::Red, 0.5),
+        _ => tc::theme::colour(tc::Role::Fg),
     }
 }
 
@@ -1320,7 +1320,7 @@ fn activity_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> 
         )];
     };
     let days = activity_days(summary);
-    let Some(cal) = day_calendar(&days, w, SPACEXSI_STEPS, None, p) else {
+    let Some(cal) = day_calendar(&days, w, spacexsi_steps(), None, p) else {
         return vec![tc::seg(
             &[(p.lbl.as_str(), " ── ACTIVITY ── ".into()), (p.dim.as_str(), "no active days on the profile".into())],
             w - 1,
@@ -1358,7 +1358,7 @@ fn activity_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> 
         rows.push(seg_owned(line, w));
     }
     let mut legend: Vec<(String, String)> = vec![(p.dim.clone(), "  Less ".into())];
-    legend.extend(SPACEXSI_STEPS.iter().map(|(r, g, b)| (tc::rgb(*r, *g, *b), "█".to_string())));
+    legend.extend(spacexsi_steps().iter().map(|(r, g, b)| (tc::rgb(*r, *g, *b), "█".to_string())));
     legend.push((p.dim.clone(), " More".into()));
     rows.push(seg_owned(&legend, w));
     rows

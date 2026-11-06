@@ -381,23 +381,52 @@ const LIST_RATES: tc::Catalogue = &[
     ("gemini-2.5-flash", "Google", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
 ];
 
+/// Four steps from the pane's background up to `role`, in the theme in
+/// force: the shape every calendar ramp here takes.
+fn steps_toward(role: tc::Role) -> [(u8, u8, u8); 4] {
+    let ground = tc::theme::colour(tc::Role::Bg);
+    let top = tc::theme::colour(role);
+    [0.28, 0.56, 0.8, 1.0].map(|t| tc::theme::mix(ground, top, t))
+}
+
+/// A hue the sixteen roles do not name, part-way between two of them and
+/// nudged, like the roles themselves, to read on the background and bars.
+fn hue_between(a: tc::Role, b: tc::Role, t: f64) -> (u8, u8, u8) {
+    let theme = tc::theme::current();
+    tc::theme::nudge(
+        tc::theme::mix(theme.colour(a), theme.colour(b), t),
+        &[theme.colour(tc::Role::Bg), theme.colour(tc::Role::Dark)],
+        theme.light,
+    )
+}
+
 /// One hue, four steps, the way /stats and the contribution calendar do it.
 /// heat() runs green to amber to red, which reads as a change of *kind*
-/// rather than of amount - wrong for "more of the same thing".
-const HEAT_STEPS: [(u8, u8, u8); 4] = [(74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84)];
-// Codex and Grok draw these four-step ramps. The numbers stay here so a
+/// rather than of amount - wrong for "more of the same thing". Claude's
+/// orange.
+fn heat_steps() -> [(u8, u8, u8); 4] {
+    steps_toward(tc::Role::Orange)
+}
+// Codex and Grok draw these four-step ramps. They are defined here so a
 // vendor file does not carry a second copy. Cursor has no day calendar,
 // so its copy is unused.
 #[allow(dead_code)]
-const CODEX_STEPS: [(u8, u8, u8); 4] =
-    [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
+fn codex_steps() -> [(u8, u8, u8); 4] {
+    steps_toward(tc::Role::Fg)
+}
 #[allow(dead_code)]
-const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
-/// SpaceXSI's activity calendar, in the plan's greyscale.
-const SPACEXSI_STEPS: [(u8, u8, u8); 4] = [(62, 62, 62), (110, 110, 110), (165, 165, 165), (225, 225, 225)];
+fn grok_steps() -> [(u8, u8, u8); 4] {
+    steps_toward(tc::Role::Blue)
+}
+/// SpaceXSI's activity calendar, in the plan's greyscale: the theme's
+/// text colour, which is as near neutral as a theme gets.
+fn spacexsi_steps() -> [(u8, u8, u8); 4] {
+    steps_toward(tc::Role::Fg)
+}
 #[allow(dead_code)]
-const CURSOR_STEPS: [(u8, u8, u8); 4] =
-    [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
+fn cursor_steps() -> [(u8, u8, u8); 4] {
+    steps_toward(tc::Role::Green)
+}
 
 /// One hue per provider. Each is the colour that agent's own tab already
 /// uses, so the same agent looks the same wherever you meet it. Copilot and
@@ -407,41 +436,52 @@ fn agent_family(name: &str) -> &str {
     name.split_once(':').map(|(head, _)| head).unwrap_or(name)
 }
 
-/// Perplexity's hue. Named, because its bars are drawn between their own
-/// two teals rather than on the shared ramp - see `bar_stops`.
-const PERPLEXITY_HUE: (u8, u8, u8) = (60, 180, 166);
+/// Perplexity's hue: the theme's cyan. Named, because its bars are drawn
+/// between their own two teals rather than on the shared ramp - see
+/// `bar_stops`.
+fn perplexity_hue() -> (u8, u8, u8) {
+    tc::theme::colour(tc::Role::Cyan)
+}
 
 /// Bar stops for a hue the shared ramp washes out. The ramp mixes every hue
 /// 15% to 60% toward white, which took Perplexity's dark teal to a pale
 /// mint at the full end; its bars instead run from the hue to a brighter
 /// teal of the same family. Every other hue keeps the shared ramp.
 fn bar_stops(hue: (u8, u8, u8)) -> Option<([u8; 3], [u8; 3])> {
-    (hue == PERPLEXITY_HUE).then_some(([60, 180, 166], [112, 214, 198]))
+    (hue == perplexity_hue()).then(|| {
+        let (r, g, b) = hue;
+        let (er, eg, eb) = hue_between(tc::Role::Cyan, tc::Role::Fg, 0.3);
+        ([r, g, b], [er, eg, eb])
+    })
 }
 
 fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
     Some(match agent_family(name) {
-        "claude" => (240, 132, 84),
-        "codex" => (206, 214, 228),
-        "cursor" => (126, 208, 176),
-        "grok" => (120, 196, 250),
-        "copilot" => (186, 166, 255),
-        "antigravity" => (232, 158, 200),
-        "notion" => (232, 226, 212),
-        // Perplexity's dark teal, its brand #20808D lifted only as far as
-        // reading needs: the brand measures 2.59 on the selected-row tint,
-        // this 4.72 there and 8.27 on black.
-        "perplexity" => PERPLEXITY_HUE,
-        "devin" => (148, 214, 255),
-        "droid" => (196, 214, 140),
+        // Each a theme role, so a vendor keeps its place in every theme;
+        // the three no role names are mixed from the two nearest and nudged
+        // to read. Red and yellow stay out: they are this widget's trouble.
+        "claude" => tc::theme::colour(tc::Role::Orange),
+        "codex" => tc::theme::colour(tc::Role::Fg),
+        "cursor" => tc::theme::colour(tc::Role::Green),
+        "grok" => tc::theme::colour(tc::Role::Blue),
+        "copilot" => tc::theme::colour(tc::Role::Magenta),
+        // Pink: between the theme's magenta and red.
+        "antigravity" => hue_between(tc::Role::Magenta, tc::Role::Red, 0.5),
+        // Notion's warm white: the theme's text, a little toward yellow.
+        "notion" => hue_between(tc::Role::Fg, tc::Role::Yellow, 0.2),
+        // Perplexity's teal, its brand #20808D: the theme's cyan, which
+        // every theme keeps readable on the selected-row tint.
+        "perplexity" => perplexity_hue(),
+        "devin" => tc::theme::colour(tc::Role::Accent),
+        // Droid's olive: between the theme's green and yellow.
+        "droid" => hue_between(tc::Role::Green, tc::Role::Yellow, 0.5),
         // The unified Cursor and Grok plan, in greyscale: the brand is
         // monochrome, and its black is unreadable on a dark pane (1.0 to
         // 1.75 against the backgrounds here). A mid grey rather than white,
         // because bars ramp this hue toward white - from white there is
-        // nothing left to ramp and the bar draws flat. From here it runs
-        // about 174 to 217. Neutral, with none of Codex's blue in it; 4.6 on
-        // the selected-row tint and 8.03 on black as text.
-        "spacexsi" => (160, 160, 160),
+        // nothing left to ramp and the bar draws flat. The theme's
+        // secondary text, readable on the selected-row tint.
+        "spacexsi" => tc::theme::colour(tc::Role::Muted),
         _ => return None,
     })
 }
@@ -463,10 +503,10 @@ fn tab_title(name: &str) -> String {
 #[allow(dead_code)]
 fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
     match name {
-        "codex" => CODEX_STEPS,
-        "grok" => GROK_STEPS,
-        "cursor" => CURSOR_STEPS,
-        _ => HEAT_STEPS,
+        "codex" => codex_steps(),
+        "grok" => grok_steps(),
+        "cursor" => cursor_steps(),
+        _ => heat_steps(),
     }
 }
 
@@ -768,15 +808,15 @@ fn work_days_between<Tz: TimeZone>(tz: &Tz, from: f64, to: f64, days: u8) -> Opt
 
 /// Keep Cursor's quota categories as distinct tints of its provider hue.
 /// This chooses category colours; core owns the gradient within each bar.
-const BAR_FLOOR: (u8, u8, u8) = (30, 38, 52);
+/// The floor is the pane's background a little toward the theme's dim.
+fn bar_floor() -> (u8, u8, u8) {
+    tc::theme::mix(tc::theme::colour(tc::Role::Bg), tc::theme::colour(tc::Role::Dim), 0.4)
+}
 
 fn blend(hue: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    let floor = bar_floor();
     let step = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
-    (
-        step(BAR_FLOOR.0, hue.0),
-        step(BAR_FLOOR.1, hue.1),
-        step(BAR_FLOOR.2, hue.2),
-    )
+    (step(floor.0, hue.0), step(floor.1, hue.1), step(floor.2, hue.2))
 }
 
 /// Which of the four steps a day falls in.
@@ -797,7 +837,7 @@ struct Palette {
     accent: String,
     agent: String,
     empty_cell: String,
-    /// The notch is white on its own dark cell rather than a bare
+    /// The notch is the text colour on its own dark cell rather than a bare
     /// foreground colour: plain white manages 1.2:1 against a full bar, so
     /// it disappears exactly where it matters.
     pace_mark: String,
@@ -805,17 +845,17 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
-        agent: tc::rgb(180, 160, 255),
-        empty_cell: tc::rgb(58, 66, 80),
-        pace_mark: format!("{}{}", tc::bg(10, 12, 18), tc::rgb(238, 244, 252)),
+        ok: tc::ink(tc::Role::Green),
+        warn: tc::ink(tc::Role::Yellow),
+        bad: tc::ink(tc::Role::Red),
+        dim: tc::ink(tc::Role::Muted),
+        grid: tc::ink(tc::Role::Dim),
+        txt: tc::ink(tc::Role::Fg),
+        lbl: tc::ink(tc::Role::Muted),
+        accent: tc::ink(tc::Role::Accent),
+        agent: tc::ink(tc::Role::Magenta),
+        empty_cell: tc::ink(tc::Role::Dim),
+        pace_mark: format!("{}{}", tc::tint(tc::Role::Dark), tc::ink(tc::Role::Fg)),
     }
 }
 
@@ -2629,7 +2669,7 @@ fn tab_bar(
         }
         parts.push((
             if here {
-                format!("{}{}", tc::bg(38, 56, 76), p.accent)
+                format!("{}{}", tc::tint(tc::Role::Slot), tc::ink_on(tc::Role::Accent, true))
             } else {
                 p.dim.clone()
             },
@@ -4681,7 +4721,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let cal = day_calendar(&totals, 60, HEAT_STEPS, None, &p).expect("a calendar");
+        let cal = day_calendar(&totals, 60, heat_steps(), None, &p).expect("a calendar");
         assert_eq!(cal.span, 6);
         assert_eq!(cal.active, 5);
         assert_eq!(cal.longest, 3);

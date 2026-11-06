@@ -429,7 +429,7 @@ pub(crate) fn start() {
     };
     let cell_query = if query_cells { "\x1b[16t" } else { "" };
     let mut query = format!(
-        "{leading}{NOTIFY_QUERY}{STATUS_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}"
+        "{leading}{NOTIFY_QUERY}{STATUS_QUERY}{SIZE_PROBE}{QUERY_TAIL}{cell_query}{UNDERLINE_QUERY}{SCHEME_REPORTS_ON}"
     );
     if let Some(probe) = probe {
         query.push_str(&probe);
@@ -816,6 +816,10 @@ fn frame_refused(message: &str) -> bool {
 }
 
 pub(crate) fn reply(sequence: &str) {
+    if super::termtheme::parse_scheme_change(sequence).is_some() {
+        SCHEME_CHANGED.store(true, Ordering::Release);
+        return;
+    }
     // Outside the 800 ms capability window on purpose: a font change asks
     // again on SIGWINCH, long after startup, and the reply is still a cell size.
     if let Some(report) = cell_report(sequence) {
@@ -2224,7 +2228,18 @@ mod tests {
 }
 
 /// The theme the terminal described, from its replies to the colour
-/// queries; `None` until it has answered, or when it never does.
+/// queries: asked once, the first time it is wanted, and remembered.
+/// `None` when it is not a terminal or it did not say.
 pub(crate) fn terminal_theme() -> Option<crate::theme::Theme> {
-    None
+    static ASKED: std::sync::OnceLock<Option<crate::theme::Theme>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(super::termtheme::query).clone()
 }
+
+/// Set when the terminal says its colours changed (mode 2031); the next
+/// keyboard poll restarts the widget so it asks again.
+pub(crate) static SCHEME_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Ask the terminal to report light/dark switches (mode 2031). Harmless
+/// where it is not known; turned off again in `restore_screen`.
+pub(crate) const SCHEME_REPORTS_ON: &str = "\x1b[?2031h";
+pub(crate) const SCHEME_REPORTS_OFF: &str = "\x1b[?2031l";

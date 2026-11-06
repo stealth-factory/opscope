@@ -46,20 +46,29 @@ pub struct Palette {
     pub grid: String,
 }
 
-/// Every colour drawn on a selected row clears AA 4.5 on the tint
-/// `bg(28, 44, 62)`: accent 8.76, lbl 5.52, txt 11.77, dim 5.84, up 9.24,
-/// down 5.95, warn 9.24.
+/// Every colour is a theme role. On a selected row each is drawn in its
+/// lifted form through `on_tint`, which clears AA 4.5 on the
+/// `tint(Role::Slot)` behind it.
 pub fn palette() -> Palette {
     Palette {
-        accent: tc::rgb(150, 210, 255),
-        lbl: tc::rgb(130, 165, 200),
-        txt: tc::rgb(225, 235, 245),
-        dim: tc::rgb(150, 168, 190),
-        up: tc::rgb(80, 235, 150),
-        down: tc::rgb(255, 130, 135),
-        warn: tc::rgb(255, 200, 90),
-        bar: tc::rgb(120, 200, 255),
-        grid: tc::rgb(96, 114, 138),
+        accent: tc::ink(tc::Role::Accent),
+        lbl: tc::ink(tc::Role::Muted),
+        txt: tc::ink(tc::Role::Fg),
+        dim: tc::ink(tc::Role::Muted),
+        up: tc::ink(tc::Role::Green),
+        down: tc::ink(tc::Role::Red),
+        warn: tc::ink(tc::Role::Yellow),
+        bar: tc::ink(tc::Role::Blue),
+        grid: tc::ink(tc::Role::Dim),
+    }
+}
+
+/// `colour` behind `tint`: lifted when there is a tint to lift it over.
+fn on(tint: &str, colour: &str) -> String {
+    if tint.is_empty() {
+        colour.to_string()
+    } else {
+        format!("{}{}", tint, tc::lift(colour))
     }
 }
 
@@ -481,8 +490,8 @@ fn stacked<'a>(cells: &[(&'a str, String, usize)], avail: usize) -> Vec<Vec<(&'a
 
 fn table(row: Cells, w: usize) -> Vec<String> {
     let room = w.saturating_sub(1).max(1);
-    let tint = if row.here { tc::bg(28, 44, 62) } else { String::new() };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let tint = if row.here { tc::tint(tc::Role::Slot) } else { String::new() };
+    let c = |colour: &str| on(&tint, colour);
     let lead_w = tc::display_width(&row.lead.1);
     let texts = cell_texts(&row.cells);
     let cells_w: usize = texts.iter().map(|t| tc::display_width(t)).sum();
@@ -1591,8 +1600,8 @@ pub fn paint<'a>(name: &str, p: &'a Palette) -> &'a str {
 }
 
 fn term_rows(t: &Term, site: &str, here: bool, p: &Palette, w: usize) -> Vec<String> {
-    let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+    let c = |colour: &str| on(&tint, colour);
     let delta = match t.prior_clicks {
         Some(before) => match percent(t.m.clicks, before) {
             Some(x) => (good_colour((x.round() != 0.0).then_some(x > 0.0), p).to_string(), signed_pct(x)),
@@ -1620,8 +1629,8 @@ fn term_rows(t: &Term, site: &str, here: bool, p: &Palette, w: usize) -> Vec<Str
 }
 
 fn inspection_rows(site: &str, url: &str, e: &Inspected, here: bool, now: f64, p: &Palette, w: usize) -> Vec<String> {
-    let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+    let c = |colour: &str| on(&tint, colour);
     let (verdict, colour) = match &e.result {
         Ok(i) => (i.verdict.clone(), verdict_colour(&i.verdict, p)),
         Err(_) => ("ERROR".to_string(), p.down.as_str()),
@@ -1667,8 +1676,8 @@ fn inspection_rows(site: &str, url: &str, e: &Inspected, here: bool, now: f64, p
 }
 
 fn sitemap_rows(site: &str, m: &Sitemap, here: bool, now: f64, p: &Palette, w: usize) -> Vec<String> {
-    let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+    let c = |colour: &str| on(&tint, colour);
     let mut out = table(
         Cells {
             here,
@@ -1720,8 +1729,8 @@ pub fn days_failed(d: &SiteData, now: f64) -> Option<(bool, String)> {
 }
 
 fn site_rows(d: &SiteData, cache: Option<&InspectionCache>, here: bool, top: usize, now: f64, p: &Palette, w: usize) -> Vec<String> {
-    let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let tint = if here { tc::tint(tc::Role::Slot) } else { String::new() };
+    let c = |colour: &str| on(&tint, colour);
     let mut out = table(
         Cells { here, lead: (p.accent.as_str(), if here { "▸ ".into() } else { "  ".into() }), name: (p.txt.as_str(), d.site.clone()), cells: Vec::new() },
         w,

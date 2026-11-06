@@ -65,21 +65,24 @@ const MIN_CHART: usize = 12;
 fn scroll_label(first: usize, last: usize, total: usize) -> String {
     format!("rows {:>3}-{:>3} of {:>3}", first, last, total)
 }
-/// The hues sessions are drawn in, kept as numbers so a faded set can be
+/// The hues sessions are drawn in, as theme roles, so a faded set can be
 /// mixed from the same six.
-const HUES: &[(u8, u8, u8)] = &[
-    (120, 200, 255),
-    (150, 230, 180),
-    (220, 170, 255),
-    (160, 190, 240),
-    (200, 220, 150),
-    (240, 180, 210),
+const HUES: &[tc::Role] = &[
+    tc::Role::Blue,
+    tc::Role::Green,
+    tc::Role::Magenta,
+    tc::Role::Cyan,
+    tc::Role::Yellow,
+    tc::Role::Orange,
 ];
 
-/// The dark these widgets are drawn against - not the terminal's real
-/// background, which cannot be asked for, but the one the palette was chosen
-/// for, and what a trace is mixed toward when it is not the one selected.
-const BACKDROP: (u8, u8, u8) = (16, 22, 30);
+/// The dark these widgets are drawn against - the theme's background, which
+/// is not the terminal's real one when the theme leaves the terminal's own,
+/// but the one the theme was chosen for - and what a trace is mixed toward
+/// when it is not the one selected.
+fn backdrop() -> (u8, u8, u8) {
+    tc::theme::colour(tc::Role::Bg)
+}
 
 /// How far an unlooked-at trace is mixed toward the backdrop. Measured
 /// against the two things it sits between: at 0.60 a faded trace stays
@@ -1047,9 +1050,17 @@ fn table(
     for (i, row) in rows.iter().enumerate() {
         let here = selected == Some(i);
         let tint = if here {
-            tc::bg(28, 44, 62)
+            tc::tint(tc::Role::Slot)
         } else {
             String::new()
+        };
+        // Text on the selected row is drawn in the lifted palette.
+        let lit;
+        let p = if here {
+            lit = palette_on(true);
+            &lit
+        } else {
+            p
         };
         let hue = &p.hues[i % p.hues.len()];
 
@@ -1542,17 +1553,26 @@ struct Palette {
 }
 
 fn palette() -> Palette {
+    palette_on(false)
+}
+
+/// The palette from the theme in force; `lit` gives every text colour the
+/// form that reads on the selected-row tint.
+fn palette_on(lit: bool) -> Palette {
+    use tc::Role;
+    let c = |role: Role| tc::ink_on(role, lit);
+    let theme = tc::theme::current();
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        warn: tc::rgb(255, 200, 90),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
-        accent: tc::rgb(150, 210, 255),
-        link: tc::rgb(140, 200, 255),
-        hues: HUES.iter().map(|c| tc::rgb(c.0, c.1, c.2)).collect(),
-        faded: HUES.iter().map(|c| tc::mix(*c, BACKDROP, FADE)).collect(),
+        ok: c(Role::Green),
+        warn: c(Role::Yellow),
+        bad: c(Role::Red),
+        dim: c(Role::Muted),
+        grid: c(Role::Dim),
+        txt: c(Role::Fg),
+        accent: c(Role::Accent),
+        link: c(Role::Accent),
+        hues: HUES.iter().map(|role| c(*role)).collect(),
+        faded: HUES.iter().map(|role| tc::mix(theme.colour(*role), backdrop(), FADE)).collect(),
     }
 }
 

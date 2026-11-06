@@ -434,14 +434,14 @@ fn block(
             // background escape runs to the end of the row until something
             // resets it - and here the row continues into the next month.
             let tint = if here {
-                tc::bg(28, 44, 62)
+                tc::tint(tc::Role::Slot)
             } else {
                 tc::NOBG.to_string()
             };
             let c = |colour: &str| format!("{}{}", tint, colour);
             let outside = day.month() != month.month || day.year() != month.year;
             let ink = if here {
-                c(&p.today)
+                c(&p.today_lit)
             } else if outside {
                 c(&p.spill)
             } else if weekend(day) {
@@ -971,35 +971,36 @@ fn main() {
 struct Palette {
     /// The title rule and the arrow hints.
     head: String,
-    /// Today's square and the number of the week it is in. 11.70 on the
-    /// today tint, 15.22 on the backdrop.
+    /// The number of the week today is in, on the backdrop.
     today: String,
-    /// A day of the month on show. 11.77 on the tint, 15.31 on the backdrop.
+    /// Today's own square, on the today tint: the same role lifted so it
+    /// stays readable there.
+    today_lit: String,
+    /// A day of the month on show.
     txt: String,
     /// Saturday and Sunday, and the two notes that have to be read rather
-    /// than glanced at. 8.34 and 10.85.
+    /// than glanced at.
     wknd: String,
     /// A day belonging to the month either side of this one: dimmed, and
-    /// measured rather than eyeballed, because "dimmed" is the whole
-    /// requirement and an unreadable grey meets it by accident. 5.85 on the
-    /// tint, 7.61 on the backdrop.
+    /// still a text role rather than decoration, because "dimmed" is the
+    /// whole requirement and an unreadable grey meets it by accident.
     spill: String,
-    /// The month heading and the weekday names. 5.52 and 7.18.
+    /// The month heading and the weekday names.
     lbl: String,
-    /// The week numbers, the reckoning lines and the footer. 4.51 on the
-    /// tint, 5.87 on the backdrop - the lowest here, and it clears AA.
+    /// The week numbers, the reckoning lines and the footer.
     dim: String,
 }
 
 fn palette() -> Palette {
     Palette {
-        head: tc::rgb(150, 210, 255),
-        today: tc::rgb(140, 255, 205),
-        txt: tc::rgb(225, 235, 245),
-        wknd: tc::rgb(240, 190, 120),
-        spill: tc::rgb(140, 170, 195),
-        lbl: tc::rgb(130, 165, 200),
-        dim: tc::rgb(127, 147, 172),
+        head: tc::ink(tc::Role::Accent),
+        today: tc::ink(tc::Role::Green),
+        today_lit: tc::ink_on(tc::Role::Green, true),
+        txt: tc::ink(tc::Role::Fg),
+        wknd: tc::ink(tc::Role::Yellow),
+        spill: tc::ink(tc::Role::Muted),
+        lbl: tc::ink(tc::Role::Muted),
+        dim: tc::ink(tc::Role::Muted),
     }
 }
 
@@ -1393,11 +1394,11 @@ mod tests {
         let tinted: Vec<&(String, String)> = rows
             .iter()
             .flatten()
-            .filter(|(colour, _)| colour.contains("48;2;28;44;62"))
+            .filter(|(colour, _)| colour.contains(&tc::tint(tc::Role::Slot)))
             .collect();
         assert_eq!(tinted.len(), 1, "exactly one square is today");
         assert_eq!(tinted[0].1.trim(), "29");
-        assert!(tinted[0].0.contains(&p.today), "today's square is not lit");
+        assert!(tinted[0].0.contains(&p.today_lit), "today's square is not lit");
         // Every cell of a grid row resets the background, or the tint runs
         // along the row and into the month drawn beside it. The heading and
         // the weekday names are not grid rows and no tint precedes them.
@@ -1435,7 +1436,7 @@ mod tests {
                         assert_eq!(text.trim(), date.day().to_string());
                         let outside = date.month() != m.month || date.year() != m.year;
                         if date == today {
-                            assert!(colour.contains(&p.today), "{} is today", date);
+                            assert!(colour.contains(&p.today_lit), "{} is today", date);
                         } else if outside {
                             spilled += 1;
                             assert!(colour.contains(&p.spill), "{} is not dimmed", date);
@@ -1705,17 +1706,25 @@ mod tests {
         // backdrop is the other half of the convention and nothing reads it,
         // so the dimmed grey - the one colour this widget adds, and the one
         // the issue asks about by name - is measured here against both.
-        let colours = [
-            ("today", (140.0, 255.0, 205.0)),
-            ("txt", (225.0, 235.0, 245.0)),
-            ("wknd", (240.0, 190.0, 120.0)),
-            ("spill", (140.0, 170.0, 195.0)),
-            ("lbl", (130.0, 165.0, 200.0)),
-            ("dim", (127.0, 147.0, 172.0)),
+        // Measured in opscope Classic: the plain roles on the backdrop, and
+        // their lifted forms on the tint today's square is drawn on.
+        use tc::Role;
+        let classic = tc::theme::find("classic").expect("opscope Classic is built in");
+        let f = |(r, g, b): (u8, u8, u8)| (r as f64, g as f64, b as f64);
+        let roles = [
+            ("today", Role::Green),
+            ("txt", Role::Fg),
+            ("wknd", Role::Yellow),
+            ("spill", Role::Muted),
+            ("lbl", Role::Muted),
+            ("dim", Role::Muted),
         ];
-        // A dark terminal, and the tint today's square is drawn on.
-        for (against, name) in [((16.0, 20.0, 26.0), "backdrop"), ((28.0, 44.0, 62.0), "tint")] {
-            for (label, colour) in colours {
+        for (name, against, tinted) in [
+            ("backdrop", f(classic.colour(Role::Bg)), false),
+            ("tint", f(classic.colour(Role::Slot)), true),
+        ] {
+            for (label, role) in roles {
+                let colour = f(if tinted { classic.lifted(role) } else { classic.colour(role) });
                 let ratio = contrast(colour, against);
                 assert!(
                     ratio >= 4.5,
@@ -1729,7 +1738,7 @@ mod tests {
         // And dimmed has to actually look dimmer than a day of this month,
         // or the requirement is met by a colour nobody can tell apart.
         assert!(
-            luminance((140.0, 170.0, 195.0)) < luminance((225.0, 235.0, 245.0)) * 0.6,
+            luminance(f(classic.colour(Role::Muted))) < luminance(f(classic.colour(Role::Fg))) * 0.6,
             "the spill is not visibly dimmer than the month"
         );
     }

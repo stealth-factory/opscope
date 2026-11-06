@@ -42,23 +42,21 @@ pub struct Palette {
     pub hint: String,
 }
 
-/// Every colour clears AA 4.5 on the terminal background and on the
-/// selected-row tint; `every_colour_clears_aa_on_the_tint` measures it.
+/// Every colour is a theme role, so it clears AA 4.5 on the background;
+/// on the selected-row tint each is drawn in its lifted form through
+/// `on_tint`. `every_colour_clears_aa_on_the_tint` measures both.
 pub fn palette() -> Palette {
     Palette {
-        txt: tc::rgb(225, 235, 245),
-        dim: tc::rgb(160, 176, 196),
-        head: tc::rgb(130, 200, 255),
-        accent: tc::rgb(150, 210, 255),
-        good: tc::rgb(110, 225, 150),
-        bad: tc::rgb(255, 140, 140),
-        warn: tc::rgb(255, 205, 110),
-        hint: tc::rgb(160, 176, 196),
+        txt: tc::ink(tc::Role::Fg),
+        dim: tc::ink(tc::Role::Muted),
+        head: tc::ink(tc::Role::Blue),
+        accent: tc::ink(tc::Role::Accent),
+        good: tc::ink(tc::Role::Green),
+        bad: tc::ink(tc::Role::Red),
+        warn: tc::ink(tc::Role::Yellow),
+        hint: tc::ink(tc::Role::Muted),
     }
 }
-
-/// The selected-row tint.
-pub const TINT: (u8, u8, u8) = (38, 56, 76);
 
 /// The metrics `m` cycles through, by the names GA uses.
 pub const METRICS: &[(&str, &str)] = &[
@@ -288,11 +286,17 @@ fn table_row(
     budget: usize,
 ) -> Vec<Line> {
     let tint = if here {
-        tc::bg(38, 56, 76)
+        tc::tint(tc::Role::Slot)
     } else {
         String::new()
     };
-    let c = |colour: &str| format!("{}{}", tint, colour);
+    let c = |colour: &str| {
+        if here {
+            format!("{}{}", tint, tc::lift(colour))
+        } else {
+            colour.to_string()
+        }
+    };
     let cells_w: usize = cells.iter().map(|(_, t)| tc::display_width(t)).sum();
     // Too narrow for the name beside its figures: the name takes the
     // whole width and the figures go on the line under it.
@@ -3192,7 +3196,19 @@ mod tests {
             };
             0.2126 * f(c.0) + 0.7152 * f(c.1) + 0.0722 * f(c.2)
         }
-        let tint = (TINT.0 as f64, TINT.1 as f64, TINT.2 as f64);
+        let rgb = |esc: &str| -> (f64, f64, f64) {
+            let nums: Vec<f64> = esc
+                .trim_start_matches("\x1b[38;2;")
+                .trim_end_matches('m')
+                .split(';')
+                .map(|n| n.parse().unwrap())
+                .collect();
+            (nums[0], nums[1], nums[2])
+        };
+        let ground = |role: tc::Role| {
+            let (r, g, b) = tc::theme::colour(role);
+            (r as f64, g as f64, b as f64)
+        };
         let p = palette();
         for (name, esc) in [
             ("txt", &p.txt),
@@ -3204,14 +3220,13 @@ mod tests {
             ("warn", &p.warn),
             ("hint", &p.hint),
         ] {
-            let nums: Vec<f64> = esc
-                .trim_start_matches("\x1b[38;2;")
-                .trim_end_matches('m')
-                .split(';')
-                .map(|n| n.parse().unwrap())
-                .collect();
-            let c = (nums[0], nums[1], nums[2]);
-            for bg in [tint, (0.0, 0.0, 0.0), (16.0, 20.0, 26.0)] {
+            let plain = rgb(esc);
+            let lifted = rgb(&tc::lift(esc));
+            for (c, bg) in [
+                (lifted, ground(tc::Role::Slot)),
+                (plain, ground(tc::Role::Bg)),
+                (plain, ground(tc::Role::Dark)),
+            ] {
                 let (a, b) = (lum(c), lum(bg));
                 let r = (a.max(b) + 0.05) / (a.min(b) + 0.05);
                 assert!(r >= 4.5, "{} on {:?} measures {:.2}", name, bg, r);

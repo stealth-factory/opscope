@@ -1674,7 +1674,7 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         w - 1,
     ));
 
-    if let Some(cal) = day_calendar(&d.daily, w, GROK_STEPS, None, p) {
+    if let Some(cal) = day_calendar(&d.daily, w, grok_steps(), None, p) {
         let peak = d.daily.values().cloned().fold(0.0f64, f64::max);
         rows.push(String::new());
         rows.push(tc::seg(
@@ -1702,7 +1702,7 @@ fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot
         }
         let mut legend: Vec<(String, String)> = vec![(p.dim.clone(), "  Less ".into())];
         legend.extend(
-            GROK_STEPS
+            grok_steps()
                 .iter()
                 .map(|(r, g, b)| (tc::rgb(*r, *g, *b), "█".to_string())),
         );
