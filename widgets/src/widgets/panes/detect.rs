@@ -211,7 +211,6 @@ pub fn outside() -> String {
         "  Rex    start rex, then run panes in one of its panes",
         "  Herdr  start herdr, then run panes in one of its panes",
         "  Luvus  start luvus, then run panes in one of its panes",
-        "To watch a Rex server from anywhere, set its rex_server in panes' settings.",
         "To choose one regardless of where this runs: panes --mux rex|herdr|luvus",
     ]
     .join("\n")

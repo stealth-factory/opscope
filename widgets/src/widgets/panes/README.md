@@ -66,14 +66,14 @@ panes runs inside Rex, Herdr or Luvus. Open it from a pane in one of those:
   Rex    start rex, then run panes in one of its panes
   Herdr  start herdr, then run panes in one of its panes
   Luvus  start luvus, then run panes in one of its panes
-To watch a Rex server from anywhere, set its rex_server in panes' settings.
 To choose one regardless of where this runs: panes --mux rex|herdr|luvus
 ```
 
 `--mux rex|herdr|luvus` or the `backend` setting chooses regardless of the
-markers, the flag first. A `rex_server` set in settings counts as being
-inside Rex, so a pane watching another machine's Rex server works from
-anywhere, as rex-panes always did.
+markers, the flag first. The pane's own markers always win over settings
+that name a server: `rex_server`, for watching another machine's Rex server,
+is used only when `panes` is in no multiplexer at all, as rex-panes always
+allowed.
 
 ## Why it is ordered this way
 
