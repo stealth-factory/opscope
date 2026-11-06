@@ -861,9 +861,10 @@ fn homely(path: &str) -> String {
     }
 }
 
-/// Run the board against the Herdr session until `q`. `comma` opens the
-/// shared settings screen.
-pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::Keyboard)) {
+/// Run the board against the Herdr session until `q`. `why` is the line
+/// under the title saying what chose Herdr; `comma` opens the shared
+/// settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
         if let Some(n) = args.get(at + 1) {
@@ -1117,6 +1118,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::K
             &p.accent,
             activity.tick(tc::animation_tick()),
         )];
+        rows.extend(super::mux_rows(why, &p.dim, w));
         // The span each pane covers, taken from where its rows started and
         // ended: a pane is one row, or several once its detail is drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();

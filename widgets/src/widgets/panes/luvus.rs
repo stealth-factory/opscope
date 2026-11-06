@@ -968,9 +968,10 @@ fn checkout_line<'a>(
     }
 }
 
-/// Run the board against a Luvus session until `q`. `comma` opens the
-/// shared settings screen.
-pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::Keyboard)) {
+/// Run the board against a Luvus session until `q`. `why` is the line
+/// under the title saying what chose Luvus; `comma` opens the shared
+/// settings screen.
+pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let session = tc::cfg_str(cfg, "luvus_session", "default");
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
@@ -1402,6 +1403,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], comma: &dyn Fn(&mut tc::K
             &p.accent,
             activity.tick(tc::animation_tick()),
         )];
+        head.extend(super::mux_rows(why, &p.dim, w));
         let mut counts: HashMap<&str, usize> = HashMap::new();
         if let Ok(listed) = &agents {
             for a in listed {

@@ -118,11 +118,23 @@ fn main() {
     }
     // `,` opens one screen for every backend: they share one section.
     let comma = |keyboard: &mut tc::Keyboard| tc::run_settings(keyboard, SETTINGS);
+    let line = format!("in {} · {}", chosen.mux.name(), chosen.why);
     match chosen.mux {
-        Mux::Rex => rex::watch(&cfg, &args, &chosen.why, &comma),
-        Mux::Herdr => herdr::watch(&cfg, &args, &comma),
-        Mux::Luvus => luvus::watch(&cfg, &args, &comma),
+        Mux::Rex => rex::watch(&cfg, &args, &line, &comma),
+        Mux::Herdr => herdr::watch(&cfg, &args, &line, &comma),
+        Mux::Luvus => luvus::watch(&cfg, &args, &line, &comma),
     }
+}
+
+/// The pinned line under every board's title: which multiplexer this is
+/// reading and what decided it, `in Rex · REX_SESSION and REX_BLOCK are
+/// set`. Wrapped rather than cut, because the reason is the part that
+/// answers "why this one" when several were set.
+pub fn mux_rows(line: &str, colour: &str, w: usize) -> Vec<String> {
+    tc::wrap_words(line, w.saturating_sub(2).max(1))
+        .into_iter()
+        .map(|l| tc::seg(&[(colour, format!(" {}", l))], w.saturating_sub(1)))
+        .collect()
 }
 
 /// What the dependency check asks for: the one multiplexer CLI this
@@ -208,6 +220,39 @@ fn ancestors() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text of a row, its colour escapes dropped.
+    fn strip(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_multiplexer_line_wraps_whole_at_any_width() {
+        let line = "in Herdr · REX_SESSION and REX_BLOCK, HERDR_ENV=1 are all set; Herdr is the nearest multiplexer above this process";
+        for w in [24, 40, 80, 140] {
+            let rows = mux_rows(line, "", w);
+            let plain: Vec<String> = rows.iter().map(|r| strip(r)).collect();
+            for r in &plain {
+                assert!(tc::display_width(r) < w, "{w}: {r:?}");
+            }
+            let joined = plain.iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+            assert_eq!(joined, line, "{w}: nothing dropped");
+        }
+        assert_eq!(mux_rows("in Rex · REX_SESSION and REX_BLOCK are set", "", 80).len(), 1);
+    }
 
     #[test]
     fn each_backend_requires_only_its_own_cli() {

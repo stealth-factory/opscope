@@ -1432,7 +1432,7 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -
             plural(board.apps)
         ),
     ));
-    out.push(("dim".into(), format!(" panes reads Rex because {}", why)));
+    out.push(("dim".into(), format!(" panes reads {}", why)));
     out
 }
 
@@ -1872,6 +1872,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             &p.accent,
             activity.tick(tick),
         )];
+        rows.extend(super::mux_rows(why, &p.dim, w));
         let mut plots = Vec::new();
         let mut all = board.as_ref().map(|b| b.panes.clone()).unwrap_or_default();
         let hidden_opscope = all

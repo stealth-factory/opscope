@@ -8,6 +8,7 @@ everything running on the server, across every session.
 
 ```text
 ╺━ PANES · REX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ in Rex · REX_SESSION and REX_BLOCK are set
  3 agents · 2 sessions · 9 panes  1 blocked  1 done  1 unknown
  ███████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░
  ▸ 3 panes waiting for you
@@ -211,6 +212,7 @@ and one keypress to get to any of it.
 
 ```
 ╺━ PANES · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ in Herdr · HERDR_ENV=1 is set
  5 agents · 3 workspaces   1 done   1 working   3 idle
  ▸ 1 agent waiting for you
 
@@ -354,6 +356,7 @@ get to any of it.
 
 ```text
 ╺━ PANES · LUVUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ in Luvus · LUVUS_ENV=1 is set
  4 agents · 9 panes   1 blocked   1 done   1 working   1 idle
  session default · uhp 1.0 · 3 workspaces · seq 4186 · focused on pane 2
  ▸ 2 agents waiting for you
