@@ -202,9 +202,21 @@ pub fn matching(rows: &[Row], query: &str) -> Vec<Row> {
     scored.into_iter().map(|(_, _, r)| r.clone()).collect()
 }
 
+/// The rows a batch should be working with after a key changes the query
+/// or the mode: what matches the query now, in the mode now.
+///
+/// `run` calls this after every key that edits the filter or switches
+/// mode, rather than trusting the list the batch opened with - a paste
+/// of `not` and ↵ arrives as one `poll`, and ↵ has to run the row the
+/// `not` the reader typed is showing them.
+pub fn refilter(commands: &[Row], switch: &[Row], on_commands: bool, query: &str) -> Vec<Row> {
+    matching(if on_commands { commands } else { switch }, query)
+}
+
 /// The box's inside, `iw` cells wide and `ih` rows tall: the mode's
 /// title with the count, the filter line, the list window scrolled to
 /// `first`, and the keys. In the theme in force.
+#[allow(clippy::too_many_arguments)]
 pub fn inside(
     mode: &str,
     list: &[Row],
@@ -408,7 +420,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
     // the same base, and returns here when it is escaped out of.
     let mut on_commands = true;
     loop {
-        let (all, list) = if on_commands {
+        let (all, mut list) = if on_commands {
             (&commands, matching(&commands, &commands_list.query))
         } else {
             (&switch, matching(&switch, &switch_list.query))
@@ -467,8 +479,16 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         // the view straight back to the highlight.
         let mut moved = false;
         for key in keys {
-            let selected = current.selected;
-            let first = current.first;
+            // The mode can change inside the batch (Switch widget…), so
+            // the state and the rows are taken again for every key
+            // rather than once per poll.
+            let state = if on_commands {
+                &mut commands_list
+            } else {
+                &mut switch_list
+            };
+            let selected = state.selected;
+            let first = state.first;
             // A click is the key it stands for: outside the box it is
             // esc, on the keys row the key it names, and on a row a
             // move there - or ↵, when that row is already the one
@@ -480,7 +500,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                     Some(k) => match k.strip_prefix("pick:").and_then(|i| i.parse::<usize>().ok()) {
                         Some(i) if i == selected => "enter".to_string(),
                         Some(i) => {
-                            current.selected = i;
+                            state.selected = i;
                             moved = true;
                             continue;
                         }
@@ -490,19 +510,25 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                 },
                 None => key,
             };
+            // Whether this key changed what the list holds - the query
+            // or the mode. Either refilters before the next key of the
+            // same batch, so a paste of `not` then ↵ runs Notices, not
+            // whatever `not` had not yet replaced.
+            let mut changed = false;
             match key.as_str() {
                 // The wheel and ctrl-y/ctrl-e move the view, never the
                 // highlight, so scrolling never changes what ↵ runs.
-                "wheel-up" => current.first = current.first.saturating_sub(3),
-                "wheel-down" => current.first = (current.first + 3).min(last_flat(list.len(), window)),
-                "ctrl-y" => current.first = current.first.saturating_sub(1),
-                "ctrl-e" => current.first = (current.first + 1).min(last_flat(list.len(), window)),
+                "wheel-up" => state.first = state.first.saturating_sub(3),
+                "wheel-down" => state.first = (state.first + 3).min(last_flat(list.len(), window)),
+                "ctrl-y" => state.first = state.first.saturating_sub(1),
+                "ctrl-e" => state.first = (state.first + 1).min(last_flat(list.len(), window)),
                 // esc pops one level: the widgets back to the commands,
                 // the commands back to the widget. ctrl-k is esc here -
                 // the key that opened the palette closing it.
                 "esc" | "ctrl-k" => {
                     if !on_commands {
                         on_commands = true;
+                        changed = true;
                     } else {
                         return close();
                     }
@@ -519,6 +545,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                     Some(Runs::Notices) => crate::notices::run(keyboard),
                     Some(Runs::Widgets) => {
                         on_commands = false;
+                        changed = true;
                     }
                     Some(Runs::Widget) => {
                         if let Some(stem) = list.get(selected).map(|r| r.label.clone()) {
@@ -528,52 +555,64 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                     None => {}
                 },
                 "up" => {
-                    current.selected = current.selected.saturating_sub(1);
+                    state.selected = state.selected.saturating_sub(1);
                     moved = true;
                 }
                 "down" => {
-                    current.selected = (current.selected + 1).min(list.len().saturating_sub(1));
+                    state.selected = (state.selected + 1).min(list.len().saturating_sub(1));
                     moved = true;
                 }
                 "pgup" => {
-                    current.selected = current.selected.saturating_sub(room.saturating_sub(3).max(1));
+                    state.selected = state.selected.saturating_sub(room.saturating_sub(3).max(1));
                     moved = true;
                 }
                 "pgdn" => {
-                    current.selected = (current.selected + room.saturating_sub(3).max(1))
+                    state.selected = (state.selected + room.saturating_sub(3).max(1))
                         .min(list.len().saturating_sub(1));
                     moved = true;
                 }
                 "home" => {
-                    current.selected = 0;
+                    state.selected = 0;
                     moved = true;
                 }
                 "end" => {
-                    current.selected = list.len().saturating_sub(1);
+                    state.selected = list.len().saturating_sub(1);
                     moved = true;
                 }
                 "backspace" => {
-                    current.query.pop();
-                    current.selected = 0;
+                    state.query.pop();
+                    state.selected = 0;
                     moved = true;
+                    changed = true;
                 }
                 other if other.chars().count() == 1 && !other.chars().all(char::is_control) => {
-                    current.query.push_str(other);
-                    current.selected = 0;
+                    state.query.push_str(other);
+                    state.selected = 0;
                     moved = true;
+                    changed = true;
                 }
                 _ => {}
             }
+            if changed {
+                let state = if on_commands {
+                    &mut commands_list
+                } else {
+                    &mut switch_list
+                };
+                list = refilter(&commands, &switch, on_commands, &state.query);
+                state.selected = state.selected.min(list.len().saturating_sub(1));
+            }
         }
         // On the pass a key moved the highlight, the window follows it.
+        let current = if on_commands {
+            &mut commands_list
+        } else {
+            &mut switch_list
+        };
         if moved {
-            let current = if on_commands {
-                &mut commands_list
-            } else {
-                &mut switch_list
-            };
             current.first = follow_flat(current.selected, window, current.first);
         }
+        current.first = current.first.min(last_flat(list.len(), window));
         keyboard.wait(Duration::from_millis(60));
     }
 }
@@ -650,6 +689,22 @@ mod tests {
         let rows = switch_rows();
         assert_eq!(rows.len(), stems.len());
         assert!(rows.iter().all(|r| r.runs == Runs::Widget));
+    }
+
+    #[test]
+    fn a_query_and_enter_in_one_batch_run_the_filtered_row() {
+        // `not` and ↵ can arrive in one poll. The list ↵ acts on is the
+        // one refiltered after `not`, not the list the batch opened on.
+        let commands = commands();
+        let switch = switch_rows();
+        let before = refilter(&commands, &switch, true, "");
+        assert_eq!(before.first().map(|r| r.label.clone()), Some("Theme…".to_string()));
+        let after = refilter(&commands, &switch, true, "not");
+        assert_eq!(after.first().map(|r| r.label.clone()), Some("Notices".to_string()));
+        // A mode change refilters too, against the other list.
+        let widgets = refilter(&commands, &switch, false, "");
+        assert!(widgets.iter().all(|r| r.runs == Runs::Widget));
+        assert_eq!(widgets.len(), switch.len());
     }
 
     #[test]

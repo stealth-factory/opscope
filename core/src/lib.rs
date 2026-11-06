@@ -4980,21 +4980,19 @@ impl Keyboard {
         if opens {
             notices::run(self);
         }
-        // ctrl-k opens the command palette over whatever widget this is.
-        // Its Theme action is the picker, and ctrl-t opens the picker
-        // directly, so the picker's key is answered here too.
-        if !palette::OPEN.load(Ordering::Acquire)
+        // ctrl-k opens the command palette over whatever widget this is;
+        // ctrl-t opens the theme picker directly. Both are answered here
+        // for every widget, and neither opens over another modal - not
+        // while the picker or palette is up, and not from the settings
+        // screen, where a second screen would clear the outer one's flag
+        // when it closed.
+        let free = !palette::OPEN.load(Ordering::Acquire)
             && !picker::OPEN.load(Ordering::Acquire)
-            && keys.iter().any(|k| k == palette::KEY)
-        {
-            keys.retain(|k| k != palette::KEY);
+            && !settings::SCREEN_OPEN.load(Ordering::Acquire);
+        if free && split_at(&mut keys, &mut self.held, palette::KEY) {
             palette::run(self);
         }
-        if !palette::OPEN.load(Ordering::Acquire)
-            && !picker::OPEN.load(Ordering::Acquire)
-            && keys.iter().any(|k| k == picker::KEY)
-        {
-            keys.retain(|k| k != picker::KEY);
+        if free && split_at(&mut keys, &mut self.held, picker::KEY) {
             let (base_rows, base_plots) = LAST_FRAME
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -5039,6 +5037,26 @@ impl Keyboard {
         );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
+}
+
+/// Take `key` out of `keys` and hold everything after it for the screen
+/// that key opens.
+///
+/// The screen runs inside the poll that saw the key, and its own `poll`
+/// reads `held` first - the same split [`next_turn`] makes for `!`. So a
+/// paste of `ctrl-k`, `not`, ↵ reaches the palette with `not` and ↵ still
+/// to come, instead of handing them to the widget once the box closes.
+fn split_at(keys: &mut Vec<String>, held: &mut Vec<String>, key: &str) -> bool {
+    let Some(at) = keys.iter().position(|k| k == key) else {
+        return false;
+    };
+    let tail: Vec<String> = keys.split_off(at + 1);
+    keys.pop();
+    // Ahead of whatever was already held: these keys arrived earlier.
+    let mut rest = std::mem::take(held);
+    held.extend(tail);
+    held.append(&mut rest);
+    true
 }
 
 /// What a click on the notices counter arrives as inside `Keyboard`, until
@@ -6154,10 +6172,34 @@ pub(crate) fn binary_name() -> String {
 
 #[cfg(test)]
 mod bang_tests {
-    use super::{next_turn, COUNTER_CLICK};
+    use super::{next_turn, split_at, COUNTER_CLICK};
 
     fn keys(k: &[&str]) -> Vec<String> {
         k.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn keys_after_an_opener_wait_for_the_screen_it_opens() {
+        // `ctrl-k` + `not` + ↵ in one read: the opener is consumed, the
+        // tail waits in `held` for the palette's own poll, and only what
+        // came before the opener is handed to the widget.
+        let mut pressed = keys(&["q", "ctrl-k", "n", "o", "t", "enter"]);
+        let mut held = keys(&[]);
+        assert!(split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert_eq!(pressed, keys(&["q"]));
+        assert_eq!(held, keys(&["n", "o", "t", "enter"]));
+        // Ahead of what an earlier `!` already held: later keys come last.
+        let mut pressed = keys(&["ctrl-k", "a"]);
+        let mut held = keys(&["b"]);
+        assert!(split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert!(pressed.is_empty());
+        assert_eq!(held, keys(&["a", "b"]));
+        // No opener, nothing touched.
+        let mut pressed = keys(&["a", "b"]);
+        let mut held = keys(&[]);
+        assert!(!split_at(&mut pressed, &mut held, "ctrl-k"));
+        assert_eq!(pressed, keys(&["a", "b"]));
+        assert!(held.is_empty());
     }
 
     #[test]

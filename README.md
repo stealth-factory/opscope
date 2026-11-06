@@ -422,7 +422,8 @@ their rows, so the palette teaches the keys it is the route around.
 `ctrl-t` skips the palette and opens the theme picker directly.
 
 The actions, all of them core's so every widget gets them with no widget
-code:
+code — except Settings, which appears only where the widget has a
+settings screen (the launcher and `matrix` have none):
 
 - **Theme…** (`ctrl-t` directly) — the theme picker, in the same box.
   Type to filter, and as

@@ -450,8 +450,8 @@ widget): one box whose modes — commands, theme picker, widgets — swap in
 place over the frame it was opened on, esc popping one level at a time.
 The theme picker also keeps its own `ctrl-t` in every widget, the same
 picker over the widget's frame with esc back to the widget.
-Core wires it from `Keyboard::poll` for every binary, as it does `!` and
-`,`; a widget registers its settings spec at startup
+Core wires it from `Keyboard::poll` for every binary, as it does `!`.
+A widget registers its settings spec at startup
 (`tc::register_settings(SETTINGS)`) and the palette's Settings action
 opens it, a widget that registers none gets no Settings command, and
 the Switch action lists the binaries from the build manifest — the same
