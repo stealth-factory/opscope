@@ -131,7 +131,7 @@ pub struct Plot {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Rect {
+pub(crate) struct Rect {
     // Coordinates in terminal cells, with fractional edges.
     x: f64,
     y: f64,
@@ -606,7 +606,7 @@ impl Plot {
             .map(Vec::as_slice).unwrap_or(&[])
     }
 
-    fn filled(
+    pub(crate) fn filled(
         x: usize,
         y: usize,
         width: usize,
@@ -627,6 +627,13 @@ impl Plot {
         );
         plot.fill = Some(Fill { rects, text, gradients: Vec::new(), always_text: false });
         plot
+    }
+
+    /// A solid rectangle for a filled plot, in cells from the plot's top-left
+    /// corner, fractional edges allowed: how core draws chrome - the theme
+    /// picker's frame and shadow - as pixels in Kitty.
+    pub(crate) fn rect(x: f64, y: f64, width: f64, height: f64, colour: &str) -> Rect {
+        Rect { x, y, width, height, colour: colour.to_string() }
     }
 
     /// Every colour this plot carries, passed through `f`: how a chart built
