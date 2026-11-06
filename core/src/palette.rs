@@ -65,14 +65,51 @@ pub const KEY: &str = "ctrl-k";
 /// what the press opens, in the shortest form that fits.
 pub const HINT: &str = "[ctrl-k]cmds";
 
-/// The box's last row. A click on `↵ run` or `esc back` is that key.
-const KEYS_ROW: &str = " ↑↓ choose · ↵ run · esc back";
+/// The box's last row: each key as a chip, and what it does. A click on
+/// a chip or its word is that key.
+const KEYS: &[(&str, &str)] = &[("↑↓", "choose"), ("↵", "run"), ("esc", "back")];
 
-/// How many options the box's list shows, with the title, the filter line
-/// and the keys row around it: one option a row, as the theme list has
-/// them, so every mode of the box reads with the same line height.
+/// Where each key's chip and word sit on the keys row, in cells from the
+/// row's start: the key, and the cells from its chip to the end of its
+/// word. One layout for drawing the row and for reading a click on it.
+///
+/// Where the row with its words would not fit `iw`, it is the chips alone:
+/// a box that narrow still says which keys work, rather than cutting a
+/// word in half.
+fn key_spans(iw: usize) -> Vec<(&'static str, usize, usize)> {
+    let lay = |words: bool| {
+        let mut out = Vec::new();
+        let mut at = 1;
+        for (key, word) in KEYS {
+            let start = at;
+            at += crate::display_width(key) + 2;
+            if words {
+                at += 1 + crate::display_width(word);
+            }
+            out.push((*key, start, at));
+            at += if words { 3 } else { 1 };
+        }
+        out
+    };
+    let full = lay(true);
+    if full.last().is_some_and(|(_, _, end)| *end <= iw) { full } else { lay(false) }
+}
+
+/// Whether the keys row has room for its words at `iw`.
+fn keys_with_words(iw: usize) -> bool {
+    let spans = key_spans(iw);
+    spans.len() < 2 || spans[1].1 - spans[0].2 > 1
+}
+
+/// Rows the box spends around its list: the title band, the filter line,
+/// the rule under it, and the keys.
+const AROUND: usize = 4;
+
+/// How many rows of the list the box shows: one option a row, as the
+/// theme list has them, so every mode of the box reads with the same line
+/// height.
 pub fn slots(ih: usize) -> usize {
-    ih.saturating_sub(3).max(1)
+    ih.saturating_sub(AROUND).max(1)
 }
 
 /// One row of whichever list the box is showing.
@@ -119,6 +156,8 @@ pub enum Runs {
     CopyDiagnostics,
     /// Put this widget's documentation link on the clipboard.
     CopyDocs,
+    /// A section's heading: not a command, and the highlight steps over it.
+    Header,
 }
 
 /// The keys core answers for every widget, which have rows of their own
@@ -480,6 +519,81 @@ pub fn matching(rows: &[Row], query: &str) -> Vec<Row> {
     scored.into_iter().map(|(_, _, r)| r.clone()).collect()
 }
 
+/// The commands in sections, for the list as it opens, before anything is
+/// typed: what was run recently, then opscope's own, then this widget's
+/// footer actions - each under a heading, and a row in one section only.
+/// Typing drops the headings and ranks every command together, since a
+/// match is a match whichever section it came from.
+pub fn sectioned(rows: &[Row], recent: &[String]) -> Vec<Row> {
+    let header = |label: &str| Row {
+        label: label.into(),
+        detail: String::new(),
+        key: None,
+        runs: Runs::Header,
+        sends: None,
+    };
+    let is_recent = |r: &Row| recent.contains(&r.id());
+    let recent_rows: Vec<Row> = recent
+        .iter()
+        .filter_map(|id| rows.iter().find(|r| &r.id() == id).cloned())
+        .collect();
+    let core: Vec<Row> = rows.iter().filter(|r| r.runs != Runs::Send && !is_recent(r)).cloned().collect();
+    // Under its own heading, "this widget" on every row says it twice; it
+    // is kept for the flat list a query ranks, where nothing else does.
+    let own: Vec<Row> = rows
+        .iter()
+        .filter(|r| r.runs == Runs::Send && !is_recent(r))
+        .map(|r| Row { detail: String::new(), ..r.clone() })
+        .collect();
+    let mut out = Vec::new();
+    for (name, group) in [("RECENT", recent_rows), ("OPSCOPE", core), ("THIS WIDGET", own)] {
+        if !group.is_empty() {
+            out.push(header(name));
+            out.extend(group);
+        }
+    }
+    out
+}
+
+/// `at`, or the nearest row to it that is not a heading: ahead of it when
+/// the highlight was moving down, behind it when moving up, and the other
+/// way when there is nothing that way.
+pub fn settle(list: &[Row], at: usize, forward: bool) -> usize {
+    if list.is_empty() {
+        return 0;
+    }
+    let at = at.min(list.len() - 1);
+    let ok = |i: usize| list.get(i).is_some_and(|r| r.runs != Runs::Header);
+    if ok(at) {
+        return at;
+    }
+    let ahead = (at..list.len()).find(|&i| ok(i));
+    let behind = (0..at).rev().find(|&i| ok(i));
+    if forward { ahead.or(behind) } else { behind.or(ahead) }.unwrap_or(at)
+}
+
+/// Which characters of `label` the query matched, letter by letter in
+/// order and ignoring case - the ones drawn picked out. Nothing when the
+/// label does not hold every letter, as when the row matched on its
+/// description instead.
+pub fn matched(query: &str, label: &str) -> Vec<bool> {
+    let mut want = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).peekable();
+    let mut out: Vec<bool> = label
+        .chars()
+        .map(|c| {
+            let hit = want.peek().is_some_and(|w| c.to_lowercase().next() == Some(*w));
+            if hit {
+                want.next();
+            }
+            hit
+        })
+        .collect();
+    if want.peek().is_some() {
+        out.iter_mut().for_each(|b| *b = false);
+    }
+    out
+}
+
 /// The rows a batch should be working with after a key changes the query
 /// or the mode: what matches the query now, in the mode now.
 ///
@@ -487,7 +601,10 @@ pub fn matching(rows: &[Row], query: &str) -> Vec<Row> {
 /// mode, rather than trusting the list the batch opened with - a paste
 /// of `not` and ↵ arrives as one `poll`, and ↵ has to run the row the
 /// `not` the reader typed is showing them.
-pub fn refilter(commands: &[Row], switch: &[Row], help: &[Row], mode: Mode, query: &str) -> Vec<Row> {
+pub fn refilter(commands: &[Row], switch: &[Row], help: &[Row], mode: Mode, query: &str, recent: &[String]) -> Vec<Row> {
+    if mode == Mode::Commands && query.trim().is_empty() {
+        return sectioned(commands, recent);
+    }
     matching(
         match mode {
             Mode::Commands => commands,
@@ -498,9 +615,22 @@ pub fn refilter(commands: &[Row], switch: &[Row], help: &[Row], mode: Mode, quer
     )
 }
 
-/// The box's inside, `iw` cells wide and `ih` rows tall: the mode's
-/// title with the count, the filter line, the list window scrolled to
-/// `first`, and the keys. In the theme in force.
+/// The box's inside, `iw` cells wide and `ih` rows tall, in the theme in
+/// force:
+///
+/// ```text
+///  ◆ Commands                                14 of 14     title band
+///   ❯ ▏type to filter                                     filter
+///  ──────────────────────────────────────────────────     rule
+///   OPSCOPE ───────────────────────────────────────────   heading
+/// ▌ Theme…  pick a theme for this pane          ctrl-t    chosen row
+///   Settings…  this widget's settings                ,
+///  ↑↓  choose   ↵  run   esc  back                        keys
+/// ```
+///
+/// The letters typed are picked out in each label, and a key is a chip
+/// at the row's end. What a narrow box cannot fit is left out whole - the
+/// description first, then the chip - and never cut.
 #[allow(clippy::too_many_arguments)]
 pub fn inside(
     mode: &str,
@@ -513,68 +643,190 @@ pub fn inside(
     ih: usize,
 ) -> Vec<String> {
     let bar = picker::modal_ground();
+    let band = theme::tint(Role::Slot);
     let line = |parts: &[(String, String)], ground: &str| -> String {
         let used: usize = parts.iter().map(|(_, t)| crate::display_width(t)).sum();
         let mut segs: Vec<(String, String)> = parts.to_vec();
         if used < iw {
-            segs.push((String::new(), " ".repeat(iw - used)));
+            segs.push(("\x1b[22;23m".to_string(), " ".repeat(iw - used)));
         }
         let refs: Vec<(&str, String)> = segs.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         let body = crate::seg(&refs, iw).replace("\x1b[0m", &format!("\x1b[0m{ground}"));
         format!("{ground}{body}\x1b[0m")
     };
+    // `seg` does not reset between segments, so each says its own weight.
+    let plain = |ink: String| format!("\x1b[22;23m{ink}");
+    let bold = |ink: String| format!("\x1b[23;1m{ink}");
+    // Back to a row's own ground after a chip: the default background
+    // where the row has none, so a chip's tint never runs on.
+    let back = |ground: &str| if ground.is_empty() { "\x1b[49m".to_string() } else { ground.to_string() };
     let mut rows = Vec::new();
-    let count = format!("{} of {} ", list.len(), total);
-    let title = format!(" {mode}");
+
+    let shown = list.iter().filter(|r| r.runs != Runs::Header).count();
+    let count = format!("{shown} of {total} ");
+    let title = format!(" ◆ {mode}");
     let gap = iw.saturating_sub(crate::display_width(&title) + crate::display_width(&count)).max(1);
     rows.push(line(
         &[
-            (theme::ink(Role::Accent), title),
-            (String::new(), " ".repeat(gap)),
-            (theme::ink(Role::Muted), count),
+            (bold(theme::ink_on(Role::Accent, true)), title),
+            (plain(String::new()), " ".repeat(gap)),
+            (plain(theme::ink_on(Role::Muted, true)), count),
         ],
-        &bar,
+        &band,
     ));
+
+    let mut filter = vec![
+        (bold(theme::ink(Role::Accent)), "  ❯ ".to_string()),
+        (plain(theme::ink(Role::Fg)), query.to_string()),
+        (plain(theme::ink(Role::Accent)), "▏".to_string()),
+    ];
+    if query.is_empty() {
+        filter.push((format!("\x1b[22;3m{}", theme::ink(Role::Muted)), "type to filter".into()));
+    }
+    rows.push(line(&filter, &bar));
     rows.push(line(
-        &[
-            (theme::ink(Role::Muted), " / ".into()),
-            (theme::ink(Role::Fg), format!("{query}▏")),
-        ],
+        &[(plain(theme::ink(Role::Border)), format!(" {} ", "─".repeat(iw.saturating_sub(2))))],
         &bar,
     ));
+
     let slots = slots(ih);
     let first = first.min(list.len().saturating_sub(slots));
     let mut listed = Vec::new();
     if list.is_empty() {
-        listed.push(line(&[(theme::ink(Role::Muted), "   nothing matches".into())], &bar));
-    }
-    for (i, r) in list.iter().enumerate().skip(first).take(slots) {
-        let here = i == selected;
-        let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
-        let mark = if here { "▸ " } else { "  " };
-        let key = r.key.map(|k| format!("  [{k}]")).unwrap_or_default();
-        // The description is the column a narrow box drops, whole: one cut
-        // mid-word reads as a different sentence.
-        let detail = if r.detail.is_empty() { String::new() } else { format!("  {}", r.detail) };
-        let used = 3 + crate::display_width(&r.label) + crate::display_width(&key);
-        let detail = if used + crate::display_width(&detail) <= iw { detail } else { String::new() };
         listed.push(line(
-            &[
-                (theme::ink_on(Role::Accent, here), format!(" {mark}")),
-                (theme::ink_on(Role::Fg, here), r.label.clone()),
-                (theme::ink_on(Role::Muted, here), key),
-                (theme::ink_on(Role::Muted, here), detail),
-            ],
-            &ground,
+            &[(format!("\x1b[22;3m{}", theme::ink(Role::Muted)), "   nothing matches".into())],
+            &bar,
         ));
     }
-    while listed.len() < ih.saturating_sub(3) {
+    for (i, r) in list.iter().enumerate().skip(first).take(slots) {
+        if r.runs == Runs::Header {
+            let head = format!("  {} ", r.label);
+            let fill = iw.saturating_sub(crate::display_width(&head) + 1);
+            listed.push(line(
+                &[
+                    (bold(theme::ink(Role::Muted)), head),
+                    (plain(theme::ink(Role::Border)), "─".repeat(fill)),
+                ],
+                &bar,
+            ));
+            continue;
+        }
+        let here = i == selected;
+        let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
+        let chip_ground = if here { bar.clone() } else { theme::tint(Role::Slot) };
+        let mark = if here {
+            (plain(theme::ink_on(Role::Accent, true)), "▌ ".to_string())
+        } else {
+            (plain(String::new()), "  ".to_string())
+        };
+        let label_w = crate::display_width(&r.label);
+        let mut chip = r.key.map(|k| format!(" {k} ")).unwrap_or_default();
+        let mut detail = if r.detail.is_empty() { String::new() } else { format!("  {}", r.detail) };
+        // The chip keeps a cell clear of the box's edge.
+        let chip_room = |chip: &str| if chip.is_empty() { 0 } else { crate::display_width(chip) + 1 };
+        if 2 + label_w + chip_room(&chip) > iw {
+            chip.clear();
+        }
+        if 2 + label_w + crate::display_width(&detail) + chip_room(&chip) > iw {
+            detail.clear();
+        }
+        let mut parts = vec![mark];
+        // The label, with the letters typed picked out.
+        let hits = matched(query, &r.label);
+        let mut run = String::new();
+        let mut run_hit = false;
+        let label_ink = |hit: bool| -> String {
+            if hit {
+                bold(theme::ink_on(Role::Accent, here))
+            } else if here {
+                bold(theme::ink_on(Role::Fg, true))
+            } else {
+                plain(theme::ink(Role::Fg))
+            }
+        };
+        for (n, c) in r.label.chars().enumerate() {
+            let hit = hits.get(n).copied().unwrap_or(false);
+            if !run.is_empty() && hit != run_hit {
+                parts.push((label_ink(run_hit), std::mem::take(&mut run)));
+            }
+            run_hit = hit;
+            run.push(c);
+        }
+        if !run.is_empty() {
+            parts.push((label_ink(run_hit), run));
+        }
+        parts.push((plain(theme::ink_on(Role::Muted, here)), detail.clone()));
+        if !chip.is_empty() {
+            let used = 2 + label_w + crate::display_width(&detail);
+            let gap = iw.saturating_sub(used + chip_room(&chip));
+            parts.push((plain(String::new()), " ".repeat(gap)));
+            let chip_ink = if here { theme::ink(Role::Muted) } else { theme::ink_on(Role::Muted, true) };
+            parts.push((format!("\x1b[22;23m{chip_ink}{chip_ground}"), chip));
+            parts.push((plain(back(&ground)), " ".to_string()));
+        }
+        listed.push(line(&parts, &ground));
+    }
+    while listed.len() < slots {
         listed.push(line(&[], &bar));
     }
     rows.extend(listed);
-    rows.push(line(&[(theme::ink(Role::Muted), KEYS_ROW.into())], &bar));
+
+    let words = keys_with_words(iw);
+    let mut keys = vec![(plain(String::new()), " ".to_string())];
+    for (n, (key, word)) in KEYS.iter().enumerate() {
+        keys.push((format!("\x1b[22;23m{}{}", theme::ink_on(Role::Muted, true), band), format!(" {key} ")));
+        let after = if words { format!(" {word}") } else { String::new() };
+        keys.push((plain(format!("{}{}", back(&bar), theme::ink(Role::Muted))), after));
+        if n + 1 < KEYS.len() {
+            keys.push((plain(String::new()), if words { "   " } else { " " }.to_string()));
+        }
+    }
+    rows.push(line(&keys, &bar));
     rows.truncate(ih);
     rows
+}
+
+/// The pixel half of the box's inside, for Kitty: the rule under the
+/// filter line as a hairline, and the chosen row's bar as a crisp stripe
+/// down its left edge. In a text terminal each draws as the characters
+/// [`inside`] already put there, so the two read the same.
+pub fn marks(m: Modal, list: &[Row], selected: usize, first: usize) -> Vec<crate::Plot> {
+    use crate::Plot;
+    let iw = m.w.saturating_sub(2);
+    let ih = m.h.saturating_sub(2);
+    let ground = picker::modal_ground();
+    let mut plots = Vec::new();
+    if ground.is_empty() || iw < 3 {
+        return plots;
+    }
+    let border = theme::ink(Role::Border);
+    let t = 0.08;
+    plots.push(Plot::filled(
+        m.x + 1,
+        m.y + 1 + 2,
+        iw,
+        1,
+        vec![
+            Plot::rect(0.0, 0.0, iw as f64, 1.0, &ground),
+            Plot::rect(1.0, 0.5 - t / 2.0, iw as f64 - 2.0, t, &border),
+        ],
+        vec![vec![(format!("{border}{ground}"), format!(" {} ", "─".repeat(iw - 2)))]],
+    ));
+    let slots = slots(ih);
+    let first = first.min(list.len().saturating_sub(slots));
+    if selected >= first && selected < first + slots && list.get(selected).is_some_and(|r| r.runs != Runs::Header) {
+        let slot = theme::tint(Role::Slot);
+        let accent = theme::ink_on(Role::Accent, true);
+        plots.push(Plot::filled(
+            m.x + 1,
+            m.y + 1 + 3 + (selected - first),
+            1,
+            1,
+            vec![Plot::rect(0.0, 0.0, 1.0, 1.0, &slot), Plot::rect(0.0, 0.0, 0.28, 1.0, &accent)],
+            vec![vec![(format!("{accent}{slot}"), "▌".to_string())]],
+        ));
+    }
+    plots
 }
 
 /// What a click at `col`, `row` of a pane `w` by `h` means while the box
@@ -595,28 +847,24 @@ pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Row], first
         return None;
     }
     if inner_row + 1 == ih {
-        let span = |word: &str| {
-            KEYS_ROW.find(word).map(|b| {
-                let at = crate::display_width(&KEYS_ROW[..b]);
-                at..at + crate::display_width(word)
-            })
-        };
-        if span("↵ run")?.contains(&inner_col) {
-            return Some("enter".into());
-        }
-        if span("esc back")?.contains(&inner_col) {
-            return Some("esc".into());
-        }
-        return None;
+        return key_spans(m.w.saturating_sub(2))
+            .into_iter()
+            .find(|(_, from, to)| (*from..*to).contains(&inner_col))
+            .and_then(|(key, _, _)| match key {
+                "↵" => Some("enter".to_string()),
+                "esc" => Some("esc".to_string()),
+                _ => None,
+            });
     }
-    let slot = inner_row.checked_sub(2)?;
+    let slot = inner_row.checked_sub(AROUND - 1)?;
     let slots = slots(ih);
     if slot >= slots {
         return None;
     }
     let first = first.min(list.len().saturating_sub(slots));
     let at = first + slot;
-    (at < list.len()).then(|| format!("pick:{at}"))
+    // A heading is not a command: a click on one does nothing.
+    (list.get(at).is_some_and(|r| r.runs != Runs::Header)).then(|| format!("pick:{at}"))
 }
 
 /// The first drawn row of a window `slots` tall that keeps `selected` in
@@ -709,7 +957,8 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
         .clone()
         .unwrap_or_default();
     let charts = Charts::now();
-    let commands = by_recent(commands(&actions, charts), &recent());
+    let recent_ids = recent();
+    let commands = by_recent(commands(&actions, charts), &recent_ids);
     let switch = switch_rows();
     let help_text = crate::HELP_TEXT.get().map(String::as_str).unwrap_or("No help text for this binary.");
     let mut help = help_rows(help_text, 40);
@@ -738,7 +987,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
             Mode::Widgets => switch_list.query.clone(),
             Mode::Help => help_list.query.clone(),
         };
-        let mut list = refilter(&commands, &switch, &help, mode, &query);
+        let mut list = refilter(&commands, &switch, &help, mode, &query, &recent_ids);
         let total = match mode {
             Mode::Commands => commands.len(),
             Mode::Widgets => switch.len(),
@@ -754,7 +1003,9 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
         if current.selected >= list.len() {
             current.selected = list.len().saturating_sub(1);
         }
+        current.selected = settle(&list, current.selected, true);
         current.first = current.first.min(last_flat(list.len(), window));
+        let (selected_now, first_now) = (current.selected, current.first);
         let title = match (mode, &note) {
             (Mode::Commands, Some(n)) => format!("Commands · {n}"),
             (Mode::Commands, None) => "Commands".to_string(),
@@ -793,6 +1044,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
             .map(|p| p.recoloured(&theme::recolour))
             .collect();
         plots.extend(picker::chrome(m, w, h));
+        plots.extend(marks(m, &list, selected_now, first_now));
         crate::draw_current(&rows, w, h, &plots);
         keyboard.typing();
         let keys = keyboard.poll();
@@ -832,7 +1084,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                     Some(k) => match k.strip_prefix("pick:").and_then(|i| i.parse::<usize>().ok()) {
                         Some(i) if i == selected => "enter".to_string(),
                         Some(i) => {
-                            state.selected = i;
+                            state.selected = settle(&list, i, true);
                             moved = true;
                             continue;
                         }
@@ -935,7 +1187,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                         Some(Runs::CopyDocs) => {
                             note = Some(copied(crate::clipboard(&docs_link(&this_stem())), "docs link"));
                         }
-                        Some(Runs::Line) | None => {}
+                        Some(Runs::Line) | Some(Runs::Header) | None => {}
                     }
                     if opened {
                         // The screen took what it wanted from the batch;
@@ -943,29 +1195,30 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                         pending.clear();
                     }
                 }
+                // The highlight steps over the section headings.
                 "up" => {
-                    state.selected = state.selected.saturating_sub(1);
+                    state.selected = settle(&list, state.selected.saturating_sub(1), false);
                     moved = true;
                 }
                 "down" => {
-                    state.selected = (state.selected + 1).min(list.len().saturating_sub(1));
+                    state.selected = settle(&list, (state.selected + 1).min(list.len().saturating_sub(1)), true);
                     moved = true;
                 }
                 "pgup" => {
-                    state.selected = state.selected.saturating_sub(room.saturating_sub(3).max(1));
+                    state.selected = settle(&list, state.selected.saturating_sub(window.max(1)), false);
                     moved = true;
                 }
                 "pgdn" => {
-                    state.selected = (state.selected + room.saturating_sub(3).max(1))
-                        .min(list.len().saturating_sub(1));
+                    state.selected =
+                        settle(&list, (state.selected + window.max(1)).min(list.len().saturating_sub(1)), true);
                     moved = true;
                 }
                 "home" => {
-                    state.selected = 0;
+                    state.selected = settle(&list, 0, true);
                     moved = true;
                 }
                 "end" => {
-                    state.selected = list.len().saturating_sub(1);
+                    state.selected = settle(&list, list.len().saturating_sub(1), false);
                     moved = true;
                 }
                 "backspace" => {
@@ -988,8 +1241,8 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
                     Mode::Widgets => &mut switch_list,
                     Mode::Help => &mut help_list,
                 };
-                list = refilter(&commands, &switch, &help, mode, &state.query);
-                state.selected = state.selected.min(list.len().saturating_sub(1));
+                list = refilter(&commands, &switch, &help, mode, &state.query, &recent_ids);
+                state.selected = settle(&list, state.selected.min(list.len().saturating_sub(1)), true);
             }
         }
         // On the pass a key moved the highlight, the window follows it.
@@ -1000,6 +1253,14 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) -> Option<String> {
         };
         if moved {
             current.first = follow_flat(current.selected, window, current.first);
+            // The first command of a section brings its heading into view
+            // with it, rather than leaving the heading just above the top.
+            if current.first == current.selected
+                && current.first > 0
+                && list.get(current.first - 1).is_some_and(|r| r.runs == Runs::Header)
+            {
+                current.first -= 1;
+            }
         }
         current.first = current.first.min(last_flat(list.len(), window));
         keyboard.wait(Duration::from_millis(60));
@@ -1212,15 +1473,16 @@ mod tests {
         let commands = commands(&[], Charts::ToText);
         let switch = switch_rows();
         let help = help_rows("q quit", 40);
-        let before = refilter(&commands, &switch, &help, Mode::Commands, "");
-        assert_eq!(before.first().map(|r| r.label.clone()), Some("Theme…".to_string()));
-        let after = refilter(&commands, &switch, &help, Mode::Commands, "not");
+        let before = refilter(&commands, &switch, &help, Mode::Commands, "", &[]);
+        assert_eq!(before[0].runs, Runs::Header, "nothing typed: in sections");
+        assert_eq!(before[settle(&before, 0, true)].label, "Theme…");
+        let after = refilter(&commands, &switch, &help, Mode::Commands, "not", &[]);
         assert_eq!(after.first().map(|r| r.label.clone()), Some("Notices".to_string()));
         // A mode change refilters too, against the other list.
-        let widgets = refilter(&commands, &switch, &help, Mode::Widgets, "");
+        let widgets = refilter(&commands, &switch, &help, Mode::Widgets, "", &[]);
         assert!(widgets.iter().all(|r| r.runs == Runs::Widget));
         assert_eq!(widgets.len(), switch.len());
-        let lines = refilter(&commands, &switch, &help, Mode::Help, "quit");
+        let lines = refilter(&commands, &switch, &help, Mode::Help, "quit", &[]);
         assert_eq!(lines.len(), 1);
     }
 
@@ -1241,16 +1503,28 @@ mod tests {
             // A click on the first option picks it and - where the box
             // has room for two - the next option is on the row under it.
             let col = m.x + 3;
-            assert_eq!(click_key(col, m.y + 3, w, h, &rows, 0).as_deref(), Some("pick:0"));
+            assert_eq!(click_key(col, m.y + 4, w, h, &rows, 0).as_deref(), Some("pick:0"));
             if slots(m.h - 2) >= 2 {
-                assert_eq!(click_key(col, m.y + 4, w, h, &rows, 0).as_deref(), Some("pick:1"));
+                assert_eq!(click_key(col, m.y + 5, w, h, &rows, 0).as_deref(), Some("pick:1"));
+            }
+            // The title, the filter line and the rule are not options.
+            for r in 1..=3 {
+                assert_eq!(click_key(col, m.y + r, w, h, &rows, 0), None, "{w}x{h} row {r}");
             }
             assert_eq!(click_key(0, 0, w, h, &rows, 0).as_deref(), Some("esc"));
-            // The keys row answers the keys it names.
+            // The keys row answers the keys it names, on its chips and
+            // words alike, at whatever width it is drawn.
             let keys_row = m.y + m.h - 2;
-            let at = |word: &str| m.x + 1 + crate::display_width(&KEYS_ROW[..KEYS_ROW.find(word).unwrap()]);
-            assert_eq!(click_key(at("↵ run") + 1, keys_row, w, h, &rows, 0).as_deref(), Some("enter"));
-            assert_eq!(click_key(at("esc back") + 1, keys_row, w, h, &rows, 0).as_deref(), Some("esc"));
+            let spans = key_spans(m.w - 2);
+            let at = |k: &str| spans.iter().find(|(key, _, _)| *key == k).map(|(_, from, _)| m.x + 1 + from + 1).unwrap();
+            assert_eq!(click_key(at("↵"), keys_row, w, h, &rows, 0).as_deref(), Some("enter"));
+            assert_eq!(click_key(at("esc"), keys_row, w, h, &rows, 0).as_deref(), Some("esc"));
+            assert_eq!(click_key(at("↑↓"), keys_row, w, h, &rows, 0), None);
+            // Every key named is on the row, never cut.
+            let shown = crate::strip_escapes(&inner[inner.len() - 1]);
+            for (key, _) in KEYS {
+                assert!(shown.contains(key), "{w}x{h}: {shown:?} lost {key}");
+            }
         }
     }
 
@@ -1275,16 +1549,18 @@ mod tests {
             }
             out
         }
-        // Title, filter, then one option a row, with the same line height
-        // as the theme list.
-        assert!(plain(&inner[2]).contains("Theme…"), "{:?}", inner[2]);
-        assert!(plain(&inner[3]).contains("Switch widget…"), "{:?}", inner[3]);
-        assert!(plain(&inner[4]).contains("Notices"), "{:?}", inner[4]);
-        assert_eq!(slots(20), 17);
-        assert_eq!(slots(20), picker::slots(20), "the palette and the theme list space their rows alike");
-        // Only the selected option's row is tinted.
-        assert!(plain(&inner[2]).contains("▸"));
-        assert!(!plain(&inner[3]).contains("▸"));
+        // Title band, filter, rule, then one option a row, with the same
+        // line height as the theme list.
+        assert!(plain(&inner[0]).contains("◆ Commands"), "{:?}", inner[0]);
+        assert!(plain(&inner[1]).contains("❯") && plain(&inner[1]).contains("type to filter"), "{:?}", inner[1]);
+        assert!(plain(&inner[2]).trim().chars().all(|c| c == '─'), "{:?}", inner[2]);
+        assert!(plain(&inner[3]).contains("Theme…"), "{:?}", inner[3]);
+        assert!(plain(&inner[4]).contains("Settings…") || plain(&inner[4]).contains("Switch widget…"), "{:?}", inner[4]);
+        assert_eq!(slots(20), 16);
+        // The chosen row carries the bar; its key is a chip at the end.
+        assert!(plain(&inner[3]).starts_with("▌ Theme…"), "{:?}", plain(&inner[3]));
+        assert!(plain(&inner[3]).trim_end().ends_with("ctrl-t"), "{:?}", plain(&inner[3]));
+        assert!(!plain(&inner[4]).contains("▌"));
     }
 
     #[test]
@@ -1300,7 +1576,7 @@ mod tests {
         let rows = commands(&[], Charts::ToText);
         for iw in [30, 44, 60, 74] {
             let inner = inside("Commands", &rows, rows.len(), 0, 0, "", iw, 20);
-            for (r, row) in rows.iter().zip(inner.iter().skip(2)) {
+            for (r, row) in rows.iter().zip(inner.iter().skip(3)) {
                 let shown = crate::strip_escapes(row);
                 // Either the whole description is there or none of it.
                 let whole = shown.contains(&r.detail);
@@ -1309,6 +1585,60 @@ mod tests {
                 assert!(whole || none, "iw={iw}: {shown:?} cut {:?}", r.detail);
             }
         }
+    }
+
+    #[test]
+    fn the_commands_open_in_sections_and_the_highlight_steps_over_headings() {
+        let actions = vec![("b".to_string(), "[b]reak start".to_string())];
+        let rows = commands(&actions, Charts::ToText);
+        let recent = vec!["Notices".to_string()];
+        let list = sectioned(&rows, &recent);
+        let labels: Vec<&str> = list.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels[0], "RECENT");
+        assert_eq!(labels[1], "Notices");
+        assert_eq!(labels[2], "OPSCOPE");
+        let own = labels.iter().position(|l| *l == "THIS WIDGET").unwrap();
+        assert_eq!(labels[own + 1], "[b]reak start");
+        // A command sits in one section only.
+        assert_eq!(labels.iter().filter(|l| **l == "Notices").count(), 1);
+        // Down from the last of one section lands on the first of the next;
+        // up from there comes back. Headings are never chosen.
+        assert_eq!(settle(&list, 2, true), 3);
+        assert_eq!(settle(&list, 2, false), 1);
+        assert_eq!(settle(&list, 0, true), 1);
+        // A click on a heading is nothing.
+        let (w, h) = (100, 36);
+        let m = Modal::place(w, h);
+        assert_eq!(click_key(m.x + 3, m.y + 4, w, h, &list, 0), None);
+        assert_eq!(click_key(m.x + 3, m.y + 5, w, h, &list, 0).as_deref(), Some("pick:1"));
+        // The count is of commands, not of headings.
+        let inner = inside("Commands", &list, rows.len(), 1, 0, "", 70, 20);
+        assert!(crate::strip_escapes(&inner[0]).contains(&format!("{} of {}", rows.len(), rows.len())));
+    }
+
+    #[test]
+    fn the_letters_typed_are_picked_out() {
+        assert_eq!(matched("swi", "Switch widget…")[..4], [true, true, true, false]);
+        assert_eq!(matched("sw", "Switch widget…").iter().filter(|b| **b).count(), 2);
+        // Not every letter in the label: nothing is picked out.
+        assert!(matched("zz", "Theme…").iter().all(|b| !b));
+        // Drawn bold in the accent; the plain row stays the same width.
+        let rows = commands(&[], Charts::ToText);
+        let inner = inside("Commands", &rows, rows.len(), 0, 0, "the", 70, 20);
+        assert!(inner[3].contains("\x1b[23;1m"), "{:?}", inner[3]);
+        assert_eq!(crate::display_width(&inner[3]), 70);
+    }
+
+    #[test]
+    fn the_pixel_marks_sit_on_the_rule_and_the_chosen_row() {
+        let rows = commands(&[], Charts::ToText);
+        let (w, h) = (100, 36);
+        let m = Modal::place(w, h);
+        let marks = marks(m, &rows, 2, 0);
+        // Tests draw in Classic, whose modal ground is a tint: both marks.
+        assert_eq!(marks.len(), 2);
+        assert_eq!((marks[0].y, marks[0].width), (m.y + 3, m.w - 2));
+        assert_eq!((marks[1].x, marks[1].y), (m.x + 1, m.y + 4 + 2));
     }
 
     #[test]

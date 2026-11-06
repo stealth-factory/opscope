@@ -512,14 +512,24 @@ pub fn chrome(m: Modal, w: usize, h: usize) -> Vec<crate::Plot> {
     if m.shadowed(w, h) {
         let ground = theme::current();
         let bg = ground.colour(Role::Bg);
-        let (r, g, b) = theme::mix(bg, (0, 0, 0), if ground.light { 0.22 } else { 0.6 });
-        let shade = format!("\x1b[38;2;{r};{g};{b}m");
+        let strength = if ground.light { 0.22 } else { 0.6 };
+        let shade_at = |f: f64| {
+            let (r, g, b) = theme::mix(bg, (0, 0, 0), strength * f);
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let shade = shade_at(1.0);
+        // In pixels the shadow fades: three strips, darkest against the
+        // box, so it reads as depth rather than as a second border. The
+        // text form keeps its one half block, the darkest shade.
+        let fade = [(0.0, 0.2, 1.0), (0.2, 0.2, 0.6), (0.4, 0.2, 0.3)];
         plots.push(Plot::filled(
             m.x + m.w,
             m.y + 1,
             1,
             m.h,
-            vec![Plot::rect(0.0, 0.0, 0.5, m.h as f64 - 0.5, &shade)],
+            fade.iter()
+                .map(|(at, size, f)| Plot::rect(*at, 0.0, *size, m.h as f64 - 0.5 + at, &shade_at(*f)))
+                .collect(),
             (0..m.h).map(|i| vec![(shade.clone(), if i + 1 == m.h { "▘" } else { "▌" }.to_string())]).collect(),
         ));
         // Stops short of the corner, which is the column's `▘`.
@@ -528,7 +538,9 @@ pub fn chrome(m: Modal, w: usize, h: usize) -> Vec<crate::Plot> {
             m.y + m.h,
             m.w - 1,
             1,
-            vec![Plot::rect(0.0, 0.0, m.w as f64 - 1.0, 0.5, &shade)],
+            fade.iter()
+                .map(|(at, size, f)| Plot::rect(0.0, *at, m.w as f64 - 1.0 - (0.4 - at), *size, &shade_at(*f)))
+                .collect(),
             vec![vec![(shade.clone(), "▀".repeat(m.w - 1))]],
         ));
     }
