@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.9.1] - 2026-11-06
+
+### Bug Fixes
+
+- **clocks**: Stack the world clock's name and time on narrow panes (OPS-237) (#588)
+
 ## [2.9.0] - 2026-11-06
 
 ### Documentation
