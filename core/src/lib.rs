@@ -4947,9 +4947,12 @@ impl Keyboard {
         // and asks again - the way saving its settings does. Only when the
         // theme in force is the terminal's own: a named theme did not change.
         // Not while the picker is open: its preview has put another theme
-        // in force, and the switch is kept for the poll after it closes
-        // rather than taken and dropped here.
-        if !picker::OPEN.load(Ordering::Acquire)
+        // in force. Nor under an unsaved edit - a field being typed in, the
+        // settings screen - which a restart would throw away. The switch is
+        // kept for the poll after they close rather than taken and dropped.
+        if !typing
+            && !picker::OPEN.load(Ordering::Acquire)
+            && !settings::SCREEN_OPEN.load(Ordering::Acquire)
             && terminal::SCHEME_CHANGED.swap(false, Ordering::AcqRel)
             && theme::current().id == "terminal"
         {
