@@ -445,9 +445,11 @@ Google sign-in, scopes and wording
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only
 their section name, optional legacy alias, and owned `settings.json`.
-And it owns the command palette (`tc::palette`, `ctrl-t` in every
+And it owns the command palette (`tc::palette`, `ctrl-k` in every
 widget): one box whose modes — commands, theme picker, widgets — swap in
 place over the frame it was opened on, esc popping one level at a time.
+The theme picker also keeps its own `ctrl-t` in every widget, the same
+picker over the widget's frame with esc back to the widget.
 Core wires it from `Keyboard::poll` for every binary, as it does `!` and
 `,`; a widget registers its settings spec at startup
 (`tc::register_settings(SETTINGS)`) and the palette's Settings action

@@ -2242,7 +2242,7 @@ fn hint_key(plain: &str) -> Option<String> {
         "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
     ];
     let first = plain.split_whitespace().next()?;
-    // A named key in brackets is the same key: `[ctrl-t]heme`, `[esc] back`.
+    // A named key in brackets is the same key: `[ctrl-k]cmds`, `[esc] back`.
     // The bracket closes the name, so the word fused onto it is not read.
     let first = match first.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
         Some((inside, _)) => inside,
@@ -4980,15 +4980,27 @@ impl Keyboard {
         if opens {
             notices::run(self);
         }
-        // ctrl-t opens the command palette over whatever widget this is.
-        // Its Theme action is the picker, so the picker's key is the
-        // palette's: not beside it but behind it, one entry point.
+        // ctrl-k opens the command palette over whatever widget this is.
+        // Its Theme action is the picker, and ctrl-t opens the picker
+        // directly, so the picker's key is answered here too.
         if !palette::OPEN.load(Ordering::Acquire)
             && !picker::OPEN.load(Ordering::Acquire)
             && keys.iter().any(|k| k == palette::KEY)
         {
             keys.retain(|k| k != palette::KEY);
             palette::run(self);
+        }
+        if !palette::OPEN.load(Ordering::Acquire)
+            && !picker::OPEN.load(Ordering::Acquire)
+            && keys.iter().any(|k| k == picker::KEY)
+        {
+            keys.retain(|k| k != picker::KEY);
+            let (base_rows, base_plots) = LAST_FRAME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
+            picker::run_over(self, &base_rows, &base_plots);
         }
         keys
     }
@@ -5349,14 +5361,15 @@ fn release_stale_string(
 }
 
 /// The name a single legacy byte already has, shared with `CSI u` so the
-/// two forms cannot drift. vim's scroll pair and readline's kill-line are
-/// named rather than left as control bytes: a widget matching `"\x05"`
-/// reads as a typo, and a control byte in a match arm is invisible to
-/// anyone scanning the file for its keys. Those three are safe to take.
-/// The terminal is in cbreak with the saved `ISIG` and `IXON` still on, so
-/// the bytes those modes intercept never arrive here as themselves. Flag 1
-/// sends the same chords as `CSI u`, and [`legacy_named`] turns them back
-/// into the signals or the flow control the saved termios describes.
+/// two forms cannot drift. vim's scroll pair, readline's kill-line and
+/// kill-to-end, and the palette's key are named rather than left as
+/// control bytes: a widget matching `"\x05"` reads as a typo, and a
+/// control byte in a match arm is invisible to anyone scanning the file
+/// for its keys. Those are safe to take. The terminal is in cbreak with
+/// the saved `ISIG` and `IXON` still on, so the bytes those modes
+/// intercept never arrive here as themselves. Flag 1 sends the same
+/// chords as `CSI u`, and [`legacy_named`] turns them back into the
+/// signals or the flow control the saved termios describes.
 fn name_byte(ch: char) -> String {
     match ch {
         '\r' | '\n' => "enter".to_string(),
@@ -5367,6 +5380,7 @@ fn name_byte(ch: char) -> String {
         '\u{5}' => "ctrl-e".to_string(),
         '\u{15}' => "ctrl-u".to_string(),
         '\u{14}' => "ctrl-t".to_string(),
+        '\u{b}' => "ctrl-k".to_string(),
         c => c.to_string(),
     }
 }
@@ -8303,6 +8317,8 @@ mod tests {
         assert_eq!(keys("\x19"), vec!["ctrl-y"]);
         assert_eq!(keys("\x05"), vec!["ctrl-e"]);
         assert_eq!(keys("\x15"), vec!["ctrl-u"]);
+        // The palette's key, by both encodings.
+        assert_eq!(keys("\x0b"), vec!["ctrl-k"]);
     }
 
     #[test]
@@ -8691,6 +8707,8 @@ mod tests {
             ("\u{19}", "\u{1b}[121;5u", "ctrl-y"),
             ("\u{5}", "\u{1b}[101;5u", "ctrl-e"),
             ("\u{15}", "\u{1b}[117;5u", "ctrl-u"),
+            ("\u{b}", "\u{1b}[107;5u", "ctrl-k"),
+            ("\u{14}", "\u{1b}[116;5u", "ctrl-t"),
             // Alt is an ESC prefix in legacy, and that prefix is not part of the name.
             ("\u{1b}a", "\u{1b}[97;3u", "a"),
             ("\u{1b}I", "\u{1b}[105;4u", "I"),

@@ -30,11 +30,13 @@ for the bundled list is the same colours with every role written out.
    { "name": "Mine", "fg": "#e6e1cf", "bg": "#1b1d24", "red": "#f07178", "green": "#aad94c" }
    ```
 
-3. Press `ctrl-t` in any widget for the command palette, then `↵` on
-   **Theme…**. The picker lists your themes in a section of
+3. Press `ctrl-t` in any widget — the theme picker opens straight to it
+   (or `ctrl-k`, then `↵` on **Theme…**). The picker lists your themes in
+   a section of
    their own, **your themes**, between `auto`/`terminal` and the bundled
    themes. Move onto yours to preview it, and press `↵` to keep it. `esc`
-   backs out to the palette's commands; `esc` again closes it.
+   backs out of the picker. Opened from the palette, `esc` returns to the
+   palette's commands; `esc` again closes it.
 
 Only `fg` and `bg` are required. Any role you leave out is worked out from
 those and from whichever hues you did give. A file whose id matches a bundled

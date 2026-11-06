@@ -14,16 +14,20 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The command palette: `ctrl-t` in any widget.
+//! The command palette: `ctrl-k` in any widget.
 //!
 //! One box over the middle of the pane - a filter line and a list under
-//! it - and every mode of it is the same box. `ctrl-t` opens the
+//! it - and every mode of it is the same box. `ctrl-k` opens the
 //! commands; the Theme action swaps the box's contents to the theme
 //! list (the picker, unchanged), and Switch widget to the other
 //! widgets. esc pops one level: the theme list back to the commands,
 //! the commands back to the widget. A mode never draws over another;
 //! each redraws over the frame the palette was opened on, so the modes
 //! read as one surface that changes, not a stack of boxes that grows.
+//!
+//! The theme picker also keeps its own `ctrl-t`, asked of the widget
+//! directly: the same picker, over the widget's frame, with esc back to
+//! the widget rather than to the palette.
 //!
 //! The commands are the widget-wide actions core owns, so every widget
 //! gets all of them with no widget code: the theme picker, this
@@ -50,19 +54,41 @@ use crate::theme::{self, Role};
 pub(crate) static OPEN: AtomicBool = AtomicBool::new(false);
 
 /// The key that opens it, and the hint every footer carries for it.
-pub const KEY: &str = "ctrl-t";
+pub const KEY: &str = "ctrl-k";
 /// In the footer's own form, `[q]uit` - the key in brackets, fused onto
-/// the word - and a click on it is `ctrl-t`.
+/// the word - and a click on it is `ctrl-k`.
 ///
 /// Twelve cells on purpose, the width `[,] settings` sits at and the
 /// old theme-picker hint sat at: `pack_hints` will not split a hint, so
 /// a wider one overflows a twelve-column pane, and twelve is the floor
 /// every frame in the tree is measured from. "cmds" because that is
 /// what the press opens, in the shortest form that fits.
-pub const HINT: &str = "[ctrl-t]cmds";
+pub const HINT: &str = "[ctrl-k]cmds";
 
 /// The box's last row. A click on `↵ run` or `esc back` is that key.
 const KEYS_ROW: &str = " ↑↓ choose · ↵ run · esc back";
+
+/// Blank rows between one option and the next.
+///
+/// A terminal has no half-line, so line spacing can only be a whole row
+/// between items - twice the leading, which is what the tall box wants:
+/// four commands on four consecutive rows read as a paragraph, not as a
+/// list of things you can pick. One, not two, so a pane that showed a
+/// dozen options still shows half of them rather than a third.
+const GAP: usize = 1;
+
+/// How many options a list window `room` rows tall shows, leaving `GAP`
+/// blank rows between them.
+fn visible(room: usize) -> usize {
+    (room + GAP) / (GAP + 1)
+}
+
+/// How many options the box's list shows, with the title, the filter line
+/// and the keys row around it. The palette's counterpart to the picker's
+/// `slots`, with the spacing taken out.
+pub fn slots(ih: usize) -> usize {
+    visible(ih.saturating_sub(3)).max(1)
+}
 
 /// One row of whichever list the box is showing.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,7 +97,7 @@ pub struct Row {
     pub detail: String,
     /// The key that does the same thing without the palette, shown on
     /// the row so the palette teaches it. `None` when there is no such
-    /// key - no widget answers `ctrl-t` with anything but this box.
+    /// key.
     pub key: Option<&'static str>,
     pub runs: Runs,
 }
@@ -101,7 +127,7 @@ pub fn commands() -> Vec<Row> {
         key,
         runs,
     };
-    let mut rows = vec![row("Theme…", "pick a theme for this pane", None, Runs::Theme)];
+    let mut rows = vec![row("Theme…", "pick a theme for this pane", Some("ctrl-t"), Runs::Theme)];
     if settings::registered().is_some() {
         rows.push(row("Settings…", "this widget's settings", Some(","), Runs::Settings));
     }
@@ -234,13 +260,18 @@ pub fn inside(
         ],
         &bar,
     ));
-    let slots = picker::slots(ih);
+    let slots = slots(ih);
     let first = first.min(list.len().saturating_sub(slots));
     let mut listed = Vec::new();
     if list.is_empty() {
         listed.push(line(&[(theme::ink(Role::Muted), "   nothing matches".into())], &bar));
     }
-    for (i, r) in list.iter().enumerate().skip(first).take(slots) {
+    for (k, (i, r)) in list.iter().enumerate().skip(first).take(slots).enumerate() {
+        // A blank row between options, never before the first: the list
+        // opens on its first row, and the gaps are what air the rest out.
+        if k > 0 {
+            listed.push(line(&[], &bar));
+        }
         let here = i == selected;
         let ground = if here { theme::tint(Role::Slot) } else { bar.clone() };
         let mark = if here { "▸ " } else { "  " };
@@ -255,7 +286,7 @@ pub fn inside(
             &ground,
         ));
     }
-    while listed.len() < slots {
+    while listed.len() < ih.saturating_sub(3) {
         listed.push(line(&[], &bar));
     }
     rows.extend(listed);
@@ -296,8 +327,15 @@ pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Row], first
         }
         return None;
     }
-    let slot = inner_row.checked_sub(2)?;
-    let slots = picker::slots(ih);
+    let list_row = inner_row.checked_sub(2)?;
+    // A gap row between two options is not an option; only a slot's own
+    // row answers a click.
+    let stride = GAP + 1;
+    if list_row % stride != 0 {
+        return None;
+    }
+    let slot = list_row / stride;
+    let slots = slots(ih);
     if slot >= slots {
         return None;
     }
@@ -405,7 +443,7 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         let (w, h) = crate::size();
         let m = Modal::place(w, h);
         let room = m.h.saturating_sub(2);
-        let window = picker::slots(room);
+        let window = slots(room);
         let current = if on_commands {
             &mut commands_list
         } else {
@@ -487,9 +525,9 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
                 "ctrl-y" => current.first = current.first.saturating_sub(1),
                 "ctrl-e" => current.first = (current.first + 1).min(last_flat(list.len(), window)),
                 // esc pops one level: the widgets back to the commands,
-                // the commands back to the widget. ctrl-t is esc here -
+                // the commands back to the widget. ctrl-k is esc here -
                 // the key that opened the palette closing it.
-                "esc" | "ctrl-t" => {
+                "esc" | "ctrl-k" => {
                     if !on_commands {
                         on_commands = true;
                     } else {
@@ -655,9 +693,15 @@ mod tests {
             for r in picker::framed(&inner, m.w - 2) {
                 assert_eq!(crate::display_width(&r), m.w, "{w}x{h}");
             }
-            // A click on the first row picks it; a click outside is esc.
+            // A click on the first option picks it, the gap under it
+            // answers nothing, and - where the box has room for two -
+            // the next option is two rows down.
             let col = m.x + 3;
             assert_eq!(click_key(col, m.y + 3, w, h, &rows, 0).as_deref(), Some("pick:0"));
+            assert_eq!(click_key(col, m.y + 4, w, h, &rows, 0), None, "{w}x{h}: a gap answered a click");
+            if slots(m.h - 2) >= 2 {
+                assert_eq!(click_key(col, m.y + 5, w, h, &rows, 0).as_deref(), Some("pick:1"));
+            }
             assert_eq!(click_key(0, 0, w, h, &rows, 0).as_deref(), Some("esc"));
             // The keys row answers the keys it names.
             let keys_row = m.y + m.h - 2;
@@ -665,6 +709,42 @@ mod tests {
             assert_eq!(click_key(at("↵ run") + 1, keys_row, w, h, &rows, 0).as_deref(), Some("enter"));
             assert_eq!(click_key(at("esc back") + 1, keys_row, w, h, &rows, 0).as_deref(), Some("esc"));
         }
+    }
+
+    #[test]
+    fn the_options_are_spaced_one_blank_row_apart() {
+        let rows = commands();
+        let inner = inside("Commands", &rows, rows.len(), 0, 0, "", 60, 20);
+        // A row as it reaches the terminal, without the colour escapes.
+        fn plain(row: &str) -> String {
+            let mut out = String::new();
+            let mut chars = row.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        // Title, filter, then the first option; every following option
+        // sits two rows down from the one above it.
+        assert!(plain(&inner[2]).contains("Theme…"), "{:?}", inner[2]);
+        assert!(plain(&inner[3]).trim().is_empty(), "the row under Theme is not blank: {:?}", plain(&inner[3]));
+        assert!(plain(&inner[4]).contains("Switch widget…"), "{:?}", inner[4]);
+        assert!(plain(&inner[5]).trim().is_empty(), "the row under Switch is not blank: {:?}", plain(&inner[5]));
+        assert!(plain(&inner[6]).contains("Notices"), "{:?}", inner[6]);
+        assert_eq!(slots(20), visible(17));
+        assert!(slots(20) >= 4, "a twenty-row box must still show four options: {}", slots(20));
+        // The selected option's row is the one tinted; the gap under it
+        // is not.
+        assert!(plain(&inner[2]).contains("▸"));
+        assert!(!plain(&inner[3]).contains("▸"));
     }
 
     #[test]

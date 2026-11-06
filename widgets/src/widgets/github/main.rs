@@ -3981,7 +3981,7 @@ mod tests {
             }
         }
         // The band that was wrong, named so a regression points at itself.
-        // First found at 81-84, before the footer gained its ctrl-t hint;
+        // First found at 81-84, before the footer gained its ctrl-k hint;
         // the palette hint that replaced it is the same width, and the
         // band stayed where it was.
         for w in 95..=98 {
@@ -4013,10 +4013,10 @@ mod tests {
                 );
             }
         }
-        // The one Codex found, at 81 columns before the footer gained
-        // `ctrl-t theme`: the whole footer fits 95 columns on one line, and
-        // only with a wording that leaves room for the rest. The palette
-        // hint that replaced it is the same width, so it still does.
+        // The one Codex found, at 81 columns before the footer gained its
+        // theme-picker hint: the whole footer fits 95 columns on one line,
+        // and only with a wording that leaves room for the rest. The
+        // palette hint that replaced it is the same width, so it still does.
         let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 93, "  ").len();
         assert_eq!(foot(info_hint(false, &p, 95)), 1);
     }

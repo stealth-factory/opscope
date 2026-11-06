@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The theme picker: the Theme action of the command palette.
+//! The theme picker: the Theme action of the command palette, and its own
+//! `ctrl-t` in any widget.
 //!
 //! A modal over the middle of the pane - a filter line and the themes
 //! under it, framed, with a shadow - drawn as text, and in Kitty with its
@@ -37,6 +38,11 @@ use crate::theme::{self, Role, Theme, Wanted};
 /// Open, so a second entry while the picker is up is not answered, and
 /// so its own frames are not taken for the widget's.
 pub(crate) static OPEN: AtomicBool = AtomicBool::new(false);
+
+/// The key that opens the picker directly, without the palette. The
+/// palette's Theme action reaches the same picker; esc then returns to
+/// the commands rather than to the widget.
+pub const KEY: &str = "ctrl-t";
 
 /// One thing the picker offers: a setting value, what to call it, and the
 /// words it is matched against.
