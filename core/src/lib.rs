@@ -1132,9 +1132,20 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some((rows.to_vec(), plots.to_vec()));
     }
     let rows: Vec<String> = rows.iter().map(|r| theme::recolour(r)).collect();
-    let rows = rows.as_slice();
     let plots: Vec<Plot> = plots.iter().cloned().map(|p| p.recoloured(&theme::recolour)).collect();
-    let plots = plots.as_slice();
+    draw_current(&rows, w, h, &plots);
+}
+
+/// [`draw_plots`] for a frame already in the theme in force: nothing is
+/// recoloured. The theme picker builds its modal in the theme it previews,
+/// and recolouring that as though it were in the theme the widget started
+/// in maps one role onto another - GitHub Light's white `Bg` is Cobalt2's
+/// white `Fg`, so the labels came out in Cobalt2's background and vanished.
+/// It recolours the widget's frame itself and hands the whole lot here.
+pub(crate) fn draw_current(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
+    if output_held() {
+        return;
+    }
     // What core adds: the counter on the top row and the banner under the
     // widget's frame, both as `size()` decided them for this frame. The
     // banner goes on only when the widget drew at the height `size()`

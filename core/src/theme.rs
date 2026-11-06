@@ -499,10 +499,17 @@ fn ulc((r, g, b): Rgb) -> String {
 /// text, lifted text, backgrounds, hue tints and the threshold underline.
 /// Where two roles share a colour in `from`, the plain form of the first
 /// in [`Role::ALL`] wins - the same choice [`lift`] makes.
+///
+/// Where a role's plain and lifted text are the same colour in `from` - as
+/// Nord's `Muted` is - the escape cannot say which one a widget meant, so
+/// it goes to the lifted form in `to`. That one reads on the background as
+/// well as on the tints; the plain one, put on a selected row, need not:
+/// Night Owl's plain `Muted` is 3.68 on its selection.
 pub fn escape_map(from: &Theme, to: &Theme) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for role in Role::ALL {
-        map.entry(fg(from.colour(role))).or_insert_with(|| fg(to.colour(role)));
+        let text = if from.colour(role) == from.lifted(role) { to.lifted(role) } else { to.colour(role) };
+        map.entry(fg(from.colour(role))).or_insert_with(|| fg(text));
         map.entry(bgc(from.colour(role))).or_insert_with(|| bgc(to.colour(role)));
     }
     for role in Role::ALL {
@@ -515,6 +522,9 @@ pub fn escape_map(from: &Theme, to: &Theme) -> std::collections::HashMap<String,
     map.retain(|k, v| k != v);
     map
 }
+
+/// The cached translation from one theme to another, with both themes.
+type RecolourMap = (Arc<Theme>, Arc<Theme>, std::collections::HashMap<String, String>);
 
 /// `text` drawn in the theme in force now, though it was built in the theme
 /// a widget started in: every role colour of the one becomes the same role
@@ -530,12 +540,14 @@ pub fn recolour(text: &str) -> String {
     if !text.contains("\x1b[") {
         return text.to_string();
     }
-    static CACHE: std::sync::Mutex<Option<(usize, usize, std::collections::HashMap<String, String>)>> =
-        std::sync::Mutex::new(None);
-    let key = (Arc::as_ptr(&from) as usize, Arc::as_ptr(&to) as usize);
+    // Keyed on the themes themselves, held: an address alone could be
+    // freed and handed to the next theme `set`, and that one would be
+    // drawn with the map of the theme before it.
+    static CACHE: std::sync::Mutex<Option<RecolourMap>> = std::sync::Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.as_ref().is_none_or(|(a, b, _)| (*a, *b) != key) {
-        *cache = Some((key.0, key.1, escape_map(&from, &to)));
+    if cache.as_ref().is_none_or(|(a, b, _)| !Arc::ptr_eq(a, &from) || !Arc::ptr_eq(b, &to)) {
+        let map = escape_map(&from, &to);
+        *cache = Some((from.clone(), to.clone(), map));
     }
     let map = &cache.as_ref().expect("just filled").2;
     let mut out = String::with_capacity(text.len());
@@ -1217,6 +1229,17 @@ mod tests {
         assert!(out.contains(&bgc(nord.toward(Role::Green))));
         // A theme to itself changes nothing.
         assert!(escape_map(nord, nord).is_empty());
+    }
+
+    #[test]
+    fn a_colour_that_is_both_forms_of_a_role_keeps_its_contrast_when_recoloured() {
+        let (nord, owl) = (find("nord").unwrap(), find("night-owl").unwrap());
+        assert_eq!(nord.colour(Role::Muted), nord.lifted(Role::Muted), "the case this pins");
+        let map = escape_map(nord, owl);
+        // Whether the widget meant plain or lifted, it lands on the form
+        // that reads on Night Owl's selection.
+        assert_eq!(map.get(&fg(nord.colour(Role::Muted))), Some(&fg(owl.lifted(Role::Muted))));
+        assert!(contrast(owl.lifted(Role::Muted), owl.colour(Role::Slot)) >= 4.5);
     }
 
     #[test]

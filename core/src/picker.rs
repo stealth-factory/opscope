@@ -182,7 +182,7 @@ pub fn click_key(col: usize, row: usize, w: usize, h: usize, list: &[Choice], fi
     let ih = m.h.saturating_sub(2);
     let inner_row = row.checked_sub(m.y + 1)?;
     let inner_col = col.checked_sub(m.x + 1)?;
-    if inner_row >= ih {
+    if inner_row >= ih || inner_col >= m.w.saturating_sub(2) {
         return None;
     }
     if inner_row + 1 == ih {
@@ -335,13 +335,16 @@ pub fn last_first(list: &[Choice], slots: usize) -> usize {
 #[cfg(test)]
 pub fn inside(list: &[Choice], selected: usize, query: &str, kept: &str, said: &str, iw: usize, ih: usize) -> Vec<String> {
     let first = follow_list(list, selected, slots(ih), 0);
-    inside_from(list, selected, first, query, kept, said, iw, ih)
+    inside_from(list, choices().len(), selected, first, query, kept, said, iw, ih)
 }
 
-/// The modal's inside with its list scrolled to drawn row `first`.
+/// The modal's inside with its list scrolled to drawn row `first`. `total`
+/// is how many choices there are unfiltered, for the count: passed in
+/// because working it out parses every theme again, every frame.
 #[allow(clippy::too_many_arguments)]
 pub fn inside_from(
     list: &[Choice],
+    total: usize,
     selected: usize,
     first: usize,
     query: &str,
@@ -362,7 +365,7 @@ pub fn inside_from(
         format!("{ground}{body}\x1b[0m")
     };
     let mut rows = Vec::new();
-    let count = format!("{} of {} ", list.len(), choices().len());
+    let count = format!("{} of {} ", list.len(), total);
     // Under NO_COLOR a theme is still saved, for the panes where it isn't
     // set; this one stays uncoloured whatever is picked.
     let title = if theme::no_color() { " Theme · NO_COLOR is set here" } else { " Theme" };
@@ -597,6 +600,10 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
     if OPEN.swap(true, Ordering::AcqRel) {
         return;
     }
+    // The widget's footer is under the modal now. Left bound, a click on
+    // where its `↵ open` was would come back as that key and keep the
+    // previewed theme, where it is outside the modal and means cancel.
+    keyboard.forget_footer();
     let original = theme::current();
     let (base_rows, base_plots) = crate::LAST_FRAME
         .lock()
@@ -634,10 +641,12 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
         }
         first = first.min(last_first(&list, window));
         let boxed = framed(
-            &inside_from(&list, selected, first, &query, &kept, &said, m.w.saturating_sub(2), room),
+            &inside_from(&list, all.len(), selected, first, &query, &kept, &said, m.w.saturating_sub(2), room),
             m.w.saturating_sub(2),
         );
-        let mut rows: Vec<String> = base_rows.iter().take(h).cloned().collect();
+        // The widget's frame was built in the theme it started in; the
+        // modal is built in the one previewed. Only the first is recoloured.
+        let mut rows: Vec<String> = base_rows.iter().take(h).map(|r| theme::recolour(r)).collect();
         rows.resize(h, String::new());
         for (i, row) in boxed.iter().enumerate() {
             if let Some(base) = rows.get_mut(m.y + i) {
@@ -651,12 +660,16 @@ pub(crate) fn run(keyboard: &mut crate::Keyboard) {
             .iter()
             .filter(|p| p.x >= bx + bw || p.x + p.width <= bx || p.y >= by + bh || p.y + p.height <= by)
             .cloned()
+            .map(|p| p.recoloured(&theme::recolour))
             .collect();
         plots.extend(chrome(m, w, h));
-        crate::draw_plots(&rows, w, h, &plots);
+        crate::draw_current(&rows, w, h, &plots);
         keyboard.typing();
         let keys = keyboard.poll();
         for key in keys {
+            // A save that failed says so until the next key, then the
+            // filter line is the filter line again.
+            said.clear();
             let before = (selected, query.clone());
             // A click is the key it stands for: outside the modal it is
             // esc, on the keys row the key it names, and on a theme a move
@@ -815,6 +828,8 @@ mod tests {
         assert_eq!(click_key(col, m.y + 1, w, h, &all, 0), None);
         assert_eq!(click_key(col, m.y + 2, w, h, &all, 0), None);
         assert_eq!(click_key(m.x, m.y + 6, w, h, &all, 0), None);
+        // Nor does the right border: it is frame, not the row inside it.
+        assert_eq!(click_key(m.x + m.w - 1, m.y + 6, w, h, &all, 0), None);
         assert_eq!(click_key(0, 0, w, h, &all, 0).as_deref(), Some("esc"));
         assert_eq!(click_key(col, m.y + m.h, w, h, &all, 0).as_deref(), Some("esc"));
     }
@@ -831,7 +846,7 @@ mod tests {
         assert_eq!(follow_list(&all, 0, 10, 8), 0);
         // The wheel stops with the last theme on the last row.
         assert_eq!(last_first(&all, 10), drawn(&all).len() - 10);
-        let rows = inside_from(&all, 0, 999, "", "dusk", "", 60, 13);
+        let rows = inside_from(&all, all.len(), 0, 999, "", "dusk", "", 60, 13);
         assert!(rows.iter().any(|r| r.contains(&all.last().unwrap().label)));
     }
 
