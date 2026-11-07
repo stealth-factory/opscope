@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.10.0] - 2026-11-07
+
+### Documentation
+
+- Allow transitions, a richer mouse and richer Kitty mode in the rules (#594)
+
+### Features
+
+- **mux-activity**: Space and rule workspace groups, drop the done tint (OPS-268) (#596)
+
 ## [2.9.2] - 2026-11-06
 
 ### Bug Fixes
