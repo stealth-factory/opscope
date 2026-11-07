@@ -118,6 +118,9 @@ different sentences. RESUMABLE lists agent sessions no pane is holding.
 PANES lists every other pane doing something. IDLE, when i has not hidden
 it and the session has panes at a prompt, is its own section.
 
+Inside AGENTS the agents are grouped by workspace, the workspace holding
+the most urgent agent first, each under its name and a rule.
+
 RESUMABLE counts the whole machine, not this session: `luvus agent sessions`
 answers for every session on the box, and most of them are usually in
 directories no workspace has open. The heading says how many are in a

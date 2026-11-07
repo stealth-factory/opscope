@@ -270,7 +270,9 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                 .cmp(&parse::rank_of(&b.state))
                 .then(b.since.total_cmp(&a.since))
         });
-        listed
+        // Drawn, walked by the keys and indexed by the cursor in this
+        // order, so the grouping happens here and nowhere else.
+        by_workspace(listed)
     });
 
     let event_sequence = snapshot.as_ref().ok().map(|snapshot| snapshot.sequence);
@@ -572,6 +574,8 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The rule under a workspace's sub-heading: decoration, never text.
+    rule: String,
     /// The lifted form of every other role this palette draws in, for text
     /// on a selected or tinted row: the named `_lit` twins above are swapped
     /// in by the tint closure first, and anything else it is handed goes
@@ -609,6 +613,7 @@ fn palette() -> Palette {
         proc: tc::ink(tc::Role::Muted),
         idle_c: tc::ink(tc::Role::Muted),
         idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        rule: tc::ink(tc::Role::Border),
         lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
             .into_iter()
             .map(|role| (tc::ink(role), tc::ink_on(role, true)))
@@ -914,6 +919,30 @@ impl Columns {
             dir_w: idle[0],
             idle_workspace_w: idle[1],
         }
+    }
+}
+
+/// Agents regrouped by workspace, without losing who needs you: each
+/// workspace's agents together in the order they already had, worst first,
+/// and the workspaces in the order their most urgent agent came - which,
+/// for a list already sorted worst first, is the order each first appears.
+fn by_workspace(agents: Vec<Agent>) -> Vec<Agent> {
+    let mut groups: Vec<Vec<Agent>> = Vec::new();
+    for agent in agents {
+        match groups.iter_mut().find(|g| g[0].workspace == agent.workspace) {
+            Some(g) => g.push(agent),
+            None => groups.push(vec![agent]),
+        }
+    }
+    groups.into_iter().flatten().collect()
+}
+
+/// A workspace as its heading names it; Luvus can report an agent in none.
+fn workspace_name(workspace: &str) -> &str {
+    if workspace.is_empty() {
+        "no workspace"
+    } else {
+        workspace
     }
 }
 
@@ -1982,7 +2011,28 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 &[(p.dim.as_str(), tc::pad(&columns, w.saturating_sub(1)))],
                 w.saturating_sub(1),
             ));
-            for a in &agent_rows {
+            let grouped = agent_rows
+                .iter()
+                .any(|a| a.workspace != agent_rows[0].workspace);
+            for (i, a) in agent_rows.iter().enumerate() {
+                // A gap between two agents, and where a workspace begins
+                // its heading and rule - only when there are workspaces to
+                // tell apart. Above `start`, so a click there is no row's.
+                if i > 0 {
+                    body.push(String::new());
+                }
+                if grouped && (i == 0 || agent_rows[i - 1].workspace != a.workspace) {
+                    let n = agent_rows.iter().filter(|o| o.workspace == a.workspace).count();
+                    let at_row = body.len();
+                    body.extend(super::group_heading(
+                        workspace_name(&a.workspace),
+                        n,
+                        w,
+                        (&p.accent, &p.dim, &p.rule),
+                        at_row,
+                        &mut plots,
+                    ));
+                }
                 let here = at == selected_row;
                 let start = body.len();
                 let colour = colour_of(&a.state, &p);
@@ -2697,6 +2747,21 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_group_by_workspace_with_the_most_urgent_workspace_first() {
+        let agent = |pane: &str, workspace: &str| Agent {
+            pane: pane.into(),
+            workspace: workspace.into(),
+            ..Agent::default()
+        };
+        // Already worst-first, as the poll sorts them before grouping.
+        let sorted = vec![agent("1", "api"), agent("2", "site"), agent("3", "api"), agent("4", "")];
+        let panes: Vec<String> = by_workspace(sorted).into_iter().map(|a| a.pane).collect();
+        assert_eq!(panes, ["1", "3", "2", "4"]);
+        assert_eq!(workspace_name(""), "no workspace");
+        assert_eq!(workspace_name("api"), "api");
+    }
 
     thread_local! {
         static SNAPSHOT_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
