@@ -377,6 +377,12 @@ pub fn read_io(pid: i32) -> Result<PidIo, String> {
     parse_proc_pid_io(&text).ok_or_else(|| format!("{}: no counters in it", path))
 }
 
+/// `/proc/<pid>/cgroup`, as `parse_proc_pid_cgroup` reads it. Readable for
+/// every process, whoever owns it.
+pub fn read_cgroup(pid: i32) -> Result<String, String> {
+    read_text(&format!("/proc/{}/cgroup", pid)).map(|t| parse_proc_pid_cgroup(&t))
+}
+
 /// `/proc/<pid>/comm`, without its trailing newline.
 pub fn read_comm(pid: i32) -> Result<String, String> {
     read_text(&format!("/proc/{}/comm", pid)).map(|s| s.trim_end_matches('\n').to_string())
@@ -429,7 +435,7 @@ pub fn read_pid(pid: i32) -> PidFiles {
         pid,
         stat: read_stat(pid),
         io: read_io(pid),
-        cgroup: read_text(&format!("{}/cgroup", dir)).map(|t| parse_proc_pid_cgroup(&t)),
+        cgroup: read_cgroup(pid),
         cmdline: read_cmdline(pid),
         comm: read_comm(pid),
         cwd: read_cwd(pid),

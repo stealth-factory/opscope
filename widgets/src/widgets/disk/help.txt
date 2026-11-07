@@ -19,11 +19,22 @@ down, each to its own peak; on macOS it is one trace of combined I/O.
 Until the disk section has focus it is the total of every disk; then it
 is the selected disk, named above it.
 
+WHO IS WRITING is Linux-only. BY SERVICE reads cgroup v2 io.stat once a
+poll and gives each io-enabled cgroup its own share, children taken out,
+for the disk the DISKS cursor is on (the first disk shown until then).
+The line under it ties that sum to the disk's own diskstats write rate
+and names what is left over. WAITING ON DISK lists processes in D state
+now; with task_delayacct=1 it also says how long each waited, and
+without it says that needs root. Kernel threads are hidden and counted.
+A Mac has no cgroups and no D state, so the section is not drawn there.
+
     disk [-n SECONDS]
 
-Keys: up/down select, enter opens, s cycles the sort of the focused
-section, w cycles the filesystem window (6, 12 or 24 hours; not on a
-disk's detail), tab moves between sections, v toggles idle disks, p
+Keys: up/down select, enter opens (a mount, a disk, a cgroup, a process,
+or the full D-state list from +N more), s cycles the sort of the focused
+section, a shows every cgroup in BY SERVICE or the top ones again, w
+cycles the filesystem window (6, 12 or 24 hours; only on the list and a
+mount's detail), tab moves between sections, v toggles idle disks, p
 pauses, esc goes back, comma opens settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number

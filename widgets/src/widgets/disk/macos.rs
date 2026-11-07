@@ -274,3 +274,21 @@ fn c_bytes(buf: &[libc::c_char]) -> Vec<u8> {
 fn c_buf(buf: &[libc::c_char]) -> String {
     String::from_utf8_lossy(&c_bytes(buf)).into_owned()
 }
+
+/// WHO IS WRITING has no source here yet. By service is cgroup v2, which a
+/// Mac does not have, and `ps` has no state that means what Linux's `D`
+/// does (`U` is the nearest, and it is a different thing). So nothing is
+/// sampled and the section is not drawn - not drawn empty.
+#[derive(Default)]
+pub struct WriterSource;
+
+pub fn sample_writers(
+    _source: &mut WriterSource,
+    _detail: Option<String>,
+) -> Option<super::writers::Writers> {
+    None
+}
+
+pub fn process_facts(_pid: i32) -> (String, String) {
+    (String::new(), String::new())
+}

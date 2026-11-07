@@ -28,6 +28,7 @@ use opscope_core as tc;
 
 mod parse;
 mod state;
+mod writers;
 use parse::{inode_percent, is_remote, percent_used, Hidden, Mount, Space};
 
 #[cfg(target_os = "linux")]
@@ -55,6 +56,20 @@ mod host {
         _every: f64,
     ) -> Result<super::parse::IoSnapshot, String> {
         Err(opscope_core::unsupported())
+    }
+
+    #[derive(Default)]
+    pub struct WriterSource;
+
+    pub fn sample_writers(
+        _source: &mut WriterSource,
+        _detail: Option<String>,
+    ) -> Option<super::writers::Writers> {
+        None
+    }
+
+    pub fn process_facts(_pid: i32) -> (String, String) {
+        (String::new(), String::new())
     }
 }
 
@@ -442,6 +457,24 @@ enum Screen {
     List,
     Detail,
     DiskDetail,
+    /// `↵` on a BY SERVICE row.
+    Service,
+    /// `↵` on a WAITING ON DISK row.
+    Process,
+    /// `↵` on `+N more`: everyone in D.
+    Waiters,
+}
+
+impl Screen {
+    /// The screens drawn from WHO IS WRITING rather than the tables above it.
+    fn writes(self) -> bool {
+        matches!(self, Screen::Service | Screen::Process | Screen::Waiters)
+    }
+
+    /// The window is filesystem history; only the screens that draw it offer `w`.
+    fn uses_window(self) -> bool {
+        matches!(self, Screen::List | Screen::Detail)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -533,6 +566,20 @@ struct View<'a> {
     now: f64,
     history_note: &'a str,
     save_err: &'a str,
+    writers: Option<&'a writers::Writers>,
+    svc_sort: DiskSort,
+    svc_all: bool,
+    top_writers: usize,
+    svc_cursor: &'a str,
+    wait_sort: writers::WaitSort,
+    wait_cursor: &'a str,
+    show_kernel: bool,
+    service_path: &'a str,
+    opened: Option<&'a writers::Opened>,
+    /// The DISKS cursor has been put on a disk with an arrow or a click.
+    /// Until then WHO IS WRITING describes whichever disk the table shows
+    /// first, which sorted by write is the busiest.
+    disk_chosen: bool,
 }
 
 struct Drawn {
@@ -542,7 +589,12 @@ struct Drawn {
     selected: usize,
     disk_selected: usize,
     plots: Vec<tc::Plot>,
-    lens: [usize; 3],
+    lens: [usize; 5],
+    /// BY SERVICE and WAITING ON DISK items in the order drawn, by key.
+    svc_keys: Vec<String>,
+    wait_keys: Vec<String>,
+    /// BY SERVICE rows before the top-N cut.
+    svc_total: usize,
 }
 
 fn main() {
@@ -570,14 +622,23 @@ fn main() {
     let alert = tc::cfg_f64(&cfg, "alert_percent", 90.0);
     let mut window_hours = window_hours_of(&cfg);
 
+    let top_writers = tc::cfg_usize(&cfg, "top_writers", 8).max(1);
+    let show_kernel = cfg
+        .get("show_kernel_threads")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
     let state = Arc::new(Mutex::new(State::default()));
     let pause = Arc::new(AtomicBool::new(false));
+    // The cgroup whose detail is open, so the poller reads its io.pressure.
+    let detail: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let refresh = tc::Refresh::default();
     {
         let state = Arc::clone(&state);
         let pause = Arc::clone(&pause);
         let refresh = refresh.clone();
-        thread::spawn(move || poll(state, pause, refresh, hide, every));
+        let detail = Arc::clone(&detail);
+        thread::spawn(move || poll(state, pause, refresh, hide, every, detail));
     }
 
     let p = palette();
@@ -585,19 +646,32 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let mut sort = Sort::Mount;
     let mut disk_sort = DiskSort::Write;
+    let mut svc_sort = DiskSort::Write;
+    let mut wait_sort = writers::WaitSort::Waited;
+    let mut svc_all = false;
     let mut screen = Screen::List;
     let mut cursor = String::new();
     let mut disk_cursor = String::new();
+    let mut svc_cursor = String::new();
+    let mut wait_cursor = String::new();
+    let mut service_path = String::new();
+    let mut opened: Option<writers::Opened> = None;
     let mut scroll = 0usize;
     let mut chase = true;
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut head = 1usize;
     let mut shown_scroll = 0usize;
-    let mut fs_at = 0usize;
-    let mut disk_at = 0usize;
+    // The row each section's cursor is on: filesystems, disks, pressure,
+    // by service, waiting on disk.
+    let mut at = [0usize; 5];
     let mut focus = 0usize;
-    let mut lens = [0usize; 3];
+    let mut lens = [0usize; 5];
     let mut show_idle = false;
+    // What BY SERVICE and WAITING drew last frame, which is what a key or a
+    // click this frame was aimed at.
+    let mut svc_keys: Vec<String> = Vec::new();
+    let mut wait_keys: Vec<String> = Vec::new();
+    let mut disk_chosen = false;
 
     loop {
         let mut keys = keyboard.poll();
@@ -605,23 +679,14 @@ fn main() {
         // cursor, so an arrow and an enter read together open the new row.
         let mut open = false;
         if screen == Screen::List {
-            let current = match focus {
-                0 => fs_at,
-                1 => DISK_BASE + disk_at,
-                _ => PRESSURE_ID,
-            };
-            if let Some(at) =
+            let current = item_id(focus, &at);
+            if let Some(id) =
                 tc::rows_clicked(&mut keys, Some(current), head, shown_scroll, &placed, None)
             {
-                if at >= PRESSURE_ID {
-                    focus = 2;
-                } else if at >= DISK_BASE {
-                    focus = 1;
-                    disk_at = at - DISK_BASE;
-                } else {
-                    focus = 0;
-                    fs_at = at;
-                }
+                let (section, row) = section_of(id);
+                focus = section;
+                at[section] = row;
+                disk_chosen |= section == 1;
                 chase = true;
             }
         } else {
@@ -640,22 +705,26 @@ fn main() {
                 }
                 "up" | "k" | "K" => {
                     if screen == Screen::List {
-                        let at = section_index(focus, fs_at, disk_at);
-                        if let Some((next, row)) = tc::step_across_sections(focus, at, &lens, false)
+                        if let Some((next, row)) =
+                            tc::step_across_sections(focus, at[focus], &lens, false)
                         {
                             focus = next;
-                            set_section_index(next, row, &mut fs_at, &mut disk_at);
+                            at[next] = row;
+                            // An arrow onto a disk picks it for WHO IS
+                            // WRITING; tabbing past the table does not.
+                            disk_chosen |= next == 1;
                             chase = true;
                         }
                     }
                 }
                 "down" | "j" | "J" => {
                     if screen == Screen::List {
-                        let at = section_index(focus, fs_at, disk_at);
-                        if let Some((next, row)) = tc::step_across_sections(focus, at, &lens, true)
+                        if let Some((next, row)) =
+                            tc::step_across_sections(focus, at[focus], &lens, true)
                         {
                             focus = next;
-                            set_section_index(next, row, &mut fs_at, &mut disk_at);
+                            at[next] = row;
+                            disk_chosen |= next == 1;
                             chase = true;
                         }
                     }
@@ -671,6 +740,11 @@ fn main() {
                 "v" | "V" => {
                     show_idle = !show_idle;
                 }
+                "a" | "A" => {
+                    if screen == Screen::List {
+                        svc_all = !svc_all;
+                    }
+                }
                 "enter" => {
                     if screen == Screen::List {
                         // Acted on after this batch's arrows have moved the
@@ -684,18 +758,23 @@ fn main() {
                         screen = Screen::List;
                         scroll = 0;
                         chase = true;
+                        *detail
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                     }
                 }
                 "s" | "S" => {
                     match focus {
                         0 => sort = sort.next(),
                         1 => disk_sort = disk_sort.next(),
+                        3 => svc_sort = svc_sort.next(),
+                        4 => wait_sort = wait_sort.next(),
                         _ => {}
                     }
                     chase = false;
                 }
                 "w" | "W" => {
-                    if screen != Screen::DiskDetail {
+                    if screen.uses_window() {
                         window_hours = tc::cycle(&WINDOWS, window_hours);
                     }
                 }
@@ -730,7 +809,7 @@ fn main() {
             }
         }
 
-        let (snap, err, sampled, board, disk_err, usage, history_note, save_err) = {
+        let (snap, err, sampled, board, disk_err, usage, history_note, save_err, writers_now) = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -743,6 +822,7 @@ fn main() {
                 Arc::clone(&guard.usage),
                 guard.history_note.clone(),
                 guard.save_err.clone(),
+                guard.writers.clone(),
             )
         };
         let age = sampled.map(|at| at.elapsed());
@@ -751,7 +831,8 @@ fn main() {
             let count = snap.rows.len();
             let missing = !snap.rows.iter().any(|row| row.mount.mount_point == cursor);
             if count > 0 && ((screen == Screen::List && chase && focus == 0) || missing) {
-                if let Some(path) = path_at(snap, sort, fs_at.min(count - 1), &usage, window_hours) {
+                if let Some(path) = path_at(snap, sort, at[0].min(count - 1), &usage, window_hours)
+                {
                     cursor = path;
                 }
             }
@@ -762,8 +843,16 @@ fn main() {
                 .iter()
                 .any(|&index| board.rows[index].disk.name == disk_cursor);
             if !indexes.is_empty() && ((screen == Screen::List && chase && focus == 1) || missing) {
-                let at = disk_at.min(indexes.len() - 1);
-                disk_cursor = board.rows[indexes[at]].disk.name.clone();
+                let row = at[1].min(indexes.len() - 1);
+                disk_cursor = board.rows[indexes[row]].disk.name.clone();
+            }
+        }
+        for (section, keys, cursor) in [
+            (3, &svc_keys, &mut svc_cursor),
+            (4, &wait_keys, &mut wait_cursor),
+        ] {
+            if screen == Screen::List && chase && focus == section && !keys.is_empty() {
+                *cursor = keys[at[section].min(keys.len() - 1)].clone();
             }
         }
         if open {
@@ -777,6 +866,41 @@ fn main() {
                     screen = Screen::DiskDetail;
                     scroll = 0;
                     chase = true;
+                }
+                3 if !svc_cursor.is_empty() => {
+                    screen = Screen::Service;
+                    service_path = svc_cursor.clone();
+                    *detail
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(service_path.clone());
+                    scroll = 0;
+                    chase = true;
+                }
+                4 if wait_cursor == writers::MORE => {
+                    screen = Screen::Waiters;
+                    scroll = 0;
+                    chase = true;
+                }
+                4 => {
+                    let found = wait_cursor.parse::<i32>().ok().and_then(|pid| {
+                        writers_now
+                            .as_ref()
+                            .and_then(|w| w.waiters.iter().find(|x| x.pid == pid).cloned())
+                    });
+                    if let Some(waiter) = found {
+                        let (cmdline, cwd) = host::process_facts(waiter.pid);
+                        opened = Some(writers::Opened {
+                            pid: waiter.pid,
+                            comm: waiter.comm,
+                            cgroup: waiter.cgroup,
+                            cmdline,
+                            cwd,
+                        });
+                        screen = Screen::Process;
+                        scroll = 0;
+                        chase = true;
+                    }
                 }
                 _ => {}
             }
@@ -804,19 +928,52 @@ fn main() {
             now: tc::now(),
             history_note: &history_note,
             save_err: &save_err,
+            writers: writers_now.as_deref(),
+            svc_sort,
+            svc_all,
+            top_writers,
+            svc_cursor: &svc_cursor,
+            wait_sort,
+            wait_cursor: &wait_cursor,
+            show_kernel,
+            service_path: &service_path,
+            opened: opened.as_ref(),
+            disk_chosen,
         };
         let (w, h) = tc::size();
         let drawn = draw_body(&view, w, &p, refresh.tick(tc::animation_tick()));
-        fs_at = drawn.selected;
-        disk_at = drawn.disk_selected;
+        at[0] = drawn.selected;
+        at[1] = drawn.disk_selected;
         lens = drawn.lens;
+        for (section, keys, cursor) in [
+            (3, &drawn.svc_keys, &mut svc_cursor),
+            (4, &drawn.wait_keys, &mut wait_cursor),
+        ] {
+            match keys.iter().position(|key| key == cursor) {
+                Some(row) => at[section] = row,
+                None => {
+                    // The row the cursor was on has gone (a cgroup went
+                    // quiet, a process left D): the cursor takes whatever
+                    // is now at its index rather than vanishing.
+                    if let Some(key) = keys.get(at[section].min(keys.len().saturating_sub(1))) {
+                        *cursor = key.clone();
+                    }
+                }
+            }
+        }
+        if screen == Screen::List && focus >= 3 && lens[focus] == 0 {
+            // A section that emptied under the cursor is not a place to be.
+            focus = tc::next_section(None, &lens).unwrap_or(0);
+        }
+        svc_keys = drawn.svc_keys.clone();
+        wait_keys = drawn.wait_keys.clone();
         let cursor_gone = snap
             .as_ref()
             .is_some_and(|snap| !snap.rows.iter().any(|row| row.mount.mount_point == cursor));
         if cursor.is_empty() || cursor_gone {
             if let Some(path) = snap
                 .as_ref()
-                .and_then(|snap| path_at(snap, sort, fs_at, &usage, window_hours))
+                .and_then(|snap| path_at(snap, sort, at[0], &usage, window_hours))
             {
                 cursor = path;
             }
@@ -831,13 +988,21 @@ fn main() {
             if let Some(name) = board.as_ref().and_then(|board| {
                 let indexes = ordered_disks(board, disk_sort, show_idle, &hide_devices);
                 indexes
-                    .get(disk_at)
+                    .get(at[1])
                     .map(|&index| board.rows[index].disk.name.clone())
             }) {
                 disk_cursor = name;
             }
         }
         let combined = board.as_ref().is_some_and(|board| board.combined);
+        let hints = WriterHints {
+            all: (drawn.svc_total > top_writers).then(|| writers::all_hint(svc_all, top_writers)),
+            svc_sort,
+            wait_sort: writers_now
+                .as_ref()
+                .is_some_and(|w| w.wait_times)
+                .then_some(wait_sort),
+        };
         let (packed, indent) = footer(
             w,
             screen,
@@ -848,6 +1013,7 @@ fn main() {
             paused,
             window_hours,
             combined,
+            &hints,
             &p,
         );
         let foot = packed.lines.clone();
@@ -855,19 +1021,15 @@ fn main() {
         let head_rows = drawn.head.min(drawn.rows.len());
         let rest = drawn.rows.len().saturating_sub(head_rows);
         let room_below = room.saturating_sub(head_rows).max(1);
-        let follow_id = match focus {
-            0 => fs_at,
-            1 => DISK_BASE + disk_at,
-            _ => PRESSURE_ID,
-        };
+        let follow_id = item_id(focus, &at);
         if chase {
-            if let Some(at) = drawn
+            if let Some(row) = drawn
                 .placed
                 .iter()
                 .find(|(_, item)| *item == follow_id)
                 .map(|(row, _)| *row)
             {
-                let in_rest = at.saturating_sub(head_rows);
+                let in_rest = row.saturating_sub(head_rows);
                 scroll = tc::follow(scroll, in_rest, room_below);
             }
         }
@@ -899,20 +1061,38 @@ fn main() {
     }
 }
 
-fn section_index(focus: usize, fs_at: usize, disk_at: usize) -> usize {
+/// The click id of the row a section's cursor is on.
+fn item_id(focus: usize, at: &[usize; 5]) -> usize {
     match focus {
-        0 => fs_at,
-        1 => disk_at,
-        _ => 0,
+        0 => at[0],
+        1 => DISK_BASE + at[1],
+        2 => PRESSURE_ID,
+        3 => writers::SERVICE_BASE + at[3],
+        _ => writers::WAIT_BASE + at[4],
     }
 }
 
-fn set_section_index(focus: usize, row: usize, fs_at: &mut usize, disk_at: &mut usize) {
-    match focus {
-        0 => *fs_at = row,
-        1 => *disk_at = row,
-        _ => {}
+/// The section and row a click id names.
+fn section_of(id: usize) -> (usize, usize) {
+    if id >= writers::WAIT_BASE {
+        (4, id - writers::WAIT_BASE)
+    } else if id >= writers::SERVICE_BASE {
+        (3, id - writers::SERVICE_BASE)
+    } else if id >= PRESSURE_ID {
+        (2, 0)
+    } else if id >= DISK_BASE {
+        (1, id - DISK_BASE)
+    } else {
+        (0, id)
     }
+}
+
+/// What the footer says about WHO IS WRITING. `wait_sort` is `None` while
+/// wait times are off: the order is then pid, and there is nothing to cycle.
+struct WriterHints {
+    all: Option<String>,
+    svc_sort: DiskSort,
+    wait_sort: Option<writers::WaitSort>,
 }
 
 fn path_at(
@@ -937,6 +1117,7 @@ struct State {
     usage: Arc<state::Store>,
     history_note: String,
     save_err: String,
+    writers: Option<Arc<writers::Writers>>,
 }
 
 impl Default for State {
@@ -950,6 +1131,7 @@ impl Default for State {
             usage: Arc::new(state::Store::default()),
             history_note: String::new(),
             save_err: String::new(),
+            writers: None,
         }
     }
 }
@@ -980,10 +1162,12 @@ fn poll(
     refresh: tc::Refresh,
     hide: Vec<String>,
     every: f64,
+    detail: Arc<Mutex<Option<String>>>,
 ) {
     tc::record_panics();
     let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
     let mut rates = RateMemory::default();
+    let mut source = host::WriterSource::default();
     let loaded = state::load_usage(&state::usage_path());
     let mut usage = loaded.store;
     let history_note = loaded.note;
@@ -1007,10 +1191,17 @@ fn poll(
                 .map(|snap| snap.all.clone())
                 .unwrap_or_default();
             let io = host::sample_io(&mounts, every);
-            (filesystems, io)
+            // One cgroup walk and one /proc pass, on this same poll, so the
+            // by-service rates cover the interval the disk rates do.
+            let wanted = detail
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let writers = host::sample_writers(&mut source, wanted);
+            (filesystems, io, writers)
         }));
         match round {
-            Ok((filesystems, io)) => {
+            Ok((filesystems, io, writers)) => {
                 if let Ok(mut guard) = state.lock() {
                     match filesystems {
                         Ok(snap) => {
@@ -1045,6 +1236,7 @@ fn poll(
                         }
                         Err(err) => guard.disk_err = err,
                     }
+                    guard.writers = writers.map(Arc::new);
                 }
             }
             Err(_) => {
@@ -1290,7 +1482,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         .unwrap_or(0);
     let mut disk_len = 0usize;
     let mut pressure_len = 0usize;
-    if view.screen != Screen::Detail {
+    if matches!(view.screen, Screen::List | Screen::DiskDetail) {
         let disk_slot: Mutex<(Vec<(usize, usize)>, Vec<tc::Plot>, usize)> =
             Mutex::new((Vec::new(), Vec::new(), 0));
         let disk_section = tc::guard_rows("disks", width, || {
@@ -1374,10 +1566,63 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
                 .position(|&index| board.rows[index].disk.name == view.disk_cursor)
         })
         .unwrap_or(0);
+    let mut painted = writers::Painted::default();
+    if view.screen == Screen::List && view.writers.is_some() {
+        let slot = Mutex::new((Vec::new(), writers::Painted::default()));
+        let section = tc::guard_rows("who is writing", width, || {
+            let mut body = vec![String::new()];
+            let mut at = Vec::new();
+            let out = writers::paint_section(view, width, p, &mut body, &mut at);
+            if let Ok(mut slot) = slot.lock() {
+                *slot = (at, out);
+            }
+            body
+        });
+        let failed = section.iter().any(|line| line.contains("could not draw"));
+        if !failed {
+            let (mut at, out) = slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let base = rows.len();
+            for (row, _) in &mut at {
+                *row += base;
+            }
+            placed.extend(at);
+            painted = out;
+        }
+        rows.extend(section);
+    }
+    if view.screen.writes() {
+        let section = tc::guard_rows("who is writing", width, || {
+            let mut body = Vec::new();
+            match view.screen {
+                Screen::Service => {
+                    writers::paint_service(view, view.service_path, width, p, &mut body)
+                }
+                Screen::Process => match view.opened {
+                    Some(open) => writers::paint_process(view, open, width, p, &mut body),
+                    None => body.push(tc::seg(
+                        &[(p.dim.as_str(), " nothing selected".into())],
+                        width,
+                    )),
+                },
+                _ => writers::paint_waiters(view, width, p, &mut body),
+            }
+            body
+        });
+        rows.extend(section);
+    }
     let lens = if view.screen == Screen::List {
-        [fs_len, disk_len, pressure_len]
+        [
+            fs_len,
+            disk_len,
+            pressure_len,
+            painted.svc_keys.len(),
+            painted.wait_keys.len(),
+        ]
     } else {
-        [0, 0, 0]
+        [0; 5]
     };
     Drawn {
         rows,
@@ -1387,6 +1632,9 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         disk_selected,
         plots,
         lens,
+        svc_keys: painted.svc_keys,
+        wait_keys: painted.wait_keys,
+        svc_total: painted.svc_total,
     }
 }
 
@@ -1414,7 +1662,7 @@ fn paint(
             rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
         }
     }
-    if view.screen == Screen::DiskDetail {
+    if view.screen == Screen::DiskDetail || view.screen.writes() {
         return;
     }
     let Some(snap) = view.snap else {
@@ -3035,7 +3283,11 @@ fn paint_pressure(
     } else {
         String::new()
     };
-    let colour = if focus == 2 { p.lit(&p.accent) } else { p.txt.clone() };
+    let colour = if focus == 2 {
+        p.lit(&p.accent)
+    } else {
+        p.txt.clone()
+    };
     for (index, line) in wrap(&text, width.saturating_sub(1)).into_iter().enumerate() {
         let ink = format!("{tint}{colour}");
         rows.push(tc::seg(&[(ink.as_str(), format!(" {line}"))], width));
@@ -3392,6 +3644,7 @@ fn footer(
     paused: bool,
     window_hours: u64,
     combined: bool,
+    writers: &WriterHints,
     p: &Palette,
 ) -> (tc::Footer, usize) {
     let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
@@ -3400,20 +3653,25 @@ fn footer(
     } else {
         hints.push(vec![(p.dim.as_str(), "↑↓ select".into())]);
         hints.push(vec![(p.dim.as_str(), "[↵] detail".into())]);
-        if focus != 2 {
-            let hint = if focus == 1 {
-                disk_sort.hint(combined)
-            } else {
-                sort.hint()
-            };
+        let hint = match focus {
+            0 => Some(sort.hint()),
+            1 => Some(disk_sort.hint(combined)),
+            3 => Some(writers.svc_sort.hint(false)),
+            4 => writers.wait_sort.map(writers::WaitSort::hint),
+            _ => None,
+        };
+        if let Some(hint) = hint {
             hints.push(vec![(p.dim.as_str(), hint.into())]);
+        }
+        if let Some(all) = &writers.all {
+            hints.push(vec![(p.dim.as_str(), all.clone())]);
         }
         hints.push(vec![(p.dim.as_str(), "tab section".into())]);
         hints.push(vec![(p.dim.as_str(), idle_hint(show_idle).into())]);
     }
     // The window is filesystem history. The disk detail screen draws only
     // the in-memory I/O chart, so a window key there would change nothing.
-    if screen != Screen::DiskDetail {
+    if screen.uses_window() {
         let next = tc::cycle(&WINDOWS, window_hours);
         hints.push(vec![(p.dim.as_str(), format!("[w] {next}h"))]);
     }
@@ -3589,6 +3847,25 @@ mod tests {
             now: 1_700_000_000.0,
             history_note: "",
             save_err: "",
+            writers: None,
+            svc_sort: DiskSort::Write,
+            svc_all: false,
+            top_writers: 8,
+            svc_cursor: "",
+            wait_sort: writers::WaitSort::Waited,
+            wait_cursor: "",
+            show_kernel: false,
+            service_path: "",
+            opened: None,
+            disk_chosen: false,
+        }
+    }
+
+    fn no_writer_hints() -> WriterHints {
+        WriterHints {
+            all: None,
+            svc_sort: DiskSort::Write,
+            wait_sort: None,
         }
     }
 
@@ -3688,6 +3965,7 @@ mod tests {
                 false,
                 24,
                 false,
+                &no_writer_hints(),
                 &p,
             );
             for line in &packed.lines {
@@ -4659,7 +4937,10 @@ mod tests {
             row("/mnt/slow", "nfs4", Figures::NoAnswer, 2),
         ];
         let snap = snap(rows, Hidden::default());
-        let board = board(vec![disk_row("sda", 1, 1, 8.0), disk_row("loop10", 1, 1, 8.0)]);
+        let board = board(vec![
+            disk_row("sda", 1, 1, 8.0),
+            disk_row("loop10", 1, 1, 8.0),
+        ]);
         let p = palette();
         let mut frame = view(Some(&snap), "/");
         frame.board = Some(&board);
@@ -4667,7 +4948,11 @@ mod tests {
             let cols = layout_for(width, "/boot/efi".len());
             assert_eq!(cols.mount, "/boot/efi".len() + 2, "{width}");
             assert!(cols.bar <= BAR_WIDE, "{width}");
-            assert_eq!(disk_columns(width, "loop10".len()).disk, DISK_MIN, "{width}");
+            assert_eq!(
+                disk_columns(width, "loop10".len()).disk,
+                DISK_MIN,
+                "{width}"
+            );
             let drawn = draw_body(&frame, width, &p, None);
             let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
             for line in &drawn.rows {
@@ -4682,7 +4967,10 @@ mod tests {
                     .unwrap_or_else(|| panic!("{width}: no row for {name}: {lines:?}"));
                 let after = &line[line.find(name).unwrap() + name.len()..];
                 let gap = after.len() - after.trim_start().len();
-                assert!(gap <= 12, "{width}: {gap} blank cells after {name}: {line:?}");
+                assert!(
+                    gap <= 12,
+                    "{width}: {gap} blank cells after {name}: {line:?}"
+                );
             }
         }
     }
@@ -4690,10 +4978,19 @@ mod tests {
     #[test]
     fn the_window_is_hours_and_tops_out_at_a_day() {
         assert_eq!(window_hours_of(&serde_json::json!({})), 24);
-        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 6 })), 6);
+        assert_eq!(
+            window_hours_of(&serde_json::json!({ "window_hours": 6 })),
+            6
+        );
         // The old day windows, or any value not on offer, start on a day.
-        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 7 })), 24);
-        assert_eq!(window_hours_of(&serde_json::json!({ "window_hours": 48 })), 24);
+        assert_eq!(
+            window_hours_of(&serde_json::json!({ "window_hours": 7 })),
+            24
+        );
+        assert_eq!(
+            window_hours_of(&serde_json::json!({ "window_hours": 48 })),
+            24
+        );
         assert_eq!(tc::cycle(&WINDOWS, 24), 6);
     }
 
@@ -4711,6 +5008,7 @@ mod tests {
                 false,
                 24,
                 false,
+                &no_writer_hints(),
                 &p,
             );
             packed.lines.join("\n").contains("[w]")
@@ -4718,5 +5016,490 @@ mod tests {
         assert!(has_w(Screen::List));
         assert!(has_w(Screen::Detail));
         assert!(!has_w(Screen::DiskDetail));
+        assert!(!has_w(Screen::Service));
+        assert!(!has_w(Screen::Process));
+        assert!(!has_w(Screen::Waiters));
+    }
+
+    // ── WHO IS WRITING ───────────────────────────────────────────────
+
+    const MIB: u64 = 1 << 20;
+
+    fn cg(path: &str, io: bool, wbytes: Option<u64>, procs: Vec<i32>) -> tc::cgroup::Node {
+        tc::cgroup::Node {
+            path: path.into(),
+            enabled: if io {
+                vec!["io".into()]
+            } else {
+                vec!["memory".into()]
+            },
+            io: wbytes.map(|w| {
+                vec![tc::cgroup::IoStat {
+                    dev: "8:0".into(),
+                    wbytes: w,
+                    rbytes: w / 4,
+                    ..tc::cgroup::IoStat::default()
+                }]
+            }),
+            cpu: None,
+            memory: None,
+            procs: Some(procs),
+        }
+    }
+
+    /// Ten services under system.slice, each writing (i + 1) MiB over the
+    /// interval, user.slice 2 MiB, and the root 1 MiB of its own: 58 MiB.
+    fn cgroup_tree(step: u64) -> tc::cgroup::Tree {
+        let services: Vec<u64> = (0..10).map(|i| (i + 1) * MIB * step).collect();
+        let sys: u64 = services.iter().sum();
+        let user = 2 * MIB * step;
+        let mut nodes = vec![
+            cg("", true, Some(sys + user + MIB * step), vec![1]),
+            cg("system.slice", true, Some(sys), vec![]),
+            cg("user.slice", true, Some(user), vec![]),
+            cg(
+                "user.slice/session-1.scope",
+                false,
+                None,
+                (500..509).collect(),
+            ),
+        ];
+        for (i, w) in services.iter().enumerate() {
+            nodes.push(cg(
+                &format!("system.slice/example-svc-{i}.service"),
+                true,
+                Some(*w),
+                vec![100 + i as i32],
+            ));
+        }
+        tc::cgroup::Tree { nodes }
+    }
+
+    /// Seven processes in D in a session scope, two kernel threads in D, a
+    /// sleeping one; half of them readable.
+    fn pid_samples(ticks: u64) -> Vec<writers::PidSample> {
+        let mut out = Vec::new();
+        for pid in 500..507 {
+            out.push(writers::PidSample {
+                pid,
+                comm: "example-sync".into(),
+                state: 'D',
+                ppid: 1,
+                starttime: 9,
+                blkio_ticks: Some(ticks * (pid as u64 - 499)),
+                io: (pid % 2 == 0).then(tc::procfs::PidIo::default),
+                cgroup: None,
+            });
+        }
+        for pid in [40, 41] {
+            out.push(writers::PidSample {
+                pid,
+                comm: "kworker/u8:0+flush-8:0".into(),
+                state: 'D',
+                ppid: 2,
+                starttime: 1,
+                blkio_ticks: Some(0),
+                io: None,
+                cgroup: None,
+            });
+        }
+        out.push(writers::PidSample {
+            pid: 100,
+            comm: "example-db".into(),
+            state: 'S',
+            ppid: 1,
+            starttime: 3,
+            blkio_ticks: Some(0),
+            io: None,
+            cgroup: None,
+        });
+        out
+    }
+
+    fn writers_fixture(delayacct: bool) -> writers::Writers {
+        let mut memory = writers::Memory::default();
+        let _ = writers::step(
+            &mut memory,
+            tc::cgroup::State::Ok(cgroup_tree(1)),
+            pid_samples(10),
+            String::new(),
+            delayacct,
+            0.0,
+            100.0,
+        );
+        writers::step(
+            &mut memory,
+            tc::cgroup::State::Ok(cgroup_tree(2)),
+            pid_samples(40),
+            String::new(),
+            delayacct,
+            2.0,
+            100.0,
+        )
+    }
+
+    fn writing_board(write_bps: f64) -> DiskBoard {
+        board(vec![disk_row("sda", 10, 10, write_bps)])
+    }
+
+    fn rows_fit(drawn: &Drawn, width: usize) {
+        for line in &drawn.rows {
+            assert!(
+                tc::display_width(&plain(line)) <= width,
+                "row wider than {width}: {:?}",
+                plain(line)
+            );
+        }
+    }
+
+    fn waiting_header(drawn: &Drawn) -> String {
+        drawn
+            .rows
+            .iter()
+            .map(|line| plain(line))
+            .find(|line| line.starts_with("  PID"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn who_is_writing_fits_every_width_and_cgroup_leaves_first() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_fixture(true);
+        for width in [28, 40, 60, 80, 100, 140] {
+            let mut frame = view(None, "/");
+            frame.board = Some(&board);
+            frame.writers = Some(&writers);
+            frame.focus = 3;
+            frame.svc_cursor = "system.slice/example-svc-9.service";
+            let drawn = draw_body(&frame, width, &p, None);
+            rows_fit(&drawn, width);
+            assert!(plain_has(&drawn, "WHO IS WRITING"), "{width}");
+            assert!(plain_has(&drawn, "+2 more  [↵] list all"), "{width}");
+            assert!(plain_has(&drawn, "accounted:"), "{width}");
+            let header = waiting_header(&drawn);
+            assert!(header.contains("WAITED"), "{width}: {header}");
+            if width >= 100 {
+                assert!(header.contains("CGROUP"), "{width}: {header}");
+                assert!(header.contains("WAITED (last 2s)"), "{width}: {header}");
+            }
+            if width <= 40 {
+                assert!(
+                    !header.contains("CGROUP"),
+                    "CGROUP drops first at {width}: {header}"
+                );
+            }
+            // Eight services, five waiters and the `+N more` row.
+            assert_eq!(drawn.lens[3], 8, "{width}");
+            assert_eq!(drawn.lens[4], 6, "{width}");
+            assert_eq!(drawn.svc_total, 12, "{width}");
+        }
+    }
+
+    #[test]
+    fn the_cgroup_rows_tie_back_to_the_device_and_the_root_is_a_row() {
+        let p = palette();
+        // 58 MiB over 2 s is 29 MiB/s; the device saw 32.
+        let board = writing_board(32.0 * MIB as f64);
+        let writers = writers_fixture(false);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        frame.svc_all = true;
+        let drawn = draw_body(&frame, 120, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "WHO IS WRITING  sda · last 2s · 32M/s written"
+        ));
+        assert!(plain_has(
+            &drawn,
+            "accounted: 29M/s of 32M/s · the rest, 3M/s, is writeback on filesystems without cgroup writeback, or root's own"
+        ));
+        assert!(
+            drawn.rows.iter().any(|l| plain(l).starts_with("  /  ")),
+            "the root's own I/O is a row"
+        );
+        assert!(plain_has(&drawn, "user.slice"));
+        assert!(
+            plain_has(&drawn, "9 · 4 readable"),
+            "the session scope's pids roll up"
+        );
+        assert_eq!(drawn.lens[3], 12, "[a] shows every cgroup");
+        // Above the device by more than the two reads explain.
+        let board = writing_board(20.0 * MIB as f64);
+        frame.board = Some(&board);
+        let drawn = draw_body(&frame, 120, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "cgroups report 29M/s against 20M/s at the device · dirtying runs ahead of submission"
+        ));
+    }
+
+    #[test]
+    fn the_top_n_cut_is_named_and_the_hints_name_the_next_state() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_fixture(true);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        let drawn = draw_body(&frame, 120, &p, None);
+        assert!(plain_has(&drawn, "8 of 12 shown · top 8 by write"));
+        let hints = WriterHints {
+            all: Some(writers::all_hint(false, 8)),
+            svc_sort: DiskSort::Write,
+            wait_sort: Some(writers::WaitSort::Waited),
+        };
+        let text = |focus| {
+            let (packed, _) = footer(
+                120,
+                Screen::List,
+                Sort::Mount,
+                DiskSort::Write,
+                focus,
+                false,
+                false,
+                24,
+                false,
+                &hints,
+                &p,
+            );
+            packed.lines.join("\n")
+        };
+        assert!(text(3).contains("[s] sort by read") && text(3).contains("[a] show all cgroups"));
+        assert!(text(4).contains("[s] sort by pid"));
+        let off = WriterHints {
+            wait_sort: None,
+            ..hints
+        };
+        let (packed, _) = footer(
+            120,
+            Screen::List,
+            Sort::Mount,
+            DiskSort::Write,
+            4,
+            false,
+            false,
+            24,
+            false,
+            &off,
+            &p,
+        );
+        assert!(
+            !packed.lines.join("\n").contains("[s]"),
+            "pid order is all there is with wait times off"
+        );
+        assert_eq!(
+            tc::next_section(Some(2), &drawn.lens),
+            Some(3),
+            "tab reaches the section"
+        );
+    }
+
+    #[test]
+    fn wait_times_off_drop_the_column_and_say_what_root_would_add() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_fixture(false);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        let drawn = draw_body(&frame, 200, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "WAITING ON DISK  9 in D state now · wait times off (needs root: sysctl kernel.task_delayacct=1)"
+        ));
+        assert!(plain_has(&drawn, "2 kernel threads hidden"));
+        assert!(!waiting_header(&drawn).contains("WAITED"));
+        assert!(
+            !drawn.rows.iter().any(|l| plain(l).contains("0.0s")),
+            "never a column of zeros"
+        );
+        // Pid order, as a sample.
+        let first = drawn
+            .rows
+            .iter()
+            .map(|l| plain(l))
+            .find(|l| l.contains("example-sync"))
+            .unwrap();
+        assert!(first.contains("500"), "{first}");
+        // Every pid shows its cgroup, readable or not.
+        let shown = drawn
+            .rows
+            .iter()
+            .filter(|l| plain(l).contains("user.slice/session-1.scope"))
+            .count();
+        assert_eq!(shown, 5);
+    }
+
+    #[test]
+    fn wait_times_on_rank_by_the_field_42_delta() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_fixture(true);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        let drawn = draw_body(&frame, 140, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "wait times on (task_delayacct=1) · by time waited"
+        ));
+        // pid 506: 7 × (40 - 10) ticks at 100 Hz over 2 s.
+        let first = drawn
+            .rows
+            .iter()
+            .map(|l| plain(l))
+            .find(|l| l.contains("example-sync"))
+            .unwrap();
+        assert!(
+            first.contains("506") && first.contains("2.1s of 2s"),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn more_lists_everyone_and_a_row_opens_its_process() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_fixture(true);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        frame.screen = Screen::Waiters;
+        frame.show_kernel = true;
+        let drawn = draw_body(&frame, 100, &p, None);
+        let listed = drawn
+            .rows
+            .iter()
+            .filter(|l| plain(l).contains("example-sync") || plain(l).contains("kworker"))
+            .count();
+        assert_eq!(listed, 9, "everyone in D, kernel threads shown when asked");
+        assert_eq!(drawn.lens, [0; 5]);
+        let open = writers::Opened {
+            pid: 501,
+            comm: "example-sync".into(),
+            cgroup: "user.slice/session-1.scope".into(),
+            cmdline: "example-sync --flush".into(),
+            cwd: String::new(),
+        };
+        frame.screen = Screen::Process;
+        frame.opened = Some(&open);
+        let drawn = draw_body(&frame, 60, &p, None);
+        rows_fit(&drawn, 60);
+        assert!(plain_has(&drawn, "cgroup user.slice/session-1.scope"));
+        assert!(plain_has(&drawn, "cwd not readable as you"));
+        assert!(plain_has(&drawn, "the rest needs root"));
+        frame.screen = Screen::Service;
+        frame.service_path = "user.slice";
+        let drawn = draw_body(&frame, 60, &p, None);
+        rows_fit(&drawn, 60);
+        assert!(plain_has(&drawn, "cgroup /user.slice"));
+        assert!(plain_has(&drawn, "controllers enabled here io"));
+        assert!(plain_has(&drawn, "1 cgroup below without it rolls up"));
+        assert!(plain_has(&drawn, "cgroup.procs 9 · 4 readable as you"));
+        assert!(plain_has(&drawn, "501  example-sync  not readable"));
+    }
+
+    #[test]
+    fn named_states_replace_the_table_and_an_idle_disk_still_reconciles() {
+        let p = palette();
+        let board = writing_board(0.0);
+        let mut memory = writers::Memory::default();
+        let flat = tc::cgroup::Tree {
+            nodes: vec![
+                cg("", true, Some(0), vec![]),
+                cg("system.slice", true, Some(0), vec![]),
+            ],
+        };
+        let _ = writers::step(
+            &mut memory,
+            tc::cgroup::State::Ok(flat.clone()),
+            vec![],
+            String::new(),
+            false,
+            0.0,
+            100.0,
+        );
+        let idle = writers::step(
+            &mut memory,
+            tc::cgroup::State::Ok(flat),
+            vec![],
+            String::new(),
+            false,
+            2.0,
+            100.0,
+        );
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&idle);
+        let drawn = draw_body(&frame, 80, &p, None);
+        assert!(
+            plain_has(&drawn, "CGROUP"),
+            "the header stays over an idle disk"
+        );
+        assert!(plain_has(&drawn, "accounted: 0B/s of 0B/s"));
+        assert!(plain_has(&drawn, "WAITING ON DISK  none in D state now"));
+        for (state, says) in [
+            (tc::cgroup::State::V1, "by service needs cgroup v2"),
+            (
+                tc::cgroup::State::NotEnabled("io".into()),
+                "io accounting is off everywhere · systemctl set-property <unit> IOAccounting=yes enables it per unit",
+            ),
+        ] {
+            let w = writers::step(&mut memory, state, vec![], String::new(), false, 4.0, 100.0);
+            let mut named = view(None, "/");
+            named.board = Some(&board);
+            named.writers = Some(&w);
+            let drawn = draw_body(&named, 140, &p, None);
+            assert!(plain_has(&drawn, says), "{says}");
+            assert!(!plain_has(&drawn, "accounted"));
+        }
+        let mut memory = writers::Memory::default();
+        let _ = writers::step(
+            &mut memory,
+            tc::cgroup::State::Container(cgroup_tree(1)),
+            vec![],
+            String::new(),
+            false,
+            0.0,
+            100.0,
+        );
+        let inside = writers::step(
+            &mut memory,
+            tc::cgroup::State::Container(cgroup_tree(2)),
+            vec![],
+            String::new(),
+            false,
+            2.0,
+            100.0,
+        );
+        frame.writers = Some(&inside);
+        let drawn = draw_body(&frame, 200, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "rows are this container's cgroups; the device total is the host's"
+        ));
+    }
+
+    #[test]
+    fn without_a_source_the_section_is_not_drawn() {
+        // A Mac never receives a Writers: no heading, no empty table.
+        let p = palette();
+        let board = writing_board(1.0);
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(!plain_has(&drawn, "WHO IS WRITING"));
+        assert_eq!(&drawn.lens[3..], &[0, 0]);
+    }
+
+    #[test]
+    fn a_click_id_names_its_section_and_row() {
+        let mut at = [0usize; 5];
+        for (section, row) in [(0, 3), (1, 2), (2, 0), (3, 7), (4, 5)] {
+            at[section] = row;
+            assert_eq!(section_of(item_id(section, &at)), (section, row));
+        }
     }
 }

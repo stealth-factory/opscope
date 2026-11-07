@@ -25,11 +25,36 @@ cycles 6, 12 and 24 hours for the session. `window_hours` is which of those
 the pane starts on (24 by default). The disk detail screen does not offer
 `w`: its I/O chart is in memory and has no window.
 
+WHO IS WRITING is Linux-only and needs no root. BY SERVICE reads cgroup v2
+`io.stat` under `/sys/fs/cgroup` once a poll, and WAITING ON DISK reads
+`/proc/<pid>/stat` for every process. What it can and cannot show is
+decided by the host, not by this widget's settings:
+
+- **`IOAccounting`.** A systemd unit gets its own BY SERVICE row only when
+  the `io` controller is enabled for it; otherwise it rolls up into the
+  nearest parent that has it, and the section's heading names the depth.
+  `systemctl set-property <unit> IOAccounting=yes` (as root) enables it
+  for one unit, and the widget picks it up on the next poll. If no cgroup
+  has it, the section says `io accounting is off everywhere`.
+- **`task_delayacct`.** `/proc/sys/kernel/task_delayacct` at 0 (the usual
+  default) leaves WAITING ON DISK without a WAITED column; the header says
+  `wait times off (needs root: sysctl kernel.task_delayacct=1)`. Setting
+  it to 1 (as root) adds per-process wait times; the widget reads it once
+  a minute. It costs a little on every context switch, which is why
+  kernels ship with it off; whether to turn it on is the user's call.
+- **What root adds.** Another user's `/proc/<pid>/io`, `cwd` and parts of
+  `cmdline` are closed to an ordinary user. BY SERVICE is complete without
+  them; the PROCS column and the process detail say how many could not be
+  read.
+
+Cgroup v1 or hybrid hosts get `by service needs cgroup v2`. macOS does not
+draw the section at all.
+
 ## Settings owned here
 
 The owned section is `disk`.
 
-Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_hours`
+Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_hours`, `top_writers`, `show_kernel_threads`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

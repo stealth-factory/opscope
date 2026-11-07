@@ -17,7 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use opscope_core::cgroup::State;
+use opscope_core::procfs;
+
 use super::parse::{self, InventoryDisk, IoSnapshot, Mount, PartMount, Space};
+use super::writers::{self, Memory, PidSample, Writers};
 
 struct InventoryCache {
     at: Instant,
@@ -229,4 +233,110 @@ fn read_text(path: &str) -> Option<String> {
 
 fn read_dev(path: &str) -> Option<String> {
     parse::parse_dev(&read_text(path)?)
+}
+
+/// What the WHO IS WRITING poll keeps between passes: the previous tree
+/// and wait ticks (in [`Memory`]), and when `task_delayacct` was last read.
+pub struct WriterSource {
+    memory: Memory,
+    delayacct: Option<(bool, Instant)>,
+    start: Instant,
+}
+
+impl Default for WriterSource {
+    fn default() -> Self {
+        Self {
+            memory: Memory::default(),
+            delayacct: None,
+            start: Instant::now(),
+        }
+    }
+}
+
+/// One cgroup walk and one `/proc` pass. `detail` is the cgroup whose
+/// detail screen is open; its `io.pressure` is read with the walk.
+///
+/// Per pid: `stat` (state, ppid, field 42) and `io`, which says whether this
+/// user can read it and is what the by-process rates will diff. The cgroup
+/// of a pid comes from the walk's `cgroup.procs`; only a process in D state
+/// the walk did not list has `/proc/<pid>/cgroup` read for it.
+pub fn sample_writers(source: &mut WriterSource, detail: Option<String>) -> Option<Writers> {
+    let state = opscope_core::cgroup::read(&["io"], true);
+    let fresh = source
+        .delayacct
+        .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(60));
+    if !fresh {
+        // Missing on a kernel without delay accounting: that is off.
+        let on = std::fs::read_to_string("/proc/sys/kernel/task_delayacct")
+            .map(|text| writers::parse_task_delayacct(&text))
+            .unwrap_or(false);
+        source.delayacct = Some((on, Instant::now()));
+    }
+    let delayacct = source.delayacct.is_some_and(|(on, _)| on);
+    let listed: BTreeSet<i32> = match &state {
+        State::Ok(tree) | State::Container(tree) => tree
+            .nodes
+            .iter()
+            .flat_map(|node| node.procs.iter().flatten().copied())
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    let (samples, pid_err) = match procfs::pids() {
+        Ok(pids) => (pass(&pids, &listed), String::new()),
+        Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
+    };
+    let mut out = writers::step(
+        &mut source.memory,
+        state,
+        samples,
+        pid_err,
+        delayacct,
+        source.start.elapsed().as_secs_f64(),
+        procfs::clock_ticks(),
+    );
+    out.pressure = detail.map(|path| {
+        let file = format!("/sys/fs/cgroup/{path}/io.pressure");
+        let reading = match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                parse::parse_pressure(&text).ok_or_else(|| "not in the expected shape".to_string())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err("not available (no PSI on this kernel, or the cgroup has gone)".to_string())
+            }
+            Err(err) => Err(format!("unreadable: {err}")),
+        };
+        (path, reading)
+    });
+    Some(out)
+}
+
+fn pass(pids: &[i32], listed: &BTreeSet<i32>) -> Vec<PidSample> {
+    let mut out = Vec::with_capacity(pids.len());
+    for &pid in pids {
+        // A pid that has gone since the listing is dropped, not zeroed.
+        let Ok(stat) = procfs::read_stat(pid) else {
+            continue;
+        };
+        let cgroup = (stat.state == 'D' && !listed.contains(&pid))
+            .then(|| procfs::read_cgroup(pid).ok())
+            .flatten();
+        out.push(PidSample {
+            pid,
+            comm: stat.comm,
+            state: stat.state,
+            ppid: stat.ppid,
+            starttime: stat.starttime,
+            blkio_ticks: stat.delayacct_blkio_ticks,
+            io: procfs::read_io(pid).ok(),
+            cgroup,
+        });
+    }
+    out
+}
+
+/// Command line and working directory for the process detail, read once
+/// when it opens. Empty where this user cannot read them.
+pub fn process_facts(pid: i32) -> (String, String) {
+    let facts = procfs::process_facts(pid);
+    (facts.cmdline, facts.cwd)
 }
