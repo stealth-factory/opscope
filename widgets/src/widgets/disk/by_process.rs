@@ -463,6 +463,23 @@ pub enum Change {
     Same(f64),
 }
 
+impl Change {
+    /// Seconds since the previous sample; `None` on the first.
+    pub fn span(&self) -> Option<f64> {
+        match *self {
+            Change::First => None,
+            Change::Grew(_, s) | Change::Shrank(_, s) | Change::Same(s) => Some(s),
+        }
+    }
+
+    fn grown(&self) -> u64 {
+        match *self {
+            Change::Grew(n, _) => n,
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileRow {
     pub path: String,
@@ -479,7 +496,9 @@ pub struct FileMemory {
 }
 
 /// Open files with growth since the previous sample of the same pid. A
-/// file open on two descriptors is one row. Biggest first.
+/// file open on two descriptors is one row. The ones growing first, most
+/// growth first, then the rest biggest first: what a writer is writing is
+/// what the screen is opened to find.
 pub fn file_growth(
     memory: &mut Option<FileMemory>,
     pid: i32,
@@ -507,7 +526,7 @@ pub fn file_growth(
             change,
         });
     }
-    rows.sort_by(|a, b| b.size.cmp(&a.size).then(a.path.cmp(&b.path)));
+    sort_files(&mut rows);
     *memory = Some(FileMemory {
         pid,
         at: now,
@@ -516,14 +535,161 @@ pub fn file_growth(
     rows
 }
 
-/// `+12M in 2s`.
-pub fn change_text(change: &Change) -> String {
+/// Most growth first, then size, then path.
+pub fn sort_files(rows: &mut [FileRow]) {
+    rows.sort_by(|a, b| {
+        b.change
+            .grown()
+            .cmp(&a.change.grown())
+            .then(b.size.cmp(&a.size))
+            .then(a.path.cmp(&b.path))
+    });
+}
+
+/// GROWTH: `+96M`, `−6B`, `—` unchanged, `first` with nothing to compare.
+pub fn growth_cell(change: &Change) -> String {
     match change {
-        Change::First => "first sample".into(),
-        Change::Grew(n, span) => format!("+{} in {}", human(*n), secs(*span)),
-        Change::Shrank(n, span) => format!("−{} in {}", human(*n), secs(*span)),
-        Change::Same(span) => format!("unchanged in {}", secs(*span)),
+        Change::First => "first".into(),
+        Change::Grew(n, _) => format!("+{}", human(*n)),
+        Change::Shrank(n, _) => format!("−{}", human(*n)),
+        Change::Same(_) => "—".into(),
     }
+}
+
+/// RATE: the growth over the time between the two samples.
+pub fn rate_cell(change: &Change) -> String {
+    match *change {
+        Change::Grew(n, span) if span > 0.0 => rate(n as f64 / span),
+        Change::Shrank(n, span) if span > 0.0 => format!("−{}", rate(n as f64 / span)),
+        _ => "—".into(),
+    }
+}
+
+/// How many seconds the detail's write history covers.
+pub const HISTORY_SECONDS: f64 = 60.0;
+
+/// One poll of the opened process: its rates over `span` seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RatePoint {
+    pub span: f64,
+    pub write: f64,
+    pub read: f64,
+}
+
+/// The opened process's per-poll rates over the last [`HISTORY_SECONDS`],
+/// bounded by measured time like the reconciliation [`Ring`], not by a
+/// count of polls. It belongs to one process: a different pid, or the same
+/// pid with another start time (reused), starts it over.
+#[derive(Clone, Debug)]
+pub struct RateHistory {
+    pid: i32,
+    start: Option<u64>,
+    seconds: f64,
+    points: VecDeque<RatePoint>,
+}
+
+impl RateHistory {
+    pub fn new(pid: i32, start: Option<u64>, seconds: f64) -> RateHistory {
+        RateHistory {
+            pid,
+            start,
+            seconds: if seconds.is_finite() {
+                seconds.max(0.0)
+            } else {
+                0.0
+            },
+            points: VecDeque::new(),
+        }
+    }
+
+    pub fn points(&self) -> Vec<RatePoint> {
+        self.points.iter().copied().collect()
+    }
+
+    fn push(&mut self, point: RatePoint) {
+        if !(point.span > 0.0) {
+            return;
+        }
+        self.points.push_back(point);
+        let mut total: f64 = self.points.iter().map(|p| p.span).sum();
+        while self.points.len() > 1 && total > self.seconds + 1e-9 {
+            if let Some(old) = self.points.pop_front() {
+                total -= old.span;
+            }
+        }
+    }
+}
+
+/// Feed this poll of `pid` into `history`, starting it over when it was
+/// another process's, and hand back what it holds. A poll with no rate
+/// for it (the first, or one it could not be read in) adds nothing.
+pub fn feed_history(
+    history: &mut Option<RateHistory>,
+    pid: i32,
+    start: Option<u64>,
+    procs: &Procs,
+) -> Vec<RatePoint> {
+    let same = history
+        .as_ref()
+        .is_some_and(|h| h.pid == pid && h.start == start);
+    if !same {
+        *history = Some(RateHistory::new(pid, start, HISTORY_SECONDS));
+    }
+    let Some(ring) = history.as_mut() else {
+        return Vec::new();
+    };
+    let row = procs.rows.iter().find(|r| r.pid == pid);
+    if let (Some(span), Some(r)) = (procs.elapsed, row) {
+        if let (Some(write), Some(read)) = (r.write_bps, r.read_bps) {
+            ring.push(RatePoint { span, write, read });
+        }
+    }
+    ring.points()
+}
+
+/// Peak and time-weighted average over what the history holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HistoryStats {
+    pub seconds: f64,
+    pub write_peak: f64,
+    pub write_avg: f64,
+    pub read_peak: f64,
+    pub read_avg: f64,
+}
+
+pub fn history_stats(points: &[RatePoint]) -> Option<HistoryStats> {
+    let seconds: f64 = points.iter().map(|p| p.span).sum();
+    if points.is_empty() || !(seconds > 0.0) {
+        return None;
+    }
+    let peak = |f: fn(&RatePoint) -> f64| points.iter().map(f).fold(0.0, f64::max);
+    let avg =
+        |f: fn(&RatePoint) -> f64| points.iter().map(|p| f(p) * p.span).sum::<f64>() / seconds;
+    Some(HistoryStats {
+        seconds,
+        write_peak: peak(|p| p.write),
+        write_avg: avg(|p| p.write),
+        read_peak: peak(|p| p.read),
+        read_avg: avg(|p| p.read),
+    })
+}
+
+/// Where each point sits across the window, 0 the far left and 1 now: a
+/// history that has not filled the window sits at its right-hand end.
+pub fn history_positions(points: &[RatePoint], seconds: f64) -> Vec<f64> {
+    let seconds = seconds.max(1e-9);
+    let mut back: f64 = 0.0;
+    let mut out: Vec<f64> = points
+        .iter()
+        .rev()
+        .map(|p| {
+            let x = (1.0 - back / seconds).clamp(0.0, 1.0);
+            back += p.span;
+            x
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// What the poller read for the process whose detail is open, every poll.
@@ -536,6 +702,8 @@ pub struct ProcDetail {
     pub cwd: String,
     /// `None` on a host where open files are not read (macOS).
     pub files: Option<Result<Vec<FileRow>, String>>,
+    /// Its rates over the last [`HISTORY_SECONDS`], oldest first.
+    pub history: Vec<RatePoint>,
 }
 
 // ── what the section draws ───────────────────────────────────────────
@@ -902,35 +1070,109 @@ fn row(cells: &Cells, cols: &Cols, width: usize, here: bool, p: &Palette) -> Vec
     out
 }
 
-/// The open-file rows of the process detail: the path, then its size and
-/// how it moved, on the same line when they fit and under it when not.
-pub fn paint_files(files: &[FileRow], width: usize, p: &Palette, rows: &mut Vec<String>) {
-    for f in files {
-        let figures = format!("{:>5}  {}", human(f.size), change_text(&f.change));
+const SIZE_COL: usize = 5;
+const GROWTH_COL: usize = 6;
+const FRATE_COL: usize = 8;
+/// FILE is never narrower than this while RATE is drawn.
+const FILE_MIN: usize = 16;
+
+/// The open-file table's layout at one width. FILE takes what the longest
+/// path wants, up to what is left; RATE is the column that goes first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FileCols {
+    pub path: usize,
+    pub rate: bool,
+    /// Too narrow for a table: each path, then its figures under it.
+    pub stacked: bool,
+}
+
+fn file_fixed(rate: bool) -> usize {
+    1 + 2 + SIZE_COL + 2 + GROWTH_COL + if rate { 2 + FRATE_COL } else { 0 }
+}
+
+pub fn file_columns(width: usize, longest: usize) -> FileCols {
+    let want = longest.max("FILE".len());
+    let rate = width >= file_fixed(true) + FILE_MIN;
+    let room = width.saturating_sub(file_fixed(rate));
+    FileCols {
+        path: want.min(room).max(1),
+        rate,
+        stacked: room < 8,
+    }
+}
+
+/// `$HOME/x` drawn as `~/x`, so a path wraps less. Nothing is cut.
+pub fn tilde(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// The open-file table of the process detail: FILE, SIZE, GROWTH and RATE,
+/// growth and rate over the time since the previous sample. A path longer
+/// than its column wraps under itself, never cut; RATE goes first as the
+/// pane narrows.
+pub fn paint_files(
+    files: &[FileRow],
+    home: &str,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+) {
+    let paths: Vec<String> = files.iter().map(|f| tilde(&f.path, home)).collect();
+    let longest = paths
+        .iter()
+        .map(|s| tc::display_width(s))
+        .max()
+        .unwrap_or(0);
+    let cols = file_columns(width, longest);
+    let figures = |size: String, growth: String, rate: String| {
+        let mut text = format!("  {size:>SIZE_COL$}  {growth:>GROWTH_COL$}");
+        if cols.rate {
+            text.push_str(&format!("  {rate:>FRATE_COL$}"));
+        }
+        text
+    };
+    if cols.stacked {
+        for (f, path) in files.iter().zip(&paths) {
+            for piece in chunks(path, width.saturating_sub(1).max(1)) {
+                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {piece}"))], width));
+            }
+            let text = format!("{} {}", human(f.size), growth_cell(&f.change));
+            push_lines(rows, &text, p.txt.as_str(), width);
+        }
+        return;
+    }
+    if !files.is_empty() {
+        let head = figures("SIZE".into(), "GROWTH".into(), "RATE".into());
+        rows.push(tc::seg(
+            &[(
+                p.lbl.as_str(),
+                format!(" {}{head}", tc::pad("FILE", cols.path)),
+            )],
+            width,
+        ));
+    }
+    for (f, path) in files.iter().zip(&paths) {
         let ink = match f.change {
             Change::Grew(..) => p.accent.as_str(),
             _ => p.txt.as_str(),
         };
-        let path_w = tc::display_width(&f.path);
-        let fig_w = tc::display_width(&figures);
-        if 1 + path_w + 2 + fig_w <= width {
-            let gap = width - 1 - path_w - fig_w;
-            rows.push(tc::seg(
-                &[
-                    (p.txt.as_str(), format!(" {}", f.path)),
-                    (ink, format!("{}{}", " ".repeat(gap.min(width)), figures)),
-                ],
-                width,
-            ));
-            continue;
-        }
-        for piece in chunks(&f.path, width.saturating_sub(1).max(1)) {
-            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {piece}"))], width));
-        }
-        if 3 + fig_w <= width {
-            rows.push(tc::seg(&[(ink, format!("   {figures}"))], width));
-        } else {
-            push_lines(rows, &figures, ink, width);
+        let pieces = chunks(path, cols.path);
+        for (i, piece) in pieces.iter().enumerate() {
+            let mut parts = vec![(p.txt.as_str(), format!(" {}", tc::pad(piece, cols.path)))];
+            if i == 0 {
+                parts.push((
+                    ink,
+                    figures(human(f.size), growth_cell(&f.change), rate_cell(&f.change)),
+                ));
+            }
+            rows.push(tc::seg(&parts, width));
         }
     }
 }
@@ -1332,14 +1574,230 @@ mod tests {
         );
         assert_eq!(next.len(), 3, "one row per path");
         assert_eq!(next[0].change, Change::Grew(12 << 20, 2.0));
-        assert_eq!(change_text(&next[0].change), "+12M in 2s");
+        assert_eq!(growth_cell(&next[0].change), "+12M");
+        assert_eq!(rate_cell(&next[0].change), "6M/s");
         let log = next.iter().find(|f| f.path.ends_with("log")).unwrap();
-        assert_eq!(change_text(&log.change), "−6B in 2s");
+        assert_eq!(growth_cell(&log.change), "−6B");
+        assert_eq!(rate_cell(&log.change), "−3B/s");
         let new = next.iter().find(|f| f.path.ends_with("new")).unwrap();
         assert_eq!(new.change, Change::First);
         // Another pid starts over.
         let other = file_growth(&mut memory, 43, &[file("/tmp/example/out.bin", 1)], 104.0);
         assert_eq!(other[0].change, Change::First);
+    }
+
+    fn procs_with(pid: i32, write: Option<f64>, read: Option<f64>, elapsed: f64) -> Procs {
+        Procs {
+            source: Source::Procfs,
+            rows: vec![ProcRate {
+                pid,
+                comm: "example-worker".into(),
+                cgroup: String::new(),
+                read_bps: read,
+                write_bps: write,
+                read_total: 0,
+                write_total: 0,
+            }],
+            locked: Vec::new(),
+            elapsed: Some(elapsed),
+            root: false,
+            visible: false,
+            moved: None,
+            window: None,
+        }
+    }
+
+    #[test]
+    fn the_rate_history_is_bounded_by_seconds_and_belongs_to_one_process() {
+        let mut history = None;
+        // The first poll of a pid has no rate: nothing is entered.
+        let none = feed_history(&mut history, 7, Some(100), &procs_with(7, None, None, 2.0));
+        assert!(none.is_empty());
+        for i in 0..40 {
+            let w = if i == 5 { 52.0 } else { 40.0 };
+            feed_history(
+                &mut history,
+                7,
+                Some(100),
+                &procs_with(7, Some(w), Some(0.0), 2.0),
+            );
+        }
+        let points = history.as_ref().unwrap().points();
+        // Forty two-second polls are eighty seconds; the ring keeps sixty.
+        assert_eq!(points.len(), 30);
+        let stats = history_stats(&points).unwrap();
+        assert_eq!(stats.seconds, 60.0);
+        // Poll five has aged out: the peak is what the window holds.
+        assert_eq!(stats.write_peak, 40.0);
+        assert_eq!(stats.read_peak, 0.0);
+        // Uneven polls are averaged by time, not by count.
+        let mut short = None;
+        feed_history(
+            &mut short,
+            7,
+            Some(100),
+            &procs_with(7, Some(10.0), Some(4.0), 1.0),
+        );
+        let pts = feed_history(
+            &mut short,
+            7,
+            Some(100),
+            &procs_with(7, Some(40.0), Some(0.0), 3.0),
+        );
+        let stats = history_stats(&pts).unwrap();
+        assert_eq!(stats.seconds, 4.0);
+        assert_eq!(stats.write_peak, 40.0);
+        assert_eq!(stats.write_avg, 32.5);
+        assert_eq!(stats.read_avg, 1.0);
+        // A slow poll longer than the window is still kept, alone.
+        let pts = feed_history(
+            &mut short,
+            7,
+            Some(100),
+            &procs_with(7, Some(1.0), Some(0.0), 90.0),
+        );
+        assert_eq!(pts.len(), 1);
+        // Another pid starts over, and so does the same pid reused.
+        let other = feed_history(
+            &mut history,
+            8,
+            Some(100),
+            &procs_with(8, Some(1.0), Some(0.0), 2.0),
+        );
+        assert_eq!(other.len(), 1);
+        let reused = feed_history(
+            &mut history,
+            8,
+            Some(900),
+            &procs_with(8, Some(1.0), Some(0.0), 2.0),
+        );
+        assert_eq!(reused.len(), 1, "a reused pid is another process");
+        // A history that has not filled the window sits at its right end.
+        let pos = history_positions(&pts, HISTORY_SECONDS);
+        assert_eq!(pos, vec![1.0]);
+        let two = [
+            RatePoint {
+                span: 2.0,
+                write: 1.0,
+                read: 0.0,
+            },
+            RatePoint {
+                span: 2.0,
+                write: 1.0,
+                read: 0.0,
+            },
+        ];
+        let pos = history_positions(&two, 60.0);
+        assert!((pos[0] - (1.0 - 2.0 / 60.0)).abs() < 1e-9 && pos[1] == 1.0);
+        assert_eq!(history_stats(&[]), None);
+    }
+
+    #[test]
+    fn open_files_sort_growing_first_and_drop_rate_when_narrow() {
+        let row = |path: &str, size: u64, change: Change| FileRow {
+            path: path.into(),
+            size,
+            change,
+        };
+        let mut rows = vec![
+            row("/srv/example/big.db", 900 << 20, Change::Same(2.0)),
+            row("/srv/example/slow.log", 1 << 20, Change::Grew(4 << 10, 2.0)),
+            row("/srv/example/out.bin", 10 << 20, Change::Grew(8 << 20, 2.0)),
+            row("/srv/example/a", 5, Change::First),
+        ];
+        sort_files(&mut rows);
+        let order: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "/srv/example/out.bin",
+                "/srv/example/slow.log",
+                "/srv/example/big.db",
+                "/srv/example/a"
+            ]
+        );
+        assert_eq!(growth_cell(&rows[2].change), "—");
+        assert_eq!(rate_cell(&rows[2].change), "—");
+        assert_eq!(growth_cell(&rows[3].change), "first");
+        assert_eq!(rate_cell(&rows[0].change), "4M/s");
+        // Wide: every column, FILE as wide as the longest path.
+        let wide = file_columns(140, 30);
+        assert!(wide.rate && !wide.stacked);
+        assert_eq!(wide.path, 30);
+        // RATE goes first; SIZE and GROWTH stay.
+        let narrow = file_columns(40, 30);
+        assert!(!narrow.rate && !narrow.stacked);
+        assert_eq!(narrow.path + file_fixed(false), 40);
+        let tiny = file_columns(20, 30);
+        assert!(tiny.stacked);
+        assert_eq!(tilde("/home/example/x", "/home/example"), "~/x");
+        assert_eq!(
+            tilde("/home/example2/x", "/home/example"),
+            "/home/example2/x"
+        );
+        assert_eq!(tilde("/srv/example/x", ""), "/srv/example/x");
+    }
+
+    #[test]
+    fn a_long_path_wraps_under_itself_and_no_row_is_wider_than_the_pane() {
+        let p = super::super::palette();
+        let long = format!("/srv/example/{}/out.bin", "nested-directory".repeat(6));
+        let files = vec![
+            FileRow {
+                path: long.clone(),
+                size: 716 << 20,
+                change: Change::Grew(96 << 20, 2.0),
+            },
+            FileRow {
+                path: "/srv/example/idle.log".into(),
+                size: 10,
+                change: Change::Same(2.0),
+            },
+        ];
+        for width in [20, 28, 40, 60, 80, 100, 140] {
+            let mut rows = Vec::new();
+            paint_files(&files, "", width, &p, &mut rows);
+            let plain: Vec<String> = rows
+                .iter()
+                .map(|r| super::super::writers::visible(r))
+                .collect();
+            for line in &plain {
+                assert!(tc::display_width(line) <= width, "{width}: {line:?}");
+            }
+            // Nothing is cut: the pieces put back together are the path.
+            let cols = file_columns(width, tc::display_width(&long));
+            let joined: String = if cols.stacked {
+                plain
+                    .iter()
+                    .take_while(|l| !l.contains("716M"))
+                    .map(|l| l[1..].to_string())
+                    .collect()
+            } else {
+                plain[1..]
+                    .iter()
+                    .take(tc::display_width(&long).div_ceil(cols.path))
+                    .map(|l| {
+                        l.chars()
+                            .skip(1)
+                            .take(cols.path)
+                            .collect::<String>()
+                            .trim_end()
+                            .to_string()
+                    })
+                    .collect()
+            };
+            assert_eq!(joined, long, "{width}");
+            if !cols.stacked {
+                assert!(plain[0].contains("FILE") && plain[0].contains("GROWTH"));
+                assert_eq!(plain[0].contains("RATE"), cols.rate, "{width}");
+                // Continuations start at the FILE column, figures only on the first.
+                assert!(plain[1].contains("+96M"));
+                assert!(plain[2].starts_with(' ') && !plain[2].contains('M'));
+                if cols.rate {
+                    assert!(plain[1].contains("48M/s"));
+                }
+            }
+        }
     }
 
     #[test]

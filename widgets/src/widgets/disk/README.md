@@ -328,13 +328,25 @@ appear as a writer. A poll where the disks had no rate
 is left out of both sides. The rest of the device's figure is the other
 users' processes, the kernel's own writeback and journal, and swap.
 
-`↵` on a process shows its command line, working directory, state and
-cgroup, what it has read and written since it started, its current rates,
-and the regular files it has open with each one's size and how much it
-grew since the previous sample (`+12M in 2s`); the screen reads all of it
-again every poll. On another user's process it shows what is readable (the
-pid, the name, the state, the cgroup and usually the command line) and
-`the rest needs root`.
+`↵` on a process opens its detail, titled with its name and pid. What you
+watch comes first: its write and read rates over the last poll and its
+state (`D · waiting on disk now` in the warning colour), then its write
+rate over the last minute as a line chart - pixels in Kitty, Braille
+elsewhere, the same samples - with the peak and the time-weighted average
+beside it, and `last 14s` until it has a minute. That history is the polls
+since the screen opened, kept by measured seconds rather than by count, and
+it starts over for another process or a reused pid. OPEN FILES is a table
+of the regular files it has open: FILE, SIZE, GROWTH since the previous
+sample, and RATE, that growth over the seconds between the two samples; the
+header names those seconds, so a growth is never read as a total. The files
+growing come first, most growth first, then the rest by size with `—`. A
+long path wraps under itself; RATE is the column that leaves as the pane
+narrows. Last, PROCESS lists its state, command line, working directory,
+cgroup and what it has read and written since it started, in an aligned
+column, a long command line wrapping under its value. The screen reads all
+of it again every poll. On another user's process it shows what is
+readable (the pid, the name, the state, the cgroup and usually the command
+line) and `the rest needs root`.
 
 **WAITING ON DISK** is every process in `D` state now - a sample of this
 instant, not a count over time - with its cgroup, which is readable for

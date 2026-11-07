@@ -1599,7 +1599,11 @@ fn refresh_seconds(cfg: &serde_json::Value) -> f64 {
 }
 
 fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Drawn {
-    let mut rows = vec![tc::title_busy("disk", width, &p.accent, busy)];
+    let title = match (view.screen, view.opened) {
+        (Screen::Process, Some(open)) => writers::process_title(open, width).0,
+        _ => "disk".to_string(),
+    };
+    let mut rows = vec![tc::title_busy(&title, width, &p.accent, busy)];
     // Placements are stored only after the section paints, so a panic
     // leaves them empty and the fault rows `guard_rows` substitutes cannot
     // be clicked as if they were mounts.
@@ -1763,14 +1767,18 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         rows.extend(section);
     }
     if view.screen.writes() {
+        let writes_plots: Mutex<Vec<tc::Plot>> = Mutex::new(Vec::new());
         let section = tc::guard_rows("who is writing", width, || {
             let mut body = Vec::new();
+            let mut local_plots = Vec::new();
             match view.screen {
                 Screen::Service => {
                     writers::paint_service(view, view.service_path, width, p, &mut body)
                 }
                 Screen::Process => match view.opened {
-                    Some(open) => writers::paint_process(view, open, width, p, &mut body),
+                    Some(open) => {
+                        writers::paint_process(view, open, width, p, &mut body, &mut local_plots)
+                    }
                     None => body.push(tc::seg(
                         &[(p.dim.as_str(), " nothing selected".into())],
                         width,
@@ -1778,8 +1786,22 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
                 },
                 _ => writers::paint_waiters(view, width, p, &mut body),
             }
+            if let Ok(mut slot) = writes_plots.lock() {
+                *slot = local_plots;
+            }
             body
         });
+        if !section.iter().any(|line| line.contains("could not draw")) {
+            let base = rows.len();
+            let drawn = writes_plots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            for mut plot in drawn {
+                plot.y += base;
+                plots.push(plot);
+            }
+        }
         rows.extend(section);
     }
     let lens = if view.screen == Screen::List {
@@ -5567,8 +5589,11 @@ mod tests {
         frame.opened = Some(&open);
         let drawn = draw_body(&frame, 60, &p, None);
         rows_fit(&drawn, 60);
-        assert!(plain_has(&drawn, "cgroup user.slice/session-1.scope"));
-        assert!(plain_has(&drawn, "cwd not readable as you"));
+        assert!(plain_has(
+            &drawn,
+            "   cgroup       user.slice/session-1.scope"
+        ));
+        assert!(plain_has(&drawn, "   cwd          not readable as you"));
         assert!(plain_has(&drawn, "the rest needs root"));
         // The same pid, started again since it was opened: a stranger.
         let start = writers.starts.get(&501).copied().expect("start of 501");
@@ -5952,20 +5977,47 @@ mod tests {
         let board = writing_board(29.0 * MIB as f64);
         let mut writers = writers_with_procs();
         let mut memory = None;
-        let file = |size| tc::procfs::OpenFile {
-            path: "/tmp/example/out.bin".into(),
+        let file = |path: &str, size| tc::procfs::OpenFile {
+            path: path.into(),
             size,
         };
-        let _ = by_process::file_growth(&mut memory, 611, &[file(MIB)], 10.0);
-        let files = by_process::file_growth(&mut memory, 611, &[file(13 * MIB)], 12.0);
+        let long = format!("/srv/example/{}/out.bin", "nested-directory".repeat(5));
+        let _ = by_process::file_growth(
+            &mut memory,
+            611,
+            &[file(&long, MIB), file("/srv/example/idle.log", 3 * MIB)],
+            10.0,
+        );
+        let files = by_process::file_growth(
+            &mut memory,
+            611,
+            &[
+                file(&long, 13 * MIB),
+                file("/srv/example/idle.log", 3 * MIB),
+            ],
+            12.0,
+        );
         writers.names.insert(611, "example-worker-11".into());
         writers.readable.insert(611);
         writers.detail = Some(by_process::ProcDetail {
             pid: 611,
             state: Some('R'),
-            cmdline: "example-worker --out /tmp/example/out.bin".into(),
-            cwd: "/tmp/example".into(),
+            cmdline:
+                "example-worker --out /srv/example/out.bin --block-size 65536 --count 400000 --sync"
+                    .into(),
+            cwd: "/srv/example".into(),
             files: Some(Ok(files)),
+            history: (0..7)
+                .map(|i| by_process::RatePoint {
+                    span: 2.0,
+                    write: if i == 3 {
+                        16.0 * MIB as f64
+                    } else {
+                        12.0 * MIB as f64
+                    },
+                    read: 0.0,
+                })
+                .collect(),
         });
         let open = writers::Opened {
             pid: 611,
@@ -5981,14 +6033,54 @@ mod tests {
         for width in [28, 40, 60, 80, 100, 140] {
             let drawn = draw_body(&frame, width, &p, None);
             rows_fit(&drawn, width);
+            // The write history is one chart, inside the pane, at every width.
+            assert_eq!(drawn.plots.len(), 1, "{width}");
+            let plot = &drawn.plots[0];
+            assert!(plot.x + plot.width <= width, "{width}");
+            assert!(plot.y + plot.height <= drawn.rows.len(), "{width}");
+            // Every word is somewhere: the peak, the growing file's rate.
+            let text = drawn
+                .rows
+                .iter()
+                .map(|r| plain(r).trim().to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for want in ["peak 16M/s", "avg 12M/s", "+12M", "--sync", "since start"] {
+                assert!(text.contains(want), "{width}: {want}");
+            }
+            // The title says which process, or the body does.
+            assert!(text.contains("611"), "{width}");
         }
         let drawn = draw_body(&frame, 100, &p, None);
-        assert!(plain_has(&drawn, "state R"));
-        assert!(plain_has(&drawn, "cmdline example-worker --out /tmp/example/out.bin"));
-        assert!(plain_has(&drawn, "now write 12M/s · read 0B/s over the last 2s"));
-        assert!(plain_has(&drawn, "written 100M · read 0B since it started"));
-        assert!(plain_has(&drawn, "OPEN FILES  1 · size and growth since the previous sample"));
-        assert!(plain_has(&drawn, "+12M in 2s"));
+        assert!(plain(&drawn.rows[0]).contains("DISK · EXAMPLE-WORKER-11 · PID 611"));
+        assert!(plain_has(
+            &drawn,
+            "writing 12M/s · reading 0B/s over the last 2s · R · running"
+        ));
+        assert!(plain_has(
+            &drawn,
+            "write · last 14s · peak 16M/s · avg 12M/s"
+        ));
+        assert!(plain_has(&drawn, "   state        R · running"));
+        assert!(plain_has(
+            &drawn,
+            "   command      example-worker --out /srv/example/out.bin"
+        ));
+        assert!(plain_has(&drawn, "   cwd          /srv/example"));
+        assert!(plain_has(&drawn, "   since start  100M written · 0B read"));
+        assert!(plain_has(
+            &drawn,
+            "OPEN FILES  2 open · 1 growing · growth since the previous sample (2s)"
+        ));
+        assert!(plain_has(&drawn, "+12M      6M/s"));
+        // The growing file comes before the bigger idle one.
+        let at = |needle: &str| drawn.rows.iter().position(|r| plain(r).contains(needle));
+        assert!(at("+12M") < at("idle.log"));
+        // The rates and the chart come before what the process is.
+        assert!(at("peak 16M/s") < at("OPEN FILES") && at("OPEN FILES") < at("PROCESS"));
+        // A narrow pane: the title keeps the pid, the body names the process.
+        let drawn = draw_body(&frame, 28, &p, None);
+        assert!(plain_has(&drawn, "example-worker-11 · pid 611"));
         // The service detail: per-process rates for the pids it can read.
         frame.screen = Screen::Service;
         frame.service_path = "user.slice";

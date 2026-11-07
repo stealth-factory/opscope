@@ -1375,12 +1375,239 @@ pub struct Opened {
     pub start: Option<u64>,
 }
 
+/// The title of the process detail: `disk · <comm> · pid <n>` when the top
+/// row has the room, `disk · pid <n>` when only that fits, else `disk`.
+/// The second half says whether both comm and pid made it, so the body
+/// names whatever the title had to leave out.
+pub fn process_title(open: &Opened, width: usize) -> (String, bool) {
+    let full = format!("disk · {} · pid {}", open.comm, open.pid);
+    if title_fits(&full, width) {
+        return (full, true);
+    }
+    let short = format!("disk · pid {}", open.pid);
+    if title_fits(&short, width) {
+        return (short, false);
+    }
+    ("disk".into(), false)
+}
+
+/// Whether core drew all of `text` on a top row `width` wide, leaving the
+/// room it keeps for the version and the notice counter. Measured with the
+/// refresh spinner showing: it spends only rule fill, never title room.
+fn title_fits(text: &str, width: usize) -> bool {
+    let row = tc::title_busy(text, width, "", Some(0));
+    visible(&row).contains(&format!(" {} ", text.to_uppercase()))
+}
+
+/// `line` without its colour escapes.
+pub fn visible(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `stat`'s state letter, said in words.
+fn state_words(state: char) -> String {
+    let words = match state {
+        'R' => "running",
+        'S' => "sleeping",
+        'D' => "waiting on disk",
+        'I' => "idle kernel thread",
+        'T' => "stopped",
+        't' => "stopped by a debugger",
+        'Z' => "zombie, exited and not yet reaped",
+        'X' => "dead",
+        'P' => "parked",
+        _ => return state.to_string(),
+    };
+    format!("{state} · {words}")
+}
+
+/// The width of the PROCESS block's key column, `since start` and a gap.
+const KEY_W: usize = 13;
+const KEY_INDENT: usize = 3;
+/// Rows of the write-rate history chart.
+const HISTORY_ROWS: usize = 3;
+
+/// One `key  value` row of the PROCESS block. A value that does not fit
+/// wraps and its continuation lines sit under the value column; on a pane
+/// too narrow for both, the value goes under its key.
+fn push_field(
+    rows: &mut Vec<String>,
+    key: &str,
+    value: &str,
+    ink: &str,
+    width: usize,
+    p: &Palette,
+) {
+    let value_w = width.saturating_sub(KEY_INDENT + KEY_W);
+    if value_w >= 16 {
+        for (i, line) in wrap(value, value_w).into_iter().enumerate() {
+            let label = if i == 0 { key } else { "" };
+            rows.push(tc::seg(
+                &[
+                    (
+                        p.lbl.as_str(),
+                        format!("{}{}", " ".repeat(KEY_INDENT), tc::pad(label, KEY_W)),
+                    ),
+                    (ink, line),
+                ],
+                width,
+            ));
+        }
+        return;
+    }
+    rows.push(tc::seg(
+        &[(
+            p.lbl.as_str(),
+            format!(
+                "{}{key}",
+                " ".repeat(KEY_INDENT.min(width.saturating_sub(1)))
+            ),
+        )],
+        width,
+    ));
+    let indent = (KEY_INDENT + 2).min(width / 3);
+    for line in wrap(value, width.saturating_sub(indent)) {
+        rows.push(tc::seg(
+            &[(ink, format!("{}{line}", " ".repeat(indent)))],
+            width,
+        ));
+    }
+}
+
+/// The opened process's write rate over the last minute: a line chart
+/// drawn by core (pixels in Kitty, Braille elsewhere) with its peak and
+/// average beside it when the pane has the room, under it when not.
+fn push_history(
+    points: &[by_process::RatePoint],
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let Some(stats) = by_process::history_stats(points) else {
+        push_lines(
+            rows,
+            "write history · from the next poll (a rate needs two samples)",
+            &p.dim,
+            width,
+        );
+        return;
+    };
+    let covered = stats.seconds.round().min(by_process::HISTORY_SECONDS);
+    let mut labels = vec![format!(
+        "write · last {} · peak {} · avg {}",
+        secs(covered),
+        rate(stats.write_peak),
+        rate(stats.write_avg)
+    )];
+    if stats.read_peak > 0.0 {
+        labels.push(format!(
+            "read · peak {} · avg {}",
+            rate(stats.read_peak),
+            rate(stats.read_avg)
+        ));
+    }
+    let label_w = labels
+        .iter()
+        .map(|l| tc::display_width(l))
+        .max()
+        .unwrap_or(0);
+    // Beside the chart when that still leaves it twenty cells.
+    let beside = width >= 60 && label_w + 4 + 20 <= width;
+    let chart_w = if beside {
+        width - label_w - 4
+    } else {
+        width.saturating_sub(2).max(1)
+    };
+    let peak = stats.write_peak;
+    let values: Vec<Option<f64>> = points
+        .iter()
+        .map(|pt| {
+            Some(if peak > 0.0 {
+                (pt.write / peak).clamp(0.0, 1.0)
+            } else {
+                0.0
+            })
+        })
+        .collect();
+    let positions = by_process::history_positions(points, by_process::HISTORY_SECONDS);
+    let y = rows.len();
+    for i in 0..HISTORY_ROWS {
+        let mut parts = vec![(p.dim.as_str(), " ".repeat(1 + chart_w))];
+        if beside {
+            if let Some(label) = labels.get(i) {
+                parts.push((p.dim.as_str(), format!("  {label}")));
+            }
+        }
+        rows.push(tc::seg(&parts, width));
+    }
+    let slots = values.len().max(1);
+    plots.push(
+        tc::Plot::new(
+            1,
+            y,
+            chart_w,
+            HISTORY_ROWS,
+            tc::LineChart {
+                traces: vec![tc::Trace {
+                    values,
+                    positions: Some(positions),
+                    colour: p.accent.clone(),
+                    baseline: Some(0.0),
+                }],
+                slots,
+                focus: Some(0),
+            },
+        )
+        .under_text()
+        .on_axis(0.0, peak),
+    );
+    if !beside {
+        for label in labels {
+            push_lines(rows, &label, &p.dim, width);
+        }
+    }
+}
+
+/// `↵` on a BY PROCESS or WAITING ON DISK row. What a reader watches comes
+/// first - the rates, their last minute, the files growing - and what the
+/// process is comes after, in an aligned block.
 pub fn paint_process(
     view: &View,
     open: &Opened,
     width: usize,
     p: &Palette,
     rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
+) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    paint_process_in(view, open, &home, width, p, rows, plots);
+}
+
+fn paint_process_in(
+    view: &View,
+    open: &Opened,
+    home: &str,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+    plots: &mut Vec<tc::Plot>,
 ) {
     let readable = view.writers.is_some_and(|w| w.readable.contains(&open.pid));
     // The last pass did not see it: it has exited, and an empty cmdline or
@@ -1400,55 +1627,6 @@ pub fn paint_process(
         .and_then(|w| w.detail.as_ref())
         .filter(|d| d.pid == open.pid && !gone);
     let mac = view.writers.is_some_and(|w| w.by_process_only);
-    let mut lines = vec![
-        format!("pid {}", open.pid),
-        format!("command {}", open.comm),
-    ];
-    let state = match (live, gone, open.from_wait) {
-        (Some(_), _, _) => Some("state D, waiting on disk now".to_string()),
-        (None, true, true) => Some("exited since it was in D".to_string()),
-        (None, true, false) => Some("exited".to_string()),
-        (None, false, true) => Some("state no longer D".to_string()),
-        (None, false, false) => detail.and_then(|d| d.state).map(|s| format!("state {s}")),
-    };
-    lines.extend(state);
-    if !mac {
-        lines.push(if open.cgroup.is_empty() && !open.from_wait {
-            "cgroup not placed by the last walk (it started after it)".into()
-        } else {
-            format!("cgroup {}", shown_path(&open.cgroup))
-        });
-    }
-    if let (Some(w), Some(writers)) = (live, view.writers) {
-        if writers.wait_times {
-            lines.push(format!(
-                "waited {}",
-                waited_text(w.waited, writers.wait_elapsed)
-            ));
-        }
-    }
-    let cmdline = detail.map_or(open.cmdline.as_str(), |d| d.cmdline.as_str());
-    let cwd = detail.map_or(open.cwd.as_str(), |d| d.cwd.as_str());
-    if mac {
-        lines.push("cmdline, cwd and open files are not read on macOS".into());
-    } else if gone && cmdline.is_empty() && cwd.is_empty() {
-        lines.push("cmdline and cwd: it had exited before they were read".into());
-        for line in lines {
-            push_lines(rows, &line, &p.txt, width);
-        }
-        return;
-    } else {
-        lines.push(if cmdline.is_empty() {
-            "cmdline empty (a kernel thread has none)".into()
-        } else {
-            format!("cmdline {cmdline}")
-        });
-        lines.push(if cwd.is_empty() {
-            "cwd not readable as you".into()
-        } else {
-            format!("cwd {cwd}")
-        });
-    }
     let row = view
         .writers
         .and_then(|w| w.procs.as_ref())
@@ -1458,64 +1636,213 @@ pub fn paint_process(
                 .iter()
                 .find(|r| r.pid == open.pid)
                 .map(|r| (r, procs.elapsed, procs.source))
-        });
+        })
+        .filter(|_| !gone);
+
+    // What the title could not hold.
+    if !process_title(open, width).1 {
+        push_lines(
+            rows,
+            &format!("{} · pid {}", open.comm, open.pid),
+            &p.txt,
+            width,
+        );
+    }
+
+    // The headline: the rates now and the state, in warning ink when D.
+    let state: Option<(String, bool)> = match (live, gone, open.from_wait) {
+        (Some(_), _, _) => Some(("D · waiting on disk now".into(), true)),
+        (None, true, true) => Some(("exited since it was in D".into(), false)),
+        (None, true, false) => Some(("exited".into(), false)),
+        (None, false, true) => Some(("no longer D".into(), false)),
+        (None, false, false) => detail
+            .and_then(|d| d.state)
+            .map(|s| (state_words(s), s == 'D')),
+    };
+    let rates = match row {
+        Some((r, elapsed, _)) => Some(match (r.write_bps, r.read_bps, elapsed) {
+            (Some(w), Some(rd), Some(e)) => format!(
+                "writing {} · reading {} over the last {}",
+                rate(w),
+                rate(rd),
+                secs(e)
+            ),
+            _ => "measuring · a rate needs two samples".into(),
+        }),
+        None if !readable && !gone => Some("io not readable as you · the rest needs root".into()),
+        None => None,
+    };
+    let state_ink = |warn: bool| {
+        if warn {
+            p.down.as_str()
+        } else {
+            p.txt.as_str()
+        }
+    };
+    match (&rates, &state) {
+        (Some(r), Some((s, warn)))
+            if 1 + tc::display_width(r) + 3 + tc::display_width(s) <= width =>
+        {
+            rows.push(tc::seg(
+                &[
+                    (p.txt.as_str(), format!(" {r} · ")),
+                    (state_ink(*warn), s.clone()),
+                ],
+                width,
+            ));
+        }
+        _ => {
+            if let Some(r) = &rates {
+                push_lines(rows, r, &p.txt, width);
+            }
+            if let Some((s, warn)) = &state {
+                push_lines(rows, s, state_ink(*warn), width);
+            }
+        }
+    }
+
+    // The last minute of the write rate.
+    if row.is_some() {
+        let points = detail.map(|d| d.history.as_slice()).unwrap_or(&[]);
+        push_history(points, width, p, rows, plots);
+    }
+
+    // OPEN FILES.
+    if let Some(files) = detail.and_then(|d| d.files.as_ref()) {
+        rows.push(String::new());
+        match files {
+            Ok(list) if list.is_empty() => {
+                push_lines(rows, "OPEN FILES  none open", &p.lbl, width);
+            }
+            Ok(list) => {
+                let growing = list
+                    .iter()
+                    .filter(|f| matches!(f.change, by_process::Change::Grew(..)))
+                    .count();
+                let span = list.iter().find_map(|f| f.change.span());
+                let since = match span {
+                    Some(s) => format!("growth since the previous sample ({})", secs(s)),
+                    None => format!("growth from the next sample, every {}", secs(view.every)),
+                };
+                push_lines(
+                    rows,
+                    &format!(
+                        "OPEN FILES  {} open · {growing} growing · {since}",
+                        list.len()
+                    ),
+                    &p.lbl,
+                    width,
+                );
+                by_process::paint_files(list, home, width, p, rows);
+            }
+            Err(why) if !readable => push_lines(
+                rows,
+                &format!("OPEN FILES  {why} · the rest needs root"),
+                &p.lbl,
+                width,
+            ),
+            Err(why) => push_lines(rows, &format!("OPEN FILES  {why}"), &p.lbl, width),
+        }
+    }
+
+    // PROCESS: what it is.
+    rows.push(String::new());
+    push_lines(rows, "PROCESS", &p.lbl, width);
+    if let Some((s, warn)) = &state {
+        push_field(rows, "state", s, state_ink(*warn), width, p);
+    }
+    if let (Some(w), Some(writers)) = (live, view.writers) {
+        if writers.wait_times {
+            push_field(
+                rows,
+                "waited",
+                &waited_text(w.waited, writers.wait_elapsed),
+                &p.txt,
+                width,
+                p,
+            );
+        }
+    }
+    let cmdline = detail.map_or(open.cmdline.as_str(), |d| d.cmdline.as_str());
+    let cwd = detail.map_or(open.cwd.as_str(), |d| d.cwd.as_str());
+    if !mac {
+        if gone && cmdline.is_empty() && cwd.is_empty() {
+            push_field(
+                rows,
+                "command",
+                "it had exited before it was read",
+                &p.dim,
+                width,
+                p,
+            );
+        } else {
+            match cmdline {
+                "" => push_field(
+                    rows,
+                    "command",
+                    &format!("{} · cmdline empty (a kernel thread has none)", open.comm),
+                    &p.txt,
+                    width,
+                    p,
+                ),
+                line => push_field(rows, "command", line, &p.txt, width, p),
+            }
+            match cwd {
+                "" => push_field(rows, "cwd", "not readable as you", &p.dim, width, p),
+                dir => push_field(rows, "cwd", &by_process::tilde(dir, home), &p.txt, width, p),
+            }
+        }
+        if open.cgroup.is_empty() && !open.from_wait {
+            push_field(
+                rows,
+                "cgroup",
+                "not placed by the last walk (it started after it)",
+                &p.dim,
+                width,
+                p,
+            );
+        } else {
+            push_field(rows, "cgroup", &shown_path(&open.cgroup), &p.txt, width, p);
+        }
+    } else {
+        push_field(rows, "command", &open.comm, &p.txt, width, p);
+    }
     match row {
-        Some((r, elapsed, source)) if !gone => {
+        Some((r, _, source)) => {
             let what = match source {
                 by_process::Source::Procfs => "write_bytes less cancelled_write_bytes",
                 by_process::Source::Rusage => "bytes handed to the disk layer",
             };
-            lines.push(format!(
-                "written {} · read {} since it started ({what})",
-                human(r.write_total),
-                human(r.read_total)
-            ));
-            lines.push(match (r.write_bps, r.read_bps, elapsed) {
-                (Some(w), Some(rd), Some(e)) => format!(
-                    "now write {} · read {} over the last {}",
-                    rate(w),
-                    rate(rd),
-                    secs(e)
-                ),
-                _ => "now measuring · a rate needs two samples".into(),
-            });
-        }
-        _ if !readable && !gone => {
-            lines.push("io not readable as you · the rest needs root".into());
-        }
-        _ => {}
-    }
-    for line in lines {
-        push_lines(rows, &line, &p.txt, width);
-    }
-    let Some(files) = detail.and_then(|d| d.files.as_ref()) else {
-        return;
-    };
-    rows.push(String::new());
-    match files {
-        Ok(list) if list.is_empty() => {
-            push_lines(rows, "OPEN FILES  none open", &p.lbl, width);
-        }
-        Ok(list) => {
-            push_lines(
+            push_field(
                 rows,
+                "since start",
                 &format!(
-                    "OPEN FILES  {} · size and growth since the previous sample, every {}",
-                    list.len(),
-                    secs(view.every)
+                    "{} written · {} read ({what})",
+                    human(r.write_total),
+                    human(r.read_total)
                 ),
-                &p.lbl,
+                &p.txt,
                 width,
+                p,
             );
-            by_process::paint_files(list, width, p, rows);
         }
-        Err(why) if !readable => push_lines(
+        None if !readable && !gone => push_field(
             rows,
-            &format!("OPEN FILES  {why} · the rest needs root"),
-            &p.lbl,
+            "since start",
+            "io not readable as you · the rest needs root",
+            &p.dim,
             width,
+            p,
         ),
-        Err(why) => push_lines(rows, &format!("OPEN FILES  {why}"), &p.lbl, width),
+        None => {}
+    }
+    if mac {
+        push_lines(
+            rows,
+            "cmdline, cwd and open files are not read on macOS",
+            &p.dim,
+            width,
+        );
     }
 }
 

@@ -41,7 +41,8 @@ iostat's combined read and write; there are no cgroups and no D state.
     disk [-n SECONDS]
 
 Keys: up/down select, enter opens (a mount, a disk, a cgroup, a process
-with its open files and how much each grew since the previous sample, or
+with its write rate over the last minute and its open files, growing
+ones first, with how much each grew since the previous sample, or
 the full D-state list from +N more), s cycles the sort of the focused
 section, a shows every row of BY PROCESS when it has the cursor and of
 BY SERVICE otherwise, or the top ones again (BY PROCESS takes the cursor

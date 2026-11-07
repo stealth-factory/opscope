@@ -21,7 +21,7 @@ use opscope_core::cgroup::State;
 use opscope_core::procfs;
 
 use super::parse::{self, InventoryDisk, IoSnapshot, Mount, PartMount, Space};
-use super::by_process::{self, FileMemory, ProcDetail, ProcMemory, Source};
+use super::by_process::{self, FileMemory, ProcDetail, ProcMemory, RateHistory, Source};
 use super::writers::{self, Memory, PidSample, Wanted, Writers};
 
 struct InventoryCache {
@@ -226,12 +226,14 @@ fn read_dev(path: &str) -> Option<String> {
 
 /// What the WHO IS WRITING poll keeps between passes: the previous tree
 /// and wait ticks (in [`Memory`]), one previous `io` reading per pid (in
-/// [`ProcMemory`]), the open process's previous file sizes, and when
+/// [`ProcMemory`]), the open process's previous file sizes and its last
+/// minute of rates, and when
 /// `task_delayacct` and the `/proc` mount's `hidepid` were last read.
 pub struct WriterSource {
     memory: Memory,
     procs: ProcMemory,
     files: Option<FileMemory>,
+    history: Option<RateHistory>,
     delayacct: Option<(bool, Instant)>,
     hidepid: Option<(bool, Instant)>,
     start: Instant,
@@ -243,6 +245,7 @@ impl Default for WriterSource {
             memory: Memory::default(),
             procs: ProcMemory::default(),
             files: None,
+            history: None,
             delayacct: None,
             hidepid: None,
             start: Instant::now(),
@@ -324,16 +327,27 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
         let facts = procfs::process_facts(pid);
         let files = procfs::open_files(pid)
             .map(|files| by_process::file_growth(&mut source.files, pid, &files, now));
+        let history = match out.procs.as_ref() {
+            Some(procs) => by_process::feed_history(
+                &mut source.history,
+                pid,
+                out.starts.get(&pid).copied(),
+                procs,
+            ),
+            None => Vec::new(),
+        };
         ProcDetail {
             pid,
             state: state_of,
             cmdline: facts.cmdline,
             cwd: facts.cwd,
             files: Some(files),
+            history,
         }
     });
     if wanted.pid.is_none() {
         source.files = None;
+        source.history = None;
     }
     out.pressure = wanted.cgroup.map(|path| {
         let file = format!("/sys/fs/cgroup/{path}/io.pressure");
