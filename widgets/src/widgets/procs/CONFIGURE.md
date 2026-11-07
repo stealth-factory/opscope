@@ -40,6 +40,23 @@ still draws. `ps` is a required tool on macOS; without it the widget
 shows the shared missing-tool screen. macOS lists no threads, so `t` is
 not offered there.
 
+The services view (`g`, Linux only) walks `/sys/fs/cgroup` once a poll
+while it is on screen, through the shared `tc::cgroup` reader: for each
+cgroup, `cgroup.subtree_control`, `cgroup.procs`, and `cpu.stat` and
+`memory.current` where those controllers are enabled; for the open
+service, `memory.max`. All of these are readable by any user. Which
+cgroups get rows is decided by which have the `cpu` or `memory`
+controller enabled, and that is systemd's to set, not this widget's:
+`systemctl set-property <unit> CPUAccounting=yes` (or
+`MemoryAccounting=yes`) enables the controller for that unit's cgroup and
+the slices above it, so it gets a row of its own instead of rolling up
+into its slice; `DefaultCPUAccounting=yes` and
+`DefaultMemoryAccounting=yes` in `system.conf` do it for every unit.
+Whether a user's login sessions get rows of their own depends on what
+`user.slice` and the user's slice enable below them; where they do not,
+the sessions roll up into the slice and the header says so. On cgroup v1 there is no services view; the
+view says so. Nothing in this widget's settings changes any of it.
+
 The detail screen reads, for the one process that is open, its
 `cmdline`, `cwd` and `/proc/<pid>/io`, every poll. Another user's `cwd`
 and `io` are closed to an ordinary user; the rows say `needs root`

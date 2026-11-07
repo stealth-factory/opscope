@@ -19,6 +19,7 @@ use opscope_core as tc;
 
 use super::model::{self, Clock, Facts, Io, MemSource, PerCore, Proc, Sample, Sort, Thread};
 use super::parse;
+use super::services::{self, Service};
 
 pub struct Palette {
     pub txt: String,
@@ -78,6 +79,8 @@ impl Palette {
 pub enum Screen {
     List,
     Detail,
+    /// One service and its processes.
+    Service,
 }
 
 /// The process the detail screen is about: its pid, its identity, and the
@@ -108,6 +111,21 @@ pub struct View<'a> {
     /// The pid the list cursor is on.
     pub cursor: Option<i32>,
     pub opened: Option<&'a Opened>,
+    pub svc_sort: services::Sort,
+    /// The cgroup path the services cursor is on.
+    pub svc_cursor: Option<&'a str>,
+    /// The service whose processes are open.
+    pub svc_opened: Option<&'a OpenedService>,
+    /// Its `memory.max`, as last read.
+    pub svc_max: Option<&'a Result<Option<u64>, String>>,
+}
+
+/// The service the detail is about, and the last row the view had for it.
+#[derive(Clone, Debug)]
+pub struct OpenedService {
+    pub last: Service,
+    /// The cgroup was not in the latest walk.
+    pub gone: bool,
 }
 
 /// One frame's body: the rows, where each list item landed (row, item),
@@ -117,6 +135,9 @@ pub struct Drawn {
     pub placed: Vec<(usize, usize)>,
     pub head: usize,
     pub keys: Vec<i32>,
+    /// The services view's cgroup paths in the order drawn; `keys` is then
+    /// empty.
+    pub paths: Vec<String>,
     /// The panel's bars, meters and trace, at their row in `rows`; `main`
     /// crops them to the window with `in_viewport`.
     pub plots: Vec<tc::Plot>,
@@ -157,7 +178,7 @@ pub fn secs(s: f64) -> String {
     }
 }
 
-fn cpu_cell(cpu: Option<f64>) -> String {
+pub fn cpu_cell(cpu: Option<f64>) -> String {
     match cpu {
         None => "—".into(),
         Some(c) => format!("{:.1}", c.clamp(0.0, 999.9)),
@@ -235,7 +256,7 @@ pub fn chunks(text: &str, room: usize) -> Vec<String> {
 
 /// Clauses joined with ` · `, broken between clauses onto as many lines
 /// as the width needs; a clause wider than a line is broken at spaces.
-fn pack_clauses(clauses: &[String], width: usize) -> Vec<String> {
+pub fn pack_clauses(clauses: &[String], width: usize) -> Vec<String> {
     let room = width.saturating_sub(1).max(1);
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
@@ -860,7 +881,7 @@ pub fn panel(sample: &Sample, every: f64, width: usize, p: &Palette) -> Panel {
 
 // ── the list ─────────────────────────────────────────────────────────
 
-const CPU_W: usize = 5;
+pub const CPU_W: usize = 5;
 const MEM_W: usize = 5;
 const RSS_W: usize = 5;
 const STATE_W: usize = 5;
@@ -978,7 +999,7 @@ pub fn columns(
     }
 }
 
-fn right(text: &str, w: usize) -> String {
+pub fn right(text: &str, w: usize) -> String {
     let n = tc::display_width(text);
     if n >= w {
         text.to_string()
@@ -989,7 +1010,7 @@ fn right(text: &str, w: usize) -> String {
 
 /// The cells of one row, joined with single spaces and the selected row's
 /// tint carried to the right edge.
-fn join(cells: &[(String, String)], width: usize, here: bool, tint: &str) -> String {
+pub fn join(cells: &[(String, String)], width: usize, here: bool, tint: &str) -> String {
     // Neighbours in the same colour are one segment: one escape rather
     // than one per cell, which is most of the bytes a row costs.
     let mut parts: Vec<(&str, String)> = Vec::new();
@@ -1017,7 +1038,7 @@ fn join(cells: &[(String, String)], width: usize, here: bool, tint: &str) -> Str
     tc::seg(&parts, width)
 }
 
-fn header(cols: &Cols, sort: Sort, width: usize, p: &Palette) -> String {
+pub fn header(cols: &Cols, sort: Sort, width: usize, p: &Palette) -> String {
     let sorted = match sort {
         Sort::Cpu => "%CPU",
         Sort::Memory => "RSS",
@@ -1055,7 +1076,7 @@ fn header(cols: &Cols, sort: Sort, width: usize, p: &Palette) -> String {
 
 /// One process as one or more lines: a second line only where COMMAND or
 /// CGROUP wraps.
-fn row(
+pub fn row(
     proc: &Proc,
     cols: &Cols,
     cores: usize,
@@ -1275,6 +1296,8 @@ pub struct Table {
     pub rows: Vec<String>,
     pub placed: Vec<(usize, usize)>,
     pub keys: Vec<i32>,
+    /// The services view's rows, by cgroup path.
+    pub paths: Vec<String>,
 }
 
 /// The processes the table lists, in order, and how many there are before
@@ -1479,6 +1502,7 @@ pub fn compose(head: Head, table: &Table) -> Drawn {
         placed: table.placed.iter().map(|&(r, i)| (r + offset, i)).collect(),
         head: 1,
         keys: table.keys.clone(),
+        paths: table.paths.clone(),
         plots: head.plots,
     }
 }
@@ -1498,7 +1522,14 @@ pub fn draw_list(view: &View, width: usize, p: &Palette, busy: Option<usize>) ->
 const LABEL_W: usize = 11;
 
 /// `label  value`, the value wrapped under itself and never cut.
-fn field(rows: &mut Vec<String>, label: &str, value: &str, ink: &str, width: usize, p: &Palette) {
+pub fn field(
+    rows: &mut Vec<String>,
+    label: &str,
+    value: &str,
+    ink: &str,
+    width: usize,
+    p: &Palette,
+) {
     let room = width.saturating_sub(LABEL_W + 2).max(8);
     if width < LABEL_W + 12 {
         // Too narrow to hang a value beside its label: one under the other.
@@ -1691,6 +1722,7 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         placed: Vec::new(),
         head,
         keys: Vec::new(),
+        paths: Vec::new(),
         plots: Vec::new(),
     }
 }
@@ -1706,6 +1738,10 @@ pub struct Keys {
     /// where the hint is not drawn.
     pub threads: Option<bool>,
     pub filtered: bool,
+    /// `[g]`: `Some(in the services view)` on Linux, `None` on macOS, where
+    /// the hint is not drawn.
+    pub services: Option<bool>,
+    pub svc_sort: services::Sort,
 }
 
 pub fn footer(width: usize, keys: &Keys, p: &Palette) -> (tc::Footer, usize) {
@@ -1716,8 +1752,19 @@ pub fn footer(width: usize, keys: &Keys, p: &Palette) -> (tc::Footer, usize) {
         hints.push(vec![(dim, "[↵] keep".into())]);
         hints.push(vec![(dim, "esc clear".into())]);
         hints.push(vec![(dim, "↑↓ select".into())]);
-    } else if keys.screen == Screen::Detail {
+    } else if keys.screen != Screen::List {
         hints.push(vec![(dim, "esc back".into())]);
+        hints.push(vec![(dim, "[r]efresh".into())]);
+    } else if keys.services == Some(true) {
+        hints.push(vec![(dim, "↑↓ select".into())]);
+        hints.push(vec![(dim, "[↵] its processes".into())]);
+        hints.push(vec![(dim, keys.svc_sort.hint())]);
+        hints.push(vec![(dim, "[/] filter".into())]);
+        hints.push(vec![(dim, users_hint(keys.all_users).into())]);
+        hints.push(vec![(dim, services_hint(true).into())]);
+        if keys.filtered {
+            hints.push(vec![(dim, "esc clear filter".into())]);
+        }
         hints.push(vec![(dim, "[r]efresh".into())]);
     } else {
         hints.push(vec![(dim, "↑↓ select".into())]);
@@ -1727,6 +1774,9 @@ pub fn footer(width: usize, keys: &Keys, p: &Palette) -> (tc::Footer, usize) {
         hints.push(vec![(dim, users_hint(keys.all_users).into())]);
         if let Some(on) = keys.threads {
             hints.push(vec![(dim, threads_hint(on).into())]);
+        }
+        if keys.services.is_some() {
+            hints.push(vec![(dim, services_hint(false).into())]);
         }
         if keys.filtered {
             hints.push(vec![(dim, "esc clear filter".into())]);
@@ -1765,6 +1815,15 @@ pub fn threads_hint(on: bool) -> &'static str {
         "[t] hide threads"
     } else {
         "[t] show threads"
+    }
+}
+
+/// `[g]`: the view the next press moves to.
+pub fn services_hint(in_services: bool) -> &'static str {
+    if in_services {
+        "[g] by process"
+    } else {
+        "[g] by service"
     }
 }
 
@@ -1813,6 +1872,10 @@ mod tests {
             threads: false,
             cursor: None,
             opened: None,
+            svc_sort: services::Sort::Cpu,
+            svc_cursor: None,
+            svc_opened: None,
+            svc_max: None,
         }
     }
 
@@ -2134,6 +2197,50 @@ mod tests {
         assert_eq!(users_hint(false), "[u] all users");
         assert_eq!(threads_hint(false), "[t] show threads");
         assert_eq!(threads_hint(true), "[t] hide threads");
+        assert_eq!(services_hint(false), "[g] by service");
+        assert_eq!(services_hint(true), "[g] by process");
+    }
+
+    /// Linux offers `g` and names the other view; macOS, with no cgroups,
+    /// draws no `g` at all. The services view has its own enter and sort.
+    #[test]
+    fn the_services_hint_is_per_platform() {
+        let footer_text = |services: Option<bool>| {
+            let keys = Keys {
+                screen: Screen::List,
+                sort: Sort::Cpu,
+                typing: false,
+                all_users: true,
+                threads: services.map(|_| false),
+                filtered: false,
+                services,
+                svc_sort: services::Sort::Memory,
+            };
+            footer(300, &keys, &palette())
+                .0
+                .lines
+                .iter()
+                .map(|l| plain(l))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let linux = footer_text(Some(false));
+        assert!(
+            linux.contains("[g] by service") && linux.contains("[↵] detail"),
+            "{linux}"
+        );
+        let services = footer_text(Some(true));
+        assert!(services.contains("[g] by process"), "{services}");
+        assert!(services.contains("[↵] its processes"), "{services}");
+        assert!(services.contains("[s] sort by procs"), "{services}");
+        assert!(!services.contains("[t]"), "{services}");
+        let mac = footer_text(None);
+        assert!(!mac.contains("[g]"), "{mac}");
+        // The platform's own hosts agree with what they read.
+        assert_eq!(
+            super::super::host::READS_SERVICES,
+            cfg!(target_os = "linux")
+        );
     }
 
     use super::super::model::{Machine, Memory, Swap, fixtures::machine};
@@ -2406,6 +2513,8 @@ mod tests {
             all_users: true,
             threads,
             filtered: false,
+            services: None,
+            svc_sort: services::Sort::Cpu,
         };
         let hints = |threads| {
             footer(200, &keys(threads), &palette())

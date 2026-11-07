@@ -25,6 +25,51 @@ use super::model::{
     Clock, Facts, Io, Machine, MemSource, Memory, PerCore, Proc, Sample, Swap, Thread,
 };
 use super::parse::{self, CpuTimes};
+use super::services::{self, Services};
+
+/// `g` switches to the services view here.
+pub const READS_SERVICES: bool = true;
+
+/// The cgroup tree mounted on this host.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// One walk of the cgroup v2 tree for the services view, with
+/// `cgroup.procs` read in it, against the last walk. A controller enabled
+/// nowhere is named, and the other one is walked alone so its figures
+/// still draw.
+pub fn services(source: &mut Source, cores: usize) -> Option<Services> {
+    use opscope_core::cgroup::{self, State};
+    let began = *source.began.get_or_insert_with(Instant::now);
+    let mut state = cgroup::read(&["cpu", "memory"], true);
+    let mut off = None;
+    if let State::NotEnabled(c) = &state {
+        let other = if c == "cpu" { "memory" } else { "cpu" };
+        off = Some((c.clone(), services::off_line(c, &state)));
+        state = match cgroup::read(&[other], true) {
+            // Both off: the first one is the line drawn.
+            State::NotEnabled(_) => State::NotEnabled(c.clone()),
+            alone => alone,
+        };
+    }
+    let off = off.filter(|_| matches!(state, State::Ok(_) | State::Container(_)));
+    let now = began.elapsed().as_secs_f64();
+    Some(services::step(&mut source.services, state, off, now, cores))
+}
+
+/// The services view closed: the last walk is not kept, so opening it
+/// again measures afresh rather than over the whole time it was shut.
+pub fn forget_services(source: &mut Source) {
+    source.services.forget();
+}
+
+/// One cgroup's `memory.max`: `Ok(None)` when it has no limit.
+pub fn memory_max(path: &str) -> Result<Option<u64>, String> {
+    let file = std::path::Path::new(CGROUP_ROOT)
+        .join(path)
+        .join("memory.max");
+    let text = std::fs::read_to_string(&file).map_err(|err| err.to_string())?;
+    parse::parse_memory_max(&text).ok_or_else(|| format!("memory.max reads {:?}", text.trim()))
+}
 
 /// `[t]` lists threads here.
 pub const READS_THREADS: bool = true;
@@ -46,6 +91,10 @@ pub struct Source {
     hidepid: Option<(bool, Instant)>,
     /// The open process's last `io` reading: pid, starttime, when, what.
     io: Option<(i32, u64, Instant, PidIo)>,
+    /// The last cgroup walk, while the services view is open.
+    services: services::Memo,
+    /// The clock the walks are timed on.
+    began: Option<Instant>,
 }
 
 /// uid to name: `/etc/passwd`, read again at most once a minute, then
@@ -356,6 +405,7 @@ pub fn sample(source: &mut Source, with_threads: bool) -> Result<Sample, String>
         machine,
         history: Vec::new(),
         threads,
+        services: None,
     })
 }
 
@@ -527,6 +577,30 @@ mod acquisition_tests {
         assert!(off.threads.is_none());
         let _ = tx.send(());
         let _ = held.join();
+    }
+
+    #[test]
+    fn the_services_walk_reads_this_host_without_root() {
+        let mut source = Source::default();
+        let Some(first) = services(&mut source, 8) else {
+            panic!("Linux reads services")
+        };
+        // A runner without cgroup v2, or with the controllers off, still
+        // gets a named state rather than an empty table.
+        let Services::Table(first) = first else {
+            return;
+        };
+        assert_eq!(first.window, None, "one walk is not a delta");
+        std::thread::sleep(Duration::from_millis(50));
+        let Some(Services::Table(second)) = services(&mut source, 8) else {
+            panic!("the second walk read the same tree")
+        };
+        assert!(second.window.is_some_and(|w| w > 0.0));
+        let me = std::process::id() as i32;
+        assert!(
+            second.rows.iter().any(|r| r.pids.contains(&me)),
+            "this process lands on a row"
+        );
     }
 
     #[test]

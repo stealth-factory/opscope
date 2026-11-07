@@ -34,14 +34,32 @@ write rate over the last poll. Another user's process needs root for
 that, and the row says so. macOS reads none of cwd, threads, nice or
 disk I/O in this version, and says so on each.
 
-Keys: up/down or j/k select, enter opens the detail, esc goes back or
-clears the filter, s cycles the sort through cpu, memory and running
-(newest first), / opens the filter box (letters are text until enter
-keeps the filter or esc clears it), u switches between all users and
-only yours, t shows or hides each process's threads under it (Linux
-only: a thread's own %CPU, state and age, never counted as a process;
-show_threads sets where it starts), r refreshes now, comma opens
-settings, q quits.
+By service (Linux only, cgroup v2): g switches the table to one row per
+cgroup with the cpu or memory controller enabled. %CPU is that cgroup's
+own share of cpu.stat usage_usec over the window between two walks of
+the tree, of all cores; MEMORY its own share of memory.current; PROCS
+the processes in it from cgroup.procs. A parent's own share has its
+enabled children taken out, so nothing is counted twice, and a cgroup
+without the controllers rolls up into the nearest one with them. The
+header says how deep the accounting goes on this host, read from the
+tree each poll. Everything is readable without root, so the table is
+complete. Rows with no CPU, memory or processes are hidden and counted.
+Without cgroup v2, or with both controllers off everywhere, the view says
+so and how to turn accounting on rather than drawing an empty table.
+macOS has no cgroups, so there is no services view there and g is not
+offered.
+
+Keys: up/down or j/k select, enter opens the detail (in the services
+view, the service's processes), esc goes back or clears the filter, s
+cycles the sort through cpu, memory and running (newest first) - by
+service through cpu, memory and procs - / opens the filter box (letters
+are text until enter keeps the filter or esc clears it; by service it
+reads the cgroup path), u switches between all users and only yours (by
+service: the cgroups under your own user slice), t shows or hides each
+process's threads under it (Linux only: a thread's own %CPU, state and
+age, never counted as a process; show_threads sets where it starts), g
+switches between by process and by service (Linux only), each keeping
+its own selection, r refreshes now, comma opens settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read or a recommended tool that is

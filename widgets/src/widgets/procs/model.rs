@@ -82,6 +82,9 @@ pub struct Sample {
     /// Threads per pid, read only while `[t]` is on (Linux). `None` when
     /// off, so a table drawn with threads never shows a stale set.
     pub threads: Option<HashMap<i32, Vec<Thread>>>,
+    /// The services view's rows, read only while it is open (Linux). The
+    /// poller adds them after the process pass, from one cgroup walk.
+    pub services: Option<super::services::Services>,
 }
 
 /// One thread of a process, as `/proc/<pid>/task/<tid>/stat` reads it.
@@ -421,6 +424,7 @@ pub mod fixtures {
                 .map(|i| Some(2.0 + (i % 40) as f64 / 10.0))
                 .collect(),
             threads: None,
+            services: None,
         }
     }
 

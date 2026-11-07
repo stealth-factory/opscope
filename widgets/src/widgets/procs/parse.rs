@@ -332,6 +332,15 @@ pub fn parse_meminfo_total(text: &str) -> Option<u64> {
     meminfo_value(text, "MemTotal")
 }
 
+/// A cgroup's `memory.max`: `Some(None)` for `max` (no limit),
+/// `Some(Some(bytes))` for a limit, `None` for anything else.
+pub fn parse_memory_max(text: &str) -> Option<Option<u64>> {
+    match text.trim() {
+        "max" => Some(None),
+        other => other.parse().ok().map(Some),
+    }
+}
+
 /// Used, reclaimable and free, in bytes, summing to `MemTotal` exactly.
 ///
 /// used = `MemTotal - MemAvailable`; reclaimable = `MemAvailable -
@@ -485,6 +494,13 @@ pub fn running_secs(starttime: u64, ticks: f64, uptime: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn memory_max_is_a_limit_or_none() {
+        assert_eq!(super::parse_memory_max("max\n"), Some(None));
+        assert_eq!(super::parse_memory_max("1073741824\n"), Some(Some(1 << 30)));
+        assert_eq!(super::parse_memory_max(""), None);
+    }
+
     use super::*;
     use opscope_core::procfs::parse_pid_stat;
 

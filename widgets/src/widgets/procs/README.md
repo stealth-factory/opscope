@@ -35,8 +35,30 @@ Linux example, 100 columns:
    51077 (a) b (c)      user-a         —  0.0%     0 Z       12s   session-2.scope
 
  D = waiting on disk, 1 shown now
- ↑↓ select  [↵] detail  [s] sort by memory  [/] filter  [u] only yours  [t] show threads  [r]efresh
- [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
+ ↑↓ select  [↵] detail  [s] sort by memory  [/] filter  [u] only yours  [t] show threads
+ [g] by service  [r]efresh  [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
+```
+
+`g` on Linux switches to one row per service (see [By service](#by-service-linux)):
+
+```text
+╺━ PROCS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ SERVICES · sampled 1s ago · every 2s · cgroup v2 · complete · %CPU of all 8 cores over the last 2s
+ 7 cgroups with cpu or memory · sorted by %CPU
+ cpu accounting down to: services, scopes; user sessions roll up to user.slice
+
+ 6 of 7 shown · 1 empty hidden
+ SERVICE                           %CPU MEMORY PROCS
+▸user.slice                        88.4   9.5G   203
+ system.slice/example-db.service   31.2   3.8G    12
+ system.slice/example-log.service   0.4   120M     1
+ /                                  0.3      —     1
+ system.slice                       0.0     4G     0
+ init.scope                         0.0     0B     1
+
+ the root has no memory.current of its own
+ ↑↓ select  [↵] its processes  [s] sort by memory  [/] filter  [u] only yours  [g] by process
+ [r]efresh  [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
 ```
 
 In Kitty the per-core bars and the load trace are pixels; the memory and
@@ -94,6 +116,88 @@ are listed - and a thread row belongs to its process: a click on it
 selects the process, and `↑` `↓` step from process to process.
 `/proc/<pid>/task/` is read only while threads are shown. macOS lists no
 threads, so `t` is not offered there.
+
+## By service (Linux)
+
+`g` switches the table to one row per cgroup with the `cpu` or `memory`
+controller enabled, and back; each view keeps its own selection and
+scroll. Linux only, and only on cgroup v2: macOS has no cgroups, so
+there is no services view there and `g` is not offered.
+
+| column | what it is |
+|---|---|
+| SERVICE | the cgroup's path under `/sys/fs/cgroup`, `/` for the root. A path too long for the column wraps; it is never cut |
+| %CPU | the cgroup's **own** share of `cpu.stat` `usage_usec` over the window between the last two walks of the tree, of all cores, like the process table |
+| MEMORY | its own share of `memory.current`. The root has no `memory.current`, so its row reads `—` and a line under the table says why |
+| PROCS | the processes in it, from `cgroup.procs` |
+
+**Own, never twice.** `cpu.stat` and `memory.current` count everything
+under a cgroup. Each row is what is left once its nearest descendants
+that carry the controller are taken out - core's `tc::cgroup::attribute`,
+the same attribution `disk` uses for `io` - so the rows add up to the
+machine's total and a slice's row is only what its services do not
+account for. For CPU the two walks are subtracted first and the
+difference attributed. A cgroup without the controllers (a login
+session under a `user.slice` that does not delegate them) rolls up into
+the nearest ancestor that has them, with its processes; how deep that
+goes on this host is read from the tree each poll and said in the
+header, as core words it: `cpu accounting down to: services, scopes;
+user sessions roll up to user.slice`.
+
+The two controllers need not reach the same depth. A slice that
+delegates `memory` but not `cpu` to its services gives each service a row
+for its memory and processes, with `—` in %CPU and a line under the
+table saying their CPU is counted in the slice's row - so the slice can
+read 14% with 0 processes of its own.
+
+The walk is not atomic: a busy cgroup's children are read a moment after
+it, and now and then they have moved more than it did over the window.
+Its own share then cannot be taken; the row reads `—`, the header counts
+`1 row with a gap this poll`, and the next poll measures it again.
+
+The first walk has nothing to subtract from, so %CPU waits for the next
+and the header says when. The tree is walked only while the services
+view (or one service) is on screen, once a poll after the `/proc` pass,
+and the previous tree is the only history kept.
+
+Rows with no CPU over the window, no memory and no processes are hidden
+and counted: `6 of 7 shown · 1 empty hidden`. `/` filters on the path,
+`u` narrows to the cgroups under your own `user.slice/user-<uid>.slice`
+(nothing, said so, when the accounting stops at `user.slice`), and `s`
+cycles %CPU, memory and processes. Everything is readable without root,
+so the header says `complete`.
+
+Instead of an empty table, the view names what stands in the way: `by
+service needs cgroup v2` on a v1 or hybrid host; `cpu accounting is off
+everywhere · systemctl set-property <unit> CPUAccounting=yes` when the
+controller is enabled on nothing below the root (with the other
+controller's figures still drawn when only one is off); `cgroup tree
+unreadable: …`. In a container the header says `rows are this
+container's cgroups`.
+
+`↵` on a service opens it:
+
+```text
+╺━ PROCS · SERVICE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ cgroup      /system.slice/example-db.service
+ unit        example-db
+ enabled     cpu memory pids
+ %CPU        31.2% own · %CPU of all 8 cores over the last 2s
+ cpu.stat    user 23.4% · system 7.8% over the last 2s, this cgroup and everything under it
+ throttled   0 times for 0s over the last 2s
+ memory      3.8G own · memory.current 3.8G with everything under it · memory.max 4G
+ processes   12 from cgroup.procs, its own and those of cgroups under it without the controller
+
+     PID COMMAND     USER        %CPU   MEM   RSS STATE RUNNING
+     100 example-db  service-b    3.0  5.5%  900M S          9d
+     101 example-db  service-b    1.0  2.4%  400M S          9d
+ esc back  [r]efresh  [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
+```
+
+Its processes are rows of the process table, sorted by %CPU. A pid in
+`cgroup.procs` that the last `/proc` pass did not list - started or gone
+between the two reads - is named by its pid, `(not in this poll's process
+list)`, or `(not readable)` under `hidepid`.
 
 ## What it shows
 
@@ -191,12 +295,13 @@ keeps the last reading it had.
 | key | does |
 |---|---|
 | `↑` `↓` / `j` `k` | move the selection |
-| `↵` | open the selected process (a click on the selected row does the same) |
+| `↵` | open the selected process, or by service the service's processes (a click on the selected row does the same) |
 | `esc` | back from the detail, or clear the filter |
-| `s` | sort by %CPU, then memory, then running (newest first); the hint names the next one and the header the one in force |
-| `/` | filter by command or user. Letters are text while the box is open, so `s`, `u` and `q` type themselves; `↵` keeps the filter and `esc` clears it |
-| `u` | every user's processes, or only yours; the hint names the next state, and `yours` shows in the filter line |
+| `s` | sort by %CPU, then memory, then running (newest first) - by service %CPU, memory, then processes; the hint names the next one and the header the one in force |
+| `/` | filter by command or user (by service: by cgroup path). Letters are text while the box is open, so `s`, `u` and `q` type themselves; `↵` keeps the filter and `esc` clears it |
+| `u` | every user's processes, or only yours (by service: the cgroups under your own user slice); the hint names the next state, and `yours` shows in the filter line |
 | `t` | show or hide each process's threads under it (Linux only); the hint reads `[t] show threads` or `[t] hide threads` |
+| `g` | switch between by process and by service (Linux only, cgroup v2); the hint reads `[g] by service` or `[g] by process`, and each view keeps its own selection |
 | `r` | poll now |
 | `,` | settings |
 | `!` | notices |
@@ -231,7 +336,11 @@ owner of `/proc/<pid>` each poll (all three readable for every process),
 `/proc/<pid>/task/<tid>/stat` only while `t` shows them. The open
 process's `cmdline`, `cwd` and `io` are read on the same poller. The
 previous poll's `stat` lines are the only history kept, beside the
-10-minute ring of load averages.
+10-minute ring of load averages. While the services view is on screen,
+one walk of `/sys/fs/cgroup` a poll (`tc::cgroup`) reads each cgroup's
+`cgroup.subtree_control`, `cpu.stat`, `memory.current` and
+`cgroup.procs`, and the open service's `memory.max`; the previous tree is
+kept for the CPU delta and dropped when the view closes.
 
 macOS: one `ps -axo
 pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=` a poll,

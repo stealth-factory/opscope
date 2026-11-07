@@ -22,8 +22,9 @@
 //!     procs [-n SECONDS]
 //!
 //! Keys: up/down select, enter opens, s cycles the sort, / filters, u
-//! switches between all users and yours, t shows threads (Linux), r
-//! refreshes, comma opens settings, q quits.
+//! switches between all users and yours, t shows threads (Linux), g
+//! switches to one row per service (Linux, cgroup v2), r refreshes, comma
+//! opens settings, q quits.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -34,10 +35,14 @@ use opscope_core as tc;
 
 mod model;
 mod parse;
+mod service_view;
+// macOS has no cgroups: only the Linux host walks the tree into rows.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod services;
 mod view;
 
 use model::{Facts, Proc, Sample, Sort};
-use view::{Opened, Screen};
+use view::{Opened, OpenedService, Screen};
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -72,6 +77,18 @@ mod host {
     }
 
     pub fn forget(_source: &mut Source) {}
+
+    pub const READS_SERVICES: bool = false;
+
+    pub fn services(_source: &mut Source, _cores: usize) -> Option<super::services::Services> {
+        None
+    }
+
+    pub fn forget_services(_source: &mut Source) {}
+
+    pub fn memory_max(_path: &str) -> Result<Option<u64>, String> {
+        Err(opscope_core::unsupported())
+    }
 }
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
@@ -92,6 +109,25 @@ struct Shared {
     sampled: Option<Instant>,
     /// The open process's facts.
     facts: Option<Facts>,
+    /// The open service's `memory.max`, by its path.
+    svc_max: Option<(String, Result<Option<u64>, String>)>,
+}
+
+/// What a list cursor stands on: a process, or a cgroup in the services
+/// view. Kept by identity, so a refresh that reorders the rows leaves it
+/// where it was.
+#[derive(Clone, Debug, PartialEq)]
+enum Key {
+    Pid(i32),
+    Path(String),
+}
+
+/// One view's cursor and scroll, kept while the other view is shown.
+#[derive(Default)]
+struct Place {
+    cursor: Option<Key>,
+    at: usize,
+    scroll: usize,
 }
 
 /// What the frame asks of the poller between polls.
@@ -174,16 +210,27 @@ fn main() {
         cond: Condvar::new(),
     });
     let wanted: Arc<Mutex<Option<Proc>>> = Arc::new(Mutex::new(None));
+    // The open service's path, whose `memory.max` the poller reads.
+    let wanted_svc: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Whether the poller reads threads: only while `[t]` is on.
     let threads_on = Arc::new(AtomicBool::new(show_threads && host::READS_THREADS));
+    // Whether the poller walks the cgroup tree: only while the services
+    // view, or a service's processes, is on screen.
+    let services_on = Arc::new(AtomicBool::new(false));
     let refresh = tc::Refresh::default();
     {
         let shared = Arc::clone(&shared);
         let wake = Arc::clone(&wake);
-        let wanted = Arc::clone(&wanted);
-        let threads_on = Arc::clone(&threads_on);
+        let wanted = Wanted {
+            proc: Arc::clone(&wanted),
+            service: Arc::clone(&wanted_svc),
+        };
+        let reads = Reads {
+            threads: Arc::clone(&threads_on),
+            services: Arc::clone(&services_on),
+        };
         let refresh = refresh.clone();
-        thread::spawn(move || poll(shared, wake, wanted, threads_on, refresh, every));
+        thread::spawn(move || poll(shared, wake, wanted, reads, refresh, every));
     }
 
     let p = view::palette();
@@ -191,14 +238,20 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let mut screen = Screen::List;
     let mut sort = Sort::Cpu;
+    let mut svc_sort = services::Sort::Cpu;
+    // `g`: one row per service rather than per process.
+    let mut by_service = false;
     let mut needle = String::new();
     let mut typing = false;
-    // The list cursor is a pid, so a refresh that reorders the table
-    // leaves it on the same process; `at` is where that was last drawn.
-    let mut cursor: Option<i32> = None;
+    // The list cursor is a pid or a cgroup path, so a refresh that
+    // reorders the table leaves it on the same row; `at` is where that was
+    // last drawn. The view not on screen keeps its own in `other`.
+    let mut cursor: Option<Key> = None;
     let mut at = 0usize;
-    let mut drawn_keys: Vec<i32> = Vec::new();
+    let mut other = Place::default();
+    let mut drawn_keys: Vec<Key> = Vec::new();
     let mut opened: Option<Opened> = None;
+    let mut svc_opened: Option<OpenedService> = None;
     let mut scroll = 0usize;
     let mut list_scroll = 0usize;
     // The pane opens at the top, on the panel; the first key that moves
@@ -221,13 +274,13 @@ fn main() {
                 tc::rows_clicked(&mut keys, Some(at), head, shown_scroll, &placed, None)
             {
                 at = index;
-                cursor = drawn_keys.get(index).copied();
+                cursor = drawn_keys.get(index).cloned();
                 chase = true;
             }
         } else {
             let _ = tc::rows_clicked(&mut keys, None, 0, 0, &[], None);
         }
-        let step = |at: usize, down: bool, keys: &[i32]| -> (usize, Option<i32>) {
+        let step = |at: usize, down: bool, keys: &[Key]| -> (usize, Option<Key>) {
             if keys.is_empty() {
                 return (0, None);
             }
@@ -236,7 +289,7 @@ fn main() {
             } else {
                 at.saturating_sub(1)
             };
-            (next, Some(keys[next]))
+            (next, Some(keys[next].clone()))
         };
         let mut open = false;
         for key in keys {
@@ -284,10 +337,13 @@ fn main() {
                 // so an arrow and an enter read together open the new row.
                 "enter" => open = screen == Screen::List,
                 "esc" => {
-                    if screen == Screen::Detail {
+                    if screen != Screen::List {
                         screen = Screen::List;
                         opened = None;
+                        svc_opened = None;
                         *wanted.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                        *wanted_svc.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                        services_on.store(by_service, Ordering::Relaxed);
                         scroll = list_scroll;
                         chase = true;
                     } else if !needle.is_empty() {
@@ -297,7 +353,11 @@ fn main() {
                 }
                 "s" | "S" => {
                     if screen == Screen::List {
-                        sort = sort.next();
+                        if by_service {
+                            svc_sort = svc_sort.next();
+                        } else {
+                            sort = sort.next();
+                        }
                         chase = true;
                     }
                 }
@@ -315,12 +375,35 @@ fn main() {
                 // Linux lists threads; on macOS the key is answered and
                 // nothing changes, and the footer does not offer it.
                 "t" | "T" => {
-                    if screen == Screen::List && host::READS_THREADS {
+                    if screen == Screen::List && !by_service && host::READS_THREADS {
                         show_threads = !show_threads;
                         threads_on.store(show_threads, Ordering::Relaxed);
                         // Read them now rather than a poll from now.
                         wake.ask(|asked| asked.resample = true);
                         chase = true;
+                    }
+                }
+                // Linux switches between processes and services, each view
+                // keeping its own cursor and scroll; macOS has no cgroups,
+                // so the key is answered and nothing changes, and the
+                // footer does not offer it.
+                "g" | "G" => {
+                    if screen == Screen::List && host::READS_SERVICES {
+                        by_service = !by_service;
+                        let leaving = Place {
+                            cursor: cursor.take(),
+                            at,
+                            scroll,
+                        };
+                        let back = std::mem::replace(&mut other, leaving);
+                        (cursor, at, scroll) = (back.cursor, back.at, back.scroll);
+                        drawn_keys.clear();
+                        services_on.store(by_service, Ordering::Relaxed);
+                        if by_service {
+                            // Walk now rather than a poll from now.
+                            wake.ask(|asked| asked.resample = true);
+                        }
+                        chase = false;
                     }
                 }
                 "r" | "R" => wake.ask(|asked| asked.resample = true),
@@ -352,21 +435,45 @@ fn main() {
             }
         }
 
-        let (sample, err, sampled, facts) = {
+        let (sample, err, sampled, facts, svc_max) = {
             let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             (
                 guard.sample.clone(),
                 guard.err.clone(),
                 guard.sampled,
                 guard.facts.clone(),
+                guard.svc_max.clone(),
             )
         };
-        if open {
-            let found = cursor.and_then(|pid| {
-                sample
+        let svc_rows = sample.as_ref().and_then(|s| match &s.services {
+            Some(services::Services::Table(t)) => Some(&t.rows),
+            _ => None,
+        });
+        if open && by_service {
+            let found = match &cursor {
+                Some(Key::Path(path)) => {
+                    svc_rows.and_then(|rows| rows.iter().find(|r| &r.path == path).cloned())
+                }
+                _ => None,
+            };
+            if let Some(row) = found {
+                *wanted_svc.lock().unwrap_or_else(|p| p.into_inner()) = Some(row.path.clone());
+                wake.ask(|asked| asked.facts = true);
+                svc_opened = Some(OpenedService {
+                    last: row,
+                    gone: false,
+                });
+                list_scroll = scroll;
+                scroll = 0;
+                screen = Screen::Service;
+            }
+        } else if open {
+            let found = match cursor {
+                Some(Key::Pid(pid)) => sample
                     .as_ref()
-                    .and_then(|s| s.procs.iter().find(|p| p.pid == pid).cloned())
-            });
+                    .and_then(|s| s.procs.iter().find(|p| p.pid == pid).cloned()),
+                _ => None,
+            };
             if let Some(proc) = found {
                 *wanted.lock().unwrap_or_else(|p| p.into_inner()) = Some(proc.clone());
                 wake.ask(|asked| asked.facts = true);
@@ -401,8 +508,28 @@ fn main() {
                 }
             }
         }
+        if let (Some(open), Some(rows)) = (svc_opened.as_mut(), svc_rows) {
+            match rows.iter().find(|r| r.path == open.last.path) {
+                Some(now) => {
+                    open.last = now.clone();
+                    open.gone = false;
+                }
+                None => open.gone = true,
+            }
+        }
+        let svc_max = svc_max
+            .filter(|(path, _)| svc_opened.as_ref().is_some_and(|o| &o.last.path == path))
+            .map(|(_, max)| max);
 
         let (w, h) = tc::size();
+        let pid_cursor = match &cursor {
+            Some(Key::Pid(pid)) => Some(*pid),
+            _ => None,
+        };
+        let path_cursor = match &cursor {
+            Some(Key::Path(path)) => Some(path.clone()),
+            _ => None,
+        };
         let state = view::View {
             sample: sample.as_deref(),
             err: &err,
@@ -414,39 +541,75 @@ fn main() {
             all_users,
             show_kernel,
             threads: show_threads && host::READS_THREADS,
-            cursor,
+            cursor: pid_cursor,
             opened: opened.as_ref(),
+            svc_sort,
+            svc_cursor: path_cursor.as_deref(),
+            svc_opened: svc_opened.as_ref(),
+            svc_max: svc_max.as_ref(),
         };
         let busy = refresh.tick(tc::animation_tick());
+        let list =
+            |state: &view::View,
+             table_cache: &mut Option<(TableKey, view::Table)>,
+             panel_cache: &mut Option<((Option<usize>, usize), view::Panel)>| {
+                if by_service {
+                    view::compose(
+                        service_view::head(state, w, &p, busy),
+                        cached(table_cache, state, w, &p, true),
+                    )
+                } else {
+                    let panel = cached_panel(panel_cache, state, w, &p);
+                    let head = view::list_head(state, w, &p, busy, panel);
+                    let table = cached(table_cache, state, w, &p, false);
+                    view::compose(head, table)
+                }
+            };
         let mut drawn = match screen {
-            Screen::List => {
-                let panel = cached_panel(&mut panel_cache, &state, w, &p);
-                let head = view::list_head(&state, w, &p, busy, panel);
-                let table = cached(&mut table_cache, &state, w, &p);
-                view::compose(head, table)
-            }
+            Screen::List => list(&state, &mut table_cache, &mut panel_cache),
             Screen::Detail => view::draw_detail(&state, w, &p, busy),
+            Screen::Service => service_view::detail(&state, w, &p, busy),
         };
         if screen == Screen::List {
-            // The cursor's process left, or the filter took it, or there was
+            // The cursor's row left, or the filter took it, or there was
             // none yet: the cursor takes whatever now stands where it was,
             // and the frame is drawn again with that row tinted.
-            let before = cursor;
-            match cursor.and_then(|pid| drawn.keys.iter().position(|k| *k == pid)) {
+            let keys_of = |drawn: &view::Drawn| -> Vec<Key> {
+                if by_service {
+                    drawn.paths.iter().cloned().map(Key::Path).collect()
+                } else {
+                    drawn.keys.iter().copied().map(Key::Pid).collect()
+                }
+            };
+            let now = keys_of(&drawn);
+            let before = cursor.clone();
+            match cursor
+                .as_ref()
+                .and_then(|key| now.iter().position(|k| k == key))
+            {
                 Some(index) => at = index,
                 None => {
-                    at = at.min(drawn.keys.len().saturating_sub(1));
-                    cursor = drawn.keys.get(at).copied();
+                    at = at.min(now.len().saturating_sub(1));
+                    cursor = now.get(at).cloned();
                 }
             }
             if cursor != before {
-                let state = view::View { cursor, ..state };
-                let panel = cached_panel(&mut panel_cache, &state, w, &p);
-                let head = view::list_head(&state, w, &p, busy, panel);
-                let table = cached(&mut table_cache, &state, w, &p);
-                drawn = view::compose(head, table);
+                let pid_cursor = match &cursor {
+                    Some(Key::Pid(pid)) => Some(*pid),
+                    _ => None,
+                };
+                let path_cursor = match &cursor {
+                    Some(Key::Path(path)) => Some(path.clone()),
+                    _ => None,
+                };
+                let state = view::View {
+                    cursor: pid_cursor,
+                    svc_cursor: path_cursor.as_deref(),
+                    ..state
+                };
+                drawn = list(&state, &mut table_cache, &mut panel_cache);
             }
-            drawn_keys = drawn.keys.clone();
+            drawn_keys = keys_of(&drawn);
         }
         let (packed, indent) = view::footer(
             w,
@@ -457,6 +620,8 @@ fn main() {
                 all_users,
                 threads: host::READS_THREADS.then_some(show_threads),
                 filtered: !needle.is_empty(),
+                services: host::READS_SERVICES.then_some(by_service),
+                svc_sort,
             },
             &p,
         );
@@ -526,6 +691,10 @@ struct TableKey {
     threads: bool,
     cursor: Option<i32>,
     width: usize,
+    /// The services view's own inputs: its rows come from the same sample.
+    by_service: bool,
+    svc_sort: services::Sort,
+    svc_cursor: Option<String>,
 }
 
 /// The CPU, memory, swap and load panel: rebuilt once a poll or on a
@@ -549,6 +718,7 @@ fn cached<'a>(
     state: &view::View,
     width: usize,
     p: &view::Palette,
+    by_service: bool,
 ) -> &'a view::Table {
     let key = TableKey {
         sample: state.sample.map(|s| s as *const Sample as usize),
@@ -558,9 +728,17 @@ fn cached<'a>(
         threads: state.threads,
         cursor: state.cursor,
         width,
+        by_service,
+        svc_sort: state.svc_sort,
+        svc_cursor: state.svc_cursor.map(str::to_string),
     };
     if cache.as_ref().is_none_or(|(held, _)| *held != key) {
-        *cache = Some((key, view::list_table(state, width, p)));
+        let table = if by_service {
+            service_view::table(state, width, p)
+        } else {
+            view::list_table(state, width, p)
+        };
+        *cache = Some((key, table));
     }
     &cache.as_ref().expect("just filled").1
 }
@@ -575,11 +753,35 @@ fn still_there(sample: Option<&Sample>, wanted: &Proc) -> Option<Proc> {
         .cloned()
 }
 
+/// What the frame wants read beyond the table: the open process, and the
+/// open service.
+struct Wanted {
+    proc: Arc<Mutex<Option<Proc>>>,
+    service: Arc<Mutex<Option<String>>>,
+}
+
+/// What the poller reads only while it is on screen.
+struct Reads {
+    threads: Arc<AtomicBool>,
+    services: Arc<AtomicBool>,
+}
+
+/// The open service's `memory.max`, read with its path.
+fn service_max(wanted: &Wanted) -> Option<(String, Result<Option<u64>, String>)> {
+    let path = wanted
+        .service
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()?;
+    let max = host::memory_max(&path);
+    Some((path, max))
+}
+
 fn poll(
     shared: Arc<Mutex<Shared>>,
     wake: Arc<Wake>,
-    wanted: Arc<Mutex<Option<Proc>>>,
-    threads_on: Arc<AtomicBool>,
+    wanted: Wanted,
+    reads: Reads,
     refresh: tc::Refresh,
     every: f64,
 ) {
@@ -592,10 +794,24 @@ fn poll(
     let began = Instant::now();
     loop {
         let work = refresh.start();
-        let want = wanted.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let with_threads = threads_on.load(Ordering::Relaxed);
+        let want = wanted
+            .proc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let with_threads = reads.threads.load(Ordering::Relaxed);
+        let with_services = reads.services.load(Ordering::Relaxed);
         let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let sample = host::sample(&mut source, with_threads);
+            let mut sample = host::sample(&mut source, with_threads);
+            // One cgroup walk after the /proc pass, only while the
+            // services view is open; closed, its last tree is dropped.
+            if let Ok(table) = sample.as_mut() {
+                if with_services {
+                    table.services = host::services(&mut source, table.cores);
+                } else {
+                    host::forget_services(&mut source);
+                }
+            }
             let facts = match (&want, &sample) {
                 (Some(proc), Ok(table)) => {
                     // A process that left is not read again: its pid may
@@ -607,10 +823,10 @@ fn poll(
                     None
                 }
             };
-            (sample, facts)
+            (sample, facts, service_max(&wanted))
         }));
         match round {
-            Ok((sample, facts)) => {
+            Ok((sample, facts, svc_max)) => {
                 let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
                 match sample {
                     Ok(mut table) => {
@@ -626,6 +842,7 @@ fn poll(
                     Err(why) => guard.err = why,
                 }
                 guard.facts = facts;
+                guard.svc_max = svc_max;
             }
             Err(_) => {
                 let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -661,15 +878,23 @@ fn poll(
             }
             if asked.facts {
                 let work = refresh.start();
-                let want = wanted.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                let want = wanted
+                    .proc
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
                 let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    want.as_ref().and_then(|proc| {
+                    let facts = want.as_ref().and_then(|proc| {
                         still_there(last.as_deref(), proc).map(|now| host::facts(&mut source, &now))
-                    })
+                    });
+                    (facts, service_max(&wanted))
                 }));
                 let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
                 match read {
-                    Ok(facts) => guard.facts = facts,
+                    Ok((facts, svc_max)) => {
+                        guard.facts = facts;
+                        guard.svc_max = svc_max;
+                    }
                     Err(_) => {
                         guard.err = tc::take_panic_reason()
                             .map(|why| format!("stopped: {why}"))

@@ -149,6 +149,7 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
         machine,
         history: Vec::new(),
         threads: None,
+        services: None,
     })
 }
 
@@ -170,6 +171,20 @@ pub fn facts(_source: &mut Source, proc: &Proc) -> Facts {
 }
 
 pub fn forget(_source: &mut Source) {}
+
+/// No services view here: macOS has no cgroups, so `g` is not offered and
+/// does nothing.
+pub const READS_SERVICES: bool = false;
+
+pub fn services(_source: &mut Source, _cores: usize) -> Option<super::services::Services> {
+    None
+}
+
+pub fn forget_services(_source: &mut Source) {}
+
+pub fn memory_max(_path: &str) -> Result<Option<u64>, String> {
+    Err("macOS has no cgroups".to_string())
+}
 
 /// Acquisition tests: they run the real `ps` on the macOS CI runner,
 /// through the function the poller calls, so they prove the columns parse
