@@ -372,6 +372,15 @@
     "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
     "refresh": 4.0
   },
+  "procs": {
+    "_comment": "Every process on this machine with its CPU, memory, state and how long it has been running. Reads /proc on Linux and ps on macOS.",
+    "_refresh_comment": "Seconds between polls. On Linux this is also the window %CPU is measured over, and the header names it every frame.",
+    "refresh": 2.0,
+    "_show_all_users_comment": "Start with every user's processes listed. `u` switches between all users and only yours for the session.",
+    "show_all_users": true,
+    "_show_kernel_threads_comment": "List kernel threads (pid 2 and its children, Linux only). Hidden ones are counted in the header, never silently missing.",
+    "show_kernel_threads": false
+  },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",
     "history": 180,

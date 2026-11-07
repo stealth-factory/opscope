@@ -29,6 +29,7 @@ navigation, not itself a widget.
 | [`mux-activity`](../widgets/src/widgets/mux-activity/README.md) | Everything running in the multiplexer it runs in — [Rex](https://www.superlogical.com/rex/docs/), [Herdr](https://herdr.dev) or [Luvus](https://luvus.dev) — agents by who needs a human, blocked first, and one key to get to any pane. Under Luvus, also the tasks and path leases agents coordinate with. |
 | [`netwatch`](../widgets/src/widgets/netwatch/README.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
 | [`disk`](../widgets/src/widgets/disk/README.md) | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling. |
+| [`procs`](../widgets/src/widgets/procs/README.md) | What this machine is running: every process with its CPU over a named window, its memory and its state, and one process opened at a time. |
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
 | [`google-trends`](../widgets/src/widgets/google-trends/README.md) | What a region is searching for right now — Google's own Trending Now feed, shown as Google states it, with what changed since the last look. |
 | [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, everyone else's clock, the current weather for one configured place, and a condition glyph on each world-clock city that has coordinates. |
