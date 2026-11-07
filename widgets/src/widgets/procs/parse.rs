@@ -76,8 +76,8 @@ pub fn parse_ps_table(text: &str) -> Vec<PsRow> {
                 ppid: fields[1].parse().ok()?,
                 uid: fields[2].parse().ok()?,
                 user: fields[3].to_string(),
-                cpu: fields[4].parse().ok()?,
-                mem: fields[5].parse().ok()?,
+                cpu: decimal(fields[4])?,
+                mem: decimal(fields[5])?,
                 rss_kb: fields[6].parse().ok()?,
                 state: apple_state(state),
                 running: parse_etime(fields[8])?,
@@ -90,6 +90,13 @@ pub fn parse_ps_table(text: &str) -> Vec<PsRow> {
         }
     }
     rows
+}
+
+/// A number as `ps` or `sysctl` printed it. Both call `setlocale`, so
+/// under a locale whose decimal mark is a comma `%cpu` reads `1,5`; read as
+/// `1.5` rather than dropping every row of the table.
+fn decimal(tok: &str) -> Option<f64> {
+    tok.replace(',', ".").parse().ok()
 }
 
 /// The first `n` whitespace-separated fields of `line`, and what follows
@@ -438,7 +445,7 @@ pub fn parse_swapusage(text: &str) -> Option<(u64, u64)> {
         let at = text.find(&format!("{key} ="))?;
         let tok = text[at + key.len() + 2..].split_whitespace().next()?;
         let (num, unit) = tok.split_at(tok.find(|c: char| c.is_ascii_alphabetic())?);
-        let n: f64 = num.parse().ok()?;
+        let n: f64 = decimal(num)?;
         let scale = match unit {
             "B" => 1.0,
             "K" => 1024.0,
@@ -847,5 +854,23 @@ garbage line
 
         assert_eq!(rows[3].state, 'Z');
         assert_eq!(rows[3].comm, "(example-zombie)");
+    }
+
+    #[test]
+    fn a_comma_locale_still_reads_every_row() {
+        // ps calls setlocale, so a locale with a decimal comma prints
+        // `%cpu` and `%mem` as `3,5`: every row must still read, or the
+        // table is empty and looks like a machine running nothing.
+        let text = "\
+    1     0     0 root               0,0  0,1  12345 Ss   12-03:04:05 /sbin/launchd    /sbin/launchd
+  501     1   501 user-a            12,5  1,2 204800 R    01:02:03 /usr/bin/example /usr/bin/example
+";
+        let rows = parse_ps_table(text);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert_eq!((rows[1].cpu, rows[1].mem), (12.5, 1.2));
+        assert_eq!(
+            parse_swapusage("total = 2048,00M  used = 1,50M  free = 2046,50M  (encrypted)"),
+            Some((2048 << 20, 1_572_864))
+        );
     }
 }

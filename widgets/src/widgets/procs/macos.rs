@@ -112,16 +112,26 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
         .map(|n| n.get())
         .unwrap_or(1);
     let total = memsize();
-    let procs = parse::parse_ps_table(&text)
+    let rows = parse::parse_ps_table(&text);
+    // ps always lists at least itself: nothing read is a format this
+    // parser does not know, never a machine running nothing.
+    if rows.is_empty() {
+        return Err(format!(
+            "ps printed {} lines and none read as a process",
+            text.lines().count()
+        ));
+    }
+    let procs = rows
         .into_iter()
         .map(|row| {
             let rss = row.rss_kb * 1024;
             Proc {
                 pid: row.pid,
                 ppid: row.ppid,
-                comm: row.comm,
+                // Any user names their own process; its bytes are text.
+                comm: tc::source_text(&row.comm),
                 uid: row.uid,
-                user: row.user,
+                user: tc::source_text(&row.user),
                 // ps gives a share of one core; the table's is of all.
                 cpu: Some(row.cpu / cores as f64),
                 rss,
@@ -134,7 +144,7 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
                 threads: None,
                 nice: None,
                 cpu_time: None,
-                args: row.args,
+                args: tc::source_text(&row.args),
             }
         })
         .collect::<Vec<_>>();
