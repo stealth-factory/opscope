@@ -86,7 +86,9 @@ PROCESS through write, read and name, and WAITING through time waited and
 pid when wait times are on. `a` shows every row of BY PROCESS while it has
 the cursor, and every cgroup in BY SERVICE otherwise, or only the top
 `top_writers` again; the hint names the table it acts on and appears once
-there are more rows than that.
+there are more rows than that. BY PROCESS takes the cursor even when no
+process moved bytes: it stands on the line saying so, and `a` from there
+lists every process.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
 
@@ -319,7 +321,10 @@ The two cannot be compared poll by poll: `write_bytes` counts a page when
 it is dirtied, and the disk counts the write when it is submitted, which
 can be half a minute later. So both sides are summed over
 `reconcile_seconds` (60) and the line says `≈`; under a write burst the
-share can even pass 100% for a while. A poll where the disks had no rate
+share can even pass 100% for a while. When a process reaps a child, Linux
+adds the child's counters to the parent's `/proc/<pid>/io`, so bytes the
+child already wrote can be counted again, and an idle parent can briefly
+appear as a writer. A poll where the disks had no rate
 is left out of both sides. The rest of the device's figure is the other
 users' processes, the kernel's own writeback and journal, and swap.
 

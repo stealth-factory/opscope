@@ -853,6 +853,9 @@ pub struct Painted {
     pub proc_keys: Vec<String>,
     /// Every row BY PROCESS has under `a`: readable and not.
     pub proc_total: usize,
+    /// BY PROCESS's length for the cursor: its rows, or 1 for the subset
+    /// line when it drew none, so it takes focus on an idle host too.
+    pub proc_len: usize,
 }
 
 /// The WHO IS WRITING section on the list screen.
@@ -883,6 +886,7 @@ pub fn paint_section(
         }
         let procs = by_process::paint(view, writers, width, p, rows, placed);
         return Painted {
+            proc_len: procs.len(),
             proc_keys: procs.keys,
             proc_total: procs.total,
             ..Painted::default()
@@ -920,6 +924,7 @@ pub fn paint_section(
         svc_keys,
         wait_keys,
         svc_total,
+        proc_len: procs.len(),
         proc_keys: procs.keys,
         proc_total: procs.total,
     }

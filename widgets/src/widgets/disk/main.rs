@@ -766,11 +766,7 @@ fn main() {
                     // BY PROCESS when it has the cursor; BY SERVICE
                     // otherwise, as before BY PROCESS existed.
                     if screen == Screen::List {
-                        if focus == BY_PROCESS {
-                            proc_all = !proc_all;
-                        } else {
-                            svc_all = !svc_all;
-                        }
+                        toggle_all(focus, &mut proc_all, &mut svc_all);
                     }
                 }
                 "enter" => {
@@ -912,7 +908,9 @@ fn main() {
                     scroll = 0;
                     chase = true;
                 }
-                BY_PROCESS => {
+                // The subset line BY PROCESS stands on when it has no rows
+                // opens nothing; only a drawn pid does.
+                BY_PROCESS if proc_keys.contains(&proc_cursor) => {
                     let found = proc_cursor.parse::<i32>().ok().and_then(|pid| {
                         let procs = writers_now.as_ref()?.procs.as_ref()?;
                         procs
@@ -1087,12 +1085,7 @@ fn main() {
         let combined = board.as_ref().is_some_and(|board| board.combined);
         // `a` acts on BY PROCESS while it has the cursor, and on BY SERVICE
         // otherwise; the hint names whichever one the press would change.
-        let all = if focus == BY_PROCESS {
-            (proc_all || drawn.proc_total > drawn.proc_keys.len())
-                .then(|| by_process::all_hint(proc_all, top_writers))
-        } else {
-            (drawn.svc_total > top_writers).then(|| writers::all_hint(svc_all, top_writers))
-        };
+        let all = all_hint_for(&drawn, focus, proc_all, svc_all, top_writers);
         let hints = WriterHints {
             all,
             svc_sort,
@@ -1157,6 +1150,33 @@ fn main() {
         // to whichever mount or disk now sits at the old index.
         chase = false;
         keyboard.wait(Duration::from_millis(200));
+    }
+}
+
+/// `a`: BY PROCESS's show-all when it has the cursor - rows or not - and
+/// BY SERVICE's otherwise, as before BY PROCESS existed.
+fn toggle_all(focus: usize, proc_all: &mut bool, svc_all: &mut bool) {
+    if focus == BY_PROCESS {
+        *proc_all = !*proc_all;
+    } else {
+        *svc_all = !*svc_all;
+    }
+}
+
+/// The `[a]` hint for the section `a` would act on, when it would change
+/// anything there.
+fn all_hint_for(
+    drawn: &Drawn,
+    focus: usize,
+    proc_all: bool,
+    svc_all: bool,
+    top: usize,
+) -> Option<String> {
+    if focus == BY_PROCESS {
+        (proc_all || drawn.proc_total > drawn.proc_keys.len())
+            .then(|| by_process::all_hint(proc_all, top))
+    } else {
+        (drawn.svc_total > top).then(|| writers::all_hint(svc_all, top))
     }
 }
 
@@ -1768,7 +1788,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
             disk_len,
             pressure_len,
             painted.svc_keys.len(),
-            painted.proc_keys.len(),
+            painted.proc_len,
             painted.wait_keys.len(),
         ]
     } else {
@@ -5826,6 +5846,104 @@ mod tests {
         );
         let text = packed.lines.join("\n");
         assert!(text.contains("[s] sort by name") && text.contains("[a] show all processes"));
+    }
+
+    /// `procs_fixture` with every readable process idle over the poll.
+    fn idle_procs(source: by_process::Source) -> by_process::Procs {
+        let mut procs = procs_fixture(source);
+        for row in &mut procs.rows {
+            row.read_bps = Some(0.0);
+            row.write_bps = Some(0.0);
+        }
+        procs
+    }
+
+    #[test]
+    fn by_process_takes_focus_and_a_with_nothing_moving() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let mut linux = writers_fixture(true);
+        linux.procs = Some(idle_procs(by_process::Source::Procfs));
+        let mac = writers::by_process_only(
+            idle_procs(by_process::Source::Rusage),
+            HashMap::new(),
+            String::new(),
+            None,
+        );
+        for writers in [&linux, &mac] {
+            let mut frame = view(None, "/");
+            frame.board = Some(&board);
+            frame.writers = Some(writers);
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert!(drawn.proc_keys.is_empty());
+            assert!(plain_has(
+                &drawn,
+                "none of the 16 readable moved bytes over the last 2s"
+            ));
+            // No row, and still a place for the cursor: the subset line.
+            assert_eq!(drawn.lens[BY_PROCESS], 1);
+            let lens = drawn.lens;
+            // `tab` from the section above lands on it, as does an arrow off
+            // the last row above it, and an arrow up from the section below.
+            let above = (0..BY_PROCESS).rev().find(|&s| lens[s] > 0).unwrap();
+            assert_eq!(tc::next_section(Some(above), &lens), Some(BY_PROCESS));
+            assert_eq!(
+                tc::step_across_sections(above, lens[above] - 1, &lens, true),
+                Some((BY_PROCESS, 0))
+            );
+            if lens[WAITING] > 0 {
+                assert_eq!(
+                    tc::step_across_sections(WAITING, 0, &lens, false),
+                    Some((BY_PROCESS, 0))
+                );
+            }
+
+            // With focus there the line is tinted and placed, and `[a]`
+            // names BY PROCESS's list, not BY SERVICE's.
+            frame.focus = BY_PROCESS;
+            for width in [28, 40, 60, 80, 100, 140] {
+                rows_fit(&draw_body(&frame, width, &p, None), width);
+            }
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert_eq!(drawn.lens[BY_PROCESS], 1);
+            let at = [0, 0, 0, 0, 0, 0];
+            let row = drawn
+                .placed
+                .iter()
+                .find(|(_, id)| *id == item_id(BY_PROCESS, &at))
+                .map(|(row, _)| *row)
+                .expect("the subset line is where the cursor stands");
+            assert!(plain(&drawn.rows[row]).contains("none of the 16 readable"));
+            assert!(drawn.rows[row].contains(&tc::tint(tc::Role::Slot)));
+            assert_eq!(
+                all_hint_for(&drawn, BY_PROCESS, false, false, 8).as_deref(),
+                Some("[a] show all processes")
+            );
+
+            let (mut proc_all, mut svc_all) = (false, false);
+            toggle_all(BY_PROCESS, &mut proc_all, &mut svc_all);
+            assert!(
+                proc_all && !svc_all,
+                "`a` toggles BY PROCESS, not BY SERVICE"
+            );
+
+            // Every process, readable then root-owned, each a row `↵` opens.
+            frame.proc_all = proc_all;
+            for width in [28, 40, 60, 80, 100, 140] {
+                rows_fit(&draw_body(&frame, width, &p, None), width);
+            }
+            let drawn = draw_body(&frame, 100, &p, None);
+            assert_eq!(drawn.lens[BY_PROCESS], 19);
+            assert!(drawn.proc_keys.iter().any(|k| k == "100"));
+            assert!(plain_has(
+                &drawn,
+                "3 need root · their I/O is not readable as you"
+            ));
+            assert_eq!(
+                all_hint_for(&drawn, BY_PROCESS, true, false, 8).as_deref(),
+                Some("[a] show top 8")
+            );
+        }
     }
 
     #[test]

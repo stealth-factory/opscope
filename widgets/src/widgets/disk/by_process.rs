@@ -636,12 +636,22 @@ fn shown_cgroup(cgroup: &str) -> String {
     }
 }
 
-/// What BY PROCESS drew: the row keys (pids) in order, and how many rows
-/// `a` would show in all.
+/// What BY PROCESS drew: the row keys (pids) in order, how many rows `a`
+/// would show in all, and whether the cursor stands on the subset line
+/// because no row was drawn.
 #[derive(Clone, Debug, Default)]
 pub struct Painted {
     pub keys: Vec<String>,
     pub total: usize,
+    pub anchor: bool,
+}
+
+impl Painted {
+    /// What the section counts as for the cursor: its rows, or the one
+    /// subset line when it has none, so it can always take focus.
+    pub fn len(&self) -> usize {
+        self.keys.len().max(usize::from(self.anchor))
+    }
 }
 
 /// BY PROCESS on the list screen. On Linux it sits between BY SERVICE and
@@ -693,7 +703,23 @@ pub fn paint(
             procs.locked.len()
         ),
     };
-    push_lines(rows, &subset, &p.dim, width);
+    // With no row to stand on, the line saying why there is none is where
+    // the cursor goes, so BY PROCESS can still take focus and `a` can still
+    // reach the full list from it.
+    let anchor = list.is_empty() && locked.is_empty();
+    if anchor {
+        let here = view.focus == 4;
+        let ink = if here {
+            format!("{}{}", tc::tint(tc::Role::Slot), p.lit(&p.accent))
+        } else {
+            p.dim.clone()
+        };
+        let from = rows.len();
+        push_lines(rows, &subset, &ink, width);
+        placed.extend((from..rows.len()).map(|at| (at, PROC_BASE)));
+    } else {
+        push_lines(rows, &subset, &p.dim, width);
+    }
 
     let comm_want = list
         .iter()
@@ -777,6 +803,7 @@ pub fn paint(
     Painted {
         keys,
         total: readable + procs.locked.len(),
+        anchor,
     }
 }
 
