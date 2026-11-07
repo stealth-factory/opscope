@@ -76,7 +76,7 @@ pub fn sample_io(mounts: &[Mount], _every: f64) -> Result<IoSnapshot, String> {
     let mut snap = IoSnapshot {
         disks,
         show_pressure: true,
-        host_devices: in_container(),
+        host_devices: opscope_core::cgroup::in_container(),
         err: inventory_err,
         ..IoSnapshot::default()
     };
@@ -91,18 +91,6 @@ pub fn sample_io(mounts: &[Mount], _every: f64) -> Result<IoSnapshot, String> {
         Err(err) => snap.pressure_err = format!("pressure unavailable: {err}"),
     }
     Ok(snap)
-}
-
-fn in_container() -> bool {
-    if std::path::Path::new("/.dockerenv").is_file()
-        || std::path::Path::new("/run/.containerenv").is_file()
-    {
-        return true;
-    }
-    let Ok(bytes) = std::fs::read("/proc/1/environ") else {
-        return false;
-    };
-    parse::parse_container_env(&String::from_utf8_lossy(&bytes))
 }
 
 fn inventory_cached() -> Result<Vec<InventoryDisk>, String> {

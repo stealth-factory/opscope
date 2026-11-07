@@ -655,8 +655,8 @@ fn main() {
         let pause = Arc::clone(&pause);
         let refresh = refresh.clone();
         let detail = Arc::clone(&detail);
-        let ring = by_process::ring_cap(reconcile_seconds, every);
-        thread::spawn(move || poll(state, pause, refresh, hide, every, detail, ring));
+        let window = reconcile_seconds;
+        thread::spawn(move || poll(state, pause, refresh, hide, every, detail, window));
     }
 
     let p = palette();
@@ -898,7 +898,9 @@ fn main() {
                     scroll = 0;
                     chase = true;
                 }
-                BY_SERVICE if !svc_cursor.is_empty() => {
+                // The root cgroup's key is the empty path, so a drawn row is
+                // the test, not a non-empty cursor.
+                BY_SERVICE if svc_keys.contains(&svc_cursor) => {
                     screen = Screen::Service;
                     service_path = svc_cursor.clone();
                     *detail
@@ -928,6 +930,7 @@ fn main() {
                     });
                     if let Some((pid, comm, cgroup)) = found {
                         let (cmdline, cwd) = host::process_facts(pid);
+                        let start = writers_now.as_ref().and_then(|w| w.starts.get(&pid).copied());
                         opened = Some(writers::Opened {
                             pid,
                             comm,
@@ -935,6 +938,7 @@ fn main() {
                             cmdline,
                             cwd,
                             from_wait: false,
+                            start,
                         });
                         *detail
                             .lock()
@@ -966,6 +970,9 @@ fn main() {
                             cgroup: None,
                             pid: Some(waiter.pid),
                         };
+                        let start = writers_now
+                            .as_ref()
+                            .and_then(|w| w.starts.get(&waiter.pid).copied());
                         opened = Some(writers::Opened {
                             pid: waiter.pid,
                             comm: waiter.comm,
@@ -973,6 +980,7 @@ fn main() {
                             cmdline,
                             cwd,
                             from_wait: true,
+                            start,
                         });
                         screen = Screen::Process;
                         scroll = 0;
@@ -1283,15 +1291,15 @@ fn poll(
     hide: Vec<String>,
     every: f64,
     detail: Arc<Mutex<writers::Wanted>>,
-    ring_cap: usize,
+    reconcile_seconds: f64,
 ) {
     tc::record_panics();
     let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
     let mut rates = RateMemory::default();
     let mut source = host::WriterSource::default();
-    // BY PROCESS's reconciliation window: `reconcile_seconds / refresh`
-    // per-poll sums, and nothing older.
-    let mut ring = by_process::Ring::new(ring_cap);
+    // BY PROCESS's reconciliation window: per-poll sums covering
+    // `reconcile_seconds` of measured time, and nothing older.
+    let mut ring = by_process::Ring::new(reconcile_seconds);
     let loaded = state::load_usage(&state::usage_path());
     let mut usage = loaded.store;
     let history_note = loaded.note;
@@ -5533,6 +5541,7 @@ mod tests {
             cmdline: "example-sync --flush".into(),
             cwd: String::new(),
             from_wait: true,
+            start: None,
         };
         frame.screen = Screen::Process;
         frame.opened = Some(&open);
@@ -5541,6 +5550,20 @@ mod tests {
         assert!(plain_has(&drawn, "cgroup user.slice/session-1.scope"));
         assert!(plain_has(&drawn, "cwd not readable as you"));
         assert!(plain_has(&drawn, "the rest needs root"));
+        // The same pid, started again since it was opened: a stranger.
+        let start = writers.starts.get(&501).copied().expect("start of 501");
+        let reused = writers::Opened {
+            pid: 501,
+            comm: "example-sync".into(),
+            from_wait: true,
+            start: Some(start + 1),
+            ..writers::Opened::default()
+        };
+        frame.opened = Some(&reused);
+        let drawn = draw_body(&frame, 60, &p, None);
+        assert!(plain_has(&drawn, "exited since it was in D"));
+        assert!(!plain_has(&drawn, "waiting on disk now"));
+        frame.opened = Some(&open);
         frame.screen = Screen::Service;
         frame.service_path = "user.slice";
         let drawn = draw_body(&frame, 60, &p, None);
@@ -5686,7 +5709,7 @@ mod tests {
                 cgroup: "system.slice/example-db.service".into(),
             })
             .collect();
-        let mut ring = by_process::Ring::new(30);
+        let mut ring = by_process::Ring::new(60.0);
         for _ in 0..30 {
             ring.push(2.0, 30.0 * MIB as f64, 376.0 * MIB as f64);
         }
@@ -5863,6 +5886,7 @@ mod tests {
         let board = writing_board(29.0 * MIB as f64);
         let writers = writers::by_process_only(
             procs_fixture(by_process::Source::Rusage),
+            HashMap::new(),
             String::new(),
             None,
         );

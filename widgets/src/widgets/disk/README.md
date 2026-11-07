@@ -277,7 +277,8 @@ moment apart. An idle disk still draws the table's header and `accounted:
 Instead of the table: `by service needs cgroup v2` on a cgroup v1 or
 hybrid host; `io accounting is off everywhere · systemctl set-property
 <unit> IOAccounting=yes enables it per unit` when no cgroup has `io`; the
-reason when the tree cannot be read. Inside a container the heading adds
+reason when the tree cannot be read. Inside a container (pid 1 at `0::/`
+and a runtime marker, as above) the heading adds
 `rows are this container's cgroups; the device total is the host's`. The
 first poll says `measuring`, because a rate needs two.
 
@@ -366,5 +367,5 @@ command line, working directory or open files: per-file I/O on macOS
 Each poll on Linux is one walk of `/sys/fs/cgroup` and one pass over
 `/proc` (`stat` and `io` per process). The previous tree, each process's
 previous wait ticks and previous `io` reading, the open process's
-previous file sizes, and the reconciliation's `reconcile_seconds /
-refresh` per-poll sums are the only history kept.
+previous file sizes, and the reconciliation's per-poll sums for the
+last `reconcile_seconds` of measured time are the only history kept.

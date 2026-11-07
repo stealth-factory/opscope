@@ -248,7 +248,7 @@ pub struct ProcMemory {
 
 /// One pass turned into rates. A pid that was not in the previous pass has
 /// no rate yet; one that has gone is dropped, never drawn as negative; a
-/// counter that went backwards is a reused pid and starts again.
+/// pid whose start time changed is a reused pid and starts again.
 pub fn step(
     memory: &mut ProcMemory,
     samples: Vec<ProcSample>,
@@ -265,10 +265,14 @@ pub fn step(
     for s in samples {
         match s.io {
             Ok((read, write)) => {
+                // Identity is the start time; each counter is then read on
+                // its own. The write figure is net of cancelled bytes, so it
+                // can fall on a live process that truncated dirty data: that
+                // poll wrote nothing net, and its reads still count.
                 let delta = elapsed.and_then(|e| {
                     let &(start, r0, w0) = memory.prev.get(&s.pid)?;
-                    (start == s.start && read >= r0 && write >= w0)
-                        .then(|| ((read - r0) as f64, (write - w0) as f64, e))
+                    (start == s.start && read >= r0)
+                        .then(|| ((read - r0) as f64, write.saturating_sub(w0) as f64, e))
                 });
                 if let Some((r, w, _)) = delta {
                     moved += if source.combined() { r + w } else { w };
@@ -340,27 +344,23 @@ pub struct Window {
     pub device: f64,
 }
 
-/// Per-poll sums, bounded by `reconcile_seconds / refresh` entries. A poll
-/// where either side has no figure is not entered at all, so both sides
-/// always cover the same polls.
+/// Per-poll sums covering at most `reconcile_seconds` of measured time.
+/// Bounded by age, not count: a poll takes longer than the refresh when
+/// its scan is slow, so `reconcile_seconds / refresh` polls would reach
+/// further back than the setting says. The newest poll is kept even when
+/// it alone is longer. A poll where either side has no figure is not
+/// entered at all, so both sides always cover the same polls.
 #[derive(Clone, Debug)]
 pub struct Ring {
     entries: VecDeque<Window>,
-    cap: usize,
-}
-
-pub fn ring_cap(reconcile_seconds: f64, refresh: f64) -> usize {
-    if !(refresh > 0.0) || !reconcile_seconds.is_finite() {
-        return 1;
-    }
-    ((reconcile_seconds / refresh).ceil() as usize).max(1)
+    seconds: f64,
 }
 
 impl Ring {
-    pub fn new(cap: usize) -> Ring {
+    pub fn new(seconds: f64) -> Ring {
         Ring {
-            entries: VecDeque::with_capacity(cap.max(1)),
-            cap: cap.max(1),
+            entries: VecDeque::new(),
+            seconds: if seconds.is_finite() { seconds.max(0.0) } else { 0.0 },
         }
     }
 
@@ -368,14 +368,17 @@ impl Ring {
         if !(seconds > 0.0) {
             return;
         }
-        while self.entries.len() >= self.cap {
-            self.entries.pop_front();
-        }
         self.entries.push_back(Window {
             seconds,
             procs: procs.max(0.0),
             device: device.max(0.0),
         });
+        let mut total: f64 = self.entries.iter().map(|e| e.seconds).sum();
+        while self.entries.len() > 1 && total > self.seconds + 1e-9 {
+            if let Some(old) = self.entries.pop_front() {
+                total -= old.seconds;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -982,6 +985,33 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_more_than_it_wrote_keeps_the_read_rate() {
+        let mut memory = ProcMemory::default();
+        let first = vec![pid_sample(100, 5, Some(io(1_000, 10_000, 0)))];
+        let _ = step(
+            &mut memory,
+            samples_from_pids(&first, &HashMap::new()),
+            0.0,
+            false,
+            false,
+            Source::Procfs,
+        );
+        // Truncated 8 KB of dirty data while writing 1 KB and reading 4 KB.
+        let next = vec![pid_sample(100, 5, Some(io(5_000, 11_000, 8_000)))];
+        let p = step(
+            &mut memory,
+            samples_from_pids(&next, &HashMap::new()),
+            2.0,
+            false,
+            false,
+            Source::Procfs,
+        );
+        assert_eq!(p.rows[0].read_bps, Some(2_000.0), "reads still count");
+        assert_eq!(p.rows[0].write_bps, Some(0.0), "nothing written net");
+        assert_eq!(p.moved, Some(0.0));
+    }
+
+    #[test]
     fn an_exited_pid_is_dropped_and_a_reused_one_starts_again() {
         let mut memory = ProcMemory::default();
         let first = vec![
@@ -1081,10 +1111,7 @@ mod tests {
 
     #[test]
     fn the_window_is_a_bounded_ring_and_reads_approximately() {
-        assert_eq!(ring_cap(60.0, 2.0), 30);
-        assert_eq!(ring_cap(10.0, 3.0), 4);
-        assert_eq!(ring_cap(60.0, 0.0), 1);
-        let mut ring = Ring::new(ring_cap(60.0, 2.0));
+        let mut ring = Ring::new(60.0);
         assert_eq!(
             reconcile_line(ring.window().as_ref(), Source::Procfs, &[]),
             "readable processes account for ≈ … of the disks · measuring"
@@ -1115,6 +1142,18 @@ mod tests {
             device: 0.0,
         };
         assert!(!reconcile_line(Some(&idle), Source::Procfs, &[]).contains('%'));
+        // Polls that ran long: the window is 60 s of measured time, not
+        // 30 polls.
+        let mut slow = Ring::new(60.0);
+        for _ in 0..40 {
+            slow.push(2.5, 1.0, 1.0);
+        }
+        assert_eq!(slow.len(), 24);
+        assert_eq!(slow.window().unwrap().seconds, 60.0);
+        // A single poll longer than the window is still kept.
+        slow.push(90.0, 1.0, 1.0);
+        assert_eq!(slow.len(), 1);
+        assert_eq!(Ring::new(f64::NAN).len(), 0);
     }
 
     #[test]

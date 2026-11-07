@@ -321,6 +321,7 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
         }
     };
     let samples = by_process::samples_from_rusage(&list, &names);
+    let starts = samples.iter().map(|s| (s.pid, s.start)).collect();
     // SAFETY: geteuid has no preconditions and cannot fail.
     let root = unsafe { libc::geteuid() } == 0;
     let procs = by_process::step(&mut source.procs, samples, now, root, false, Source::Rusage);
@@ -331,7 +332,7 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
         cwd: String::new(),
         files: None,
     });
-    Some(writers::by_process_only(procs, pid_err, detail))
+    Some(writers::by_process_only(procs, starts, pid_err, detail))
 }
 
 fn list_pids() -> Result<Vec<i32>, String> {

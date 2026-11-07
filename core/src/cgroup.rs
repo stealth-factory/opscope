@@ -28,8 +28,7 @@
 //! Parsers, the [`Tree`] value, the attribution and [`walk`] (which reads
 //! any directory laid out like cgroupfs, so tests run on a temp dir) are
 //! compiled everywhere. Only [`read`], which knows the tree is mounted at
-//! `/sys/fs/cgroup` and asks `/proc/1/cgroup` whether this is a container,
-//! is Linux. There is no cache and no thread: each call is one pass, and
+//! `/sys/fs/cgroup` and asks whether this is a container, is Linux. There is no cache and no thread: each call is one pass, and
 //! every failure comes back as a [`State`] for the caller's poller to show.
 
 use std::collections::BTreeMap;
@@ -170,8 +169,10 @@ pub enum State {
     /// The named controller is enabled on nothing below the root.
     /// [`State::remedy`] has the one line that turns it on.
     NotEnabled(String),
-    /// PID 1 sits at `0::/`: this is a container's own cgroup namespace,
-    /// and the rows are this container's cgroups, not the host's.
+    /// PID 1 sits at `0::/` and a runtime marker says this is a container:
+    /// the rows are this container's own cgroup namespace, not the host's.
+    /// `0::/` alone is not enough - a host whose init stays in the root
+    /// cgroup reads the same.
     Container(Tree),
     Unreadable(String),
 }
@@ -280,6 +281,20 @@ pub fn parse_cgroup_procs(text: &str) -> Vec<i32> {
     text.lines().filter_map(|l| l.trim().parse().ok()).collect()
 }
 
+/// True when pid 1's environment names a container runtime.
+///
+/// `/proc/1/environ` is NUL-separated `KEY=value` pairs. An empty
+/// `container=` does not count. A cgroup path is not this signal: `0::/`
+/// is what pid 1 sees in a private cgroup namespace and on a host whose
+/// init stays in the root cgroup.
+pub fn parse_container_env(text: &str) -> bool {
+    text.split('\0').any(|entry| {
+        entry
+            .strip_prefix("container=")
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
 /// `/proc/<pid>/cgroup`: the v2 line's path (`0::<path>`), if there is one.
 pub fn parse_proc_cgroup(text: &str) -> Option<String> {
     text.lines()
@@ -364,16 +379,23 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
         let Some(total) = reading(node, controller) else {
             continue;
         };
-        let (below, rolled) = nearest_enabled(tree, &kids, i, controller);
+        let (mut pending, rolled) = nearest_enabled(tree, &kids, i, controller);
         let mut inconsistent = false;
-        let below: Vec<Reading> = below
-            .iter()
-            .filter_map(|&j| {
-                let r = reading(&tree.nodes[j], controller);
-                inconsistent |= r.is_none();
-                r
-            })
-            .collect();
+        // A child with no reading gets no row, so its own nearest enabled
+        // descendants - which do get rows - are subtracted in its place.
+        // Otherwise their bytes would be counted here and again on their
+        // own rows. The child's own bytes stay in this share, so it is
+        // marked inconsistent.
+        let mut below: Vec<Reading> = Vec::new();
+        while let Some(j) = pending.pop() {
+            match reading(&tree.nodes[j], controller) {
+                Some(r) => below.push(r),
+                None => {
+                    inconsistent = true;
+                    pending.extend(nearest_enabled(tree, &kids, j, controller).0);
+                }
+            }
+        }
         let own = match total {
             Reading::Io(mut devs) => {
                 let mut taken: BTreeMap<String, IoStat> = BTreeMap::new();
@@ -615,8 +637,18 @@ pub fn walk(root: &Path, controllers: &[&str], with_procs: bool) -> Result<Tree,
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{State, parse_proc_cgroup, walk};
+    use super::{State, parse_container_env, parse_proc_cgroup, walk};
     use std::path::Path;
+
+    /// A runtime marker: the files Docker and Podman leave at the root, or
+    /// `container=` in pid 1's environment (readable only as its owner).
+    pub fn in_container() -> bool {
+        if Path::new("/.dockerenv").is_file() || Path::new("/run/.containerenv").is_file() {
+            return true;
+        }
+        std::fs::read("/proc/1/environ")
+            .is_ok_and(|bytes| parse_container_env(&String::from_utf8_lossy(&bytes)))
+    }
 
     /// The host's tree at `/sys/fs/cgroup`, or why it cannot be read.
     pub fn read(controllers: &[&str], with_procs: bool) -> State {
@@ -625,7 +657,7 @@ mod linux {
             Err(state) => return state,
         };
         let pid1 = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
-        if parse_proc_cgroup(&pid1).as_deref() == Some("/") {
+        if parse_proc_cgroup(&pid1).as_deref() == Some("/") && in_container() {
             State::Container(tree)
         } else {
             State::Ok(tree)
@@ -634,7 +666,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::read;
+pub use linux::{in_container, read};
 
 #[cfg(test)]
 mod tests {
@@ -664,6 +696,16 @@ mod tests {
         };
         let s = &devs[dev];
         (s.rbytes, s.wbytes)
+    }
+
+    #[test]
+    fn a_container_variable_names_a_runtime_and_an_empty_one_does_not() {
+        assert!(parse_container_env("container=podman\0PATH=/bin"));
+        assert!(parse_container_env("PATH=/bin\0container=docker"));
+        assert!(!parse_container_env("container=\0PATH=/bin"));
+        assert!(!parse_container_env("container_name=web\0"));
+        assert!(!parse_container_env(""));
+        assert!(!parse_container_env("0::/\n"));
     }
 
     #[test]
@@ -922,6 +964,28 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].inconsistent);
+    }
+
+    /// An unreadable middle cgroup: its readable child has a row of its
+    /// own, so the parent subtracts that child instead, and the shares
+    /// still add up to the root's total rather than counting it twice.
+    #[test]
+    fn a_missing_middle_reading_does_not_count_its_children_twice() {
+        let mut root = node("", &["io"]);
+        root.io = Some(io("8:0", 0, 100));
+        let middle = node("system.slice", &["io"]);
+        let mut leaf = node("system.slice/example-db.service", &["io"]);
+        leaf.io = Some(io("8:0", 0, 80));
+        let rows = attribute(
+            &Tree {
+                nodes: vec![root, middle, leaf],
+            },
+            "io",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(own_io(&rows, "", "8:0"), (0, 20));
+        assert_eq!(own_io(&rows, "system.slice/example-db.service", "8:0"), (0, 80));
+        assert!(rows[0].inconsistent, "the middle's own bytes are in the root's share");
     }
 
     fn host_like() -> Tree {

@@ -119,6 +119,9 @@ pub struct Writers {
     pub readable: BTreeSet<i32>,
     /// `comm` of every pid the pass saw, for the service detail's list.
     pub names: HashMap<i32, String>,
+    /// When each pid the pass saw started, in the host's unit. An open
+    /// detail compares it, so a reused pid is not drawn as the one opened.
+    pub starts: HashMap<i32, u64>,
     /// Every process in D state, kernel threads included.
     pub waiters: Vec<Waiter>,
     /// `task_delayacct` is 1 and the kernel prints field 42.
@@ -150,8 +153,14 @@ pub struct Wanted {
 
 /// The section on a host that has only BY PROCESS (macOS).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn by_process_only(procs: Procs, pid_err: String, detail: Option<ProcDetail>) -> Writers {
+pub fn by_process_only(
+    procs: Procs,
+    starts: HashMap<i32, u64>,
+    pid_err: String,
+    detail: Option<ProcDetail>,
+) -> Writers {
     Writers {
+        starts,
         services: Services::Measuring,
         readable: procs.rows.iter().map(|r| r.pid).collect(),
         names: procs
@@ -249,6 +258,7 @@ pub fn step(
             .map(|s| s.pid)
             .collect(),
         names: samples.iter().map(|s| (s.pid, s.comm.clone())).collect(),
+        starts: samples.iter().map(|s| (s.pid, s.starttime)).collect(),
         waiters,
         wait_times,
         wait_elapsed: elapsed,
@@ -1355,6 +1365,9 @@ pub struct Opened {
     pub cwd: String,
     /// Opened from WAITING ON DISK, so the state line talks about D.
     pub from_wait: bool,
+    /// The pid's start time when it was opened. `None` when the pass gave
+    /// none, and then only the pid is followed.
+    pub start: Option<u64>,
 }
 
 pub fn paint_process(
@@ -1364,15 +1377,18 @@ pub fn paint_process(
     p: &Palette,
     rows: &mut Vec<String>,
 ) {
-    let live = view
-        .writers
-        .and_then(|w| w.waiters.iter().find(|x| x.pid == open.pid));
     let readable = view.writers.is_some_and(|w| w.readable.contains(&open.pid));
     // The last pass did not see it: it has exited, and an empty cmdline or
     // cwd says nothing about what this user could read.
-    let gone = view
+    // A pid that started again since is a different process: also gone.
+    let gone = view.writers.is_some_and(|w| {
+        !w.names.contains_key(&open.pid)
+            || open.start.is_some_and(|start| w.starts.get(&open.pid) != Some(&start))
+    });
+    let live = view
         .writers
-        .is_some_and(|w| !w.names.contains_key(&open.pid));
+        .and_then(|w| w.waiters.iter().find(|x| x.pid == open.pid))
+        .filter(|_| !gone);
     // Read again every poll while this screen is open.
     let detail = view
         .writers
