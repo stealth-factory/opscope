@@ -1986,16 +1986,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 let here = at == selected_row;
                 let start = body.len();
                 let colour = colour_of(&a.state, &p);
-                // Blocked and done keep a tint of their own even unselected:
-                // the whole point is that they are visible without being
-                // looked for.
+                // Blocked keeps a tint of its own even unselected: it is the
+                // one row that has to be visible without being looked for.
+                // Done does not - a green ground read as a second state
+                // beside the one the row names.
                 let loud = a.state == "blocked" || a.state == "done";
                 let tint = if here {
                     tc::tint(tc::Role::Slot)
                 } else if a.state == "blocked" {
                     tc::tint_toward(tc::Role::Red)
-                } else if a.state == "done" {
-                    tc::tint_toward(tc::Role::Green)
                 } else {
                     String::new()
                 };

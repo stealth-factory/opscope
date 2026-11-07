@@ -648,8 +648,6 @@ struct Palette {
     idle_c_lit: String,
     /// The rule under a session's sub-heading: decoration, never text.
     rule: String,
-    /// The lighter divider between two panes of one session.
-    divider: String,
     /// The lifted form of every other role this palette draws in, for text
     /// on a selected or tinted row: the named `_lit` twins above are swapped
     /// in by the tint closure first, and anything else it is handed goes
@@ -688,7 +686,6 @@ fn palette() -> Palette {
         idle_c: tc::ink(tc::Role::Muted),
         idle_c_lit: tc::ink_on(tc::Role::Muted, true),
         rule: tc::ink(tc::Role::Border),
-        divider: tc::ink(tc::Role::Dim),
         lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
             .into_iter()
             .map(|role| (tc::ink(role), tc::ink_on(role, true)))
@@ -806,14 +803,14 @@ fn render_pane(
 ) -> Vec<String> {
     let state = pane.state();
     let loud = matches!(state.as_str(), "blocked" | "error" | "done");
-    // Blocked and done keep a tint of their own even unselected: the whole
-    // point is that they are visible without being looked for.
+    // Blocked keeps a tint of its own even unselected: it is the one row
+    // that has to be visible without being looked for. Done does not - a
+    // green ground read as a state of its own beside the one the row
+    // names, and the green mark and upper-case DONE already say it.
     let tint = if here {
         tc::tint(tc::Role::Slot)
     } else if matches!(state.as_str(), "blocked" | "error") {
         tc::tint_toward(tc::Role::Red)
-    } else if state == "done" {
-        tc::tint_toward(tc::Role::Green)
     } else {
         String::new()
     };
@@ -2110,7 +2107,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // Decided from the section's own list, so each section
                 // starts its own run of sub-headings.
                 // The previous pane drawn in this section: its session and
-                // how many rows it took, for the divider between two panes.
+                // how many rows it took, for the gap between two of its panes.
                 let mut previous: Option<(String, usize)> = None;
                 let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize, of: &[&Pane]| {
                     let at_group = of.iter().position(|o| o.session_id == pane.session_id);
@@ -2132,9 +2129,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         rows.extend(group_heading(&pane.session_label, n, w, &p, rows.len(), &mut body_plots));
                     } else if let Some((session, rows_before)) = &previous {
                         // One-row panes stack as a table; a pane of several
-                        // rows gets a divider so its rows stay its own.
+                        // rows gets a gap so its rows stay its own. A gap,
+                        // not a line: the rule is kept for where one
+                        // session ends and the next begins.
                         if *session == pane.session_id && (*rows_before > 1 || drawn.len() > 1) {
-                            rows.push(divider(w, &p, rows.len(), &mut body_plots));
+                            rows.push(String::new());
                         }
                     }
                     previous = Some((pane.session_id.clone(), drawn.len()));
@@ -2421,22 +2420,6 @@ fn group_heading(
         plots.push(tc::Plot::rule(x, y, width, &p.rule, "─", 0.08));
     }
     out
-}
-
-/// The light divider between two panes of one session, indented to where
-/// a pane's own rows start.
-fn divider(w: usize, p: &Palette, y: usize, plots: &mut Vec<tc::Plot>) -> String {
-    let room = w.saturating_sub(1);
-    let x = 3;
-    if room <= x + 1 {
-        return String::new();
-    }
-    let width = room - x;
-    plots.push(tc::Plot::rule(x, y, width, &p.divider, "┈", 0.05));
-    tc::seg(
-        &[("", " ".repeat(x)), (p.divider.as_str(), "┈".repeat(width))],
-        room,
-    )
 }
 
 fn flow(parts: &[(&str, String)], w: usize) -> Vec<String> {
