@@ -395,6 +395,32 @@ pub fn read_stat(pid: i32) -> Result<PidStat, String> {
     parse_pid_stat(&text).ok_or_else(|| format!("{}: not a stat line", path))
 }
 
+/// A machine-wide file under `/proc` as text - `stat`, `loadavg`,
+/// `meminfo` - or `Err("/proc/<name>: <io error>")`, so the reason a
+/// figure is missing can be drawn beside it.
+pub fn read_proc(name: &str) -> Result<String, String> {
+    read_text(&format!("/proc/{}", name))
+}
+
+/// The thread ids in `/proc/<pid>/task`, the main thread's (the pid)
+/// among them.
+pub fn tids(pid: i32) -> Result<Vec<i32>, String> {
+    let dir = format!("/proc/{}/task", pid);
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {}", dir, e))?;
+    Ok(entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect())
+}
+
+/// `/proc/<pid>/task/<tid>/stat`: one thread's line, the same shape as a
+/// process's, parsed by the same `parse_pid_stat`.
+pub fn read_task_stat(pid: i32, tid: i32) -> Result<PidStat, String> {
+    let path = format!("/proc/{}/task/{}/stat", pid, tid);
+    let text = read_text(&path)?;
+    parse_pid_stat(&text).ok_or_else(|| format!("{}: not a stat line", path))
+}
+
 /// `/proc/<pid>/io`, parsed. Another user's is closed to us, which is an
 /// `Err` like any other unreadable file.
 pub fn read_io(pid: i32) -> Result<PidIo, String> {
