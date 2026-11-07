@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn a_cgroup_names_the_daemon() {
         assert_eq!(unit_name("/system.slice/example-worker.service"), "example-worker");
-        assert_eq!(unit_name("/user.slice/user-1002.slice/session-1.scope"), "");
+        assert_eq!(unit_name("/user.slice/user-1000.slice/session-1.scope"), "");
         assert_eq!(unit_name("/"), "");
     }
 

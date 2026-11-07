@@ -3411,7 +3411,7 @@ mod tests {
             "google-guest-agent"
         );
         // A login session says who is logged in, not what opened the socket.
-        assert_eq!(unit_name("/user.slice/user-1002.slice/session-1.scope"), "");
+        assert_eq!(unit_name("/user.slice/user-1000.slice/session-1.scope"), "");
         assert_eq!(unit_name("/"), "");
     }
 
