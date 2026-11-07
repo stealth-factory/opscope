@@ -25,8 +25,8 @@ kernel's own, from the `/proc/stat` totals. The tick rate and the page
 size come from `sysconf`. User names come from `/etc/passwd`, then
 `getpwuid_r` for a uid it does not list.
 
-macOS runs one `ps -axo pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=`
-a poll, which lists every user's processes. Its `%cpu` is macOS's
+macOS runs one `ps -axww -o pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=`
+a poll, plus `ps -ww -o args= -p <pid>` for the open process, which lists every user's processes. Its `%cpu` is macOS's
 decaying average, not a delta over the poll, and the header says so.
 `hw.memsize` gives the total that MEM is a share of. The panel reads
 `vm_stat` (its page size from the first line, then free, active,

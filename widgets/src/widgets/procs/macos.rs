@@ -6,7 +6,7 @@
 // by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Where the bytes come from on macOS: one `ps -axo` per poll.
+//! Where the bytes come from on macOS: one `ps -axww` per poll.
 //!
 //! `ps` reads every user's processes, so the table is complete. Its
 //! `%cpu` is macOS's decaying average rather than a delta over the poll,
@@ -28,7 +28,7 @@ const PS_TIMEOUT: u64 = 10;
 /// Seconds for `vm_stat` and `sysctl`, which answer at once.
 const TOOL_TIMEOUT: u64 = 5;
 
-/// `[t]` has no threads to list here: `ps -axo` prints processes.
+/// `[t]` has no threads to list here: `ps -ax` prints processes.
 pub const READS_THREADS: bool = false;
 
 /// Nothing is kept between polls: `ps` hands over its own average.
@@ -104,10 +104,13 @@ fn machine(procs: &[Proc]) -> Machine {
     out
 }
 
-/// One `ps -axo` over every process. macOS lists no threads.
+/// One `ps -axww` over every process. macOS lists no threads.
 pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, String> {
-    let text = tc::run(&["ps", "-axo", parse::PS_COLUMNS], PS_TIMEOUT)
-        .map_err(|err| format!("ps failed: {err}"))?;
+    let text = tc::run(
+        &["ps", parse::PS_FLAGS, "-o", parse::PS_COLUMNS],
+        PS_TIMEOUT,
+    )
+    .map_err(|err| format!("ps failed: {err}"))?;
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -144,7 +147,8 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
                 threads: None,
                 nice: None,
                 cpu_time: None,
-                args: tc::source_text(&row.args),
+                // Read for the open process alone, by `facts`.
+                args: String::new(),
             }
         })
         .collect::<Vec<_>>();
@@ -163,17 +167,27 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
     })
 }
 
-/// The open process's facts: the command line `ps` already printed, and
-/// nothing read that this version does not read.
+/// The open process's facts: its command line from one `ps -ww -o args=`,
+/// and nothing read that this version does not read.
 pub fn facts(_source: &mut Source, proc: &Proc) -> Facts {
+    let pid = proc.pid.to_string();
+    let cmdline = tc::run(
+        &["ps", "-ww", "-o", parse::PS_ARGS, "-p", &pid],
+        TOOL_TIMEOUT,
+    )
+    .map_err(|err| format!("ps failed: {err}"))
+    .and_then(|text| {
+        let line = tc::source_text(text.trim());
+        if line.is_empty() {
+            Err("ps printed no command line".to_string())
+        } else {
+            Ok(line)
+        }
+    });
     Facts {
         pid: proc.pid,
         start: proc.start,
-        cmdline: if proc.args.is_empty() {
-            Err("ps printed no command line".to_string())
-        } else {
-            Ok(proc.args.clone())
-        },
+        cmdline,
         cwd: Err("not read on macOS in this version".to_string()),
         gid: None,
         io: Io::NotRead,
@@ -205,7 +219,7 @@ mod acquisition_tests {
 
     #[test]
     fn the_machine_comes_from_vm_stat_sysctl_and_getloadavg() {
-        let got = sample(&mut Source, true).expect("ps -axo");
+        let got = sample(&mut Source, true).expect("ps -axww");
         let m = &got.machine;
         assert!(m.problems.is_empty(), "{:?}", m.problems);
         assert_eq!(m.per_core, PerCore::NotRead, "no per-core figure on macOS");
@@ -235,7 +249,7 @@ mod acquisition_tests {
 
     #[test]
     fn ps_lists_this_process_and_launchd() {
-        let got = sample(&mut Source, false).expect("ps -axo");
+        let got = sample(&mut Source, false).expect("ps -axww");
         let me = std::process::id() as i32;
         let row =
             got.procs.iter().find(|p| p.pid == me).unwrap_or_else(|| {
@@ -256,11 +270,8 @@ mod acquisition_tests {
             "ps named this process {:?}; the binary is {exe:?}",
             row.comm
         );
-        assert!(
-            row.args.contains(exe),
-            "{:?} does not name {exe:?}",
-            row.args
-        );
+        let cmdline = facts(&mut Source, row).cmdline.expect("ps -o args=");
+        assert!(cmdline.contains(exe), "{cmdline:?} does not name {exe:?}");
         let launchd = got.procs.iter().find(|p| p.pid == 1).expect("launchd");
         assert_eq!(launchd.uid, 0);
         assert!(matches!(got.clock, Clock::Decaying));

@@ -47,8 +47,8 @@ pub struct Proc {
     pub nice: Option<i64>,
     /// User plus system CPU time over its life, in seconds.
     pub cpu_time: Option<f64>,
-    /// The full command line where the poll already has it (macOS `ps`
-    /// prints it; Linux reads it only for the detail).
+    /// The full command line where the poll already has it. Neither host
+    /// fills it now: both read it only for the open process, as a fact.
     pub args: String,
 }
 

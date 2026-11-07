@@ -342,8 +342,11 @@ one walk of `/sys/fs/cgroup` a poll (`tc::cgroup`) reads each cgroup's
 `cgroup.procs`, and the open service's `memory.max`; the previous tree is
 kept for the CPU delta and dropped when the view closes.
 
-macOS: one `ps -axo
-pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=` a poll,
+macOS: one `ps -axww -o
+pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=` a poll (the
+name is the last column because Apple's `ps` cuts every other column to a
+fixed width, and `ww` because without it a line is cut at 79 columns), one
+`ps -ww -o args= -p <pid>` for the open process's command line,
 `vm_stat`, `sysctl -n vm.swapusage` and `getloadavg` a poll, and
 `hw.memsize` once. Apple's `U` (uninterruptible) state is drawn as `D`
 and `I` (idle) as `S`. `ps` is required on macOS; without it the widget

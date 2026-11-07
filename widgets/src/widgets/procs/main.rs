@@ -14,7 +14,7 @@
 //!
 //! Linux reads `/proc` through `tc::procfs` and measures %CPU as the delta
 //! of `utime + stime` over the poll, as a share of every core. macOS reads
-//! one `ps -axo` a poll, whose `%cpu` is a decaying average and is labelled
+//! one `ps -axww` a poll, whose `%cpu` is a decaying average and is labelled
 //! as one, with `vm_stat`, `sysctl vm.swapusage` and `getloadavg` for the
 //! panel. The parsers, the sort, the filter and the drawing compile and are
 //! tested on every target; only the reads are behind `cfg(target_os)`.

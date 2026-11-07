@@ -22,12 +22,23 @@ use std::collections::BTreeMap;
 
 use opscope_core::procfs::PidStat;
 
-/// The columns `macos.rs` asks `ps` for, in this order. `comm` and `args`
-/// are both free text, which is why they come last and why
-/// [`parse_ps_table`] has to split them.
-pub const PS_COLUMNS: &str = "pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=";
+/// The columns `macos.rs` asks `ps` for, in this order, with
+/// [`PS_FLAGS`]. `comm` is free text - a path with a space in it is common
+/// on a Mac (`/Applications/Example App.app/...`) - so it is the last
+/// column and the only one: Apple's `ps` pads and cuts every column but the
+/// last to a fixed width, and `comm`'s is sixteen, which left a name like
+/// `wo` from `/Users/runner/work/...`. The command line is read for the
+/// open process alone, by [`PS_ARGS`].
+pub const PS_COLUMNS: &str = "pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=";
 
-/// One row of `ps -axo` with [`PS_COLUMNS`].
+/// Every process, and no width limit: without `ww` Apple's `ps` cuts each
+/// line to 79 columns when its output is not a terminal.
+pub const PS_FLAGS: &str = "-axww";
+
+/// One process's whole command line, as `ps -ww -o args= -p <pid>`.
+pub const PS_ARGS: &str = "args=";
+
+/// One row of `ps` with [`PS_COLUMNS`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PsRow {
     pub pid: i32,
@@ -46,31 +57,23 @@ pub struct PsRow {
     pub running: f64,
     /// The executable's name, without its directory.
     pub comm: String,
-    /// The whole command line.
-    pub args: String,
 }
 
-/// `ps -axo pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=`.
+/// `ps -axww -o pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=`.
 ///
-/// Nine whitespace-separated fields, then `comm` and `args` - both free
-/// text, and a path with a space in it is common on a Mac
-/// (`/Applications/Example App.app/...`). The split is made where the rest
-/// of the line starts again with the command: `args` begins with the path
-/// it was started by, which `comm` also is. Where no split reads that way
-/// (a process that rewrote its argv), `comm` is the first word and `args`
-/// is the rest, which still keeps every character of the line.
+/// Nine whitespace-separated fields, then `comm` - the rest of the line,
+/// spaces and all, since it is the last column. Its directory is dropped.
 ///
 /// A line that does not parse is skipped, not zeroed.
 pub fn parse_ps_table(text: &str) -> Vec<PsRow> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let (fields, rest) = leading_fields(line, 9);
-        if fields.len() < 9 {
+        if fields.len() < 9 || rest.is_empty() {
             continue;
         }
         let parsed = (|| {
             let state = fields[7].chars().next()?;
-            let (comm, args) = split_comm_args(rest);
             Some(PsRow {
                 pid: fields[0].parse().ok()?,
                 ppid: fields[1].parse().ok()?,
@@ -81,8 +84,7 @@ pub fn parse_ps_table(text: &str) -> Vec<PsRow> {
                 rss_kb: fields[6].parse().ok()?,
                 state: apple_state(state),
                 running: parse_etime(fields[8])?,
-                comm: basename(&comm).to_string(),
-                args,
+                comm: basename(rest).to_string(),
             })
         })();
         if let Some(row) = parsed {
@@ -114,32 +116,6 @@ fn leading_fields(line: &str, n: usize) -> (Vec<&str>, &str) {
         rest = &trimmed[end..];
     }
     (fields, rest.trim())
-}
-
-/// `comm` and `args` from the free text after the ninth field.
-fn split_comm_args(rest: &str) -> (String, String) {
-    let rest = rest.trim();
-    // Every place a space could end `comm`, left to right: the first one
-    // after which the line starts again with what came before it.
-    for (at, _) in rest.match_indices(' ') {
-        let comm = rest[..at].trim_end();
-        let args = rest[at..].trim_start();
-        if comm.is_empty() || args.is_empty() {
-            continue;
-        }
-        if args.starts_with(comm) {
-            return (comm.to_string(), args.to_string());
-        }
-        // `comm` may be only the name while `args` holds the full path.
-        let first = args.split(' ').next().unwrap_or("");
-        if !comm.contains('/') && basename(first) == comm {
-            return (comm.to_string(), args.to_string());
-        }
-    }
-    match rest.split_once(' ') {
-        Some((comm, args)) => (comm.to_string(), args.trim_start().to_string()),
-        None => (rest.to_string(), rest.to_string()),
-    }
 }
 
 fn basename(path: &str) -> &str {
@@ -812,14 +788,15 @@ shadowed:x:1000:1000::/:/bin/sh
     #[test]
     fn a_ps_table_keeps_spaces_in_a_command_and_reads_apple_states() {
         let text = "\
-    1     0     0 root               0.0  0.1  12345 Ss   12-03:04:05 /sbin/launchd    /sbin/launchd
-  501     1   501 user-a             3.5  1.2 204800 U    01:02:03 /Applications/Example App.app/Contents/MacOS/Example App /Applications/Example App.app/Contents/MacOS/Example App --flag value
-  777   501   501 user-a             0.0  0.0    900 I    05:09 example-worker   example-worker: rewritten title
+    1     0     0 root               0.0  0.1  12345 Ss   12-03:04:05 /sbin/launchd
+  501     1   501 user-a             3.5  1.2 204800 U    01:02:03 /Applications/Example App.app/Contents/MacOS/Example App
+  777   501   501 user-a             0.0  0.0    900 I    05:09 example-worker
   778   501   501 user-a             0.0  0.0    900 Z    00:01 (example-zombie)
+  779   501   501 user-a             0.0  0.0    900 S    00:01
 garbage line
 ";
         let rows = parse_ps_table(text);
-        assert_eq!(rows.len(), 4, "{rows:#?}");
+        assert_eq!(rows.len(), 4, "a row with no command is skipped: {rows:#?}");
 
         let launchd = &rows[0];
         assert_eq!(
@@ -836,24 +813,29 @@ garbage line
             "a space in the path stays in the name"
         );
         assert_eq!(
-            app.args,
-            "/Applications/Example App.app/Contents/MacOS/Example App --flag value"
-        );
-        assert_eq!(
             (app.user.as_str(), app.uid, app.rss_kb),
             ("user-a", 501, 204_800)
         );
         assert_eq!(app.cpu, 3.5);
         assert_eq!(app.running, 3723.0);
 
-        let renamed = &rows[2];
-        assert_eq!(renamed.state, 'S', "I is idle sleep");
-        assert_eq!(renamed.comm, "example-worker");
-        assert_eq!(renamed.args, "example-worker: rewritten title");
-        assert_eq!(renamed.running, 309.0);
+        let worker = &rows[2];
+        assert_eq!(worker.state, 'S', "I is idle sleep");
+        assert_eq!(worker.comm, "example-worker");
+        assert_eq!(worker.running, 309.0);
 
         assert_eq!(rows[3].state, 'Z');
         assert_eq!(rows[3].comm, "(example-zombie)");
+    }
+
+    #[test]
+    fn a_long_path_is_named_by_its_last_part_not_cut_at_sixteen() {
+        // The name is the last column, so nothing pads or cuts it.
+        let text = "  901     1   501 user-a   0.0  0.0  900 S  00:01 /Users/example/work/project/target/debug/deps/procs-0123456789abcdef\n";
+        let rows = parse_ps_table(text);
+        assert_eq!(rows[0].comm, "procs-0123456789abcdef");
+        assert!(PS_COLUMNS.ends_with(",comm="), "{PS_COLUMNS}");
+        assert!(PS_FLAGS.ends_with("ww"), "{PS_FLAGS}");
     }
 
     #[test]
@@ -862,8 +844,8 @@ garbage line
         // `%cpu` and `%mem` as `3,5`: every row must still read, or the
         // table is empty and looks like a machine running nothing.
         let text = "\
-    1     0     0 root               0,0  0,1  12345 Ss   12-03:04:05 /sbin/launchd    /sbin/launchd
-  501     1   501 user-a            12,5  1,2 204800 R    01:02:03 /usr/bin/example /usr/bin/example
+    1     0     0 root               0,0  0,1  12345 Ss   12-03:04:05 /sbin/launchd
+  501     1   501 user-a            12,5  1,2 204800 R    01:02:03 /usr/bin/example
 ";
         let rows = parse_ps_table(text);
         assert_eq!(rows.len(), 2, "{rows:#?}");
