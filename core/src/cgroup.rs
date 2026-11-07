@@ -362,6 +362,24 @@ fn reading(node: &Node, controller: &str) -> Option<Reading> {
     }
 }
 
+/// How far a parent's cpu or memory figure may fall short of its children's
+/// before the row is called inconsistent, as a share of the parent's.
+///
+/// The walk reads one file at a time, so a child is read a moment after its
+/// parent and a busy child has used a little more by then. On a live host
+/// that made busy parents with almost no CPU of their own `inconsistent` on
+/// most polls - two or three rows of gaps every frame, each one a reading
+/// that was right to within the time between two reads. A shortfall that
+/// small is that skew, not a missing reading; the row's own share still
+/// bottoms out at zero.
+const READ_SKEW_PERCENT: u64 = 1;
+
+/// Whether children's `taken` exceeds the parent's `own` by more than the
+/// read skew allows.
+fn beyond_read_skew(own: u64, taken: u64) -> bool {
+    taken > own && taken - own > own / 100 * READ_SKEW_PERCENT
+}
+
 /// Every cgroup with `controller` enabled and a reading for it, with its
 /// own share: the reading minus those of its nearest descendants that
 /// also carry the controller. Subtraction saturates at zero and marks the
@@ -431,7 +449,7 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
                         Reading::Io(_) => 0,
                     })
                     .fold(0u64, u64::saturating_add);
-                inconsistent |= taken > v;
+                inconsistent |= beyond_read_skew(v, taken);
                 let left = v.saturating_sub(taken);
                 if controller == "cpu" {
                     Reading::Cpu(left)
@@ -888,6 +906,32 @@ mod tests {
         assert_eq!(mem[0].path, "user.slice");
         assert_eq!(mem[0].own, Reading::Memory(4096));
         assert!(attribute(&tree, "pids").is_empty());
+    }
+
+    /// A child read a moment after its parent can be a little ahead of it.
+    /// Within the read skew that is not a gap: the parent's own share is
+    /// zero and the row is not flagged. Past it, the row is flagged.
+    #[test]
+    fn a_child_just_ahead_of_its_parent_is_read_skew_not_a_gap() {
+        let tree_with = |child: u64| {
+            let mut root = node("", &["cpu"]);
+            root.cpu = Some(CpuStat {
+                usage_usec: 1_000_000,
+                ..CpuStat::default()
+            });
+            let mut svc = node("example-db.service", &["cpu"]);
+            svc.cpu = Some(CpuStat {
+                usage_usec: child,
+                ..CpuStat::default()
+            });
+            Tree { nodes: vec![root, svc] }
+        };
+        let skewed = attribute(&tree_with(1_009_000), "cpu");
+        assert_eq!(skewed[0].own, Reading::Cpu(0));
+        assert!(!skewed[0].inconsistent, "0.9% ahead is read skew");
+        let short = attribute(&tree_with(1_020_000), "cpu");
+        assert_eq!(short[0].own, Reading::Cpu(0));
+        assert!(short[0].inconsistent, "2% ahead is a real shortfall");
     }
 
     /// A child reporting more than its parent: zero, never negative, and
