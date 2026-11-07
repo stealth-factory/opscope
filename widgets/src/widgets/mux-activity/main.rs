@@ -138,6 +138,48 @@ pub fn mux_rows(line: &str, colour: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
+/// A group's sub-heading - a Rex session, a Herdr workspace - with a rule
+/// to the pane's edge: its name, how many panes it holds, then the line
+/// that says one group has ended and the next begun. The rule is a hairline
+/// in Kitty (`Plot::rule`) and `─` in text, written into the row as well so
+/// the row reads the same without the plot. `y` is the row the heading
+/// lands on in whatever the plots are placed against.
+///
+/// A name too long for the pane wraps whole, without a rule, rather than
+/// being cut: a cut name reads as a different group.
+pub fn group_heading(
+    label: &str,
+    n: usize,
+    w: usize,
+    (name, count, rule): (&str, &str, &str),
+    y: usize,
+    plots: &mut Vec<tc::Plot>,
+) -> Vec<String> {
+    let tally = format!("· {}", n);
+    let room = w.saturating_sub(1);
+    let used = 1 + tc::display_width(label) + 1 + tc::display_width(&tally);
+    if used + 3 < room {
+        let x = used + 1;
+        let width = room - x;
+        plots.push(tc::Plot::rule(x, y, width, rule, "─", 0.08));
+        return vec![tc::seg(
+            &[
+                ("", " ".to_string()),
+                (name, label.to_string()),
+                ("", " ".to_string()),
+                (count, tally),
+                ("", " ".to_string()),
+                (rule, "─".repeat(width)),
+            ],
+            room,
+        )];
+    }
+    tc::wrap_words(&format!("{} {}", label, tally), w.saturating_sub(2).max(1))
+        .into_iter()
+        .map(|l| tc::seg(&[(name, format!(" {}", l))], room))
+        .collect()
+}
+
 /// What the dependency check asks for: the one multiplexer CLI this
 /// backend talks to, made required, and what it alone recommends.
 ///

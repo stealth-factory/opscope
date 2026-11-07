@@ -2126,7 +2126,14 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                             .iter()
                             .filter(|o| o.session_id == pane.session_id)
                             .count();
-                        rows.extend(group_heading(&pane.session_label, n, w, &p, rows.len(), &mut body_plots));
+                        rows.extend(super::group_heading(
+                            &pane.session_label,
+                            n,
+                            w,
+                            (&p.accent, &p.dim, &p.rule),
+                            rows.len(),
+                            &mut body_plots,
+                        ));
                     } else if let Some((session, rows_before)) = &previous {
                         // One-row panes stack as a table; a pane of several
                         // rows gets a gap so its rows stay its own. A gap,
@@ -2385,43 +2392,6 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 /// pane, and then it is wrapped at its own spaces. Clipping a header line
 /// at the pane edge is the cut this collection does not make: `5 pane` and
 /// `panes runn` are numbers and words that are not on the server.
-/// A session's sub-heading: its name and pane count, then a rule to the
-/// pane's edge. The rule is a hairline in Kitty and `─` in text; it is
-/// written into the row as well, so the row reads the same without it.
-fn group_heading(
-    label: &str,
-    n: usize,
-    w: usize,
-    p: &Palette,
-    y: usize,
-    plots: &mut Vec<tc::Plot>,
-) -> Vec<String> {
-    let parts = [
-        (p.accent.as_str(), label.to_string()),
-        (p.dim.as_str(), format!("· {}", n)),
-    ];
-    let mut out = flow(&parts, w);
-    let used = 1 + tc::display_width(label) + 1 + tc::display_width(&format!("· {}", n));
-    let room = w.saturating_sub(1);
-    if out.len() == 1 && used + 3 < room {
-        let x = used + 1;
-        let width = room - x;
-        out[0] = tc::seg(
-            &[
-                ("", " ".to_string()),
-                (parts[0].0, parts[0].1.clone()),
-                ("", " ".to_string()),
-                (parts[1].0, parts[1].1.clone()),
-                ("", " ".to_string()),
-                (p.rule.as_str(), "─".repeat(width)),
-            ],
-            room,
-        );
-        plots.push(tc::Plot::rule(x, y, width, &p.rule, "─", 0.08));
-    }
-    out
-}
-
 fn flow(parts: &[(&str, String)], w: usize) -> Vec<String> {
     let room = w.saturating_sub(2).max(1);
     let mut rows = Vec::new();

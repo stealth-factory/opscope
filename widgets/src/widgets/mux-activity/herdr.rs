@@ -573,8 +573,11 @@ fn foreground(pane_id: &str) -> Front {
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     let mut labels = HashMap::new();
+    // Herdr's own order, for workspaces whose most urgent agents tie.
+    let mut order: Vec<String> = Vec::new();
     if let Some(res) = herdr(&["workspace", "list"]) {
         for w in res["workspaces"].as_array().into_iter().flatten() {
+            order.push(text_at(w, "workspace_id"));
             labels.insert(text_at(w, "workspace_id"), text_at(w, "label"));
         }
     }
@@ -640,6 +643,9 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             .cmp(&rank_of(&b.state))
             .then(b.since.total_cmp(&a.since))
     });
+    // Drawn, walked by the keys and indexed by the cursor in this order, so
+    // the grouping happens here and nowhere else.
+    let agents = by_workspace(agents, &order);
 
     let mut panels = Vec::new();
     if let Some(listing) = pane_listing
@@ -718,6 +724,82 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     seen.first_poll = false;
 }
 
+/// Agents regrouped by workspace, without losing who needs you.
+///
+/// Each workspace's agents stay together in the order they already had -
+/// worst first. Workspaces are ordered by their most urgent agent, then by
+/// Herdr's own workspace order, so a blocked agent still puts its workspace
+/// at the top rather than waiting behind a quiet one that is listed first.
+/// Rex's `by_session`, for Herdr's workspaces.
+fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
+    let mut groups: Vec<(usize, usize, Vec<Agent>)> = Vec::new();
+    for agent in agents {
+        let rank = rank_of(&agent.state);
+        match groups
+            .iter_mut()
+            .find(|(_, _, g)| g[0].workspace_id == agent.workspace_id)
+        {
+            Some((worst, _, g)) => {
+                *worst = (*worst).min(rank);
+                g.push(agent);
+            }
+            None => {
+                let at = order
+                    .iter()
+                    .position(|id| *id == agent.workspace_id)
+                    .unwrap_or(usize::MAX);
+                groups.push((rank, at, vec![agent]));
+            }
+        }
+    }
+    // Stable, so workspaces Herdr did not list keep the order they arrived in.
+    groups.sort_by_key(|(worst, at, _)| (*worst, *at));
+    groups.into_iter().flat_map(|(_, _, g)| g).collect()
+}
+
+/// What goes above agent `i`: nothing for the section's first agent when
+/// there is one workspace, a gap between two agents of one workspace, and
+/// a gap and the workspace's heading where a workspace begins. A heading
+/// only when there is more than one workspace to tell apart - with one, the
+/// heading would name the only thing there is.
+///
+/// The rows it returns are what the window counts, so `y` decides only
+/// where the heading's rule is placed, not how many rows there are.
+fn lead_rows(
+    agents: &[Agent],
+    i: usize,
+    w: usize,
+    name_of: &dyn Fn(&str) -> String,
+    p: &Palette,
+    y: usize,
+    plots: &mut Vec<tc::Plot>,
+) -> Vec<String> {
+    let grouped = agents
+        .iter()
+        .any(|a| a.workspace_id != agents[0].workspace_id);
+    let starts = i == 0 || agents[i - 1].workspace_id != agents[i].workspace_id;
+    let mut out = Vec::new();
+    if i > 0 {
+        out.push(String::new());
+    }
+    if grouped && starts {
+        let n = agents
+            .iter()
+            .filter(|a| a.workspace_id == agents[i].workspace_id)
+            .count();
+        let at = y + out.len();
+        out.extend(super::group_heading(
+            &name_of(&agents[i].workspace_id),
+            n,
+            w,
+            (&p.accent, &p.dim, &p.rule),
+            at,
+            plots,
+        ));
+    }
+    out
+}
+
 /// A duration as this widget says it, which is not how the others do.
 ///
 /// Between an hour and a day it carries the minutes too: an agent blocked
@@ -786,8 +868,8 @@ struct Palette {
     /// the same role lifted - `ink_on(Muted, true)` - and it is used *only*
     /// where a tint is on, so an untinted row is exactly the colour it always
     /// was. Not quite the same as
-    /// "unselected": herdr-panes tints a blocked or done row whether or not it
-    /// is selected, and those get the lighter colours too.
+    /// "unselected": a blocked row is tinted whether or not it is selected,
+    /// and gets the lighter colours too.
     ///
     /// The substitution happens inside the closure that composes the tint, not
     /// at each call site. Seventeen sites were counted when this was found and
@@ -803,6 +885,8 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The rule under a workspace's sub-heading: decoration, never text.
+    rule: String,
     /// The lifted form of every other role this palette draws in, for text
     /// on a selected or tinted row: the named `_lit` twins above are swapped
     /// in by the tint closure first, and anything else it is handed goes
@@ -840,6 +924,7 @@ fn palette() -> Palette {
         proc: tc::ink(tc::Role::Muted),
         idle_c: tc::ink(tc::Role::Muted),
         idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        rule: tc::ink(tc::Role::Border),
         lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
             .into_iter()
             .map(|role| (tc::ink(role), tc::ink_on(role, true)))
@@ -1319,10 +1404,20 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             + footer.len()
             + 1; // the note line
         let room = h.saturating_sub(chrome).max(1);
-        // An agent takes two rows and a pane takes one, in the order the
-        // keys walk them.
-        let heights: Vec<usize> = std::iter::repeat(2)
-            .take(agents.len())
+        // A workspace's heading names it by its label, whatever `l` says
+        // the rows show: the heading is where the label is for.
+        let name_of = |workspace_id: &str| -> String {
+            match labels.get(workspace_id) {
+                Some(label) if !label.is_empty() => label.clone(),
+                _ => workspace_id.to_string(),
+            }
+        };
+        // An agent takes two rows, plus the gap or workspace heading above
+        // it, and a pane takes one, in the order the keys walk them. The
+        // rows above an agent count as its own, so the window keeps them
+        // with the agent they introduce.
+        let heights: Vec<usize> = (0..agents.len())
+            .map(|i| 2 + lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len())
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
         let window = window_over(&heights, selected, room, scroll, moved);
@@ -1398,6 +1493,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             if !window.contains(&i) {
                 continue;
             }
+            let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut plots);
+            rows.extend(lead);
             let from = rows.len();
             let here = i == selected;
             let colour = colour_of(&a.state, &p);
@@ -1798,6 +1895,61 @@ fn idle_filter(show_idle: bool, resting: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent(pane: &str, workspace: &str, state: &str) -> Agent {
+        Agent {
+            name: "claude".into(),
+            pane_id: pane.into(),
+            tab_id: String::new(),
+            workspace_id: workspace.into(),
+            state: state.into(),
+            title: String::new(),
+            cwd: String::new(),
+            since: 0.0,
+            exact: true,
+            cpu: None,
+            rss: None,
+        }
+    }
+
+    #[test]
+    fn agents_group_by_workspace_with_the_most_urgent_workspace_first() {
+        // Already worst-first, as poll sorts them before grouping.
+        let sorted = vec![
+            agent("p1", "w2", "blocked"),
+            agent("p2", "w1", "done"),
+            agent("p3", "w2", "idle"),
+            agent("p4", "w1", "working"),
+            agent("p5", "w3", "done"),
+        ];
+        let order = ["w1".to_string(), "w2".to_string(), "w3".to_string()];
+        let panes: Vec<String> = by_workspace(sorted, &order)
+            .into_iter()
+            .map(|a| a.pane_id)
+            .collect();
+        // w2 holds the blocked agent, so it leads; w1 and w3 tie on done
+        // and keep Herdr's order. Inside each, the order it already had.
+        assert_eq!(panes, ["p1", "p3", "p2", "p4", "p5"]);
+    }
+
+    #[test]
+    fn a_workspace_heading_only_when_there_are_workspaces_to_tell_apart() {
+        let p = palette();
+        let name = |id: &str| id.to_string();
+        let one = vec![agent("p1", "w1", "idle"), agent("p2", "w1", "idle")];
+        assert!(lead_rows(&one, 0, 80, &name, &p, 0, &mut Vec::new()).is_empty());
+        // Between two agents of one workspace: a gap, and no line.
+        assert_eq!(lead_rows(&one, 1, 80, &name, &p, 0, &mut Vec::new()), [""]);
+
+        let two = vec![agent("p1", "w1", "idle"), agent("p2", "w2", "idle")];
+        let mut plots = Vec::new();
+        assert_eq!(lead_rows(&two, 0, 80, &name, &p, 0, &mut plots).len(), 1);
+        let second = lead_rows(&two, 1, 80, &name, &p, 10, &mut plots);
+        assert_eq!(second.len(), 2, "a gap, then the heading");
+        assert!(second[1].contains("w2") && second[1].contains('─'));
+        // One rule per heading, each placed on its heading's row.
+        assert_eq!(plots.len(), 2);
+    }
 
     #[test]
     fn watcher_panic_reason_is_visible_in_state() {

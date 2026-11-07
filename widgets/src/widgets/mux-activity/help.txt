@@ -77,6 +77,9 @@ dev servers, monitors, builds - with what it is running and what it costs.
 IDLE lists the panes sitting at a shell prompt, by directory, so they can
 still be jumped to.
 
+Inside AGENTS the agents are grouped by workspace, the workspace holding
+the most urgent agent first, each under its label and a rule.
+
 Enter (or f) jumps to whatever is selected: the agent's pane, or the tab
 holding that process.
 
