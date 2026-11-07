@@ -646,6 +646,10 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The rule under a session's sub-heading: decoration, never text.
+    rule: String,
+    /// The lighter divider between two panes of one session.
+    divider: String,
     /// The lifted form of every other role this palette draws in, for text
     /// on a selected or tinted row: the named `_lit` twins above are swapped
     /// in by the tint closure first, and anything else it is handed goes
@@ -683,6 +687,8 @@ fn palette() -> Palette {
         proc: tc::ink(tc::Role::Muted),
         idle_c: tc::ink(tc::Role::Muted),
         idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        rule: tc::ink(tc::Role::Border),
+        divider: tc::ink(tc::Role::Dim),
         lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
             .into_iter()
             .map(|role| (tc::ink(role), tc::ink_on(role, true)))
@@ -2052,6 +2058,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         let mut cursor_span: Option<(usize, usize)> = None;
+        // Rules that scroll with the body, placed by their row in `rows`.
+        let mut body_plots: Vec<tc::Plot> = Vec::new();
         sections.clear();
 
         match (&board, &absence) {
@@ -2101,24 +2109,37 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // session: with one, the count line has already named it.
                 // Decided from the section's own list, so each section
                 // starts its own run of sub-headings.
+                // The previous pane drawn in this section: its session and
+                // how many rows it took, for the divider between two panes.
+                let mut previous: Option<(String, usize)> = None;
                 let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize, of: &[&Pane]| {
-                    let first = of.iter().position(|o| o.session_id == pane.session_id)
-                        == of.iter().position(|o| o.block_id == pane.block_id);
-                    if cols.sessions && first {
+                    let at_group = of.iter().position(|o| o.session_id == pane.session_id);
+                    let at_pane = of.iter().position(|o| o.block_id == pane.block_id);
+                    if at_pane == Some(0) {
+                        previous = None;
+                    }
+                    let drawn = render_pane(pane, index == selected, w, &cols, &p, tick, at);
+                    if cols.sessions && at_group == at_pane {
+                        // A gap above every session but the section's
+                        // first, so each reads as its own group.
+                        if at_pane != Some(0) {
+                            rows.push(String::new());
+                        }
                         let n = of
                             .iter()
                             .filter(|o| o.session_id == pane.session_id)
                             .count();
-                        rows.extend(flow(
-                            &[
-                                (p.accent.as_str(), format!("  ╶ {}", pane.session_label)),
-                                (p.dim.as_str(), format!("· {}", n)),
-                            ],
-                            w,
-                        ));
+                        rows.extend(group_heading(&pane.session_label, n, w, &p, rows.len(), &mut body_plots));
+                    } else if let Some((session, rows_before)) = &previous {
+                        // One-row panes stack as a table; a pane of several
+                        // rows gets a divider so its rows stay its own.
+                        if *session == pane.session_id && (*rows_before > 1 || drawn.len() > 1) {
+                            rows.push(divider(w, &p, rows.len(), &mut body_plots));
+                        }
                     }
+                    previous = Some((pane.session_id.clone(), drawn.len()));
                     let from = rows.len();
-                    rows.extend(render_pane(pane, index == selected, w, &cols, &p, tick, at));
+                    rows.extend(drawn);
                     rows_at.extend((from..rows.len()).map(|row| (row, index)));
                     if index == selected {
                         cursor_span = Some((from, rows.len()));
@@ -2343,10 +2364,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // click resolves through `item_at` with the same head and scroll.
         placed = rows_at;
         // The bar sits in the pinned header, so its frame row is its row.
-        let plots: Vec<_> = plots
+        let mut plots: Vec<_> = plots
             .into_iter()
             .filter_map(|plot| plot.in_viewport(0, 0, head_rows))
             .collect();
+        // The rules scroll with the body, so they are windowed like it.
+        plots.extend(
+            body_plots
+                .into_iter()
+                .filter_map(|plot| plot.in_viewport(scroll, head_rows, room)),
+        );
         tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
@@ -2359,6 +2386,59 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 /// pane, and then it is wrapped at its own spaces. Clipping a header line
 /// at the pane edge is the cut this collection does not make: `5 pane` and
 /// `panes runn` are numbers and words that are not on the server.
+/// A session's sub-heading: its name and pane count, then a rule to the
+/// pane's edge. The rule is a hairline in Kitty and `─` in text; it is
+/// written into the row as well, so the row reads the same without it.
+fn group_heading(
+    label: &str,
+    n: usize,
+    w: usize,
+    p: &Palette,
+    y: usize,
+    plots: &mut Vec<tc::Plot>,
+) -> Vec<String> {
+    let parts = [
+        (p.accent.as_str(), label.to_string()),
+        (p.dim.as_str(), format!("· {}", n)),
+    ];
+    let mut out = flow(&parts, w);
+    let used = 1 + tc::display_width(label) + 1 + tc::display_width(&format!("· {}", n));
+    let room = w.saturating_sub(1);
+    if out.len() == 1 && used + 3 < room {
+        let x = used + 1;
+        let width = room - x;
+        out[0] = tc::seg(
+            &[
+                ("", " ".to_string()),
+                (parts[0].0, parts[0].1.clone()),
+                ("", " ".to_string()),
+                (parts[1].0, parts[1].1.clone()),
+                ("", " ".to_string()),
+                (p.rule.as_str(), "─".repeat(width)),
+            ],
+            room,
+        );
+        plots.push(tc::Plot::rule(x, y, width, &p.rule, "─", 0.08));
+    }
+    out
+}
+
+/// The light divider between two panes of one session, indented to where
+/// a pane's own rows start.
+fn divider(w: usize, p: &Palette, y: usize, plots: &mut Vec<tc::Plot>) -> String {
+    let room = w.saturating_sub(1);
+    let x = 3;
+    if room <= x + 1 {
+        return String::new();
+    }
+    let width = room - x;
+    plots.push(tc::Plot::rule(x, y, width, &p.divider, "┈", 0.05));
+    tc::seg(
+        &[("", " ".repeat(x)), (p.divider.as_str(), "┈".repeat(width))],
+        room,
+    )
+}
+
 fn flow(parts: &[(&str, String)], w: usize) -> Vec<String> {
     let room = w.saturating_sub(2).max(1);
     let mut rows = Vec::new();
