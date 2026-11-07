@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
+use opscope_core as tc;
 use opscope_core::procfs::{self, PidIo, PidStat};
 
 use super::model::{
@@ -237,7 +238,7 @@ fn threads(
             };
             list.push(Thread {
                 tid,
-                comm: stat.comm.clone(),
+                comm: tc::source_text(&stat.comm),
                 state: stat.state,
                 cpu,
                 running: uptime.map(|up| parse::running_secs(stat.starttime, ticks, up)),
@@ -326,14 +327,18 @@ pub fn sample(source: &mut Source, with_threads: bool) -> Result<Sample, String>
         let Ok((uid, _)) = procfs::read_owner(pid) else {
             continue;
         };
-        let cgroup = procfs::read_cgroup(pid).ok();
+        // A process names itself and anyone can name a directory, so
+        // every string read here is text with its escapes taken out: a
+        // name holding `ESC[` or a newline would otherwise restyle or
+        // misalign the table it is drawn in.
+        let cgroup = procfs::read_cgroup(pid).ok().map(|c| tc::source_text(&c));
         let comm = if stat.comm.is_empty() {
             procfs::read_cmdline(pid)
                 .ok()
-                .and_then(|line| line.split(' ').next().map(str::to_string))
+                .and_then(|line| line.split(' ').next().map(tc::source_text))
                 .unwrap_or_default()
         } else {
-            stat.comm.clone()
+            tc::source_text(&stat.comm)
         };
         let before = source
             .prev
@@ -424,16 +429,18 @@ pub fn facts(source: &mut Source, proc: &Proc) -> Facts {
         if line.is_empty() {
             Err("empty: a kernel thread or a zombie has no command line".to_string())
         } else {
-            Ok(line)
+            Ok(tc::source_text(&line))
         }
     });
-    let cwd = procfs::read_cwd(pid).map_err(|err| {
-        if denied(&err) {
-            "needs root for another user's process".to_string()
-        } else {
-            err
-        }
-    });
+    let cwd = procfs::read_cwd(pid)
+        .map(|cwd| tc::source_text(&cwd))
+        .map_err(|err| {
+            if denied(&err) {
+                "needs root for another user's process".to_string()
+            } else {
+                err
+            }
+        });
     let gid = procfs::read_owner(pid).ok().map(|(_, gid)| gid);
     let starttime = start.unwrap_or(0);
     let now = Instant::now();
@@ -575,6 +582,32 @@ mod acquisition_tests {
         assert!(!second.procs.iter().any(|p| p.pid == tid && tid != me));
         let off = sample(&mut source, false).expect("/proc is readable");
         assert!(off.threads.is_none());
+        let _ = tx.send(());
+        let _ = held.join();
+    }
+
+    #[test]
+    fn a_name_with_escapes_in_it_is_read_as_text() {
+        // Any process names its own threads; the kernel keeps the bytes.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let held = std::thread::Builder::new()
+            .name("\u{1b}[7mesc\nx".into())
+            .spawn(move || {
+                let _ = rx.recv();
+            })
+            .expect("spawn a named thread");
+        let mut source = Source::default();
+        let me = std::process::id() as i32;
+        let got = sample(&mut source, true).expect("/proc is readable");
+        let mine = &got.threads.as_ref().expect("asked for threads")[&me];
+        let named = mine
+            .iter()
+            .find(|t| t.comm.contains("esc"))
+            .unwrap_or_else(|| panic!("the named thread is listed: {mine:?}"));
+        assert_eq!(named.comm, "escx", "{:?}", named.comm);
+        for proc in &got.procs {
+            assert!(!proc.comm.chars().any(char::is_control), "{:?}", proc.comm);
+        }
         let _ = tx.send(());
         let _ = held.join();
     }

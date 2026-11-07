@@ -405,12 +405,12 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     field(
         &mut rows,
         "cgroup",
-        &format!("/{}", svc.path),
+        &format!("/{}", tc::source_text(&svc.path)),
         txt,
         width,
         p,
     );
-    let unit = tc::procfs::unit_name(&svc.path);
+    let unit = tc::procfs::unit_name(&tc::source_text(&svc.path));
     if !unit.is_empty() {
         field(&mut rows, "unit", &unit, txt, width, p);
     }

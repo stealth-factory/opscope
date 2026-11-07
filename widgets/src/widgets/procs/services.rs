@@ -58,12 +58,15 @@ impl Service {
         self.cpu_usec.unwrap_or(0) == 0 && self.memory.unwrap_or(0) == 0 && self.pids.is_empty()
     }
 
-    /// The row's name: its path, `/` for the root.
+    /// The row's name: its path, `/` for the root. A delegated subtree
+    /// lets a user name a cgroup anything, so the path is drawn as text
+    /// with its escapes taken out; `path` itself stays exact, since it is
+    /// what `memory.max` is read through.
     pub fn name(&self) -> String {
         if self.path.is_empty() {
             "/".to_string()
         } else {
-            self.path.clone()
+            opscope_core::source_text(&self.path)
         }
     }
 }
