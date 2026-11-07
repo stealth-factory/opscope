@@ -25,7 +25,7 @@ cycles 6, 12 and 24 hours for the session. `window_hours` is which of those
 the pane starts on (24 by default). The disk detail screen does not offer
 `w`: its I/O chart is in memory and has no window.
 
-WHO IS WRITING is Linux-only and needs no root. BY SERVICE reads cgroup v2
+WHO IS WRITING needs no root. On Linux BY SERVICE reads cgroup v2
 `io.stat` under `/sys/fs/cgroup` once a poll, and WAITING ON DISK reads
 `/proc/<pid>/stat` for every process. What it can and cannot show is
 decided by the host, not by this widget's settings:
@@ -42,19 +42,34 @@ decided by the host, not by this widget's settings:
   it to 1 (as root) adds per-process wait times; the widget reads it once
   a minute. It costs a little on every context switch, which is why
   kernels ship with it off; whether to turn it on is the user's call.
-- **What root adds.** Another user's `/proc/<pid>/io`, `cwd` and parts of
-  `cmdline` are closed to an ordinary user. BY SERVICE is complete without
-  them; the PROCS column and the process detail say how many could not be
-  read.
+- **What root adds.** Another user's `/proc/<pid>/io`, `cwd`, open files
+  and parts of `cmdline` are closed to an ordinary user. BY SERVICE is
+  complete without them; the PROCS column, BY PROCESS's heading (`412 of
+  598 processes readable (yours) · the other 186 need root`) and the
+  process detail say how many could not be read. Running as root makes
+  every process readable; nothing in the widget's settings does.
+- **`hidepid`.** With `/proc` mounted `hidepid=invisible` (or `2`), other
+  users' processes are not listed at all, and BY PROCESS counts the
+  `visible` ones and says so.
 
-Cgroup v1 or hybrid hosts get `by service needs cgroup v2`. macOS does not
-draw the section at all.
+BY PROCESS reads `/proc/<pid>/io` in the same pass as WAITING ON DISK, and
+`reconcile_seconds` (60, at least 10) is how long it sums the readable
+processes' writes and the disks' before it compares them. Longer is
+steadier; shorter follows a change sooner. A process's write counter moves
+when a page is dirtied and the disk's when the write is submitted, so the
+two only line up over a window, and the line says `≈`.
+
+Cgroup v1 or hybrid hosts get `by service needs cgroup v2`. On macOS the
+section is BY PROCESS alone: `proc_pid_rusage` for every process this user
+owns (another user's is counted as needing root), named by one
+`ps -axo pid=,comm=` a poll, and compared with `iostat`'s combined MB/s.
+Running the widget as root there reads every process as well.
 
 ## Settings owned here
 
 The owned section is `disk`.
 
-Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_hours`, `top_writers`, `show_kernel_threads`
+Declared fields: `refresh`, `hide_mounts`, `hide_devices`, `warn_percent`, `alert_percent`, `window_hours`, `top_writers`, `show_kernel_threads`, `reconcile_seconds`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

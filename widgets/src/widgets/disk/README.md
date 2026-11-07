@@ -42,6 +42,15 @@ CGROUP                              WRITE    READ SHARE PROCS
   /                                400K/s    0B/s    2% 1 · not readable
  accounted: 18M/s of 18M/s
 
+ BY PROCESS  /proc/<pid>/io · every disk · sorted: write · 412 of 598 processes
+ readable (yours) · the other 186 need root
+ 2 of 412 readable moved bytes over the last 2s
+  PID     COMMAND               WRITE    READ CGROUP
+  48213   example-worker      9.8M/s    0B/s user.slice
+  48990   example-sync        3.1M/s   11M/s user.slice
+ readable processes account for ≈ 13M/s of 19M/s (68%) written to sda, sdb over the
+ last 60s · write_bytes counts at dirtying, devices at submission
+
  WAITING ON DISK  3 in D state now · wait times off (needs root: sysctl
  kernel.task_delayacct=1) · 1 kernel thread hidden
   PID     COMMAND      STATE CGROUP
@@ -70,12 +79,14 @@ the pane starts on the `window_hours` setting, 24 by default (an old
 `w`: its I/O chart is kept in memory and has no window, and neither do
 the WHO IS WRITING screens.
 `v` shows idle disks, or hides them again.
-On Linux, `tab` also reaches BY SERVICE and WAITING ON DISK. There `↵`
-opens a cgroup's detail, a process's detail, or, on `+N more`, everyone
-in D state. `s` cycles BY SERVICE through write, read and name, and
-WAITING through time waited and pid when wait times are on. `a` shows
-every cgroup in BY SERVICE, or only the top `top_writers` again; the hint
-appears once there are more cgroups than that.
+`tab` also reaches BY SERVICE, BY PROCESS and WAITING ON DISK (on macOS,
+BY PROCESS only). There `↵` opens a cgroup's detail, a process's detail,
+or, on `+N more`, everyone in D state. `s` cycles BY SERVICE and BY
+PROCESS through write, read and name, and WAITING through time waited and
+pid when wait times are on. `a` shows every row of BY PROCESS while it has
+the cursor, and every cgroup in BY SERVICE otherwise, or only the top
+`top_writers` again; the hint names the table it acts on and appears once
+there are more rows than that.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
 
@@ -131,9 +142,12 @@ it for that run, with the same limits.
 warning the bar stays quiet; at the alert it is fully hot, and between
 them it climbs in a straight line.
 
-`top_writers` (8, at least 1) is how many cgroups BY SERVICE shows before
-`a`. `show_kernel_threads` (false) lists kernel threads in WAITING ON DISK
-instead of only counting them. Both are Linux-only.
+`top_writers` (8, at least 1) is how many rows BY SERVICE and BY PROCESS
+show before `a`. `show_kernel_threads` (false, Linux-only) lists kernel
+threads in WAITING ON DISK instead of only counting them.
+`reconcile_seconds` (60, at least 10) is the window BY PROCESS sums both
+sides over before it compares what the readable processes moved with what
+the disks did.
 
 ## When a number is missing
 
@@ -215,7 +229,9 @@ not available on this kernel (CONFIG_PSI or psi=0)` and never a zero.
 
 ## Who is writing
 
-Linux only, and only on the list screen. It describes one disk: the one
+Only on the list screen. On Linux it has BY SERVICE, BY PROCESS and
+WAITING ON DISK; on macOS it is BY PROCESS alone (below). BY SERVICE
+describes one disk: the one
 the DISKS cursor was put on, or until then the disk the table shows first
 (sorted by write, the busiest). The heading names it, the interval, and
 that disk's own write and read rates from `/proc/diskstats`.
@@ -268,7 +284,51 @@ first poll says `measuring`, because a rate needs two.
 `↵` on a row shows the full cgroup path, the controllers enabled there,
 its `io.pressure`, how many cgroups below it roll up into it and how to
 give one its own row, its rates on the disk, and every pid in it with its
-name and whether this user can read it.
+name and, for each one this user can read, its write and read rates over
+the last poll (every disk's: a process's counters are not kept per
+device), or `not readable`.
+
+**BY PROCESS** ranks processes by the bytes they moved over the last poll,
+from `/proc/<pid>/io`: `read_bytes`, and `write_bytes` less
+`cancelled_write_bytes` (pages dirtied and then thrown away by a truncate
+or a delete, which never reach the disk). It covers every disk, because a
+process's counters are not kept per device. Another user's
+`/proc/<pid>/io` is closed to an ordinary user, so this table is the
+readable share, and it says so every frame, even when the share is all of
+them: `412 of 598 processes readable (yours) · the other 186 need root`.
+Run as root, every process is readable and the sentence drops `(yours)`.
+With `/proc` mounted `hidepid=invisible`, other users' processes are not
+listed at all; the count then says `visible` and the line says why. The
+table shows the top `top_writers` that moved bytes, and the line above it
+says how many of the readable ones did (`2 of 412 readable moved bytes
+over the last 2s`); a readable process that moved nothing is counted, not
+listed. `a` lists every process: the readable ones (idle ones too), then
+the ones that need root, each still with its cgroup, since that is
+readable for every process. A process seen once has no rate yet (`—`);
+one that exits is dropped, and a pid reused by a new process starts again
+rather than being subtracted from the old one. CGROUP is the BY SERVICE
+row the process's I/O lands in. Columns leave as the pane narrows: CGROUP,
+then READ; a long command wraps.
+
+The line under the table ties what the readable processes wrote to what
+the disks took: `readable processes account for ≈ 13M/s of 19M/s (68%)
+written to sda, sdb over the last 60s`. The disk side is the total drawn
+above the chart, so a disk left out of that total is left out here too.
+The two cannot be compared poll by poll: `write_bytes` counts a page when
+it is dirtied, and the disk counts the write when it is submitted, which
+can be half a minute later. So both sides are summed over
+`reconcile_seconds` (60) and the line says `≈`; under a write burst the
+share can even pass 100% for a while. A poll where the disks had no rate
+is left out of both sides. The rest of the device's figure is the other
+users' processes, the kernel's own writeback and journal, and swap.
+
+`↵` on a process shows its command line, working directory, state and
+cgroup, what it has read and written since it started, its current rates,
+and the regular files it has open with each one's size and how much it
+grew since the previous sample (`+12M in 2s`); the screen reads all of it
+again every poll. On another user's process it shows what is readable (the
+pid, the name, the state, the cgroup and usually the command line) and
+`the rest needs root`.
 
 **WAITING ON DISK** is every process in `D` state now - a sample of this
 instant, not a count over time - with its cgroup, which is readable for
@@ -287,11 +347,24 @@ shows its command line, its working directory if this user can read it,
 and `the rest needs root` when its `io` cannot be read. Columns leave as
 the pane narrows: CGROUP first, then STATE.
 
-On macOS this section is not drawn. By service is cgroup v2, which a Mac
-does not have, and `ps` has no state that means what `D` means on Linux
-(`U` is the nearest, and it is a different thing). It is left out rather
-than drawn empty, because an empty table would read as nothing writing.
+On macOS the section reads `WHO IS WRITING  by process · proc_pid_rusage`
+and holds BY PROCESS alone. By service is cgroup v2, which a Mac does not
+have, and `ps` has no state that means what `D` means on Linux (`U` is
+the nearest, and it is a different thing), so neither is drawn, not even
+empty. Each poll lists every pid with `proc_listallpids` and reads
+`proc_pid_rusage(RUSAGE_INFO_V2)` for each: `ri_diskio_bytesread` and
+`ri_diskio_byteswritten`, the bytes the process handed to the disk layer.
+There is no `cancelled_write_bytes` there. Another user's process answers
+`EPERM` and is counted as needing root, in the same sentence as on Linux;
+run as root, every process is readable. Names come from one
+`ps -axo pid=,comm=` a poll. `iostat` gives only read and write together,
+so the reconciliation adds each process's read and write and says
+`combined`. There is no CGROUP column, and the process detail has no
+command line, working directory or open files: per-file I/O on macOS
+(`fs_usage`) needs root.
 
-Each poll is one walk of `/sys/fs/cgroup` and one pass over `/proc`
-(`stat` and `io` per process). The previous tree and each process's
-previous wait ticks are the only history kept.
+Each poll on Linux is one walk of `/sys/fs/cgroup` and one pass over
+`/proc` (`stat` and `io` per process). The previous tree, each process's
+previous wait ticks and previous `io` reading, the open process's
+previous file sizes, and the reconciliation's `reconcile_seconds /
+refresh` per-poll sums are the only history kept.

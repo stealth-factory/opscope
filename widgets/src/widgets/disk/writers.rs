@@ -12,8 +12,10 @@
 //! Nothing here opens a file. `linux.rs` walks `/sys/fs/cgroup` once per
 //! poll and passes `/proc` once; [`step`] turns two of those into rates,
 //! and the painters below draw them. So the arithmetic and the wording run
-//! on every target and are tested with hand-built trees, and a Mac build
-//! simply never receives a [`Writers`] and never draws the section.
+//! on every target and are tested with hand-built trees. BY PROCESS, which
+//! sits between BY SERVICE and WAITING, is `by_process.rs`; a Mac build
+//! receives a [`Writers`] holding only that ([`by_process_only`]) and
+//! draws nothing else here.
 //!
 //! Attribution is core's [`cgroup::attribute`]: deepest io-enabled level,
 //! children subtracted. It is run over a tree of *deltas* rather than over
@@ -21,8 +23,8 @@
 //! child's bytes: diffing two attributions would hand a parent every byte
 //! a short-lived child ever wrote, in the sample after that child went.
 
-// Only `linux.rs` builds a `Writers`. Everything here still compiles, and
-// its tests run, on every target; on a Mac the acquisition half is unused.
+// Only `linux.rs` builds a full `Writers`. Everything here still compiles,
+// and its tests run, on every target; on a Mac the cgroup half is unused.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -31,6 +33,7 @@ use opscope_core as tc;
 use tc::cgroup::{self, Attributed, IoStat, Reading, State, Tree};
 use tc::procfs::PidIo;
 
+use super::by_process::{self, ProcDetail, Procs};
 use super::{
     chunks, human, join_cells, ordered_disks, parse, wrap, DiskViewRow, Palette, ShownRate, View,
 };
@@ -57,8 +60,8 @@ pub struct PidSample {
     /// Field 42, `delayacct_blkio_ticks`. `None` on a kernel too old to
     /// print it.
     pub blkio_ticks: Option<u64>,
-    /// `/proc/<pid>/io` when this user may read it. The by-process rates of
-    /// the next phase start from this same pass.
+    /// `/proc/<pid>/io` when this user may read it. BY PROCESS diffs this
+    /// same reading against the previous pass's.
     pub io: Option<PidIo>,
     /// Read only for a process in D state that the cgroup walk did not
     /// place (one that started after the walk).
@@ -126,6 +129,66 @@ pub struct Writers {
     pub pid_err: String,
     /// `io.pressure` of the cgroup whose detail is open.
     pub pressure: Option<(String, Result<parse::Pressure, String>)>,
+    /// BY PROCESS, from the same pass.
+    pub procs: Option<Procs>,
+    /// What was read this poll for the process whose detail is open.
+    pub detail: Option<ProcDetail>,
+    /// macOS: BY PROCESS is the whole section. There is no BY SERVICE and
+    /// no WAITING ON DISK there, and no placeholder for either.
+    pub by_process_only: bool,
+}
+
+/// What the open detail screen asks the poller to read with its pass.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Wanted {
+    /// The cgroup whose `io.pressure` to read.
+    pub cgroup: Option<String>,
+    /// The process whose command line, working directory and open files to
+    /// read, every poll.
+    pub pid: Option<i32>,
+}
+
+/// The section on a host that has only BY PROCESS (macOS).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn by_process_only(procs: Procs, pid_err: String, detail: Option<ProcDetail>) -> Writers {
+    Writers {
+        services: Services::Measuring,
+        readable: procs.rows.iter().map(|r| r.pid).collect(),
+        names: procs
+            .rows
+            .iter()
+            .map(|r| (r.pid, r.comm.clone()))
+            .chain(procs.locked.iter().map(|l| (l.pid, l.comm.clone())))
+            .collect(),
+        waiters: Vec::new(),
+        wait_times: false,
+        wait_elapsed: None,
+        pid_err,
+        pressure: None,
+        procs: Some(procs),
+        detail,
+        by_process_only: true,
+    }
+}
+
+/// The BY SERVICE row each listed pid's I/O lands in: its own cgroup when
+/// that has `io`, otherwise the nearest ancestor that does. Empty without
+/// a tree.
+pub fn pid_rows(state: &State) -> HashMap<i32, String> {
+    let (State::Ok(tree) | State::Container(tree)) = state else {
+        return HashMap::new();
+    };
+    let owner = owners(tree);
+    let mut out = HashMap::new();
+    for node in &tree.nodes {
+        let Some(row) = owner.get(&node.path) else {
+            continue;
+        };
+        for pid in node.procs.iter().flatten() {
+            out.insert(*pid, row.clone());
+        }
+    }
+    out
 }
 
 /// Everything kept from one poll to the next: the previous tree and the
@@ -191,6 +254,9 @@ pub fn step(
         wait_elapsed: elapsed,
         pid_err,
         pressure: None,
+        procs: None,
+        detail: None,
+        by_process_only: false,
     }
 }
 
@@ -773,6 +839,10 @@ pub struct Painted {
     pub wait_keys: Vec<String>,
     /// BY SERVICE rows before the top-N cut.
     pub svc_total: usize,
+    /// BY PROCESS rows in the order drawn, by pid.
+    pub proc_keys: Vec<String>,
+    /// Every row BY PROCESS has under `a`: readable and not.
+    pub proc_total: usize,
 }
 
 /// The WHO IS WRITING section on the list screen.
@@ -786,6 +856,28 @@ pub fn paint_section(
     let Some(writers) = view.writers else {
         return Painted::default();
     };
+    if writers.by_process_only {
+        let source = writers
+            .procs
+            .as_ref()
+            .map(|p| p.source.label())
+            .unwrap_or("proc_pid_rusage");
+        push_lines(
+            rows,
+            &format!("WHO IS WRITING  by process · {source}"),
+            &p.lbl,
+            width,
+        );
+        if !writers.pid_err.is_empty() {
+            push_lines(rows, &writers.pid_err, &p.accent, width);
+        }
+        let procs = by_process::paint(view, writers, width, p, rows, placed);
+        return Painted {
+            proc_keys: procs.keys,
+            proc_total: procs.total,
+            ..Painted::default()
+        };
+    }
     let disk = selected_disk(view);
     let elapsed = match &writers.services {
         Services::Table(table) => Some(table.elapsed),
@@ -812,11 +904,14 @@ pub fn paint_section(
     }
     push_lines(rows, &heading, &p.lbl, width);
     let (svc_keys, svc_total) = paint_services(view, writers, disk, width, p, rows, placed);
+    let procs = by_process::paint(view, writers, width, p, rows, placed);
     let wait_keys = paint_waiting(view, writers, width, p, rows, placed);
     Painted {
         svc_keys,
         wait_keys,
         svc_total,
+        proc_keys: procs.keys,
+        proc_total: procs.total,
     }
 }
 
@@ -1041,14 +1136,14 @@ fn paint_waiting(
     let mut keys = Vec::new();
     for (item, w) in top.iter().enumerate() {
         let key = w.pid.to_string();
-        let here = view.focus == 4 && view.wait_cursor == key;
+        let here = view.focus == 5 && view.wait_cursor == key;
         let from = rows.len();
         rows.extend(waiter_row(w, writers, &cols, width, here, p));
         placed.extend((from..rows.len()).map(|at| (at, WAIT_BASE + item)));
         keys.push(key);
     }
     if shown.len() > top.len() {
-        let here = view.focus == 4 && view.wait_cursor == MORE;
+        let here = view.focus == 5 && view.wait_cursor == MORE;
         let tint = if here {
             tc::tint(tc::Role::Slot)
         } else {
@@ -1247,14 +1342,19 @@ pub fn paint_waiters(view: &View, width: usize, p: &Palette, rows: &mut Vec<Stri
     }
 }
 
-/// What `↵` on a WAITING row opened: the pid, and what was read for it then.
+/// What `↵` on a WAITING or BY PROCESS row opened: the pid, and what was
+/// known about it then. The poller reads it again every poll from then on.
 #[derive(Clone, Debug, Default)]
 pub struct Opened {
     pub pid: i32,
     pub comm: String,
+    /// WAITING: the process's own cgroup. BY PROCESS: the BY SERVICE row
+    /// its I/O lands in, as drawn. Empty when the walk did not place it.
     pub cgroup: String,
     pub cmdline: String,
     pub cwd: String,
+    /// Opened from WAITING ON DISK, so the state line talks about D.
+    pub from_wait: bool,
 }
 
 pub fn paint_process(
@@ -1273,16 +1373,31 @@ pub fn paint_process(
     let gone = view
         .writers
         .is_some_and(|w| !w.names.contains_key(&open.pid));
+    // Read again every poll while this screen is open.
+    let detail = view
+        .writers
+        .and_then(|w| w.detail.as_ref())
+        .filter(|d| d.pid == open.pid && !gone);
+    let mac = view.writers.is_some_and(|w| w.by_process_only);
     let mut lines = vec![
         format!("pid {}", open.pid),
         format!("command {}", open.comm),
-        match (live, gone) {
-            (Some(_), _) => "state D, waiting on disk now".to_string(),
-            (None, true) => "exited since it was in D".to_string(),
-            (None, false) => "state no longer D".to_string(),
-        },
-        format!("cgroup {}", shown_path(&open.cgroup)),
     ];
+    let state = match (live, gone, open.from_wait) {
+        (Some(_), _, _) => Some("state D, waiting on disk now".to_string()),
+        (None, true, true) => Some("exited since it was in D".to_string()),
+        (None, true, false) => Some("exited".to_string()),
+        (None, false, true) => Some("state no longer D".to_string()),
+        (None, false, false) => detail.and_then(|d| d.state).map(|s| format!("state {s}")),
+    };
+    lines.extend(state);
+    if !mac {
+        lines.push(if open.cgroup.is_empty() && !open.from_wait {
+            "cgroup not placed by the last walk (it started after it)".into()
+        } else {
+            format!("cgroup {}", shown_path(&open.cgroup))
+        });
+    }
     if let (Some(w), Some(writers)) = (live, view.writers) {
         if writers.wait_times {
             lines.push(format!(
@@ -1291,28 +1406,95 @@ pub fn paint_process(
             ));
         }
     }
-    if gone && open.cmdline.is_empty() && open.cwd.is_empty() {
+    let cmdline = detail.map_or(open.cmdline.as_str(), |d| d.cmdline.as_str());
+    let cwd = detail.map_or(open.cwd.as_str(), |d| d.cwd.as_str());
+    if mac {
+        lines.push("cmdline, cwd and open files are not read on macOS".into());
+    } else if gone && cmdline.is_empty() && cwd.is_empty() {
         lines.push("cmdline and cwd: it had exited before they were read".into());
         for line in lines {
             push_lines(rows, &line, &p.txt, width);
         }
         return;
+    } else {
+        lines.push(if cmdline.is_empty() {
+            "cmdline empty (a kernel thread has none)".into()
+        } else {
+            format!("cmdline {cmdline}")
+        });
+        lines.push(if cwd.is_empty() {
+            "cwd not readable as you".into()
+        } else {
+            format!("cwd {cwd}")
+        });
     }
-    lines.push(if open.cmdline.is_empty() {
-        "cmdline empty (a kernel thread has none)".into()
-    } else {
-        format!("cmdline {}", open.cmdline)
-    });
-    lines.push(if open.cwd.is_empty() {
-        "cwd not readable as you".into()
-    } else {
-        format!("cwd {}", open.cwd)
-    });
-    if !readable {
-        lines.push("io not readable as you · the rest needs root".into());
+    let row = view
+        .writers
+        .and_then(|w| w.procs.as_ref())
+        .and_then(|procs| {
+            procs
+                .rows
+                .iter()
+                .find(|r| r.pid == open.pid)
+                .map(|r| (r, procs.elapsed, procs.source))
+        });
+    match row {
+        Some((r, elapsed, source)) if !gone => {
+            let what = match source {
+                by_process::Source::Procfs => "write_bytes less cancelled_write_bytes",
+                by_process::Source::Rusage => "bytes handed to the disk layer",
+            };
+            lines.push(format!(
+                "written {} · read {} since it started ({what})",
+                human(r.write_total),
+                human(r.read_total)
+            ));
+            lines.push(match (r.write_bps, r.read_bps, elapsed) {
+                (Some(w), Some(rd), Some(e)) => format!(
+                    "now write {} · read {} over the last {}",
+                    rate(w),
+                    rate(rd),
+                    secs(e)
+                ),
+                _ => "now measuring · a rate needs two samples".into(),
+            });
+        }
+        _ if !readable && !gone => {
+            lines.push("io not readable as you · the rest needs root".into());
+        }
+        _ => {}
     }
     for line in lines {
         push_lines(rows, &line, &p.txt, width);
+    }
+    let Some(files) = detail.and_then(|d| d.files.as_ref()) else {
+        return;
+    };
+    rows.push(String::new());
+    match files {
+        Ok(list) if list.is_empty() => {
+            push_lines(rows, "OPEN FILES  none open", &p.lbl, width);
+        }
+        Ok(list) => {
+            push_lines(
+                rows,
+                &format!(
+                    "OPEN FILES  {} · size and growth since the previous sample, every {}",
+                    list.len(),
+                    secs(view.every)
+                ),
+                &p.lbl,
+                width,
+            );
+            by_process::paint_files(list, width, p, rows);
+        }
+        Err(why) if !readable => push_lines(
+            rows,
+            &format!("OPEN FILES  {why} · the rest needs root"),
+            &p.lbl,
+            width,
+        ),
+        Err(why) => push_lines(rows, &format!("OPEN FILES  {why}"), &p.lbl, width),
     }
 }
 
@@ -1382,16 +1564,35 @@ pub fn paint_service(view: &View, path: &str, width: usize, p: &Palette, rows: &
         &p.lbl,
         width,
     );
+    // Per-process rates for the pids this user can read, from the same pass
+    // as BY PROCESS. They are every disk's, not only this one's: a
+    // process's counters are not kept per device.
+    let rates: HashMap<i32, &by_process::ProcRate> = writers
+        .procs
+        .as_ref()
+        .map(|procs| procs.rows.iter().map(|r| (r.pid, r)).collect())
+        .unwrap_or_default();
+    if readable > 0 {
+        push_lines(
+            rows,
+            "per process: write and read over the last poll, every disk (a process's counters are not kept per device)",
+            &p.dim,
+            width,
+        );
+    }
     for pid in pids {
         let name = writers
             .names
             .get(&pid)
             .map(String::as_str)
             .unwrap_or("gone");
-        let can = if writers.readable.contains(&pid) {
-            "readable"
-        } else {
-            "not readable"
+        let can = match (writers.readable.contains(&pid), rates.get(&pid)) {
+            (true, Some(r)) => match (r.write_bps, r.read_bps) {
+                (Some(w), Some(rd)) => format!("write {} · read {}", rate(w), rate(rd)),
+                _ => "readable · measuring".into(),
+            },
+            (true, None) => "readable".into(),
+            (false, _) => "not readable".into(),
         };
         push_lines(rows, &format!("{pid}  {name}  {can}"), &p.txt, width);
     }

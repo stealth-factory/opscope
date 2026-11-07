@@ -22,7 +22,9 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use super::by_process::{self, ProcDetail, ProcMemory, Rusage, Source, Unreadable};
 use super::parse::{self, IoSnapshot, LiveDisk, Mount, Space};
+use super::writers::{self, Wanted, Writers};
 
 struct IostatState {
     track: parse::IostatTrack,
@@ -275,18 +277,113 @@ fn c_buf(buf: &[libc::c_char]) -> String {
     String::from_utf8_lossy(&c_bytes(buf)).into_owned()
 }
 
-/// WHO IS WRITING has no source here yet. By service is cgroup v2, which a
-/// Mac does not have, and `ps` has no state that means what Linux's `D`
-/// does (`U` is the nearest, and it is a different thing). So nothing is
-/// sampled and the section is not drawn - not drawn empty.
+/// WHO IS WRITING on a Mac is BY PROCESS alone. By service is cgroup v2,
+/// which a Mac does not have, and `ps` has no state that means what
+/// Linux's `D` does (`U` is the nearest, and it is a different thing), so
+/// neither is drawn - not drawn empty either.
+///
+/// Per poll: `proc_listallpids` (libproc's `proc_listpids(PROC_ALL_PIDS)`
+/// returning a count), then `proc_pid_rusage(RUSAGE_INFO_V2)` per pid for
+/// `ri_diskio_bytesread` / `ri_diskio_byteswritten`, then one
+/// `ps -axo pid=,comm=` for the names. libproc is in libSystem, so this
+/// links nothing new.
 #[derive(Default)]
-pub struct WriterSource;
+pub struct WriterSource {
+    procs: ProcMemory,
+    start: Option<std::time::Instant>,
+}
 
-pub fn sample_writers(
-    _source: &mut WriterSource,
-    _detail: Option<String>,
-) -> Option<super::writers::Writers> {
-    None
+// `rusage_info_v2` comes from `libc` (bsd/sys/resource.h in xnu: a 16-byte
+// uuid then eighteen u64 counters, `ri_diskio_bytesread` and
+// `ri_diskio_byteswritten` last). A layout that drifted would read another
+// counter as the disk bytes; this fails the macOS build instead.
+const _: () = assert!(std::mem::size_of::<libc::rusage_info_v2>() == 16 + 18 * 8);
+
+pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Writers> {
+    let start = *source.start.get_or_insert_with(std::time::Instant::now);
+    let now = start.elapsed().as_secs_f64();
+    let (list, mut pid_err) = match list_pids() {
+        Ok(pids) => (rusage_all(&pids), String::new()),
+        Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
+    };
+    let names = match Command::new("ps")
+        .args(["-axo", "pid=,comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(out) => by_process::parse_ps_names(&String::from_utf8_lossy(&out.stdout)),
+        Err(err) => {
+            if pid_err.is_empty() {
+                pid_err = format!("process names unavailable: ps: {err}");
+            }
+            HashMap::new()
+        }
+    };
+    let samples = by_process::samples_from_rusage(&list, &names);
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    let procs = by_process::step(&mut source.procs, samples, now, root, false, Source::Rusage);
+    let detail = wanted.pid.map(|pid| ProcDetail {
+        pid,
+        state: None,
+        cmdline: String::new(),
+        cwd: String::new(),
+        files: None,
+    });
+    Some(writers::by_process_only(procs, pid_err, detail))
+}
+
+fn list_pids() -> Result<Vec<i32>, String> {
+    // SAFETY: a null buffer asks only for the count.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // Room for processes started between the two calls.
+    let mut pids: Vec<libc::c_int> = vec![0; count as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+    // SAFETY: the buffer is `bytes` long and lives across the call.
+    let got = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if got <= 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    pids.truncate((got as usize).min(pids.len()));
+    Ok(pids.into_iter().filter(|&pid| pid >= 0).collect())
+}
+
+/// `EPERM` is another user's process (`CHECK_SAME_USER` in xnu's
+/// proc_info.c): counted, unreadable. Anything else - `ESRCH` above all -
+/// is a process that left between the listing and the read, and is
+/// dropped rather than counted.
+fn rusage_all(pids: &[i32]) -> Vec<(i32, Result<Rusage, Unreadable>)> {
+    let mut out = Vec::with_capacity(pids.len());
+    for &pid in pids {
+        // SAFETY: zeroed is a valid value for a struct of integers.
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: the kernel writes at most size_of::<rusage_info_v2>() for
+        // RUSAGE_INFO_V2, and `info` is that type.
+        let rc = unsafe {
+            libc::proc_pid_rusage(
+                pid,
+                libc::RUSAGE_INFO_V2,
+                (&mut info as *mut libc::rusage_info_v2).cast::<libc::rusage_info_t>(),
+            )
+        };
+        if rc == 0 {
+            out.push((
+                pid,
+                Ok(Rusage {
+                    read: info.ri_diskio_bytesread,
+                    write: info.ri_diskio_byteswritten,
+                    start: info.ri_proc_start_abstime,
+                }),
+            ));
+        } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+            out.push((pid, Err(Unreadable)));
+        }
+    }
+    out
 }
 
 pub fn process_facts(_pid: i32) -> (String, String) {

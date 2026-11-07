@@ -19,23 +19,33 @@ down, each to its own peak; on macOS it is one trace of combined I/O.
 Until the disk section has focus it is the total of every disk; then it
 is the selected disk, named above it.
 
-WHO IS WRITING is Linux-only. BY SERVICE reads cgroup v2 io.stat once a
-poll and gives each io-enabled cgroup its own share, children taken out,
-for the disk the DISKS cursor is on (the first disk shown until then).
-The line under it ties that sum to the disk's own diskstats write rate
-and names what is left over. WAITING ON DISK lists processes in D state
-now; with task_delayacct=1 it also says how long each waited, and
-without it says that needs root. Kernel threads are hidden and counted.
-A Mac has no cgroups and no D state, so the section is not drawn there.
+WHO IS WRITING on Linux has three parts. BY SERVICE reads cgroup v2
+io.stat once a poll and gives each io-enabled cgroup its own share,
+children taken out, for the disk the DISKS cursor is on (the first disk
+shown until then). The line under it ties that sum to the disk's own
+diskstats write rate and names what is left over. BY PROCESS ranks the
+processes this user can read /proc/<pid>/io for, says every frame how
+many that is out of how many there are, and ties what they wrote to what
+the disks took over the last reconcile_seconds (60), marked with an
+approximately sign because a process's counter moves when a page is
+dirtied and a disk's when the write is submitted. WAITING ON DISK lists
+processes in D state now; with task_delayacct=1 it also says how long
+each waited, and without it says that needs root. Kernel threads are
+hidden and counted.
+
+On macOS the section is BY PROCESS alone, from proc_pid_rusage, against
+iostat's combined read and write; there are no cgroups and no D state.
 
     disk [-n SECONDS]
 
-Keys: up/down select, enter opens (a mount, a disk, a cgroup, a process,
-or the full D-state list from +N more), s cycles the sort of the focused
-section, a shows every cgroup in BY SERVICE or the top ones again, w
-cycles the filesystem window (6, 12 or 24 hours; only on the list and a
-mount's detail), tab moves between sections, v toggles idle disks, p
-pauses, esc goes back, comma opens settings, q quits.
+Keys: up/down select, enter opens (a mount, a disk, a cgroup, a process
+with its open files and how much each grew since the previous sample, or
+the full D-state list from +N more), s cycles the sort of the focused
+section, a shows every row of BY PROCESS when it has the cursor and of
+BY SERVICE otherwise, or the top ones again, w cycles the filesystem
+window (6, 12 or 24 hours; only on the list and a mount's detail), tab
+moves between sections, v toggles idle disks, p pauses, esc goes back,
+comma opens settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read or a recommended tool that is

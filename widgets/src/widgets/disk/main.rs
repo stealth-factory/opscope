@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use opscope_core as tc;
 
+mod by_process;
 mod parse;
 mod state;
 mod writers;
@@ -63,7 +64,7 @@ mod host {
 
     pub fn sample_writers(
         _source: &mut WriterSource,
-        _detail: Option<String>,
+        _wanted: super::writers::Wanted,
     ) -> Option<super::writers::Writers> {
         None
     }
@@ -573,6 +574,9 @@ struct View<'a> {
     svc_cursor: &'a str,
     wait_sort: writers::WaitSort,
     wait_cursor: &'a str,
+    proc_sort: DiskSort,
+    proc_all: bool,
+    proc_cursor: &'a str,
     show_kernel: bool,
     service_path: &'a str,
     opened: Option<&'a writers::Opened>,
@@ -582,6 +586,13 @@ struct View<'a> {
     disk_chosen: bool,
 }
 
+/// Sections, in the order drawn and stepped through: filesystems, disks,
+/// pressure, by service, by process, waiting on disk.
+const SECTIONS: usize = 6;
+const BY_SERVICE: usize = 3;
+const BY_PROCESS: usize = 4;
+const WAITING: usize = 5;
+
 struct Drawn {
     rows: Vec<String>,
     placed: Vec<(usize, usize)>,
@@ -589,12 +600,16 @@ struct Drawn {
     selected: usize,
     disk_selected: usize,
     plots: Vec<tc::Plot>,
-    lens: [usize; 5],
-    /// BY SERVICE and WAITING ON DISK items in the order drawn, by key.
+    lens: [usize; SECTIONS],
+    /// BY SERVICE, BY PROCESS and WAITING ON DISK items in the order
+    /// drawn, by key.
     svc_keys: Vec<String>,
+    proc_keys: Vec<String>,
     wait_keys: Vec<String>,
     /// BY SERVICE rows before the top-N cut.
     svc_total: usize,
+    /// BY PROCESS rows `a` would show.
+    proc_total: usize,
 }
 
 fn main() {
@@ -627,18 +642,21 @@ fn main() {
         .get("show_kernel_threads")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let reconcile_seconds = reconcile_seconds_of(&cfg);
 
     let state = Arc::new(Mutex::new(State::default()));
     let pause = Arc::new(AtomicBool::new(false));
-    // The cgroup whose detail is open, so the poller reads its io.pressure.
-    let detail: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // The cgroup and the process whose detail is open, so the poller reads
+    // the cgroup's io.pressure and the process's facts and open files.
+    let detail: Arc<Mutex<writers::Wanted>> = Arc::new(Mutex::new(writers::Wanted::default()));
     let refresh = tc::Refresh::default();
     {
         let state = Arc::clone(&state);
         let pause = Arc::clone(&pause);
         let refresh = refresh.clone();
         let detail = Arc::clone(&detail);
-        thread::spawn(move || poll(state, pause, refresh, hide, every, detail));
+        let ring = by_process::ring_cap(reconcile_seconds, every);
+        thread::spawn(move || poll(state, pause, refresh, hide, every, detail, ring));
     }
 
     let p = palette();
@@ -648,12 +666,15 @@ fn main() {
     let mut disk_sort = DiskSort::Write;
     let mut svc_sort = DiskSort::Write;
     let mut wait_sort = writers::WaitSort::Waited;
+    let mut proc_sort = DiskSort::Write;
     let mut svc_all = false;
+    let mut proc_all = false;
     let mut screen = Screen::List;
     let mut cursor = String::new();
     let mut disk_cursor = String::new();
     let mut svc_cursor = String::new();
     let mut wait_cursor = String::new();
+    let mut proc_cursor = String::new();
     let mut service_path = String::new();
     let mut opened: Option<writers::Opened> = None;
     let mut scroll = 0usize;
@@ -662,14 +683,15 @@ fn main() {
     let mut head = 1usize;
     let mut shown_scroll = 0usize;
     // The row each section's cursor is on: filesystems, disks, pressure,
-    // by service, waiting on disk.
-    let mut at = [0usize; 5];
+    // by service, by process, waiting on disk.
+    let mut at = [0usize; SECTIONS];
     let mut focus = 0usize;
-    let mut lens = [0usize; 5];
+    let mut lens = [0usize; SECTIONS];
     let mut show_idle = false;
-    // What BY SERVICE and WAITING drew last frame, which is what a key or a
-    // click this frame was aimed at.
+    // What BY SERVICE, BY PROCESS and WAITING drew last frame, which is what
+    // a key or a click this frame was aimed at.
     let mut svc_keys: Vec<String> = Vec::new();
+    let mut proc_keys: Vec<String> = Vec::new();
     let mut wait_keys: Vec<String> = Vec::new();
     let mut disk_chosen = false;
 
@@ -741,8 +763,14 @@ fn main() {
                     show_idle = !show_idle;
                 }
                 "a" | "A" => {
+                    // BY PROCESS when it has the cursor; BY SERVICE
+                    // otherwise, as before BY PROCESS existed.
                     if screen == Screen::List {
-                        svc_all = !svc_all;
+                        if focus == BY_PROCESS {
+                            proc_all = !proc_all;
+                        } else {
+                            svc_all = !svc_all;
+                        }
                     }
                 }
                 "enter" => {
@@ -760,15 +788,17 @@ fn main() {
                         chase = true;
                         *detail
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            writers::Wanted::default();
                     }
                 }
                 "s" | "S" => {
                     match focus {
                         0 => sort = sort.next(),
                         1 => disk_sort = disk_sort.next(),
-                        3 => svc_sort = svc_sort.next(),
-                        4 => wait_sort = wait_sort.next(),
+                        BY_SERVICE => svc_sort = svc_sort.next(),
+                        BY_PROCESS => proc_sort = proc_sort.next(),
+                        WAITING => wait_sort = wait_sort.next(),
                         _ => {}
                     }
                     chase = false;
@@ -848,8 +878,9 @@ fn main() {
             }
         }
         for (section, keys, cursor) in [
-            (3, &svc_keys, &mut svc_cursor),
-            (4, &wait_keys, &mut wait_cursor),
+            (BY_SERVICE, &svc_keys, &mut svc_cursor),
+            (BY_PROCESS, &proc_keys, &mut proc_cursor),
+            (WAITING, &wait_keys, &mut wait_cursor),
         ] {
             if screen == Screen::List && chase && focus == section && !keys.is_empty() {
                 *cursor = keys[at[section].min(keys.len() - 1)].clone();
@@ -867,22 +898,61 @@ fn main() {
                     scroll = 0;
                     chase = true;
                 }
-                3 if !svc_cursor.is_empty() => {
+                BY_SERVICE if !svc_cursor.is_empty() => {
                     screen = Screen::Service;
                     service_path = svc_cursor.clone();
                     *detail
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(service_path.clone());
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = writers::Wanted {
+                        cgroup: Some(service_path.clone()),
+                        pid: None,
+                    };
                     scroll = 0;
                     chase = true;
                 }
-                4 if wait_cursor == writers::MORE => {
+                BY_PROCESS => {
+                    let found = proc_cursor.parse::<i32>().ok().and_then(|pid| {
+                        let procs = writers_now.as_ref()?.procs.as_ref()?;
+                        procs
+                            .rows
+                            .iter()
+                            .find(|r| r.pid == pid)
+                            .map(|r| (r.pid, r.comm.clone(), r.cgroup.clone()))
+                            .or_else(|| {
+                                procs
+                                    .locked
+                                    .iter()
+                                    .find(|l| l.pid == pid)
+                                    .map(|l| (l.pid, l.comm.clone(), l.cgroup.clone()))
+                            })
+                    });
+                    if let Some((pid, comm, cgroup)) = found {
+                        let (cmdline, cwd) = host::process_facts(pid);
+                        opened = Some(writers::Opened {
+                            pid,
+                            comm,
+                            cgroup,
+                            cmdline,
+                            cwd,
+                            from_wait: false,
+                        });
+                        *detail
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = writers::Wanted {
+                            cgroup: None,
+                            pid: Some(pid),
+                        };
+                        screen = Screen::Process;
+                        scroll = 0;
+                        chase = true;
+                    }
+                }
+                WAITING if wait_cursor == writers::MORE => {
                     screen = Screen::Waiters;
                     scroll = 0;
                     chase = true;
                 }
-                4 => {
+                WAITING => {
                     let found = wait_cursor.parse::<i32>().ok().and_then(|pid| {
                         writers_now
                             .as_ref()
@@ -890,12 +960,19 @@ fn main() {
                     });
                     if let Some(waiter) = found {
                         let (cmdline, cwd) = host::process_facts(waiter.pid);
+                        *detail
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = writers::Wanted {
+                            cgroup: None,
+                            pid: Some(waiter.pid),
+                        };
                         opened = Some(writers::Opened {
                             pid: waiter.pid,
                             comm: waiter.comm,
                             cgroup: waiter.cgroup,
                             cmdline,
                             cwd,
+                            from_wait: true,
                         });
                         screen = Screen::Process;
                         scroll = 0;
@@ -935,6 +1012,9 @@ fn main() {
             svc_cursor: &svc_cursor,
             wait_sort,
             wait_cursor: &wait_cursor,
+            proc_sort,
+            proc_all,
+            proc_cursor: &proc_cursor,
             show_kernel,
             service_path: &service_path,
             opened: opened.as_ref(),
@@ -946,8 +1026,9 @@ fn main() {
         at[1] = drawn.disk_selected;
         lens = drawn.lens;
         for (section, keys, cursor) in [
-            (3, &drawn.svc_keys, &mut svc_cursor),
-            (4, &drawn.wait_keys, &mut wait_cursor),
+            (BY_SERVICE, &drawn.svc_keys, &mut svc_cursor),
+            (BY_PROCESS, &drawn.proc_keys, &mut proc_cursor),
+            (WAITING, &drawn.wait_keys, &mut wait_cursor),
         ] {
             match keys.iter().position(|key| key == cursor) {
                 Some(row) => at[section] = row,
@@ -961,11 +1042,12 @@ fn main() {
                 }
             }
         }
-        if screen == Screen::List && focus >= 3 && lens[focus] == 0 {
+        if screen == Screen::List && focus >= BY_SERVICE && lens[focus] == 0 {
             // A section that emptied under the cursor is not a place to be.
             focus = tc::next_section(None, &lens).unwrap_or(0);
         }
         svc_keys = drawn.svc_keys.clone();
+        proc_keys = drawn.proc_keys.clone();
         wait_keys = drawn.wait_keys.clone();
         let cursor_gone = snap
             .as_ref()
@@ -995,9 +1077,18 @@ fn main() {
             }
         }
         let combined = board.as_ref().is_some_and(|board| board.combined);
+        // `a` acts on BY PROCESS while it has the cursor, and on BY SERVICE
+        // otherwise; the hint names whichever one the press would change.
+        let all = if focus == BY_PROCESS {
+            (proc_all || drawn.proc_total > drawn.proc_keys.len())
+                .then(|| by_process::all_hint(proc_all, top_writers))
+        } else {
+            (drawn.svc_total > top_writers).then(|| writers::all_hint(svc_all, top_writers))
+        };
         let hints = WriterHints {
-            all: (drawn.svc_total > top_writers).then(|| writers::all_hint(svc_all, top_writers)),
+            all,
             svc_sort,
+            proc_sort,
             wait_sort: writers_now
                 .as_ref()
                 .is_some_and(|w| w.wait_times)
@@ -1062,22 +1153,25 @@ fn main() {
 }
 
 /// The click id of the row a section's cursor is on.
-fn item_id(focus: usize, at: &[usize; 5]) -> usize {
+fn item_id(focus: usize, at: &[usize; SECTIONS]) -> usize {
     match focus {
         0 => at[0],
         1 => DISK_BASE + at[1],
         2 => PRESSURE_ID,
-        3 => writers::SERVICE_BASE + at[3],
-        _ => writers::WAIT_BASE + at[4],
+        BY_SERVICE => writers::SERVICE_BASE + at[BY_SERVICE],
+        BY_PROCESS => by_process::PROC_BASE + at[BY_PROCESS],
+        _ => writers::WAIT_BASE + at[WAITING],
     }
 }
 
 /// The section and row a click id names.
 fn section_of(id: usize) -> (usize, usize) {
-    if id >= writers::WAIT_BASE {
-        (4, id - writers::WAIT_BASE)
+    if id >= by_process::PROC_BASE {
+        (BY_PROCESS, id - by_process::PROC_BASE)
+    } else if id >= writers::WAIT_BASE {
+        (WAITING, id - writers::WAIT_BASE)
     } else if id >= writers::SERVICE_BASE {
-        (3, id - writers::SERVICE_BASE)
+        (BY_SERVICE, id - writers::SERVICE_BASE)
     } else if id >= PRESSURE_ID {
         (2, 0)
     } else if id >= DISK_BASE {
@@ -1092,7 +1186,21 @@ fn section_of(id: usize) -> (usize, usize) {
 struct WriterHints {
     all: Option<String>,
     svc_sort: DiskSort,
+    proc_sort: DiskSort,
     wait_sort: Option<writers::WaitSort>,
+}
+
+/// `reconcile_seconds`: how long BY PROCESS sums both sides before it
+/// compares them. At least 10, because under that the dirtying and the
+/// submission of the same bytes fall in different windows more often than
+/// not; at most a day.
+fn reconcile_seconds_of(cfg: &serde_json::Value) -> f64 {
+    let value = tc::cfg_f64(cfg, "reconcile_seconds", 60.0);
+    if value.is_finite() {
+        value.clamp(10.0, 86_400.0)
+    } else {
+        60.0
+    }
 }
 
 fn path_at(
@@ -1156,18 +1264,34 @@ impl Default for RateMemory {
     }
 }
 
+/// What the disks moved this poll, in the unit BY PROCESS compares with:
+/// the summed write rate on Linux, iostat's combined rate on macOS. `None`
+/// when any disk in the sum has no rate this poll.
+fn device_bps(board: &DiskBoard) -> Option<f64> {
+    let series = if board.combined {
+        &board.total_read
+    } else {
+        &board.total_write
+    };
+    series.last().copied().flatten()
+}
+
 fn poll(
     state: Arc<Mutex<State>>,
     pause: Arc<AtomicBool>,
     refresh: tc::Refresh,
     hide: Vec<String>,
     every: f64,
-    detail: Arc<Mutex<Option<String>>>,
+    detail: Arc<Mutex<writers::Wanted>>,
+    ring_cap: usize,
 ) {
     tc::record_panics();
     let mut inflight: HashMap<Vec<u8>, Receiver<Result<Space, String>>> = HashMap::new();
     let mut rates = RateMemory::default();
     let mut source = host::WriterSource::default();
+    // BY PROCESS's reconciliation window: `reconcile_seconds / refresh`
+    // per-poll sums, and nothing older.
+    let mut ring = by_process::Ring::new(ring_cap);
     let loaded = state::load_usage(&state::usage_path());
     let mut usage = loaded.store;
     let history_note = loaded.note;
@@ -1229,12 +1353,29 @@ fn poll(
                         }
                         Err(err) => guard.err = err,
                     }
-                    match io {
+                    let device = match io {
                         Ok(snap) => {
                             guard.disk_err = snap.err.clone();
-                            guard.board = Some(board_from(&snap, &mut rates));
+                            let board = board_from(&snap, &mut rates);
+                            let device = device_bps(&board);
+                            guard.board = Some(board);
+                            device
                         }
-                        Err(err) => guard.disk_err = err,
+                        Err(err) => {
+                            guard.disk_err = err;
+                            None
+                        }
+                    };
+                    let mut writers = writers;
+                    if let Some(procs) = writers.as_mut().and_then(|w| w.procs.as_mut()) {
+                        // Both sides over the same poll, or neither: a poll
+                        // where the disks have no rate is left out whole.
+                        if let (Some(seconds), Some(moved), Some(device)) =
+                            (procs.elapsed, procs.moved, device)
+                        {
+                            ring.push(seconds, moved, device * seconds);
+                        }
+                        procs.window = ring.window();
                     }
                     guard.writers = writers.map(Arc::new);
                 }
@@ -1619,10 +1760,11 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
             disk_len,
             pressure_len,
             painted.svc_keys.len(),
+            painted.proc_keys.len(),
             painted.wait_keys.len(),
         ]
     } else {
-        [0; 5]
+        [0; SECTIONS]
     };
     Drawn {
         rows,
@@ -1633,8 +1775,10 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
         plots,
         lens,
         svc_keys: painted.svc_keys,
+        proc_keys: painted.proc_keys,
         wait_keys: painted.wait_keys,
         svc_total: painted.svc_total,
+        proc_total: painted.proc_total,
     }
 }
 
@@ -3656,8 +3800,9 @@ fn footer(
         let hint = match focus {
             0 => Some(sort.hint()),
             1 => Some(disk_sort.hint(combined)),
-            3 => Some(writers.svc_sort.hint(false)),
-            4 => writers.wait_sort.map(writers::WaitSort::hint),
+            BY_SERVICE => Some(writers.svc_sort.hint(false)),
+            BY_PROCESS => Some(writers.proc_sort.hint(false)),
+            WAITING => writers.wait_sort.map(writers::WaitSort::hint),
             _ => None,
         };
         if let Some(hint) = hint {
@@ -3854,6 +3999,9 @@ mod tests {
             svc_cursor: "",
             wait_sort: writers::WaitSort::Waited,
             wait_cursor: "",
+            proc_sort: DiskSort::Write,
+            proc_all: false,
+            proc_cursor: "",
             show_kernel: false,
             service_path: "",
             opened: None,
@@ -3865,6 +4013,7 @@ mod tests {
         WriterHints {
             all: None,
             svc_sort: DiskSort::Write,
+            proc_sort: DiskSort::Write,
             wait_sort: None,
         }
     }
@@ -5191,7 +5340,7 @@ mod tests {
             }
             // Eight services, five waiters and the `+N more` row.
             assert_eq!(drawn.lens[3], 8, "{width}");
-            assert_eq!(drawn.lens[4], 6, "{width}");
+            assert_eq!(drawn.lens[WAITING], 6, "{width}");
             assert_eq!(drawn.svc_total, 12, "{width}");
         }
     }
@@ -5248,6 +5397,7 @@ mod tests {
         let hints = WriterHints {
             all: Some(writers::all_hint(false, 8)),
             svc_sort: DiskSort::Write,
+            proc_sort: DiskSort::Write,
             wait_sort: Some(writers::WaitSort::Waited),
         };
         let text = |focus| {
@@ -5267,7 +5417,7 @@ mod tests {
             packed.lines.join("\n")
         };
         assert!(text(3).contains("[s] sort by read") && text(3).contains("[a] show all cgroups"));
-        assert!(text(4).contains("[s] sort by pid"));
+        assert!(text(WAITING).contains("[s] sort by pid"));
         let off = WriterHints {
             wait_sort: None,
             ..hints
@@ -5277,7 +5427,7 @@ mod tests {
             Screen::List,
             Sort::Mount,
             DiskSort::Write,
-            4,
+            WAITING,
             false,
             false,
             24,
@@ -5375,13 +5525,14 @@ mod tests {
             .filter(|l| plain(l).contains("example-sync") || plain(l).contains("kworker"))
             .count();
         assert_eq!(listed, 9, "everyone in D, kernel threads shown when asked");
-        assert_eq!(drawn.lens, [0; 5]);
+        assert_eq!(drawn.lens, [0; SECTIONS]);
         let open = writers::Opened {
             pid: 501,
             comm: "example-sync".into(),
             cgroup: "user.slice/session-1.scope".into(),
             cmdline: "example-sync --flush".into(),
             cwd: String::new(),
+            from_wait: true,
         };
         frame.screen = Screen::Process;
         frame.opened = Some(&open);
@@ -5491,15 +5642,263 @@ mod tests {
         frame.board = Some(&board);
         let drawn = draw_body(&frame, 100, &p, None);
         assert!(!plain_has(&drawn, "WHO IS WRITING"));
-        assert_eq!(&drawn.lens[3..], &[0, 0]);
+        assert_eq!(&drawn.lens[3..], &[0, 0, 0]);
     }
 
     #[test]
     fn a_click_id_names_its_section_and_row() {
-        let mut at = [0usize; 5];
-        for (section, row) in [(0, 3), (1, 2), (2, 0), (3, 7), (4, 5)] {
+        let mut at = [0usize; SECTIONS];
+        for (section, row) in [(0, 3), (1, 2), (2, 0), (3, 7), (4, 4), (5, 5)] {
             at[section] = row;
             assert_eq!(section_of(item_id(section, &at)), (section, row));
         }
+    }
+
+    /// Twelve readable workers writing 1..12 MiB/s, the even session pids
+    /// readable and idle, and three processes that need root.
+    fn procs_fixture(source: by_process::Source) -> by_process::Procs {
+        let mut rows: Vec<by_process::ProcRate> = (0..12)
+            .map(|i| by_process::ProcRate {
+                pid: 600 + i,
+                comm: format!("example-worker-{i}"),
+                cgroup: "user.slice".into(),
+                read_bps: Some(0.0),
+                write_bps: Some(((i + 1) as u64 * MIB) as f64),
+                read_total: 0,
+                write_total: 100 * MIB,
+            })
+            .collect();
+        for pid in [500, 502, 504, 506] {
+            rows.push(by_process::ProcRate {
+                pid,
+                comm: "example-sync".into(),
+                cgroup: "user.slice".into(),
+                read_bps: Some(0.0),
+                write_bps: Some(if pid == 502 { 2.0 * MIB as f64 } else { 0.0 }),
+                read_total: 0,
+                write_total: 0,
+            });
+        }
+        let locked = (0..3)
+            .map(|i| by_process::Locked {
+                pid: 100 + i,
+                comm: "example-db".into(),
+                cgroup: "system.slice/example-db.service".into(),
+            })
+            .collect();
+        let mut ring = by_process::Ring::new(30);
+        for _ in 0..30 {
+            ring.push(2.0, 30.0 * MIB as f64, 376.0 * MIB as f64);
+        }
+        by_process::Procs {
+            source,
+            rows,
+            locked,
+            elapsed: Some(2.0),
+            root: false,
+            visible: false,
+            moved: Some(0.0),
+            window: ring.window(),
+        }
+    }
+
+    fn writers_with_procs() -> writers::Writers {
+        let mut w = writers_fixture(true);
+        w.procs = Some(procs_fixture(by_process::Source::Procfs));
+        w
+    }
+
+    #[test]
+    fn by_process_fits_every_width_and_cgroup_leaves_first() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_with_procs();
+        for width in [28, 40, 60, 80, 100, 140] {
+            let mut frame = view(None, "/");
+            frame.board = Some(&board);
+            frame.writers = Some(&writers);
+            frame.focus = BY_PROCESS;
+            frame.proc_cursor = "611";
+            let drawn = draw_body(&frame, width, &p, None);
+            rows_fit(&drawn, width);
+            let header = drawn
+                .rows
+                .iter()
+                .map(|l| plain(l))
+                .find(|l| l.starts_with("  PID") && l.contains("WRITE"))
+                .unwrap_or_default();
+            assert!(header.contains("COMMAND"), "{width}: {header}");
+            if width >= 80 {
+                assert!(header.contains("CGROUP"), "{width}: {header}");
+                assert!(header.contains("READ"), "{width}: {header}");
+            }
+            if width <= 40 {
+                assert!(!header.contains("CGROUP"), "CGROUP drops first at {width}");
+            }
+            assert_eq!(drawn.lens[BY_PROCESS], 8, "top 8 at {width}");
+            assert_eq!(drawn.proc_keys[0], "611", "the busiest leads at {width}");
+            assert_eq!(drawn.proc_total, 19);
+            let text: String = drawn
+                .rows
+                .iter()
+                .map(|l| plain(l))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(text.contains("readable (yours)"), "{width}");
+            assert!(text.contains('≈'), "{width}");
+        }
+    }
+
+    #[test]
+    fn by_process_states_its_coverage_and_reconciles_over_the_window() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_with_procs();
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        let drawn = draw_body(&frame, 240, &p, None);
+        assert!(plain_has(
+            &drawn,
+            "BY PROCESS  /proc/<pid>/io · every disk · sorted: write · 16 of 19 processes readable (yours) · the other 3 need root"
+        ));
+        assert!(plain_has(
+            &drawn,
+            "top 8 shown · 13 of 16 readable moved bytes over the last 2s"
+        ));
+        assert!(plain_has(
+            &drawn,
+            "readable processes account for ≈ 15M/s of 188M/s (8%)"
+        ));
+        assert!(plain_has(&drawn, "write_bytes counts at dirtying, devices at submission"));
+        // `a`: every readable process, then the ones that need root, each
+        // still with its cgroup.
+        frame.proc_all = true;
+        let drawn = draw_body(&frame, 140, &p, None);
+        rows_fit(&drawn, 140);
+        assert_eq!(drawn.lens[BY_PROCESS], 19);
+        assert!(plain_has(&drawn, "3 need root · their I/O is not readable as you"));
+        assert!(drawn.rows.iter().any(|l| {
+            let l = plain(l);
+            l.contains("100") && l.contains("example-db") && l.contains("system.slice/example-db.service")
+        }));
+        let hints = WriterHints {
+            all: Some(by_process::all_hint(false, 8)),
+            svc_sort: DiskSort::Write,
+            proc_sort: DiskSort::Read,
+            wait_sort: None,
+        };
+        let (packed, _) = footer(
+            140,
+            Screen::List,
+            Sort::Mount,
+            DiskSort::Write,
+            BY_PROCESS,
+            false,
+            false,
+            24,
+            false,
+            &hints,
+            &p,
+        );
+        let text = packed.lines.join("\n");
+        assert!(text.contains("[s] sort by name") && text.contains("[a] show all processes"));
+    }
+
+    #[test]
+    fn the_process_detail_shows_file_growth_and_the_service_detail_rates() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let mut writers = writers_with_procs();
+        let mut memory = None;
+        let file = |size| tc::procfs::OpenFile {
+            path: "/tmp/example/out.bin".into(),
+            size,
+        };
+        let _ = by_process::file_growth(&mut memory, 611, &[file(MIB)], 10.0);
+        let files = by_process::file_growth(&mut memory, 611, &[file(13 * MIB)], 12.0);
+        writers.names.insert(611, "example-worker-11".into());
+        writers.readable.insert(611);
+        writers.detail = Some(by_process::ProcDetail {
+            pid: 611,
+            state: Some('R'),
+            cmdline: "example-worker --out /tmp/example/out.bin".into(),
+            cwd: "/tmp/example".into(),
+            files: Some(Ok(files)),
+        });
+        let open = writers::Opened {
+            pid: 611,
+            comm: "example-worker-11".into(),
+            cgroup: "user.slice".into(),
+            ..writers::Opened::default()
+        };
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        frame.screen = Screen::Process;
+        frame.opened = Some(&open);
+        for width in [28, 40, 60, 80, 100, 140] {
+            let drawn = draw_body(&frame, width, &p, None);
+            rows_fit(&drawn, width);
+        }
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(plain_has(&drawn, "state R"));
+        assert!(plain_has(&drawn, "cmdline example-worker --out /tmp/example/out.bin"));
+        assert!(plain_has(&drawn, "now write 12M/s · read 0B/s over the last 2s"));
+        assert!(plain_has(&drawn, "written 100M · read 0B since it started"));
+        assert!(plain_has(&drawn, "OPEN FILES  1 · size and growth since the previous sample"));
+        assert!(plain_has(&drawn, "+12M in 2s"));
+        // The service detail: per-process rates for the pids it can read.
+        frame.screen = Screen::Service;
+        frame.service_path = "user.slice";
+        let drawn = draw_body(&frame, 100, &p, None);
+        rows_fit(&drawn, 100);
+        assert!(plain_has(&drawn, "502  example-sync  write 2M/s · read 0B/s"));
+        assert!(plain_has(&drawn, "501  example-sync  not readable"));
+    }
+
+    #[test]
+    fn on_macos_by_process_is_the_whole_section() {
+        let p = palette();
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers::by_process_only(
+            procs_fixture(by_process::Source::Rusage),
+            String::new(),
+            None,
+        );
+        for width in [28, 40, 60, 80, 100, 140] {
+            let mut frame = view(None, "/");
+            frame.board = Some(&board);
+            frame.writers = Some(&writers);
+            let drawn = draw_body(&frame, width, &p, None);
+            rows_fit(&drawn, width);
+            assert!(!plain_has(&drawn, "BY SERVICE"), "{width}");
+            assert!(!plain_has(&drawn, "WAITING ON DISK"), "{width}");
+            assert!(!plain_has(&drawn, "CGROUP"), "no cgroups on a Mac: {width}");
+            assert_eq!(drawn.lens[BY_SERVICE], 0);
+            assert_eq!(drawn.lens[WAITING], 0);
+            assert_eq!(drawn.lens[BY_PROCESS], 8);
+        }
+        let mut frame = view(None, "/");
+        frame.board = Some(&board);
+        frame.writers = Some(&writers);
+        let drawn = draw_body(&frame, 200, &p, None);
+        assert!(plain_has(&drawn, "WHO IS WRITING  by process · proc_pid_rusage"));
+        assert!(plain_has(
+            &drawn,
+            "every disk · sorted: write · 16 of 19 processes readable (yours) · the other 3 need root"
+        ));
+        assert!(plain_has(&drawn, "≈ 15M/s of 188M/s combined (8%)"));
+        let open = writers::Opened {
+            pid: 611,
+            comm: "example-worker-11".into(),
+            ..writers::Opened::default()
+        };
+        frame.screen = Screen::Process;
+        frame.opened = Some(&open);
+        let drawn = draw_body(&frame, 100, &p, None);
+        assert!(plain_has(&drawn, "cmdline, cwd and open files are not read on macOS"));
+        assert!(plain_has(&drawn, "(bytes handed to the disk layer)"));
+        assert!(!plain_has(&drawn, "cgroup"));
     }
 }

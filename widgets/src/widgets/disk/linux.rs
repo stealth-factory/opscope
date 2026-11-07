@@ -21,7 +21,8 @@ use opscope_core::cgroup::State;
 use opscope_core::procfs;
 
 use super::parse::{self, InventoryDisk, IoSnapshot, Mount, PartMount, Space};
-use super::writers::{self, Memory, PidSample, Writers};
+use super::by_process::{self, FileMemory, ProcDetail, ProcMemory, Source};
+use super::writers::{self, Memory, PidSample, Wanted, Writers};
 
 struct InventoryCache {
     at: Instant,
@@ -236,10 +237,15 @@ fn read_dev(path: &str) -> Option<String> {
 }
 
 /// What the WHO IS WRITING poll keeps between passes: the previous tree
-/// and wait ticks (in [`Memory`]), and when `task_delayacct` was last read.
+/// and wait ticks (in [`Memory`]), one previous `io` reading per pid (in
+/// [`ProcMemory`]), the open process's previous file sizes, and when
+/// `task_delayacct` and the `/proc` mount's `hidepid` were last read.
 pub struct WriterSource {
     memory: Memory,
+    procs: ProcMemory,
+    files: Option<FileMemory>,
     delayacct: Option<(bool, Instant)>,
+    hidepid: Option<(bool, Instant)>,
     start: Instant,
 }
 
@@ -247,20 +253,25 @@ impl Default for WriterSource {
     fn default() -> Self {
         Self {
             memory: Memory::default(),
+            procs: ProcMemory::default(),
+            files: None,
             delayacct: None,
+            hidepid: None,
             start: Instant::now(),
         }
     }
 }
 
-/// One cgroup walk and one `/proc` pass. `detail` is the cgroup whose
-/// detail screen is open; its `io.pressure` is read with the walk.
+/// One cgroup walk and one `/proc` pass. `wanted` names the cgroup whose
+/// detail screen is open (its `io.pressure` is read with the walk) and the
+/// process whose detail is open (its command line, working directory and
+/// open files are read with the pass).
 ///
-/// Per pid: `stat` (state, ppid, field 42) and `io`, which says whether this
-/// user can read it and is what the by-process rates will diff. The cgroup
-/// of a pid comes from the walk's `cgroup.procs`; only a process in D state
+/// Per pid: `stat` (state, ppid, field 42) and `io`, which is both whether
+/// this user can read it and what the BY PROCESS rates diff. The cgroup of
+/// a pid comes from the walk's `cgroup.procs`; only a process in D state
 /// the walk did not list has `/proc/<pid>/cgroup` read for it.
-pub fn sample_writers(source: &mut WriterSource, detail: Option<String>) -> Option<Writers> {
+pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Writers> {
     let state = opscope_core::cgroup::read(&["io"], true);
     let fresh = source
         .delayacct
@@ -273,6 +284,17 @@ pub fn sample_writers(source: &mut WriterSource, detail: Option<String>) -> Opti
         source.delayacct = Some((on, Instant::now()));
     }
     let delayacct = source.delayacct.is_some_and(|(on, _)| on);
+    let fresh = source
+        .hidepid
+        .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(60));
+    if !fresh {
+        // Unreadable is not hidden: the count then says every process.
+        let on = std::fs::read_to_string("/proc/self/mountinfo")
+            .map(|text| by_process::parse_hidepid(&text))
+            .unwrap_or(false);
+        source.hidepid = Some((on, Instant::now()));
+    }
+    let visible = source.hidepid.is_some_and(|(on, _)| on);
     let listed: BTreeSet<i32> = match &state {
         State::Ok(tree) | State::Container(tree) => tree
             .nodes
@@ -281,20 +303,51 @@ pub fn sample_writers(source: &mut WriterSource, detail: Option<String>) -> Opti
             .collect(),
         _ => BTreeSet::new(),
     };
+    let rows_of = writers::pid_rows(&state);
     let (samples, pid_err) = match procfs::pids() {
         Ok(pids) => (pass(&pids, &listed), String::new()),
         Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
     };
+    let now = source.start.elapsed().as_secs_f64();
+    let proc_samples = by_process::samples_from_pids(&samples, &rows_of);
+    let state_of = wanted
+        .pid
+        .and_then(|pid| samples.iter().find(|s| s.pid == pid).map(|s| s.state));
     let mut out = writers::step(
         &mut source.memory,
         state,
         samples,
         pid_err,
         delayacct,
-        source.start.elapsed().as_secs_f64(),
+        now,
         procfs::clock_ticks(),
     );
-    out.pressure = detail.map(|path| {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    out.procs = Some(by_process::step(
+        &mut source.procs,
+        proc_samples,
+        now,
+        root,
+        visible,
+        Source::Procfs,
+    ));
+    out.detail = wanted.pid.map(|pid| {
+        let facts = procfs::process_facts(pid);
+        let files = procfs::open_files(pid)
+            .map(|files| by_process::file_growth(&mut source.files, pid, &files, now));
+        ProcDetail {
+            pid,
+            state: state_of,
+            cmdline: facts.cmdline,
+            cwd: facts.cwd,
+            files: Some(files),
+        }
+    });
+    if wanted.pid.is_none() {
+        source.files = None;
+    }
+    out.pressure = wanted.cgroup.map(|path| {
         let file = format!("/sys/fs/cgroup/{path}/io.pressure");
         let reading = match std::fs::read_to_string(&file) {
             Ok(text) => {
@@ -335,7 +388,8 @@ fn pass(pids: &[i32], listed: &BTreeSet<i32>) -> Vec<PidSample> {
 }
 
 /// Command line and working directory for the process detail, read once
-/// when it opens. Empty where this user cannot read them.
+/// when it opens so the first frame has them. Empty where this user cannot
+/// read them. The poller reads them again every poll after that.
 pub fn process_facts(pid: i32) -> (String, String) {
     let facts = procfs::process_facts(pid);
     (facts.cmdline, facts.cwd)
