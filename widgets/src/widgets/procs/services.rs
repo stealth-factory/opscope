@@ -54,8 +54,13 @@ pub struct Service {
 
 impl Service {
     /// Nothing measured: no CPU over the window, no memory, no processes.
+    /// A gap is not empty - its share could not be taken this poll, which
+    /// is the opposite of having measured nothing - so it stays drawn.
     pub fn empty(&self) -> bool {
-        self.cpu_usec.unwrap_or(0) == 0 && self.memory.unwrap_or(0) == 0 && self.pids.is_empty()
+        !self.gap
+            && self.cpu_usec.unwrap_or(0) == 0
+            && self.memory.unwrap_or(0) == 0
+            && self.pids.is_empty()
     }
 
     /// The row's name: its path, `/` for the root. A delegated subtree
@@ -569,6 +574,21 @@ mod tests {
         let (by_procs, _) = super::shown(&t.rows, "", true, 1000, Sort::Procs);
         assert_eq!(by_procs[0].path, "user.slice");
         assert_eq!(by_procs[1].path, "system.slice/example-db.service");
+    }
+
+    #[test]
+    fn a_gap_is_drawn_never_hidden_as_empty() {
+        let t = table();
+        let mut rows = t.rows.clone();
+        let idle = rows
+            .iter_mut()
+            .find(|r| r.empty())
+            .expect("the fixture has an empty row");
+        let path = idle.path.clone();
+        idle.gap = true;
+        let (shown, empty) = shown(&rows, "", true, 1000, Sort::Cpu);
+        assert_eq!(empty, 0, "a gap is not counted as empty");
+        assert!(shown.iter().any(|r| r.path == path), "{path} is drawn");
     }
 
     #[test]
