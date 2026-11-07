@@ -78,8 +78,12 @@ pub struct ProcSample {
     /// equality: a pid reused between two passes is a different process,
     /// and its counters are not subtracted from a stranger's.
     pub start: u64,
-    /// `(read, write)` bytes since the process started.
-    pub io: Result<(u64, u64), Unreadable>,
+    /// `(read, write, cancelled)` bytes since the process started. Kept
+    /// apart so a poll's net write is the write delta less the cancelled
+    /// delta: a lifetime net clamped at zero would hide every write of a
+    /// process that once truncated more than it had written. `cancelled`
+    /// is 0 where the host has no such counter (macOS).
+    pub io: Result<(u64, u64, u64), Unreadable>,
     /// The BY SERVICE row the process's I/O lands in, as drawn (`/` for the
     /// root's own), `""` when the walk did not place it.
     pub cgroup: String,
@@ -95,13 +99,11 @@ pub struct Rusage {
     pub start: u64,
 }
 
-/// Linux: `read_bytes`, and `write_bytes` less what was dirtied and then
-/// thrown away before it reached the disk (a truncated or deleted file).
-pub fn io_counts(io: &PidIo) -> (u64, u64) {
-    (
-        io.read_bytes,
-        io.write_bytes.saturating_sub(io.cancelled_write_bytes),
-    )
+/// Linux: `read_bytes`, `write_bytes`, and `cancelled_write_bytes` - what
+/// was dirtied and then thrown away before it reached the disk (a
+/// truncated or deleted file), which `step` takes off the writes.
+pub fn io_counts(io: &PidIo) -> (u64, u64, u64) {
+    (io.read_bytes, io.write_bytes, io.cancelled_write_bytes)
 }
 
 /// The Linux pass as samples. `cgroups` is pid → BY SERVICE row.
@@ -134,7 +136,7 @@ pub fn samples_from_rusage(
             pid: *pid,
             comm: names.get(pid).cloned().unwrap_or_else(|| "—".into()),
             start: read.map(|r| r.start).unwrap_or(0),
-            io: read.map(|r| (r.read, r.write)),
+            io: read.map(|r| (r.read, r.write, 0)),
             cgroup: String::new(),
         })
         .collect()
@@ -242,7 +244,7 @@ pub struct Procs {
 /// What is kept from one pass to the next: one previous reading per pid.
 #[derive(Default)]
 pub struct ProcMemory {
-    prev: HashMap<i32, (u64, u64, u64)>,
+    prev: HashMap<i32, (u64, u64, u64, u64)>,
     at: Option<f64>,
 }
 
@@ -264,20 +266,25 @@ pub fn step(
     let mut moved = 0.0;
     for s in samples {
         match s.io {
-            Ok((read, write)) => {
+            Ok((read, written, cancelled)) => {
                 // Identity is the start time; each counter is then read on
-                // its own. The write figure is net of cancelled bytes, so it
-                // can fall on a live process that truncated dirty data: that
-                // poll wrote nothing net, and its reads still count.
+                // its own. The poll's write is its write delta less its
+                // cancelled delta, so a poll that truncated more dirty data
+                // than it wrote is 0, and its reads still count.
                 let delta = elapsed.and_then(|e| {
-                    let &(start, r0, w0) = memory.prev.get(&s.pid)?;
-                    (start == s.start && read >= r0)
-                        .then(|| ((read - r0) as f64, write.saturating_sub(w0) as f64, e))
+                    let &(start, r0, w0, c0) = memory.prev.get(&s.pid)?;
+                    (start == s.start && read >= r0).then(|| {
+                        let w = written
+                            .saturating_sub(w0)
+                            .saturating_sub(cancelled.saturating_sub(c0));
+                        ((read - r0) as f64, w as f64, e)
+                    })
                 });
+                let write = written.saturating_sub(cancelled);
                 if let Some((r, w, _)) = delta {
                     moved += if source.combined() { r + w } else { w };
                 }
-                next.insert(s.pid, (s.start, read, write));
+                next.insert(s.pid, (s.start, read, written, cancelled));
                 rows.push(ProcRate {
                     pid: s.pid,
                     comm: s.comm,
@@ -1009,6 +1016,38 @@ mod tests {
         assert_eq!(p.rows[0].read_bps, Some(2_000.0), "reads still count");
         assert_eq!(p.rows[0].write_bps, Some(0.0), "nothing written net");
         assert_eq!(p.moved, Some(0.0));
+        // Its lifetime cancelled bytes now pass its lifetime writes. The
+        // next 4 KB it writes are still 4 KB, not lost under that.
+        let after = vec![pid_sample(100, 5, Some(io(5_000, 15_000, 8_000)))];
+        let p = step(
+            &mut memory,
+            samples_from_pids(&after, &HashMap::new()),
+            4.0,
+            false,
+            false,
+            Source::Procfs,
+        );
+        assert_eq!(p.rows[0].write_bps, Some(2_000.0));
+        assert_eq!(p.moved, Some(4_000.0));
+        let mut lifetime = ProcMemory::default();
+        let _ = step(
+            &mut lifetime,
+            samples_from_pids(&[pid_sample(7, 1, Some(io(0, 4_096, 16_781_312)))], &HashMap::new()),
+            0.0,
+            false,
+            false,
+            Source::Procfs,
+        );
+        let p = step(
+            &mut lifetime,
+            samples_from_pids(&[pid_sample(7, 1, Some(io(0, 8_192, 16_781_312)))], &HashMap::new()),
+            1.0,
+            false,
+            false,
+            Source::Procfs,
+        );
+        assert_eq!(p.rows[0].write_bps, Some(4_096.0));
+        assert_eq!(p.rows[0].write_total, 0, "the lifetime net is still floored");
     }
 
     #[test]
