@@ -849,20 +849,6 @@ pub struct IoSnapshot {
     pub err: String,
 }
 
-/// True when pid 1's environment names a container runtime.
-///
-/// `/proc/1/environ` is NUL-separated `KEY=value` pairs. An empty
-/// `container=` does not count. A cgroup path is not this signal: `0::/`
-/// is what pid 1 sees in a private cgroup namespace and on a host whose
-/// init stays in the root cgroup.
-pub fn parse_container_env(text: &str) -> bool {
-    text.split('\0').any(|entry| {
-        entry
-            .strip_prefix("container=")
-            .is_some_and(|value| !value.is_empty())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,15 +1338,5 @@ full avg10=7.2 avg60=5.1 avg300=2.0 total=40
         );
         assert_eq!(track.names, second);
         assert!(iostat_disk_idle(&track, 0));
-    }
-
-    #[test]
-    fn a_container_variable_names_a_runtime_and_an_empty_one_does_not() {
-        assert!(parse_container_env("container=podman\0PATH=/bin"));
-        assert!(parse_container_env("PATH=/bin\0container=docker"));
-        assert!(!parse_container_env("container=\0PATH=/bin"));
-        assert!(!parse_container_env("container_name=web\0"));
-        assert!(!parse_container_env(""));
-        assert!(!parse_container_env("0::/\n"));
     }
 }

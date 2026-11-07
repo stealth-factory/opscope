@@ -58,26 +58,15 @@ fn bytes_at(value: &serde_json::Value, key: &str) -> u64 {
 /// window rather than all time - a peer reading 0B may just predate a
 /// restart.
 fn daemon_uptime() -> Option<f64> {
-    let hz = {
-        let n = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if n > 0 { n as f64 } else { 100.0 }
-    };
-    for entry in std::fs::read_dir("/proc").ok()? {
-        let entry = entry.ok()?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.chars().all(|c| c.is_ascii_digit()) {
+    use tc::procfs;
+    let hz = procfs::clock_ticks();
+    for pid in procfs::pids().ok()? {
+        if procfs::read_comm(pid).unwrap_or_default().trim() != "tailscaled" {
             continue;
         }
-        let comm = std::fs::read_to_string(format!("/proc/{}/comm", name)).unwrap_or_default();
-        if comm.trim() != "tailscaled" {
-            continue;
-        }
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", name)).ok()?;
-        let rest = stat.rsplit_once(')')?.1;
-        let started: f64 = rest.split_whitespace().nth(19)?.parse().ok()?;
-        let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
-        let up: f64 = uptime.split_whitespace().next()?.parse().ok()?;
-        return Some(up - started / hz);
+        let started = procfs::read_stat(pid).ok()?.starttime;
+        let up = procfs::read_uptime().ok()?;
+        return Some(procfs::age_seconds(up, started, hz));
     }
     None
 }

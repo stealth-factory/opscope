@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use opscope_core as tc;
+use tc::procfs::{unit_name, Facts, OpenFile, PidIo, Resolver};
 
 mod parse;
 
@@ -56,9 +57,6 @@ const VIRTUAL: &[&str] = &[
     "lo", "tailscale0", "docker", "veth", "br-", "virbr", "wg", "tun", "tap", "cni", "flannel",
     "kube", "utun", "bridge", "awdl", "llw", "gif", "stf", "anpi", "vmenet", "pktap", "ap",
 ];
-
-/// Systemd names the slice, not the thing in it.
-const SLICES: &[&str] = &["system.slice", "user.slice", "init.scope", "-.slice", "app.slice"];
 
 /// Decimal units, as network equipment and ISPs quote them.
 fn units(n: f64) -> String {
@@ -92,46 +90,6 @@ fn elapsed(seconds: f64) -> String {
 /// Seconds before an external command is given up on, from netwatch.py.
 const RUN_TIMEOUT: u64 = 5;
 
-/// Whether this traffic never leaves the machine.
-#[allow(dead_code)] // Linux filtering, still tested on macOS.
-fn local_peer(host: &str, own: &[String]) -> bool {
-    if host.starts_with("127.") || host == "::1" || host.is_empty() || host == "*" {
-        return true;
-    }
-    let bare = host.strip_prefix("::ffff:").unwrap_or(host);
-    own.iter().any(|a| a == bare)
-}
-
-/// Whether a peer is out on the internet rather than nearby.
-#[allow(dead_code)] // Linux filtering, still tested on macOS.
-fn off_box(host: &str, own: &[String]) -> bool {
-    if local_peer(host, own) {
-        return false;
-    }
-    let h = host.strip_prefix("::ffff:").unwrap_or(host);
-    if h.starts_with("10.") || h.starts_with("192.168.") || h.starts_with("169.254.") {
-        return false;
-    }
-    if h.starts_with("172.") {
-        if let Some(second) = h.split('.').nth(1).and_then(|s| s.parse::<u16>().ok()) {
-            if (16..=31).contains(&second) {
-                return false;
-            }
-        }
-    }
-    if let Some(second) = h.strip_prefix("100.").and_then(|r| r.split('.').next()) {
-        if let Ok(n) = second.parse::<u16>() {
-            if (64..=127).contains(&n) {
-                return false;
-            }
-        }
-    }
-    !(h.starts_with("fd7a:115c:a1e0")
-        || h.starts_with("fe80:")
-        || h.starts_with("fc")
-        || h.starts_with("fd"))
-}
-
 #[derive(Clone)]
 struct Seen {
     sent: u64,
@@ -157,31 +115,6 @@ struct ProcessSeen {
 enum TrafficSample {
     Sockets(HashMap<String, Seen>),
     Processes(Vec<ProcessSeen>),
-}
-
-/// Who owns a socket, from the cgroup the kernel already reports.
-///
-/// Another user's /proc is closed, but `ss` prints the control group for
-/// every socket regardless, and on a systemd machine that names the unit.
-fn unit_name(cgroup: &str) -> String {
-    for part in cgroup.trim_matches('/').split('/').rev() {
-        if part.is_empty() || SLICES.contains(&part) {
-            continue;
-        }
-        let mut name = part;
-        for suffix in [".service", ".scope", ".slice"] {
-            if let Some(base) = name.strip_suffix(suffix) {
-                name = base;
-                break;
-            }
-        }
-        // A login session is a person, not a program.
-        if name.starts_with("session-") || name.starts_with("user-") {
-            continue;
-        }
-        return name.to_string();
-    }
-    String::new()
 }
 
 /// Which interfaces are being counted, for the end of the line.
@@ -406,7 +339,7 @@ fn acquire(external: bool) -> Reading {
         }
     };
     let owners = match &traffic {
-        Ok(TrafficSample::Sockets(found)) if !found.is_empty() => match host::socket_owners() {
+        Ok(TrafficSample::Sockets(found)) if !found.is_empty() => match host::owners() {
             Ok(found) => found,
             Err(err) => {
                 errors.push(err);
@@ -683,10 +616,8 @@ fn absorb_rows(
             // is unreadable for anyone else's, which the empty map covers.
             let (mut read_rate, mut write_rate) = (0.0, 0.0);
             if row.pid != 0 && row.alive {
-                let io = proc_io(row.pid);
-                let now_read = *io.get("read_bytes").unwrap_or(&0);
-                let now_write = *io.get("write_bytes").unwrap_or(&0);
-                if !io.is_empty() {
+                if let Some(io) = disk_io(row.pid) {
+                    let (now_read, now_write) = (io.read_bytes, io.write_bytes);
                     if let Some((was_at, was_read, was_write)) = row.io_was {
                         let span = stamp - was_at;
                         if span > 0.0 {
@@ -764,65 +695,6 @@ fn absorb_wire(state: &mut State, stamp: f64, counters: Option<(u64, u64, Vec<St
 // processes and out of nothing at all for anybody else's, which is why the
 // screen says so rather than showing empty lists.
 
-/// Reverse DNS, off the drawing thread.
-///
-/// A PTR lookup takes half a second when it works and longer when it does
-/// not, which is several frames. The address is shown until a name arrives,
-/// and an address that has no name is remembered as having none so it is
-/// not asked about again every second.
-struct Resolver {
-    known: Arc<Mutex<HashMap<String, String>>>,
-    wanted: Arc<Mutex<Vec<String>>>,
-}
-
-impl Resolver {
-    fn new(activity: tc::Refresh) -> Resolver {
-        let known: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-        let wanted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let (k, q) = (Arc::clone(&known), Arc::clone(&wanted));
-        std::thread::spawn(move || loop {
-            let next = q.lock().ok().and_then(|mut g| g.pop());
-            let ip = match next {
-                Some(ip) => ip,
-                None => {
-                    std::thread::sleep(Duration::from_millis(300));
-                    continue;
-                }
-            };
-            let work = activity.start();
-            // getent rather than a resolver library: it is glibc's own
-            // lookup, so it honours /etc/hosts, nsswitch and the search
-            // domains exactly as everything else on the machine does.
-            let answer = tc::run_quiet(&["getent", "hosts", &ip], RUN_TIMEOUT);
-            let name = answer
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            if let Ok(mut guard) = k.lock() {
-                guard.insert(ip, name);
-            }
-            drop(work);
-        });
-        Resolver { known, wanted }
-    }
-
-    /// A name for an address if one is known, queueing a lookup if not.
-    fn name(&self, ip: &str) -> String {
-        if let Ok(guard) = self.known.lock() {
-            if let Some(found) = guard.get(ip) {
-                return found.clone();
-            }
-        }
-        if let Ok(mut queue) = self.wanted.lock() {
-            if !queue.iter().any(|q| q == ip) && queue.len() < 64 {
-                queue.push(ip.to_string());
-            }
-        }
-        String::new()
-    }
-}
-
 /// What a port number is conventionally for, from /etc/services.
 fn service(port: u16) -> String {
     if port == 0 {
@@ -856,14 +728,8 @@ fn running(pid: i32) -> bool {
 
 /// Disk bytes this process has read and written, when the platform exposes
 /// them without elevated privileges.
-fn proc_io(pid: i32) -> HashMap<String, u64> {
-    host::proc_io(pid)
-}
-
-#[derive(Clone)]
-struct OpenFile {
-    path: String,
-    size: u64,
+fn disk_io(pid: i32) -> Option<PidIo> {
+    host::disk_io(pid)
 }
 
 /// Regular files this process has open, largest first.
@@ -872,14 +738,8 @@ struct OpenFile {
 /// bigger. This is the closest thing to "which file" that exists outside
 /// the encrypted stream - the name of the thing being written, rather than
 /// the name of the thing being fetched.
-fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
-    host::open_files(pid)
-}
-
-#[derive(Clone, Default)]
-struct Facts {
-    cmdline: String,
-    cwd: String,
+fn files_of(pid: i32) -> Result<Vec<OpenFile>, String> {
+    host::files_of(pid)
 }
 
 /// Command and directory - what the table has no room for.
@@ -922,7 +782,7 @@ impl DetailLoader {
             };
             let work = activity.start();
             let snapshot = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let (files, files_err) = match open_files(pid) {
+                let (files, files_err) = match files_of(pid) {
                     Ok(files) => (files, String::new()),
                     Err(err) => (Vec::new(), err),
                 };
@@ -1589,12 +1449,8 @@ fn detail_rows(
         out.push(String::new());
     }
 
-    let io = if here_now {
-        proc_io(row.pid)
-    } else {
-        HashMap::new()
-    };
-    if !io.is_empty() && h.saturating_sub(out.len()) >= 2 {
+    let io = if here_now { disk_io(row.pid) } else { None };
+    if let Some(io) = io.filter(|_| h.saturating_sub(out.len()) >= 2) {
         out.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── DISK ── ".into()),
@@ -1602,8 +1458,8 @@ fn detail_rows(
                     p.dim.as_str(),
                     format!(
                         "read {} · written {} since it started",
-                        units(*io.get("read_bytes").unwrap_or(&0) as f64),
-                        units(*io.get("write_bytes").unwrap_or(&0) as f64)
+                        units(io.read_bytes as f64),
+                        units(io.write_bytes as f64)
                     ),
                 ),
             ],
@@ -2938,6 +2794,7 @@ fn palette_on(lit: bool) -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tc::procfs::{local_peer, off_box};
 
     #[test]
     fn the_list_reserves_the_packed_footer_not_a_fixed_three() {
@@ -3238,10 +3095,7 @@ mod tests {
     }
 
     fn a_resolver() -> Resolver {
-        Resolver {
-            known: Arc::new(Mutex::new(HashMap::new())),
-            wanted: Arc::new(Mutex::new(Vec::new())),
-        }
+        Resolver::idle()
     }
 
     // The headings are found by looking at where the rendered row put its
@@ -3557,19 +3411,19 @@ mod tests {
             "google-guest-agent"
         );
         // A login session says who is logged in, not what opened the socket.
-        assert_eq!(unit_name("/user.slice/user-1002.slice/session-1.scope"), "");
+        assert_eq!(unit_name("/user.slice/user-1000.slice/session-1.scope"), "");
         assert_eq!(unit_name("/"), "");
     }
 
     #[test]
     fn ss_fields_are_read_off_the_line() {
         let line = "\t ts sack cubic bytes_sent:1669 bytes_acked:1670 bytes_received:11469 segs_out:272";
-        assert_eq!(parse::field(line, "bytes_sent:"), Some("1669".into()));
+        assert_eq!(tc::procfs::field(line, "bytes_sent:"), Some("1669".into()));
         assert_eq!(
-            parse::field(line, "bytes_received:"),
+            tc::procfs::field(line, "bytes_received:"),
             Some("11469".into())
         );
-        assert_eq!(parse::field(line, "nothing:"), None);
+        assert_eq!(tc::procfs::field(line, "nothing:"), None);
     }
 
     #[test]

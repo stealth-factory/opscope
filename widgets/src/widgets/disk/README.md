@@ -33,7 +33,31 @@ DISK                                     TYPE    SIZE   READ WRITE  IOPS AWAIT B
  /proc/pressure/io · stall time, not busy time
  some 23.1% avg10 · 18.4% avg60 · 9.7% avg300   full 7.2% · 5.1% · 2.0%
 
- ↑↓ select  [↵] detail  [s] sort by fills soonest  tab section  [v] show idle disks
+ WHO IS WRITING  sda · last 2s · 18M/s written · 1.5M/s read
+ BY SERVICE  cgroup v2 io.stat · complete · sorted: write · io accounting down to:
+ services; user sessions roll up to user.slice
+CGROUP                              WRITE    READ SHARE PROCS
+▸ system.slice/example-db.service   16M/s  1.2M/s   89% 12 · none readable as you
+  user.slice                       1.6M/s  300K/s    9% 203 · 198 readable
+  /                                400K/s    0B/s    2% 1 · not readable
+ accounted: 18M/s of 18M/s
+
+ BY PROCESS  /proc/<pid>/io · every disk · sorted: write · 412 of 598 processes
+ readable (yours) · the other 186 need root
+ 2 of 412 readable moved bytes over the last 2s
+  PID     COMMAND               WRITE    READ CGROUP
+  48213   example-worker      9.8M/s    0B/s user.slice
+  48990   example-sync        3.1M/s   11M/s user.slice
+ readable processes account for ≈ 13M/s of 19M/s (68%) written to sda, sdb over the
+ last 60s · write_bytes counts at dirtying, devices at submission
+
+ WAITING ON DISK  3 in D state now · wait times off (needs root: sysctl
+ kernel.task_delayacct=1) · 1 kernel thread hidden
+  PID     COMMAND      STATE CGROUP
+  1204    example-db   D     system.slice/example-db.service
+  48190   example-sync D     user.slice/user-1000.slice/session-2.scope
+
+ ↑↓ select  [↵] detail  [s] sort by read  tab section  [v] show idle disks
  [w] 6h  [p] pause  [,] settings  [q]uit
 ```
 
@@ -52,8 +76,19 @@ is transfers per second, and the heading names the one in force. `w`
 cycles the projection window through 6, 12 and 24 hours for this session;
 the pane starts on the `window_hours` setting, 24 by default (an old
 `window_days` setting is ignored). The disk detail screen does not offer
-`w`: its I/O chart is kept in memory and has no window.
+`w`: its I/O chart is kept in memory and has no window, and neither do
+the WHO IS WRITING screens.
 `v` shows idle disks, or hides them again.
+`tab` also reaches BY SERVICE, BY PROCESS and WAITING ON DISK (on macOS,
+BY PROCESS only). There `↵` opens a cgroup's detail, a process's detail,
+or, on `+N more`, everyone in D state. `s` cycles BY SERVICE and BY
+PROCESS through write, read and name, and WAITING through time waited and
+pid when wait times are on. `a` shows every row of BY PROCESS while it has
+the cursor, and every cgroup in BY SERVICE otherwise, or only the top
+`top_writers` again; the hint names the table it acts on and appears once
+there are more rows than that. BY PROCESS takes the cursor even when no
+process moved bytes: it stands on the line saying so, and `a` from there
+lists every process.
 `p` pauses the sample and the header says so. `,` opens settings. `!`
 opens notices. `q` quits.
 
@@ -108,6 +143,13 @@ it for that run, with the same limits.
 `warn_percent` and `alert_percent` default to 80 and 90. At and below the
 warning the bar stays quiet; at the alert it is fully hot, and between
 them it climbs in a straight line.
+
+`top_writers` (8, at least 1) is how many rows BY SERVICE and BY PROCESS
+show before `a`. `show_kernel_threads` (false, Linux-only) lists kernel
+threads in WAITING ON DISK instead of only counting them.
+`reconcile_seconds` (60, at least 10) is the window BY PROCESS sums both
+sides over before it compares what the readable processes moved with what
+the disks did.
 
 ## When a number is missing
 
@@ -186,3 +228,161 @@ Linux only. The row is stall time from `/proc/pressure/io`, some and full,
 over 10, 60 and 300 seconds. The heading says it is stall time, not busy
 time. A kernel built without PSI, or one booted with `psi=0`, shows `PSI
 not available on this kernel (CONFIG_PSI or psi=0)` and never a zero.
+
+## Who is writing
+
+Only on the list screen. On Linux it has BY SERVICE, BY PROCESS and
+WAITING ON DISK; on macOS it is BY PROCESS alone (below). BY SERVICE
+describes one disk: the one
+the DISKS cursor was put on, or until then the disk the table shows first
+(sorted by write, the busiest). The heading names it, the interval, and
+that disk's own write and read rates from `/proc/diskstats`.
+
+**BY SERVICE** is complete: every cgroup that moved bytes on that disk in
+the interval, from cgroup v2 `io.stat`, which the kernel keeps for every
+process whether this user can read the process or not. Nothing here
+needs root. `io.stat` is hierarchical, so a parent's figure already holds
+its children's; each row is the cgroup's *own* share, with every child
+that has `io` enabled taken out, so the rows add up without counting a
+byte twice. The shares are taken over the interval's change rather than
+from two readings, because a cgroup that went away leaves its bytes in
+its parent's counter, and that parent would otherwise show them all at
+once. Where `io` is not enabled below a cgroup, its children roll up into
+it, and the heading says how deep accounting goes on this host (`io
+accounting down to: services; user sessions roll up to user.slice`). `/`
+is the root's own share: I/O no child cgroup was charged for. A
+partition's bytes count toward its disk. A dm or md device above the disk
+is a disk row of its own, and the kernel already charges what it passes
+down to this disk, so it is not added again.
+
+WRITE and READ are bytes per second over the interval. SHARE is the
+row's part of the cgroups' summed write. PROCS is how many processes land
+in the row and how many of them this user can read `/proc/<pid>/io` for;
+the rest of their per-process figures need root. The table shows the top
+`top_writers` in the sort's order; the line above it says how many it
+left out, and `a` shows them. Columns leave as the pane narrows: who is
+readable, then PROCS, then SHARE, then READ. A path wider than its column
+wraps.
+
+The line under the table ties the cgroups to the device over the same
+interval. `accounted: 187M/s of 188M/s · the rest, 1M/s, is writeback on
+filesystems without cgroup writeback, or root's own` names what is left
+over whenever the two figures read differently: writeback on a filesystem
+without cgroup writeback (anything but ext2, ext4, btrfs, f2fs and xfs) is
+charged to the root, and so is the root's own I/O. When
+the cgroups add up to more than the device by over 2%, it does not call
+that accounted: `cgroups report 203M/s against 188M/s at the device ·
+dirtying runs ahead of submission`. Under 2% it says the two were read a
+moment apart. An idle disk still draws the table's header and `accounted:
+0B/s of 0B/s`.
+
+Instead of the table: `by service needs cgroup v2` on a cgroup v1 or
+hybrid host; `io accounting is off everywhere · systemctl set-property
+<unit> IOAccounting=yes enables it per unit` when no cgroup has `io`; the
+reason when the tree cannot be read. Inside a container (pid 1 at `0::/`
+and a runtime marker, as above) the heading adds
+`rows are this container's cgroups; the device total is the host's`. The
+first poll says `measuring`, because a rate needs two.
+
+`↵` on a row shows the full cgroup path, the controllers enabled there,
+its `io.pressure`, how many cgroups below it roll up into it and how to
+give one its own row, its rates on the disk, and every pid in it with its
+name and, for each one this user can read, its write and read rates over
+the last poll (every disk's: a process's counters are not kept per
+device), or `not readable`.
+
+**BY PROCESS** ranks processes by the bytes they moved over the last poll,
+from `/proc/<pid>/io`: `read_bytes`, and `write_bytes` less
+`cancelled_write_bytes` (pages dirtied and then thrown away by a truncate
+or a delete, which never reach the disk). It covers every disk, because a
+process's counters are not kept per device. Another user's
+`/proc/<pid>/io` is closed to an ordinary user, so this table is the
+readable share, and it says so every frame, even when the share is all of
+them: `412 of 598 processes readable (yours) · the other 186 need root`.
+Run as root, every process is readable and the sentence drops `(yours)`.
+With `/proc` mounted `hidepid=invisible`, other users' processes are not
+listed at all; the count then says `visible` and the line says why. The
+table shows the top `top_writers` that moved bytes, and the line above it
+says how many of the readable ones did (`2 of 412 readable moved bytes
+over the last 2s`); a readable process that moved nothing is counted, not
+listed. `a` lists every process: the readable ones (idle ones too), then
+the ones that need root, each still with its cgroup, since that is
+readable for every process. A process seen once has no rate yet (`—`);
+one that exits is dropped, and a pid reused by a new process starts again
+rather than being subtracted from the old one. CGROUP is the BY SERVICE
+row the process's I/O lands in. Columns leave as the pane narrows: CGROUP,
+then READ; a long command wraps.
+
+The line under the table ties what the readable processes wrote to what
+the disks took: `readable processes account for ≈ 13M/s of 19M/s (68%)
+written to sda, sdb over the last 60s`. The disk side is the total drawn
+above the chart, so a disk left out of that total is left out here too.
+The two cannot be compared poll by poll: `write_bytes` counts a page when
+it is dirtied, and the disk counts the write when it is submitted, which
+can be half a minute later. So both sides are summed over
+`reconcile_seconds` (60) and the line says `≈`; under a write burst the
+share can even pass 100% for a while. When a process reaps a child, Linux
+adds the child's counters to the parent's `/proc/<pid>/io`, so bytes the
+child already wrote can be counted again, and an idle parent can briefly
+appear as a writer. A poll where the disks had no rate
+is left out of both sides. The rest of the device's figure is the other
+users' processes, the kernel's own writeback and journal, and swap.
+
+`↵` on a process opens its detail, titled with its name and pid. What you
+watch comes first: its write and read rates over the last poll and its
+state (`D · waiting on disk now` in the warning colour), then its write
+rate over the last minute as a line chart - pixels in Kitty, Braille
+elsewhere, the same samples - with the peak and the time-weighted average
+beside it, and `last 14s` until it has a minute. That history is the polls
+since the screen opened, kept by measured seconds rather than by count, and
+it starts over for another process or a reused pid. OPEN FILES is a table
+of the regular files it has open: FILE, SIZE, GROWTH since the previous
+sample, and RATE, that growth over the seconds between the two samples; the
+header names those seconds, so a growth is never read as a total. The files
+growing come first, most growth first, then the rest by size with `—`. A
+long path wraps under itself; RATE is the column that leaves as the pane
+narrows. Last, PROCESS lists its state, command line, working directory,
+cgroup and what it has read and written since it started, in an aligned
+column, a long command line wrapping under its value. The screen reads all
+of it again every poll. On another user's process it shows what is
+readable (the pid, the name, the state, the cgroup and usually the command
+line) and `the rest needs root`.
+
+**WAITING ON DISK** is every process in `D` state now - a sample of this
+instant, not a count over time - with its cgroup, which is readable for
+every process. With `/proc/sys/kernel/task_delayacct` at 1, WAITED is the
+time each spent waiting on block I/O since the last poll (`1.8s of 2s`,
+from field 42 of `/proc/<pid>/stat`), and the rows are ranked by it. At 0,
+the default, there is no WAITED column at all rather than a column of
+zeros, the header says `wait times off (needs root: sysctl
+kernel.task_delayacct=1)`, and the rows are in pid order, a sample. A
+kernel that does not print field 42 is the same as 0. The widget reads
+the setting once a minute. Kernel threads (children of `kthreadd`) wait
+on someone else's behalf, so they are hidden unless
+`show_kernel_threads` is set, and the header counts them. Five rows are
+shown, then `+N more`; `↵` there lists everyone in D. `↵` on a process
+shows its command line, its working directory if this user can read it,
+and `the rest needs root` when its `io` cannot be read. Columns leave as
+the pane narrows: CGROUP first, then STATE.
+
+On macOS the section reads `WHO IS WRITING  by process · proc_pid_rusage`
+and holds BY PROCESS alone. By service is cgroup v2, which a Mac does not
+have, and `ps` has no state that means what `D` means on Linux (`U` is
+the nearest, and it is a different thing), so neither is drawn, not even
+empty. Each poll lists every pid with `proc_listallpids` and reads
+`proc_pid_rusage(RUSAGE_INFO_V2)` for each: `ri_diskio_bytesread` and
+`ri_diskio_byteswritten`, the bytes the process handed to the disk layer.
+There is no `cancelled_write_bytes` there. Another user's process answers
+`EPERM` and is counted as needing root, in the same sentence as on Linux;
+run as root, every process is readable. Names come from one
+`ps -axo pid=,comm=` a poll. `iostat` gives only read and write together,
+so the reconciliation adds each process's read and write and says
+`combined`. There is no CGROUP column, and the process detail has no
+command line, working directory or open files: per-file I/O on macOS
+(`fs_usage`) needs root.
+
+Each poll on Linux is one walk of `/sys/fs/cgroup` and one pass over
+`/proc` (`stat` and `io` per process). The previous tree, each process's
+previous wait ticks and previous `io` reading, the open process's
+previous file sizes, and the reconciliation's per-poll sums for the
+last `reconcile_seconds` of measured time are the only history kept.

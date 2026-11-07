@@ -6,7 +6,9 @@
     "hide_devices": { "items": "string" },
     "warn_percent": { "minimum": 1, "maximum": 100 },
     "alert_percent": { "minimum": 1, "maximum": 100 },
-    "window_hours": { "choices": [6, 12, 24] }
+    "window_hours": { "choices": [6, 12, 24] },
+    "top_writers": { "minimum": 1 },
+    "reconcile_seconds": { "minimum": 10 }
   },
   "_refresh_comment": "Seconds between samples. Minimum 0.5. -n SECONDS on the command line overrides this for one run.",
   "refresh": 2.0,
@@ -19,5 +21,11 @@
   "_alert_percent_comment": "Percent used at which the bar is fully hot. Between warn_percent and this it climbs in a straight line.",
   "alert_percent": 90,
   "_window_hours_comment": "How many hours of this widget's own samples the window rate, the FULL IN column and the filesystem trace start from. 6, 12 or 24. w on the pane cycles the same three for this session and does not write the choice back.",
-  "window_hours": 24
+  "window_hours": 24,
+  "_top_writers_comment": "How many rows the BY SERVICE and BY PROCESS tables under WHO IS WRITING show, in the order the sort puts them. The rest are counted on the line above each table, and a on the pane shows every one for this session. BY SERVICE is Linux only.",
+  "top_writers": 8,
+  "_show_kernel_threads_comment": "Linux only. Whether WAITING ON DISK lists kernel threads in D state (children of kthreadd, such as writeback workers). They wait on someone else's behalf, so by default they are hidden and the section's header counts them.",
+  "show_kernel_threads": false,
+  "_reconcile_seconds_comment": "How many seconds BY PROCESS sums before it compares what the readable processes moved with what the disks did. A process's write counter moves when a page is dirtied and a disk's when the write is submitted, often many seconds later, so a short window compares the two at different moments. Minimum 10.",
+  "reconcile_seconds": 60
 }

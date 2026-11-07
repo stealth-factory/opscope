@@ -514,12 +514,23 @@ are `tc::PALETTE_HINT` and, beside it, `tc::THEME_HINT` for the picker's
 own key - twelve cells each: `pack_hints` will not split a hint, and
 twelve columns is the floor every frame is measured from.
 
+`cgroup` (`tc::cgroup`) walks the cgroup v2 tree and gives each cgroup its
+own `io`, `cpu` or `memory` reading with its nearest controller-enabled
+descendants subtracted, so `disk` and `procs` never count a byte twice.
+
 A widget that acquires per OS lives in its package folder
 `widgets/src/widgets/<widget>/{main,parse,linux,macos}.rs` — the same
 folder that holds `help.txt`. Parsers always compiled (`mod parse`);
 `mod host` gated by `cfg(target_os)` onto `linux.rs` / `macos.rs`. `ports`
 is the worked example; drop the same three files beside `main.rs` to give
 another widget a second source.
+
+`tc::procfs` (`core/src/procfs.rs`) is where `/proc/<pid>/{stat,io,cgroup,
+cmdline,comm,cwd,fd}`, `/proc/uptime` and `ss -tine` are read: `parse_*`
+for each, ungated; `pids()` / `read_pid()` returning `Err` per unreadable
+file; `rss_bytes()` at this kernel's page size and `clock_ticks()`; and,
+Linux-only, the socket-owner and open-file walks netwatch and ports share.
+A widget that needs a process list starts there, not at `"/proc"`.
 
 Line charts belong to core: `LineChart`, `Trace`, `Plot`, and `draw_plots`
 choose pixels or Braille from the same data. Widgets own axis transforms,
