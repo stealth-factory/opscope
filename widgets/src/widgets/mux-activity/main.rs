@@ -298,6 +298,26 @@ mod tests {
     }
 
     #[test]
+    fn a_group_heading_too_wide_for_its_rule_wraps_whole_without_one() {
+        let label = "a-workspace-label-longer-than-the-pane";
+        for w in [12, 24, 40] {
+            let mut plots = Vec::new();
+            let rows = group_heading(label, 3, w, ("", "", ""), 0, &mut plots);
+            assert!(plots.is_empty(), "{w}: no rule on a wrapped heading");
+            let plain: Vec<String> = rows.iter().map(|r| strip(r)).collect();
+            for r in &plain {
+                assert!(tc::display_width(r) < w, "{w}: {r:?}");
+                assert!(!r.contains('─'), "{w}: {r:?}");
+            }
+            assert!(plain.concat().contains("· 3"), "{w}: the count survives");
+        }
+        // Wide enough: one row and one rule.
+        let mut plots = Vec::new();
+        assert_eq!(group_heading(label, 3, 80, ("", "", ""), 0, &mut plots).len(), 1);
+        assert_eq!(plots.len(), 1);
+    }
+
+    #[test]
     fn each_backend_requires_only_its_own_cli() {
         let all = include_str!("dependencies.json");
         for mux in Mux::ALL {

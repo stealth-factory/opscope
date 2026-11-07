@@ -1415,9 +1415,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // An agent takes two rows, plus the gap or workspace heading above
         // it, and a pane takes one, in the order the keys walk them. The
         // rows above an agent count as its own, so the window keeps them
-        // with the agent they introduce.
+        // with the agent they introduce. On a pane with too little room for
+        // an agent and what goes above it, the rows above are left off and
+        // the agent takes its two, as it did before there were headings:
+        // the window cannot split an entry, so an entry taller than the
+        // room is admitted whole and the truncate below cuts the section
+        // headings after it instead.
+        let lead_fits = |lead: usize| 2 + lead <= room;
         let heights: Vec<usize> = (0..agents.len())
-            .map(|i| 2 + lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len())
+            .map(|i| {
+                let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
+                if lead_fits(lead) { 2 + lead } else { 2 }
+            })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
         let window = window_over(&heights, selected, room, scroll, moved);
@@ -1493,8 +1502,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             if !window.contains(&i) {
                 continue;
             }
-            let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut plots);
-            rows.extend(lead);
+            let mut rule = Vec::new();
+            let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
+            if lead_fits(lead.len()) {
+                rows.extend(lead);
+                plots.extend(rule);
+            }
             let from = rows.len();
             let here = i == selected;
             let colour = colour_of(&a.state, &p);
@@ -1930,6 +1943,21 @@ mod tests {
         // w2 holds the blocked agent, so it leads; w1 and w3 tie on done
         // and keep Herdr's order. Inside each, the order it already had.
         assert_eq!(panes, ["p1", "p3", "p2", "p4", "p5"]);
+
+        // Workspaces Herdr did not list come after the listed ones of the
+        // same urgency, in the order they arrived.
+        let sorted = vec![
+            agent("p1", "x2", "idle"),
+            agent("p2", "w1", "idle"),
+            agent("p3", "x1", "idle"),
+            agent("p4", "x2", "idle"),
+        ];
+        let order = ["w1".to_string()];
+        let panes: Vec<String> = by_workspace(sorted, &order)
+            .into_iter()
+            .map(|a| a.pane_id)
+            .collect();
+        assert_eq!(panes, ["p2", "p1", "p4", "p3"]);
     }
 
     #[test]
