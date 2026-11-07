@@ -57,13 +57,14 @@ you are back. It is the launcher, not another widget.
 | **`mux-activity`** | Every agent and process in the multiplexer it runs in — Rex, Herdr or Luvus, found out from the pane itself — ordered by which one needs a human. Enter jumps you there. Under Rex, the state each program reports over OSC 7501, `z` zoom and `e` explain; under Herdr, every workspace; under Luvus, the tasks agents coordinate and the file paths those reserve. Outside a multiplexer it says so and exits. | `rex`, `herdr` or `luvus` | [read →](widgets/src/widgets/mux-activity/README.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ip` + `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
 | **`disk`** | Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling — space and inodes from the kernel, per-disk I/O (macOS needs `iostat`), and Linux I/O pressure. | Linux, macOS | [read →](widgets/src/widgets/disk/README.md) |
+| **`procs`** | What this machine is running — a panel of per-core CPU, load against the core count, memory as used / reclaimable / free with swap, and ten minutes of load, over every process with its CPU, memory, state and how long it has been up, sorted, filtered to a name or to yours, and `↵` for one process's command line, parents, owner and disk rate. %CPU on Linux is measured over the poll and the header names the window; on macOS it is `ps`'s decaying average and says so. | `ps` on macOS · Linux, macOS | [read →](widgets/src/widgets/procs/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`google-trends`** | What a region is searching for right now, from Google's own Trending Now feed: every trend in Google's order with its traffic bucket as Google writes it, when it started and the news attached — plus, labelled as the widget's own count, what is new since the last look and what has left the feed. No account or key. | `curl` | [read →](widgets/src/widgets/google-trends/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, a world clock, current weather for one configured place, and a condition glyph on each world-clock city that has coordinates. | `curl`, for weather | [read →](widgets/src/widgets/clocks/README.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-All nineteen widgets run on Linux and macOS.
+All twenty widgets run on Linux and macOS.
 
 Each is a single self-contained binary — every library it needs is compiled
 in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
@@ -127,7 +128,7 @@ any release. It is for trying a fix or a new widget early, and it can break;
 `--version` names the commit it was built from. Plain `npx opscope` and
 `@latest` are never moved by a canary.
 
-It fetches the launcher and nineteen widget binaries for this machine into
+It fetches the launcher and twenty widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -185,7 +186,7 @@ opscope doctor              # check optional external tools
 ```
 
 Apple Silicon and Intel Macs use the same release binaries as npm and the
-tarball download. Only `opscope` goes on `PATH`; all twenty binaries
+tarball download. Only `opscope` goes on `PATH`; all twenty-one binaries
 ship together, with the widgets kept private beside the launcher.
 No Node or Rust installation is needed.
 
@@ -193,7 +194,7 @@ Upgrade with `brew update && brew upgrade opscope`. Settings stay in
 `~/.config/opscope/config.json` (or the location selected by `OPSCOPE_CONFIG`
 or `XDG_CONFIG_HOME`), outside Homebrew's versioned installation.
 
-You can also download a release or build all twenty binaries below.
+You can also download a release or build all twenty-one binaries below.
 
 ### Inside Luvus
 
@@ -237,7 +238,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The twenty binaries are right there, beside `config.example.json` and a
+The twenty-one binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -264,13 +265,13 @@ xattr -dr com.apple.quarantine opscope-*-apple-darwin
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + nineteen widgets in ./target/release
+cargo build --release   # launcher + twenty widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the nineteen widgets, with a live preview of
+`opscope` is the front door — a menu of the twenty widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -280,7 +281,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and nineteen
+The launcher looks for each widget beside itself, so the launcher and twenty
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -562,7 +563,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read nineteen widget pages to find out what you can
+**So you do not have to read twenty widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The

@@ -38,6 +38,10 @@ name = "ports"
 path = "src/widgets/ports/main.rs"
 
 [[bin]]
+name = "procs"
+path = "src/widgets/procs/main.rs"
+
+[[bin]]
 name = "mux-activity"
 path = "src/widgets/mux-activity/main.rs"
 

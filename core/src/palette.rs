@@ -1503,8 +1503,8 @@ mod tests {
     #[test]
     fn the_manifest_names_every_binary_and_the_launcher_is_not_a_widget() {
         let names = built();
-        // Nineteen widgets and the launcher.
-        assert_eq!(names.len(), 20, "{names:?}");
+        // Twenty widgets and the launcher.
+        assert_eq!(names.len(), 21, "{names:?}");
         assert!(names.contains(&"clocks".to_string()));
         assert!(names.contains(&"vercel-deployments".to_string()));
         assert!(names.contains(&"google-trends".to_string()));

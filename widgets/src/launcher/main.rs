@@ -69,6 +69,7 @@ const WIDGETS: &[Widget] = &[
     widget!("mux-activity", aliases: ["rex-panes", "herdr-panes", "luvus-panes"]),
     widget!("netwatch"),
     widget!("ports"),
+    widget!("procs"),
     widget!("tailnet"),
     widget!("vercel-deployments", aliases: ["deployments"]),
 ];

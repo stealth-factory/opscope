@@ -158,6 +158,13 @@ title = "ports"
 placement = "split"
 command = ["./luvus/bin/opscope", "ports"]
 
+# What this machine is running: every process, its CPU, memory and state.
+[[panes]]
+id = "procs"
+title = "procs"
+placement = "split"
+command = ["./luvus/bin/opscope", "procs"]
+
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]
 id = "tailnet"
