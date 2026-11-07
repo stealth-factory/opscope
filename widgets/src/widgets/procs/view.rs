@@ -1646,8 +1646,7 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         .unwrap_or_else(|| not_on_mac.into());
     field(&mut rows, "nice", &nice, txt, width, p);
     if let Some(running) = proc.running {
-        let started =
-            chrono::Local::now() - chrono::Duration::milliseconds((running * 1000.0) as i64);
+        let started = started_at(chrono::Local::now(), view.age, running);
         let when = format!(
             "{} · running {}",
             started.format("%Y-%m-%d %H:%M:%S"),
@@ -1725,6 +1724,19 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         paths: Vec::new(),
         plots: Vec::new(),
     }
+}
+
+/// When a process started: `running` was measured when the sample was
+/// taken, `age` ago, so the start is that much further back than `now`.
+/// Without the age the start crept forward by a second every second
+/// between polls and jumped back at each one.
+pub fn started_at(
+    now: chrono::DateTime<chrono::Local>,
+    age: Option<Duration>,
+    running: f64,
+) -> chrono::DateTime<chrono::Local> {
+    let age = age.map(|a| a.as_millis() as i64).unwrap_or(0);
+    now - chrono::Duration::milliseconds(age + (running * 1000.0) as i64)
 }
 
 // ── the footer ───────────────────────────────────────────────────────
@@ -1838,6 +1850,16 @@ pub fn users_hint(all_users: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_start_time_holds_still_as_the_sample_ages() {
+        let taken = chrono::Local::now();
+        let at_sample = super::started_at(taken, Some(Duration::ZERO), 90.0);
+        let later = taken + chrono::Duration::milliseconds(1500);
+        let after = super::started_at(later, Some(Duration::from_millis(1500)), 90.0);
+        assert_eq!(at_sample, after);
+        assert_eq!(taken - at_sample, chrono::Duration::seconds(90));
+    }
+
     use super::super::model::fixtures::{proc, sample};
     use super::*;
 
