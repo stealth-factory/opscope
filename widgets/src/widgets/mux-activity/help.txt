@@ -77,6 +77,9 @@ dev servers, monitors, builds - with what it is running and what it costs.
 IDLE lists the panes sitting at a shell prompt, by directory, so they can
 still be jumped to.
 
+Inside AGENTS the agents are grouped by workspace, the workspace holding
+the most urgent agent first, each under its label and a rule.
+
 Enter (or f) jumps to whatever is selected: the agent's pane, or the tab
 holding that process.
 
@@ -114,6 +117,9 @@ claim, because a list with three tasks in it and nothing claimable are
 different sentences. RESUMABLE lists agent sessions no pane is holding.
 PANES lists every other pane doing something. IDLE, when i has not hidden
 it and the session has panes at a prompt, is its own section.
+
+Inside AGENTS the agents are grouped by workspace, the workspace holding
+the most urgent agent first, each under its name and a rule.
 
 RESUMABLE counts the whole machine, not this session: `luvus agent sessions`
 answers for every session on the box, and most of them are usually in

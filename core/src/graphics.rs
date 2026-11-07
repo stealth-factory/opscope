@@ -580,6 +580,26 @@ impl Plot {
         plot
     }
 
+    /// A horizontal divider across `width` cells of one row.
+    ///
+    /// In Kitty it is a hairline `weight` of a cell tall through the row's
+    /// middle, on a transparent ground, so it sits on whatever the pane
+    /// shows behind it. Everywhere else it is `glyph` repeated in `colour`,
+    /// which is why the two read as the same divider: `─` for a rule that
+    /// heads something, `┈` for a lighter one between items. Decoration
+    /// only - it carries no value - so it never needs a label.
+    pub fn rule(x: usize, y: usize, width: usize, colour: &str, glyph: &str, weight: f64) -> Self {
+        let weight = weight.clamp(0.02, 1.0);
+        Self::filled(
+            x,
+            y,
+            width,
+            1,
+            vec![Self::rect(0.0, 0.5 - weight / 2.0, width as f64, weight, colour)],
+            vec![vec![(colour.to_string(), glyph.repeat(width))]],
+        )
+    }
+
     /// Draw this filled plot as text in every mode, never as an image.
     ///
     /// For values that move every frame, such as a `dance` placeholder or

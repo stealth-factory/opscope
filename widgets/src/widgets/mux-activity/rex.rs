@@ -646,6 +646,8 @@ struct Palette {
     proc: String,
     idle_c: String,
     idle_c_lit: String,
+    /// The rule under a session's sub-heading: decoration, never text.
+    rule: String,
     /// The lifted form of every other role this palette draws in, for text
     /// on a selected or tinted row: the named `_lit` twins above are swapped
     /// in by the tint closure first, and anything else it is handed goes
@@ -683,6 +685,7 @@ fn palette() -> Palette {
         proc: tc::ink(tc::Role::Muted),
         idle_c: tc::ink(tc::Role::Muted),
         idle_c_lit: tc::ink_on(tc::Role::Muted, true),
+        rule: tc::ink(tc::Role::Border),
         lifts: [tc::Role::Green, tc::Role::Yellow, tc::Role::Fg, tc::Role::Accent]
             .into_iter()
             .map(|role| (tc::ink(role), tc::ink_on(role, true)))
@@ -800,14 +803,14 @@ fn render_pane(
 ) -> Vec<String> {
     let state = pane.state();
     let loud = matches!(state.as_str(), "blocked" | "error" | "done");
-    // Blocked and done keep a tint of their own even unselected: the whole
-    // point is that they are visible without being looked for.
+    // Blocked keeps a tint of its own even unselected: it is the one row
+    // that has to be visible without being looked for. Done does not - a
+    // green ground read as a state of its own beside the one the row
+    // names, and the green mark and upper-case DONE already say it.
     let tint = if here {
         tc::tint(tc::Role::Slot)
     } else if matches!(state.as_str(), "blocked" | "error") {
         tc::tint_toward(tc::Role::Red)
-    } else if state == "done" {
-        tc::tint_toward(tc::Role::Green)
     } else {
         String::new()
     };
@@ -2052,6 +2055,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
         let mut cursor_span: Option<(usize, usize)> = None;
+        // Rules that scroll with the body, placed by their row in `rows`.
+        let mut body_plots: Vec<tc::Plot> = Vec::new();
         sections.clear();
 
         match (&board, &absence) {
@@ -2101,24 +2106,46 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // session: with one, the count line has already named it.
                 // Decided from the section's own list, so each section
                 // starts its own run of sub-headings.
+                // The previous pane drawn in this section: its session and
+                // how many rows it took, for the gap between two of its panes.
+                let mut previous: Option<(String, usize)> = None;
                 let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize, of: &[&Pane]| {
-                    let first = of.iter().position(|o| o.session_id == pane.session_id)
-                        == of.iter().position(|o| o.block_id == pane.block_id);
-                    if cols.sessions && first {
+                    let at_group = of.iter().position(|o| o.session_id == pane.session_id);
+                    let at_pane = of.iter().position(|o| o.block_id == pane.block_id);
+                    if at_pane == Some(0) {
+                        previous = None;
+                    }
+                    let drawn = render_pane(pane, index == selected, w, &cols, &p, tick, at);
+                    if cols.sessions && at_group == at_pane {
+                        // A gap above every session but the section's
+                        // first, so each reads as its own group.
+                        if at_pane != Some(0) {
+                            rows.push(String::new());
+                        }
                         let n = of
                             .iter()
                             .filter(|o| o.session_id == pane.session_id)
                             .count();
-                        rows.extend(flow(
-                            &[
-                                (p.accent.as_str(), format!("  ╶ {}", pane.session_label)),
-                                (p.dim.as_str(), format!("· {}", n)),
-                            ],
+                        rows.extend(super::group_heading(
+                            &pane.session_label,
+                            n,
                             w,
+                            (&p.accent, &p.dim, &p.rule),
+                            rows.len(),
+                            &mut body_plots,
                         ));
+                    } else if let Some((session, rows_before)) = &previous {
+                        // One-row panes stack as a table; a pane of several
+                        // rows gets a gap so its rows stay its own. A gap,
+                        // not a line: the rule is kept for where one
+                        // session ends and the next begins.
+                        if *session == pane.session_id && (*rows_before > 1 || drawn.len() > 1) {
+                            rows.push(String::new());
+                        }
                     }
+                    previous = Some((pane.session_id.clone(), drawn.len()));
                     let from = rows.len();
-                    rows.extend(render_pane(pane, index == selected, w, &cols, &p, tick, at));
+                    rows.extend(drawn);
                     rows_at.extend((from..rows.len()).map(|row| (row, index)));
                     if index == selected {
                         cursor_span = Some((from, rows.len()));
@@ -2343,10 +2370,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // click resolves through `item_at` with the same head and scroll.
         placed = rows_at;
         // The bar sits in the pinned header, so its frame row is its row.
-        let plots: Vec<_> = plots
+        let mut plots: Vec<_> = plots
             .into_iter()
             .filter_map(|plot| plot.in_viewport(0, 0, head_rows))
             .collect();
+        // The rules scroll with the body, so they are windowed like it.
+        plots.extend(
+            body_plots
+                .into_iter()
+                .filter_map(|plot| plot.in_viewport(scroll, head_rows, room)),
+        );
         tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         keyboard.wait(Duration::from_millis(250));
