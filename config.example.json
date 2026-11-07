@@ -379,7 +379,9 @@
     "_show_all_users_comment": "Start with every user's processes listed. `u` switches between all users and only yours for the session.",
     "show_all_users": true,
     "_show_kernel_threads_comment": "List kernel threads (pid 2 and its children, Linux only). Hidden ones are counted in the header, never silently missing.",
-    "show_kernel_threads": false
+    "show_kernel_threads": false,
+    "_show_threads_comment": "Start with each process's threads listed under it (Linux only). `t` shows or hides them for the session; they are never counted as processes.",
+    "show_threads": false
   },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",

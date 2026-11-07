@@ -12,17 +12,24 @@
 //! `%cpu` is macOS's decaying average rather than a delta over the poll,
 //! and the header says so (William, 2026-10-22); a true per-process delta
 //! through libproc is not in this version. The machine's memory for MEM
-//! comes from `sysctlbyname("hw.memsize")`, read once.
+//! comes from `sysctlbyname("hw.memsize")`, read once. The panel's memory
+//! is `vm_stat`'s, its swap `sysctl -n vm.swapusage`'s and its load
+//! `getloadavg`'s, each poll; there is no per-core CPU figure.
 
 use std::sync::OnceLock;
 
 use opscope_core as tc;
 
-use super::model::{Clock, Facts, Io, Proc, Sample};
+use super::model::{Clock, Facts, Io, Machine, MemSource, Memory, PerCore, Proc, Sample, Swap};
 use super::parse;
 
 /// Seconds before a `ps` that has not answered is given up on.
 const PS_TIMEOUT: u64 = 10;
+/// Seconds for `vm_stat` and `sysctl`, which answer at once.
+const TOOL_TIMEOUT: u64 = 5;
+
+/// `[t]` has no threads to list here: `ps -axo` prints processes.
+pub const READS_THREADS: bool = false;
 
 /// Nothing is kept between polls: `ps` hands over its own average.
 #[derive(Default)]
@@ -48,8 +55,57 @@ fn memsize() -> Option<u64> {
     })
 }
 
-/// One `ps -axo` over every process.
-pub fn sample(_source: &mut Source) -> Result<Sample, String> {
+/// The load averages from `getloadavg(3)`.
+fn load() -> Option<(f64, f64, f64)> {
+    let mut avg = [0f64; 3];
+    // SAFETY: `avg` holds three doubles and the count says three.
+    let n = unsafe { libc::getloadavg(avg.as_mut_ptr(), 3) };
+    (n == 3).then_some((avg[0], avg[1], avg[2]))
+}
+
+/// Memory from `vm_stat`, swap from `sysctl -n vm.swapusage`, the load
+/// from `getloadavg`, and the CPU total as the sum of `ps`'s decaying
+/// averages. There is no per-core figure: that needs
+/// `host_processor_info`, which this version does not call.
+fn machine(procs: &[Proc]) -> Machine {
+    let mut out = Machine::empty(PerCore::NotRead);
+    // Each process's share is already of every core.
+    let sum: f64 = procs.iter().filter_map(|p| p.cpu).sum();
+    out.busy = Some((sum / 100.0).clamp(0.0, 1.0));
+    match load() {
+        Some(avg) => out.load = Some(avg),
+        None => out.problems.push("getloadavg failed".into()),
+    }
+    match tc::run(&["vm_stat"], TOOL_TIMEOUT) {
+        Ok(text) => match parse::parse_vm_stat(&text) {
+            Some(v) => {
+                out.memory = Some(Memory::from_parts(
+                    parse::vm_stat_parts(&v),
+                    MemSource::VmStat,
+                ))
+            }
+            None => out
+                .problems
+                .push("vm_stat unavailable: its page counts did not read".into()),
+        },
+        Err(why) => out.problems.push(format!("vm_stat unavailable: {why}")),
+    }
+    match tc::run(&["sysctl", "-n", "vm.swapusage"], TOOL_TIMEOUT) {
+        Ok(text) => match parse::parse_swapusage(&text) {
+            Some((total, used)) => out.swap = Some(Swap { total, used }),
+            None => out
+                .problems
+                .push("vm.swapusage unavailable: its sizes did not read".into()),
+        },
+        Err(why) => out
+            .problems
+            .push(format!("vm.swapusage unavailable: {why}")),
+    }
+    out
+}
+
+/// One `ps -axo` over every process. macOS lists no threads.
+pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, String> {
     let text = tc::run(&["ps", "-axo", parse::PS_COLUMNS], PS_TIMEOUT)
         .map_err(|err| format!("ps failed: {err}"))?;
     let cores = std::thread::available_parallelism()
@@ -81,7 +137,8 @@ pub fn sample(_source: &mut Source) -> Result<Sample, String> {
                 args: row.args,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let machine = machine(&procs);
     Ok(Sample {
         procs,
         cores,
@@ -89,6 +146,9 @@ pub fn sample(_source: &mut Source) -> Result<Sample, String> {
         hidepid: false,
         // SAFETY: geteuid has no preconditions and cannot fail.
         me: unsafe { libc::geteuid() },
+        machine,
+        history: Vec::new(),
+        threads: None,
     })
 }
 
@@ -119,8 +179,38 @@ mod acquisition_tests {
     use super::*;
 
     #[test]
+    fn the_machine_comes_from_vm_stat_sysctl_and_getloadavg() {
+        let got = sample(&mut Source, true).expect("ps -axo");
+        let m = &got.machine;
+        assert!(m.problems.is_empty(), "{:?}", m.problems);
+        assert_eq!(m.per_core, PerCore::NotRead, "no per-core figure on macOS");
+        assert!(
+            m.busy.is_some_and(|b| (0.0..=1.0).contains(&b)),
+            "{:?}",
+            m.busy
+        );
+        let (one, five, fifteen) = m.load.expect("getloadavg");
+        assert!(one >= 0.0 && five >= 0.0 && fifteen >= 0.0);
+        let memory = m.memory.expect("vm_stat read");
+        assert_eq!(memory.source, MemSource::VmStat);
+        assert!(memory.used > 0 && memory.total > memory.used);
+        // vm_stat's pages are of this machine's memory, give or take what
+        // it does not count: never more than hw.memsize, and most of it.
+        let installed = memsize().expect("hw.memsize");
+        assert!(memory.total <= installed, "{} > {installed}", memory.total);
+        assert!(
+            memory.total > installed / 2,
+            "{} of {installed}",
+            memory.total
+        );
+        let swap = m.swap.expect("vm.swapusage read");
+        assert!(swap.used <= swap.total);
+        assert!(got.threads.is_none(), "macOS lists no threads");
+    }
+
+    #[test]
     fn ps_lists_this_process_and_launchd() {
-        let got = sample(&mut Source).expect("ps -axo");
+        let got = sample(&mut Source, false).expect("ps -axo");
         let me = std::process::id() as i32;
         let row =
             got.procs.iter().find(|p| p.pid == me).unwrap_or_else(|| {

@@ -10,6 +10,16 @@ last few seconds.
 
     procs [-n SECONDS]
 
+Above the table, the machine: CPU with its core count, how busy it was
+and the load averages against the core count, a bar per core when four
+or more fit (otherwise one meter of the total); MEMORY as used,
+reclaimable and free, three parts that sum to the total, where used is
+total less MemAvailable; SWAP; and the 1-minute load over the last ten
+minutes, one point a poll, with the core count marked on its axis. On
+macOS the total is the sum of ps's decaying averages, memory comes from
+vm_stat and swap from sysctl vm.swapusage, and per-core CPU is not read;
+the panel says so rather than drawing empty bars.
+
 Columns leave as the pane narrows: CGROUP, then RUNNING, STATE, USER and
 MEM. A command too long for its column wraps onto the next line; nothing
 is cut. STATE D is waiting on disk. Zombies are counted in the header and
@@ -28,7 +38,10 @@ Keys: up/down or j/k select, enter opens the detail, esc goes back or
 clears the filter, s cycles the sort through cpu, memory and running
 (newest first), / opens the filter box (letters are text until enter
 keeps the filter or esc clears it), u switches between all users and
-only yours, r refreshes now, comma opens settings, q quits.
+only yours, t shows or hides each process's threads under it (Linux
+only: a thread's own %CPU, state and age, never counted as a process;
+show_threads sets where it starts), r refreshes now, comma opens
+settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number
 on screen, such as a config file others can read or a recommended tool that is

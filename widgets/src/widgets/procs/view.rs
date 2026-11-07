@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-use super::model::{self, Clock, Facts, Io, Proc, Sample, Sort};
+use super::model::{self, Clock, Facts, Io, MemSource, PerCore, Proc, Sample, Sort, Thread};
+use super::parse;
 
 pub struct Palette {
     pub txt: String,
@@ -26,6 +27,12 @@ pub struct Palette {
     pub accent: String,
     pub down: String,
     pub bad: String,
+    /// Memory's three parts, in the bar and in its legend.
+    pub used: String,
+    pub reclaimable: String,
+    pub free: String,
+    /// A meter's empty track: decoration, never text.
+    pub track: String,
 }
 
 pub fn palette() -> Palette {
@@ -38,6 +45,10 @@ pub fn palette() -> Palette {
         accent: tc::ink(tc::Role::Accent),
         down: tc::ink(tc::Role::Orange),
         bad: tc::ink(tc::Role::Red),
+        used: tc::ink(tc::Role::Magenta),
+        reclaimable: tc::ink(tc::Role::Blue),
+        free: tc::ink(tc::Role::Green),
+        track: tc::ink(tc::Role::Dim),
     }
 }
 
@@ -92,6 +103,8 @@ pub struct View<'a> {
     pub typing: bool,
     pub all_users: bool,
     pub show_kernel: bool,
+    /// `[t]`: threads listed under their processes (Linux).
+    pub threads: bool,
     /// The pid the list cursor is on.
     pub cursor: Option<i32>,
     pub opened: Option<&'a Opened>,
@@ -104,6 +117,9 @@ pub struct Drawn {
     pub placed: Vec<(usize, usize)>,
     pub head: usize,
     pub keys: Vec<i32>,
+    /// The panel's bars, meters and trace, at their row in `rows`; `main`
+    /// crops them to the window with `in_viewport`.
+    pub plots: Vec<tc::Plot>,
 }
 
 // ── numbers as the columns print them ────────────────────────────────
@@ -270,6 +286,575 @@ pub fn cpu_label(clock: Clock, cores: usize, every: f64) -> Vec<String> {
             ),
             format!("of {cores}"),
         ],
+    }
+}
+
+// ── the panel: CPU, MEMORY, SWAP and load ───────────────────────────
+
+/// One row as coloured pieces, measured by their text alone.
+type Line = Vec<(String, String)>;
+
+fn line_width(line: &Line) -> usize {
+    line.iter().map(|(_, t)| tc::display_width(t)).sum()
+}
+
+/// The panel above the table: its rows, and the plots in them at their
+/// row within the panel.
+#[derive(Clone, Debug, Default)]
+pub struct Panel {
+    pub rows: Vec<String>,
+    pub plots: Vec<tc::Plot>,
+}
+
+/// Rows and plots built for one width, the plots at their row in `lines`.
+#[derive(Default)]
+struct Block {
+    lines: Vec<Line>,
+    plots: Vec<tc::Plot>,
+}
+
+impl Block {
+    fn push(&mut self, line: Line) {
+        self.lines.push(line);
+    }
+
+    /// `other` under this one.
+    fn stack(&mut self, other: Block) {
+        let y = self.lines.len();
+        self.lines.extend(other.lines);
+        self.plots.extend(other.plots.into_iter().map(|mut plot| {
+            plot.y += y;
+            plot
+        }));
+    }
+
+    /// `right` beside this one, starting at column `at`.
+    fn beside(mut self, right: Block, at: usize) -> Block {
+        let rows = self.lines.len().max(right.lines.len());
+        self.lines.resize(rows, Vec::new());
+        for (line, extra) in self.lines.iter_mut().zip(right.lines) {
+            let used = line_width(line);
+            if used < at {
+                line.push((String::new(), " ".repeat(at - used)));
+            }
+            line.extend(extra);
+        }
+        self.plots.extend(right.plots.into_iter().map(|mut plot| {
+            plot.x += at;
+            plot
+        }));
+        self
+    }
+}
+
+const LABEL: usize = 8;
+const BAR_MIN: usize = 8;
+const BAR_MAX: usize = 32;
+
+/// `pct` of a fraction, as the panel prints it.
+fn pct(frac: f64) -> String {
+    format!("{:.0}%", (frac * 100.0).clamp(0.0, 100.0))
+}
+
+/// A load average: two decimals, as `uptime` prints them, fewer past ten.
+pub fn load_text(value: f64) -> String {
+    if value < 10.0 {
+        format!("{value:.2}")
+    } else if value < 100.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.0}")
+    }
+}
+
+/// Coloured clauses joined with ` · `, packed into lines of `room` cells,
+/// each line starting with `lead`. A clause wider than a line is broken at
+/// its spaces, so nothing is cut.
+fn pack(clauses: &[(String, String)], room: usize, lead: &str, sep: &str) -> Vec<Line> {
+    let room = room.max(1);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut line: Line = Vec::new();
+    let mut used = 0usize;
+    for (colour, clause) in clauses {
+        let w = tc::display_width(clause);
+        if used > 0 && used + 3 + w > room {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        if w > room {
+            if used > 0 {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            for piece in tc::wrap_words(clause, room) {
+                lines.push(vec![(colour.clone(), piece)]);
+            }
+            continue;
+        }
+        if used > 0 {
+            line.push((sep.to_string(), " · ".into()));
+            used += 3;
+        }
+        line.push((colour.clone(), clause.clone()));
+        used += w;
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    for line in &mut lines {
+        line.insert(0, (String::new(), lead.to_string()));
+    }
+    lines
+}
+
+/// `LABEL  clause · clause …`: the label in its own column, the clauses
+/// wrapping under the first. Too narrow for the column, the label takes a
+/// row of its own.
+fn labelled(label: &str, clauses: &[(String, String)], width: usize, p: &Palette) -> Vec<Line> {
+    let head = (p.accent.clone(), format!(" {label:<w$}", w = LABEL - 1));
+    if width >= LABEL + 20 {
+        let mut lines = pack(clauses, width - LABEL - 1, "", &p.dim);
+        if lines.is_empty() {
+            lines.push(Vec::new());
+        }
+        for (i, line) in lines.iter_mut().enumerate() {
+            let lead = if i == 0 {
+                head.clone()
+            } else {
+                (String::new(), " ".repeat(LABEL))
+            };
+            line.insert(0, lead);
+        }
+        return lines;
+    }
+    let mut lines = vec![vec![(p.accent.clone(), format!(" {label}"))]];
+    lines.extend(pack(clauses, width.saturating_sub(2), " ", &p.dim));
+    lines
+}
+
+/// Cells per core and the gap between cores, widest first, that put every
+/// core in `room`; `None` when they do not fit one cell each.
+pub fn bar_shape(cores: usize, room: usize) -> Option<(usize, usize)> {
+    if cores == 0 {
+        return None;
+    }
+    for k in (1..=4).rev() {
+        if cores * (k + 1) - 1 <= room {
+            return Some((k, 1));
+        }
+    }
+    (cores <= room).then_some((1, 0))
+}
+
+/// The CPU block: the headline, then a bar per core when four or more fit,
+/// otherwise one meter of the total.
+fn cpu_block(sample: &Sample, every: f64, width: usize, p: &Palette) -> Block {
+    let m = &sample.machine;
+    let cores = sample.cores;
+    let mut clauses = vec![(
+        p.txt.clone(),
+        format!("{cores} core{}", if cores == 1 { "" } else { "s" }),
+    )];
+    match (m.busy, sample.clock) {
+        (Some(b), Clock::Decaying) => {
+            clauses.push((p.txt.clone(), format!("{} decaying average (ps)", pct(b))))
+        }
+        (Some(b), _) => clauses.push((p.txt.clone(), format!("{} busy", pct(b)))),
+        (None, _) => clauses.push((
+            p.dim.clone(),
+            format!("busy from the next sample, in {}", secs(every)),
+        )),
+    }
+    if let Some((one, five, fifteen)) = m.load {
+        clauses.push((
+            p.txt.clone(),
+            format!(
+                "load {} {} {} (of {cores})",
+                load_text(one),
+                load_text(five),
+                load_text(fifteen)
+            ),
+        ));
+    }
+    let mut block = Block::default();
+    for line in labelled("CPU", &clauses, width, p) {
+        block.push(line);
+    }
+    let room = width.saturating_sub(2);
+    let meter = |block: &mut Block| {
+        let Some(busy) = m.busy else { return };
+        let w = room.min(BAR_MAX);
+        if w < 4 {
+            return;
+        }
+        let y = block.lines.len();
+        block.plots.push(tc::Plot::meter(
+            1,
+            y,
+            w,
+            busy,
+            None,
+            &tc::heat_on(busy, false),
+            &p.track,
+            &p.txt,
+        ));
+        block.push(vec![(String::new(), " ".repeat(1 + w))]);
+    };
+    let note = |block: &mut Block, text: &str| {
+        for line in tc::wrap_words(text, width.saturating_sub(2).max(1)) {
+            block.push(vec![(p.dim.clone(), format!(" {line}"))]);
+        }
+    };
+    match &m.per_core {
+        PerCore::Read(each) if each.len() >= 4 => match bar_shape(each.len(), room) {
+            Some((k, gap)) => {
+                let mut columns: Vec<(f64, String)> = Vec::new();
+                for (i, (_, busy)) in each.iter().enumerate() {
+                    if i > 0 && gap > 0 {
+                        columns.push((0.0, p.track.clone()));
+                    }
+                    for _ in 0..k {
+                        columns.push((busy * 100.0, tc::heat_on(*busy, false)));
+                    }
+                }
+                let y = block.lines.len();
+                // Text in every mode: these change every poll, and as an
+                // image they were a whole upload each time - 31 KB/s of raw
+                // RGBA at 100 columns with eight cores, against 0.5 KB/s
+                // for the load trace's edits (OPS-222).
+                block
+                    .plots
+                    .push(tc::Plot::bars(1, y, &columns, 2, 100.0, false).as_text());
+                for _ in 0..2 {
+                    block.push(vec![(String::new(), " ".repeat(1 + columns.len()))]);
+                }
+                if k >= 3 {
+                    // Each core's figure under its bar.
+                    let mut line = String::from(" ");
+                    for (i, (_, busy)) in each.iter().enumerate() {
+                        if i > 0 {
+                            line.push_str(&" ".repeat(gap));
+                        }
+                        let n = format!("{:.0}", (busy * 100.0).clamp(0.0, 100.0));
+                        line.push_str(&right(&n, k));
+                    }
+                    block.push(vec![(p.dim.clone(), line)]);
+                }
+                let (id, hot) = each
+                    .iter()
+                    .copied()
+                    .fold((0, -1.0), |best, c| if c.1 > best.1 { c } else { best });
+                note(
+                    &mut block,
+                    &format!(
+                        "per core, % over the last poll · busiest cpu{id} {}",
+                        pct(hot)
+                    ),
+                );
+            }
+            None => meter(&mut block),
+        },
+        PerCore::Read(_) => meter(&mut block),
+        PerCore::Waiting => note(
+            &mut block,
+            &format!("per core from the next sample, in {}", secs(every)),
+        ),
+        PerCore::NotRead => {
+            meter(&mut block);
+            note(
+                &mut block,
+                "per-core CPU not read on macOS (needs host_processor_info)",
+            );
+        }
+    }
+    block
+}
+
+/// `LABEL  total  [bar]  legend`, the legend beside the bar when it fits
+/// and under it when it does not. `bar_w` caps the bar, so the swap bar
+/// can line up under the memory bar.
+fn gauge(
+    label: &str,
+    total: &str,
+    legend: &[(String, String)],
+    width: usize,
+    bar_w: Option<usize>,
+    bar: &dyn Fn(usize, usize, usize) -> tc::Plot,
+    p: &Palette,
+) -> (Block, usize) {
+    let head = format!(" {label:<w$}{total:>5}  ", w = LABEL - 1);
+    let hw = tc::display_width(&head);
+    let legend_w = legend
+        .iter()
+        .map(|(_, t)| tc::display_width(t))
+        .sum::<usize>()
+        + 3 * legend.len().saturating_sub(1);
+    let cap = bar_w.unwrap_or(BAR_MAX);
+    let mut block = Block::default();
+    if width >= hw + BAR_MIN + 1 {
+        let room = width - hw - 1;
+        if room >= BAR_MIN + 2 + legend_w {
+            let w = (room - 2 - legend_w).min(cap).max(BAR_MIN);
+            block.plots.push(bar(hw, 0, w));
+            let mut line: Line = vec![(p.accent.clone(), head), (String::new(), " ".repeat(w + 2))];
+            for (i, piece) in legend.iter().enumerate() {
+                if i > 0 {
+                    line.push((p.dim.clone(), " · ".into()));
+                }
+                line.push(piece.clone());
+            }
+            block.push(line);
+            return (block, w);
+        }
+        let w = room.min(cap).max(BAR_MIN);
+        block.plots.push(bar(hw, 0, w));
+        block.push(vec![
+            (p.accent.clone(), head),
+            (String::new(), " ".repeat(w)),
+        ]);
+        let lead = if width >= hw + 16 { hw } else { 1 };
+        block.lines.extend(pack(
+            legend,
+            width.saturating_sub(lead + 1),
+            &" ".repeat(lead),
+            &p.dim,
+        ));
+        return (block, w);
+    }
+    // Narrow: the label and total on one row, the bar under them.
+    block.push(vec![(p.accent.clone(), head.trim_end().to_string())]);
+    let w = width.saturating_sub(2).min(cap).max(1);
+    block.plots.push(bar(1, 1, w));
+    block.push(vec![(String::new(), " ".repeat(1 + w))]);
+    block
+        .lines
+        .extend(pack(legend, width.saturating_sub(2), " ", &p.dim));
+    (block, w)
+}
+
+/// What the memory figures are, under the bar: where `used` comes from.
+pub fn mem_note(source: MemSource) -> &'static str {
+    match source {
+        MemSource::MemAvailable => "used = total − MemAvailable",
+        MemSource::VmStat => "from vm_stat",
+    }
+}
+
+/// MEMORY as used / reclaimable / free, then SWAP.
+fn memory_block(sample: &Sample, width: usize, p: &Palette) -> Block {
+    let m = &sample.machine;
+    let mut block = Block::default();
+    let mut bar_w = None;
+    if let Some(mem) = m.memory {
+        let shares = parse::shares([mem.used, mem.reclaimable, mem.free]);
+        let parts: Vec<(f64, String)> = vec![
+            (shares[0], p.used.clone()),
+            (shares[1], p.reclaimable.clone()),
+            (shares[2], p.free.clone()),
+        ];
+        let legend = vec![
+            (p.used.clone(), format!("used {}", human(mem.used))),
+            (
+                p.reclaimable.clone(),
+                format!("reclaimable {}", human(mem.reclaimable)),
+            ),
+            (p.free.clone(), format!("free {}", human(mem.free))),
+        ];
+        let (got, w) = gauge(
+            "MEMORY",
+            &human(mem.total),
+            &legend,
+            width,
+            None,
+            &|x, y, w| tc::Plot::stacked_bar(x, y, w, &parts),
+            p,
+        );
+        bar_w = Some(w);
+        block.stack(got);
+        let note = mem_note(mem.source);
+        // Under the legend: in the bar's column where the legend hangs
+        // there, at the edge where it does not.
+        let hw = LABEL + 7;
+        let lead = if width >= hw + 16 { hw } else { 1 };
+        for line in tc::wrap_words(note, width.saturating_sub(lead + 1).max(1)) {
+            block.push(vec![(p.dim.clone(), format!("{}{line}", " ".repeat(lead)))]);
+        }
+    }
+    match m.swap {
+        Some(swap) if swap.total == 0 => block.push(vec![
+            (p.accent.clone(), format!(" {:<w$}", "SWAP", w = LABEL - 1)),
+            (p.dim.clone(), "no swap".into()),
+        ]),
+        Some(swap) => {
+            let frac = swap.used as f64 / swap.total as f64;
+            let said = if swap.used == 0 {
+                (p.dim.clone(), "none used".to_string())
+            } else {
+                (p.used.clone(), format!("{} used", human(swap.used)))
+            };
+            let (got, _) = gauge(
+                "SWAP",
+                &human(swap.total),
+                &[said],
+                width,
+                bar_w,
+                &|x, y, w| tc::Plot::meter(x, y, w, frac, None, &p.used, &p.track, &p.txt),
+                p,
+            );
+            block.stack(got);
+        }
+        None => {}
+    }
+    block
+}
+
+/// LOAD: the 1-minute average at every poll for ten minutes, the core
+/// count marked on the axis and the latest figure at the line's end.
+fn load_block(sample: &Sample, every: f64, width: usize, p: &Palette) -> Block {
+    let slots = model::history_slots(every).max(sample.history.len());
+    let have = sample.history.len();
+    let mut clauses = vec![(p.txt.clone(), "1-minute average, last 10 min".to_string())];
+    if have < slots {
+        clauses.push((
+            p.dim.clone(),
+            format!("{} so far", tc::age(have as f64 * every)),
+        ));
+    }
+    let mut block = Block::default();
+    for line in labelled("LOAD", &clauses, width, p) {
+        block.push(line);
+    }
+    let latest = sample.history.iter().rev().find_map(|v| *v);
+    let Some(latest) = latest else {
+        block.push(vec![(p.dim.clone(), " no reading yet".into())]);
+        return block;
+    };
+    let cores = sample.cores.max(1) as f64;
+    let peak = sample
+        .history
+        .iter()
+        .flatten()
+        .copied()
+        .fold(0.0f64, f64::max);
+    // The axis is the core count until the load passes it, then the next
+    // whole number above the peak: it moves only when the load does.
+    let hi = cores.max(peak.ceil()).max(1.0);
+    const ROWS: usize = 3;
+    let core_row = tc::line_row(cores / hi, ROWS);
+    let cores_label = format!("{} cores", sample.cores);
+    let label = |row: usize| -> (String, bool) {
+        if row == core_row {
+            (cores_label.clone(), true)
+        } else if row == 0 {
+            (load_text(hi), false)
+        } else if row == ROWS - 1 {
+            ("0".to_string(), false)
+        } else {
+            (String::new(), false)
+        }
+    };
+    let aw = (0..ROWS)
+        .map(|r| tc::display_width(&label(r).0))
+        .max()
+        .unwrap_or(1);
+    let now = format!(" {}", load_text(latest));
+    let x = 1 + aw + 1;
+    let cw = width.saturating_sub(x + tc::display_width(&now) + 1);
+    if cw < 6 {
+        block.push(vec![(p.dim.clone(), format!(" now {}", load_text(latest)))]);
+        return block;
+    }
+    let chart = tc::LineChart {
+        slots,
+        traces: vec![tc::Trace {
+            values: sample
+                .history
+                .iter()
+                .map(|v| v.map(|v| (v / hi).clamp(0.0, 1.0)))
+                .collect(),
+            positions: None,
+            colour: p.accent.clone(),
+            baseline: None,
+        }],
+        focus: None,
+    };
+    let y = block.lines.len();
+    block.plots.push(
+        tc::Plot::new(x, y, cw, ROWS, chart)
+            .under_text()
+            .on_axis(0.0, hi),
+    );
+    let now_row = tc::line_row((latest / hi).clamp(0.0, 1.0), ROWS);
+    for row in 0..ROWS {
+        let (text, is_cores) = label(row);
+        let mut line: Line = vec![
+            (
+                if is_cores {
+                    p.txt.clone()
+                } else {
+                    p.dim.clone()
+                },
+                format!(" {}", right(&text, aw)),
+            ),
+            (
+                p.dim.clone(),
+                if text.is_empty() { "│" } else { "┤" }.into(),
+            ),
+            (String::new(), " ".repeat(cw)),
+        ];
+        if row == now_row {
+            line.push((p.accent.clone(), now.clone()));
+        }
+        block.push(line);
+    }
+    block
+}
+
+/// The whole panel for `width`: problems first, then CPU beside MEMORY and
+/// SWAP when both fit on one line each, under each other when they do
+/// not, then the load trace across the full width.
+pub fn panel(sample: &Sample, every: f64, width: usize, p: &Palette) -> Panel {
+    let mut block = Block::default();
+    for why in &sample.machine.problems {
+        for line in tc::wrap_words(&format!("! {why}"), width.saturating_sub(2).max(1)) {
+            block.push(vec![(p.bad.clone(), format!(" {line}"))]);
+        }
+    }
+    // Side by side when the CPU block keeps its natural width and the
+    // memory and swap legends stay beside bars a dozen cells long.
+    const WIDE: usize = 400;
+    let unwrapped = cpu_block(sample, every, WIDE, p);
+    let left = unwrapped.lines.iter().map(line_width).max().unwrap_or(0) + 1;
+    let gap = 2;
+    let right_w = width.saturating_sub(left + gap);
+    let cpu = cpu_block(sample, every, left, p);
+    let unwrapped_mem = memory_block(sample, WIDE, p).lines.len();
+    let roomy = memory_block(sample, right_w.saturating_sub(12 - BAR_MIN), p);
+    if left <= width / 2
+        && cpu.lines.len() == unwrapped.lines.len()
+        && roomy.lines.len() == unwrapped_mem
+    {
+        let mem = memory_block(sample, right_w, p);
+        block.stack(cpu.beside(mem, left + gap));
+    } else {
+        block.stack(cpu_block(sample, every, width, p));
+        block.push(Vec::new());
+        block.stack(memory_block(sample, width, p));
+    }
+    block.push(Vec::new());
+    block.stack(load_block(sample, every, width, p));
+    let rows = block
+        .lines
+        .iter()
+        .map(|line| {
+            let parts: Vec<(&str, String)> =
+                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            tc::seg(&parts, width)
+        })
+        .collect();
+    Panel {
+        rows,
+        plots: block.plots,
     }
 }
 
@@ -575,6 +1160,74 @@ fn row(
     out
 }
 
+/// One thread under its process: its tid in PID, `└ name` in COMMAND, its
+/// own %CPU, state and age. Memory, the user and the cgroup are the
+/// process's, so the thread's cells there are left empty rather than
+/// repeated.
+fn thread_row(
+    thread: &Thread,
+    cols: &Cols,
+    cores: usize,
+    width: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let comm = chunks(&format!("└ {}", thread.comm), cols.cmd);
+    let cpu_ink = match thread.cpu {
+        Some(cpu) if cpu >= 0.05 => {
+            tc::heat_on((cpu * cores as f64 / 100.0).clamp(0.0, 1.0), false)
+        }
+        _ => p.dim.clone(),
+    };
+    let state_ink = match thread.state {
+        'D' => p.down.clone(),
+        'Z' => p.bad.clone(),
+        _ => p.dim.clone(),
+    };
+    let mut out = Vec::with_capacity(comm.len());
+    for (line, piece) in comm.iter().enumerate() {
+        let first = line == 0;
+        let tid = if first {
+            thread.tid.to_string()
+        } else {
+            String::new()
+        };
+        let first_or = |text: String, w: usize| if first { text } else { " ".repeat(w) };
+        let mut cells: Vec<(String, String)> = vec![
+            (
+                p.dim.clone(),
+                format!(" {}", right(&tid, cols.pid.saturating_sub(1))),
+            ),
+            (p.dim.clone(), tc::pad(piece, cols.cmd)),
+        ];
+        if let Some(w) = cols.user {
+            cells.push((p.dim.clone(), " ".repeat(w)));
+        }
+        cells.push((
+            cpu_ink.clone(),
+            first_or(right(&cpu_cell(thread.cpu), CPU_W), CPU_W),
+        ));
+        if cols.mem {
+            cells.push((p.dim.clone(), " ".repeat(MEM_W)));
+        }
+        cells.push((p.dim.clone(), " ".repeat(RSS_W)));
+        if cols.state {
+            cells.push((
+                state_ink.clone(),
+                first_or(tc::pad(&thread.state.to_string(), STATE_W), STATE_W),
+            ));
+        }
+        if cols.running {
+            let ran = thread.running.map(tc::age).unwrap_or_else(|| "—".into());
+            cells.push((p.dim.clone(), first_or(right(&ran, RUN_W), RUN_W)));
+        }
+        if let Some(w) = cols.cgroup {
+            cells.push((p.dim.clone(), " ".repeat(w)));
+        }
+        out.push(join(&cells, width, false, ""));
+    }
+    out
+}
+
 /// The status lines above the table: when, how often, what %CPU means,
 /// how many, in what order, and what is not shown.
 fn status(
@@ -637,10 +1290,26 @@ fn shown<'a>(view: &View, sample: &'a Sample) -> (Vec<&'a Proc>, Vec<&'a Proc>, 
     (listed, shown, hidden)
 }
 
-/// The title and everything above the table: when, how often, what %CPU
-/// means, how many, the filter in force and any error.
-pub fn list_head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Vec<String> {
+/// The title and everything above the table, with the plots in it: when,
+/// how often, what %CPU means, how many, any error, the CPU / MEMORY /
+/// SWAP / LOAD panel, and the filter in force.
+pub struct Head {
+    pub rows: Vec<String>,
+    pub plots: Vec<tc::Plot>,
+}
+
+/// [`Head`] for this frame. `panel` is built once a poll by `main` (see
+/// [`panel`]); the services view (`[g]`, phase 3) will put its own summary
+/// in the same place.
+pub fn list_head(
+    view: &View,
+    width: usize,
+    p: &Palette,
+    busy: Option<usize>,
+    panel: Option<&Panel>,
+) -> Head {
     let mut rows = vec![tc::title_busy("procs", width, &p.accent, busy)];
+    let mut plots = Vec::new();
     let err_rows = |rows: &mut Vec<String>| {
         if !view.err.is_empty() {
             for line in tc::wrap_words(&format!("! {}", view.err), width.saturating_sub(1).max(1)) {
@@ -654,17 +1323,44 @@ pub fn list_head(view: &View, width: usize, p: &Palette, busy: Option<usize>) ->
             width,
         ));
         err_rows(&mut rows);
-        return rows;
+        return Head { rows, plots };
     };
     let (listed, hidden) = model::listed(sample, view.show_kernel);
-    let count = listed
+    let passing: Vec<&Proc> = listed
         .iter()
+        .copied()
         .filter(|proc| model::passes(proc, view.needle, view.all_users, sample.me))
-        .count();
+        .collect();
+    let count = passing.len();
     let (zombies, _) = model::counts(&listed);
-    for line in pack_clauses(&status(view, sample, listed.len(), zombies, hidden), width) {
+    let mut clauses = status(view, sample, listed.len(), zombies, hidden);
+    if view.threads {
+        clauses.push(match &sample.threads {
+            Some(threads) => {
+                let n: usize = passing
+                    .iter()
+                    .filter_map(|proc| threads.get(&proc.pid))
+                    .map(Vec::len)
+                    .sum();
+                format!("{n} threads listed under their processes")
+            }
+            None => "reading threads…".to_string(),
+        });
+    }
+    for line in pack_clauses(&clauses, width) {
         rows.push(tc::seg(&[(p.dim.as_str(), line)], width));
     }
+    err_rows(&mut rows);
+    if let Some(panel) = panel {
+        rows.push(String::new());
+        let top = rows.len();
+        plots.extend(panel.plots.iter().cloned().map(|mut plot| {
+            plot.y += top;
+            plot
+        }));
+        rows.extend(panel.rows.iter().cloned());
+    }
+    rows.push(String::new());
     if view.typing {
         rows.push(tc::seg(
             &[
@@ -685,9 +1381,7 @@ pub fn list_head(view: &View, width: usize, p: &Palette, busy: Option<usize>) ->
             rows.push(tc::seg(&[(p.txt.as_str(), format!(" {piece}"))], width));
         }
     }
-    err_rows(&mut rows);
-    rows.push(String::new());
-    rows
+    Head { rows, plots }
 }
 
 pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
@@ -707,15 +1401,30 @@ pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
         return table;
     }
     let (_, waiting) = model::counts(&shown);
+    let threads = sample.threads.as_ref().filter(|_| view.threads);
+    let under = |pid: i32| threads.and_then(|t| t.get(&pid)).map(Vec::as_slice);
     let digits = shown
         .iter()
-        .map(|p| p.pid.to_string().len())
+        .map(|p| p.pid)
+        .chain(
+            shown
+                .iter()
+                .flat_map(|p| under(p.pid).unwrap_or(&[]).iter().map(|t| t.tid)),
+        )
+        .map(|pid| pid.to_string().len())
         .max()
         .unwrap_or(3)
         .max(3);
+    // A thread's name is drawn after `└ `, so it wants two cells more.
     let cmd_want = shown
         .iter()
         .map(|p| tc::display_width(&p.comm))
+        .chain(shown.iter().flat_map(|p| {
+            under(p.pid)
+                .unwrap_or(&[])
+                .iter()
+                .map(|t| tc::display_width(&t.comm) + 2)
+        }))
         .max()
         .unwrap_or(7)
         .max(7);
@@ -736,6 +1445,11 @@ pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
         let here = view.cursor == Some(proc.pid);
         let from = rows.len();
         rows.extend(row(proc, &cols, sample.cores, width, here, p));
+        // A thread is part of its process's item: a click on it selects the
+        // process, and the arrows step over it to the next process.
+        for thread in under(proc.pid).unwrap_or(&[]) {
+            rows.extend(thread_row(thread, &cols, sample.cores, width, p));
+        }
         table.placed.extend((from..rows.len()).map(|r| (r, index)));
         table.keys.push(proc.pid);
     }
@@ -756,8 +1470,8 @@ pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
 }
 
 /// The head and the table as one frame body, the title pinned.
-pub fn compose(head: Vec<String>, table: &Table) -> Drawn {
-    let mut rows = head;
+pub fn compose(head: Head, table: &Table) -> Drawn {
+    let mut rows = head.rows;
     let offset = rows.len();
     rows.extend(table.rows.iter().cloned());
     Drawn {
@@ -765,11 +1479,18 @@ pub fn compose(head: Vec<String>, table: &Table) -> Drawn {
         placed: table.placed.iter().map(|&(r, i)| (r + offset, i)).collect(),
         head: 1,
         keys: table.keys.clone(),
+        plots: head.plots,
     }
 }
 
 pub fn draw_list(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Drawn {
-    compose(list_head(view, width, p, busy), &list_table(view, width, p))
+    let panel = view
+        .sample
+        .map(|sample| panel(sample, view.every, width, p));
+    compose(
+        list_head(view, width, p, busy, panel.as_ref()),
+        &list_table(view, width, p),
+    )
 }
 
 // ── the detail ───────────────────────────────────────────────────────
@@ -970,6 +1691,7 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         placed: Vec::new(),
         head,
         keys: Vec::new(),
+        plots: Vec::new(),
     }
 }
 
@@ -980,6 +1702,9 @@ pub struct Keys {
     pub sort: Sort,
     pub typing: bool,
     pub all_users: bool,
+    /// `[t]`: `Some(on)` where threads can be listed, `None` on macOS,
+    /// where the hint is not drawn.
+    pub threads: Option<bool>,
     pub filtered: bool,
 }
 
@@ -1000,6 +1725,9 @@ pub fn footer(width: usize, keys: &Keys, p: &Palette) -> (tc::Footer, usize) {
         hints.push(vec![(dim, keys.sort.hint())]);
         hints.push(vec![(dim, "[/] filter".into())]);
         hints.push(vec![(dim, users_hint(keys.all_users).into())]);
+        if let Some(on) = keys.threads {
+            hints.push(vec![(dim, threads_hint(on).into())]);
+        }
         if keys.filtered {
             hints.push(vec![(dim, "esc clear filter".into())]);
         }
@@ -1029,6 +1757,15 @@ pub fn footer(width: usize, keys: &Keys, p: &Palette) -> (tc::Footer, usize) {
         .map(|line| format!("{}{}", " ".repeat(indent), line))
         .collect();
     (packed, indent)
+}
+
+/// `[t]`: the state the next press moves to.
+pub fn threads_hint(on: bool) -> &'static str {
+    if on {
+        "[t] hide threads"
+    } else {
+        "[t] show threads"
+    }
 }
 
 /// `[u]`: the state the next press moves to.
@@ -1073,6 +1810,7 @@ mod tests {
             typing: false,
             all_users: true,
             show_kernel: false,
+            threads: false,
             cursor: None,
             opened: None,
         }
@@ -1394,6 +2132,292 @@ mod tests {
     fn hints_name_the_next_state() {
         assert_eq!(users_hint(true), "[u] only yours");
         assert_eq!(users_hint(false), "[u] all users");
+        assert_eq!(threads_hint(false), "[t] show threads");
+        assert_eq!(threads_hint(true), "[t] hide threads");
+    }
+
+    use super::super::model::{Machine, Memory, Swap, fixtures::machine};
+
+    fn with_machine(cores: usize, m: Machine) -> Sample {
+        let mut s = table();
+        s.cores = cores;
+        s.machine = m;
+        s
+    }
+
+    fn mac() -> Sample {
+        let mut s = with_machine(
+            8,
+            Machine {
+                per_core: PerCore::NotRead,
+                memory: Some(Memory::from_parts(
+                    [9 << 30, 5 << 30, 2 << 30],
+                    MemSource::VmStat,
+                )),
+                ..machine(8)
+            },
+        );
+        s.clock = Clock::Decaying;
+        s
+    }
+
+    fn bars(panel: &Panel) -> Vec<&tc::Plot> {
+        panel
+            .plots
+            .iter()
+            .filter(|p| p.height == 2 && p.chart.traces.is_empty())
+            .collect()
+    }
+
+    fn one_row(panel: &Panel) -> usize {
+        panel.plots.iter().filter(|p| p.height == 1).count()
+    }
+
+    fn panel_text(panel: &Panel) -> String {
+        flat(
+            &panel
+                .rows
+                .iter()
+                .map(|r| plain(r))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    #[test]
+    fn every_panel_row_fits_and_every_plot_sits_inside_it() {
+        let mut waiting = machine(8);
+        waiting.per_core = PerCore::Waiting;
+        waiting.busy = None;
+        let mut broken = machine(8);
+        broken.problems =
+            vec!["/proc/stat unavailable: /proc/stat: Permission denied (os error 13)".into()];
+        broken.memory = None;
+        let mut no_swap = machine(8);
+        no_swap.swap = Some(Swap { total: 0, used: 0 });
+        let samples = [
+            with_machine(8, machine(8)),
+            with_machine(2, machine(2)),
+            with_machine(4, machine(4)),
+            with_machine(64, machine(64)),
+            with_machine(8, waiting),
+            with_machine(8, broken),
+            with_machine(8, no_swap),
+            mac(),
+        ];
+        for s in &samples {
+            for width in [28, 40, 60, 80, 100, 140] {
+                let panel = panel(s, 2.0, width, &palette());
+                for line in &panel.rows {
+                    assert!(
+                        tc::display_width(&plain(line)) <= width,
+                        "{width} cells, {} cores: {:?}",
+                        s.cores,
+                        plain(line)
+                    );
+                }
+                for plot in &panel.plots {
+                    assert!(plot.x + plot.width <= width, "{width}: {plot:?}");
+                    assert!(plot.y + plot.height <= panel.rows.len());
+                    // The cells under a plot are left blank for it.
+                    for row in plot.y..plot.y + plot.height {
+                        let cells: String = plain(&panel.rows[row])
+                            .chars()
+                            .skip(plot.x)
+                            .take(plot.width)
+                            .collect();
+                        assert!(cells.trim().is_empty(), "{width}: {cells:?}");
+                    }
+                }
+                let mut v = view(Some(s));
+                v.cursor = Some(48_213);
+                let drawn = draw_list(&v, width, &palette(), None);
+                for line in &drawn.rows {
+                    assert!(tc::display_width(&plain(line)) <= width, "{width}");
+                }
+                assert_eq!(drawn.plots.len(), panel.plots.len());
+            }
+        }
+    }
+
+    #[test]
+    fn four_cores_draw_a_bar_each_and_two_draw_one_meter() {
+        let four = panel(&with_machine(4, machine(4)), 2.0, 80, &palette());
+        let b = bars(&four);
+        assert_eq!(b.len(), 1, "one bar chart");
+        // Four cores at four cells each and a gap between them.
+        assert_eq!(b[0].width, 4 * 4 + 3);
+        let two = panel(&with_machine(2, machine(2)), 2.0, 80, &palette());
+        assert!(bars(&two).is_empty(), "two cores is a meter of the total");
+        // The CPU meter, the memory bar and the swap meter.
+        assert_eq!(one_row(&two), 3);
+        assert_eq!(one_row(&four), 2, "memory and swap only");
+        // Too many cores for the width is a meter too.
+        let many = panel(&with_machine(64, machine(64)), 2.0, 40, &palette());
+        assert!(bars(&many).is_empty());
+        assert_eq!(bar_shape(64, 38), None);
+        assert_eq!(bar_shape(8, 38), Some((3, 1)));
+        assert_eq!(bar_shape(8, 9), Some((1, 0)));
+        // Extra width buys wider bars, and their figures under them.
+        let t = panel_text(&panel(&with_machine(8, machine(8)), 2.0, 100, &palette()));
+        assert!(t.contains("92 10 20 30 40 50 60 70"), "{t}");
+        assert!(t.contains("busiest cpu0 92%"), "{t}");
+    }
+
+    #[test]
+    fn the_panel_names_cpu_load_memory_and_swap() {
+        let s = with_machine(8, machine(8));
+        let t = panel_text(&panel(&s, 2.0, 100, &palette()));
+        assert!(
+            t.contains("CPU 8 cores · 41% busy · load 3.90 2.80 2.10 (of 8)"),
+            "{t}"
+        );
+        assert!(t.contains("MEMORY 31G"), "{t}");
+        assert!(t.contains("used 18G · reclaimable 6G · free 7G"), "{t}");
+        assert!(t.contains("used = total − MemAvailable"), "{t}");
+        assert!(t.contains("SWAP 4G"), "{t}");
+        assert!(t.contains("1.2G used"), "{t}");
+        assert!(t.contains("LOAD 1-minute average, last 10 min"), "{t}");
+        assert!(
+            t.contains("8 cores┤"),
+            "the core count marks the axis:\n{t}"
+        );
+        let mut none = machine(8);
+        none.swap = Some(Swap {
+            total: 4 << 30,
+            used: 0,
+        });
+        let t = panel_text(&panel(&with_machine(8, none), 2.0, 100, &palette()));
+        assert!(t.contains("none used"), "{t}");
+        let mut off = machine(8);
+        off.swap = Some(Swap { total: 0, used: 0 });
+        let t = panel_text(&panel(&with_machine(8, off), 2.0, 100, &palette()));
+        assert!(t.contains("SWAP no swap"), "{t}");
+        // A file that could not be read is named, and the table still draws.
+        let mut broken = machine(8);
+        broken.problems = vec!["/proc/stat unavailable: example".into()];
+        let s = with_machine(8, broken);
+        let drawn = draw_list(&view(Some(&s)), 100, &palette(), None);
+        let t = flat(&text(&drawn));
+        assert!(t.contains("! /proc/stat unavailable: example"), "{t}");
+        assert_eq!(drawn.keys.len(), 4, "the table is there");
+    }
+
+    #[test]
+    fn the_platform_lines_differ() {
+        let macos = panel_text(&panel(&mac(), 2.0, 100, &palette()));
+        let linux = panel_text(&panel(&with_machine(8, machine(8)), 2.0, 100, &palette()));
+        let per_core = "per-core CPU not read on macOS (needs host_processor_info)";
+        assert!(macos.contains(per_core), "{macos}");
+        assert!(!linux.contains(per_core), "{linux}");
+        assert!(macos.contains("from vm_stat"), "{macos}");
+        assert!(!linux.contains("vm_stat"), "{linux}");
+        assert!(macos.contains("41% decaying average (ps)"), "{macos}");
+        assert!(!linux.contains("decaying"), "{linux}");
+        assert!(linux.contains("MemAvailable") && !macos.contains("MemAvailable"));
+        // No bars on macOS: the line says why instead.
+        assert!(bars(&panel(&mac(), 2.0, 100, &palette())).is_empty());
+    }
+
+    #[test]
+    fn the_load_trace_holds_ten_minutes_and_is_under_its_text() {
+        let s = with_machine(8, machine(8));
+        let panel = panel(&s, 2.0, 100, &palette());
+        let trace: Vec<&tc::Plot> = panel
+            .plots
+            .iter()
+            .filter(|p| !p.chart.traces.is_empty())
+            .collect();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].chart.slots, 300, "600 s at one slot every 2 s");
+        assert_eq!(trace[0].height, 3);
+        // Five-second polls: 120 slots.
+        let slow = super::panel(&s, 5.0, 100, &palette());
+        let slots = slow
+            .plots
+            .iter()
+            .find(|p| !p.chart.traces.is_empty())
+            .map(|p| p.chart.slots);
+        assert_eq!(slots, Some(300), "never fewer slots than samples held");
+        let mut short = s.clone();
+        short.history.truncate(30);
+        let t = panel_text(&super::panel(&short, 2.0, 100, &palette()));
+        assert!(t.contains("60s so far"), "{t}");
+        // The latest reading is text at the line's end, in both modes.
+        let latest = load_text(s.history.last().unwrap().unwrap());
+        assert!(panel_text(&panel).contains(&latest), "{latest}");
+    }
+
+    #[test]
+    fn threads_list_under_their_process_and_are_not_counted() {
+        use super::super::model::Thread;
+        let mut s = table();
+        let thread = |tid: i32, comm: &str, cpu: f64| Thread {
+            tid,
+            comm: comm.into(),
+            state: 'S',
+            cpu: Some(cpu),
+            running: Some(60.0),
+        };
+        s.threads = Some(
+            [(
+                48_213,
+                vec![
+                    thread(48_213, "example-worker", 40.0),
+                    thread(4_194_301, "example-io", 21.0),
+                ],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut v = view(Some(&s));
+        let without = draw_list(&v, 100, &palette(), None);
+        assert!(!text(&without).contains("example-io"), "off by default");
+        v.threads = true;
+        for width in [28, 40, 60, 80, 100, 140] {
+            let drawn = draw_list(&v, width, &palette(), None);
+            for line in &drawn.rows {
+                assert!(tc::display_width(&plain(line)) <= width, "{width}");
+            }
+            assert_eq!(drawn.keys.len(), 4, "threads are not items of their own");
+            let t = text(&drawn);
+            assert!(in_order(&t, "└ example-io"), "{width}:\n{t}");
+            assert!(t.contains("4194301"), "a tid wider than any pid fits:\n{t}");
+        }
+        let t = flat(&text(&draw_list(&v, 100, &palette(), None)));
+        assert!(t.contains("4 processes"), "the count is of processes:\n{t}");
+        assert!(t.contains("2 threads listed under their processes"), "{t}");
+        // The thread rows sit under their process and belong to its item.
+        let drawn = draw_list(&v, 100, &palette(), None);
+        let rows: Vec<usize> = drawn
+            .placed
+            .iter()
+            .filter(|(_, i)| *i == 0)
+            .map(|(r, _)| *r)
+            .collect();
+        assert!(rows.len() >= 3, "the process and its two threads: {rows:?}");
+        let last = plain(&drawn.rows[*rows.last().unwrap()]);
+        assert!(last.contains("example-io"), "{last}");
+        assert!(!plain(&drawn.rows[rows[0]]).contains("└"));
+        let keys = |threads| Keys {
+            screen: Screen::List,
+            sort: Sort::Cpu,
+            typing: false,
+            all_users: true,
+            threads,
+            filtered: false,
+        };
+        let hints = |threads| {
+            footer(200, &keys(threads), &palette())
+                .0
+                .lines
+                .iter()
+                .map(|l| plain(l))
+                .collect::<String>()
+        };
+        assert!(hints(Some(false)).contains("[t] show threads"));
+        assert!(hints(Some(true)).contains("[t] hide threads"));
+        assert!(!hints(None).contains("[t]"), "macOS has no threads to show");
     }
 
     #[test]

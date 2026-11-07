@@ -25,6 +25,9 @@ same. Higher resolution does not imply more samples or faster polling.
 `github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
 `google-search-console` adds hourly bars, a daily window-against-window
 trace and a page or query's 28-day traces.
+`procs` adds a 10-minute load trace; its per-core bars are `as_text()`,
+since they change every poll and as an image were a whole upload each time
+(31 KB/s of raw RGBA at 100 columns with eight cores).
 These use shared text fallbacks: block bars, Braille traces and reference marks.
 
 Meters and stacked bars are text in every mode, Kitty included (OPS-203):

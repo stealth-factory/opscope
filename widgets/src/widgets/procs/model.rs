@@ -73,6 +73,160 @@ pub struct Sample {
     pub hidepid: bool,
     /// This user's uid, for `[u] only yours`.
     pub me: u32,
+    /// The machine as a whole: CPU, load, memory and swap.
+    pub machine: Machine,
+    /// The 1-minute load at each poll for the last ten minutes, oldest
+    /// first; `None` for a poll that could not read it. Kept by the poller,
+    /// not by the host.
+    pub history: Vec<Option<f64>>,
+    /// Threads per pid, read only while `[t]` is on (Linux). `None` when
+    /// off, so a table drawn with threads never shows a stale set.
+    pub threads: Option<HashMap<i32, Vec<Thread>>>,
+}
+
+/// One thread of a process, as `/proc/<pid>/task/<tid>/stat` reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thread {
+    pub tid: i32,
+    pub comm: String,
+    pub state: char,
+    /// % of all cores over the same window as the processes; `None` until
+    /// it has been read twice.
+    pub cpu: Option<f64>,
+    pub running: Option<f64>,
+}
+
+/// The machine's headline, read once a poll beside the process list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Machine {
+    /// The share of every core that was busy: over the last poll on Linux,
+    /// `ps`'s decaying average summed on macOS (`Sample::clock` says
+    /// which). `None` until there are two readings to subtract.
+    pub busy: Option<f64>,
+    pub per_core: PerCore,
+    /// The 1, 5 and 15 minute load averages.
+    pub load: Option<(f64, f64, f64)>,
+    pub memory: Option<Memory>,
+    pub swap: Option<Swap>,
+    /// Why a figure above is missing, one line each, drawn in the panel:
+    /// `/proc/stat unavailable: …`. The table still draws.
+    pub problems: Vec<String>,
+}
+
+/// Per-core busy shares, or why there are none.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PerCore {
+    /// `(cpu number, busy share)` over the last poll.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Read(Vec<(usize, f64)>),
+    /// One reading so far; the next poll makes a delta.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Waiting,
+    /// macOS: `ps` has no per-core figure and `host_processor_info` is not
+    /// read in this version.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    NotRead,
+}
+
+/// Memory as three parts that sum to `total` exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Memory {
+    pub total: u64,
+    pub used: u64,
+    pub reclaimable: u64,
+    pub free: u64,
+    pub source: MemSource,
+}
+
+/// Where the three parts came from, which the legend names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemSource {
+    /// Linux: used is `MemTotal - MemAvailable`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    MemAvailable,
+    /// macOS: page counts from `vm_stat`.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    VmStat,
+}
+
+impl Memory {
+    pub fn from_parts(parts: [u64; 3], source: MemSource) -> Memory {
+        Memory {
+            total: parts.iter().sum(),
+            used: parts[0],
+            reclaimable: parts[1],
+            free: parts[2],
+            source,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Swap {
+    pub total: u64,
+    pub used: u64,
+}
+
+impl Machine {
+    /// Nothing read yet, for a host or a test to fill.
+    pub fn empty(per_core: PerCore) -> Machine {
+        Machine {
+            busy: None,
+            per_core,
+            load: None,
+            memory: None,
+            swap: None,
+            problems: Vec::new(),
+        }
+    }
+}
+
+/// The load ring: one slot a poll for ten minutes. A poll that comes much
+/// sooner than `every` (an `r`) replaces the newest slot rather than adding
+/// one, so the slots stay about `every` apart and the axis stays ten
+/// minutes wide.
+pub struct LoadHistory {
+    slots: usize,
+    every: f64,
+    held: std::collections::VecDeque<Option<f64>>,
+    last: Option<f64>,
+}
+
+impl LoadHistory {
+    pub fn new(every: f64) -> LoadHistory {
+        let slots = history_slots(every);
+        LoadHistory {
+            slots,
+            every,
+            held: std::collections::VecDeque::with_capacity(slots),
+            last: None,
+        }
+    }
+
+    /// `at` is seconds on any monotonic clock.
+    pub fn push(&mut self, load: Option<f64>, at: f64) {
+        let soon = self.last.is_some_and(|last| at - last < self.every * 0.75);
+        if soon && !self.held.is_empty() {
+            if let Some(newest) = self.held.back_mut() {
+                *newest = load;
+            }
+            return;
+        }
+        if self.held.len() == self.slots {
+            self.held.pop_front();
+        }
+        self.held.push_back(load);
+        self.last = Some(at);
+    }
+
+    pub fn values(&self) -> Vec<Option<f64>> {
+        self.held.iter().copied().collect()
+    }
+}
+
+/// Slots in ten minutes at one a poll: 300 at the default 2 s.
+pub fn history_slots(every: f64) -> usize {
+    ((600.0 / every.max(0.5)).ceil() as usize).clamp(2, 1200)
 }
 
 /// What the detail screen shows beyond the table's own columns. Read for
@@ -262,6 +416,33 @@ pub mod fixtures {
             clock: Clock::Measured { window: Some(2.0) },
             hidepid: false,
             me: 1000,
+            machine: machine(8),
+            history: (0..300)
+                .map(|i| Some(2.0 + (i % 40) as f64 / 10.0))
+                .collect(),
+            threads: None,
+        }
+    }
+
+    /// A Linux machine with `cores` cores, the first one hot.
+    pub fn machine(cores: usize) -> Machine {
+        Machine {
+            busy: Some(0.41),
+            per_core: PerCore::Read(
+                (0..cores)
+                    .map(|n| (n, if n == 0 { 0.92 } else { 0.1 * n as f64 % 1.0 }))
+                    .collect(),
+            ),
+            load: Some((3.9, 2.8, 2.1)),
+            memory: Some(Memory::from_parts(
+                [18 << 30, 6 << 30, 7 << 30],
+                MemSource::MemAvailable,
+            )),
+            swap: Some(Swap {
+                total: 4 << 30,
+                used: 1_288_490_189,
+            }),
+            problems: Vec::new(),
         }
     }
 }
@@ -270,6 +451,30 @@ pub mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
+
+    #[test]
+    fn the_load_ring_holds_ten_minutes_at_the_poll_rate() {
+        assert_eq!(history_slots(2.0), 300);
+        assert_eq!(history_slots(5.0), 120);
+        assert_eq!(history_slots(0.5), 1200);
+        let mut ring = LoadHistory::new(2.0);
+        for i in 0..400 {
+            ring.push(Some(i as f64), i as f64 * 2.0);
+        }
+        let held = ring.values();
+        assert_eq!(held.len(), 300, "trimmed to the window");
+        assert_eq!(held[0], Some(100.0), "the oldest fell off");
+        assert_eq!(held[299], Some(399.0));
+        // An `r` a moment after a poll replaces the newest slot.
+        ring.push(Some(7.0), 399.0 * 2.0 + 0.3);
+        let held = ring.values();
+        assert_eq!(held.len(), 300);
+        assert_eq!(held[299], Some(7.0));
+        assert_eq!(held[298], Some(398.0));
+        // A poll that could not read the load is a gap, not a zero.
+        ring.push(None, 900.0);
+        assert_eq!(ring.values().last(), Some(&None));
+    }
 
     #[test]
     fn sort_cycles_three_ways_and_names_the_next() {

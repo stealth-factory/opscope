@@ -8,20 +8,24 @@
 
 //! What this machine is running: every process, what it costs in CPU and
 //! memory, its state and how long it has been up, sorted, filtered, and
-//! opened one at a time.
+//! opened one at a time - under a panel of the machine as a whole: CPU per
+//! core, load against the core count, memory and swap, and ten minutes of
+//! load.
 //!
 //! Linux reads `/proc` through `tc::procfs` and measures %CPU as the delta
 //! of `utime + stime` over the poll, as a share of every core. macOS reads
 //! one `ps -axo` a poll, whose `%cpu` is a decaying average and is labelled
-//! as one. The parsers, the sort, the filter and the drawing compile and
-//! are tested on every target; only the reads are behind `cfg(target_os)`.
+//! as one, with `vm_stat`, `sysctl vm.swapusage` and `getloadavg` for the
+//! panel. The parsers, the sort, the filter and the drawing compile and are
+//! tested on every target; only the reads are behind `cfg(target_os)`.
 //!
 //!     procs [-n SECONDS]
 //!
 //! Keys: up/down select, enter opens, s cycles the sort, / filters, u
-//! switches between all users and yours, r refreshes, comma opens
-//! settings, q quits.
+//! switches between all users and yours, t shows threads (Linux), r
+//! refreshes, comma opens settings, q quits.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,7 +54,9 @@ mod host {
     #[derive(Default)]
     pub struct Source;
 
-    pub fn sample(_source: &mut Source) -> Result<Sample, String> {
+    pub const READS_THREADS: bool = false;
+
+    pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, String> {
         Err(opscope_core::unsupported())
     }
 
@@ -157,6 +163,10 @@ fn main() {
         .get("show_kernel_threads")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let mut show_threads = cfg
+        .get("show_threads")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     let shared = Arc::new(Mutex::new(Shared::default()));
     let wake = Arc::new(Wake {
@@ -164,13 +174,16 @@ fn main() {
         cond: Condvar::new(),
     });
     let wanted: Arc<Mutex<Option<Proc>>> = Arc::new(Mutex::new(None));
+    // Whether the poller reads threads: only while `[t]` is on.
+    let threads_on = Arc::new(AtomicBool::new(show_threads && host::READS_THREADS));
     let refresh = tc::Refresh::default();
     {
         let shared = Arc::clone(&shared);
         let wake = Arc::clone(&wake);
         let wanted = Arc::clone(&wanted);
+        let threads_on = Arc::clone(&threads_on);
         let refresh = refresh.clone();
-        thread::spawn(move || poll(shared, wake, wanted, refresh, every));
+        thread::spawn(move || poll(shared, wake, wanted, threads_on, refresh, every));
     }
 
     let p = view::palette();
@@ -188,11 +201,14 @@ fn main() {
     let mut opened: Option<Opened> = None;
     let mut scroll = 0usize;
     let mut list_scroll = 0usize;
-    let mut chase = true;
+    // The pane opens at the top, on the panel; the first key that moves
+    // the cursor brings the table to it.
+    let mut chase = false;
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut head = 1usize;
     let mut shown_scroll = 0usize;
     let mut table_cache: Option<(TableKey, view::Table)> = None;
+    let mut panel_cache: Option<((Option<usize>, usize), view::Panel)> = None;
 
     loop {
         // The filter box takes letters, `!` included, as text.
@@ -296,6 +312,17 @@ fn main() {
                         chase = true;
                     }
                 }
+                // Linux lists threads; on macOS the key is answered and
+                // nothing changes, and the footer does not offer it.
+                "t" | "T" => {
+                    if screen == Screen::List && host::READS_THREADS {
+                        show_threads = !show_threads;
+                        threads_on.store(show_threads, Ordering::Relaxed);
+                        // Read them now rather than a poll from now.
+                        wake.ask(|asked| asked.resample = true);
+                        chase = true;
+                    }
+                }
                 "r" | "R" => wake.ask(|asked| asked.resample = true),
                 "ctrl-y" | "wheel-up" => {
                     scroll = scroll.saturating_sub(1);
@@ -386,14 +413,17 @@ fn main() {
             typing,
             all_users,
             show_kernel,
+            threads: show_threads && host::READS_THREADS,
             cursor,
             opened: opened.as_ref(),
         };
         let busy = refresh.tick(tc::animation_tick());
         let mut drawn = match screen {
             Screen::List => {
+                let panel = cached_panel(&mut panel_cache, &state, w, &p);
+                let head = view::list_head(&state, w, &p, busy, panel);
                 let table = cached(&mut table_cache, &state, w, &p);
-                view::compose(view::list_head(&state, w, &p, busy), table)
+                view::compose(head, table)
             }
             Screen::Detail => view::draw_detail(&state, w, &p, busy),
         };
@@ -411,8 +441,10 @@ fn main() {
             }
             if cursor != before {
                 let state = view::View { cursor, ..state };
+                let panel = cached_panel(&mut panel_cache, &state, w, &p);
+                let head = view::list_head(&state, w, &p, busy, panel);
                 let table = cached(&mut table_cache, &state, w, &p);
-                drawn = view::compose(view::list_head(&state, w, &p, busy), table);
+                drawn = view::compose(head, table);
             }
             drawn_keys = drawn.keys.clone();
         }
@@ -423,6 +455,7 @@ fn main() {
                 sort,
                 typing,
                 all_users,
+                threads: host::READS_THREADS.then_some(show_threads),
                 filtered: !needle.is_empty(),
             },
             &p,
@@ -462,7 +495,13 @@ fn main() {
         }
         let foot_top = rows.len();
         rows.extend(foot);
-        tc::draw(&rows, w, h);
+        // The panel's bars and trace are in body rows; they scroll with
+        // the text and are cropped where the window cuts them.
+        let plots: Vec<tc::Plot> = std::mem::take(&mut drawn.plots)
+            .into_iter()
+            .filter_map(|plot| plot.in_viewport(scroll, head_rows, room_below))
+            .collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, indent);
         placed = drawn.placed;
         head = head_rows;
@@ -484,8 +523,25 @@ struct TableKey {
     sort: Sort,
     needle: String,
     all_users: bool,
+    threads: bool,
     cursor: Option<i32>,
     width: usize,
+}
+
+/// The CPU, memory, swap and load panel: rebuilt once a poll or on a
+/// resize, like the table, since its figures change only with the sample.
+fn cached_panel<'a>(
+    cache: &'a mut Option<((Option<usize>, usize), view::Panel)>,
+    state: &view::View,
+    width: usize,
+    p: &view::Palette,
+) -> Option<&'a view::Panel> {
+    let sample = state.sample?;
+    let key = (Some(sample as *const Sample as usize), width);
+    if cache.as_ref().is_none_or(|(held, _)| *held != key) {
+        *cache = Some((key, view::panel(sample, state.every, width, p)));
+    }
+    cache.as_ref().map(|(_, panel)| panel)
 }
 
 fn cached<'a>(
@@ -499,6 +555,7 @@ fn cached<'a>(
         sort: state.sort,
         needle: state.needle.to_string(),
         all_users: state.all_users,
+        threads: state.threads,
         cursor: state.cursor,
         width,
     };
@@ -522,17 +579,23 @@ fn poll(
     shared: Arc<Mutex<Shared>>,
     wake: Arc<Wake>,
     wanted: Arc<Mutex<Option<Proc>>>,
+    threads_on: Arc<AtomicBool>,
     refresh: tc::Refresh,
     every: f64,
 ) {
     tc::record_panics();
     let mut source = host::Source::default();
     let mut last: Option<Arc<Sample>> = None;
+    // The 10-minute load trace: a slot a poll, kept here so it survives
+    // a poll that fails.
+    let mut history = model::LoadHistory::new(every);
+    let began = Instant::now();
     loop {
         let work = refresh.start();
         let want = wanted.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let with_threads = threads_on.load(Ordering::Relaxed);
         let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let sample = host::sample(&mut source);
+            let sample = host::sample(&mut source, with_threads);
             let facts = match (&want, &sample) {
                 (Some(proc), Ok(table)) => {
                     // A process that left is not read again: its pid may
@@ -550,7 +613,10 @@ fn poll(
             Ok((sample, facts)) => {
                 let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
                 match sample {
-                    Ok(table) => {
+                    Ok(mut table) => {
+                        let load = table.machine.load.map(|(one, _, _)| one);
+                        history.push(load, began.elapsed().as_secs_f64());
+                        table.history = history.values();
                         let table = Arc::new(table);
                         last = Some(Arc::clone(&table));
                         guard.sample = Some(table);

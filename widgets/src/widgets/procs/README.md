@@ -11,6 +11,21 @@ Linux example, 100 columns:
  sampled 1s ago · every 2s · %CPU of all 8 cores over the last 2s · 598 processes · sorted by %CPU
  3 zombies · 112 kernel threads hidden
 
+ CPU    8 cores · 41% busy · load 3.90 2.80 2.10 (of 8)
+ ████ ▁▁▁▁                          ▃▃▃▃
+ ████ ████ ███▆ ▇▇▇▇ ▂▂▂▂ ▅▅▅▅ ███▃ ████
+   92   48   38   11   20   29   61   35
+ per core, % over the last poll · busiest cpu0 92%
+
+ MEMORY   31G  ███████████████████▌██████░░░░░░  used 18G · reclaimable 6G · free 7G
+               used = total − MemAvailable
+ SWAP      4G  ████████░░░░░░░░░░░░░░░░░░░░░░░░  1.2G used
+
+ LOAD   1-minute average, last 10 min
+ 8 cores┤
+        │      ⢀⣀⡠⠤⠒⠒⠒⠤⠤⣀⣀                ⣀⡠⠤⠒⠊⠉⠉⠑⠒⠢⠤⢄⣀⣀⣀⡀                ⢀⣀⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠒ 3.90
+       0┤⠤⠔⠒⠊⠁              ⠉⠉⠒⠒⠢⠤⠤⣀⣀⡠⠤⠒⠊⠉                     ⠈⠉⠉⠒⠒⠒⠢⠤⠤⠤⠔⠒⠊⠁
+
      PID COMMAND        USER        %CPU   MEM   RSS STATE RUNNING CGROUP
 ▸  48213 example-worker user-a      12.4  4.1%  1.3G R       2d    session-2.scope
    51020 example-agent  user-a       2.8  2.0%  640M S       3h    session-2.scope
@@ -20,9 +35,65 @@ Linux example, 100 columns:
    51077 (a) b (c)      user-a         —  0.0%     0 Z       12s   session-2.scope
 
  D = waiting on disk, 1 shown now
- ↑↓ select  [↵] detail  [s] sort by memory  [/] filter  [u] only yours  [r]efresh  [,] settings
- [ctrl-k]cmds  [ctrl-t]heme  [q]uit
+ ↑↓ select  [↵] detail  [s] sort by memory  [/] filter  [u] only yours  [t] show threads  [r]efresh
+ [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
 ```
+
+In Kitty the per-core bars and the load trace are pixels; the memory and
+swap bars are eighth-cell text in every terminal. On a pane wide enough
+for both to stay on one line each - about 130 columns with eight cores -
+MEMORY and SWAP move up beside CPU.
+
+## The panel
+
+Above the table, the machine as a whole, from three files read once a
+poll on Linux:
+
+- **CPU**: the core count, the share of every core that was busy over the
+  last poll (`/proc/stat`: everything but `idle` and `iowait`, so `steal`
+  counts as busy), and the three load averages from `/proc/loadavg` with
+  the core count beside them, so a load over the core count reads as one.
+  Under it, a bar per core, 0 to 100%, when four or more cores fit the
+  width - wider bars, and each core's figure under its bar, as the pane
+  grows - and otherwise one meter of the total. The first poll has nothing
+  to subtract from and says when the figures will come.
+- **MEMORY**: three parts that sum to `MemTotal` exactly - used is
+  `MemTotal - MemAvailable`, reclaimable `MemAvailable - MemFree`, free
+  `MemFree` - so `used` is what `free` prints as total less available.
+  Not `Cached`, which overlaps `MemAvailable`. On an idle machine whose
+  `MemAvailable` is under `MemFree`, nothing is reclaimable and free is
+  `MemAvailable`, so the parts still sum to the total.
+- **SWAP**: its size and how much is used, `none used`, or `no swap`.
+- **LOAD**: the 1-minute load average at every poll for the last ten
+  minutes (300 points at `refresh` 2; a poll whose load could not be read
+  is a gap), the axis topped at the core count until the load passes it,
+  the core count marked on the axis, and the latest figure at the line's
+  end. Until ten minutes have passed it says how long it has so far.
+
+A file that cannot be read is named in the panel (`/proc/stat
+unavailable: …`), and the table still draws. The panel scrolls with the
+table; the pane opens at the top.
+
+**macOS** has no per-core figure in this version - it would need
+`host_processor_info` - and the panel says so in one line rather than
+drawing a row of empty bars. Its total is the sum of `ps`'s `%cpu` over
+the core count and is labelled `decaying average (ps)`; memory is
+`vm_stat`'s (used is active + wired + compressed pages, reclaimable
+inactive + speculative, at the page size `vm_stat` prints), labelled
+`from vm_stat`; swap is `sysctl -n vm.swapusage`; the load is
+`getloadavg`.
+
+## Threads
+
+`t` lists each multi-threaded process's threads under it, Linux only: the
+tid in PID, `└ name` in COMMAND, the thread's own %CPU over the same
+window, its state and how long it has been running. Memory, user and
+cgroup are the process's and are not repeated. Threads are never counted
+as processes - the header's count is unchanged and names how many threads
+are listed - and a thread row belongs to its process: a click on it
+selects the process, and `↑` `↓` step from process to process.
+`/proc/<pid>/task/` is read only while threads are shown. macOS lists no
+threads, so `t` is not offered there.
 
 ## What it shows
 
@@ -125,6 +196,7 @@ keeps the last reading it had.
 | `s` | sort by %CPU, then memory, then running (newest first); the hint names the next one and the header the one in force |
 | `/` | filter by command or user. Letters are text while the box is open, so `s`, `u` and `q` type themselves; `↵` keeps the filter and `esc` clears it |
 | `u` | every user's processes, or only yours; the hint names the next state, and `yours` shows in the filter line |
+| `t` | show or hide each process's threads under it (Linux only); the hint reads `[t] show threads` or `[t] hide threads` |
 | `r` | poll now |
 | `,` | settings |
 | `!` | notices |
@@ -144,6 +216,7 @@ Section `procs` in `config.json`; `,` opens the settings screen.
 | `refresh` | `2.0` | seconds between polls, at least 0.5. On Linux this is also the %CPU window. `-n SECONDS` overrides it |
 | `show_all_users` | `true` | start on every user's processes; `u` switches for the session |
 | `show_kernel_threads` | `false` | list kernel threads rather than hiding and counting them |
+| `show_threads` | `false` | start with threads listed under their processes (Linux); `t` switches for the session |
 
 There is no `rows` setting - the pane scrolls, and a cap would hide rows -
 and no `cpu_window`: the %CPU window is the poll interval, and the header
@@ -153,13 +226,16 @@ names it.
 
 Linux: `/proc` through `tc::procfs` - per pid, `stat`, `cgroup` and the
 owner of `/proc/<pid>` each poll (all three readable for every process),
-`cmdline` only for an empty `comm`; `/proc/stat`, `/proc/uptime` and
-`/proc/meminfo` once a poll. The open process's `cmdline`, `cwd` and `io`
-are read on the same poller. The previous poll's `stat` is the only
-history kept.
+`cmdline` only for an empty `comm`; `/proc/stat`, `/proc/loadavg`,
+`/proc/uptime` and `/proc/meminfo` once a poll; each thread's
+`/proc/<pid>/task/<tid>/stat` only while `t` shows them. The open
+process's `cmdline`, `cwd` and `io` are read on the same poller. The
+previous poll's `stat` lines are the only history kept, beside the
+10-minute ring of load averages.
 
 macOS: one `ps -axo
 pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=,args=` a poll,
-and `hw.memsize` once. Apple's `U` (uninterruptible) state is drawn as `D`
+`vm_stat`, `sysctl -n vm.swapusage` and `getloadavg` a poll, and
+`hw.memsize` once. Apple's `U` (uninterruptible) state is drawn as `D`
 and `I` (idle) as `S`. `ps` is required on macOS; without it the widget
 shows the shared missing-tool screen.

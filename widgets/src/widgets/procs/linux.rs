@@ -11,25 +11,33 @@
 //! Per poll: the pid list, then for each pid its `stat`, its `cgroup` and
 //! the owner of its directory - three reads, each readable for every
 //! process whoever owns it - plus `cmdline` only for a process whose
-//! `comm` is empty. `/proc/stat`, `/proc/uptime` and `/proc/meminfo` are
-//! read once. The previous poll's `stat` per pid is the only history kept:
-//! two samples make a rate.
+//! `comm` is empty. `/proc/stat`, `/proc/loadavg`, `/proc/uptime` and
+//! `/proc/meminfo` are read once. The previous poll's `stat` per pid (and
+//! per thread, while `[t]` is on) and `/proc/stat` lines are the only
+//! history kept: two samples make a rate.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use opscope_core::procfs::{self, PidIo, PidStat};
 
-use super::model::{Clock, Facts, Io, Proc, Sample};
-use super::parse;
+use super::model::{
+    Clock, Facts, Io, Machine, MemSource, Memory, PerCore, Proc, Sample, Swap, Thread,
+};
+use super::parse::{self, CpuTimes};
+
+/// `[t]` lists threads here.
+pub const READS_THREADS: bool = true;
 
 /// What one poll keeps for the next.
 #[derive(Default)]
 pub struct Source {
     /// Last poll's `stat` per pid.
     prev: HashMap<i32, PidStat>,
-    /// Last poll's `/proc/stat` `cpu` line.
-    prev_cpu: Option<[u64; 8]>,
+    /// Last poll's `/proc/stat` `cpu` lines, the total and each core.
+    prev_cpus: Option<Vec<CpuTimes>>,
+    /// Last read of each thread's `stat`, by tid, while `[t]` is on.
+    prev_tasks: HashMap<i32, PidStat>,
     /// The uptime at the last poll, so a process that started since can be
     /// measured from zero rather than waiting a poll.
     prev_uptime: Option<f64>,
@@ -86,25 +94,158 @@ fn lookup(uid: u32) -> Option<String> {
     Some(name.to_string_lossy().to_string())
 }
 
-/// One pass over `/proc`.
-pub fn sample(source: &mut Source) -> Result<Sample, String> {
+/// What `/proc/stat`, `/proc/loadavg` and `/proc/meminfo` say about the
+/// machine, each read once, against the last poll's `/proc/stat`. A file
+/// that cannot be read is a line in `problems`, and the table still draws.
+fn machine(
+    stat: &Result<Vec<CpuTimes>, String>,
+    prev: Option<&Vec<CpuTimes>>,
+    meminfo: &Result<String, String>,
+) -> Machine {
+    let mut out = Machine::empty(PerCore::Waiting);
+    match stat {
+        Ok(cpus) => {
+            if let Some(prev) = prev {
+                let busy = |id: Option<usize>| {
+                    let before = prev.iter().find(|c| c.id == id)?;
+                    let after = cpus.iter().find(|c| c.id == id)?;
+                    parse::core_busy(before, after)
+                };
+                out.busy = busy(None);
+                let cores: Vec<(usize, f64)> = cpus
+                    .iter()
+                    .filter_map(|c| c.id)
+                    .filter_map(|id| busy(Some(id)).map(|b| (id, b)))
+                    .collect();
+                if !cores.is_empty() {
+                    out.per_core = PerCore::Read(cores);
+                }
+            }
+        }
+        Err(why) => out.problems.push(format!("/proc/stat unavailable: {why}")),
+    }
+    match procfs::read_proc("loadavg") {
+        Ok(text) => match parse::parse_loadavg(&text) {
+            Some(load) => out.load = Some(load),
+            None => out
+                .problems
+                .push("/proc/loadavg unavailable: no averages in it".into()),
+        },
+        Err(why) => out
+            .problems
+            .push(format!("/proc/loadavg unavailable: {why}")),
+    }
+    match meminfo {
+        Ok(text) => match parse::parse_meminfo(text) {
+            Some(m) => {
+                out.memory = Some(Memory::from_parts(
+                    parse::memory_parts(&m),
+                    MemSource::MemAvailable,
+                ));
+                out.swap = Some(Swap {
+                    total: m.swap_total,
+                    used: m.swap_total.saturating_sub(m.swap_free),
+                });
+            }
+            None => out
+                .problems
+                .push("/proc/meminfo unavailable: no MemAvailable (a kernel before 3.14)".into()),
+        },
+        Err(why) => out
+            .problems
+            .push(format!("/proc/meminfo unavailable: {why}")),
+    }
+    out
+}
+
+/// Every thread of every process with more than one, against the last
+/// read of each. Read only while `[t]` is on.
+fn threads(
+    source: &mut Source,
+    procs: &[Proc],
+    window: Option<f64>,
+    ticks: f64,
+    cores: usize,
+    uptime: Option<f64>,
+) -> HashMap<i32, Vec<Thread>> {
+    let mut out = HashMap::new();
+    let mut seen = HashMap::new();
+    for proc in procs.iter().filter(|p| p.threads.unwrap_or(1) > 1) {
+        // A process that left since the listing has no threads to read.
+        let Ok(tids) = procfs::tids(proc.pid) else {
+            continue;
+        };
+        let mut list = Vec::with_capacity(tids.len());
+        for tid in tids {
+            let Ok(stat) = procfs::read_task_stat(proc.pid, tid) else {
+                continue;
+            };
+            let cpu = match (source.prev_tasks.get(&tid), window) {
+                (Some(before), Some(window)) if before.starttime == stat.starttime => {
+                    Some(parse::cpu_percent(before, &stat, window, ticks, cores))
+                }
+                _ => None,
+            };
+            list.push(Thread {
+                tid,
+                comm: stat.comm.clone(),
+                state: stat.state,
+                cpu,
+                running: uptime.map(|up| parse::running_secs(stat.starttime, ticks, up)),
+            });
+            seen.insert(tid, stat);
+        }
+        list.sort_by(|a, b| {
+            b.cpu
+                .unwrap_or(-1.0)
+                .total_cmp(&a.cpu.unwrap_or(-1.0))
+                .then(a.tid.cmp(&b.tid))
+        });
+        out.insert(proc.pid, list);
+    }
+    source.prev_tasks = seen;
+    out
+}
+
+/// One pass over `/proc`. Threads are read too when `with_threads`.
+pub fn sample(source: &mut Source, with_threads: bool) -> Result<Sample, String> {
     let pids = procfs::pids().map_err(|err| format!("processes unavailable: {err}"))?;
     let ticks = procfs::clock_ticks();
-    let stat = std::fs::read_to_string("/proc/stat").ok();
-    let cpu = stat.as_deref().and_then(parse::parse_proc_stat_cpu);
+    let stat = procfs::read_proc("stat").and_then(|text| {
+        let cpus = parse::parse_proc_stat_cpus(&text);
+        if cpus.is_empty() {
+            Err("no cpu lines in it".to_string())
+        } else {
+            Ok(cpus)
+        }
+    });
+    let cpu = stat
+        .as_ref()
+        .ok()
+        .and_then(|cpus| parse::cpu_total(cpus))
+        .map(|c| c.ticks);
     let cores = stat
-        .as_deref()
-        .and_then(parse::parse_proc_stat_cores)
+        .as_ref()
+        .ok()
+        .and_then(|cpus| parse::core_count(cpus))
         .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
         .unwrap_or(1);
     let uptime = procfs::read_uptime().ok();
-    let total = std::fs::read_to_string("/proc/meminfo")
+    let meminfo = procfs::read_proc("meminfo");
+    let total = meminfo
+        .as_ref()
         .ok()
-        .and_then(|text| parse::parse_meminfo_total(&text));
+        .and_then(|text| parse::parse_meminfo_total(text));
+    let machine = machine(&stat, source.prev_cpus.as_ref(), &meminfo);
     let now = Instant::now();
     // The kernel's own clock for the window; the wall clock only when
     // /proc/stat could not be read twice.
-    let window = match (source.prev_cpu, cpu) {
+    let prev_cpu = source
+        .prev_cpus
+        .as_ref()
+        .and_then(|cpus| parse::cpu_total(cpus))
+        .map(|c| c.ticks);
+    let window = match (prev_cpu, cpu) {
         (Some(prev), Some(next)) => parse::window_secs(&prev, &next, ticks, cores),
         _ => None,
     }
@@ -194,9 +335,17 @@ pub fn sample(source: &mut Source) -> Result<Sample, String> {
         stats.insert(pid, stat);
     }
     source.prev = stats;
-    source.prev_cpu = cpu;
+    source.prev_cpus = stat.ok();
     source.prev_uptime = uptime;
     source.prev_at = Some(now);
+    let threads = if with_threads {
+        Some(threads(source, &procs, window, ticks, cores, uptime))
+    } else {
+        // Off: nothing is kept, so turning it on again measures afresh
+        // rather than over the whole time it was off.
+        source.prev_tasks.clear();
+        None
+    };
     Ok(Sample {
         procs,
         cores,
@@ -204,6 +353,9 @@ pub fn sample(source: &mut Source) -> Result<Sample, String> {
         hidepid: source.hidepid.is_some_and(|(on, _)| on),
         // SAFETY: geteuid has no preconditions and cannot fail.
         me: unsafe { libc::geteuid() },
+        machine,
+        history: Vec::new(),
+        threads,
     })
 }
 
@@ -286,7 +438,7 @@ mod acquisition_tests {
     #[test]
     fn this_process_is_in_the_table_with_its_owner_and_memory() {
         let mut source = Source::default();
-        let first = sample(&mut source).expect("/proc is readable");
+        let first = sample(&mut source, false).expect("/proc is readable");
         let me = std::process::id() as i32;
         let row = first.procs.iter().find(|p| p.pid == me).expect("own row");
         assert_eq!(row.uid, unsafe { libc::geteuid() });
@@ -299,17 +451,89 @@ mod acquisition_tests {
             spin = spin.wrapping_add(1);
         }
         assert!(spin > 0);
-        let second = sample(&mut source).expect("/proc is readable");
+        let second = sample(&mut source, false).expect("/proc is readable");
         let row = second.procs.iter().find(|p| p.pid == me).expect("own row");
         assert!(row.cpu.is_some_and(|c| c > 0.0), "{:?}", row.cpu);
         assert!(matches!(second.clock, Clock::Measured { window: Some(w) } if w > 0.0));
     }
 
     #[test]
+    fn the_machine_is_read_once_a_poll_and_measured_on_the_second() {
+        let mut source = Source::default();
+        let first = sample(&mut source, false).expect("/proc is readable");
+        let m = &first.machine;
+        assert!(m.problems.is_empty(), "{:?}", m.problems);
+        assert_eq!(m.busy, None, "one reading of /proc/stat is not a delta");
+        assert_eq!(m.per_core, PerCore::Waiting);
+        assert!(m.load.is_some());
+        let memory = m.memory.expect("/proc/meminfo has MemAvailable");
+        assert_eq!(memory.source, MemSource::MemAvailable);
+        assert_eq!(memory.used + memory.reclaimable + memory.free, memory.total);
+        assert!(m.swap.is_some_and(|s| s.used <= s.total));
+        std::thread::sleep(Duration::from_millis(250));
+        let second = sample(&mut source, false).expect("/proc is readable");
+        let m = &second.machine;
+        assert!(
+            m.busy.is_some_and(|b| (0.0..=1.0).contains(&b)),
+            "{:?}",
+            m.busy
+        );
+        match &m.per_core {
+            PerCore::Read(cores) => {
+                assert_eq!(cores.len(), second.cores, "one bar per online CPU");
+                assert!(cores.iter().all(|(_, b)| (0.0..=1.0).contains(b)));
+            }
+            other => panic!("per-core not measured: {other:?}"),
+        }
+        assert!(
+            second.threads.is_none(),
+            "threads are read only while [t] is on"
+        );
+    }
+
+    #[test]
+    fn threads_are_listed_under_their_process_only_while_asked() {
+        // This test binary runs its tests on threads of its own, and one
+        // more here makes sure there are at least two.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let held = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        let mut source = Source::default();
+        let me = std::process::id() as i32;
+        let first = sample(&mut source, true).expect("/proc is readable");
+        let own = first.procs.iter().find(|p| p.pid == me).expect("own row");
+        let threads = first.threads.as_ref().expect("asked for threads");
+        let mine = threads.get(&me).expect("this process has threads");
+        assert!(mine.len() >= 2, "{mine:?}");
+        assert!(own.threads.is_some_and(|n| n >= 2), "{:?}", own.threads);
+        assert!(
+            mine.iter().any(|t| t.tid == me),
+            "the main thread is listed"
+        );
+        // SAFETY: gettid has no preconditions and cannot fail.
+        let tid = unsafe { libc::gettid() };
+        assert!(mine.iter().any(|t| t.tid == tid), "this thread is listed");
+        assert!(
+            mine.iter().all(|t| t.cpu.is_none()),
+            "one read is not a delta"
+        );
+        let second = sample(&mut source, true).expect("/proc is readable");
+        let mine = &second.threads.as_ref().expect("asked")[&me];
+        assert!(mine.iter().any(|t| t.cpu.is_some()), "{mine:?}");
+        // Threads are never counted as processes.
+        assert!(!second.procs.iter().any(|p| p.pid == tid && tid != me));
+        let off = sample(&mut source, false).expect("/proc is readable");
+        assert!(off.threads.is_none());
+        let _ = tx.send(());
+        let _ = held.join();
+    }
+
+    #[test]
     fn own_io_is_measured_on_the_second_read() {
         let mut source = Source::default();
         let me = std::process::id() as i32;
-        let table = sample(&mut source).expect("/proc is readable");
+        let table = sample(&mut source, false).expect("/proc is readable");
         let own = table
             .procs
             .iter()

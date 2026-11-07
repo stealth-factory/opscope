@@ -8,10 +8,11 @@
 
 //! Text to values, compiled and tested on every target.
 //!
-//! The Linux parsers here read `/proc/stat`, `/proc/meminfo` and
-//! `/etc/passwd`; the per-pid files are `tc::procfs`'s. The macOS one reads
-//! one `ps -axo` table. Both run on both, so the macOS CI build proves the
-//! Linux arithmetic and the other way round.
+//! The Linux parsers here read `/proc/stat`, `/proc/loadavg`,
+//! `/proc/meminfo` and `/etc/passwd`; the per-pid files are `tc::procfs`'s.
+//! The macOS ones read one `ps -axo` table, `vm_stat` and `sysctl
+//! vm.swapusage`. Both run on both, so the macOS CI build proves the Linux
+//! arithmetic and the other way round.
 
 // Each half is only acquired on its own platform - the `/proc` parsers on
 // Linux, `parse_ps_table` on macOS - and both are tested on both.
@@ -192,44 +193,254 @@ pub fn parse_passwd(text: &str) -> BTreeMap<u32, String> {
     users
 }
 
-/// The `cpu` line of `/proc/stat`: user, nice, system, idle, iowait, irq,
-/// softirq, steal, in clock ticks summed over every online CPU. `guest`
-/// and `guest_nice` are left out because `user` and `nice` already count
-/// them. A kernel too old to print the later fields has them as zero.
-pub fn parse_proc_stat_cpu(text: &str) -> Option<[u64; 8]> {
-    let line = text.lines().find(|l| l.starts_with("cpu "))?;
-    let mut out = [0u64; 8];
-    let mut seen = 0;
-    for (slot, field) in out.iter_mut().zip(line.split_whitespace().skip(1)) {
-        *slot = field.parse().ok()?;
-        seen += 1;
+/// One `cpu` or `cpuN` line of `/proc/stat`: user, nice, system, idle,
+/// iowait, irq, softirq, steal, in clock ticks. `guest` and `guest_nice`
+/// are left out because `user` and `nice` already count them. A kernel too
+/// old to print the later fields has them as zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CpuTimes {
+    /// `None` for the `cpu` line, which sums every online CPU; `Some(n)`
+    /// for `cpuN`. An offline CPU has no line, so the numbers can skip.
+    pub id: Option<usize>,
+    pub ticks: [u64; 8],
+}
+
+/// Every `cpu` line of `/proc/stat`, in the order printed: index 0 is the
+/// `cpu` total where the kernel printed one, then one per online CPU. A
+/// line that does not read is left out rather than zeroed.
+pub fn parse_proc_stat_cpus(text: &str) -> Vec<CpuTimes> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("cpu") else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let id = if rest.starts_with(char::is_whitespace) {
+            None
+        } else {
+            match fields.next().and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) => Some(n),
+                None => continue,
+            }
+        };
+        let mut ticks = [0u64; 8];
+        let mut seen = 0;
+        let mut bad = false;
+        for (slot, field) in ticks.iter_mut().zip(fields) {
+            match field.parse() {
+                Ok(n) => *slot = n,
+                Err(_) => {
+                    bad = true;
+                    break;
+                }
+            }
+            seen += 1;
+        }
+        if !bad && seen >= 4 {
+            out.push(CpuTimes { id, ticks });
+        }
     }
-    (seen >= 4).then_some(out)
+    out
+}
+
+/// The `cpu` total line, if `/proc/stat` printed one.
+pub fn cpu_total(cpus: &[CpuTimes]) -> Option<CpuTimes> {
+    cpus.iter().find(|c| c.id.is_none()).copied()
 }
 
 /// How many CPUs `/proc/stat` lists: its `cpuN` lines, which are the
 /// online ones the `cpu` line sums over.
-pub fn parse_proc_stat_cores(text: &str) -> Option<usize> {
-    let n = text
-        .lines()
-        .filter(|l| {
-            l.strip_prefix("cpu")
-                .and_then(|rest| rest.split(char::is_whitespace).next())
-                .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
-        })
-        .count();
+pub fn core_count(cpus: &[CpuTimes]) -> Option<usize> {
+    let n = cpus.iter().filter(|c| c.id.is_some()).count();
     (n > 0).then_some(n)
 }
 
-/// `MemTotal` from `/proc/meminfo`, in bytes.
-pub fn parse_meminfo_total(text: &str) -> Option<u64> {
-    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-    let mut parts = line["MemTotal:".len()..].split_whitespace();
+/// The share of the time between two readings of one CPU line that it
+/// was busy: everything but `idle` and `iowait`, over everything, so
+/// `steal` - time the hypervisor gave to someone else - counts as busy.
+/// `None` when no tick passed or a counter went backwards (a CPU taken
+/// offline and brought back), never a zero standing in for "not
+/// measured".
+pub fn core_busy(prev: &CpuTimes, next: &CpuTimes) -> Option<f64> {
+    let total = |t: &[u64; 8]| t.iter().sum::<u64>();
+    let idle = |t: &[u64; 8]| t[3] + t[4];
+    let all = total(&next.ticks).checked_sub(total(&prev.ticks))?;
+    let quiet = idle(&next.ticks).checked_sub(idle(&prev.ticks))?;
+    if all == 0 {
+        return None;
+    }
+    Some((all.saturating_sub(quiet) as f64 / all as f64).clamp(0.0, 1.0))
+}
+
+/// `/proc/loadavg`: the 1, 5 and 15 minute averages, the first three of
+/// its five fields.
+pub fn parse_loadavg(text: &str) -> Option<(f64, f64, f64)> {
+    let mut fields = text.split_whitespace();
+    let mut next = || {
+        fields
+            .next()?
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+    };
+    Some((next()?, next()?, next()?))
+}
+
+/// The lines of `/proc/meminfo` the panel draws, in bytes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemInfo {
+    pub total: u64,
+    pub free: u64,
+    /// The kernel's estimate of what could be handed out without
+    /// swapping: free memory plus the cache and slab it can reclaim.
+    pub available: u64,
+    pub swap_total: u64,
+    pub swap_free: u64,
+}
+
+/// One `Key:  1234 kB` line of `/proc/meminfo`, in bytes.
+fn meminfo_value(text: &str, key: &str) -> Option<u64> {
+    let line = text.lines().find(|l| {
+        l.strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with(':'))
+    })?;
+    let mut parts = line[key.len() + 1..].split_whitespace();
     let n: u64 = parts.next()?.parse().ok()?;
     match parts.next() {
-        Some("kB") | None => Some(n * 1024),
+        Some("kB") | None => n.checked_mul(1024),
         _ => None,
     }
+}
+
+/// `/proc/meminfo`: `MemTotal`, `MemFree`, `MemAvailable`, `SwapTotal`
+/// and `SwapFree`. `None` when any is missing - a kernel older than 3.14
+/// prints no `MemAvailable`, and a guess at it would be a figure nobody
+/// measured.
+pub fn parse_meminfo(text: &str) -> Option<MemInfo> {
+    Some(MemInfo {
+        total: meminfo_value(text, "MemTotal")?,
+        free: meminfo_value(text, "MemFree")?,
+        available: meminfo_value(text, "MemAvailable")?,
+        swap_total: meminfo_value(text, "SwapTotal")?,
+        swap_free: meminfo_value(text, "SwapFree")?,
+    })
+}
+
+/// `MemTotal` from `/proc/meminfo`, in bytes: what MEM is a share of,
+/// read even from a kernel that prints no `MemAvailable`.
+pub fn parse_meminfo_total(text: &str) -> Option<u64> {
+    meminfo_value(text, "MemTotal")
+}
+
+/// Used, reclaimable and free, in bytes, summing to `MemTotal` exactly.
+///
+/// used = `MemTotal - MemAvailable`; reclaimable = `MemAvailable -
+/// MemFree`; free = `MemFree`. On an idle machine with little cache the
+/// kernel's reserve can put `MemAvailable` under `MemFree`; then nothing
+/// is reclaimable and free is `MemAvailable`, so the three still sum to
+/// the total rather than overrunning it.
+pub fn memory_parts(m: &MemInfo) -> [u64; 3] {
+    let available = m.available.min(m.total);
+    let free = m.free.min(available);
+    [m.total - available, available - free, free]
+}
+
+/// [`memory_parts`] as fractions of the total, summing to one.
+pub fn memory_shares(m: &MemInfo) -> [f64; 3] {
+    shares(memory_parts(m))
+}
+
+/// Three byte counts as fractions of their sum; all zero for nothing.
+pub fn shares(parts: [u64; 3]) -> [f64; 3] {
+    let sum: u64 = parts.iter().sum();
+    if sum == 0 {
+        return [0.0; 3];
+    }
+    let a = parts[0] as f64 / sum as f64;
+    let b = parts[1] as f64 / sum as f64;
+    // The last takes the rounding, so the three are one exactly.
+    [a, b, 1.0 - a - b]
+}
+
+/// What macOS `vm_stat` prints that the panel draws: the page size from
+/// its first line, then page counts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VmStat {
+    pub page_size: u64,
+    pub free: u64,
+    pub active: u64,
+    pub inactive: u64,
+    pub speculative: u64,
+    pub wired: u64,
+    pub compressor: u64,
+}
+
+/// `vm_stat`: `Mach Virtual Memory Statistics: (page size of 16384
+/// bytes)`, then `Pages free:  1234.` and the rest. The page size is read,
+/// never assumed - Apple silicon's is 16 KiB, Intel's 4 KiB.
+pub fn parse_vm_stat(text: &str) -> Option<VmStat> {
+    let page_size = text
+        .lines()
+        .next()?
+        .split("page size of")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)?;
+    let get = |key: &str| -> Option<u64> {
+        let line = text.lines().find(|l| {
+            l.strip_prefix(key)
+                .is_some_and(|rest| rest.starts_with(':'))
+        })?;
+        line[key.len() + 1..]
+            .trim()
+            .trim_end_matches('.')
+            .parse()
+            .ok()
+    };
+    Some(VmStat {
+        page_size,
+        free: get("Pages free")?,
+        active: get("Pages active")?,
+        inactive: get("Pages inactive")?,
+        speculative: get("Pages speculative")?,
+        wired: get("Pages wired down")?,
+        compressor: get("Pages occupied by compressor")?,
+    })
+}
+
+/// Used (active, wired and compressed), reclaimable (inactive and
+/// speculative) and free, in bytes, from `vm_stat`.
+pub fn vm_stat_parts(v: &VmStat) -> [u64; 3] {
+    let bytes = |pages: u64| pages.saturating_mul(v.page_size);
+    [
+        bytes(v.active + v.wired + v.compressor),
+        bytes(v.inactive + v.speculative),
+        bytes(v.free),
+    ]
+}
+
+/// `sysctl -n vm.swapusage`: `total = 2048.00M  used = 1.00M  free =
+/// 2047.00M  (encrypted)`, as `(total, used)` in bytes.
+pub fn parse_swapusage(text: &str) -> Option<(u64, u64)> {
+    let value = |key: &str| -> Option<u64> {
+        let at = text.find(&format!("{key} ="))?;
+        let tok = text[at + key.len() + 2..].split_whitespace().next()?;
+        let (num, unit) = tok.split_at(tok.find(|c: char| c.is_ascii_alphabetic())?);
+        let n: f64 = num.parse().ok()?;
+        let scale = match unit {
+            "B" => 1.0,
+            "K" => 1024.0,
+            "M" => 1024.0 * 1024.0,
+            "G" => 1024.0 * 1024.0 * 1024.0,
+            "T" => 1024.0f64.powi(4),
+            _ => return None,
+        };
+        (n.is_finite() && n >= 0.0).then(|| (n * scale).round() as u64)
+    };
+    Some((value("total")?, value("used")?))
 }
 
 /// Seconds that passed between two `/proc/stat` `cpu` lines: every tick
@@ -299,8 +510,12 @@ mod tests {
         let stat_a = "cpu  1000 0 1000 10000 0 0 0 0 0 0\ncpu0 1 1 1 1\n";
         // Two seconds later: 250 ticks × 2 s × 8 cores more in total.
         let stat_b = "cpu  2000 0 2000 12000 0 0 0 0 0 0\ncpu0 1 1 1 1\n";
-        let a = parse_proc_stat_cpu(stat_a).expect("cpu line");
-        let b = parse_proc_stat_cpu(stat_b).expect("cpu line");
+        let a = cpu_total(&parse_proc_stat_cpus(stat_a))
+            .expect("cpu line")
+            .ticks;
+        let b = cpu_total(&parse_proc_stat_cpus(stat_b))
+            .expect("cpu line")
+            .ticks;
         let window = window_secs(&a, &b, ticks, cores).expect("time passed");
         assert!((window - 2.0).abs() < 1e-9, "{window}");
         assert_ne!(
@@ -328,14 +543,199 @@ mod tests {
     #[test]
     fn cores_are_the_cpu_lines_that_have_a_number() {
         let text = "cpu  1 2 3 4\ncpu0 1 2 3 4\ncpu1 1 2 3 4\ncpu11 1 2 3 4\nintr 5\nctxt 9\n";
-        assert_eq!(parse_proc_stat_cores(text), Some(3));
-        assert_eq!(parse_proc_stat_cores("intr 5\n"), None);
-        assert_eq!(parse_proc_stat_cpu("intr 5\n"), None);
+        let cpus = parse_proc_stat_cpus(text);
+        assert_eq!(core_count(&cpus), Some(3));
+        assert_eq!(
+            cpus.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![None, Some(0), Some(1), Some(11)],
+            "an offline CPU leaves a gap in the numbers, not a renumbering"
+        );
+        assert_eq!(core_count(&parse_proc_stat_cpus("intr 5\n")), None);
+        assert_eq!(cpu_total(&parse_proc_stat_cpus("intr 5\n")), None);
         // An old kernel with four fields still reads.
         assert_eq!(
-            parse_proc_stat_cpu("cpu 1 2 3 4\n"),
+            cpu_total(&parse_proc_stat_cpus("cpu 1 2 3 4\n")).map(|c| c.ticks),
             Some([1, 2, 3, 4, 0, 0, 0, 0])
         );
+    }
+
+    /// Eight cores with a `steal` column and the two guest columns that
+    /// `user` and `nice` already count.
+    const STAT_8_A: &str = "\
+cpu  8000 0 2000 70000 400 0 100 1500 900 0
+cpu0 1000 0 250 8750 50 0 13 187 100 0
+cpu1 1000 0 250 8750 50 0 13 187 100 0
+cpu2 1000 0 250 8750 50 0 13 187 100 0
+cpu3 1000 0 250 8750 50 0 13 187 100 0
+cpu4 1000 0 250 8750 50 0 12 188 100 0
+cpu5 1000 0 250 8750 50 0 12 188 100 0
+cpu6 1000 0 250 8750 50 0 12 188 100 0
+cpu7 1000 0 250 8750 50 0 12 188 100 0
+intr 123456 0 0
+ctxt 987654
+btime 1700000000
+processes 4242
+procs_running 3
+procs_blocked 0
+";
+
+    #[test]
+    fn each_core_is_busy_for_everything_but_idle_and_iowait() {
+        let a = parse_proc_stat_cpus(STAT_8_A);
+        assert_eq!(a.len(), 9, "the total and eight cores");
+        assert_eq!(a[0].id, None, "index 0 is the cpu total");
+        assert_eq!(core_count(&a), Some(8));
+        assert_eq!(a[1].ticks, [1000, 0, 250, 8750, 50, 0, 13, 187]);
+        // 200 ticks later on cpu0: 150 user, 10 iowait, 20 idle, 20 steal.
+        // Busy is user + steal over everything: 170 / 200.
+        let mut b0 = a[1];
+        b0.ticks[0] += 150;
+        b0.ticks[4] += 10;
+        b0.ticks[3] += 20;
+        b0.ticks[7] += 20;
+        let busy = core_busy(&a[1], &b0).expect("ticks passed");
+        assert!((busy - 0.85).abs() < 1e-9, "{busy}");
+        // An idle core is zero, measured.
+        let mut idle = a[2];
+        idle.ticks[3] += 200;
+        assert_eq!(core_busy(&a[2], &idle), Some(0.0));
+        // No tick passed, or a counter went backwards: not measured.
+        assert_eq!(core_busy(&a[1], &a[1]), None);
+        assert_eq!(core_busy(&b0, &a[1]), None);
+    }
+
+    #[test]
+    fn loadavg_is_its_first_three_fields() {
+        assert_eq!(
+            parse_loadavg("3.90 2.81 2.10 4/1234 56789\n"),
+            Some((3.9, 2.81, 2.1))
+        );
+        assert_eq!(
+            parse_loadavg("0.00 0.01 0.05 1/90 7\n"),
+            Some((0.0, 0.01, 0.05))
+        );
+        assert_eq!(parse_loadavg("3.90 2.81\n"), None);
+        assert_eq!(parse_loadavg("x 1 2 3/4 5\n"), None);
+    }
+
+    const MEMINFO: &str = "\
+MemTotal:       32768000 kB
+MemFree:         7340032 kB
+MemAvailable:   13631488 kB
+Buffers:          204800 kB
+Cached:          6000000 kB
+SwapCached:        10240 kB
+SwapTotal:       4194304 kB
+SwapFree:        2936013 kB
+";
+
+    #[test]
+    fn memory_is_three_parts_that_sum_to_the_total() {
+        let m = parse_meminfo(MEMINFO).expect("parses");
+        assert_eq!(m.total, 32_768_000 * 1024);
+        assert!(m.available > m.free);
+        let [used, reclaimable, free] = memory_parts(&m);
+        assert_eq!(
+            used,
+            (32_768_000 - 13_631_488) * 1024,
+            "total - MemAvailable"
+        );
+        assert_eq!(reclaimable, (13_631_488 - 7_340_032) * 1024);
+        assert_eq!(free, 7_340_032 * 1024, "MemFree");
+        assert_eq!(used + reclaimable + free, m.total);
+        let shares = memory_shares(&m);
+        assert!(
+            (shares.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            "{shares:?}"
+        );
+        assert!((shares[0] - used as f64 / m.total as f64).abs() < 1e-9);
+        assert_eq!(
+            (m.swap_total, m.swap_free),
+            (4_194_304 * 1024, 2_936_013 * 1024)
+        );
+
+        // The kernel's reserve can put MemAvailable under MemFree: nothing
+        // is reclaimable, and the parts still sum to the total.
+        let tight = MemInfo {
+            available: m.free - 1024,
+            ..m
+        };
+        let parts = memory_parts(&tight);
+        assert_eq!(parts[1], 0);
+        assert_eq!(parts.iter().sum::<u64>(), m.total);
+
+        // No MemAvailable (a kernel before 3.14): not guessed at.
+        let old = MEMINFO.replace("MemAvailable:   13631488 kB\n", "");
+        assert_eq!(parse_meminfo(&old), None);
+        assert_eq!(parse_meminfo_total(&old), Some(32_768_000 * 1024));
+    }
+
+    #[test]
+    fn vm_stat_reads_its_own_page_size() {
+        let text = "\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                5000.
+Pages active:                            300000.
+Pages inactive:                          280000.
+Pages speculative:                        20000.
+Pages throttled:                              0.
+Pages wired down:                        150000.
+Pages purgeable:                          12000.
+\"Translation faults\":                 123456789.
+Pages copy-on-write:                    4567890.
+Pages zero filled:                     98765432.
+Pages reactivated:                       123456.
+Pages purged:                             65432.
+File-backed pages:                       200000.
+Anonymous pages:                         400000.
+Pages stored in compressor:              250000.
+Pages occupied by compressor:             50000.
+Decompressions:                          111111.
+Compressions:                            222222.
+Pageins:                                 333333.
+Pageouts:                                  4444.
+Swapins:                                      0.
+Swapouts:                                     0.
+";
+        let v = parse_vm_stat(text).expect("parses");
+        assert_eq!(v.page_size, 16_384, "not the 4096 an Intel Mac has");
+        assert_eq!(
+            (
+                v.free,
+                v.active,
+                v.inactive,
+                v.speculative,
+                v.wired,
+                v.compressor
+            ),
+            (5_000, 300_000, 280_000, 20_000, 150_000, 50_000)
+        );
+        let [used, reclaimable, free] = vm_stat_parts(&v);
+        assert_eq!(used, (300_000 + 150_000 + 50_000) * 16_384);
+        assert_eq!(reclaimable, 300_000 * 16_384);
+        assert_eq!(free, 5_000 * 16_384);
+        let s = shares(vm_stat_parts(&v));
+        assert!((s.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        // Without the page-size line nothing is assumed.
+        let headless: String = text.lines().skip(1).collect::<Vec<_>>().join("\n");
+        assert_eq!(parse_vm_stat(&headless), None);
+    }
+
+    #[test]
+    fn swapusage_reads_each_unit() {
+        assert_eq!(
+            parse_swapusage("total = 2048.00M  used = 1.00M  free = 2047.00M  (encrypted)\n"),
+            Some((2048 << 20, 1 << 20))
+        );
+        assert_eq!(
+            parse_swapusage("total = 4.00G  used = 1536.50M  free = 2559.50M  (encrypted)"),
+            Some((4 << 30, (1536.5 * 1048576.0) as u64))
+        );
+        assert_eq!(
+            parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"),
+            Some((0, 0))
+        );
+        assert_eq!(parse_swapusage("vm.swapusage: unknown oid"), None);
     }
 
     #[test]
