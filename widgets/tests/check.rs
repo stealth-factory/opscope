@@ -3935,15 +3935,112 @@ fn cfg_gated_mod_files(src: &str, file: &PathBuf) -> Vec<PathBuf> {
     out
 }
 
+/// A cfg-gated host file may carry exactly one kind of test: an
+/// acquisition test, in a `mod acquisition_tests { .. }`, that calls the
+/// platform API this file exists to call and that cannot compile anywhere
+/// else (`proc_pid_rusage` is not in Linux's libc). It runs on the CI job
+/// for its own OS, which is the only place it can say anything. What stays
+/// forbidden is the thing this check is for: a parser, or a test of one.
+/// So a `parse_` anywhere in that module - a parser test that moved in to
+/// hide - is flagged as before.
 fn file_has_parser_or_test(src: &str) -> bool {
-    src.lines().any(|line| {
+    let (outside, acquisition) = split_acquisition_tests(src);
+    let flagged = outside.lines().any(|line| {
         let t = line.trim_start();
         if t.starts_with("//") {
             return false;
         }
         let item = rust_item(t);
         item.starts_with("fn parse_") || t.starts_with("#[test]")
-    })
+    });
+    flagged
+        || acquisition.lines().any(|line| {
+            let t = line.trim_start();
+            !t.starts_with("//") && t.contains("parse_")
+        })
+}
+
+/// `src` without its `mod acquisition_tests { .. }` block, and the block.
+fn split_acquisition_tests(src: &str) -> (String, String) {
+    let mut outside = String::new();
+    let mut inside = String::new();
+    let mut depth = 0i32;
+    for line in src.lines() {
+        let t = line.trim();
+        if depth == 0 && rust_item(t).starts_with("mod acquisition_tests") && t.contains('{') {
+            depth = t.matches('{').count() as i32 - t.matches('}').count() as i32;
+            continue;
+        }
+        if depth > 0 {
+            depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+            inside.push_str(line);
+            inside.push('\n');
+            continue;
+        }
+        outside.push_str(line);
+        outside.push('\n');
+    }
+    (outside, inside)
+}
+
+#[test]
+fn a_gated_host_file_may_hold_acquisition_tests_and_nothing_else() {
+    let acquisition = r#"
+fn rusage_all() {}
+
+#[cfg(test)]
+mod acquisition_tests {
+    use super::*;
+
+    #[test]
+    fn own_process_is_readable() {
+        assert!(rusage_all());
+    }
+}
+"#;
+    assert!(
+        !file_has_parser_or_test(acquisition),
+        "an acquisition test in a gated host file is the sanctioned shape"
+    );
+    let parser_test = r#"
+#[cfg(test)]
+mod acquisition_tests {
+    #[test]
+    fn reads_ps() {
+        assert!(super::parse_ps_names("1 launchd").len() == 1);
+    }
+}
+"#;
+    assert!(
+        file_has_parser_or_test(parser_test),
+        "a parser test hiding in acquisition_tests is still a gated parser test"
+    );
+    let loose_test = r#"
+fn rusage_all() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn own_process_is_readable() {}
+}
+"#;
+    assert!(
+        file_has_parser_or_test(loose_test),
+        "a test outside acquisition_tests in a gated file is still flagged"
+    );
+    let parser_after = r#"
+#[cfg(test)]
+mod acquisition_tests {
+    #[test]
+    fn t() {}
+}
+
+pub fn parse_thing(text: &str) {}
+"#;
+    assert!(
+        file_has_parser_or_test(parser_after),
+        "a parser after the acquisition block is still flagged"
+    );
 }
 
 #[test]

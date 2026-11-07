@@ -308,16 +308,11 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
         Ok(pids) => (rusage_all(&pids), String::new()),
         Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
     };
-    let names = match Command::new("ps")
-        .args(["-axo", "pid=,comm="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(out) => by_process::parse_ps_names(&String::from_utf8_lossy(&out.stdout)),
+    let names = match process_names() {
+        Ok(names) => names,
         Err(err) => {
             if pid_err.is_empty() {
-                pid_err = format!("process names unavailable: ps: {err}");
+                pid_err = format!("process names unavailable: {err}");
             }
             HashMap::new()
         }
@@ -344,6 +339,19 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
         source.history = None;
     }
     Some(writers::by_process_only(procs, starts, pid_err, detail))
+}
+
+/// One `ps -axo pid=,comm=` for every process's name, pid to basename.
+fn process_names() -> Result<HashMap<i32, String>, String> {
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|err| format!("ps: {err}"))?;
+    Ok(by_process::parse_ps_names(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 fn list_pids() -> Result<Vec<i32>, String> {
@@ -400,4 +408,141 @@ fn rusage_all(pids: &[i32]) -> Vec<(i32, Result<Rusage, Unreadable>)> {
 
 pub fn process_facts(_pid: i32) -> (String, String) {
     (String::new(), String::new())
+}
+
+/// Acquisition tests: they call the real libproc and `ps` on the macOS CI
+/// runner, through the same functions the poller calls, so they prove the
+/// counters move rather than only that the calls compile. They cannot live
+/// in a parser file: `proc_pid_rusage` does not exist in Linux's libc.
+/// `widgets/tests/check.rs` allows `#[test]` in a gated host file only
+/// inside this module, and only while nothing in it touches a parser.
+/// The layout of `rusage_info_v2` is held by the compile-time assertion
+/// above, not here.
+#[cfg(test)]
+mod acquisition_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn own_pid() -> i32 {
+        std::process::id() as i32
+    }
+
+    fn own_rusage() -> Rusage {
+        let got = rusage_all(&[own_pid()]);
+        assert_eq!(got.len(), 1, "own pid was dropped: {got:?}");
+        got[0].1.expect("this process's own rusage must be readable")
+    }
+
+    /// Removes the scratch directory however the test ends.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn own_disk_writes_are_counted() {
+        const CHUNK: usize = 1 << 20;
+        const CHUNKS: usize = 64;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("opscope-disk-{}-{nanos}", own_pid()));
+        std::fs::create_dir(&dir).expect("a fresh scratch directory");
+        let scratch = Scratch(dir);
+
+        // Bytes that do not repeat, so neither a compressing nor a
+        // deduplicating filesystem can store them in less than they are.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ nanos as u64;
+        let mut chunk = vec![0u8; CHUNK];
+        let before = own_rusage();
+        {
+            let mut file =
+                std::fs::File::create(scratch.0.join("written")).expect("a scratch file");
+            for _ in 0..CHUNKS {
+                for word in chunk.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+                }
+                file.write_all(&chunk).expect("write to the scratch file");
+            }
+            // F_FULLFSYNC on macOS: the bytes reach the disk from this
+            // process before the second read, rather than later from the
+            // kernel's own flusher, which is not charged to this pid.
+            file.sync_all().expect("sync the scratch file");
+        }
+        let after = own_rusage();
+
+        let written = (CHUNK * CHUNKS) as u64;
+        let counted = after.write.saturating_sub(before.write);
+        // Half, not all: APFS counts what went to the device, and metadata,
+        // copy-on-write placement and block rounding can each move that
+        // away from the bytes handed to write(). Parallel tests in this
+        // process can only add. What this guards against is a counter that
+        // reads zero or reads the wrong field - either is far below half.
+        assert!(
+            counted >= written / 2,
+            "wrote {written} bytes and synced them; ri_diskio_byteswritten rose by {counted} \
+             (before {}, after {})",
+            before.write,
+            after.write
+        );
+        assert!(
+            after.start == before.start && after.start != 0,
+            "ri_proc_start_abstime must be set and steady for one process: {} then {}",
+            before.start,
+            after.start
+        );
+    }
+
+    #[test]
+    fn another_users_process_is_unreadable_not_zero() {
+        // pid 1 is launchd, owned by root. For any other user xnu's
+        // CHECK_SAME_USER answers EPERM, which must come back as Unreadable
+        // - not dropped, and not a row of zeros. Only root may read it, and
+        // the GitHub runner user is not root (it has sudo, which this test
+        // does not use), so the second arm is for a root shell running this
+        // by hand.
+        let got = rusage_all(&[1]);
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let root = unsafe { libc::geteuid() } == 0;
+        assert_eq!(got.len(), 1, "launchd was dropped as if it had exited: {got:?}");
+        assert_eq!(got[0].0, 1);
+        match got[0].1 {
+            Err(Unreadable) => {}
+            Ok(rusage) => assert!(root, "pid 1 read as {rusage:?} by a non-root user"),
+        }
+    }
+
+    #[test]
+    fn the_listing_and_ps_both_see_this_process() {
+        let pids = list_pids().expect("proc_listallpids");
+        assert!(
+            pids.contains(&own_pid()),
+            "proc_listallpids left out this process ({}) among {} pids",
+            own_pid(),
+            pids.len()
+        );
+        assert!(pids.contains(&1), "proc_listallpids left out launchd");
+
+        let names = process_names().expect("ps -axo pid=,comm=");
+        let name = names
+            .get(&own_pid())
+            .unwrap_or_else(|| panic!("ps named {} pids but not this one", names.len()));
+        let exe = std::env::current_exe().expect("this test binary's path");
+        let exe = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("a file name");
+        // `comm` may be cut at MAXCOMLEN, so a prefix of the binary's name.
+        assert!(
+            !name.is_empty() && exe.starts_with(name.as_str()),
+            "ps named this process {name:?}; the binary is {exe:?}"
+        );
+    }
 }
