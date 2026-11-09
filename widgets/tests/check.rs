@@ -4113,6 +4113,7 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
 }
 
 fn opens_proc(src: &str) -> bool {
+    let readers = procfs_readers();
     src.lines().any(|line| {
         let t = line.trim_start();
         if t.starts_with("//") {
@@ -4127,7 +4128,65 @@ fn opens_proc(src: &str) -> bool {
         // and a check that looked only for the string lost sight of
         // tailnet the day it moved - while on a Mac its uptime is still
         // simply absent.
-        line.contains("\"/proc") || line.contains("format!(\"/proc") || line.contains("procfs::")
+        line.contains("\"/proc")
+            || line.contains("format!(\"/proc")
+            || names_a_procfs_reader(line, &readers)
+    })
+}
+
+/// The `tc::procfs` functions that read `/proc`, from core's own source:
+/// `pids`, every `read_*`, and everything in its Linux-only `mod linux`.
+/// The parsers, the types and the pure helpers (`clock_ticks`, `field`,
+/// `off_box`) read nothing, and a widget that names only those does not
+/// open `/proc` - counting every `procfs::` made a parser look like a
+/// reader. Read from core rather than listed here, so a reader added there
+/// is seen here without anyone remembering to.
+fn procfs_readers() -> BTreeSet<String> {
+    let core = std::fs::read_to_string(root().join("core/src/procfs.rs"))
+        .expect("core/src/procfs.rs is where the /proc readers live");
+    let mut out = BTreeSet::new();
+    let mut in_linux = false;
+    for line in core.lines() {
+        if line.starts_with("mod linux") {
+            in_linux = true;
+        } else if line.starts_with('}') {
+            in_linux = false;
+        }
+        let Some(rest) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if in_linux || name == "pids" || name.starts_with("read_") {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// `procfs::<reader>` on this line outside a string, or a reader named in a
+/// `use ...procfs::{...}` list - the import is how a bare `read_stat(pid)`
+/// further down gets there.
+fn names_a_procfs_reader(line: &str, readers: &BTreeSet<String>) -> bool {
+    line.match_indices("procfs::").any(|(at, word)| {
+        if line[..at].matches('"').count() % 2 == 1 {
+            return false;
+        }
+        let after = &line[at + word.len()..];
+        let names: Vec<&str> = match after.strip_prefix('{') {
+            Some(list) => list.split('}').next().unwrap_or("").split(',').collect(),
+            None => vec![after],
+        };
+        names.iter().any(|name| {
+            let name: String = name
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            readers.contains(&name)
+        })
     })
 }
 
@@ -4138,7 +4197,16 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
     ));
     assert!(opens_proc(r#"format!("/proc/{}/fd", pid)"#));
     assert!(opens_proc(r#"let up = tc::procfs::read_uptime();"#));
+    assert!(opens_proc(r#"let pids = procfs::pids()?;"#));
+    assert!(opens_proc(r#"let files = tc::procfs::open_files(pid);"#));
+    assert!(opens_proc(r#"use tc::procfs::{own_addresses, process_facts};"#));
     assert!(!opens_proc(r#"// tc::procfs::read_uptime() is the reader"#));
+    // A parser, a type, a pure helper, or the words in a string: none of
+    // them reads /proc.
+    assert!(!opens_proc(r#"let s = tc::procfs::parse_pid_stat(&line);"#));
+    assert!(!opens_proc(r#"use tc::procfs::{OpenFile, PidIo, local_peer};"#));
+    assert!(!opens_proc(r#"let hz = tc::procfs::clock_ticks();"#));
+    assert!(!opens_proc(r#"let tip = "see tc::procfs::read_stat";"#));
     assert!(!opens_proc(
         r#"// /proc/<pid>/cmdline is readable by anyone"#
     ));

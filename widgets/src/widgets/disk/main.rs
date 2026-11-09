@@ -1136,7 +1136,13 @@ fn main() {
         let head_rows = drawn.head.min(drawn.rows.len());
         let rest = drawn.rows.len().saturating_sub(head_rows);
         let room_below = room.saturating_sub(head_rows).max(1);
-        let follow_id = item_id(focus, &at);
+        // BY PROCESS with no rows draws its subset line under PROC_BASE;
+        // `at` keeps its old index so a refill restores the cursor there.
+        let follow_id = if focus == BY_PROCESS && drawn.proc_keys.is_empty() {
+            by_process::PROC_BASE
+        } else {
+            item_id(focus, &at)
+        };
         if chase {
             if let Some(row) = drawn
                 .placed
@@ -1315,6 +1321,15 @@ impl Default for RateMemory {
     }
 }
 
+impl RateMemory {
+    /// Drop the baseline so the next board measures from scratch. The
+    /// charts keep their history; the next point is simply not drawn.
+    fn forget(&mut self) {
+        self.prev.clear();
+        self.at = None;
+    }
+}
+
 /// What the disks moved this poll, in the unit BY PROCESS compares with:
 /// the summed write rate on Linux, iostat's combined rate on macOS. `None`
 /// when any disk in the sum has no rate this poll.
@@ -1414,6 +1429,11 @@ fn poll(
                         }
                         Err(err) => {
                             guard.disk_err = err;
+                            // A poll with no device counters is not a
+                            // previous sample. Kept, the next rate would
+                            // span both polls while the processes it is
+                            // compared with span only the last one.
+                            rates.forget();
                             None
                         }
                     };
@@ -2961,7 +2981,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 fn board_from(snap: &parse::IoSnapshot, memory: &mut RateMemory) -> DiskBoard {
-    let now = Instant::now();
+    let now = snap.read_at.unwrap_or_else(Instant::now);
     let elapsed = memory
         .at
         .map(|at| now.saturating_duration_since(at).as_secs_f64())
@@ -5056,6 +5076,36 @@ mod tests {
             vec!["md0"]
         );
         assert_eq!(total_point(&pair, &members, false), Some(80.0));
+    }
+
+    /// The rate divides by the time between the two diskstats reads, not
+    /// between the two boards: the scans that run between a read and its
+    /// board vary in length.
+    #[test]
+    fn a_rate_spans_the_reads_and_a_failed_read_starts_it_over() {
+        let mut memory = RateMemory::default();
+        let mut sda = disk_row("sda", 10, 4, 0.0).disk;
+        let t0 = Instant::now() - Duration::from_secs(30);
+        let snap = |disk: &parse::LiveDisk, at: Instant| parse::IoSnapshot {
+            disks: vec![disk.clone()],
+            read_at: Some(at),
+            ..parse::IoSnapshot::default()
+        };
+        board_from(&snap(&sda, t0), &mut memory);
+        if let Some(stat) = sda.stat.as_mut() {
+            stat.sectors_read += 8;
+        }
+        let board = board_from(&snap(&sda, t0 + Duration::from_secs(2)), &mut memory);
+        assert_eq!(board.rows[0].read.last().copied().flatten(), Some(2048.0));
+        // A poll whose read failed: the next board has no baseline, rather
+        // than one rate spanning both polls.
+        memory.forget();
+        if let Some(stat) = sda.stat.as_mut() {
+            stat.sectors_read += 8;
+        }
+        let board = board_from(&snap(&sda, t0 + Duration::from_secs(6)), &mut memory);
+        assert!(matches!(board.rows[0].rate, ShownRate::Measuring));
+        assert_eq!(board.rows[0].read.last().copied().flatten(), None);
     }
 
     #[test]

@@ -58,8 +58,9 @@ processes' writes and the disks' before it compares them. Longer is
 steadier; shorter follows a change sooner. A process's write counter moves
 when a page is dirtied and the disk's when the write is submitted, so the
 two only line up over a window, and the line says `≈`. A parent that
-reaps a child inherits the child's counters, so those bytes can be counted
-twice and an idle parent can briefly appear as a writer.
+reaps a child inherits the child's counters; the widget takes the child's
+last reading back out of the parent's next one, so those bytes count once
+and a parent that only waited is not a writer.
 
 Cgroup v1 or hybrid hosts get `by service needs cgroup v2`. On macOS the
 section is BY PROCESS alone: `proc_pid_rusage` for every process this user

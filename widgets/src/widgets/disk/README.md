@@ -344,9 +344,12 @@ it is dirtied, and the disk counts the write when it is submitted, which
 can be half a minute later. So both sides are summed over
 `reconcile_seconds` (60) and the line says `≈`; under a write burst the
 share can even pass 100% for a while. When a process reaps a child, Linux
-adds the child's counters to the parent's `/proc/<pid>/io`, so bytes the
-child already wrote can be counted again, and an idle parent can briefly
-appear as a writer. A poll where the disks had no rate
+adds the child's counters to the parent's `/proc/<pid>/io`. The widget
+takes the child's last reading back out of the parent's next delta, so
+bytes the child already wrote are not counted again and a parent that only
+waited is not a writer; what the child wrote after it was last read is
+counted once, on the parent. A child this user cannot read cannot be taken
+back out. A poll where the disks had no rate
 is left out of both sides. The rest of the device's figure is the other
 users' processes, the kernel's own writeback and journal, and swap.
 
@@ -355,13 +358,21 @@ watch comes first: its write and read rates over the last poll and its
 state (`D · waiting on disk now` in the warning colour), then its write
 rate over the last minute as a line chart - pixels in Kitty, Braille
 elsewhere, the same samples - with the peak and the time-weighted average
-beside it, and `last 14s` until it has a minute. That history is the polls
+beside it, and `last 14s` until it has a minute. A single poll longer than
+a minute is kept whole, and the label then names its whole span. That history is the polls
 since the screen opened, kept by measured seconds rather than by count, and
 it starts over for another process or a reused pid. OPEN FILES is a table
 of the regular files it has open: FILE, SIZE, GROWTH since the previous
 sample, and RATE, that growth over the seconds between the two samples; the
-header names those seconds, so a growth is never read as a total. The files
-growing come first, most growth first, then the rest by size with `—`. A
+header names those seconds, so a growth is never read as a total. The
+files are read on a thread of their own and given a second: a file on a
+hard-mounted network filesystem that has stopped answering would otherwise
+stop the whole widget, so the table says `no answer` instead and the rest
+of the screen keeps updating. The files
+growing come first, most growth first, then the rest by size: `—` for a
+file the same size as last time, `first` for one not seen at the previous
+sample, so it has nothing to grow from yet. A file that shrank, truncated
+or rewritten, shows `−` and how much it lost in GROWTH, and a `−` rate. A
 long path wraps under itself; RATE is the column that leaves as the pane
 narrows. Last, PROCESS lists its state, command line, working directory,
 cgroup and what it has read and written since it started, in an aligned
@@ -370,11 +381,17 @@ of it again every poll. On another user's process it shows what is
 readable (the pid, the name, the state, the cgroup and usually the command
 line) and `the rest needs root`.
 
-**WAITING ON DISK** is every process in `D` state now - a sample of this
-instant, not a count over time - with its cgroup, which is readable for
-every process. With `/proc/sys/kernel/task_delayacct` at 1, WAITED is the
-time each spent waiting on block I/O since the last poll (`1.8s of 2s`,
-from field 42 of `/proc/<pid>/stat`), and the rows are ranked by it. At 0,
+**WAITING ON DISK** is every process with a thread in `D` state now - a
+sample of this instant, not a count over time - with its cgroup, which is
+readable for every process. `/proc/<pid>/stat` is the leader thread alone,
+so a process with more than one thread is read thread by thread from
+`/proc/<pid>/task`: a worker stuck in `D` while its leader sleeps still
+puts the process here. With `/proc/sys/kernel/task_delayacct` at 1, WAITED
+is the time its threads spent waiting on block I/O since the last poll
+(`1.8s of 2s`, field 42 of each thread's `stat`, summed, so a process
+whose threads waited together can show more than the poll), and the rows
+are ranked by it. A thread that waited and then exited takes its wait
+with it, and that poll has no WAITED figure rather than a short one. At 0,
 the default, there is no WAITED column at all rather than a column of
 zeros, the line under the heading says `wait times off (needs root: sysctl
 kernel.task_delayacct=1)`, and the rows are in pid order, a sample. A

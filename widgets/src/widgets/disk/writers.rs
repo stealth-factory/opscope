@@ -206,6 +206,9 @@ pub fn pid_rows(state: &State) -> HashMap<i32, String> {
 #[derive(Default)]
 pub struct Memory {
     tree: Option<(Tree, f64)>,
+    /// Bytes a cgroup's children reported beyond its own, owed against the
+    /// next interval (see [`cgroup::attribute_io`]).
+    carry: cgroup::Carry,
     ticks: HashMap<i32, (u64, u64)>,
     ticks_at: Option<f64>,
 }
@@ -234,9 +237,12 @@ pub fn step(
     let services = match (&tree, named) {
         (Some(next), _) => match memory.tree.take() {
             Some((prev, at)) if now > at => {
-                Services::Table(table(&prev, next, now - at, container))
+                Services::Table(table(&prev, next, now - at, container, &mut memory.carry))
             }
-            _ => Services::Measuring,
+            _ => {
+                memory.carry = cgroup::Carry::default();
+                Services::Measuring
+            }
         },
         (None, Some(named)) => named,
         (None, None) => Services::Measuring,
@@ -371,9 +377,15 @@ fn owners(tree: &Tree) -> HashMap<String, String> {
     out
 }
 
-fn table(prev: &Tree, next: &Tree, elapsed: f64, container: bool) -> Table {
+fn table(
+    prev: &Tree,
+    next: &Tree,
+    elapsed: f64,
+    container: bool,
+    carry: &mut cgroup::Carry,
+) -> Table {
     let delta = delta_tree(prev, next);
-    let own = cgroup::attribute(&delta, "io");
+    let own = cgroup::attribute_io(&delta, carry);
     let owner = owners(next);
     let mut members: BTreeMap<String, Vec<i32>> = BTreeMap::new();
     let mut rolled: BTreeMap<String, usize> = BTreeMap::new();
@@ -469,6 +481,28 @@ pub fn waiters(
         .collect()
 }
 
+/// One process from its threads' `(state, blkio ticks)`: `D` when any
+/// thread is waiting on the disk (the leader's state otherwise), and the
+/// threads' waits summed, since the
+/// kernel's per-process field 42 is the leader's alone. `None` with no
+/// threads read, for the caller to fall back on the leader. The sum drops
+/// when a thread that waited exits; [`waiters`] reads a drop as no figure.
+pub fn fold_threads(leader: char, threads: &[(char, Option<u64>)]) -> Option<(char, Option<u64>)> {
+    if threads.is_empty() {
+        return None;
+    }
+    let state = if threads.iter().any(|(s, _)| *s == 'D') {
+        'D'
+    } else {
+        leader
+    };
+    let ticks = threads
+        .iter()
+        .map(|(_, t)| *t)
+        .try_fold(0u64, |sum, t| Some(sum.saturating_add(t?)));
+    Some((state, ticks))
+}
+
 /// `/proc/sys/kernel/task_delayacct`: anything but a non-zero number is off.
 pub fn parse_task_delayacct(text: &str) -> bool {
     text.trim().parse::<u64>().is_ok_and(|n| n != 0)
@@ -488,6 +522,23 @@ pub struct ServiceRow {
     /// the root counts completions while its children count submissions).
     /// The figure is the floor, zero.
     pub inconsistent: bool,
+    /// A child cgroup with `io` had no reading this sample, so its bytes
+    /// could not be taken out of this one's. The figures are a measured
+    /// total but not this cgroup's own: drawn as `—` and left out of the
+    /// accounted sum.
+    pub unread: bool,
+}
+
+impl ServiceRow {
+    /// What sorting and the accounted sum read: nothing for a row whose
+    /// figure is not its own.
+    pub fn counted_write(&self) -> f64 {
+        if self.unread { 0.0 } else { self.write_bps }
+    }
+
+    pub fn counted_read(&self) -> f64 {
+        if self.unread { 0.0 } else { self.read_bps }
+    }
 }
 
 /// Every cgroup that moved bytes on `devs` over the interval: the disk and
@@ -527,6 +578,7 @@ pub fn rows_for(
                 procs,
                 readable,
                 inconsistent: row.inconsistent,
+                unread: row.unread,
             })
         })
         .collect()
@@ -704,10 +756,13 @@ pub fn ordered_rows(view: &View, rows: &[ServiceRow]) -> Vec<usize> {
         let (l, r) = (&rows[a], &rows[b]);
         match view.svc_sort {
             DiskSort::Write => r
-                .write_bps
-                .total_cmp(&l.write_bps)
+                .counted_write()
+                .total_cmp(&l.counted_write())
                 .then(l.path.cmp(&r.path)),
-            DiskSort::Read => r.read_bps.total_cmp(&l.read_bps).then(l.path.cmp(&r.path)),
+            DiskSort::Read => r
+                .counted_read()
+                .total_cmp(&l.counted_read())
+                .then(l.path.cmp(&r.path)),
             DiskSort::Name => l.path.cmp(&r.path),
         }
     });
@@ -991,7 +1046,9 @@ fn paint_services(
         p,
         rows,
     );
-    let mut note = format!("cgroup v2 io.stat · complete · {}", table.depth);
+    let unread = table.own.iter().filter(|r| r.unread).count();
+    let coverage = if unread > 0 { "partial" } else { "complete" };
+    let mut note = format!("cgroup v2 io.stat · {coverage} · {}", table.depth);
     if table.container {
         note.push_str(" · rows are this container's cgroups; the device total is the host's");
     }
@@ -1017,7 +1074,7 @@ fn paint_services(
             push_note(&line, &p.dim, width, rows);
         }
     }
-    let sum_write: f64 = all.iter().map(|r| r.write_bps).sum();
+    let sum_write: f64 = all.iter().map(ServiceRow::counted_write).sum();
     let longest = order
         .iter()
         .map(|&i| tc::display_width(&shown_path(&all[i].path)))
@@ -1072,6 +1129,17 @@ fn paint_services(
         ),
     };
     push_note(&line, &p.txt, width, rows);
+    let gaps = all.iter().filter(|r| r.unread).count();
+    if gaps > 0 {
+        push_note(
+            &format!(
+                "{gaps} show — : a child cgroup's io.stat was unreadable this sample, so their own share is not known and is left out of the sum"
+            ),
+            &p.dim,
+            width,
+            rows,
+        );
+    }
     let floored = all
         .iter()
         .filter(|r| r.inconsistent && !r.path.is_empty())
@@ -1123,18 +1191,19 @@ fn service_row(
             p.txt.as_str()
         };
         let mut cells = vec![(c(ink), name)];
+        let figure = |bps: f64| if row.unread { "—".to_string() } else { rate(bps) };
         cells.push((
             c(p.txt.as_str()),
-            format!("{:>w$}", rate(row.write_bps), w = RATE_W),
+            format!("{:>w$}", figure(row.write_bps), w = RATE_W),
         ));
         if cols.read {
             cells.push((
                 c(p.txt.as_str()),
-                format!("{:>w$}", rate(row.read_bps), w = RATE_W),
+                format!("{:>w$}", figure(row.read_bps), w = RATE_W),
             ));
         }
         if cols.share {
-            let share = if sum_write > 0.0 {
+            let share = if sum_write > 0.0 && !row.unread {
                 format!(
                     "{:.0}%",
                     (row.write_bps / sum_write * 100.0)
@@ -1543,7 +1612,10 @@ fn push_history(
         );
         return;
     };
-    let covered = stats.seconds.round().min(by_process::HISTORY_SECONDS);
+    // The span the figures cover, which is longer than the window when a
+    // single poll is: the newest point is kept whole, and the peak and
+    // average are taken over all of it.
+    let covered = stats.seconds.round();
     let mut labels = vec![format!(
         "write · last {} · peak {} · avg {}",
         secs(covered),
@@ -1921,13 +1993,21 @@ pub fn paint_service(view: &View, path: &str, width: usize, p: &Palette, rows: &
             .into_iter()
             .find(|r| r.path == path)
         {
-            lines.push(format!(
-                "on {} over the last {}: write {} · read {}",
-                disk.disk.name,
-                secs(table.elapsed),
-                rate(row.write_bps),
-                rate(row.read_bps)
-            ));
+            if row.unread {
+                lines.push(format!(
+                    "on {} over the last {}: not known · a child cgroup's io.stat was unreadable, so its bytes cannot be taken out of these",
+                    disk.disk.name,
+                    secs(table.elapsed),
+                ));
+            } else {
+                lines.push(format!(
+                    "on {} over the last {}: write {} · read {}",
+                    disk.disk.name,
+                    secs(table.elapsed),
+                    rate(row.write_bps),
+                    rate(row.read_bps)
+                ));
+            }
         } else {
             lines.push(format!(
                 "no I/O on {} over the last {}",
@@ -2034,7 +2114,7 @@ mod tests {
     }
 
     fn table_of(prev: &Tree, next: &Tree, elapsed: f64) -> Table {
-        table(prev, next, elapsed, false)
+        table(prev, next, elapsed, false, &mut cgroup::Carry::default())
     }
 
     #[test]
@@ -2054,6 +2134,53 @@ mod tests {
         assert_eq!(by("user.slice"), Some(7.5));
         assert_eq!(by(""), Some(2.5), "the root's own I/O is a row");
         assert_eq!(shown_path(""), "/");
+    }
+
+    /// system.slice's io.stat could not be read this sample: its bytes are
+    /// in the root's share, so the root's figure is not the root's own. It
+    /// is a gap - out of the sum, and last when sorted - not activity.
+    #[test]
+    fn a_share_holding_an_unread_childs_bytes_is_a_gap_not_a_figure() {
+        let prev = tree(1000, 800, 500, 100);
+        let mut next = tree(1100, 880, 570, 115);
+        next.nodes[1].io = None;
+        let t = table_of(&prev, &next, 2.0);
+        let rows = rows_for(&t, &devs(&["8:0"]), &BTreeSet::new());
+        let root = rows.iter().find(|r| r.path.is_empty()).expect("root row");
+        assert!(root.unread);
+        assert_eq!(root.counted_write(), 0.0);
+        assert!(rows.iter().filter(|r| !r.path.is_empty()).all(|r| !r.unread));
+        let counted: f64 = rows.iter().map(ServiceRow::counted_write).sum();
+        assert_eq!(counted, 35.0 + 7.5, "the service and user.slice, and nothing else");
+    }
+
+    /// The root counts a write at completion, its children at submission.
+    /// One write that straddles two polls is the child's, once.
+    #[test]
+    fn a_write_that_straddles_two_polls_is_the_childs_once() {
+        let mut carry = cgroup::Carry::default();
+        let a = tree(1000, 800, 500, 100);
+        // The service submitted 1 MiB; the root has not completed it yet.
+        let b = tree(1000, 800 + (1 << 20), 500 + (1 << 20), 100);
+        // Now the root has.
+        let c = tree(1000 + (1 << 20), 800 + (1 << 20), 500 + (1 << 20), 100);
+        let first = rows_for(
+            &table(&a, &b, 1.0, false, &mut carry),
+            &devs(&["8:0"]),
+            &BTreeSet::new(),
+        );
+        let second = rows_for(
+            &table(&b, &c, 1.0, false, &mut carry),
+            &devs(&["8:0"]),
+            &BTreeSet::new(),
+        );
+        let written: f64 = first
+            .iter()
+            .chain(&second)
+            .map(ServiceRow::counted_write)
+            .sum();
+        assert_eq!(written, (1 << 20) as f64);
+        assert!(second.iter().all(|r| !r.path.is_empty()), "no root row: nothing of its own");
     }
 
     #[test]
@@ -2372,6 +2499,22 @@ mod tests {
         assert!(parse_task_delayacct("1\n"));
         assert!(!parse_task_delayacct("0\n"));
         assert!(!parse_task_delayacct(""));
+    }
+
+    /// A worker thread in D while the leader sleeps: the process is
+    /// waiting on the disk, and its wait is every thread's, not the
+    /// leader's alone.
+    #[test]
+    fn a_worker_thread_in_d_puts_its_process_in_d() {
+        let threads = [('S', Some(3)), ('D', Some(40)), ('S', Some(0))];
+        assert_eq!(fold_threads('S', &threads), Some(('D', Some(43))));
+        assert_eq!(
+            fold_threads('R', &[('S', Some(1)), ('R', Some(2))]),
+            Some(('R', Some(3)))
+        );
+        // A kernel without field 42 on one thread has no sum to give.
+        assert_eq!(fold_threads('S', &[('D', Some(1)), ('S', None)]), Some(('D', None)));
+        assert_eq!(fold_threads('S', &[]), None);
     }
 
     #[test]
