@@ -10,7 +10,7 @@ use opscope_core as tc;
 use super::parse::{
     parse_ifconfig_addresses, parse_lsof_files, parse_netstat_interfaces, parse_nettop_processes,
 };
-use super::{Facts, OpenFile, ProcessSeen, RUN_TIMEOUT, TrafficSample, VIRTUAL};
+use super::{Facts, OpenFile, PidIo, ProcessSeen, RUN_TIMEOUT, TrafficSample, VIRTUAL};
 
 pub const ROW_SOURCE: &str = "per-process cumulative bytes · macOS nettop";
 pub const HAS_CONNECTION_DETAILS: bool = false;
@@ -232,7 +232,7 @@ pub fn sockets(_external: bool, _own: &[String]) -> Result<TrafficSample, String
 
 /// `nettop` already names each process. There is no per-socket counter to
 /// join to an owner on macOS, so this seam is deliberately an empty map.
-pub fn socket_owners() -> Result<HashMap<String, (i32, String)>, String> {
+pub fn owners() -> Result<HashMap<String, (i32, String)>, String> {
     Ok(HashMap::new())
 }
 
@@ -250,11 +250,11 @@ pub fn running(pid: i32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-pub fn proc_io(_pid: i32) -> HashMap<String, u64> {
-    HashMap::new()
+pub fn disk_io(_pid: i32) -> Option<PidIo> {
+    None
 }
 
-pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
+pub fn files_of(pid: i32) -> Result<Vec<OpenFile>, String> {
     let text = tc::run(
         &["lsof", "-a", "-p", &pid.to_string(), "-s", "-Fnfst"],
         RUN_TIMEOUT,

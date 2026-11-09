@@ -7,19 +7,11 @@
 // (at your option) any later version.
 
 //! Parsers for every source netwatch reads, compiled on every target.
+//!
+//! The `ss -tine` and `ip -o addr` parsers are shared with other widgets
+//! and live in `tc::procfs`.
 
 #![allow(dead_code)]
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SocketRecord {
-    pub inode: String,
-    pub sent: u64,
-    pub recv: u64,
-    pub peer: String,
-    pub port: u16,
-    pub mine: u16,
-    pub cgroup: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRecord {
@@ -33,28 +25,6 @@ pub struct ProcessRecord {
 pub struct FileRecord {
     pub path: String,
     pub size: u64,
-}
-
-/// The value after `key:` on a line, up to the next space.
-pub fn field(line: &str, key: &str) -> Option<String> {
-    let at = line.find(key)? + key.len();
-    let rest = &line[at..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let value = &rest[..end];
-    (!value.is_empty()).then(|| value.to_string())
-}
-
-pub fn parse_ip_addresses(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for line in text.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if let Some(at) = cols.iter().position(|c| *c == "inet" || *c == "inet6") {
-            if let Some(addr) = cols.get(at + 1) {
-                found.push(addr.split('/').next().unwrap_or(addr).to_string());
-            }
-        }
-    }
-    found
 }
 
 pub fn parse_ifconfig_addresses(text: &str) -> Vec<String> {
@@ -73,56 +43,6 @@ pub fn parse_ifconfig_addresses(text: &str) -> Vec<String> {
             }
         })
         .collect()
-}
-
-/// `ss -tine`: an address line followed by an indented counter line.
-pub fn parse_ss_sockets(text: &str) -> Vec<SocketRecord> {
-    let mut found = Vec::new();
-    let (mut inode, mut peer, mut port, mut cgroup) = (None, String::new(), 0u16, String::new());
-    let mut mine = 0u16;
-    for (i, line) in text.lines().enumerate() {
-        if i == 0 {
-            continue;
-        }
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            peer = cols
-                .get(4)
-                .and_then(|a| a.rsplit_once(':'))
-                .map(|(h, _)| h.trim_matches(|c| c == '[' || c == ']').to_string())
-                .unwrap_or_default();
-            port = cols
-                .get(4)
-                .and_then(|a| a.rsplit_once(':'))
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(0);
-            mine = cols
-                .get(3)
-                .and_then(|a| a.rsplit_once(':'))
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(0);
-            inode = field(line, "ino:").filter(|v| v != "0");
-            cgroup = field(line, "cgroup:").unwrap_or_default();
-            continue;
-        }
-        let Some(id) = inode.take() else {
-            continue;
-        };
-        found.push(SocketRecord {
-            inode: id,
-            sent: field(line, "bytes_sent:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            recv: field(line, "bytes_received:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            peer: peer.clone(),
-            port,
-            mine,
-            cgroup: cgroup.clone(),
-        });
-    }
-    found
 }
 
 pub fn parse_proc_net_dev(text: &str, virtual_prefixes: &[&str]) -> (u64, u64, Vec<String>) {
@@ -289,49 +209,5 @@ mod tests {
                 size: 4096
             }]
         );
-    }
-
-    #[test]
-    fn parses_captured_ss_tine_rows() {
-        let text = "\
-State Recv-Q Send-Q Local Address:Port Peer Address:Port
-ESTAB 0      0      192.0.2.10:54321   192.0.2.1:443     ino:4242 cgroup:/user.slice/session-1.scope
-\t cubic bytes_sent:1669 bytes_received:11469 segs_out:12
-ESTAB 0      0      [2001:db8::10]:22  [2001:db8::1]:6000 ino:99
-\t bytes_sent:10 bytes_received:20
-ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
-\t bytes_sent:1 bytes_received:2
-";
-        assert_eq!(
-            parse_ss_sockets(text),
-            vec![
-                SocketRecord {
-                    inode: "4242".into(),
-                    sent: 1669,
-                    recv: 11469,
-                    peer: "192.0.2.1".into(),
-                    port: 443,
-                    mine: 54321,
-                    cgroup: "/user.slice/session-1.scope".into(),
-                },
-                SocketRecord {
-                    inode: "99".into(),
-                    sent: 10,
-                    recv: 20,
-                    peer: "2001:db8::1".into(),
-                    port: 6000,
-                    mine: 22,
-                    cgroup: String::new(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ss_fields_are_read_off_the_line() {
-        let line = "\t ts sack cubic bytes_sent:1669 bytes_received:11469 segs_out:272";
-        assert_eq!(field(line, "bytes_sent:"), Some("1669".into()));
-        assert_eq!(field(line, "bytes_received:"), Some("11469".into()));
-        assert_eq!(field(line, "nothing:"), None);
     }
 }

@@ -98,6 +98,16 @@ fn shared_helpers_are_not_redefined_by_widgets() {
         "const SPARK:",
         "const BRAILLE:",
         "const SPINNER:",
+        // tc::procfs (OPS-194): /proc and `ss` are read one way, in core.
+        "fn parse_pid_stat(",
+        "fn parse_proc_stat(",
+        "fn parse_proc_pid_io(",
+        "fn proc_io(",
+        "fn unit_name(",
+        "fn parse_ss_sockets(",
+        "fn socket_owners(",
+        "fn open_files(",
+        "fn clock_ticks(",
     ];
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
@@ -3925,15 +3935,112 @@ fn cfg_gated_mod_files(src: &str, file: &PathBuf) -> Vec<PathBuf> {
     out
 }
 
+/// A cfg-gated host file may carry exactly one kind of test: an
+/// acquisition test, in a `mod acquisition_tests { .. }`, that calls the
+/// platform API this file exists to call and that cannot compile anywhere
+/// else (`proc_pid_rusage` is not in Linux's libc). It runs on the CI job
+/// for its own OS, which is the only place it can say anything. What stays
+/// forbidden is the thing this check is for: a parser, or a test of one.
+/// So a `parse_` anywhere in that module - a parser test that moved in to
+/// hide - is flagged as before.
 fn file_has_parser_or_test(src: &str) -> bool {
-    src.lines().any(|line| {
+    let (outside, acquisition) = split_acquisition_tests(src);
+    let flagged = outside.lines().any(|line| {
         let t = line.trim_start();
         if t.starts_with("//") {
             return false;
         }
         let item = rust_item(t);
         item.starts_with("fn parse_") || t.starts_with("#[test]")
-    })
+    });
+    flagged
+        || acquisition.lines().any(|line| {
+            let t = line.trim_start();
+            !t.starts_with("//") && t.contains("parse_")
+        })
+}
+
+/// `src` without its `mod acquisition_tests { .. }` block, and the block.
+fn split_acquisition_tests(src: &str) -> (String, String) {
+    let mut outside = String::new();
+    let mut inside = String::new();
+    let mut depth = 0i32;
+    for line in src.lines() {
+        let t = line.trim();
+        if depth == 0 && rust_item(t).starts_with("mod acquisition_tests") && t.contains('{') {
+            depth = t.matches('{').count() as i32 - t.matches('}').count() as i32;
+            continue;
+        }
+        if depth > 0 {
+            depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+            inside.push_str(line);
+            inside.push('\n');
+            continue;
+        }
+        outside.push_str(line);
+        outside.push('\n');
+    }
+    (outside, inside)
+}
+
+#[test]
+fn a_gated_host_file_may_hold_acquisition_tests_and_nothing_else() {
+    let acquisition = r#"
+fn rusage_all() {}
+
+#[cfg(test)]
+mod acquisition_tests {
+    use super::*;
+
+    #[test]
+    fn own_process_is_readable() {
+        assert!(rusage_all());
+    }
+}
+"#;
+    assert!(
+        !file_has_parser_or_test(acquisition),
+        "an acquisition test in a gated host file is the sanctioned shape"
+    );
+    let parser_test = r#"
+#[cfg(test)]
+mod acquisition_tests {
+    #[test]
+    fn reads_ps() {
+        assert!(super::parse_ps_names("1 launchd").len() == 1);
+    }
+}
+"#;
+    assert!(
+        file_has_parser_or_test(parser_test),
+        "a parser test hiding in acquisition_tests is still a gated parser test"
+    );
+    let loose_test = r#"
+fn rusage_all() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn own_process_is_readable() {}
+}
+"#;
+    assert!(
+        file_has_parser_or_test(loose_test),
+        "a test outside acquisition_tests in a gated file is still flagged"
+    );
+    let parser_after = r#"
+#[cfg(test)]
+mod acquisition_tests {
+    #[test]
+    fn t() {}
+}
+
+pub fn parse_thing(text: &str) {}
+"#;
+    assert!(
+        file_has_parser_or_test(parser_after),
+        "a parser after the acquisition block is still flagged"
+    );
 }
 
 #[test]
@@ -4006,6 +4113,7 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
 }
 
 fn opens_proc(src: &str) -> bool {
+    let readers = procfs_readers();
     src.lines().any(|line| {
         let t = line.trim_start();
         if t.starts_with("//") {
@@ -4014,7 +4122,71 @@ fn opens_proc(src: &str) -> bool {
         // A string that is a /proc path, not a mention of the word in
         // prose. github.rs talks about cmdline leaking; that string does
         // not start with /proc inside the quotes.
-        line.contains("\"/proc") || line.contains("format!(\"/proc")
+        //
+        // Or a call into core's /proc readers. Since they moved into
+        // `tc::procfs`, a widget can read /proc without spelling the path,
+        // and a check that looked only for the string lost sight of
+        // tailnet the day it moved - while on a Mac its uptime is still
+        // simply absent.
+        line.contains("\"/proc")
+            || line.contains("format!(\"/proc")
+            || names_a_procfs_reader(line, &readers)
+    })
+}
+
+/// The `tc::procfs` functions that read `/proc`, from core's own source:
+/// `pids`, every `read_*`, and everything in its Linux-only `mod linux`.
+/// The parsers, the types and the pure helpers (`clock_ticks`, `field`,
+/// `off_box`) read nothing, and a widget that names only those does not
+/// open `/proc` - counting every `procfs::` made a parser look like a
+/// reader. Read from core rather than listed here, so a reader added there
+/// is seen here without anyone remembering to.
+fn procfs_readers() -> BTreeSet<String> {
+    let core = std::fs::read_to_string(root().join("core/src/procfs.rs"))
+        .expect("core/src/procfs.rs is where the /proc readers live");
+    let mut out = BTreeSet::new();
+    let mut in_linux = false;
+    for line in core.lines() {
+        if line.starts_with("mod linux") {
+            in_linux = true;
+        } else if line.starts_with('}') {
+            in_linux = false;
+        }
+        let Some(rest) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if in_linux || name == "pids" || name.starts_with("read_") {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// `procfs::<reader>` on this line outside a string, or a reader named in a
+/// `use ...procfs::{...}` list - the import is how a bare `read_stat(pid)`
+/// further down gets there.
+fn names_a_procfs_reader(line: &str, readers: &BTreeSet<String>) -> bool {
+    line.match_indices("procfs::").any(|(at, word)| {
+        if line[..at].matches('"').count() % 2 == 1 {
+            return false;
+        }
+        let after = &line[at + word.len()..];
+        let names: Vec<&str> = match after.strip_prefix('{') {
+            Some(list) => list.split('}').next().unwrap_or("").split(',').collect(),
+            None => vec![after],
+        };
+        names.iter().any(|name| {
+            let name: String = name
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            readers.contains(&name)
+        })
     })
 }
 
@@ -4024,6 +4196,17 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
         r#"let t = std::fs::read_to_string("/proc/net/tcp");"#
     ));
     assert!(opens_proc(r#"format!("/proc/{}/fd", pid)"#));
+    assert!(opens_proc(r#"let up = tc::procfs::read_uptime();"#));
+    assert!(opens_proc(r#"let pids = procfs::pids()?;"#));
+    assert!(opens_proc(r#"let files = tc::procfs::open_files(pid);"#));
+    assert!(opens_proc(r#"use tc::procfs::{own_addresses, process_facts};"#));
+    assert!(!opens_proc(r#"// tc::procfs::read_uptime() is the reader"#));
+    // A parser, a type, a pure helper, or the words in a string: none of
+    // them reads /proc.
+    assert!(!opens_proc(r#"let s = tc::procfs::parse_pid_stat(&line);"#));
+    assert!(!opens_proc(r#"use tc::procfs::{OpenFile, PidIo, local_peer};"#));
+    assert!(!opens_proc(r#"let hz = tc::procfs::clock_ticks();"#));
+    assert!(!opens_proc(r#"let tip = "see tc::procfs::read_stat";"#));
     assert!(!opens_proc(
         r#"// /proc/<pid>/cmdline is readable by anyone"#
     ));
@@ -4038,7 +4221,7 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
 /// new `/proc` reader with no explanation looks on macOS like a source
 /// with nothing in it.
 const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
-    ("tailnet", "process table is /proc; no macOS source yet"),
+    ("tailnet", "process table is /proc (through tc::procfs); no macOS source yet"),
     ("agent-usage", "Antigravity's port discovery walks /proc"),
 ];
 

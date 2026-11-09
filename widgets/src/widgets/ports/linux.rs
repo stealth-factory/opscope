@@ -34,7 +34,11 @@ use super::{Found, RUN_TIMEOUT};
 /// One address-family table missing is fine. Both missing is an error,
 /// not an empty list: empty is what "nothing is listening" looks like.
 pub fn sockets() -> Result<Vec<Found>, String> {
-    let owners = socket_owners();
+    // inode -> pid, for every process this user can read. Root's sockets
+    // are not readable, so sshd and the like arrive unowned - stated on
+    // screen rather than papered over. An unreadable /proc is the same
+    // empty map it always was here: the tables below still list the ports.
+    let owners = tc::procfs::socket_pids().unwrap_or_default();
     let tcp = std::fs::read_to_string("/proc/net/tcp").ok();
     let tcp6 = std::fs::read_to_string("/proc/net/tcp6").ok();
     Ok(proc_sockets_from_tables(tcp.as_deref(), tcp6.as_deref())?
@@ -46,39 +50,6 @@ pub fn sockets() -> Result<Vec<Found>, String> {
             pid: owners.get(&sock.inode).copied(),
         })
         .collect())
-}
-
-/// inode -> pid, for every process this user can read.
-///
-/// Root's sockets are not readable, so sshd and the like arrive unowned.
-/// That is stated on screen rather than papered over.
-fn socket_owners() -> HashMap<String, i32> {
-    let mut owners = HashMap::new();
-    let entries = match std::fs::read_dir("/proc") {
-        Ok(e) => e,
-        Err(_) => return owners,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let pid: i32 = match name.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let fds = match std::fs::read_dir(format!("/proc/{}/fd", pid)) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        for fd in fds.flatten() {
-            if let Ok(target) = std::fs::read_link(fd.path()) {
-                let target = target.to_string_lossy();
-                if let Some(rest) = target.strip_prefix("socket:[") {
-                    owners.insert(rest.trim_end_matches(']').to_string(), pid);
-                }
-            }
-        }
-    }
-    owners
 }
 
 fn process_info(pid: i32) -> (String, String, Option<f64>) {

@@ -14,11 +14,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! CPU and memory of the pids Rex reported, on Linux: `/proc/<pid>/stat`.
+//! CPU and memory of the pids Rex reported, on Linux: `/proc/<pid>/stat`,
+//! read through `tc::procfs`.
 
 use std::collections::HashMap;
 
-use super::rex_parse as parse;
+use opscope_core as tc;
 
 /// Ticks and the time they were read, per pid, so a percentage is two
 /// readings apart rather than a lifetime average.
@@ -31,22 +32,13 @@ impl Usage {
     /// pid → (cpu %, resident bytes). CPU is `None` on the first reading of
     /// a pid, because one reading is not a rate.
     pub fn sample(&mut self, pids: &[i64], at: f64) -> HashMap<i64, (Option<f64>, u64)> {
-        let hz = {
-            let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-            if hz > 0 { hz as f64 } else { 100.0 }
-        };
-        let page = {
-            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-            if page > 0 { page as u64 } else { 4096 }
-        };
+        let hz = tc::procfs::clock_ticks();
         let mut out = HashMap::new();
         for &pid in pids {
-            let Ok(text) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+            let Ok(stat) = tc::procfs::read_stat(pid as i32) else {
                 continue;
             };
-            let Some((ticks, rss)) = parse::parse_proc_stat(&text, page) else {
-                continue;
-            };
+            let (ticks, rss) = (stat.utime + stat.stime, tc::procfs::rss_bytes(stat.rss_pages));
             let cpu = match self.seen.get(&pid) {
                 Some((was, when)) if at - when > 0.0 => {
                     Some(ticks.saturating_sub(*was) as f64 / hz / (at - when) * 100.0)
@@ -66,16 +58,13 @@ impl Usage {
 /// and after 64 steps whatever happens.
 pub fn ancestors() -> Vec<String> {
     let mut out = Vec::new();
-    let mut pid = unsafe { libc::getppid() } as i64;
+    let mut pid = unsafe { libc::getppid() };
     while pid > 1 && out.len() < 64 {
-        let Ok(text) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+        let Ok(stat) = tc::procfs::read_stat(pid) else {
             break;
         };
-        let Some((name, parent)) = super::detect::parse_stat_parent(&text) else {
-            break;
-        };
-        out.push(name);
-        pid = parent;
+        out.push(stat.comm);
+        pid = stat.ppid;
     }
     out
 }

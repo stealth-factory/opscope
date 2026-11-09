@@ -29,6 +29,8 @@ mod picker;
 pub mod palette;
 pub mod google;
 pub mod notices;
+pub mod procfs;
+pub mod cgroup;
 mod settings;
 pub mod statefile;
 mod terminal;
