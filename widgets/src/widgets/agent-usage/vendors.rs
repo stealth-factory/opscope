@@ -2377,7 +2377,8 @@ mod tests {
         let stamp = crate::codex::local_expiry(iso_epoch("2126-01-03T00:00:00Z").unwrap()).unwrap();
         let at = tab.iter().position(|row| row.trim_end() == " ── 1 BANK RESET ──")
             .unwrap_or_else(|| panic!("no bank on the tab: {tab:#?}"));
-        assert_eq!(tab[at + 1].trim_end(), format!("  Full reset · expires {stamp}"), "{tab:#?}");
+        // The live shape is a Fable grant: `type: "full"` with `gives_back_weekly`.
+        assert_eq!(tab[at + 1].trim_end(), format!("  Fable reset · expires {stamp}"), "{tab:#?}");
         assert!(tab[at + 2].trim().is_empty(), "{tab:#?}");
         let line = s.claude[0].reset_summary_line().expect("the [+] line");
         assert!(plus.iter().any(|row| row.trim() == line), "{plus:#?}");
