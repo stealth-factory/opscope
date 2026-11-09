@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.11.0] - 2026-11-09
+
+### Bug Fixes
+
+- **agent-usage**: Name a Claude Fable reset as one, and show unknown reset types as sent (OPS-269) (#602)
+
+### Features
+
+- **disk**: Who is writing, by service and by process, with what is waiting on disk (#593)
+
 ## [2.10.1] - 2026-11-09
 
 ### Bug Fixes
