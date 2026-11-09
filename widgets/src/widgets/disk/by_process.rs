@@ -941,6 +941,7 @@ pub fn paint(
         Source::Rusage => format!("every disk · {}", coverage(procs)),
     };
     push_note(&note, &p.dim, width, rows);
+    push_note(&writers.pid_err, &p.accent, width, rows);
 
     let (list, locked) = ordered(procs, view.proc_sort, view.proc_all, view.top_writers);
     let readable = procs.rows.len();

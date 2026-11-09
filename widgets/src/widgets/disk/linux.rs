@@ -311,7 +311,13 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
     let rows_of = writers::pid_rows(&state);
     let (samples, pid_err) = match procfs::pids() {
         Ok(pids) => (pass(&pids, &listed), String::new()),
-        Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
+        Err(err) => {
+            // Not an empty host: no baseline survives a poll that could not
+            // list processes, so neither it nor the next poll has a rate,
+            // and neither reaches the reconciliation against the disks.
+            source.procs = ProcMemory::default();
+            (Vec::new(), format!("processes unavailable: {err}"))
+        }
     };
     let now = source.start.elapsed().as_secs_f64();
     let proc_samples = by_process::samples_from_pids(&samples, &rows_of);
