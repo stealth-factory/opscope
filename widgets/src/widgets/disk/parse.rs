@@ -847,6 +847,11 @@ pub struct IoSnapshot {
     pub combined: bool,
     pub missing: String,
     pub err: String,
+    /// When the device counters were read. A rate divides by the time
+    /// between two reads, not between two finished polls: the cgroup and
+    /// process scans run after this, and their duration varies. `None`
+    /// reads as the moment the board is built.
+    pub read_at: Option<std::time::Instant>,
 }
 
 #[cfg(test)]

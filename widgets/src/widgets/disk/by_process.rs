@@ -32,7 +32,9 @@ use opscope_core as tc;
 use tc::procfs::{OpenFile, PidIo};
 
 use super::writers::{PidSample, Writers, rate, secs, shown_path};
-use super::{DiskSort, Palette, View, chunks, human, join_cells, wrap};
+use super::{
+    DiskSort, Palette, View, chunks, human, join_cells, push_note, push_part, wrap,
+};
 
 /// Item ids for a click, above WAITING's.
 pub const PROC_BASE: usize = 5_000_000;
@@ -87,6 +89,9 @@ pub struct ProcSample {
     /// The BY SERVICE row the process's I/O lands in, as drawn (`/` for the
     /// root's own), `""` when the walk did not place it.
     pub cgroup: String,
+    /// The parent, whose counters take this process's when it reaps it
+    /// (Linux). 0 where counters are not inherited (macOS).
+    pub ppid: i32,
 }
 
 /// What `proc_pid_rusage` returned for one pid: the two disk counters and
@@ -115,6 +120,7 @@ pub fn samples_from_pids(samples: &[PidSample], cgroups: &HashMap<i32, String>) 
             comm: s.comm.clone(),
             start: s.starttime,
             io: s.io.as_ref().map(io_counts).ok_or(Unreadable),
+            ppid: s.ppid,
             cgroup: cgroups
                 .get(&s.pid)
                 .map(|c| shown_path(c))
@@ -138,6 +144,7 @@ pub fn samples_from_rusage(
             start: read.map(|r| r.start).unwrap_or(0),
             io: read.map(|r| (r.read, r.write, 0)),
             cgroup: String::new(),
+            ppid: 0,
         })
         .collect()
 }
@@ -221,13 +228,75 @@ pub struct Procs {
 /// What is kept from one pass to the next: one previous reading per pid.
 #[derive(Default)]
 pub struct ProcMemory {
-    prev: HashMap<i32, (u64, u64, u64, u64)>,
+    prev: HashMap<i32, Seen>,
     at: Option<f64>,
+}
+
+/// One pid's reading on the previous pass.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    start: u64,
+    ppid: i32,
+    read: u64,
+    written: u64,
+    cancelled: u64,
+}
+
+/// What each parent inherited this pass: the last counters of the children
+/// that have gone since the previous one. Linux adds a reaped child's
+/// `read_bytes`, `write_bytes` and `cancelled_write_bytes` to its parent's
+/// `/proc/<pid>/io`, so bytes already counted on the child would be counted
+/// again on the parent - and an idle parent would read as a writer. What
+/// the child did after its last sample was never counted, so that part
+/// stays in the parent's delta: it is counted once, there.
+fn inherited(prev: &HashMap<i32, Seen>, samples: &[ProcSample]) -> HashMap<i32, (u64, u64, u64)> {
+    let here: HashMap<i32, u64> = samples.iter().map(|s| (s.pid, s.start)).collect();
+    let mut out: HashMap<i32, (u64, u64, u64)> = HashMap::new();
+    for (pid, seen) in prev {
+        if here.get(pid) == Some(&seen.start) || seen.ppid <= 0 {
+            continue;
+        }
+        let sum = out.entry(seen.ppid).or_default();
+        sum.0 = sum.0.saturating_add(seen.read);
+        sum.1 = sum.1.saturating_add(seen.written);
+        sum.2 = sum.2.saturating_add(seen.cancelled);
+    }
+    out
+}
+
+/// Whether the parent's counters show the transfer at all, and so how much
+/// of [`inherited`] to take out. A child reaped automatically - its parent
+/// ignores `SIGCHLD` or set `SA_NOCLDWAIT` - passes nothing on, and taking
+/// its counters out anyway would hide the parent's own I/O. A real transfer
+/// moves at least the child's last reading into every counter, so a parent
+/// that moved less than that on any counter did not receive one. What this
+/// cannot tell apart is a parent whose own I/O over the poll was at least a
+/// child's whole lifetime on every counter: that is read as a transfer.
+fn inherited_here(
+    from_children: Option<(u64, u64, u64)>,
+    (read, written, cancelled): (u64, u64, u64),
+    seen: &Seen,
+) -> (u64, u64, u64) {
+    let Some((ir, iw, ic)) = from_children else {
+        return (0, 0, 0);
+    };
+    let moved = (
+        read.saturating_sub(seen.read),
+        written.saturating_sub(seen.written),
+        cancelled.saturating_sub(seen.cancelled),
+    );
+    if moved.0 >= ir && moved.1 >= iw && moved.2 >= ic {
+        (ir, iw, ic)
+    } else {
+        (0, 0, 0)
+    }
 }
 
 /// One pass turned into rates. A pid that was not in the previous pass has
 /// no rate yet; one that has gone is dropped, never drawn as negative; a
-/// pid whose start time changed is a reused pid and starts again.
+/// pid whose start time changed is a reused pid and starts again. A parent
+/// that reaped a child since the last pass has that child's counters, as
+/// last read, taken out of its delta (see [`inherited`]).
 pub fn step(
     memory: &mut ProcMemory,
     samples: Vec<ProcSample>,
@@ -241,6 +310,7 @@ pub fn step(
     let mut locked = Vec::new();
     let mut next = HashMap::with_capacity(samples.len());
     let mut moved = 0.0;
+    let inherited = inherited(&memory.prev, &samples);
     for s in samples {
         match s.io {
             Ok((read, written, cancelled)) => {
@@ -249,19 +319,37 @@ pub fn step(
                 // cancelled delta, so a poll that truncated more dirty data
                 // than it wrote is 0, and its reads still count.
                 let delta = elapsed.and_then(|e| {
-                    let &(start, r0, w0, c0) = memory.prev.get(&s.pid)?;
-                    (start == s.start && read >= r0).then(|| {
+                    let seen = memory.prev.get(&s.pid)?;
+                    let (ir, iw, ic) = inherited_here(
+                        inherited.get(&s.pid).copied(),
+                        (read, written, cancelled),
+                        seen,
+                    );
+                    (seen.start == s.start && read >= seen.read).then(|| {
                         let w = written
-                            .saturating_sub(w0)
-                            .saturating_sub(cancelled.saturating_sub(c0));
-                        ((read - r0) as f64, w as f64, e)
+                            .saturating_sub(seen.written)
+                            .saturating_sub(iw)
+                            .saturating_sub(
+                                cancelled.saturating_sub(seen.cancelled).saturating_sub(ic),
+                            );
+                        let r = (read - seen.read).saturating_sub(ir);
+                        (r as f64, w as f64, e)
                     })
                 });
                 let write = written.saturating_sub(cancelled);
                 if let Some((r, w, _)) = delta {
                     moved += if source.combined() { r + w } else { w };
                 }
-                next.insert(s.pid, (s.start, read, written, cancelled));
+                next.insert(
+                    s.pid,
+                    Seen {
+                        start: s.start,
+                        ppid: s.ppid,
+                        read,
+                        written,
+                        cancelled,
+                    },
+                );
                 rows.push(ProcRate {
                     pid: s.pid,
                     comm: s.comm,
@@ -812,19 +900,25 @@ pub fn paint(
     let Some(procs) = writers.procs.as_ref() else {
         return Painted::default();
     };
-    let sorted = format!("every disk · sorted: {}", view.proc_sort.label(false));
-    let heading = match procs.source {
-        Source::Procfs => format!(
-            "BY PROCESS  {} · {sorted} · {}",
-            procs.source.label(),
-            coverage(procs)
-        ),
-        Source::Rusage => format!("{sorted} · {}", coverage(procs)),
-    };
+    // On Linux it follows BY SERVICE, a blank line apart; on macOS it is
+    // the first part under the group's rule.
     if procs.source == Source::Procfs {
         rows.push(String::new());
     }
-    push_lines(rows, &heading, &p.lbl, width);
+    push_part(
+        "BY PROCESS",
+        &format!("sorted: {}", view.proc_sort.label(false)),
+        view.focus == 4,
+        width,
+        p,
+        rows,
+    );
+    let note = match procs.source {
+        Source::Procfs => format!("{} · every disk · {}", procs.source.label(), coverage(procs)),
+        Source::Rusage => format!("every disk · {}", coverage(procs)),
+    };
+    push_note(&note, &p.dim, width, rows);
+    push_note(&writers.pid_err, &p.accent, width, rows);
 
     let (list, locked) = ordered(procs, view.proc_sort, view.proc_all, view.top_writers);
     let readable = procs.rows.len();
@@ -860,10 +954,10 @@ pub fn paint(
             p.dim.clone()
         };
         let from = rows.len();
-        push_lines(rows, &subset, &ink, width);
+        push_note(&subset, &ink, width, rows);
         placed.extend((from..rows.len()).map(|at| (at, PROC_BASE)));
     } else {
-        push_lines(rows, &subset, &p.dim, width);
+        push_note(&subset, &p.dim, width, rows);
     }
 
     let comm_want = list
@@ -910,14 +1004,14 @@ pub fn paint(
         keys.push(key);
     }
     if !locked.is_empty() {
-        push_lines(
-            rows,
+        push_note(
             &format!(
                 "{} need root · their I/O is not readable as you",
                 locked.len()
             ),
             &p.dim,
             width,
+            rows,
         );
     }
     for l in &locked {
@@ -939,11 +1033,11 @@ pub fn paint(
         .board
         .map(|b| b.total_names.clone())
         .unwrap_or_default();
-    push_lines(
-        rows,
+    push_note(
         &reconcile_line(procs.window.as_ref(), procs.source, &disks),
         &p.txt,
         width,
+        rows,
     );
     Painted {
         keys,
@@ -1235,6 +1329,88 @@ mod tests {
                 cgroup: "system.slice/example-db.service".into()
             }]
         );
+    }
+
+    /// Linux adds a reaped child's counters to its parent's. The child's
+    /// 1 MiB is counted once, on the child, and the parent that only waited
+    /// is not a writer. What the child wrote after its last sample is
+    /// counted once too, on the parent.
+    #[test]
+    fn a_reaped_childs_bytes_are_not_counted_again_on_its_parent() {
+        let mut memory = ProcMemory::default();
+        let child = |io: PidIo| PidSample {
+            ppid: 100,
+            ..pid_sample(300, 9, Some(io))
+        };
+        let mut moved = 0.0;
+        let mut pass = |list: Vec<PidSample>, now: f64| {
+            let p = step(
+                &mut memory,
+                samples_from_pids(&list, &HashMap::new()),
+                now,
+                false,
+                false,
+                Source::Procfs,
+            );
+            moved += p.moved.unwrap_or(0.0);
+            p
+        };
+        pass(
+            vec![
+                pid_sample(100, 5, Some(io(0, 4_096, 0))),
+                child(io(0, 8_192, 0)),
+            ],
+            0.0,
+        );
+        pass(
+            vec![
+                pid_sample(100, 5, Some(io(0, 4_096, 0))),
+                child(io(0, 8_192 + (1 << 20), 0)),
+            ],
+            1.0,
+        );
+        // Reaped: the parent now carries every byte the child ever wrote,
+        // plus 4 KiB the child wrote after it was last read.
+        let p = pass(
+            vec![pid_sample(100, 5, Some(io(0, 4_096 + 8_192 + (1 << 20) + 4_096, 0)))],
+            2.0,
+        );
+        assert_eq!(p.rows[0].write_bps, Some(4_096.0), "only the unseen tail");
+        assert_eq!(moved, ((1 << 20) + 4_096) as f64);
+    }
+
+    /// A parent that ignores SIGCHLD has its children reaped automatically,
+    /// and nothing is added to its counters. Its own 1 MiB is its own.
+    #[test]
+    fn an_automatically_reaped_child_takes_nothing_from_its_parent() {
+        let mut memory = ProcMemory::default();
+        let child = |io: PidIo| PidSample {
+            ppid: 100,
+            ..pid_sample(300, 9, Some(io))
+        };
+        let mut pass = |list: Vec<PidSample>, now: f64| {
+            step(
+                &mut memory,
+                samples_from_pids(&list, &HashMap::new()),
+                now,
+                false,
+                false,
+                Source::Procfs,
+            )
+        };
+        pass(
+            vec![
+                pid_sample(100, 5, Some(io(0, 4_096, 0))),
+                child(io(0, 4 << 20, 0)),
+            ],
+            0.0,
+        );
+        // The child has gone; the parent's counter moved by its own 1 MiB.
+        let p = pass(
+            vec![pid_sample(100, 5, Some(io(0, 4_096 + (1 << 20), 0)))],
+            1.0,
+        );
+        assert_eq!(p.rows[0].write_bps, Some((1 << 20) as f64));
     }
 
     #[test]

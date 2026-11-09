@@ -154,10 +154,29 @@ pub struct Attributed {
     /// the walk was not asked for `cgroup.procs`.
     pub procs: usize,
     /// A descendant reported more than this cgroup (a counter reset during
-    /// the walk), or a descendant's reading was missing so its share could
-    /// not be taken out. `own` is still never negative, but the sample is a
-    /// gap, not a figure.
+    /// the walk, or one read a moment later than this one). `own` is still
+    /// never negative, but the sample is a gap, not a figure.
     pub inconsistent: bool,
+    /// A descendant with the controller had no reading, so its own usage
+    /// could not be taken out and sits in `own`. The figure is a measured
+    /// total, but not this cgroup's.
+    pub unread: bool,
+}
+
+/// Bytes [`attribute_io`] could not take out of a cgroup's share on one
+/// interval because its descendants reported more than it did, per cgroup
+/// path and device, owed against the next. Counts that are read at
+/// different moments - the root counts completions, its children
+/// submissions - settle over later intervals, and without this the bytes
+/// floored away on one would come back as the parent's own on the next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Carry(BTreeMap<String, BTreeMap<String, IoStat>>);
+
+impl Carry {
+    /// True when nothing is owed anywhere.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// What a walk found, for the consumer to draw.
@@ -388,7 +407,28 @@ fn beyond_read_skew(own: u64, taken: u64) -> bool {
 /// descendants keep their own shares. `controller` is `io`, `cpu` or
 /// `memory`; anything else gives no rows.
 pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
+    attribute_with(tree, controller, None)
+}
+
+/// [`attribute`] for `io` read as deltas over successive intervals. Bytes
+/// a cgroup's descendants reported beyond its own on one interval are owed
+/// in `carry` and taken out of its share on the next, so a write its child
+/// counted at submission and it counted at completion, an interval apart,
+/// is the child's once and never the parent's. Only bytes are owed: the
+/// root counts merged requests where its children count bios, so its ios
+/// fall short of theirs for good. What is owed by a cgroup that is no
+/// longer in the tree, or has no reading this interval, is dropped.
+pub fn attribute_io(tree: &Tree, carry: &mut Carry) -> Vec<Attributed> {
+    attribute_with(tree, "io", Some(carry))
+}
+
+fn attribute_with(
+    tree: &Tree,
+    controller: &str,
+    mut carry: Option<&mut Carry>,
+) -> Vec<Attributed> {
     let kids = children(tree);
+    let mut owed_next: BTreeMap<String, BTreeMap<String, IoStat>> = BTreeMap::new();
     let mut out = Vec::new();
     for (i, node) in tree.nodes.iter().enumerate() {
         if !node.has(controller) {
@@ -399,17 +439,18 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
         };
         let (mut pending, rolled) = nearest_enabled(tree, &kids, i, controller);
         let mut inconsistent = false;
+        let mut unread = false;
         // A child with no reading gets no row, so its own nearest enabled
         // descendants - which do get rows - are subtracted in its place.
         // Otherwise their bytes would be counted here and again on their
         // own rows. The child's own bytes stay in this share, so it is
-        // marked inconsistent.
+        // marked unread.
         let mut below: Vec<Reading> = Vec::new();
         while let Some(j) = pending.pop() {
             match reading(&tree.nodes[j], controller) {
                 Some(r) => below.push(r),
                 None => {
-                    inconsistent = true;
+                    unread = true;
                     pending.extend(nearest_enabled(tree, &kids, j, controller).0);
                 }
             }
@@ -430,6 +471,7 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
                         }
                     }
                 }
+                let owed = carry.as_deref().and_then(|c| c.0.get(&node.path));
                 for (dev, t) in &taken {
                     let mine = devs.entry(dev.clone()).or_insert_with(|| IoStat {
                         dev: dev.clone(),
@@ -437,7 +479,40 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
                     });
                     let (left, short) = mine.minus(t);
                     inconsistent |= short;
+                    if short && carry.is_some() {
+                        let (over, _) = t.minus(mine);
+                        owed_next
+                            .entry(node.path.clone())
+                            .or_default()
+                            .insert(dev.clone(), bytes_only(over));
+                    }
                     *mine = left;
+                }
+                // What was owed from the last interval comes out of what is
+                // left; whatever it still cannot cover is owed again.
+                for (dev, debt) in owed.into_iter().flatten() {
+                    let zero = IoStat {
+                        dev: dev.clone(),
+                        ..IoStat::default()
+                    };
+                    let mine = devs.get_mut(dev);
+                    let have = mine.as_deref().unwrap_or(&zero);
+                    let still = bytes_only(debt.minus(have).0);
+                    if let Some(mine) = mine {
+                        // A debt carries no ios, so only bytes move.
+                        *mine = mine.minus(debt).0;
+                    }
+                    if still.rbytes > 0 || still.wbytes > 0 || still.dbytes > 0 {
+                        owed_next
+                            .entry(node.path.clone())
+                            .or_default()
+                            .entry(dev.clone())
+                            .or_insert_with(|| IoStat {
+                                dev: dev.clone(),
+                                ..IoStat::default()
+                            })
+                            .add(&still);
+                    }
                 }
                 Reading::Io(devs)
             }
@@ -467,9 +542,24 @@ pub fn attribute(tree: &Tree, controller: &str) -> Vec<Attributed> {
             own,
             procs,
             inconsistent,
+            unread,
         });
     }
+    if let Some(carry) = carry.as_deref_mut() {
+        carry.0 = owed_next;
+    }
     out
+}
+
+/// An owed amount: bytes only, since ios never reconcile (see
+/// [`attribute_io`]).
+fn bytes_only(stat: IoStat) -> IoStat {
+    IoStat {
+        rios: 0,
+        wios: 0,
+        dios: 0,
+        ..stat
+    }
 }
 
 /// What a level of units is called, from the unit-type suffix.
@@ -1007,7 +1097,8 @@ mod tests {
             "io",
         );
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].inconsistent);
+        assert!(rows[0].unread, "the child's bytes are in the root's share");
+        assert!(!rows[0].inconsistent, "nothing was floored");
     }
 
     /// An unreadable middle cgroup: its readable child has a row of its
@@ -1029,7 +1120,91 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(own_io(&rows, "", "8:0"), (0, 20));
         assert_eq!(own_io(&rows, "system.slice/example-db.service", "8:0"), (0, 80));
-        assert!(rows[0].inconsistent, "the middle's own bytes are in the root's share");
+        assert!(rows[0].unread, "the middle's own bytes are in the root's share");
+        assert!(!rows[1].unread);
+    }
+
+    /// A write the child counted at submission and the root at completion,
+    /// an interval apart: the child's once, and never the root's own.
+    #[test]
+    fn bytes_floored_on_one_interval_are_owed_on_the_next() {
+        let two = |root_w: u64, child_w: u64| {
+            let mut root = node("", &["io"]);
+            root.io = Some(io("8:0", 0, root_w));
+            let mut child = node("example-db.service", &["io"]);
+            child.io = Some(io("8:0", 0, child_w));
+            Tree {
+                nodes: vec![root, child],
+            }
+        };
+        let mut carry = Carry::default();
+        let first = attribute_io(&two(0, 1 << 20), &mut carry);
+        assert_eq!(own_io(&first, "", "8:0"), (0, 0));
+        assert_eq!(own_io(&first, "example-db.service", "8:0"), (0, 1 << 20));
+        assert!(!carry.is_empty());
+        let second = attribute_io(&two(1 << 20, 0), &mut carry);
+        assert_eq!(
+            own_io(&second, "", "8:0"),
+            (0, 0),
+            "the completion is not the root's own"
+        );
+        assert!(carry.is_empty(), "the debt is settled");
+        // Settled, the root's own writes count again.
+        let third = attribute_io(&two(4096, 0), &mut carry);
+        assert_eq!(own_io(&third, "", "8:0"), (0, 4096));
+        // Without the carry, the same intervals count the write twice:
+        // that is what attribute_io is for.
+        assert_eq!(
+            own_io(&attribute(&two(1 << 20, 0), "io"), "", "8:0"),
+            (0, 1 << 20)
+        );
+    }
+
+    /// A debt larger than the next interval's own bytes is paid off over
+    /// several, and only bytes are ever owed.
+    #[test]
+    fn a_debt_is_paid_over_several_intervals_and_in_bytes_only() {
+        let tree = |root_w: u64, child_w: u64| {
+            let mut root = node("", &["io"]);
+            root.io = Some(io("8:0", 0, root_w));
+            let mut child = node("example-db.service", &["io"]);
+            child.io = Some(io("8:0", 0, child_w));
+            Tree {
+                nodes: vec![root, child],
+            }
+        };
+        let mut carry = Carry::default();
+        attribute_io(&tree(0, 300), &mut carry);
+        let root_own =
+            |carry: &mut Carry, w: u64| own_io(&attribute_io(&tree(w, 0), carry), "", "8:0");
+        assert_eq!(root_own(&mut carry, 100), (0, 0));
+        assert_eq!(root_own(&mut carry, 150), (0, 0));
+        assert_eq!(root_own(&mut carry, 100), (0, 50));
+        assert!(carry.is_empty());
+        // Only bytes are owed: the root's ios still read as they are.
+        let mut root = node("", &["io"]);
+        root.io = Some(vec![IoStat {
+            dev: "8:0".into(),
+            wbytes: 0,
+            wios: 2,
+            ..IoStat::default()
+        }]);
+        let mut child = node("example-db.service", &["io"]);
+        child.io = Some(vec![IoStat {
+            dev: "8:0".into(),
+            wbytes: 10,
+            wios: 9,
+            ..IoStat::default()
+        }]);
+        attribute_io(
+            &Tree {
+                nodes: vec![root, child],
+            },
+            &mut carry,
+        );
+        let Carry(owed) = &carry;
+        assert_eq!(owed[""]["8:0"].wbytes, 10);
+        assert_eq!(owed[""]["8:0"].wios, 0);
     }
 
     fn host_like() -> Tree {

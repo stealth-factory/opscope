@@ -1150,10 +1150,15 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     // picker in another pane, or config.json edited by hand - is picked up
     // here, and every colour this widget built in the theme it started in
     // is drawn in the theme in force: rows and charts alike.
+    if !picker::OPEN.load(Ordering::Acquire) && theme::watch() {
+        forget_frame();
+    }
     if !picker::OPEN.load(Ordering::Acquire) {
         *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some((rows.to_vec(), plots.to_vec()));
     }
-    draw_current(rows, w, h, plots);
+    let rows: Vec<String> = rows.iter().map(|r| theme::recolour(r)).collect();
+    let plots: Vec<Plot> = plots.iter().cloned().map(|p| p.recoloured(&theme::recolour)).collect();
+    draw_current(&rows, w, h, &plots);
 }
 
 /// [`draw_plots`] for a frame already in the theme in force: nothing is
@@ -5017,21 +5022,9 @@ impl Keyboard {
         {
             settings::relaunch(self);
         }
-        // The theme was changed - in the picker in another pane, or in
-        // config.json by hand - so this widget starts again in it. Never
-        // under something that holds an unsaved edit or a captured frame:
-        // a field being typed in, the settings screen, the picker, the
-        // palette. The check waits for them,
-        // and `changed()` is not even asked until then, so the change is
-        // still there to find when they close.
-        if !typing
-            && !picker::OPEN.load(Ordering::Acquire)
-            && !palette::OPEN.load(Ordering::Acquire)
-            && !settings::SCREEN_OPEN.load(Ordering::Acquire)
-            && theme::changed()
-        {
-            settings::relaunch(self);
-        }
+        // A theme changed in the picker in another pane, or in config.json
+        // by hand, does not restart this widget: `draw_plots` picks it up
+        // and draws the next frame in it (`theme::watch`).
         self.held.extend(fresh);
         let (mut keys, opens) = next_turn(&mut self.held, typing, notices::answers_bang());
         if opens {

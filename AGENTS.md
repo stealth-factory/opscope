@@ -44,6 +44,15 @@ The founding rule, and the one worth defending: **every number on screen is
 real.** Widgets that could not be wired to a true source were deleted rather
 than faked. `matrix` is the sole exception and computes nothing on purpose.
 
+The rule is aimed at the movie terminal: digits that churn because churning
+looks busy, a graph that means nothing. It is about where a number comes from,
+not about whether anything may move. A figure may roll, count or ease from one
+reading to the next, provided it **comes to rest on the real reading** and
+stays there. What the rule forbids is a resting value nobody measured: a
+figure that keeps moving when nothing changed, a gap filled with a plausible
+guess, a trend extended past the last sample, or motion that implies activity
+the source did not report.
+
 ## Conventions
 
 - **What ships must carry what it needs.** Third-party dependencies are
@@ -82,6 +91,24 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
      tool on `PATH`; whether `ping` accepts `-O`; whether the kernel has
      PSI. `cfg` cannot see any of it, and a build-target check would be
      wrong on the machine that matters.
+- **Kitty mode may be richer; text mode is the contract.** Pixels, motion,
+  transitions, rounded selection and the richer mouse are all welcome where
+  the terminal supports them. Every fact, key and action still works in text
+  mode, and Kitty never shows a fact text mode cannot reach, for the same
+  reason a gesture may not do what no key does. Core owns every Kitty feature
+  and its fallback; widgets still never branch on the terminal or emit
+  graphics escapes.
+- **Pay for motion once, not per frame.** These panes run several to a tab
+  over SSH, on mobile data. Prefer motion the terminal plays itself (Kitty
+  animation frames uploaded once) and frame edits that send only the changed
+  pixels; re-uploading a whole image every frame stays ruled out. Motion stops
+  while the pane is unfocused and when nothing is changing. A widget's
+  measured bytes per second in both modes (OPS-201) is the budget a change
+  must meet; that budget replaces the blanket "never animate an image" of
+  OPS-204.
+- **Contrast is measured at rest.** Every frame a transition settles on clears
+  AA against the background and the tint. Frames in the middle of a short
+  transition are exempt; a transition that never settles is not short.
 - **Spend extra width on more content, not padding.** Add columns as a pane
   grows; drop them as it shrinks. Never truncate.
 - **The mouse moves the view. Keys move the selection.** The wheel does a
@@ -95,6 +122,29 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   `every_widget_answers_the_wheel` in `check.rs` fails when a widget does not,
   and it reads match arms rather than the file, so a comment saying it scrolls
   will not satisfy it.
+- **The mouse can do anything a key can, and nothing a key cannot.** This is
+  the click rule below, widened: use the mouse fully, but every gesture
+  resolves to a key the widget already answers, so it has a hint, a `--help`
+  line and a doc row, and `check.rs` can see it. Gestures core is to support
+  on that basis, each with its key equivalent:
+  - **hover** highlights the thing under the pointer and shows its detail (the
+    value at a chart point, a name that was cut short); the key equivalent is
+    moving the cursor there. All-motion reporting (1003) is on only while the
+    pane has focus (focus reporting, 1004), and core merges motion to one
+    redraw per frame, only when what is under the pointer changes;
+  - **drag** a scrollbar (`Ctrl-Y`/`Ctrl-E`/`pgup`/`pgdn`), across a chart to
+    choose a window (the zoom keys), or a row to reorder it (the move keys).
+    Button-motion reporting (1002) while a button is held;
+  - **right-click** opens a menu of the actions on that row, each labelled
+    with its key, so the menu teaches the keys it stands in for;
+  - **click** anything that reads as clickable (section headers, tabs, filter
+    text, chart bars), each acting as the key that moves to or acts on it;
+  - where the terminal reports **pixel positions** (SGR-pixel, 1016), a hover
+    or click lands on the chart point, not merely the cell; elsewhere it
+    falls back to cells.
+  Still ruled out: a gesture with no key, and double-click (see below). The
+  wheel rule above is unchanged. Until core ships each gesture, the README
+  keeps describing what ships today.
 - **A click is a second route to a key, never a capability of its own.** The
   wheel moves the view; keys and clicks move the selection. A click moves the
   selection because that is what an arrow already does. Nothing is reachable

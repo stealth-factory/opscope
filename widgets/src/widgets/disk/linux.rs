@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use opscope_core::cgroup::State;
@@ -66,6 +67,7 @@ pub fn stat_mount(path: &[u8]) -> Result<Space, String> {
 pub fn sample_io(mounts: &[Mount], _every: f64) -> Result<IoSnapshot, String> {
     let text = std::fs::read_to_string("/proc/diskstats")
         .map_err(|err| format!("diskstats unavailable: {err}"))?;
+    let read_at = std::time::Instant::now();
     let stats = parse::parse_diskstats(&text);
     let (inventory, inventory_err) = match inventory_cached() {
         Ok(disks) => (disks, String::new()),
@@ -78,6 +80,7 @@ pub fn sample_io(mounts: &[Mount], _every: f64) -> Result<IoSnapshot, String> {
         show_pressure: true,
         host_devices: opscope_core::cgroup::in_container(),
         err: inventory_err,
+        read_at: Some(read_at),
         ..IoSnapshot::default()
     };
     match std::fs::read_to_string("/proc/pressure/io") {
@@ -233,11 +236,21 @@ pub struct WriterSource {
     memory: Memory,
     procs: ProcMemory,
     files: Option<FileMemory>,
+    /// The open-files read in flight and the pid it is for. It runs on its
+    /// own thread: it stats every file the process holds, and a stat on a
+    /// hard-mounted filesystem that stopped answering does not return.
+    files_reading: Option<FilesReading>,
     history: Option<RateHistory>,
     delayacct: Option<(bool, Instant)>,
     hidepid: Option<(bool, Instant)>,
     start: Instant,
 }
+
+type FilesReading = (i32, Receiver<Result<Vec<procfs::OpenFile>, String>>);
+
+/// How long a poll waits for the open-files read before drawing that it
+/// has not answered and moving on.
+const FILES_BUDGET: Duration = Duration::from_secs(1);
 
 impl Default for WriterSource {
     fn default() -> Self {
@@ -245,6 +258,7 @@ impl Default for WriterSource {
             memory: Memory::default(),
             procs: ProcMemory::default(),
             files: None,
+            files_reading: None,
             history: None,
             delayacct: None,
             hidepid: None,
@@ -297,7 +311,13 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
     let rows_of = writers::pid_rows(&state);
     let (samples, pid_err) = match procfs::pids() {
         Ok(pids) => (pass(&pids, &listed), String::new()),
-        Err(err) => (Vec::new(), format!("processes unavailable: {err}")),
+        Err(err) => {
+            // Not an empty host: no baseline survives a poll that could not
+            // list processes, so neither it nor the next poll has a rate,
+            // and neither reaches the reconciliation against the disks.
+            source.procs = ProcMemory::default();
+            (Vec::new(), format!("processes unavailable: {err}"))
+        }
     };
     let now = source.start.elapsed().as_secs_f64();
     let proc_samples = by_process::samples_from_pids(&samples, &rows_of);
@@ -325,7 +345,7 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
     ));
     out.detail = wanted.pid.map(|pid| {
         let facts = procfs::process_facts(pid);
-        let files = procfs::open_files(pid)
+        let files = open_files_bounded(&mut source.files_reading, pid)
             .map(|files| by_process::file_growth(&mut source.files, pid, &files, now));
         let history = match out.procs.as_ref() {
             Some(procs) => by_process::feed_history(
@@ -365,6 +385,56 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
     Some(out)
 }
 
+/// `procfs::open_files` on a thread of its own, waited on for at most
+/// [`FILES_BUDGET`]. A read that has not answered is left running and
+/// asked again on the next poll rather than started twice: the thread is
+/// inside the kernel and cannot be cancelled, and a second one would hang
+/// on the same file. Until it answers the detail says so, and the rest of
+/// the widget keeps sampling.
+fn open_files_bounded(
+    reading: &mut Option<FilesReading>,
+    pid: i32,
+) -> Result<Vec<procfs::OpenFile>, String> {
+    for _ in 0..2 {
+        if reading.is_none() {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(procfs::open_files(pid));
+            });
+            *reading = Some((pid, rx));
+        }
+        let Some((for_pid, rx)) = reading.as_ref() else {
+            break;
+        };
+        let for_pid = *for_pid;
+        match rx.recv_timeout(FILES_BUDGET) {
+            Ok(found) => {
+                *reading = None;
+                if for_pid == pid {
+                    return found;
+                }
+                // The answer was for a process no longer open: ask again
+                // for this one.
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(if for_pid == pid {
+                    format!(
+                        "open files: no answer in {}s · a filesystem this process has open is not responding",
+                        FILES_BUDGET.as_secs()
+                    )
+                } else {
+                    "open files: an earlier read is still waiting on a filesystem that is not responding".into()
+                });
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                *reading = None;
+                return Err("open files: the read ended without an answer".into());
+            }
+        }
+    }
+    Err("open files: not read yet".into())
+}
+
 fn pass(pids: &[i32], listed: &BTreeSet<i32>) -> Vec<PidSample> {
     let mut out = Vec::with_capacity(pids.len());
     for &pid in pids {
@@ -372,21 +442,47 @@ fn pass(pids: &[i32], listed: &BTreeSet<i32>) -> Vec<PidSample> {
         let Ok(stat) = procfs::read_stat(pid) else {
             continue;
         };
-        let cgroup = (stat.state == 'D' && !listed.contains(&pid))
+        // `stat` is the leader's state and the leader's wait alone: a worker
+        // thread stuck in D while its leader sleeps would leave the process
+        // out of WAITING ON DISK. A process with more than one thread is
+        // read thread by thread.
+        let (state, blkio_ticks) = if stat.num_threads > 1 {
+            writers::fold_threads(stat.state, &threads(pid))
+                .unwrap_or((stat.state, stat.delayacct_blkio_ticks))
+        } else {
+            (stat.state, stat.delayacct_blkio_ticks)
+        };
+        let cgroup = (state == 'D' && !listed.contains(&pid))
             .then(|| procfs::read_cgroup(pid).ok())
             .flatten();
         out.push(PidSample {
             pid,
             comm: stat.comm,
-            state: stat.state,
+            state,
             ppid: stat.ppid,
             starttime: stat.starttime,
-            blkio_ticks: stat.delayacct_blkio_ticks,
+            blkio_ticks,
             io: procfs::read_io(pid).ok(),
             cgroup,
         });
     }
     out
+}
+
+/// Every thread of `pid`: its state and its own block-I/O wait. A thread
+/// that exits between the listing and the read is skipped.
+fn threads(pid: i32) -> Vec<(char, Option<u64>)> {
+    let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|tid| {
+            let text = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).ok()?;
+            let stat = procfs::parse_pid_stat(&text)?;
+            Some((stat.state, stat.delayacct_blkio_ticks))
+        })
+        .collect()
 }
 
 /// Command line and working directory for the process detail, read once

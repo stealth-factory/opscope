@@ -480,12 +480,10 @@ command palette (`ctrl-k`), on **Theme…**.
 The choice is one setting in the main `config.json`, `"opscope": { "theme":
 "…" }` - also the THEME row on any widget's `,` screen, and a top-level
 `"theme"` works too. **Every running widget follows it**: each looks at the
-setting again at most every two seconds and, when it has changed, restarts
-itself in place in the new theme, as saving its settings does - so a theme
-kept in one pane reaches all of them. A widget with its settings screen or a
-text field open waits until that closes, so no edit is lost. The picker's
-preview is the widget's last frame repainted, close but not exact; `↵`
-restarts the widget so every colour is right. `OPSCOPE_THEME=…` overrides it
+setting again as it draws, at most every two seconds, so a theme kept in one
+pane recolours all of them without a restart. The recolour is close but not
+exact: a colour a widget works out itself, such as a faded trace or a
+gradient end, keeps its old theme until that widget is restarted. `OPSCOPE_THEME=…` overrides it
 for one run. A name opscope does not know falls back to the default, `auto`,
 and a notice (`!`) names it.
 

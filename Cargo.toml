@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "widgets"]
 
 [workspace.package]
-version = "2.9.2"
+version = "2.11.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 homepage = "https://opscope.stealth-factory.co"

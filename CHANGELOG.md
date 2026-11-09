@@ -3,6 +3,32 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.11.0] - 2026-11-09
+
+### Bug Fixes
+
+- **agent-usage**: Name a Claude Fable reset as one, and show unknown reset types as sent (OPS-269) (#602)
+
+### Features
+
+- **disk**: Who is writing, by service and by process, with what is waiting on disk (#593)
+
+## [2.10.1] - 2026-11-09
+
+### Bug Fixes
+
+- **core**: A theme change recolours running widgets instead of restarting them (#599)
+
+## [2.10.0] - 2026-11-07
+
+### Documentation
+
+- Allow transitions, a richer mouse and richer Kitty mode in the rules (#594)
+
+### Features
+
+- **mux-activity**: Space and rule workspace groups, drop the done tint (OPS-268) (#596)
+
 ## [2.9.2] - 2026-11-06
 
 ### Bug Fixes

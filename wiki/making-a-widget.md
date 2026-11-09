@@ -12,6 +12,12 @@ worth defending. Widgets that could not be wired to a true source were deleted
 rather than faked; `matrix` is the sole exception and computes nothing on
 purpose.
 
+The rule is about where a number comes from, not about stillness. A figure may
+animate from one reading to the next as long as it comes to rest on the real
+reading. What is ruled out is a resting value nobody measured: a guess filling
+a gap, a trend drawn past the last sample, or motion when the source reported
+no change. `AGENTS.md` has the full wording.
+
 So the first question is not "what would look good" but "what tells the truth
 here, and can this binary reach it?" If the answer is a plausible-looking
 simulation, stop.
