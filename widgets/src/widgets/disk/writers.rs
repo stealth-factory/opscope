@@ -35,7 +35,8 @@ use tc::procfs::PidIo;
 
 use super::by_process::{self, ProcDetail, Procs};
 use super::{
-    chunks, human, join_cells, ordered_disks, parse, wrap, DiskViewRow, Palette, ShownRate, View,
+    chunks, human, join_cells, ordered_disks, parse, push_group, push_note, push_part, wrap,
+    DiskViewRow, Palette, ShownRate, View, PART_INDENT,
 };
 
 /// Rows WAITING ON DISK shows before `+N more`.
@@ -717,6 +718,8 @@ pub fn ordered_rows(view: &View, rows: &[ServiceRow]) -> Vec<usize> {
 }
 
 const NAME_MIN: usize = 10;
+/// What the name column asks for before the PROCS wording is kept long.
+const NAME_ROOMY: usize = 24;
 const RATE_W: usize = 7;
 const SHARE_W: usize = 5;
 
@@ -734,6 +737,38 @@ struct SvcCols {
 /// longer than its column wraps.
 fn svc_columns(width: usize, longest: usize, full_w: usize, count_w: usize) -> SvcCols {
     let want = (longest + 2).max(NAME_MIN);
+    // First pass: the name column holds a typical cgroup path whole
+    // (`user.slice`, a `system.slice/<unit>` of moderate length) before
+    // the PROCS wording is kept long. Without it a 60-column pane kept
+    // `543 · 534 readable` and broke every name into nine-cell pieces.
+    let roomy = want.min(NAME_ROOMY);
+    for &(read, share, procs, full) in &[
+        (true, true, true, true),
+        (true, true, true, false),
+        (true, true, false, false),
+    ] {
+        let procs_w = if full { full_w } else { count_w }.max(5);
+        let mut need = roomy + 1 + RATE_W;
+        if read {
+            need += 1 + RATE_W;
+        }
+        if share {
+            need += 1 + SHARE_W;
+        }
+        if procs {
+            need += 1 + procs_w;
+        }
+        if need <= width {
+            return SvcCols {
+                name: (roomy + width - need).min(want),
+                read,
+                share,
+                procs,
+                full,
+                procs_w,
+            };
+        }
+    }
     for &(read, share, procs, full) in &[
         (true, true, true, true),
         (true, true, true, false),
@@ -875,15 +910,8 @@ pub fn paint_section(
             .as_ref()
             .map(|p| p.source.label())
             .unwrap_or("proc_pid_rusage");
-        push_lines(
-            rows,
-            &format!("WHO IS WRITING  by process · {source}"),
-            &p.lbl,
-            width,
-        );
-        if !writers.pid_err.is_empty() {
-            push_lines(rows, &writers.pid_err, &p.accent, width);
-        }
+        push_group("WHO IS WRITING", &format!("by process · {source}"), width, p, rows);
+        push_note(&writers.pid_err, &p.accent, width, rows);
         let procs = by_process::paint(view, writers, width, p, rows, placed);
         return Painted {
             proc_len: procs.len(),
@@ -897,10 +925,10 @@ pub fn paint_section(
         Services::Table(table) => Some(table.elapsed),
         _ => writers.wait_elapsed,
     };
-    let mut heading = String::from("WHO IS WRITING");
+    let mut heading = String::new();
     match disk {
         Some(row) => {
-            heading.push_str(&format!("  {}", row.disk.name));
+            heading.push_str(&row.disk.name);
             if let Some(e) = elapsed {
                 heading.push_str(&format!(" · last {}", secs(e)));
             }
@@ -914,9 +942,9 @@ pub fn paint_section(
                 _ => heading.push_str(" · device measuring"),
             }
         }
-        None => heading.push_str("  no disk to describe"),
+        None => heading.push_str("no disk to describe"),
     }
-    push_lines(rows, &heading, &p.lbl, width);
+    push_group("WHO IS WRITING", &heading, width, p, rows);
     let (svc_keys, svc_total) = paint_services(view, writers, disk, width, p, rows, placed);
     let procs = by_process::paint(view, writers, width, p, rows, placed);
     let wait_keys = paint_waiting(view, writers, width, p, rows, placed);
@@ -939,39 +967,45 @@ fn paint_services(
     rows: &mut Vec<String>,
     placed: &mut Vec<(usize, usize)>,
 ) -> (Vec<String>, usize) {
+    let focused = view.focus == 3;
     let table = match &writers.services {
         Services::Table(table) => table,
         other => {
             let line = match other {
-                Services::Measuring => "BY SERVICE  cgroup v2 io.stat · measuring".to_string(),
-                Services::V1 => "BY SERVICE  by service needs cgroup v2".to_string(),
-                Services::NotEnabled(line) => format!("BY SERVICE  {line}"),
-                Services::Unreadable(why) => format!("BY SERVICE  cgroup tree unreadable: {why}"),
+                Services::Measuring => "cgroup v2 io.stat · measuring".to_string(),
+                Services::V1 => "by service needs cgroup v2".to_string(),
+                Services::NotEnabled(line) => line.clone(),
+                Services::Unreadable(why) => format!("cgroup tree unreadable: {why}"),
                 Services::Table(_) => unreachable!(),
             };
-            push_lines(rows, &line, &p.txt, width);
+            push_part("BY SERVICE", "", focused, width, p, rows);
+            push_note(&line, &p.txt, width, rows);
             return (Vec::new(), 0);
         }
     };
-    let mut heading = format!(
-        "BY SERVICE  cgroup v2 io.stat · complete · sorted: {} · {}",
-        view.svc_sort.label(false),
-        table.depth
+    push_part(
+        "BY SERVICE",
+        &format!("sorted: {}", view.svc_sort.label(false)),
+        focused,
+        width,
+        p,
+        rows,
     );
+    let mut note = format!("cgroup v2 io.stat · complete · {}", table.depth);
     if table.container {
-        heading.push_str(" · rows are this container's cgroups; the device total is the host's");
+        note.push_str(" · rows are this container's cgroups; the device total is the host's");
     }
-    push_lines(rows, &heading, &p.lbl, width);
+    push_note(&note, &p.dim, width, rows);
     let Some(disk) = disk else {
         return (Vec::new(), 0);
     };
     let devs = devs_of(disk);
     if devs.is_empty() {
-        push_lines(
-            rows,
+        push_note(
             &format!("no device number for {}", disk.disk.name),
             &p.txt,
             width,
+            rows,
         );
         return (Vec::new(), 0);
     }
@@ -980,7 +1014,7 @@ fn paint_services(
     if order.len() < all.len() {
         let label = format!("top {} by {}", order.len(), view.svc_sort.label(false));
         if let Some(line) = tc::filter_row(order.len(), all.len(), &[label]) {
-            push_lines(rows, &line, &p.dim, width);
+            push_note(&line, &p.dim, width, rows);
         }
     }
     let sum_write: f64 = all.iter().map(|r| r.write_bps).sum();
@@ -1001,7 +1035,7 @@ fn paint_services(
         .unwrap_or(0);
     let cols = svc_columns(width, longest, full_w, count_w);
     let mut head = vec![
-        tc::pad("CGROUP", cols.name),
+        tc::pad(&format!("{PART_INDENT}CGROUP"), cols.name),
         format!("{:>w$}", "WRITE", w = RATE_W),
     ];
     if cols.read {
@@ -1037,17 +1071,17 @@ fn paint_services(
             rate(sum_write)
         ),
     };
-    push_lines(rows, &line, &p.txt, width);
+    push_note(&line, &p.txt, width, rows);
     let floored = all
         .iter()
         .filter(|r| r.inconsistent && !r.path.is_empty())
         .count();
     if floored > 0 {
-        push_lines(
-            rows,
+        push_note(
             &format!("{floored} read below their children this sample (the walk is not atomic) and show 0"),
             &p.dim,
             width,
+            rows,
         );
     }
     (keys, all.len())
@@ -1133,15 +1167,10 @@ fn paint_waiting(
 ) -> Vec<String> {
     let (shown, hidden) = shown_waiters(writers, view.show_kernel, view.wait_sort);
     rows.push(String::new());
-    push_lines(
-        rows,
-        &waiting_heading(writers, &shown, hidden, view.wait_sort),
-        &p.lbl,
-        width,
-    );
-    if !writers.pid_err.is_empty() {
-        push_lines(rows, &writers.pid_err, &p.accent, width);
-    }
+    let (summary, note) = waiting_heading(writers, &shown, hidden, view.wait_sort);
+    push_part("WAITING ON DISK", &summary, view.focus == 5, width, p, rows);
+    push_note(&note, &p.dim, width, rows);
+    push_note(&writers.pid_err, &p.accent, width, rows);
     if shown.is_empty() {
         return Vec::new();
     }
@@ -1179,34 +1208,42 @@ fn paint_waiting(
     keys
 }
 
-fn waiting_heading(writers: &Writers, shown: &[&Waiter], hidden: usize, sort: WaitSort) -> String {
+/// WAITING ON DISK's heading summary (how many, in what order) and the
+/// note under it (whether wait times are measured, what is hidden).
+fn waiting_heading(
+    writers: &Writers,
+    shown: &[&Waiter],
+    hidden: usize,
+    sort: WaitSort,
+) -> (String, String) {
     let total = writers.waiters.len();
-    let mut line = if total == 0 {
-        "WAITING ON DISK  none in D state now".to_string()
+    let mut summary = if total == 0 {
+        "none in D state now".to_string()
     } else {
-        format!("WAITING ON DISK  {total} in D state now")
+        format!("{total} in D state now")
     };
+    let mut notes: Vec<String> = Vec::new();
     if writers.wait_times {
-        line.push_str(" · wait times on (task_delayacct=1)");
+        notes.push("wait times on (task_delayacct=1)".into());
         if !shown.is_empty() {
-            line.push_str(match sort {
+            summary.push_str(match sort {
                 WaitSort::Waited => " · by time waited",
                 WaitSort::Pid => " · in pid order",
             });
         }
     } else {
-        line.push_str(" · wait times off (needs root: sysctl kernel.task_delayacct=1)");
+        notes.push("wait times off (needs root: sysctl kernel.task_delayacct=1)".into());
         if shown.len() > WAIT_TOP {
-            line.push_str(" · the first by pid, a sample");
+            summary.push_str(" · the first by pid, a sample");
         }
     }
     if hidden > 0 {
-        line.push_str(&format!(
-            " · {hidden} kernel thread{} hidden",
+        notes.push(format!(
+            "{hidden} kernel thread{} hidden",
             if hidden == 1 { "" } else { "s" }
         ));
     }
-    line
+    (summary, notes.join(" · "))
 }
 
 fn waiter_columns(writers: &Writers, list: &[&Waiter], width: usize) -> WaitCols {
@@ -1340,14 +1377,11 @@ pub fn paint_waiters(view: &View, width: usize, p: &Palette, rows: &mut Vec<Stri
         return;
     };
     let (shown, hidden) = shown_waiters(writers, view.show_kernel, view.wait_sort);
-    push_lines(
-        rows,
-        &waiting_heading(writers, &shown, hidden, view.wait_sort),
-        &p.lbl,
-        width,
-    );
+    let (summary, note) = waiting_heading(writers, &shown, hidden, view.wait_sort);
+    push_part("WAITING ON DISK", &summary, false, width, p, rows);
+    push_note(&note, &p.dim, width, rows);
     if shown.is_empty() {
-        push_lines(rows, "nothing is in D state now", &p.txt, width);
+        push_note("nothing is in D state now", &p.txt, width, rows);
         return;
     }
     let cols = waiter_columns(writers, &shown, width);
@@ -1712,7 +1746,7 @@ fn paint_process_in(
         rows.push(String::new());
         match files {
             Ok(list) if list.is_empty() => {
-                push_lines(rows, "OPEN FILES  none open", &p.lbl, width);
+                push_part("OPEN FILES", "none open", false, width, p, rows);
             }
             Ok(list) => {
                 let growing = list
@@ -1724,30 +1758,31 @@ fn paint_process_in(
                     Some(s) => format!("growth since the previous sample ({})", secs(s)),
                     None => format!("growth from the next sample, every {}", secs(view.every)),
                 };
-                push_lines(
-                    rows,
-                    &format!(
-                        "OPEN FILES  {} open · {growing} growing · {since}",
-                        list.len()
-                    ),
-                    &p.lbl,
+                push_part(
+                    "OPEN FILES",
+                    &format!("{} open · {growing} growing · {since}", list.len()),
+                    false,
                     width,
+                    p,
+                    rows,
                 );
                 by_process::paint_files(list, home, width, p, rows);
             }
-            Err(why) if !readable => push_lines(
-                rows,
-                &format!("OPEN FILES  {why} · the rest needs root"),
-                &p.lbl,
+            Err(why) if !readable => push_part(
+                "OPEN FILES",
+                &format!("{why} · the rest needs root"),
+                false,
                 width,
+                p,
+                rows,
             ),
-            Err(why) => push_lines(rows, &format!("OPEN FILES  {why}"), &p.lbl, width),
+            Err(why) => push_part("OPEN FILES", why, false, width, p, rows),
         }
     }
 
     // PROCESS: what it is.
     rows.push(String::new());
-    push_lines(rows, "PROCESS", &p.lbl, width);
+    push_part("PROCESS", "", false, width, p, rows);
     if let Some((s, warn)) = &state {
         push_field(rows, "state", s, state_ink(*warn), width, p);
     }

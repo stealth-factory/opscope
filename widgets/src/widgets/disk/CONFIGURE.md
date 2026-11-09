@@ -32,19 +32,19 @@ decided by the host, not by this widget's settings:
 
 - **`IOAccounting`.** A systemd unit gets its own BY SERVICE row only when
   the `io` controller is enabled for it; otherwise it rolls up into the
-  nearest parent that has it, and the section's heading names the depth.
+  nearest parent that has it, and the line under the section's heading names the depth.
   `systemctl set-property <unit> IOAccounting=yes` (as root) enables it
   for one unit, and the widget picks it up on the next poll. If no cgroup
   has it, the section says `io accounting is off everywhere`.
 - **`task_delayacct`.** `/proc/sys/kernel/task_delayacct` at 0 (the usual
-  default) leaves WAITING ON DISK without a WAITED column; the header says
+  default) leaves WAITING ON DISK without a WAITED column; the line under its heading says
   `wait times off (needs root: sysctl kernel.task_delayacct=1)`. Setting
   it to 1 (as root) adds per-process wait times; the widget reads it once
   a minute. It costs a little on every context switch, which is why
   kernels ship with it off; whether to turn it on is the user's call.
 - **What root adds.** Another user's `/proc/<pid>/io`, `cwd`, open files
   and parts of `cmdline` are closed to an ordinary user. BY SERVICE is
-  complete without them; the PROCS column, BY PROCESS's heading (`412 of
+  complete without them; the PROCS column, the line under BY PROCESS's heading (`412 of
   598 processes readable (yours) · the other 186 need root`) and the
   process detail say how many could not be read. Running as root makes
   every process readable; nothing in the widget's settings does.

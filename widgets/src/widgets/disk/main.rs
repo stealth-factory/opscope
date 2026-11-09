@@ -88,7 +88,9 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 /// type, then size. The window rate and FULL IN stay. The bar shrinks from
 /// 11 cells to 4 before a column is dropped. A row that still does not fit
 /// wraps whole cells onto the next line.
-const MOUNT_MIN: usize = 5;
+/// `  MOUNT`: the header sits two cells in, over the names after their
+/// `▸ ` marker, and is never cut.
+const MOUNT_MIN: usize = 7;
 const STACK_INDENT: usize = 3;
 const USED_W: usize = 5;
 const USABLE_W: usize = 6;
@@ -169,8 +171,32 @@ fn columns_for(width: usize) -> Columns {
 /// at the cost of no more than one column the stacked layout would keep;
 /// otherwise each mount point gets a line and its figures go under it,
 /// where they have the full width. The bar narrows first to make room.
-fn layout_for(width: usize, longest: usize) -> Columns {
+///
+/// One long mount point does not stack the rest: the column is sized for
+/// all of them if it can be, and otherwise for as many as it can hold, down
+/// to half. A name wider than that gets a line of its own above its
+/// figures, which stay in the columns every other row uses. Only when not
+/// even half fit beside their figures does every mount point stack.
+fn layout_for(width: usize, names: &[usize]) -> Columns {
+    let mut sorted = names.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    for k in (n.div_ceil(2)..=n).rev() {
+        let want = if k == 0 { 0 } else { sorted[k - 1] };
+        if let Some(cols) = beside(width, want) {
+            return cols;
+        }
+    }
     let mut stacked = columns_for((width + MOUNT_MIN).saturating_sub(STACK_INDENT));
+    stacked.mount = 0;
+    stacked.stacked = true;
+    stacked
+}
+
+/// The columns with a mount column `longest` wide beside the figures, if
+/// that costs no more than one column the stacked layout would keep.
+fn beside(width: usize, longest: usize) -> Option<Columns> {
+    let stacked = columns_for((width + MOUNT_MIN).saturating_sub(STACK_INDENT));
     let mount = (longest + 2).max(MOUNT_MIN);
     let from = COLUMN_SETS
         .iter()
@@ -184,7 +210,7 @@ fn layout_for(width: usize, longest: usize) -> Columns {
                 // and no wider. Spare width widens the bar, which shows
                 // more, and whatever is left over trails the last figure.
                 let grow = (width - need).min(BAR_WIDE.saturating_sub(bar));
-                return Columns {
+                return Some(Columns {
                     mount,
                     stacked: false,
                     typ,
@@ -192,21 +218,18 @@ fn layout_for(width: usize, longest: usize) -> Columns {
                     inodes,
                     hour,
                     bar: bar + grow,
-                };
+                });
             }
         }
     }
-    stacked.mount = 0;
-    stacked.stacked = true;
-    stacked
+    None
 }
 
-fn longest_mount(snap: &Snap) -> usize {
+fn mount_widths(snap: &Snap) -> Vec<usize> {
     snap.rows
         .iter()
         .map(|row| tc::display_width(&row.mount.mount_point))
-        .max()
-        .unwrap_or(0)
+        .collect()
 }
 
 fn column_need(hour: bool, inodes: bool, typ: bool, size: bool, bar: usize) -> usize {
@@ -1743,7 +1766,7 @@ fn draw_body(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dra
     if view.screen == Screen::List && view.writers.is_some() {
         let slot = Mutex::new((Vec::new(), writers::Painted::default()));
         let section = tc::guard_rows("who is writing", width, || {
-            let mut body = vec![String::new()];
+            let mut body = Vec::new();
             let mut at = Vec::new();
             let out = writers::paint_section(view, width, p, &mut body, &mut at);
             if let Ok(mut slot) = slot.lock() {
@@ -1859,31 +1882,40 @@ fn paint(
     if view.screen == Screen::DiskDetail || view.screen.writes() {
         return;
     }
+    let list = view.screen == Screen::List;
+    if list {
+        let summary = view
+            .snap
+            .map(|snap| {
+                let n = snap.rows.len();
+                format!("{n} filesystem{}", if n == 1 { "" } else { "s" })
+            })
+            .unwrap_or_default();
+        push_group("SPACE", &summary, width, p, rows);
+    }
+    push_part(
+        "FILESYSTEMS",
+        &format!("sorted: {}", view.sort.label()),
+        list && view.focus == 0,
+        width,
+        p,
+        rows,
+    );
+    push_note("usable = f_bavail (root reserve excluded)", &p.dim, width, rows);
     let Some(snap) = view.snap else {
-        rows.push(tc::seg(&[(p.dim.as_str(), " sampling…".into())], width));
+        push_note("sampling…", &p.dim, width, rows);
         return;
     };
     let labels = filter_labels(snap.hidden);
     if let Some(line) = tc::filter_row(snap.rows.len(), snap.total, &labels) {
-        for line in wrap(&line, width.saturating_sub(1)) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
-        }
+        push_note(&line, &p.dim, width, rows);
     }
     if snap.rows.is_empty() {
         if let Some(line) = tc::filtered_to_nothing(snap.total, &labels) {
-            for line in wrap(&line, width.saturating_sub(1)) {
-                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {line}"))], width));
-            }
+            push_note(&line, &p.txt, width, rows);
         } else if view.err.is_empty() {
-            rows.push(tc::seg(&[(p.dim.as_str(), " no mounts".into())], width));
+            push_note("no mounts", &p.dim, width, rows);
         }
-    }
-    let heading = format!(
-        "FILESYSTEMS  usable = f_bavail (root reserve excluded) · sorted: {}",
-        view.sort.label()
-    );
-    for line in wrap(&heading, width.saturating_sub(1)) {
-        rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
     }
 
     if view.screen == Screen::Detail {
@@ -1893,7 +1925,7 @@ fn paint(
     if snap.rows.is_empty() {
         return;
     }
-    let cols = layout_for(width, longest_mount(snap));
+    let cols = layout_for(width, &mount_widths(snap));
     rows.extend(header_row(&cols, view.window_hours, width, p));
     let ordered = ordered(snap, view.sort, view.usage, view.window_hours, view.now);
     for (item, index) in ordered.iter().copied().enumerate() {
@@ -1997,10 +2029,11 @@ fn header_row(cols: &Columns, window_hours: u64, width: usize, p: &Palette) -> V
     let right = |text: String, width: usize| (dim.clone(), align_right(text, width));
     let mut lines = Vec::new();
     let mut cells = Vec::new();
+    // Two cells in, where a row's name starts after its `▸ ` marker.
     if cols.stacked {
-        lines.push(tc::seg(&[(dim.as_str(), "MOUNT".to_string())], width));
+        lines.push(tc::seg(&[(dim.as_str(), format!("{PART_INDENT}MOUNT"))], width));
     } else {
-        cells.push(left("MOUNT", cols.mount));
+        cells.push(left(&format!("{PART_INDENT}MOUNT"), cols.mount));
     }
     if cols.typ {
         cells.push(left("TYPE", TYPE_W));
@@ -2122,6 +2155,59 @@ fn data_rows(
         return out;
     }
     let room = cols.mount.saturating_sub(2).max(1);
+    if tc::display_width(&row.mount.mount_point) > room {
+        // Too long for the column the other names share: the name gets
+        // the width of the pane on a line of its own, and its figures sit
+        // under it in the same columns as every other row's.
+        let room = width.saturating_sub(2).max(1);
+        for (index, chunk) in chunks(&row.mount.mount_point, room).iter().enumerate() {
+            let marker = if index == 0 && here { "▸ " } else { "  " };
+            out.push(tc::seg(
+                &[(
+                    name_ink.as_str(),
+                    tc::pad(&format!("{marker}{chunk}"), width),
+                )],
+                width,
+            ));
+        }
+        let mut cells = vec![(c(p.txt.as_str()), " ".repeat(cols.mount))];
+        let note = match &row.figures {
+            Figures::NoAnswer => Some("no answer in 2s"),
+            Figures::Failed(err) => Some(err.as_str()),
+            Figures::Ready(_) => None,
+        };
+        if let Some(note) = note {
+            let ink = c(p.accent.as_str());
+            let room = width.saturating_sub(cols.mount + 1).max(1);
+            let lines = wrap(note, room)
+                .into_iter()
+                .map(|line| {
+                    let pad = " ".repeat(cols.mount + 1);
+                    tc::seg(
+                        &[(ink.as_str(), tc::pad(&format!("{pad}{line}"), width))],
+                        width,
+                    )
+                })
+                .collect::<Vec<_>>();
+            out.extend(lines);
+            return out;
+        }
+        figure_cells(
+            row,
+            cols,
+            here,
+            warn,
+            alert,
+            usage,
+            window_hours,
+            now,
+            p,
+            &c,
+            &mut cells,
+        );
+        out.extend(pack_cells(cells, width, tint_fill));
+        return out;
+    }
     let chunks = chunks(&row.mount.mount_point, room);
     for (index, chunk) in chunks.iter().enumerate() {
         let marker = if index == 0 {
@@ -2480,11 +2566,12 @@ fn footnote_lines(view: &View, snap: &Snap, width: usize, p: &Palette) -> Vec<St
         .filter(|word| !word.is_empty())
         .map(|word| vec![(p.dim.as_str(), word.to_string())])
         .collect();
-    let room = width.saturating_sub(1).max(1);
+    let indent = tc::display_width(PART_INDENT);
+    let room = width.saturating_sub(indent).max(1);
     tc::pack_hints(&words, room, " ")
         .into_iter()
         .map(|line| {
-            let padded = format!(" {line}");
+            let padded = format!("{PART_INDENT}{line}");
             if tc::display_width(&padded) <= width {
                 padded
             } else {
@@ -2611,6 +2698,102 @@ fn push_axis(left: String, right: String, width: usize, p: &Palette, rows: &mut 
         rows.push(tc::seg(&[(p.dim.as_str(), text)], width));
     } else {
         push_wrapped(&format!("{left}  {right}"), width, p, rows);
+    }
+}
+
+/// Where a group's parts, notes and rows start: two cells in, under the
+/// first letter of the group's name and level with a row's name after its
+/// `▸ ` marker.
+const PART_INDENT: &str = "  ";
+
+/// Level 1 of the main screen: one of the three things the widget answers
+/// (SPACE, ACTIVITY, WHO IS WRITING), as a rule across the pane with what
+/// the group comes to beside its name. A blank line always comes first, so
+/// a group never runs on from the one above it. A summary too long for the
+/// rule goes on the lines under it, whole, rather than being cut.
+fn push_group(name: &str, summary: &str, width: usize, p: &Palette, rows: &mut Vec<String>) {
+    rows.push(String::new());
+    let room = width.saturating_sub(1);
+    let rule = "\u{2500}\u{2500}";
+    // ` ── NAME ── ` and at least `──` of rule after whatever follows it.
+    let head_w = 1 + 2 + 1 + tc::display_width(name) + 1 + 2 + 1;
+    // As many of the summary's ` · ` parts as fit on the rule, in order;
+    // the rest go whole onto the lines under it.
+    let pieces: Vec<&str> = summary.split(" \u{b7} ").filter(|s| !s.is_empty()).collect();
+    let mut on_rule = String::new();
+    let mut taken = 0;
+    for piece in &pieces {
+        let next = if on_rule.is_empty() {
+            piece.to_string()
+        } else {
+            format!("{on_rule} \u{b7} {piece}")
+        };
+        if head_w + tc::display_width(&next) + 1 + 2 > room {
+            break;
+        }
+        on_rule = next;
+        taken += 1;
+    }
+    let mut parts: Vec<(&str, String)> = vec![
+        (p.dim.as_str(), format!(" {rule} ")),
+        (p.txt.as_str(), name.to_string()),
+    ];
+    let mut used = 1 + 2 + 1 + tc::display_width(name);
+    if on_rule.is_empty() {
+        parts.push((p.dim.as_str(), " ".into()));
+        used += 1;
+    } else {
+        parts.push((p.dim.as_str(), format!(" {rule} {on_rule} ")));
+        used += 4 + tc::display_width(&on_rule) + 1;
+    }
+    parts.push((p.dim.as_str(), "\u{2500}".repeat(room.saturating_sub(used))));
+    rows.push(tc::seg(&parts, width));
+    if taken < pieces.len() {
+        push_note(&pieces[taken..].join(" \u{b7} "), &p.dim, width, rows);
+    }
+}
+
+/// Level 2: a part of a group - FILESYSTEMS, DISKS, BY PROCESS and the
+/// rest - indented under the group's rule, with no rule of its own. `tab`
+/// steps through these, so the one taking the keys says so: accent ink and
+/// a `▏` in the margin. `summary` is what is in force (the sort, a count);
+/// what a number means goes on the note lines under it.
+fn push_part(
+    name: &str,
+    summary: &str,
+    focused: bool,
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+) {
+    let (mark, ink) = if focused {
+        ("\u{258f} ", p.accent.as_str())
+    } else {
+        (PART_INDENT, p.txt.as_str())
+    };
+    let head_w = tc::display_width(PART_INDENT) + tc::display_width(name);
+    let fits = summary.is_empty() || head_w + 2 + tc::display_width(summary) <= width;
+    let mut parts: Vec<(&str, String)> = vec![
+        (p.accent.as_str(), mark.to_string()),
+        (ink, name.to_string()),
+    ];
+    if fits && !summary.is_empty() {
+        parts.push((p.dim.as_str(), format!("  {summary}")));
+    }
+    rows.push(tc::seg(&parts, width));
+    if !fits {
+        push_note(summary, &p.dim, width, rows);
+    }
+}
+
+/// A sentence inside a part, wrapped at words at the part's indent.
+fn push_note(text: &str, ink: &str, width: usize, rows: &mut Vec<String>) {
+    if text.is_empty() {
+        return;
+    }
+    let indent = tc::display_width(PART_INDENT);
+    for line in wrap(text, width.saturating_sub(indent)) {
+        rows.push(tc::seg(&[(ink, format!("{PART_INDENT}{line}"))], width));
     }
 }
 
@@ -3001,23 +3184,26 @@ fn paint_disks(
         })
         .unwrap_or(0);
     let cols = disk_columns(width, longest);
-    let heading = disks_heading(view, combined, cols.queue);
-    for line in wrap(&heading, width.saturating_sub(1)) {
-        rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
+    let list = view.screen == Screen::List;
+    if list {
+        push_group("ACTIVITY", &activity_summary(view.board), width, p, rows);
     }
-    if !view.disk_err.is_empty() {
-        for line in wrap(view.disk_err, width.saturating_sub(1)) {
-            rows.push(tc::seg(&[(p.accent.as_str(), format!(" {line}"))], width));
-        }
-    }
+    push_part(
+        "DISKS",
+        &format!("sorted: {}", view.disk_sort.label(combined)),
+        list && view.focus == 1,
+        width,
+        p,
+        rows,
+    );
+    push_note(&disks_note(view, combined, cols.queue), &p.dim, width, rows);
+    push_note(view.disk_err, &p.accent, width, rows);
     let Some(board) = view.board else {
-        rows.push(tc::seg(&[(p.dim.as_str(), " measuring".into())], width));
+        push_note("measuring", &p.dim, width, rows);
         return 0;
     };
     if !board.missing.is_empty() {
-        for line in wrap(&board.missing, width.saturating_sub(1)) {
-            rows.push(tc::seg(&[(p.txt.as_str(), format!(" {line}"))], width));
-        }
+        push_note(&board.missing, &p.txt, width, rows);
         return 0;
     }
     if view.screen == Screen::DiskDetail {
@@ -3028,18 +3214,14 @@ fn paint_disks(
     let (visible, hidden) = parse::visible_disk_indexes(&lives, view.show_idle, view.hide_devices);
     let labels = hidden.labels();
     if let Some(line) = tc::filter_row(visible.len(), lives.len(), &labels) {
-        for line in wrap(&line, width.saturating_sub(1)) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
-        }
+        push_note(&line, &p.dim, width, rows);
     }
     let indexes = ordered_disks(board, view.disk_sort, view.show_idle, view.hide_devices);
     if indexes.is_empty() {
         if let Some(line) = tc::filtered_to_nothing(lives.len(), &labels) {
-            for line in wrap(&line, width.saturating_sub(1)) {
-                rows.push(tc::seg(&[(p.txt.as_str(), format!(" {line}"))], width));
-            }
+            push_note(&line, &p.txt, width, rows);
         } else if view.disk_err.is_empty() {
-            rows.push(tc::seg(&[(p.dim.as_str(), " no disks".into())], width));
+            push_note("no disks", &p.dim, width, rows);
         }
         // A disk hidden by name stays in the sum, so hiding every row
         // still leaves the machine's chart.
@@ -3056,25 +3238,19 @@ fn paint_disks(
     }
     if !board.combined {
         let note = "* BUSY = share of time with at least one request in flight (field 10); an NVMe reaches 100% with headroom";
-        for line in wrap(note, width.saturating_sub(1)) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], width));
-        }
+        push_note(note, &p.dim, width, rows);
     }
     push_io_chart(view, board, &indexes, width, p, rows, plots);
     indexes.len()
 }
 
-fn disks_heading(view: &View, combined: bool, queue: bool) -> String {
+/// What the DISKS figures are and where they come from, under its heading.
+fn disks_note(view: &View, combined: bool, queue: bool) -> String {
     if combined {
-        return format!(
-            "DISKS  iostat: read and write combined · sorted: {} · AWAIT, BUSY and QUEUE need IOKit (OPS-193)",
-            view.disk_sort.label(true)
-        );
+        return "iostat: read and write combined · AWAIT, BUSY and QUEUE need IOKit (OPS-193)"
+            .into();
     }
-    let mut line = format!(
-        "DISKS  whole disks only · /proc/diskstats · 512-byte sectors · sorted: {}",
-        view.disk_sort.label(false)
-    );
+    let mut line = "whole disks only · /proc/diskstats · 512-byte sectors".to_string();
     if view.board.is_some_and(|board| board.host_devices) {
         line.push_str(" · host devices, container filesystems");
     }
@@ -3084,16 +3260,36 @@ fn disks_heading(view: &View, combined: bool, queue: bool) -> String {
     line
 }
 
+/// What ACTIVITY comes to on its rule: how many disks, and the total the
+/// chart under the table ends on.
+fn activity_summary(board: Option<&DiskBoard>) -> String {
+    let Some(board) = board else {
+        return String::new();
+    };
+    let n = board.rows.len();
+    let mut line = format!("{n} disk{}", if n == 1 { "" } else { "s" });
+    let read = rate_now(&board.total_read);
+    let write = rate_now(&board.total_write);
+    if board.combined {
+        if read != "—" {
+            line.push_str(&format!(" · {read} combined"));
+        }
+    } else if read != "—" || write != "—" {
+        line.push_str(&format!(" · {write} written · {read} read"));
+    }
+    line
+}
+
 fn disk_header(combined: bool, cols: &DiskCols, width: usize, p: &Palette) -> String {
     if combined {
         let cells = vec![
-            tc::pad("DISK", cols.disk),
+            tc::pad(&format!("{PART_INDENT}DISK"), cols.disk),
             format!("{:>width$}", "TPS", width = TPS_W),
             format!("{:>width$}", "MB/s", width = MB_W),
         ];
         return tc::seg(&[(p.dim.as_str(), cells.join(" "))], width);
     }
-    let mut cells = vec![tc::pad("DISK", cols.disk)];
+    let mut cells = vec![tc::pad(&format!("{PART_INDENT}DISK"), cols.disk)];
     if cols.typ {
         cells.push(tc::pad("TYPE", DISK_TYPE_W));
     }
@@ -3452,10 +3648,9 @@ fn paint_pressure(
     rows: &mut Vec<String>,
     placed: &mut Vec<(usize, usize)>,
 ) {
-    let heading = "/proc/pressure/io · stall time, not busy time";
-    for line in wrap(heading, width.saturating_sub(1)) {
-        rows.push(tc::seg(&[(p.lbl.as_str(), format!(" {line}"))], width));
-    }
+    rows.push(String::new());
+    push_part("PRESSURE", "", focus == 2, width, p, rows);
+    push_note("/proc/pressure/io · stall time, not busy time", &p.dim, width, rows);
     let text = if !board.pressure_err.is_empty() {
         board.pressure_err.clone()
     } else if board.pressure_absent || board.pressure.is_none() {
@@ -3482,9 +3677,10 @@ fn paint_pressure(
     } else {
         p.txt.clone()
     };
-    for (index, line) in wrap(&text, width.saturating_sub(1)).into_iter().enumerate() {
+    let indent = tc::display_width(PART_INDENT);
+    for (index, line) in wrap(&text, width.saturating_sub(indent)).into_iter().enumerate() {
         let ink = format!("{tint}{colour}");
-        rows.push(tc::seg(&[(ink.as_str(), format!(" {line}"))], width));
+        rows.push(tc::seg(&[(ink.as_str(), format!("{PART_INDENT}{line}"))], width));
         if index == 0 {
             placed.push((rows.len() - 1, PRESSURE_ID));
         }
@@ -3514,7 +3710,8 @@ fn push_io_chart(
         .flatten()
         .map(|index| &board.rows[index]);
     if let Some(row) = selected {
-        push_wrapped(&row.disk.name, width, p, rows);
+        rows.push(String::new());
+        push_part("THROUGHPUT", &row.disk.name, false, width, p, rows);
         push_chart(
             &row.read,
             &row.write,
@@ -3530,8 +3727,11 @@ fn push_io_chart(
     if board.total_names.is_empty() {
         return;
     }
-    push_wrapped(
+    rows.push(String::new());
+    push_part(
+        "THROUGHPUT",
         &total_label(&board.total_names, &board.total_covered),
+        false,
         width,
         p,
         rows,
@@ -4131,7 +4331,7 @@ mod tests {
             assert!(flat.contains("f_bavail"), "{width}");
             assert!(flat.contains("sorted: mount"), "{width}");
             assert!(flat.contains("no answer in 2s"), "{width}");
-            let cols = layout_for(width, 2);
+            let cols = layout_for(width, &[1, 2, 2]);
             if cols.inodes {
                 assert!(flat.contains("n/a"), "inode n/a missing at {width}");
             }
@@ -4140,8 +4340,8 @@ mod tests {
             let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
             let from = lines
                 .iter()
-                .position(|line| line.starts_with("MOUNT"))
-                .unwrap_or_else(|| panic!("no header at {width}"));
+                .position(|line| line.trim_start().starts_with("MOUNT"))
+                .unwrap_or_else(|| panic!("no header at {width}: {lines:?}"));
             let to = lines[from..]
                 .iter()
                 .position(|line| line.starts_with("▸ "))
@@ -4186,7 +4386,7 @@ mod tests {
         for line in &drawn.rows {
             assert!(tc::display_width(line) <= 28, "{line:?}");
         }
-        assert!(layout_for(28, path.len()).stacked);
+        assert!(layout_for(28, &[path.len()]).stacked);
         // Stacked, the mount point has the whole line less the marker.
         let pieces = chunks(path, 26);
         assert!(
@@ -5010,7 +5210,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("read") && line.contains("peak"))
             .unwrap();
-        assert_eq!(lines[chart_at - 1].trim(), "sda");
+        assert_eq!(lines[chart_at - 1].trim(), "THROUGHPUT  sda");
     }
 
     #[test]
@@ -5081,7 +5281,7 @@ mod tests {
         let snap = snap(rows, Hidden::default());
         let p = palette();
         for width in [28usize, 40, 60, 80, 100, 160] {
-            let cols = layout_for(width, long.len());
+            let cols = layout_for(width, &[1, long.len(), "/run/user/1000/doc".len()]);
             let drawn = draw_body(&view(Some(&snap), long), width, &p, None);
             let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
             for line in &drawn.rows {
@@ -5095,7 +5295,7 @@ mod tests {
                     "{width}: {lines:?}"
                 );
                 assert!(
-                    lines.iter().any(|line| line.trim_end() == "MOUNT"),
+                    lines.iter().any(|line| line.trim() == "MOUNT"),
                     "{width}"
                 );
                 // The error is a sentence, so it wraps rather than being cut.
@@ -5107,7 +5307,12 @@ mod tests {
                     .iter()
                     .position(|line| line.starts_with(&format!("▸ {long}")))
                     .unwrap_or_else(|| panic!("{width}: {lines:?}"));
-                assert!(lines[at].contains('%'), "{width}: figures beside the mount");
+                // Beside its figures, or on a line of its own with its
+                // figures on the next one, in the shared columns.
+                assert!(
+                    lines[at].contains('%') || lines[at + 1].contains('%'),
+                    "{width}: figures beside or under the mount: {lines:?}"
+                );
             }
             // Every line of the selected mount is that mount's item.
             let item = drawn
@@ -5119,11 +5324,12 @@ mod tests {
             let rows_of = drawn.placed.iter().filter(|(_, at)| *at == item).count();
             assert!(rows_of >= if cols.stacked { 2 } else { 1 }, "{width}");
         }
-        assert!(layout_for(60, long.len()).stacked);
-        assert!(!layout_for(160, long.len()).stacked);
+        let names = [1, long.len(), "/run/user/1000/doc".len()];
+        assert!(layout_for(60, &names).stacked);
+        assert!(!layout_for(160, &names).stacked);
         // Short mount points stay beside their figures once the figures fit.
-        assert!(!layout_for(80, 2).stacked);
-        assert!(layout_for(40, 2).stacked);
+        assert!(!layout_for(80, &[2]).stacked);
+        assert!(layout_for(40, &[2]).stacked);
     }
 
     #[test]
@@ -5144,7 +5350,7 @@ mod tests {
         let mut frame = view(Some(&snap), "/");
         frame.board = Some(&board);
         for width in [160usize, 400] {
-            let cols = layout_for(width, "/boot/efi".len());
+            let cols = layout_for(width, &[1, "/boot/efi".len(), "/mnt/slow".len()]);
             assert_eq!(cols.mount, "/boot/efi".len() + 2, "{width}");
             assert!(cols.bar <= BAR_WIDE, "{width}");
             assert_eq!(
@@ -5171,6 +5377,171 @@ mod tests {
                     "{width}: {gap} blank cells after {name}: {line:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn one_long_mount_point_stacks_alone() {
+        // OPS-58 retouch: a single long name used to stack every mount on
+        // its own line above its figures, doubling the section at 100
+        // columns. Only the one that does not fit stacks now.
+        let long = "/mnt/example-archive/with-a-long-tail";
+        let rows = vec![
+            row("/", "ext4", Figures::Ready(space(80, 20, 100, 90)), 0),
+            row("/boot", "ext4", Figures::Ready(space(10, 90, 0, 0)), 1),
+            row("/dev/shm", "tmpfs", Figures::Ready(space(1, 99, 0, 0)), 2),
+            row("/run/lock", "tmpfs", Figures::Ready(space(1, 99, 0, 0)), 3),
+            row(long, "fuse.rclone", Figures::Ready(space(40, 60, 0, 0)), 4),
+        ];
+        let snap = snap(rows, Hidden::default());
+        let p = palette();
+        let cols = layout_for(100, &mount_widths(&snap));
+        assert!(!cols.stacked);
+        assert!(cols.mount < long.len() + 2);
+        let drawn = draw_body(&view(Some(&snap), "/"), 100, &p, None);
+        let lines: Vec<String> = drawn.rows.iter().map(|line| plain(line)).collect();
+        for name in ["/boot", "/dev/shm", "/run/lock"] {
+            let line = lines
+                .iter()
+                .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("no row for {name}: {lines:?}"));
+            assert!(line.contains('%'), "{name} beside its figures: {line:?}");
+        }
+        let at = lines
+            .iter()
+            .position(|line| line.trim() == long)
+            .unwrap_or_else(|| panic!("{long} on a line of its own: {lines:?}"));
+        assert!(lines[at + 1].contains('%'), "{lines:?}");
+        // Its figures sit in the same columns as the row above it.
+        let pct = |line: &str| line.find('%');
+        assert_eq!(pct(&lines[at + 1]), pct(&lines[at - 1]), "{lines:?}");
+        for line in &drawn.rows {
+            assert!(tc::display_width(line) <= 100, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn each_group_opens_after_a_blank_line_and_the_focused_part_is_marked() {
+        let rows = vec![row("/", "ext4", Figures::Ready(space(80, 20, 100, 90)), 0)];
+        let snap = snap(rows, Hidden::default());
+        let mut board = board(vec![disk_row("sda", 1, 1, 8.0)]);
+        board.total_names = vec!["sda".into()];
+        board.total_read = vec![Some(1.0)];
+        board.total_write = vec![Some(8.0)];
+        let p = palette();
+        let heads = |focus: usize, width: usize| {
+            let mut frame = view(Some(&snap), "/");
+            frame.board = Some(&board);
+            frame.focus = focus;
+            let drawn = draw_body(&frame, width, &p, None);
+            for line in &drawn.rows {
+                assert!(tc::display_width(line) <= width, "{width}: {line:?}");
+            }
+            drawn.rows
+        };
+        for width in [28usize, 40, 60, 80, 100, 140] {
+            let rows = heads(0, width);
+            let lines: Vec<String> = rows.iter().map(|line| plain(line)).collect();
+            for group in ["SPACE", "ACTIVITY"] {
+                let at = lines
+                    .iter()
+                    .position(|line| line.starts_with(&format!(" ── {group} ")))
+                    .unwrap_or_else(|| panic!("{width}: no {group} rule: {lines:?}"));
+                assert!(lines[at - 1].is_empty(), "{width}: {group} runs on: {lines:?}");
+                assert!(lines[at].trim_end().ends_with('─'), "{width}: {lines:?}");
+            }
+            // Parts sit under the rule, two cells in, and every part after
+            // the first in a group is a blank line apart.
+            for part in ["DISKS", "THROUGHPUT", "PRESSURE"] {
+                assert!(
+                    lines.iter().any(|line| line.trim_start_matches('▏').trim_start()
+                        .starts_with(part)
+                        && line.starts_with(['▏', ' '])
+                        && !line.starts_with(" ──")),
+                    "{width}: no {part} heading: {lines:?}"
+                );
+            }
+            for part in ["THROUGHPUT", "PRESSURE"] {
+                let at = lines
+                    .iter()
+                    .position(|line| line.trim_start().starts_with(part))
+                    .unwrap();
+                assert!(lines[at - 1].is_empty(), "{width}: {part}: {lines:?}");
+            }
+        }
+        // `tab` moves the mark: the heading of the part with the keys
+        // changes, in text and ink, and only that one.
+        let find = |rows: &[String], part: &str| {
+            rows.iter()
+                .find(|line| plain(line).trim_start_matches('▏').trim_start().starts_with(part))
+                .cloned()
+                .unwrap_or_else(|| panic!("no {part}"))
+        };
+        for (focus, part) in [(0usize, "FILESYSTEMS"), (1, "DISKS"), (2, "PRESSURE")] {
+            let on = heads(focus, 100);
+            let off = heads((focus + 1) % 3, 100);
+            let lit = find(&on, part);
+            let unlit = find(&off, part);
+            assert_ne!(lit, unlit, "{part}");
+            assert!(plain(&lit).starts_with('▏'), "{part}: {lit:?}");
+            assert!(!plain(&unlit).starts_with('▏'), "{part}: {unlit:?}");
+            assert!(lit.contains(&p.accent), "{part}");
+            let marked = on.iter().filter(|line| plain(line).starts_with('▏')).count();
+            assert_eq!(marked, 1, "{part}: one part has the keys");
+        }
+        // WHO IS WRITING: the same, and its three parts take the mark in
+        // the order tab reaches them.
+        let board = writing_board(29.0 * MIB as f64);
+        let writers = writers_with_procs();
+        let who = |focus: usize, width: usize| {
+            let mut frame = view(None, "/");
+            frame.board = Some(&board);
+            frame.writers = Some(&writers);
+            frame.focus = focus;
+            let drawn = draw_body(&frame, width, &p, None);
+            rows_fit(&drawn, width);
+            drawn.rows
+        };
+        for width in [28usize, 40, 60, 80, 100, 140] {
+            let lines: Vec<String> = who(0, width).iter().map(|line| plain(line)).collect();
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with(" ── WHO IS WRITING "))
+                .unwrap_or_else(|| panic!("{width}: {lines:?}"));
+            assert!(lines[at - 1].is_empty(), "{width}: {lines:?}");
+            if width >= 60 {
+                // The name column gets room before the PROCS wording does,
+                // so a cgroup path is not broken into eight-cell pieces.
+                let whole = if width >= 80 {
+                    "system.slice/example-svc-9.service "
+                } else {
+                    "system.slice/example-svc-9"
+                };
+                assert!(
+                    lines.iter().any(|line| line.trim_start().starts_with(whole)
+                        && line.contains("/s")),
+                    "{width}: {lines:?}"
+                );
+            }
+            for part in ["BY PROCESS", "WAITING ON DISK"] {
+                let at = lines
+                    .iter()
+                    .position(|line| line.trim_start().starts_with(part))
+                    .unwrap_or_else(|| panic!("{width}: no {part}: {lines:?}"));
+                assert!(lines[at - 1].is_empty(), "{width}: {part}: {lines:?}");
+            }
+        }
+        for (focus, part) in [
+            (BY_SERVICE, "BY SERVICE"),
+            (BY_PROCESS, "BY PROCESS"),
+            (WAITING, "WAITING ON DISK"),
+        ] {
+            let on = who(focus, 100);
+            let off = who(0, 100);
+            assert!(plain(&find(&on, part)).starts_with('▏'), "{part}");
+            assert!(!plain(&find(&off, part)).starts_with('▏'), "{part}");
+            let marked = on.iter().filter(|line| plain(line).starts_with('▏')).count();
+            assert_eq!(marked, 1, "{part}: one part has the keys");
         }
     }
 
@@ -5408,7 +5779,7 @@ mod tests {
         let drawn = draw_body(&frame, 120, &p, None);
         assert!(plain_has(
             &drawn,
-            "WHO IS WRITING  sda · last 2s · 32M/s written"
+            " ── WHO IS WRITING ── sda · last 2s · 32M/s written"
         ));
         assert!(plain_has(
             &drawn,
@@ -5505,9 +5876,10 @@ mod tests {
         frame.board = Some(&board);
         frame.writers = Some(&writers);
         let drawn = draw_body(&frame, 200, &p, None);
+        assert!(plain_has(&drawn, "WAITING ON DISK  9 in D state now"));
         assert!(plain_has(
             &drawn,
-            "WAITING ON DISK  9 in D state now · wait times off (needs root: sysctl kernel.task_delayacct=1)"
+            "wait times off (needs root: sysctl kernel.task_delayacct=1)"
         ));
         assert!(plain_has(&drawn, "2 kernel threads hidden"));
         assert!(!waiting_header(&drawn).contains("WAITED"));
@@ -5541,10 +5913,8 @@ mod tests {
         frame.board = Some(&board);
         frame.writers = Some(&writers);
         let drawn = draw_body(&frame, 140, &p, None);
-        assert!(plain_has(
-            &drawn,
-            "wait times on (task_delayacct=1) · by time waited"
-        ));
+        assert!(plain_has(&drawn, "in D state now · by time waited"));
+        assert!(plain_has(&drawn, "wait times on (task_delayacct=1)"));
         // pid 506: 7 × (40 - 10) ticks at 100 Hz over 2 s.
         let first = drawn
             .rows
@@ -5811,6 +6181,9 @@ mod tests {
                 .iter()
                 .map(|l| plain(l))
                 .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
                 .join(" ");
             assert!(text.contains("readable (yours)"), "{width}");
             assert!(text.contains('≈'), "{width}");
@@ -5826,9 +6199,10 @@ mod tests {
         frame.board = Some(&board);
         frame.writers = Some(&writers);
         let drawn = draw_body(&frame, 240, &p, None);
+        assert!(plain_has(&drawn, "BY PROCESS  sorted: write"));
         assert!(plain_has(
             &drawn,
-            "BY PROCESS  /proc/<pid>/io · every disk · sorted: write · 16 of 19 processes readable (yours) · the other 3 need root"
+            "/proc/<pid>/io · every disk · 16 of 19 processes readable (yours) · the other 3 need root"
         ));
         assert!(plain_has(
             &drawn,
@@ -6117,10 +6491,11 @@ mod tests {
         frame.board = Some(&board);
         frame.writers = Some(&writers);
         let drawn = draw_body(&frame, 200, &p, None);
-        assert!(plain_has(&drawn, "WHO IS WRITING  by process · proc_pid_rusage"));
+        assert!(plain_has(&drawn, " ── WHO IS WRITING ── by process · proc_pid_rusage"));
+        assert!(plain_has(&drawn, "BY PROCESS  sorted: write"));
         assert!(plain_has(
             &drawn,
-            "every disk · sorted: write · 16 of 19 processes readable (yours) · the other 3 need root"
+            "every disk · 16 of 19 processes readable (yours) · the other 3 need root"
         ));
         assert!(plain_has(&drawn, "≈ 15M/s of 188M/s combined (8%)"));
         let open = writers::Opened {

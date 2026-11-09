@@ -32,7 +32,9 @@ use opscope_core as tc;
 use tc::procfs::{OpenFile, PidIo};
 
 use super::writers::{PidSample, Writers, rate, secs, shown_path};
-use super::{DiskSort, Palette, View, chunks, human, join_cells, wrap};
+use super::{
+    DiskSort, Palette, View, chunks, human, join_cells, push_note, push_part, wrap,
+};
 
 /// Item ids for a click, above WAITING's.
 pub const PROC_BASE: usize = 5_000_000;
@@ -835,19 +837,24 @@ pub fn paint(
     let Some(procs) = writers.procs.as_ref() else {
         return Painted::default();
     };
-    let sorted = format!("every disk · sorted: {}", view.proc_sort.label(false));
-    let heading = match procs.source {
-        Source::Procfs => format!(
-            "BY PROCESS  {} · {sorted} · {}",
-            procs.source.label(),
-            coverage(procs)
-        ),
-        Source::Rusage => format!("{sorted} · {}", coverage(procs)),
-    };
+    // On Linux it follows BY SERVICE, a blank line apart; on macOS it is
+    // the first part under the group's rule.
     if procs.source == Source::Procfs {
         rows.push(String::new());
     }
-    push_lines(rows, &heading, &p.lbl, width);
+    push_part(
+        "BY PROCESS",
+        &format!("sorted: {}", view.proc_sort.label(false)),
+        view.focus == 4,
+        width,
+        p,
+        rows,
+    );
+    let note = match procs.source {
+        Source::Procfs => format!("{} · every disk · {}", procs.source.label(), coverage(procs)),
+        Source::Rusage => format!("every disk · {}", coverage(procs)),
+    };
+    push_note(&note, &p.dim, width, rows);
 
     let (list, locked) = ordered(procs, view.proc_sort, view.proc_all, view.top_writers);
     let readable = procs.rows.len();
@@ -883,10 +890,10 @@ pub fn paint(
             p.dim.clone()
         };
         let from = rows.len();
-        push_lines(rows, &subset, &ink, width);
+        push_note(&subset, &ink, width, rows);
         placed.extend((from..rows.len()).map(|at| (at, PROC_BASE)));
     } else {
-        push_lines(rows, &subset, &p.dim, width);
+        push_note(&subset, &p.dim, width, rows);
     }
 
     let comm_want = list
@@ -933,14 +940,14 @@ pub fn paint(
         keys.push(key);
     }
     if !locked.is_empty() {
-        push_lines(
-            rows,
+        push_note(
             &format!(
                 "{} need root · their I/O is not readable as you",
                 locked.len()
             ),
             &p.dim,
             width,
+            rows,
         );
     }
     for l in &locked {
@@ -962,11 +969,11 @@ pub fn paint(
         .board
         .map(|b| b.total_names.clone())
         .unwrap_or_default();
-    push_lines(
-        rows,
+    push_note(
         &reconcile_line(procs.window.as_ref(), procs.source, &disks),
         &p.txt,
         width,
+        rows,
     );
     Painted {
         keys,

@@ -1,5 +1,8 @@
 Which filesystems can still take a write, which disks are doing I/O, and, on Linux, whether I/O is stalling.
 
+The screen is three groups, each opening on a rule: SPACE (FILESYSTEMS),
+ACTIVITY (DISKS, the THROUGHPUT chart and PRESSURE) and WHO IS WRITING.
+
 Space and inodes come from the kernel. Linux reads the mount table and
 statvfs; macOS reads getmntinfo. Pseudo filesystems, bind mounts and
 read-only mounts are hidden, because none of them can fill. A mount
@@ -48,7 +51,7 @@ section, a shows every row of BY PROCESS when it has the cursor and of
 BY SERVICE otherwise, or the top ones again (BY PROCESS takes the cursor
 even when nothing moved), w cycles the filesystem window (6, 12 or 24
 hours; only on the list and a mount's detail), tab moves between
-sections, v toggles idle disks, p pauses, esc goes back, comma opens
+sections (the heading of the one with the keys is marked), v toggles idle disks, p pauses, esc goes back, comma opens
 settings, q quits.
 
 Press ! to read this widget's notices - warnings that are not about a number
