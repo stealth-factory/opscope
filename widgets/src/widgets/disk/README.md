@@ -348,7 +348,10 @@ adds the child's counters to the parent's `/proc/<pid>/io`. The widget
 takes the child's last reading back out of the parent's next delta, so
 bytes the child already wrote are not counted again and a parent that only
 waited is not a writer; what the child wrote after it was last read is
-counted once, on the parent. A child this user cannot read cannot be taken
+counted once, on the parent. A child reaped automatically, because its
+parent ignores `SIGCHLD`, passes nothing on, so nothing is taken out: the
+widget only takes a child back out when the parent's counters moved by at
+least that child's reading. A child this user cannot read cannot be taken
 back out. A poll where the disks had no rate
 is left out of both sides. The rest of the device's figure is the other
 users' processes, the kernel's own writeback and journal, and swap.

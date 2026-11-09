@@ -287,6 +287,34 @@ fn inherited(prev: &HashMap<i32, Seen>, samples: &[ProcSample]) -> HashMap<i32, 
     out
 }
 
+/// Whether the parent's counters show the transfer at all, and so how much
+/// of [`inherited`] to take out. A child reaped automatically - its parent
+/// ignores `SIGCHLD` or set `SA_NOCLDWAIT` - passes nothing on, and taking
+/// its counters out anyway would hide the parent's own I/O. A real transfer
+/// moves at least the child's last reading into every counter, so a parent
+/// that moved less than that on any counter did not receive one. What this
+/// cannot tell apart is a parent whose own I/O over the poll was at least a
+/// child's whole lifetime on every counter: that is read as a transfer.
+fn inherited_here(
+    from_children: Option<(u64, u64, u64)>,
+    (read, written, cancelled): (u64, u64, u64),
+    seen: &Seen,
+) -> (u64, u64, u64) {
+    let Some((ir, iw, ic)) = from_children else {
+        return (0, 0, 0);
+    };
+    let moved = (
+        read.saturating_sub(seen.read),
+        written.saturating_sub(seen.written),
+        cancelled.saturating_sub(seen.cancelled),
+    );
+    if moved.0 >= ir && moved.1 >= iw && moved.2 >= ic {
+        (ir, iw, ic)
+    } else {
+        (0, 0, 0)
+    }
+}
+
 /// One pass turned into rates. A pid that was not in the previous pass has
 /// no rate yet; one that has gone is dropped, never drawn as negative; a
 /// pid whose start time changed is a reused pid and starts again. A parent
@@ -313,9 +341,13 @@ pub fn step(
                 // its own. The poll's write is its write delta less its
                 // cancelled delta, so a poll that truncated more dirty data
                 // than it wrote is 0, and its reads still count.
-                let (ir, iw, ic) = inherited.get(&s.pid).copied().unwrap_or_default();
                 let delta = elapsed.and_then(|e| {
                     let seen = memory.prev.get(&s.pid)?;
+                    let (ir, iw, ic) = inherited_here(
+                        inherited.get(&s.pid).copied(),
+                        (read, written, cancelled),
+                        seen,
+                    );
                     (seen.start == s.start && read >= seen.read).then(|| {
                         let w = written
                             .saturating_sub(seen.written)
@@ -1367,6 +1399,40 @@ mod tests {
         );
         assert_eq!(p.rows[0].write_bps, Some(4_096.0), "only the unseen tail");
         assert_eq!(moved, ((1 << 20) + 4_096) as f64);
+    }
+
+    /// A parent that ignores SIGCHLD has its children reaped automatically,
+    /// and nothing is added to its counters. Its own 1 MiB is its own.
+    #[test]
+    fn an_automatically_reaped_child_takes_nothing_from_its_parent() {
+        let mut memory = ProcMemory::default();
+        let child = |io: PidIo| PidSample {
+            ppid: 100,
+            ..pid_sample(300, 9, Some(io))
+        };
+        let mut pass = |list: Vec<PidSample>, now: f64| {
+            step(
+                &mut memory,
+                samples_from_pids(&list, &HashMap::new()),
+                now,
+                false,
+                false,
+                Source::Procfs,
+            )
+        };
+        pass(
+            vec![
+                pid_sample(100, 5, Some(io(0, 4_096, 0))),
+                child(io(0, 4 << 20, 0)),
+            ],
+            0.0,
+        );
+        // The child has gone; the parent's counter moved by its own 1 MiB.
+        let p = pass(
+            vec![pid_sample(100, 5, Some(io(0, 4_096 + (1 << 20), 0)))],
+            1.0,
+        );
+        assert_eq!(p.rows[0].write_bps, Some((1 << 20) as f64));
     }
 
     #[test]
