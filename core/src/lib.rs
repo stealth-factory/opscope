@@ -3651,7 +3651,7 @@ pub fn meter(frac: f64, n: usize) -> String {
     format!("{}{}", "█".repeat(filled), "░".repeat(n - filled))
 }
 
-const EIGHTHS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+pub(crate) const EIGHTHS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// Where a window of `room` rows has to start to keep `row` in view.
 ///
 /// Every list here that is longer than its pane is drawn whole and shown
