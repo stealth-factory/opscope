@@ -726,10 +726,15 @@ pub(crate) fn run_over(keyboard: &mut crate::Keyboard, base_rows: &[String], bas
                 "enter" => {
                     if let Some(c) = list.get(selected) {
                         match theme::save(&c.value) {
-                            // The theme previewed stays in force and the
-                            // widget's next frame is drawn in it, without a
-                            // restart (`theme::watch`, `theme::recolour`).
-                            Ok(()) => return close(),
+                            // The widget's next frame is drawn in the theme
+                            // now in force, without a restart (`theme::watch`,
+                            // `theme::recolour`). Worked out again rather
+                            // than left at the preview, so `OPSCOPE_THEME`
+                            // still wins for this run when it is set.
+                            Ok(()) => {
+                                theme::refresh();
+                                return close();
+                            }
                             Err(why) => said = format!("could not save: {why}"),
                         }
                     }
