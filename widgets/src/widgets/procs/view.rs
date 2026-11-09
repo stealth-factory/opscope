@@ -369,6 +369,9 @@ impl Block {
 }
 
 const LABEL: usize = 8;
+/// Rows a per-core bar stands in: twenty-four eighths of a cell, so a step
+/// of about four percent shows.
+const BAR_ROWS: usize = 3;
 const BAR_MIN: usize = 8;
 const BAR_MAX: usize = 32;
 
@@ -529,37 +532,38 @@ fn cpu_block(sample: &Sample, every: f64, width: usize, p: &Palette) -> Block {
     match &m.per_core {
         PerCore::Read(each) if each.len() >= 4 => match bar_shape(each.len(), room) {
             Some((k, gap)) => {
-                let mut columns: Vec<(f64, String)> = Vec::new();
+                let mut columns: Vec<Option<(f64, String)>> = Vec::new();
                 for (i, (_, busy)) in each.iter().enumerate() {
                     if i > 0 && gap > 0 {
-                        columns.push((0.0, p.track.clone()));
+                        columns.push(None);
                     }
                     for _ in 0..k {
-                        columns.push((busy * 100.0, tc::heat_on(*busy, false)));
+                        columns.push(Some((busy * 100.0, tc::heat_on(*busy, false))));
                     }
                 }
                 let y = block.lines.len();
                 // Text in every mode: these change every poll, and as an
                 // image they were a whole upload each time - 31 KB/s of raw
                 // RGBA at 100 columns with eight cores, against 0.5 KB/s
-                // for the load trace's edits (OPS-222).
-                block
-                    .plots
-                    .push(tc::Plot::bars(1, y, &columns, 2, 100.0, false).as_text());
-                for _ in 0..2 {
+                // for the load trace's edits (OPS-222). Each bar stands in
+                // its track, so an idle core still shows its full height.
+                block.plots.push(
+                    tc::Plot::bars_on_track(1, y, &columns, BAR_ROWS, 100.0, &p.track).as_text(),
+                );
+                for _ in 0..BAR_ROWS {
                     block.push(vec![(String::new(), " ".repeat(1 + columns.len()))]);
                 }
                 if k >= 3 {
-                    // Each core's figure under its bar.
-                    let mut line = String::from(" ");
+                    // Each core's figure under its bar, in its bar's colour.
+                    let mut line: Line = vec![(String::new(), " ".into())];
                     for (i, (_, busy)) in each.iter().enumerate() {
                         if i > 0 {
-                            line.push_str(&" ".repeat(gap));
+                            line.push((String::new(), " ".repeat(gap)));
                         }
                         let n = format!("{:.0}", (busy * 100.0).clamp(0.0, 100.0));
-                        line.push_str(&right(&n, k));
+                        line.push((tc::heat_on(*busy, false), right(&n, k)));
                     }
-                    block.push(vec![(p.dim.clone(), line)]);
+                    block.push(line);
                 }
                 let (id, hot) = each
                     .iter()
@@ -708,10 +712,13 @@ fn memory_block(sample: &Sample, width: usize, p: &Palette) -> Block {
         ]),
         Some(swap) => {
             let frac = swap.used as f64 / swap.total as f64;
+            // Coloured by how full it is: swap in use is pressure, and the
+            // bar and its figure say how much in the same colour.
+            let hot = tc::heat_on(frac, false);
             let said = if swap.used == 0 {
                 (p.dim.clone(), "none used".to_string())
             } else {
-                (p.used.clone(), format!("{} used", human(swap.used)))
+                (hot.clone(), format!("{} used", human(swap.used)))
             };
             let (got, _) = gauge(
                 "SWAP",
@@ -719,7 +726,7 @@ fn memory_block(sample: &Sample, width: usize, p: &Palette) -> Block {
                 &[said],
                 width,
                 bar_w,
-                &|x, y, w| tc::Plot::meter(x, y, w, frac, None, &p.used, &p.track, &p.txt),
+                &|x, y, w| tc::Plot::meter(x, y, w, frac, None, &hot, &p.track, &p.txt),
                 p,
             );
             block.stack(got);
@@ -727,6 +734,29 @@ fn memory_block(sample: &Sample, width: usize, p: &Palette) -> Block {
         None => {}
     }
     block
+}
+
+/// How hot a load of `load` on `cores` cores is, as a fraction of the heat
+/// ramp: calm to the core count, where every core has a runnable task on
+/// average, and red at twice it.
+pub fn load_heat(load: f64, cores: f64) -> f64 {
+    let per_core = load / cores.max(1.0);
+    if per_core <= 1.0 {
+        0.4 * per_core.max(0.0)
+    } else {
+        (0.4 + 0.6 * (per_core - 1.0)).min(1.0)
+    }
+}
+
+/// The load chart's colour by height: `load_heat` at nine levels of an
+/// axis `hi` tall, mixed between them.
+fn load_ramp(cores: f64, hi: f64) -> Vec<(f64, String)> {
+    (0..=8)
+        .map(|i| {
+            let at = i as f64 / 8.0;
+            (at, tc::heat_on(load_heat(at * hi, cores), false))
+        })
+        .collect()
 }
 
 /// LOAD: the 1-minute average at every poll for ten minutes, the core
@@ -760,7 +790,7 @@ fn load_block(sample: &Sample, every: f64, width: usize, p: &Palette) -> Block {
     // The axis is the core count until the load passes it, then the next
     // whole number above the peak: it moves only when the load does.
     let hi = cores.max(peak.ceil()).max(1.0);
-    const ROWS: usize = 3;
+    const ROWS: usize = 4;
     let core_row = tc::line_row(cores / hi, ROWS);
     let cores_label = format!("{} cores", sample.cores);
     let label = |row: usize| -> (String, bool) {
@@ -803,7 +833,11 @@ fn load_block(sample: &Sample, every: f64, width: usize, p: &Palette) -> Block {
     block.plots.push(
         tc::Plot::new(x, y, cw, ROWS, chart)
             .under_text()
-            .on_axis(0.0, hi),
+            .on_axis(0.0, hi)
+            .area()
+            .ramp(load_ramp(cores, hi))
+            .reference(cores / hi, &p.dim)
+            .end_dot(),
     );
     let now_row = tc::line_row((latest / hi).clamp(0.0, 1.0), ROWS);
     for row in 0..ROWS {
@@ -2294,7 +2328,7 @@ mod tests {
         panel
             .plots
             .iter()
-            .filter(|p| p.height == 2 && p.chart.traces.is_empty())
+            .filter(|p| p.height == BAR_ROWS && p.chart.traces.is_empty())
             .collect()
     }
 
@@ -2449,6 +2483,24 @@ mod tests {
     }
 
     #[test]
+    fn load_is_calm_to_the_core_count_and_red_at_twice_it() {
+        assert_eq!(load_heat(0.0, 8.0), 0.0);
+        assert!(load_heat(8.0, 8.0) < 0.5, "a full machine is not yet hot");
+        assert!(load_heat(4.0, 8.0) < load_heat(8.0, 8.0));
+        assert!(load_heat(12.0, 8.0) > 0.5);
+        assert_eq!(load_heat(16.0, 8.0), 1.0);
+        assert_eq!(load_heat(40.0, 8.0), 1.0);
+        // Rising all the way: a ramp that is the same colour for two loads
+        // says nothing about which is higher.
+        let mut last = -1.0;
+        for tenth in 0..=200 {
+            let h = load_heat(tenth as f64 / 10.0, 8.0);
+            assert!(h >= last);
+            last = h;
+        }
+    }
+
+    #[test]
     fn the_load_trace_holds_ten_minutes_and_is_under_its_text() {
         let s = with_machine(8, machine(8));
         let panel = panel(&s, 2.0, 100, &palette());
@@ -2459,7 +2511,7 @@ mod tests {
             .collect();
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].chart.slots, 300, "600 s at one slot every 2 s");
-        assert_eq!(trace[0].height, 3);
+        assert_eq!(trace[0].height, 4);
         // Five-second polls: 120 slots.
         let slow = super::panel(&s, 5.0, 100, &palette());
         let slots = slow

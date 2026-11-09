@@ -12,8 +12,9 @@ Linux example, 100 columns:
  3 zombies · 112 kernel threads hidden
 
  CPU    8 cores · 41% busy · load 3.90 2.80 2.10 (of 8)
- ████ ▁▁▁▁                          ▃▃▃▃
- ████ ████ ███▆ ▇▇▇▇ ▂▂▂▂ ▅▅▅▅ ███▃ ████
+ ▆▆▆▆
+ ████ ▃▃▃▃ ▁▁▁▁                ▆▆▆▆ ▁▁▁▁
+ ████ ████ ████ ▂▂▂▂ ▄▄▄▄ ▆▆▆▆ ████ ████
    92   48   38   11   20   29   61   35
  per core, % over the last poll · busiest cpu0 92%
 
@@ -22,9 +23,10 @@ Linux example, 100 columns:
  SWAP      4G  ████████░░░░░░░░░░░░░░░░░░░░░░░░  1.2G used
 
  LOAD   1-minute average, last 10 min
- 8 cores┤
-        │      ⢀⣀⡠⠤⠒⠒⠒⠤⠤⣀⣀                ⣀⡠⠤⠒⠊⠉⠉⠑⠒⠢⠤⢄⣀⣀⣀⡀                ⢀⣀⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠒ 3.90
-       0┤⠤⠔⠒⠊⠁              ⠉⠉⠒⠒⠢⠤⠤⣀⣀⡠⠤⠒⠊⠉                     ⠈⠉⠉⠒⠒⠒⠢⠤⠤⠤⠔⠒⠊⠁
+ 8 cores┤⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁⠁
+        │⢀⣠⣤⣤⣶⣶⣶⣶⣶⣶⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣄⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣤⣤⣶⣶⣾⣿⣿⣿⣷⣶⣶⣤⣤⣄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡀
+        │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣤⣤⣶⣶⣶⣾⣿⣿⣿⣿⣶⣶⣶⣶⣶⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ 3.90
+       0┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
 
      PID COMMAND        USER        %CPU   MEM   RSS STATE RUNNING CGROUP
 ▸  48213 example-worker user-a      12.4  4.1%  1.3G R       2d    session-2.scope
@@ -61,8 +63,14 @@ Linux example, 100 columns:
  [r]efresh  [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
 ```
 
-In Kitty the per-core bars and the load trace are pixels; the memory and
-swap bars are eighth-cell text in every terminal. On a pane wide enough
+In Kitty the load trace is pixels: a smooth line with the area under it,
+coloured by height along the heat ramp - calm up to the core count, red
+at twice it - the core count as a dashed line across it, and a dot on the
+latest reading. In text the same trace is Braille with every dot under
+the line set, each row in its height's colour and the core-count row
+dotted. The per-core bars are eighth-cell text in every terminal, since
+they change every poll and as an image were a whole upload each time;
+the memory and swap bars are text everywhere too, as every meter is. On a pane wide enough
 for both to stay on one line each - about 130 columns with eight cores -
 MEMORY and SWAP move up beside CPU.
 
@@ -75,9 +83,11 @@ poll on Linux:
   last poll (`/proc/stat`: everything but `idle` and `iowait`, so `steal`
   counts as busy), and the three load averages from `/proc/loadavg` with
   the core count beside them, so a load over the core count reads as one.
-  Under it, a bar per core, 0 to 100%, when four or more cores fit the
-  width - wider bars, and each core's figure under its bar, as the pane
-  grows - and otherwise one meter of the total. The first poll has nothing
+  Under it, a bar per core, 0 to 100% over three rows, standing in a
+  track that shows its full height and coloured by that core's own load,
+  when four or more cores fit the width - wider bars, and each core's
+  figure under its bar in the same colour, as the pane grows - and
+  otherwise one meter of the total. The first poll has nothing
   to subtract from and says when the figures will come.
 - **MEMORY**: three parts that sum to `MemTotal` exactly - used is
   `MemTotal - MemAvailable`, reclaimable `MemAvailable - MemFree`, free
@@ -85,12 +95,14 @@ poll on Linux:
   Not `Cached`, which overlaps `MemAvailable`. On an idle machine whose
   `MemAvailable` is under `MemFree`, nothing is reclaimable and free is
   `MemAvailable`, so the parts still sum to the total.
-- **SWAP**: its size and how much is used, `none used`, or `no swap`.
+- **SWAP**: its size and how much is used, `none used`, or `no swap`,
+  the bar and its figure coloured by how full it is.
 - **LOAD**: the 1-minute load average at every poll for the last ten
   minutes (300 points at `refresh` 2; a poll whose load could not be read
   is a gap), the axis topped at the core count until the load passes it,
-  the core count marked on the axis, and the latest figure at the line's
-  end. Until ten minutes have passed it says how long it has so far.
+  the core count marked on the axis and as a line across the chart, and
+  the latest figure at the line's end. The colour is by height, not by
+  sample: the same load is the same colour wherever it appears. Until ten minutes have passed it says how long it has so far.
 
 A file that cannot be read is named in the panel (`/proc/stat
 unavailable: …`), and the table still draws. The panel scrolls with the
