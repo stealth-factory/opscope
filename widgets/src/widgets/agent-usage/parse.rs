@@ -64,9 +64,8 @@ pub const MOST_RESETS: u64 = 1000;
 ///
 /// A grant holds `resets_left` resets and its `ends_at` applies to every
 /// one of them, so a grant of two is two entries with the same expiry:
-/// nothing is merged. A grant's `type` of `full` is a full reset, which is
-/// what Codex calls its credits, and is named the same way; any other type
-/// is not guessed at and the entry has no kind. The grant's `label` is a
+/// nothing is merged. Each entry is named by `claude_reset_kind`; a grant
+/// it cannot name is not guessed at and the entry has no kind. The grant's `label` is a
 /// sentence of marketing copy rather than a kind and is not kept, nor are
 /// grant identifiers.
 ///
@@ -99,16 +98,32 @@ pub fn parse_claude_resets(text: &str, now: f64) -> Option<ResetBank> {
             continue;
         }
         left = left.checked_add(count).filter(|n| *n <= MOST_RESETS)?;
-        let title = match grant.get("type").and_then(|v| v.as_str()) {
-            Some("full") => Some("Full reset".to_string()),
-            _ => None,
-        };
+        let title = claude_reset_kind(grant).map(str::to_string);
         for _ in 0..count {
             listed.push(ResetCredit { title: title.clone(), expiry });
         }
     }
     soonest_first(&mut listed);
     Some(ResetBank { left, credits: listed })
+}
+
+/// What a Claude reset grant gives back, in Claude Code's own order.
+///
+/// `gives_back_weekly` comes first: a Fable reset is sent as `type: "full"`
+/// and returns only what Fable used of the weekly limit, so reading `type`
+/// alone named it a full reset. Claude Code 2.1.321 checks that flag before
+/// the type, and so does this. `full` keeps Codex's wording. A type outside
+/// the three the schema allows is unnamed rather than guessed.
+pub fn claude_reset_kind(grant: &serde_json::Map<String, serde_json::Value>) -> Option<&'static str> {
+    if grant.get("gives_back_weekly").and_then(|v| v.as_bool()) == Some(true) {
+        return Some("Fable reset");
+    }
+    match grant.get("type").and_then(|v| v.as_str()) {
+        Some("full") => Some("Full reset"),
+        Some("session") => Some("5-hour reset"),
+        Some("weekly") => Some("Weekly reset"),
+        _ => None,
+    }
 }
 
 /// The name to show for a Claude plan, or `None` when these ids are not in
@@ -1770,6 +1785,32 @@ mod tests {
             left: 2,
             credits: vec![grant_of(full, d12), grant_of(full, d12)],
         }));
+    }
+
+    #[test]
+    fn a_fable_reset_is_not_named_a_full_reset() {
+        let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
+        let d12 = iso_epoch("2026-10-12T00:00:00Z");
+        // As sent: a Fable grant carries `type: "full"` beside the flag.
+        let body = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+            {"resets_left": 1, "usable_now": true, "type": "full", "gives_back_weekly": true,
+             "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "full", "gives_back_weekly": false,
+             "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "session", "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "weekly", "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "type": "mystery", "ends_at": "2026-10-12T00:00:00Z"}
+        ]}}).to_string();
+        let mut titles: Vec<_> = parse_claude_resets(&body, now).unwrap().credits.into_iter()
+            .map(|c| { assert_eq!(c.expiry, d12); c.title }).collect();
+        titles.sort();
+        assert_eq!(titles, vec![
+            None,
+            Some("5-hour reset".to_string()),
+            Some("Fable reset".to_string()),
+            Some("Full reset".to_string()),
+            Some("Weekly reset".to_string()),
+        ]);
     }
 
     #[test]
