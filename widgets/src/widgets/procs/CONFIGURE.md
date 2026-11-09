@@ -27,7 +27,7 @@ size come from `sysconf`. User names come from `/etc/passwd`, then
 
 macOS runs one `ps -axww -o pid=,ppid=,uid=,user=,%cpu=,%mem=,rss=,state=,etime=,comm=`
 a poll, plus `ps -ww -o args= -p <pid>` for the open process, which lists every user's processes. Its `%cpu` is macOS's
-decaying average, not a delta over the poll, and the header says so.
+decaying average, not a delta over the poll, and the heading says so.
 `hw.memsize` gives the total that MEM is a share of. The panel reads
 `vm_stat` (its page size from the first line, then free, active,
 inactive, speculative, wired and compressor pages: used is active +
@@ -54,7 +54,7 @@ into its slice; `DefaultCPUAccounting=yes` and
 `DefaultMemoryAccounting=yes` in `system.conf` do it for every unit.
 Whether a user's login sessions get rows of their own depends on what
 `user.slice` and the user's slice enable below them; where they do not,
-the sessions roll up into the slice and the header says so. On cgroup v1 there is no services view; the
+the sessions roll up into the slice and the heading says so. On cgroup v1 there is no services view; the
 view says so. Nothing in this widget's settings changes any of it.
 
 The detail screen reads, for the one process that is open, its
@@ -75,7 +75,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 There is no `rows` setting (the pane scrolls; a cap would hide rows) and
 no `cpu_window` setting (the %CPU window is the poll interval, and the
-header names it).
+PROCESSES heading names it).
 
 ## Safe configuration process
 

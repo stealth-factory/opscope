@@ -260,6 +260,13 @@ fn main() {
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut head = 1usize;
     let mut shown_scroll = 0usize;
+    // The list window's height on the last frame, for pgup and pgdn.
+    let mut shown_room = 1usize;
+    // Whether the list's head was pinned on the last list frame, at what
+    // size and in which view, and how many rows it pinned: the decision
+    // holds while the head's height wobbles (see `view::pin_head`), and
+    // a change of mode keeps the same row at the top of the window.
+    let mut pin_state: Option<((usize, usize, bool), bool, usize)> = None;
     let mut table_cache: Option<(TableKey, view::Table)> = None;
     let mut panel_cache: Option<((Option<usize>, usize), view::Panel)> = None;
 
@@ -416,11 +423,11 @@ fn main() {
                     chase = false;
                 }
                 "pgup" => {
-                    scroll = scroll.saturating_sub(tc::size().1.saturating_sub(4).max(1));
+                    scroll = scroll.saturating_sub(shown_room);
                     chase = false;
                 }
                 "pgdn" => {
-                    scroll = scroll.saturating_add(tc::size().1.saturating_sub(4).max(1));
+                    scroll = scroll.saturating_add(shown_room);
                     chase = false;
                 }
                 "home" => {
@@ -627,10 +634,28 @@ fn main() {
         );
         let foot = packed.lines.clone();
         let room = h.saturating_sub(foot.len());
-        let head_rows = drawn.head.min(drawn.rows.len());
-        let rest = drawn.rows.len().saturating_sub(head_rows);
-        let room_below = room.saturating_sub(head_rows).max(1);
-        if chase && screen == Screen::List {
+        // On the list, everything down to the column header stays put when
+        // the pane leaves the table room under it; otherwise, and on the
+        // detail screens, only the title does and the rest scrolls.
+        let list = screen == Screen::List;
+        let size = (w, h, by_service);
+        let was = pin_state
+            .filter(|(at, _, _)| list && *at == size)
+            .map(|(_, pinned, _)| pinned);
+        let (pinned, head_rows, room_below) = view::layout(&drawn, room, was);
+        if list {
+            if let Some((at, before, before_head)) = pin_state {
+                // The mode changed under the same view: keep the row that
+                // was at the top of the window there - unless the window
+                // was at its top, with the whole head in view, which is
+                // where the whole body starts too.
+                if at.2 == by_service && before != pinned && scroll > 0 {
+                    scroll = (scroll + before_head).saturating_sub(head_rows);
+                }
+            }
+            pin_state = Some((size, pinned, head_rows));
+        }
+        if chase && list {
             if let Some(row) = drawn
                 .placed
                 .iter()
@@ -651,17 +676,16 @@ fn main() {
                 scroll = tc::follow(scroll, top, room_below);
             }
         }
-        scroll = scroll.min(rest.saturating_sub(room_below.min(rest)));
-        let end = (scroll + room_below).min(rest);
-        let mut rows: Vec<String> = drawn.rows[..head_rows].to_vec();
-        rows.extend_from_slice(&drawn.rows[head_rows + scroll..head_rows + end]);
+        scroll = view::clamp_scroll(&drawn, head_rows, scroll, room_below);
+        let mut rows = view::visible(&drawn, head_rows, scroll, room_below);
         while rows.len() < room {
             rows.push(String::new());
         }
         let foot_top = rows.len();
         rows.extend(foot);
-        // The panel's bars and trace are in body rows; they scroll with
-        // the text and are cropped where the window cuts them.
+        // The panel's bars and trace are in body rows: pinned with the head
+        // when it is, otherwise scrolled with the text and cropped where
+        // the window cuts them.
         let plots: Vec<tc::Plot> = std::mem::take(&mut drawn.plots)
             .into_iter()
             .filter_map(|plot| plot.in_viewport(scroll, head_rows, room_below))
@@ -671,6 +695,7 @@ fn main() {
         placed = drawn.placed;
         head = head_rows;
         shown_scroll = scroll;
+        shown_room = room_below;
         // Frame-local: only the frame a key moved the cursor follows it, or
         // the follow drags the view back from wherever the wheel put it.
         chase = false;

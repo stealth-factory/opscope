@@ -133,7 +133,12 @@ pub struct OpenedService {
 pub struct Drawn {
     pub rows: Vec<String>,
     pub placed: Vec<(usize, usize)>,
+    /// Rows pinned whatever the pane's height: the title.
     pub head: usize,
+    /// Rows pinned when the pane leaves the list room under them (see
+    /// [`pin_head`]): on the list, everything down to the table's column
+    /// header. The detail screens pin only their title, so this is `head`.
+    pub pin: usize,
     pub keys: Vec<i32>,
     /// The services view's cgroup paths in the order drawn; `keys` is then
     /// empty.
@@ -1283,8 +1288,21 @@ fn thread_row(
     out
 }
 
-/// The status lines above the table: when, how often, what %CPU means,
-/// how many, in what order, and what is not shown.
+/// When the figures were read and how often: the summary on the first
+/// group's rule, since every figure under it comes from that one poll.
+pub fn timing(view: &View) -> Vec<String> {
+    vec![
+        match view.age {
+            Some(age) => format!("sampled {} ago", tc::age(age.as_secs_f64())),
+            None => "not sampled yet".to_string(),
+        },
+        format!("every {}", secs(view.every)),
+    ]
+}
+
+/// What the PROCESSES rule says: how many, in what order, what is not
+/// shown, then what %CPU in the table is a share of and over what - last,
+/// because it is the longest and the one to go under the rule first.
 fn status(
     view: &View,
     sample: &Sample,
@@ -1292,19 +1310,11 @@ fn status(
     zombies: usize,
     hidden: usize,
 ) -> Vec<String> {
-    let mut clauses = vec![
-        match view.age {
-            Some(age) => format!("sampled {} ago", tc::age(age.as_secs_f64())),
-            None => "not sampled yet".to_string(),
-        },
-        format!("every {}", secs(view.every)),
-    ];
-    clauses.extend(cpu_label(sample.clock, sample.cores, view.every));
-    clauses.push(if sample.hidepid {
-        format!("{listed} processes visible (hidepid hides other users')")
+    let mut clauses = vec![if sample.hidepid {
+        format!("{listed} visible (hidepid hides other users')")
     } else {
-        format!("{listed} processes")
-    });
+        listed.to_string()
+    }];
     clauses.push(view.sort.in_force().to_string());
     if zombies > 0 {
         clauses.push(format!(
@@ -1321,6 +1331,57 @@ fn status(
     clauses
 }
 
+/// One part of the screen - MACHINE, PROCESSES, SERVICES - as a rule
+/// across the pane with what the part comes to beside its name, the way
+/// `disk` draws its groups: ` ── NAME ── a · b ──────`. A blank line always
+/// comes first, so a part never runs on from the one above it. As many
+/// clauses as fit go on the rule, in order; the rest go whole onto the
+/// lines under it rather than being cut.
+pub fn push_group(
+    name: &str,
+    clauses: &[String],
+    width: usize,
+    p: &Palette,
+    rows: &mut Vec<String>,
+) {
+    rows.push(String::new());
+    let room = width.saturating_sub(1);
+    let rule = "\u{2500}\u{2500}";
+    // ` ── NAME ── ` and at least `──` of rule after whatever follows it.
+    let head_w = 1 + 2 + 1 + tc::display_width(name) + 1 + 2 + 1;
+    let mut on_rule = String::new();
+    let mut taken = 0;
+    for clause in clauses {
+        let next = if on_rule.is_empty() {
+            clause.clone()
+        } else {
+            format!("{on_rule} \u{b7} {clause}")
+        };
+        if head_w + tc::display_width(&next) + 1 + 2 > room {
+            break;
+        }
+        on_rule = next;
+        taken += 1;
+    }
+    let mut parts: Vec<(&str, String)> = vec![
+        (p.dim.as_str(), format!(" {rule} ")),
+        (p.txt.as_str(), name.to_string()),
+    ];
+    let mut used = 1 + 2 + 1 + tc::display_width(name);
+    if on_rule.is_empty() {
+        parts.push((p.dim.as_str(), " ".into()));
+        used += 1;
+    } else {
+        parts.push((p.dim.as_str(), format!(" {rule} {on_rule} ")));
+        used += 4 + tc::display_width(&on_rule) + 1;
+    }
+    parts.push((p.dim.as_str(), "\u{2500}".repeat(room.saturating_sub(used))));
+    rows.push(tc::seg(&parts, width));
+    for line in pack_clauses(&clauses[taken..], width) {
+        rows.push(tc::seg(&[(p.dim.as_str(), line)], width));
+    }
+}
+
 /// The table under the status lines: its rows, where each process landed
 /// (row within the table, item), and the pids in the order drawn. The
 /// expensive half of a frame, which `main` keeps until something it
@@ -1328,6 +1389,10 @@ fn status(
 #[derive(Clone, Debug, Default)]
 pub struct Table {
     pub rows: Vec<String>,
+    /// How many of `rows`, from the top, are the column header: pinned
+    /// with the head above them, so the columns stay named as the rows
+    /// under them scroll. None when a sentence stands in for the table.
+    pub header: usize,
     pub placed: Vec<(usize, usize)>,
     pub keys: Vec<i32>,
     /// The services view's rows, by cgroup path.
@@ -1347,17 +1412,18 @@ fn shown<'a>(view: &View, sample: &'a Sample) -> (Vec<&'a Proc>, Vec<&'a Proc>, 
     (listed, shown, hidden)
 }
 
-/// The title and everything above the table, with the plots in it: when,
-/// how often, what %CPU means, how many, any error, the CPU / MEMORY /
-/// SWAP / LOAD panel, and the filter in force.
+/// The title and everything above the table, with the plots in it: any
+/// error, then the MACHINE rule (when and how often) over the CPU / MEMORY
+/// / SWAP / LOAD panel, then the PROCESSES rule (how many, the sort, what
+/// is hidden, what %CPU means) and the filter in force. The services view
+/// puts its SERVICES rule where these two parts are.
 pub struct Head {
     pub rows: Vec<String>,
     pub plots: Vec<tc::Plot>,
 }
 
 /// [`Head`] for this frame. `panel` is built once a poll by `main` (see
-/// [`panel`]); the services view (`[g]`, phase 3) will put its own summary
-/// in the same place.
+/// [`panel`]).
 pub fn list_head(
     view: &View,
     width: usize,
@@ -1404,20 +1470,24 @@ pub fn list_head(
             None => "reading threads…".to_string(),
         });
     }
-    for line in pack_clauses(&clauses, width) {
-        rows.push(tc::seg(&[(p.dim.as_str(), line)], width));
-    }
+    clauses.extend(cpu_label(sample.clock, sample.cores, view.every));
     err_rows(&mut rows);
-    if let Some(panel) = panel {
-        rows.push(String::new());
-        let top = rows.len();
-        plots.extend(panel.plots.iter().cloned().map(|mut plot| {
-            plot.y += top;
-            plot
-        }));
-        rows.extend(panel.rows.iter().cloned());
+    match panel {
+        Some(panel) => {
+            push_group("MACHINE", &timing(view), width, p, &mut rows);
+            let top = rows.len();
+            plots.extend(panel.plots.iter().cloned().map(|mut plot| {
+                plot.y += top;
+                plot
+            }));
+            rows.extend(panel.rows.iter().cloned());
+        }
+        // No panel to carry the timing: it goes on the list's own rule.
+        None => {
+            clauses.splice(0..0, timing(view));
+        }
     }
-    rows.push(String::new());
+    push_group("PROCESSES", &clauses, width, p, &mut rows);
     if view.typing {
         rows.push(tc::seg(
             &[
@@ -1498,6 +1568,7 @@ pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
         .unwrap_or(0);
     let cols = columns(width, digits + 1, cmd_want, user_want, cg_want);
     rows.push(header(&cols, view.sort, width, p));
+    table.header = 1;
     for (index, proc) in shown.iter().enumerate() {
         let here = view.cursor == Some(proc.pid);
         let from = rows.len();
@@ -1526,7 +1597,8 @@ pub fn list_table(view: &View, width: usize, p: &Palette) -> Table {
     table
 }
 
-/// The head and the table as one frame body, the title pinned.
+/// The head and the table as one frame body: the title always pinned, and
+/// everything down to the column header pinnable.
 pub fn compose(head: Head, table: &Table) -> Drawn {
     let mut rows = head.rows;
     let offset = rows.len();
@@ -1535,10 +1607,70 @@ pub fn compose(head: Head, table: &Table) -> Drawn {
         rows,
         placed: table.placed.iter().map(|&(r, i)| (r + offset, i)).collect(),
         head: 1,
+        pin: offset + table.header,
         keys: table.keys.clone(),
         paths: table.paths.clone(),
         plots: head.plots,
     }
+}
+
+/// The fewest list rows a pinned head may leave under itself: below this a
+/// list of hundreds is read through a slot.
+pub const LIST_MIN: usize = 6;
+
+/// How far the room may shrink past the threshold before a pinned head lets
+/// go: the filter box and the filter row come and go with a key, and the
+/// panel's note lines with a poll, and none of that should make the whole
+/// screen jump from one way of scrolling to the other.
+pub const PIN_SLACK: usize = 3;
+
+/// Whether the head - everything down to the column header - stays put
+/// above the list, with the wheel and the cursor moving the list alone.
+///
+/// `room` is the rows above the footer, `pin` the rows that would be pinned,
+/// `was` this decision on the last frame at the same size and in the same
+/// view. Pinned when the list keeps at least [`LIST_MIN`] rows and a third
+/// of the room: a third because past that the head is most of the pane
+/// and a list squeezed under it is the part that hides things, which the
+/// scroll-don't-hide rule is about. Otherwise the whole body scrolls under
+/// the title, and every row is still one scroll away.
+///
+/// A pinned head lets go only [`PIN_SLACK`] rows past the line, so a head
+/// that grows by a row or two between polls cannot flick the screen from
+/// one mode to the other and back.
+pub fn pin_head(room: usize, pin: usize, was: Option<bool>) -> bool {
+    let need = LIST_MIN.max(room / 3);
+    let left = room.saturating_sub(pin);
+    match was {
+        Some(true) => left + PIN_SLACK >= need,
+        _ => left >= need,
+    }
+}
+
+/// One frame's split of the body: whether the head is pinned, how many rows
+/// stay put above the window, and how many rows the window has. `room` is
+/// the rows above the footer; `was` as for [`pin_head`].
+pub fn layout(drawn: &Drawn, room: usize, was: Option<bool>) -> (bool, usize, usize) {
+    let pinned = drawn.pin > drawn.head && pin_head(room, drawn.pin, was);
+    let head = if pinned { drawn.pin } else { drawn.head }.min(drawn.rows.len());
+    (pinned, head, room.saturating_sub(head).max(1))
+}
+
+/// `scroll` held to the rows there are under `head`, so the window never
+/// opens past the end.
+pub fn clamp_scroll(drawn: &Drawn, head: usize, scroll: usize, below: usize) -> usize {
+    let rest = drawn.rows.len().saturating_sub(head);
+    scroll.min(rest.saturating_sub(below.min(rest)))
+}
+
+/// The rows on screen: the `head` rows as they are, then `below` rows of
+/// the rest from `scroll`.
+pub fn visible(drawn: &Drawn, head: usize, scroll: usize, below: usize) -> Vec<String> {
+    let rest = drawn.rows.len().saturating_sub(head);
+    let end = (scroll + below).min(rest);
+    let mut rows: Vec<String> = drawn.rows[..head].to_vec();
+    rows.extend_from_slice(&drawn.rows[head + scroll.min(end)..head + end]);
+    rows
 }
 
 pub fn draw_list(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Drawn {
@@ -1754,6 +1886,7 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         rows,
         placed: Vec::new(),
         head,
+        pin: head,
         keys: Vec::new(),
         paths: Vec::new(),
         plots: Vec::new(),
@@ -2094,8 +2227,12 @@ mod tests {
         let drawn = draw_list(&view(Some(&s)), 100, &palette(), None);
         let t = text(&drawn);
         assert!(
-            t.contains("sampled 2s ago · every 2s · %CPU of all 8 cores over the last 2s"),
+            t.contains("── MACHINE ── sampled 2s ago · every 2s ──"),
             "{t}"
+        );
+        assert!(
+            flat(&t).contains("1 zombie · %CPU of all 8 cores over the last 2s"),
+            "the window is on the list's own rule:\n{t}"
         );
         assert!(t.contains("1 zombie"), "{t}");
         assert!(t.contains("D = waiting on disk, 1 shown now"), "{t}");
@@ -2131,7 +2268,10 @@ mod tests {
         v.needle = "example";
         let t = text(&draw_list(&v, 120, &palette(), None));
         assert!(t.contains("2 of 4 visible shown · /example"), "{t}");
-        assert!(t.contains("4 processes visible"), "{t}");
+        assert!(
+            t.contains("── PROCESSES ── 4 visible (hidepid hides other users')"),
+            "{t}"
+        );
     }
 
     #[test]
@@ -2142,7 +2282,7 @@ mod tests {
         s.procs.push(k);
         let t = text(&draw_list(&view(Some(&s)), 120, &palette(), None));
         assert!(t.contains("1 kernel thread hidden"), "{t}");
-        assert!(t.contains("4 processes"), "{t}");
+        assert!(t.contains("── PROCESSES ── 4 ·"), "{t}");
     }
 
     #[test]
@@ -2566,7 +2706,10 @@ mod tests {
             assert!(t.contains("4194301"), "a tid wider than any pid fits:\n{t}");
         }
         let t = flat(&text(&draw_list(&v, 100, &palette(), None)));
-        assert!(t.contains("4 processes"), "the count is of processes:\n{t}");
+        assert!(
+            t.contains("── PROCESSES ── 4 ·"),
+            "the count is of processes:\n{t}"
+        );
         assert!(t.contains("2 threads listed under their processes"), "{t}");
         // The thread rows sit under their process and belong to its item.
         let drawn = draw_list(&v, 100, &palette(), None);
@@ -2601,6 +2744,208 @@ mod tests {
         assert!(hints(Some(false)).contains("[t] show threads"));
         assert!(hints(Some(true)).contains("[t] hide threads"));
         assert!(!hints(None).contains("[t]"), "macOS has no threads to show");
+    }
+
+    /// A sample with `n` processes, enough to scroll a table under a
+    /// pinned head; memory falls with the index so the order is fixed.
+    fn many(n: usize) -> Sample {
+        sample(
+            (0..n)
+                .map(|i| {
+                    proc(
+                        1_000 + i as i32,
+                        &format!("worker-{i}"),
+                        "user-a",
+                        Some(50.0 - i as f64),
+                        (500 - i as u64) << 20,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_head_pins_only_while_the_list_keeps_its_share() {
+        // 38 rows: the list wants a third, 12.
+        assert!(pin_head(38, 26, None), "12 left: pinned");
+        assert!(!pin_head(38, 27, None), "11 left: the whole body scrolls");
+        // Once pinned, a head that grows by a row or three holds.
+        assert!(pin_head(38, 27, Some(true)));
+        assert!(pin_head(38, 29, Some(true)));
+        assert!(!pin_head(38, 30, Some(true)), "past the slack it lets go");
+        // Once let go, it pins again only at the line itself.
+        assert!(!pin_head(38, 27, Some(false)));
+        assert!(pin_head(38, 26, Some(false)));
+        // A short pane: never fewer than LIST_MIN rows of list.
+        assert!(pin_head(12, 6, None));
+        assert!(!pin_head(12, 7, None));
+        assert!(!pin_head(4, 1, None), "no room for a list at all");
+        // The decision is a function of its inputs and nothing else.
+        for room in 0..80 {
+            for pin in 0..80 {
+                assert_eq!(pin_head(room, pin, None), pin_head(room, pin, None));
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_the_wheel_moves_the_table_and_nothing_above_it() {
+        let s = many(40);
+        let drawn = draw_list(&view(Some(&s)), 100, &palette(), None);
+        assert!(drawn.pin > drawn.head, "the list has a head to pin");
+        assert!(!drawn.plots.is_empty(), "the panel draws its charts");
+        // The column header is the last pinned row.
+        assert!(
+            plain(&drawn.rows[drawn.pin - 1]).contains("PID"),
+            "{}",
+            text(&drawn)
+        );
+        let room = drawn.pin + 15;
+        let (pinned, head, below) = layout(&drawn, room, None);
+        assert!(pinned);
+        assert_eq!((head, below), (drawn.pin, 15));
+        let at = |scroll: usize| {
+            let scroll = clamp_scroll(&drawn, head, scroll, below);
+            let rows = visible(&drawn, head, scroll, below);
+            let plots: Vec<tc::Plot> = drawn
+                .plots
+                .iter()
+                .cloned()
+                .filter_map(|p| p.in_viewport(scroll, head, below))
+                .collect();
+            (scroll, rows, plots)
+        };
+        let (_, top, top_plots) = at(0);
+        let (scroll, moved, moved_plots) = at(3);
+        assert_eq!(scroll, 3);
+        assert_eq!(top[..head], moved[..head], "the head did not move");
+        assert_eq!(top_plots, moved_plots, "nor did its charts");
+        assert_eq!(top_plots.len(), drawn.plots.len(), "every chart is drawn");
+        assert_eq!(moved[head], drawn.rows[head + 3], "the table did");
+        assert_eq!(moved.len(), head + below);
+        // To the end and no further.
+        let (end, rows, _) = at(usize::MAX / 4);
+        assert_eq!(end, drawn.rows.len() - head - below);
+        assert_eq!(rows.last(), drawn.rows.last());
+    }
+
+    #[test]
+    fn a_short_pane_scrolls_the_whole_body_and_hides_nothing() {
+        let s = many(40);
+        let drawn = draw_list(&view(Some(&s)), 100, &palette(), None);
+        let room = drawn.pin + 3;
+        let (pinned, head, below) = layout(&drawn, room, None);
+        assert!(!pinned);
+        assert_eq!((head, below), (1, room - 1), "only the title stays");
+        // Every row of the body is reachable at some scroll.
+        let last = clamp_scroll(&drawn, head, usize::MAX / 4, below);
+        let mut seen = std::collections::BTreeSet::new();
+        for scroll in 0..=last {
+            for (i, _) in visible(&drawn, head, scroll, below)
+                .iter()
+                .enumerate()
+                .skip(head)
+            {
+                seen.insert(scroll + i);
+            }
+        }
+        assert_eq!(seen.len(), drawn.rows.len() - head);
+        // The panel's charts go with the text, and are cropped by the window.
+        let gone: Vec<_> = drawn
+            .plots
+            .iter()
+            .cloned()
+            .filter_map(|p| p.in_viewport(last, head, below))
+            .collect();
+        assert!(gone.len() < drawn.plots.len());
+    }
+
+    #[test]
+    fn a_click_lands_on_the_row_drawn_there_in_both_modes() {
+        let s = many(40);
+        let drawn = draw_list(&view(Some(&s)), 100, &palette(), None);
+        for room in [drawn.pin + 15, drawn.pin + 3] {
+            let (_, head, below) = layout(&drawn, room, None);
+            for scroll in [0, 2, 7] {
+                let scroll = clamp_scroll(&drawn, head, scroll, below);
+                let rows = visible(&drawn, head, scroll, below);
+                for (y, row) in rows.iter().enumerate() {
+                    let item = tc::item_at(y, head, scroll, &drawn.placed);
+                    if y < head {
+                        assert_eq!(item, None, "a pinned row is no item");
+                        continue;
+                    }
+                    // The item is the process whose pid the row shows.
+                    if let Some(item) = item {
+                        let pid = drawn.keys[item].to_string();
+                        assert!(
+                            plain(row).split_whitespace().next() == Some(pid.as_str()),
+                            "room {room} scroll {scroll} y {y}: {:?} is not {pid}",
+                            plain(row)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_and_the_machine_each_have_a_heading() {
+        let s = table();
+        for width in [28, 40, 60, 80, 100, 140] {
+            let drawn = draw_list(&view(Some(&s)), width, &palette(), None);
+            let t = text(&drawn);
+            assert!(t.contains("── MACHINE ──"), "{width}:\n{t}");
+            assert!(t.contains("── PROCESSES ──"), "{width}:\n{t}");
+            // Every clause is there, on the rule or under it, whole.
+            let f = flat(&t);
+            for clause in ["sampled 2s ago", "every 2s", "sorted by %CPU", "1 zombie"] {
+                assert!(f.contains(clause), "{width}: {clause}:\n{t}");
+            }
+            assert!(
+                in_order(&f, "%CPU of all 8 cores over the last 2s"),
+                "{width}:\n{t}"
+            );
+            let heading = drawn
+                .rows
+                .iter()
+                .position(|r| plain(r).contains("── PROCESSES"))
+                .unwrap();
+            assert!(
+                plain(&drawn.rows[heading - 1]).is_empty(),
+                "a blank line before"
+            );
+            assert!(heading < drawn.pin, "the heading pins with the head");
+        }
+    }
+
+    #[test]
+    fn a_group_rule_fits_and_keeps_every_clause() {
+        let clauses: Vec<String> = vec![
+            "580".into(),
+            "sorted by running, newest first".into(),
+            "a-clause-with-no-spaces-wider-than-a-narrow-pane-by-far".into(),
+            "%CPU of all 8 cores over the last 2s".into(),
+        ];
+        for width in [28, 40, 60, 80, 100, 140] {
+            let mut rows = Vec::new();
+            push_group("PROCESSES", &clauses, width, &palette(), &mut rows);
+            assert!(plain(&rows[0]).is_empty());
+            let rule = plain(&rows[1]);
+            assert!(rule.starts_with(" ── PROCESSES"), "{width}: {rule:?}");
+            assert!(rule.ends_with('─'), "{width}: the rule runs on: {rule:?}");
+            for row in &rows {
+                assert!(
+                    tc::display_width(&plain(row)) <= width,
+                    "{width}: {:?}",
+                    plain(row)
+                );
+            }
+            let all: String = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+            for clause in &clauses {
+                assert!(in_order(&all, clause), "{width}: {clause} was cut:\n{all}");
+            }
+        }
     }
 
     #[test]

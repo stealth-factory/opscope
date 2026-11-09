@@ -871,7 +871,17 @@ impl Plot {
     }
 
     /// `top` is the pinned header height; `room` excludes the footer.
+    ///
+    /// A plot wholly inside the pinned rows is pinned with them: it keeps
+    /// its row and all of its height whatever the scroll, the way the text
+    /// beside it does. A widget that pins a panel above a scrolling list
+    /// would otherwise lose the panel's charts the moment it pinned them.
     pub fn in_viewport(mut self, scroll: usize, top: usize, room: usize) -> Option<Self> {
+        if self.height > 0 && self.y.saturating_add(self.height) <= top {
+            self.first_row = 0;
+            self.visible_rows = self.height;
+            return Some(self);
+        }
         let start = top.saturating_add(scroll);
         let end = start.saturating_add(room);
         let first = self.y.max(start);
@@ -3837,6 +3847,26 @@ mod tests {
             (1, 8, 2, 4)
         );
         assert!(p.in_viewport(20, 1, 4).is_none());
+    }
+
+    #[test]
+    fn a_plot_in_the_pinned_head_stays_put_at_every_scroll() {
+        // Rows 0..6 pinned: a chart on rows 2..5 is part of the head.
+        let p = Plot::new(8, 2, 20, 3, chart(vec![Some(0.2)]));
+        for scroll in [0, 1, 7, 40] {
+            let kept = p.clone().in_viewport(scroll, 6, 10).unwrap();
+            assert_eq!(
+                (kept.y, kept.first_row, kept.visible_rows),
+                (2, 0, 3),
+                "scroll {scroll}"
+            );
+        }
+        // The same chart under a one-row head scrolls and crops as before.
+        let moved = p.clone().in_viewport(1, 1, 10).unwrap();
+        assert_eq!((moved.y, moved.first_row, moved.visible_rows), (1, 0, 3));
+        let cut = p.clone().in_viewport(2, 1, 10).unwrap();
+        assert_eq!((cut.y, cut.first_row, cut.visible_rows), (1, 1, 2));
+        assert!(p.in_viewport(4, 1, 10).is_none());
     }
 
     #[test]

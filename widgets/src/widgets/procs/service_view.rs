@@ -20,7 +20,7 @@ use super::model::{Clock, Proc, Sample, Sort as ProcSort};
 use super::services::{self, Service, Services};
 use super::view::{
     self, CPU_W, Drawn, Head, Palette, Table, View, chunks, cpu_cell, cpu_label, field, human,
-    join, pack_clauses, right, secs,
+    join, push_group, right, secs, timing,
 };
 
 const MEM_W: usize = 6;
@@ -171,22 +171,16 @@ fn lines(rows: &mut Vec<String>, text: &str, ink: &str, width: usize) {
     }
 }
 
-/// The title, then `SERVICES` and what the table is: cgroup v2, complete,
+/// The title, then the `SERVICES` rule and what the table is: when, cgroup
+/// v2, complete,
 /// the %CPU window, the count, the sort, and how deep the accounting goes
 /// as core says it. A named state replaces the table below, never an empty
 /// one.
 pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head {
     let mut rows = vec![tc::title_busy("procs", width, &p.accent, busy)];
     let sample = view.sample;
-    let mut clauses = vec![
-        "SERVICES".to_string(),
-        match view.age {
-            Some(age) => format!("sampled {} ago", tc::age(age.as_secs_f64())),
-            None => "not sampled yet".to_string(),
-        },
-        format!("every {}", secs(view.every)),
-        "cgroup v2".to_string(),
-    ];
+    let mut clauses = timing(view);
+    clauses.push("cgroup v2".to_string());
     let mut warn: Option<String> = None;
     let mut count = (0, 0, 0);
     match sample.and_then(|s| s.services.as_ref()) {
@@ -226,29 +220,13 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
         Some(_) => {}
         None => clauses.push("reading cgroups…".to_string()),
     }
-    let packed = pack_clauses(&clauses, width);
-    for (i, line) in packed.into_iter().enumerate() {
-        if i == 0 {
-            if let Some(rest) = line.strip_prefix(" SERVICES") {
-                rows.push(tc::seg(
-                    &[
-                        (p.accent.as_str(), " SERVICES".into()),
-                        (p.dim.as_str(), rest.into()),
-                    ],
-                    width,
-                ));
-                continue;
-            }
-        }
-        rows.push(tc::seg(&[(p.dim.as_str(), line)], width));
-    }
-    if let Some(line) = warn {
-        lines(&mut rows, &line, &p.down, width);
-    }
     if !view.err.is_empty() {
         lines(&mut rows, &format!("! {}", view.err), &p.bad, width);
     }
-    rows.push(String::new());
+    push_group("SERVICES", &clauses, width, p, &mut rows);
+    if let Some(line) = warn {
+        lines(&mut rows, &line, &p.down, width);
+    }
     if view.typing {
         rows.push(tc::seg(
             &[
@@ -326,6 +304,7 @@ pub fn table(view: &View, width: usize, p: &Palette) -> Table {
         .max(7);
     let cols = columns(width, want);
     rows.push(header(&cols, view.svc_sort, width, p));
+    out.header = 1;
     for (index, svc) in shown.iter().enumerate() {
         let here = view.svc_cursor == Some(svc.path.as_str());
         let from = rows.len();
@@ -378,6 +357,7 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
             rows,
             placed: Vec::new(),
             head,
+            pin: head,
             keys: Vec::new(),
             paths: Vec::new(),
             plots: Vec::new(),
@@ -486,6 +466,7 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
         rows,
         placed: Vec::new(),
         head,
+        pin: head,
         keys: Vec::new(),
         paths: Vec::new(),
         plots: Vec::new(),
@@ -637,7 +618,10 @@ mod tests {
         let (h, t) = (head(&v, 100, &p, None), table(&v, 100, &p));
         let out = text(&h, &t);
         let flat = flat(&out);
-        assert!(flat.contains("SERVICES"), "{out}");
+        assert!(
+            flat.contains("── SERVICES ── sampled 1s ago · every 2s"),
+            "{out}"
+        );
         assert!(flat.contains("cgroup v2 · complete"), "{out}");
         assert!(
             flat.contains("%CPU of all 8 cores over the last 2s"),
@@ -702,6 +686,30 @@ mod tests {
             flat(&out).contains("%CPU of all 8 cores from the next sample"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_services_heading_pins_with_the_column_header() {
+        let s = with(Services::Table(svc_table()));
+        let v = view(&s);
+        let p = view::palette();
+        for width in [28, 40, 60, 80, 100, 140] {
+            let drawn = view::compose(head(&v, width, &p, None), &table(&v, width, &p));
+            let rows: Vec<String> = drawn.rows.iter().map(|r| plain(r)).collect();
+            let rule = rows
+                .iter()
+                .position(|r| r.starts_with(" ── SERVICES"))
+                .unwrap_or_else(|| panic!("{width}: no heading:\n{}", rows.join("\n")));
+            assert!(rows[rule - 1].is_empty(), "a blank line before the rule");
+            assert!(rule < drawn.pin, "the heading pins");
+            assert!(
+                rows[drawn.pin - 1].trim_start().starts_with("SERVICE"),
+                "{width}: the column header is the last pinned row:\n{}",
+                rows.join("\n")
+            );
+            // The first row of the window is the first service.
+            assert_eq!(drawn.placed.iter().map(|(r, _)| *r).min(), Some(drawn.pin));
+        }
     }
 
     #[test]

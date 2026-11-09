@@ -577,7 +577,10 @@ zero traffic. Do not use interpolation to manufacture operational readings.
 
 `Plot::in_viewport` takes the same scroll offset and pinned header height as the
 text body; its `room` argument excludes the header and footer. It returns no plot
-when the region is offscreen. Core rejects plots on the title row and still
+when the region is offscreen. A plot wholly inside the pinned rows is returned
+unchanged at every scroll, so a widget that pins a panel of charts above a
+scrolling list (`procs`) passes its whole head height as `top` and the charts
+stay with their text. Core rejects plots on the title row and still
 sanitizes all widget text. Never embed graphics escapes in row strings or write
 around `draw_plots`. `draw` remains the text-only API and clears former images
 when a settings screen or other view takes over.

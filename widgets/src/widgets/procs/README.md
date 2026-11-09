@@ -8,9 +8,8 @@ Linux example, 100 columns:
 
 ```text
 ╺━ PROCS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- sampled 1s ago · every 2s · %CPU of all 8 cores over the last 2s · 598 processes · sorted by %CPU
- 3 zombies · 112 kernel threads hidden
 
+ ── MACHINE ── sampled 1s ago · every 2s ──────────────────────────────────────────────────────────
  CPU    8 cores · 41% busy · load 3.90 2.80 2.10 (of 8)
  ▆▆▆▆
  ████ ▃▃▃▃ ▁▁▁▁                ▆▆▆▆ ▁▁▁▁
@@ -28,6 +27,8 @@ Linux example, 100 columns:
         │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣤⣤⣶⣶⣶⣾⣿⣿⣿⣿⣶⣶⣶⣶⣶⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ 3.90
        0┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
 
+ ── PROCESSES ── 598 · sorted by %CPU · 3 zombies · 112 kernel threads hidden ─────────────────────
+ %CPU of all 8 cores over the last 2s
      PID COMMAND        USER        %CPU   MEM   RSS STATE RUNNING CGROUP
 ▸  48213 example-worker user-a      12.4  4.1%  1.3G R       2d    session-2.scope
    51020 example-agent  user-a       2.8  2.0%  640M S       3h    session-2.scope
@@ -45,10 +46,10 @@ Linux example, 100 columns:
 
 ```text
 ╺━ PROCS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- SERVICES · sampled 1s ago · every 2s · cgroup v2 · complete · %CPU of all 8 cores over the last 2s
- 7 cgroups with cpu or memory · sorted by %CPU
- cpu accounting down to: services, scopes; user sessions roll up to user.slice
 
+ ── SERVICES ── sampled 1s ago · every 2s · cgroup v2 · complete ──────────────────────────────────
+ %CPU of all 8 cores over the last 2s · 7 cgroups with cpu or memory · sorted by %CPU
+ cpu accounting down to: services, scopes; user sessions roll up to user.slice
  6 of 7 shown · 1 empty hidden
  SERVICE                           %CPU MEMORY PROCS
 ▸user.slice                        88.4   9.5G   203
@@ -62,6 +63,24 @@ Linux example, 100 columns:
  ↑↓ select  [↵] its processes  [s] sort by memory  [/] filter  [u] only yours  [g] by process
  [r]efresh  [,] settings  [ctrl-k]cmds  [ctrl-t]heme  [q]uit
 ```
+
+The screen is in two parts, each under a rule: **MACHINE**, the panel,
+with when it was sampled and how often, and **PROCESSES**, the table,
+with how many there are, the sort, what is hidden and what %CPU is a
+share of - what does not fit on the rule goes, whole, on the lines under
+it. In the services view one **SERVICES** rule stands where both are.
+Below, *the heading* is the list's rule and the lines under it.
+
+On a pane tall enough, everything down to the column header stays put
+and only the table scrolls: the wheel, `ctrl-y` / `ctrl-e` and the
+cursor all move the table's own window, and the panel and its charts do
+not move. That needs the table to keep at least 6 rows and a third of
+the pane - 100×40 with eight cores does, 100×24 does not. A pane shorter
+than that scrolls the whole body under the title instead, so nothing is
+out of reach: pinned there, the head would leave the list a slot, and a
+list too small to read is as good as a list that is not there. A head
+that grows by a row or three - the filter box opening, a note on the
+panel - does not switch the pane back and forth; a resize decides again.
 
 In Kitty the load trace is pixels: a smooth line with the area under it,
 coloured by height along the heat ramp - calm up to the core count, red
@@ -105,8 +124,9 @@ poll on Linux:
   sample: the same load is the same colour wherever it appears. Until ten minutes have passed it says how long it has so far.
 
 A file that cannot be read is named in the panel (`/proc/stat
-unavailable: …`), and the table still draws. The panel scrolls with the
-table; the pane opens at the top.
+unavailable: …`), and the table still draws. The panel stays put above
+the table when the pane is tall enough (see above) and scrolls with it
+when not; the pane opens at the top.
 
 **macOS** has no per-core figure in this version - it would need
 `host_processor_info` - and the panel says so in one line rather than
@@ -123,7 +143,7 @@ inactive + speculative, at the page size `vm_stat` prints), labelled
 tid in PID, `└ name` in COMMAND, the thread's own %CPU over the same
 window, its state and how long it has been running. Memory, user and
 cgroup are the process's and are not repeated. Threads are never counted
-as processes - the header's count is unchanged and names how many threads
+as processes - the heading's count is unchanged and names how many threads
 are listed - and a thread row belongs to its process: a click on it
 selects the process, and `↑` `↓` step from process to process.
 `/proc/<pid>/task/` is read only while threads are shown. macOS lists no
@@ -153,7 +173,7 @@ difference attributed. A cgroup without the controllers (a login
 session under a `user.slice` that does not delegate them) rolls up into
 the nearest ancestor that has them, with its processes; how deep that
 goes on this host is read from the tree each poll and said in the
-header, as core words it: `cpu accounting down to: services, scopes;
+heading, as core words it: `cpu accounting down to: services, scopes;
 user sessions roll up to user.slice`.
 
 The two controllers need not reach the same depth. A slice that
@@ -164,11 +184,11 @@ read 14% with 0 processes of its own.
 
 The walk is not atomic: a busy cgroup's children are read a moment after
 it, and now and then they have moved more than it did over the window.
-Its own share then cannot be taken; the row reads `—`, the header counts
+Its own share then cannot be taken; the row reads `—`, the heading counts
 `1 row with a gap this poll`, and the next poll measures it again.
 
 The first walk has nothing to subtract from, so %CPU waits for the next
-and the header says when. The tree is walked only while the services
+and the heading says when. The tree is walked only while the services
 view (or one service) is on screen, once a poll after the `/proc` pass,
 and the previous tree is the only history kept.
 
@@ -177,14 +197,14 @@ and counted: `6 of 7 shown · 1 empty hidden`. `/` filters on the path,
 `u` narrows to the cgroups under your own `user.slice/user-<uid>.slice`
 (nothing, said so, when the accounting stops at `user.slice`), and `s`
 cycles %CPU, memory and processes. Everything is readable without root,
-so the header says `complete`.
+so the heading says `complete`.
 
 Instead of an empty table, the view names what stands in the way: `by
 service needs cgroup v2` on a v1 or hybrid host; `cpu accounting is off
 everywhere · systemctl set-property <unit> CPUAccounting=yes` when the
 controller is enabled on nothing below the root (with the other
 controller's figures still drawn when only one is off); `cgroup tree
-unreadable: …`. In a container the header says `rows are this
+unreadable: …`. In a container the heading says `rows are this
 container's cgroups`.
 
 `↵` on a service opens it:
@@ -220,29 +240,29 @@ One row per process, every user's by default:
 | PID | the process id |
 | COMMAND | the short name: `comm` on Linux, the executable's name on macOS. A name too long for the column wraps onto the next line; it is never cut |
 | USER | the owner, from `/etc/passwd` on Linux (then the system's user lookup) and from `ps` on macOS |
-| %CPU | a share of **all** cores: a busy single thread on 8 cores reads 12.5. The header says what it is measured over, every frame |
+| %CPU | a share of **all** cores: a busy single thread on 8 cores reads 12.5. The heading says what it is measured over, every frame |
 | MEM | resident memory as a share of the machine's |
 | RSS | resident memory |
 | STATE | `R` running, `S` sleeping, `D` waiting on disk (tinted, and footnoted under the table), `Z` zombie, `T` stopped |
 | RUNNING | how long since it started |
 | CGROUP | Linux only: the unit its cgroup names, or for a login session or the root the last part of the path |
 
-**%CPU is not the same figure on both platforms**, and the header says
+**%CPU is not the same figure on both platforms**, and the heading says
 which one it is:
 
 - **Linux** measures it: the change in `utime + stime` between two polls,
   divided by the clock tick rate (from `sysconf`, never assumed to be 100),
   the window and the number of CPUs. The window is the kernel's own, from
-  the `/proc/stat` totals, so the header reads `%CPU of all 8 cores over
+  the `/proc/stat` totals, so the heading reads `%CPU of all 8 cores over
   the last 2s`. A process seen for the first time shows `—` until it has
   been seen twice - unless it started since the last poll, in which case
   all of its time is inside the window and it is measured from zero.
 - **macOS** reads `ps`'s `%cpu`, which is the kernel's decaying average,
-  not a delta over any window. The header says `%CPU = macOS decaying
+  not a delta over any window. The heading says `%CPU = macOS decaying
   average (ps), not the last 2s`. It is divided by the core count so the
   two platforms' columns are both shares of the whole machine.
 
-The header also counts zombies (they stay in the table) and the kernel
+The heading also counts zombies (they stay in the table) and the kernel
 threads that are hidden (pid 2 and its children; `show_kernel_threads`
 lists them). A process that exits between the listing and the read is
 dropped, never drawn with a delta against nothing, and a pid reused
@@ -309,7 +329,7 @@ keeps the last reading it had.
 | `↑` `↓` / `j` `k` | move the selection |
 | `↵` | open the selected process, or by service the service's processes (a click on the selected row does the same) |
 | `esc` | back from the detail, or clear the filter |
-| `s` | sort by %CPU, then memory, then running (newest first) - by service %CPU, memory, then processes; the hint names the next one and the header the one in force |
+| `s` | sort by %CPU, then memory, then running (newest first) - by service %CPU, memory, then processes; the hint names the next one and the heading the one in force |
 | `/` | filter by command or user (by service: by cgroup path). Letters are text while the box is open, so `s`, `u` and `q` type themselves; `↵` keeps the filter and `esc` clears it |
 | `u` | every user's processes, or only yours (by service: the cgroups under your own user slice); the hint names the next state, and `yours` shows in the filter line |
 | `t` | show or hide each process's threads under it (Linux only); the hint reads `[t] show threads` or `[t] hide threads` |
@@ -318,7 +338,7 @@ keeps the last reading it had.
 | `,` | settings |
 | `!` | notices |
 | `q` | quit |
-| wheel, `ctrl-y` / `ctrl-e`, `pgup` / `pgdn`, `home` / `end` | scroll the view; the selection stays where it is |
+| wheel, `ctrl-y` / `ctrl-e`, `pgup` / `pgdn`, `home` / `end` | scroll the view - the table alone when the head is pinned, the whole body when the pane is too short for that; the selection stays where it is |
 
 A filter in force is named in the body: `184 of 598 shown · /example ·
 yours`. A filter that leaves nothing says `nothing matches · all 598
@@ -336,7 +356,7 @@ Section `procs` in `config.json`; `,` opens the settings screen.
 | `show_threads` | `false` | start with threads listed under their processes (Linux); `t` switches for the session |
 
 There is no `rows` setting - the pane scrolls, and a cap would hide rows -
-and no `cpu_window`: the %CPU window is the poll interval, and the header
+and no `cpu_window`: the %CPU window is the poll interval, and the heading
 names it.
 
 ## Sources

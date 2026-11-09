@@ -3,12 +3,17 @@ What this machine is running: every process, its CPU, memory and state.
 A process table for a wall: PID, COMMAND, USER, %CPU, MEM, RSS, STATE,
 RUNNING and CGROUP, every user's by default, sorted, filtered, and opened
 one at a time. On Linux every row comes from /proc and %CPU is measured
-over the poll, as a share of all cores, with the window named in the
-header every frame. On macOS every row comes from one ps a poll, and %CPU
+over the poll, as a share of all cores, with the window named on the
+PROCESSES rule every frame. On macOS every row comes from one ps a poll, and %CPU
 is macOS's decaying average from ps, labelled as that rather than as the
 last few seconds.
 
     procs [-n SECONDS]
+
+The screen is two parts, each under a rule: MACHINE, with when it was
+sampled and how often, and PROCESSES, with the count, the sort, what is
+hidden and what %CPU is a share of. What does not fit on a rule goes,
+whole, on the lines under it.
 
 Above the table, the machine: CPU with its core count, how busy it was
 and the load averages against the core count, a bar per core when four
@@ -22,7 +27,7 @@ the panel says so rather than drawing empty bars.
 
 Columns leave as the pane narrows: CGROUP, then RUNNING, STATE, USER and
 MEM. A command too long for its column wraps onto the next line; nothing
-is cut. STATE D is waiting on disk. Zombies are counted in the header and
+is cut. STATE D is waiting on disk. Zombies are counted on the rule and
 kept in the table; kernel threads are hidden and counted unless
 show_kernel_threads is on. With /proc mounted hidepid the counts are of
 the processes this user can see, and say visible.
@@ -41,7 +46,7 @@ the tree, of all cores; MEMORY its own share of memory.current; PROCS
 the processes in it from cgroup.procs. A parent's own share has its
 enabled children taken out, so nothing is counted twice, and a cgroup
 without the controllers rolls up into the nearest one with them. The
-header says how deep the accounting goes on this host, read from the
+SERVICES rule, which stands where MACHINE and PROCESSES are, says how deep the accounting goes on this host, read from the
 tree each poll. Everything is readable without root, so the table is
 complete. Rows with no CPU, memory or processes are hidden and counted.
 Without cgroup v2, or with both controllers off everywhere, the view says
@@ -70,4 +75,8 @@ as long as it is still true. Clicking the count opens the same screen.
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same. pgup, pgdn, home and end move that same view.
 They move the pane and never the selection, which is what the arrows are for.
+On a pane tall enough - the table keeping at least 6 rows and a third of
+the pane - everything down to the column header stays put, the panel's
+charts included, and only the table scrolls. On a shorter pane the
+whole body scrolls under the title instead, so nothing is out of reach.
 Click a row to select it; click the selected row to open it.
