@@ -180,11 +180,13 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
     let mut rows = vec![tc::title_busy("procs", width, &p.accent, busy)];
     let sample = view.sample;
     let mut clauses = timing(view);
-    clauses.push("cgroup v2".to_string());
     let mut warn: Option<String> = None;
     let mut count = (0, 0, 0);
     match sample.and_then(|s| s.services.as_ref()) {
         Some(Services::Table(table)) => {
+            // Only a walk that read a v2 tree may say so: on v1 the body
+            // says the opposite, and an unreadable tree says nothing yet.
+            clauses.push("cgroup v2".to_string());
             let unread = table.rows.iter().filter(|r| r.unread).count();
             clauses.push(if unread > 0 { "partial" } else { "complete" }.to_string());
             if table.container {
@@ -224,6 +226,7 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
             clauses.extend(table.depth.iter().cloned());
             warn = table.off.as_ref().map(|(_, line)| line.clone());
         }
+        Some(Services::NotEnabled(_)) => clauses.push("cgroup v2".to_string()),
         Some(_) => {}
         None => clauses.push("reading cgroups…".to_string()),
     }
@@ -511,8 +514,10 @@ fn processes(
     };
     let mut found: Vec<&Proc> = Vec::new();
     let mut missing: Vec<i32> = Vec::new();
+    let by_pid: std::collections::HashMap<i32, &Proc> =
+        sample.procs.iter().map(|proc| (proc.pid, proc)).collect();
     for pid in &svc.pids {
-        match sample.procs.iter().find(|p| p.pid == *pid) {
+        match by_pid.get(pid).copied() {
             Some(proc) => found.push(proc),
             None => missing.push(*pid),
         }
@@ -694,6 +699,25 @@ mod tests {
         let v = view(&s);
         let out = text(&head(&v, 80, &p, None), &table(&v, 80, &p));
         assert!(flat(&out).contains("by service needs cgroup v2"), "{out}");
+        // The heading never claims v2 on a v1 host, or for a tree it could
+        // not read.
+        let rule = |out: &str| {
+            out.lines()
+                .find(|l| l.contains("SERVICES"))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert!(!rule(&out).contains("cgroup v2"), "{out}");
+        let s = with(step(
+            &mut memo,
+            State::Unreadable("denied".into()),
+            None,
+            1.0,
+            8,
+        ));
+        let v = view(&s);
+        let out = text(&head(&v, 80, &p, None), &table(&v, 80, &p));
+        assert!(!rule(&out).contains("cgroup v2"), "{out}");
         let s = with(step(&mut memo, State::Container(host(0)), None, 1.0, 8));
         let v = view(&s);
         let out = text(&head(&v, 80, &p, None), &table(&v, 80, &p));

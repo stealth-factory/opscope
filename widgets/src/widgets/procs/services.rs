@@ -20,7 +20,7 @@
 //! Everything here is pure: `linux.rs` walks the tree and hands the
 //! [`State`] in, and tests build trees by hand.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use opscope_core::cgroup::{self, CpuStat, Reading, State, Tree};
 
@@ -215,7 +215,7 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
             }
         }
     }
-    let cpu_rows: Vec<String> = cgroup::attribute(next, "cpu")
+    let cpu_rows: HashSet<String> = cgroup::attribute(next, "cpu")
         .into_iter()
         .map(|r| r.path)
         .collect();
@@ -234,7 +234,7 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
                 .collect()
         })
         .unwrap_or_default();
-    let is_row = |path: &str| cpu_rows.iter().any(|p| p == path) || memory.contains_key(path);
+    let is_row = |path: &str| cpu_rows.contains(path) || memory.contains_key(path);
     // Every cgroup's processes land on itself when it is a row, otherwise on
     // the nearest ancestor that is.
     let mut pids: BTreeMap<String, Vec<i32>> = BTreeMap::new();
