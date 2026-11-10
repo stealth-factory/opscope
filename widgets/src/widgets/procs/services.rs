@@ -45,6 +45,10 @@ pub struct Service {
     /// share is a measured total but not this cgroup's, so it is not drawn
     /// as one.
     pub unread: bool,
+    /// The `cgroup.procs` of this cgroup, or of one that rolls up into it,
+    /// could not be read: `pids` is then what could be read, not all of
+    /// them, and the count is not drawn as one.
+    pub procs_unread: bool,
     /// Its processes, with those of any cgroup under it that rolls up.
     pub pids: Vec<i32>,
     /// Controllers enabled on it.
@@ -65,6 +69,7 @@ impl Service {
     pub fn empty(&self) -> bool {
         !self.gap
             && !self.unread
+            && !self.procs_unread
             && self.cpu_usec.unwrap_or(0) == 0
             && self.memory.unwrap_or(0) == 0
             && self.pids.is_empty()
@@ -256,7 +261,10 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
     let is_row = |path: &str| cpu_rows.contains(path) || memory.contains_key(path);
     // Every cgroup's processes land on itself when it is a row, otherwise on
     // the nearest ancestor that is.
+    // A list that could not be read marks the row it lands on, so an
+    // unread list is never counted as an empty one.
     let mut pids: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+    let mut procs_short: HashSet<String> = HashSet::new();
     for node in &next.nodes {
         let mut at = Some(node.path.as_str());
         while let Some(path) = at {
@@ -264,6 +272,9 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
                 pids.entry(path.to_string())
                     .or_default()
                     .extend(node.procs.iter().flatten().copied());
+                if node.procs.is_none() {
+                    procs_short.insert(path.to_string());
+                }
                 break;
             }
             at = parent(path);
@@ -296,6 +307,7 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
                 memory: own_mem.and_then(figure),
                 gap,
                 unread,
+                procs_unread: procs_short.contains(&node.path),
                 pids: list,
                 enabled: node.enabled.clone(),
                 stat: node.cpu,
@@ -733,6 +745,38 @@ mod tests {
             .find(|r| r.path == "system.slice/example-db.service")
             .unwrap();
         assert!(!db.unread && db.cpu.is_some());
+    }
+
+    /// A `cgroup.procs` that could not be read is not an empty one: the
+    /// row it lands on says its list is short, and is never hidden.
+    #[test]
+    fn an_unread_process_list_is_not_zero_processes() {
+        let a = host(0);
+        let mut b = host(1);
+        let log = b
+            .nodes
+            .iter_mut()
+            .find(|n| n.path == "system.slice/example-log.service")
+            .unwrap();
+        log.procs = None;
+        // A session that rolls up into user.slice, unread too.
+        let session = b
+            .nodes
+            .iter_mut()
+            .find(|n| n.path == "user.slice/user-1000.slice/session-2.scope")
+            .unwrap();
+        session.procs = None;
+        let rows = rows(&b, Some((&a, 2.0)), 8);
+        let row = |path: &str| rows.iter().find(|r| r.path == path).unwrap();
+        let log = row("system.slice/example-log.service");
+        assert!(log.procs_unread && log.pids.is_empty(), "{log:?}");
+        assert!(!log.empty(), "an unread list is drawn, not hidden");
+        assert!(
+            row("user.slice").procs_unread,
+            "the rolled-up list was unread"
+        );
+        let db = row("system.slice/example-db.service");
+        assert!(!db.procs_unread && db.pids.len() == 12);
     }
 
     #[test]

@@ -104,6 +104,16 @@ fn memory_cell(memory: Option<u64>) -> String {
     memory.map(human).unwrap_or_else(|| "—".into())
 }
 
+/// The process count, or `—` when a `cgroup.procs` behind it was unread:
+/// a short list counted would read as fewer processes than there are.
+fn procs_cell(svc: &Service) -> String {
+    if svc.procs_unread {
+        "—".into()
+    } else {
+        svc.pids.len().to_string()
+    }
+}
+
 fn row(
     svc: &Service,
     cols: &Cols,
@@ -157,7 +167,7 @@ fn row(
         if cols.procs {
             cells.push((
                 c(&p.txt),
-                or_blank(right(&svc.pids.len().to_string(), PROCS_W), PROCS_W),
+                or_blank(right(&procs_cell(svc), PROCS_W), PROCS_W),
             ));
         }
         out.push(join(&cells, width, here, &tint));
@@ -188,7 +198,15 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
             // says the opposite, and an unreadable tree says nothing yet.
             clauses.push("cgroup v2".to_string());
             let unread = table.rows.iter().filter(|r| r.unread).count();
-            clauses.push(if unread > 0 { "partial" } else { "complete" }.to_string());
+            let lists = table.rows.iter().filter(|r| r.procs_unread).count();
+            clauses.push(
+                if unread + lists > 0 {
+                    "partial"
+                } else {
+                    "complete"
+                }
+                .to_string(),
+            );
             if table.container {
                 clauses.push("rows are this container's cgroups".to_string());
             }
@@ -221,6 +239,12 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
                 clauses.push(format!(
                     "{unread} row{} holding an unread cgroup's usage",
                     if unread == 1 { "" } else { "s" }
+                ));
+            }
+            if lists > 0 {
+                clauses.push(format!(
+                    "{lists} row{} with an unread process list",
+                    if lists == 1 { "" } else { "s" }
                 ));
             }
             clauses.extend(table.depth.iter().cloned());
@@ -340,6 +364,12 @@ pub fn table(view: &View, width: usize, p: &Palette) -> Table {
     if shown.iter().any(|s| s.unread) {
         notes.push(
             "— not known: a cgroup under it could not be read this poll, or was removed during it, so its usage could not be taken out of this one's"
+                .to_string(),
+        );
+    }
+    if cols.procs && shown.iter().any(|s| s.procs_unread) {
+        notes.push(
+            "— in PROCS: a cgroup.procs behind that row could not be read this poll, so its processes are not all known"
                 .to_string(),
         );
     }
@@ -472,16 +502,16 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     }
     field(&mut rows, "memory", &memory.join(" · "), txt, width, p);
     let n = svc.pids.len();
-    field(
-        &mut rows,
-        "processes",
-        &format!(
+    let listed = if svc.procs_unread {
+        format!(
+            "not all known: the cgroup.procs of this cgroup or one rolled into it could not be read; {n} listed"
+        )
+    } else {
+        format!(
             "{n} from cgroup.procs, its own and those of cgroups under it without the controller"
-        ),
-        txt,
-        width,
-        p,
-    );
+        )
+    };
+    field(&mut rows, "processes", &listed, txt, width, p);
     rows.push(String::new());
     processes(&mut rows, svc, sample, width, p);
     Drawn {
@@ -506,7 +536,12 @@ fn processes(
     p: &Palette,
 ) {
     if svc.pids.is_empty() {
-        lines(rows, "no processes in it now", &p.dim, width);
+        let line = if svc.procs_unread {
+            "its cgroup.procs could not be read, so its processes are not known"
+        } else {
+            "no processes in it now"
+        };
+        lines(rows, line, &p.dim, width);
         return;
     }
     let Some(sample) = sample else {
@@ -815,6 +850,55 @@ mod tests {
             flat(&out).contains("nothing matches · all 7 hidden by the filter · yours"),
             "{out}"
         );
+    }
+
+    /// A row whose `cgroup.procs` was unread draws `—` in PROCS, the
+    /// heading says `partial`, and the detail never says it is empty.
+    #[test]
+    fn an_unread_process_list_reads_as_not_known() {
+        let mut t = svc_table();
+        let log = t
+            .rows
+            .iter_mut()
+            .find(|r| r.path == "system.slice/example-log.service")
+            .unwrap();
+        log.procs_unread = true;
+        log.pids.clear();
+        let log = log.clone();
+        let s = with(Services::Table(t));
+        let v = view(&s);
+        let p = view::palette();
+        let out = text(&head(&v, 140, &p, None), &table(&v, 140, &p));
+        let f = flat(&out);
+        assert!(f.contains("partial"), "{out}");
+        assert!(f.contains("1 row with an unread process list"), "{out}");
+        assert!(
+            f.contains("— in PROCS: a cgroup.procs behind that row"),
+            "{out}"
+        );
+        let line = out
+            .lines()
+            .find(|l| l.contains("example-log.service"))
+            .expect("the row is drawn");
+        assert!(line.trim_end().ends_with('—'), "{line:?}");
+        let open = OpenedService {
+            last: log,
+            gone: false,
+        };
+        let mut v = view(&s);
+        v.svc_opened = Some(&open);
+        let drawn = detail(&v, 120, &p, None);
+        let f = flat(
+            &drawn
+                .rows
+                .iter()
+                .map(|r| plain(r))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert!(f.contains("not all known"), "{f}");
+        assert!(f.contains("its cgroup.procs could not be read"), "{f}");
+        assert!(!f.contains("no processes in it now"), "{f}");
     }
 
     #[test]

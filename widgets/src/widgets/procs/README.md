@@ -194,6 +194,9 @@ walks (a transient service or scope that ran and finished: what it used
 stays in its parent's `cpu.stat`). The row's own share is then not known:
 it reads `—`, a line under the table says why, and the heading says
 `partial` and counts `1 row holding an unread cgroup's usage`.
+A `cgroup.procs` that cannot be read is treated the same way: the row it
+lands on reads `—` in PROCS rather than a count short by its processes,
+and the heading counts `1 row with an unread process list`.
 
 The first walk has nothing to subtract from, so %CPU waits for the next
 and the heading says when. The tree is walked only while the services
