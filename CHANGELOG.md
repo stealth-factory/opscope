@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.12.0] - 2026-11-10
+
+### Features
+
+- **procs**: A process and services pane with CPU, memory and load (#597)
+
 ## [2.11.0] - 2026-11-09
 
 ### Bug Fixes
