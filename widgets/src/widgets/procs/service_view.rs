@@ -199,8 +199,9 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
             clauses.push("cgroup v2".to_string());
             let unread = table.rows.iter().filter(|r| r.unread).count();
             let lists = table.rows.iter().filter(|r| r.procs_unread).count();
+            let own = table.rows.iter().filter(|r| r.own_unread).count();
             clauses.push(
-                if unread + lists > 0 {
+                if unread + lists + own > 0 {
                     "partial"
                 } else {
                     "complete"
@@ -245,6 +246,12 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
                 clauses.push(format!(
                     "{lists} row{} with an unread process list",
                     if lists == 1 { "" } else { "s" }
+                ));
+            }
+            if own > 0 {
+                clauses.push(format!(
+                    "{own} row{} with an unread counter of its own",
+                    if own == 1 { "" } else { "s" }
                 ));
             }
             clauses.extend(table.depth.iter().cloned());
@@ -367,13 +374,23 @@ pub fn table(view: &View, width: usize, p: &Palette) -> Table {
                 .to_string(),
         );
     }
+    if shown.iter().any(|s| s.own_unread) {
+        notes.push(
+            "— not known: that cgroup's own cpu.stat or memory.current could not be read this poll"
+                .to_string(),
+        );
+    }
     if cols.procs && shown.iter().any(|s| s.procs_unread) {
         notes.push(
             "— in PROCS: a cgroup.procs behind that row could not be read this poll, so its processes are not all known"
                 .to_string(),
         );
     }
-    if table.window.is_some() && shown.iter().any(|s| !s.gap && !s.unread && s.cpu.is_none()) {
+    if table.window.is_some()
+        && shown
+            .iter()
+            .any(|s| !s.gap && !s.unread && !s.own_unread && s.cpu.is_none())
+    {
         notes.push(
             "— in %CPU: no cpu controller on that cgroup; its CPU is counted in the nearest one above it that has one"
                 .to_string(),
@@ -444,6 +461,9 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     let label = cpu_label(Clock::Measured { window }, cores, view.every).join(" · ");
     let cpu = match (svc.cpu, svc.gap) {
         (Some(c), _) => format!("{c:.1}% own · {label}"),
+        (None, _) if svc.own_unread && svc.stat.is_none() && svc.enabled.iter().any(|c| c == "cpu") => {
+            "— not known this poll: this cgroup's cpu.stat could not be read".to_string()
+        }
         (None, _) if svc.unread && svc.enabled.iter().any(|c| c == "cpu") => {
             "— not known this poll: a cgroup under it could not be read, or was removed during the window, so its usage could not be taken out of this one's"
                 .to_string()
@@ -479,6 +499,8 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     let mut memory = Vec::new();
     if let Some(own) = svc.memory {
         memory.push(format!("{} own", human(own)));
+    } else if svc.own_unread && svc.memory_total.is_none() && !svc.path.is_empty() {
+        memory.push("not known: its memory.current could not be read".to_string());
     } else if svc.unread && svc.enabled.iter().any(|c| c == "memory") {
         memory.push("own not known: a cgroup under it could not be read".to_string());
     }

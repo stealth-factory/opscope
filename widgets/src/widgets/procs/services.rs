@@ -49,6 +49,11 @@ pub struct Service {
     /// could not be read: `pids` is then what could be read, not all of
     /// them, and the count is not drawn as one.
     pub procs_unread: bool,
+    /// Its own `cpu.stat` or `memory.current` could not be read although
+    /// the controller is enabled on it (the root's missing
+    /// `memory.current` is not a failure: it has none). That share is
+    /// `None` because it is unknown, not because it is off.
+    pub own_unread: bool,
     /// Its processes, with those of any cgroup under it that rolls up.
     pub pids: Vec<i32>,
     /// Controllers enabled on it.
@@ -70,6 +75,7 @@ impl Service {
         !self.gap
             && !self.unread
             && !self.procs_unread
+            && !self.own_unread
             && self.cpu_usec.unwrap_or(0) == 0
             && self.memory.unwrap_or(0) == 0
             && self.pids.is_empty()
@@ -218,6 +224,15 @@ pub fn delta_tree(prev: &Tree, next: &Tree) -> Tree {
     Tree { nodes }
 }
 
+/// A controller the walk asked for is enabled here and its file gave no
+/// reading. The root has no `memory.current` of its own, which is not a
+/// failure.
+fn own_unread(node: &cgroup::Node) -> bool {
+    let on = |c: &str| node.enabled.iter().any(|e| e == c);
+    (on("cpu") && node.cpu.is_none())
+        || (on("memory") && node.memory.is_none() && !node.path.is_empty())
+}
+
 fn parent(path: &str) -> Option<&str> {
     if path.is_empty() {
         None
@@ -308,6 +323,7 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
                 gap,
                 unread,
                 procs_unread: procs_short.contains(&node.path),
+                own_unread: own_unread(node),
                 pids: list,
                 enabled: node.enabled.clone(),
                 stat: node.cpu,
@@ -777,6 +793,31 @@ mod tests {
         );
         let db = row("system.slice/example-db.service");
         assert!(!db.procs_unread && db.pids.len() == 12);
+    }
+
+    /// Its own `memory.current` unreadable, its `cpu.stat` fine: the row
+    /// says its memory is not known and stays drawn, idle or not.
+    #[test]
+    fn a_cgroups_own_unread_counter_is_not_known_not_off() {
+        let a = host(0);
+        let mut b = host(1);
+        let idle = b
+            .nodes
+            .iter_mut()
+            .find(|n| n.path == "system.slice/example-idle.service")
+            .unwrap();
+        idle.memory = None;
+        let rows = rows(&b, Some((&a, 2.0)), 8);
+        let idle = rows
+            .iter()
+            .find(|r| r.path == "system.slice/example-idle.service")
+            .expect("its cpu.stat still makes it a row");
+        assert!(idle.own_unread && idle.memory.is_none(), "{idle:?}");
+        assert!(!idle.empty(), "unknown is not empty");
+        // The root has no memory.current at all: not a failure.
+        let root = rows.iter().find(|r| r.path.is_empty()).unwrap();
+        assert!(!root.own_unread, "{root:?}");
+        assert!(rows.iter().filter(|r| r.own_unread).count() == 1);
     }
 
     #[test]

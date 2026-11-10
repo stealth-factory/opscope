@@ -197,6 +197,10 @@ it reads `—`, a line under the table says why, and the heading says
 A `cgroup.procs` that cannot be read is treated the same way: the row it
 lands on reads `—` in PROCS rather than a count short by its processes,
 and the heading counts `1 row with an unread process list`.
+So is a cgroup's own `cpu.stat` or `memory.current` that cannot be read
+while the other can: that figure reads `—` as not known, never as a
+controller that is off, and the heading counts `1 row with an unread
+counter of its own`. None of these rows is hidden as empty.
 
 The first walk has nothing to subtract from, so %CPU waits for the next
 and the heading says when. The tree is walked only while the services
