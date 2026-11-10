@@ -189,7 +189,9 @@ Its own share then cannot be taken; the row reads `—`, the heading counts
 `1 row with a gap this poll`, and the next poll measures it again.
 
 A cgroup under a row whose `cpu.stat` or `memory.current` cannot be read
-leaves its usage inside that row's, so the row's own share is not known:
+leaves its usage inside that row's, and so does one removed between two
+walks (a transient service or scope that ran and finished: what it used
+stays in its parent's `cpu.stat`). The row's own share is then not known:
 it reads `—`, a line under the table says why, and the heading says
 `partial` and counts `1 row holding an unread cgroup's usage`.
 

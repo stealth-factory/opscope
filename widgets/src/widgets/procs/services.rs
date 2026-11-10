@@ -158,10 +158,28 @@ pub fn off_line(controller: &str, state: &State) -> String {
 /// its count is this window's; so is one whose counter went backwards (it
 /// was removed and made again under the same name). One that was there
 /// without a reading and has one now gets none: its count could be from
-/// any time.
+/// any time. A cgroup with `cpu` that was in the last walk and is gone
+/// from this one is kept with no reading: what it used before it was
+/// removed is still in its parent's counter and cannot be taken out, so
+/// `attribute` marks the parent's share unread rather than handing it
+/// that usage as its own.
 pub fn delta_tree(prev: &Tree, next: &Tree) -> Tree {
     let before: HashMap<&str, &cgroup::Node> =
         prev.nodes.iter().map(|n| (n.path.as_str(), n)).collect();
+    let now: HashSet<&str> = next.nodes.iter().map(|n| n.path.as_str()).collect();
+    let gone = prev
+        .nodes
+        .iter()
+        .filter(|n| !now.contains(n.path.as_str()))
+        .filter(|n| n.cpu.is_some() && n.enabled.iter().any(|c| c == "cpu"))
+        .map(|n| cgroup::Node {
+            path: n.path.clone(),
+            enabled: n.enabled.clone(),
+            io: None,
+            cpu: None,
+            memory: None,
+            procs: None,
+        });
     let nodes = next
         .nodes
         .iter()
@@ -190,6 +208,7 @@ pub fn delta_tree(prev: &Tree, next: &Tree) -> Tree {
                 procs: None,
             }
         })
+        .chain(gone)
         .collect();
     Tree { nodes }
 }
@@ -688,6 +707,32 @@ mod tests {
             .find(|r| r.path == "system.slice/example-log.service")
             .unwrap();
         assert!(!log.unread && log.cpu.is_some() && log.memory.is_some());
+    }
+
+    /// A transient service that ran and was removed between two walks: its
+    /// CPU stays in the slice's counter, so the slice's own share is not
+    /// known that poll, never the dead service's usage drawn as its own.
+    #[test]
+    fn a_child_removed_between_walks_leaves_its_parent_unknown() {
+        let a = host(1);
+        let mut b = host(2);
+        b.nodes
+            .retain(|n| n.path != "system.slice/example-log.service");
+        let rows = rows(&b, Some((&a, 2.0)), 8);
+        let slice = rows.iter().find(|r| r.path == "system.slice").unwrap();
+        assert!(slice.unread && slice.cpu.is_none(), "{slice:?}");
+        // Memory is a reading now, not a delta: the gone child holds none.
+        assert!(slice.memory.is_some(), "{slice:?}");
+        assert!(
+            rows.iter()
+                .all(|r| r.path != "system.slice/example-log.service")
+        );
+        // Everything else is measured as before.
+        let db = rows
+            .iter()
+            .find(|r| r.path == "system.slice/example-db.service")
+            .unwrap();
+        assert!(!db.unread && db.cpu.is_some());
     }
 
     #[test]

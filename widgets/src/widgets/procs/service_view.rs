@@ -339,7 +339,7 @@ pub fn table(view: &View, width: usize, p: &Palette) -> Table {
     }
     if shown.iter().any(|s| s.unread) {
         notes.push(
-            "— not known: a cgroup under it could not be read this poll, so its usage could not be taken out of this one's"
+            "— not known: a cgroup under it could not be read this poll, or was removed during it, so its usage could not be taken out of this one's"
                 .to_string(),
         );
     }
@@ -415,7 +415,7 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     let cpu = match (svc.cpu, svc.gap) {
         (Some(c), _) => format!("{c:.1}% own · {label}"),
         (None, _) if svc.unread && svc.enabled.iter().any(|c| c == "cpu") => {
-            "— not known this poll: a cgroup under it could not be read, so its usage could not be taken out of this one's"
+            "— not known this poll: a cgroup under it could not be read, or was removed during the window, so its usage could not be taken out of this one's"
                 .to_string()
         }
         (None, true) => {
