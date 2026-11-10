@@ -318,10 +318,16 @@ pub fn sample(source: &mut Source, with_threads: bool) -> Result<Sample, String>
 
     let mut procs = Vec::with_capacity(pids.len());
     let mut stats = HashMap::with_capacity(pids.len());
+    let mut closed = 0;
     for pid in pids {
         // A pid that has gone since the listing is dropped, never drawn
-        // with a delta against nothing.
+        // with a delta against nothing. One whose directory is still
+        // there is running but closed to this user (`hidepid=1`): it is
+        // counted, so the rule can say the table is short by it.
         let Ok(stat) = procfs::read_stat(pid) else {
+            if procfs::read_owner(pid).is_ok() {
+                closed += 1;
+            }
             continue;
         };
         let Ok((uid, _)) = procfs::read_owner(pid) else {
@@ -405,6 +411,7 @@ pub fn sample(source: &mut Source, with_threads: bool) -> Result<Sample, String>
         cores,
         clock: Clock::Measured { window },
         hidepid: source.hidepid.is_some_and(|(on, _)| on),
+        closed,
         // SAFETY: geteuid has no preconditions and cannot fail.
         me: unsafe { libc::geteuid() },
         machine,

@@ -158,6 +158,8 @@ pub fn sample(_source: &mut Source, _with_threads: bool) -> Result<Sample, Strin
         cores,
         clock: Clock::Decaying,
         hidepid: false,
+        // `ps` reads every user's processes.
+        closed: 0,
         // SAFETY: geteuid has no preconditions and cannot fail.
         me: unsafe { libc::geteuid() },
         machine,

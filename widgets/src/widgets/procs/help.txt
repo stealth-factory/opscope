@@ -30,7 +30,9 @@ MEM. A command too long for its column wraps onto the next line; nothing
 is cut. STATE D is waiting on disk. Zombies are counted on the rule and
 kept in the table; kernel threads are hidden and counted unless
 show_kernel_threads is on. With /proc mounted hidepid the counts are of
-the processes this user can see, and say visible.
+the processes this user can see, and say visible; under hidepid=1,
+which lists other users' processes but closes their files, the rule
+counts the ones it could not read.
 
 The detail of one process shows its full command line, working
 directory, parent chain, owner, threads, nice, start time, cumulative CPU

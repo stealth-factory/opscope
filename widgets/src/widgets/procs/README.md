@@ -279,7 +279,10 @@ between two polls is a new process, not a continuation of the old one.
 users' processes are not listed to this user at all. The counts are then
 of the processes this user can see, and say so: `412 processes visible
 (hidepid hides other users')`, and `184 of 412 visible shown` under a
-filter.
+filter. With `hidepid=noaccess` (or `1`) they are listed but their files
+are closed, so they cannot be in the table; the rule counts them instead
+of dropping them: `184 · 228 more running, closed to this user
+(hidepid)`.
 
 Columns leave as the pane narrows, in this order: CGROUP, RUNNING, STATE,
 USER, MEM. PID, COMMAND, %CPU and RSS stay at any width. Extra width goes

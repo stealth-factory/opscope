@@ -1319,6 +1319,12 @@ fn status(
     } else {
         listed.to_string()
     }];
+    if sample.closed > 0 {
+        clauses.push(format!(
+            "{} more running, closed to this user (hidepid)",
+            sample.closed
+        ));
+    }
     clauses.push(view.sort.in_force().to_string());
     if zombies > 0 {
         clauses.push(format!(
@@ -2279,6 +2285,24 @@ mod tests {
             t.contains("── PROCESSES ── 4 visible (hidepid hides other users')"),
             "{t}"
         );
+    }
+
+    /// `hidepid=1` lists other users' pids but closes their files: those
+    /// processes are not in the table, and the rule says how many.
+    #[test]
+    fn processes_closed_by_hidepid_are_counted_not_dropped() {
+        let mut s = table();
+        s.closed = 37;
+        let v = view(Some(&s));
+        let t = flat(&text(&draw_list(&v, 120, &palette(), None)));
+        assert!(
+            t.contains("4 · 37 more running, closed to this user (hidepid)"),
+            "{t}"
+        );
+        s.closed = 0;
+        let v = view(Some(&s));
+        let t = flat(&text(&draw_list(&v, 120, &palette(), None)));
+        assert!(!t.contains("closed to this user"), "{t}");
     }
 
     #[test]

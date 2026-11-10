@@ -300,7 +300,11 @@ fn main() {
         };
         let mut open = false;
         for key in keys {
-            if typing {
+            // The filter box takes text, but the view still scrolls: those
+            // keys fall through to the scroll arms below, and only a key
+            // that moved the cursor or changed the filter lets the window
+            // follow the cursor.
+            if typing && !scrolls(&key) {
                 match key.as_str() {
                     "esc" => {
                         needle.clear();
@@ -313,7 +317,7 @@ fn main() {
                     "up" => (at, cursor) = step(at, false, &drawn_keys),
                     "down" => (at, cursor) = step(at, true, &drawn_keys),
                     other if other.chars().count() == 1 => needle.push_str(other),
-                    _ => {}
+                    _ => continue,
                 }
                 chase = true;
                 continue;
@@ -772,6 +776,15 @@ fn cached<'a>(
     &cache.as_ref().expect("just filled").1
 }
 
+/// Keys that only move the view. They scroll even while the filter box is
+/// open, and never move the cursor.
+fn scrolls(key: &str) -> bool {
+    matches!(
+        key,
+        "ctrl-y" | "wheel-up" | "ctrl-e" | "wheel-down" | "pgup" | "pgdn" | "home" | "end"
+    )
+}
+
 /// When `proc` started, from the sample it was read in, taken `sampled`.
 fn started_from(proc: &Proc, sampled: Option<Instant>) -> Option<chrono::DateTime<chrono::Local>> {
     proc.running.map(|running| {
@@ -959,5 +972,26 @@ mod tests {
         assert_eq!(refresh_seconds(&cfg), 0.5);
         let cfg = serde_json::json!({});
         assert_eq!(refresh_seconds(&cfg), 2.0);
+    }
+
+    /// The filter box keeps the view scrollable: these reach the scroll
+    /// arms rather than the text, and none of them is a letter it takes.
+    #[test]
+    fn the_scroll_keys_pass_the_filter_box() {
+        for key in [
+            "ctrl-y",
+            "ctrl-e",
+            "wheel-up",
+            "wheel-down",
+            "pgup",
+            "pgdn",
+            "home",
+            "end",
+        ] {
+            assert!(scrolls(key), "{key}");
+        }
+        for key in ["a", "j", "k", "up", "down", "enter", "esc", "backspace"] {
+            assert!(!scrolls(key), "{key}");
+        }
     }
 }

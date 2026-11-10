@@ -71,6 +71,10 @@ pub struct Sample {
     /// `/proc` is mounted with a `hidepid` that hides other users'
     /// processes, so every count is of the visible ones.
     pub hidepid: bool,
+    /// Processes listed in `/proc` whose files this user cannot read
+    /// (`hidepid=1`, `noaccess`): they are running but not in `procs`, so
+    /// every count is short by this many and the rule says so.
+    pub closed: usize,
     /// This user's uid, for `[u] only yours`.
     pub me: u32,
     /// The machine as a whole: CPU, load, memory and swap.
@@ -432,6 +436,7 @@ pub mod fixtures {
             cores: 8,
             clock: Clock::Measured { window: Some(2.0) },
             hidepid: false,
+            closed: 0,
             me: 1000,
             machine: machine(8),
             history: (0..300)
