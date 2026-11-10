@@ -40,6 +40,11 @@ pub struct Service {
     /// Read a moment after this cgroup, a descendant moved more than it did
     /// (or could not be read), so a share could not be taken: drawn as a gap.
     pub gap: bool,
+    /// A cgroup under it with the controller could not be read, so that
+    /// cgroup's usage could not be taken out and sits in this one's: the
+    /// share is a measured total but not this cgroup's, so it is not drawn
+    /// as one.
+    pub unread: bool,
     /// Its processes, with those of any cgroup under it that rolls up.
     pub pids: Vec<i32>,
     /// Controllers enabled on it.
@@ -55,9 +60,11 @@ pub struct Service {
 impl Service {
     /// Nothing measured: no CPU over the window, no memory, no processes.
     /// A gap is not empty - its share could not be taken this poll, which
-    /// is the opposite of having measured nothing - so it stays drawn.
+    /// is the opposite of having measured nothing - so it stays drawn. A
+    /// share holding an unread child's usage is the same.
     pub fn empty(&self) -> bool {
         !self.gap
+            && !self.unread
             && self.cpu_usec.unwrap_or(0) == 0
             && self.memory.unwrap_or(0) == 0
             && self.pids.is_empty()
@@ -199,11 +206,12 @@ fn parent(path: &str) -> Option<&str> {
 /// before (`None` on the first). `cores` normalises %CPU to the machine.
 pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Service> {
     let delta = prev.map(|(prev, elapsed)| (delta_tree(prev, next), elapsed));
-    let mut cpu: HashMap<String, (u64, bool)> = HashMap::new();
+    // Each share with its two flags: (own, inconsistent, unread).
+    let mut cpu: HashMap<String, (u64, bool, bool)> = HashMap::new();
     if let Some((delta, _)) = &delta {
         for row in cgroup::attribute(delta, "cpu") {
             if let Reading::Cpu(usec) = row.own {
-                cpu.insert(row.path, (usec, row.inconsistent));
+                cpu.insert(row.path, (usec, row.inconsistent, row.unread));
             }
         }
     }
@@ -211,10 +219,10 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
         .into_iter()
         .map(|r| r.path)
         .collect();
-    let mut memory: HashMap<String, (u64, bool)> = HashMap::new();
+    let mut memory: HashMap<String, (u64, bool, bool)> = HashMap::new();
     for row in cgroup::attribute(next, "memory") {
         if let Reading::Memory(bytes) = row.own {
-            memory.insert(row.path, (bytes, row.inconsistent));
+            memory.insert(row.path, (bytes, row.inconsistent, row.unread));
         }
     }
     let deltas: HashMap<&str, CpuStat> = delta
@@ -251,8 +259,14 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
         .map(|node| {
             let own_cpu = cpu.get(&node.path).copied();
             let own_mem = memory.get(&node.path).copied();
-            let gap = own_cpu.is_some_and(|(_, bad)| bad) || own_mem.is_some_and(|(_, bad)| bad);
-            let cpu_usec = own_cpu.filter(|(_, bad)| !bad).map(|(usec, _)| usec);
+            let gap =
+                own_cpu.is_some_and(|(_, bad, _)| bad) || own_mem.is_some_and(|(_, bad, _)| bad);
+            let unread = own_cpu.is_some_and(|(_, _, part)| part)
+                || own_mem.is_some_and(|(_, _, part)| part);
+            // A share is a figure only when nothing below it was short or
+            // unread; otherwise it is drawn as `—` and said why.
+            let figure = |(v, bad, part): (u64, bool, bool)| (!bad && !part).then_some(v);
+            let cpu_usec = own_cpu.and_then(figure);
             let mut list = pids.remove(&node.path).unwrap_or_default();
             list.sort_unstable();
             list.dedup();
@@ -260,8 +274,9 @@ pub fn rows(next: &Tree, prev: Option<(&Tree, f64)>, cores: usize) -> Vec<Servic
                 path: node.path.clone(),
                 cpu: cpu_usec.zip(elapsed).map(|(usec, e)| scale(usec, e)),
                 cpu_usec,
-                memory: own_mem.filter(|(_, bad)| !bad).map(|(bytes, _)| bytes),
+                memory: own_mem.and_then(figure),
                 gap,
+                unread,
                 pids: list,
                 enabled: node.enabled.clone(),
                 stat: node.cpu,
@@ -651,6 +666,28 @@ mod tests {
         let rows = rows(&b, Some((&a, 2.0)), 8);
         let slice = rows.iter().find(|r| r.path == "system.slice").unwrap();
         assert!(slice.gap && slice.cpu.is_none(), "{slice:?}");
+    }
+
+    #[test]
+    fn a_share_holding_an_unread_childs_usage_is_not_a_figure() {
+        let a = host(0);
+        let mut b = host(1);
+        // example-db's cpu.stat and memory.current fail this walk: its usage
+        // cannot be taken out of system.slice's.
+        b.nodes[3].cpu = None;
+        b.nodes[3].memory = None;
+        let rows = rows(&b, Some((&a, 2.0)), 8);
+        let slice = rows.iter().find(|r| r.path == "system.slice").unwrap();
+        assert!(slice.unread, "{slice:?}");
+        assert!(!slice.gap, "nothing was floored");
+        assert_eq!(slice.cpu, None, "db's CPU is not system.slice's own");
+        assert_eq!(slice.memory, None, "db's memory is not system.slice's own");
+        assert!(!slice.empty(), "an unread share is drawn, not hidden");
+        let log = rows
+            .iter()
+            .find(|r| r.path == "system.slice/example-log.service")
+            .unwrap();
+        assert!(!log.unread && log.cpu.is_some() && log.memory.is_some());
     }
 
     #[test]

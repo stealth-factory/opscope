@@ -172,7 +172,7 @@ fn lines(rows: &mut Vec<String>, text: &str, ink: &str, width: usize) {
 }
 
 /// The title, then the `SERVICES` rule and what the table is: when, cgroup
-/// v2, complete,
+/// v2, complete (or partial, when a cgroup could not be read),
 /// the %CPU window, the count, the sort, and how deep the accounting goes
 /// as core says it. A named state replaces the table below, never an empty
 /// one.
@@ -185,7 +185,8 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
     let mut count = (0, 0, 0);
     match sample.and_then(|s| s.services.as_ref()) {
         Some(Services::Table(table)) => {
-            clauses.push("complete".to_string());
+            let unread = table.rows.iter().filter(|r| r.unread).count();
+            clauses.push(if unread > 0 { "partial" } else { "complete" }.to_string());
             if table.container {
                 clauses.push("rows are this container's cgroups".to_string());
             }
@@ -212,6 +213,12 @@ pub fn head(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Head
                 clauses.push(format!(
                     "{gaps} row{} with a gap this poll",
                     if gaps == 1 { "" } else { "s" }
+                ));
+            }
+            if unread > 0 {
+                clauses.push(format!(
+                    "{unread} row{} holding an unread cgroup's usage",
+                    if unread == 1 { "" } else { "s" }
                 ));
             }
             clauses.extend(table.depth.iter().cloned());
@@ -327,7 +334,13 @@ pub fn table(view: &View, width: usize, p: &Palette) -> Table {
                 .to_string(),
         );
     }
-    if table.window.is_some() && shown.iter().any(|s| !s.gap && s.cpu.is_none()) {
+    if shown.iter().any(|s| s.unread) {
+        notes.push(
+            "— not known: a cgroup under it could not be read this poll, so its usage could not be taken out of this one's"
+                .to_string(),
+        );
+    }
+    if table.window.is_some() && shown.iter().any(|s| !s.gap && !s.unread && s.cpu.is_none()) {
         notes.push(
             "— in %CPU: no cpu controller on that cgroup; its CPU is counted in the nearest one above it that has one"
                 .to_string(),
@@ -398,6 +411,10 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     let label = cpu_label(Clock::Measured { window }, cores, view.every).join(" · ");
     let cpu = match (svc.cpu, svc.gap) {
         (Some(c), _) => format!("{c:.1}% own · {label}"),
+        (None, _) if svc.unread && svc.enabled.iter().any(|c| c == "cpu") => {
+            "— not known this poll: a cgroup under it could not be read, so its usage could not be taken out of this one's"
+                .to_string()
+        }
         (None, true) => {
             "— a gap this poll: read a moment after this cgroup, the ones under it moved more than it did"
                 .to_string()
@@ -429,6 +446,8 @@ pub fn detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) -> Dr
     let mut memory = Vec::new();
     if let Some(own) = svc.memory {
         memory.push(format!("{} own", human(own)));
+    } else if svc.unread && svc.enabled.iter().any(|c| c == "memory") {
+        memory.push("own not known: a cgroup under it could not be read".to_string());
     }
     if let Some(total) = svc.memory_total {
         memory.push(format!(

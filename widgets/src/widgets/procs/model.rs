@@ -187,7 +187,10 @@ impl Machine {
 /// The load ring: one slot a poll for ten minutes. A poll that comes much
 /// sooner than `every` (an `r`) replaces the newest slot rather than adding
 /// one, so the slots stay about `every` apart and the axis stays ten
-/// minutes wide.
+/// minutes wide. A poll that comes late - the poller stalled, or polls in
+/// between failed - first fills the intervals it missed with gaps, so an
+/// outage is drawn as one and never joined across as a trend, and readings
+/// older than ten minutes fall off the axis.
 pub struct LoadHistory {
     slots: usize,
     every: f64,
@@ -215,11 +218,22 @@ impl LoadHistory {
             }
             return;
         }
+        if let Some(last) = self.last {
+            let intervals = ((at - last) / self.every).round();
+            let missed = (intervals.max(1.0) as usize - 1).min(self.slots);
+            for _ in 0..missed {
+                self.add(None);
+            }
+        }
+        self.add(load);
+        self.last = Some(at);
+    }
+
+    fn add(&mut self, load: Option<f64>) {
         if self.held.len() == self.slots {
             self.held.pop_front();
         }
         self.held.push_back(load);
-        self.last = Some(at);
     }
 
     pub fn values(&self) -> Vec<Option<f64>> {
@@ -478,6 +492,30 @@ mod tests {
         // A poll that could not read the load is a gap, not a zero.
         ring.push(None, 900.0);
         assert_eq!(ring.values().last(), Some(&None));
+    }
+
+    #[test]
+    fn a_late_poll_fills_the_time_it_missed_with_gaps() {
+        let mut ring = LoadHistory::new(2.0);
+        ring.push(Some(1.0), 0.0);
+        ring.push(Some(2.0), 2.1);
+        // Three polls missed (failed, or the poller stalled): 6, 8 and
+        // 10 s land on nothing, and the reading at 12 s is not joined to
+        // the one at 2 s.
+        ring.push(Some(3.0), 12.0);
+        assert_eq!(
+            ring.values(),
+            vec![Some(1.0), Some(2.0), None, None, None, None, Some(3.0)]
+        );
+        // Twenty minutes later nothing from before is inside the window.
+        ring.push(Some(4.0), 12.0 + 1200.0);
+        let held = ring.values();
+        assert_eq!(held.len(), 300);
+        assert_eq!(held[299], Some(4.0));
+        assert!(
+            held[..299].iter().all(|v| v.is_none()),
+            "the old readings fell off"
+        );
     }
 
     #[test]

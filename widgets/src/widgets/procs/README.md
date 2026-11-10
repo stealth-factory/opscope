@@ -118,7 +118,8 @@ poll on Linux:
   the bar and its figure coloured by how full it is.
 - **LOAD**: the 1-minute load average at every poll for the last ten
   minutes (300 points at `refresh` 2; a poll whose load could not be read
-  is a gap), the axis topped at the core count until the load passes it,
+  is a gap, and so is every interval a stalled or failing poller missed,
+  so an outage is never joined across as a trend), the axis topped at the core count until the load passes it,
   the core count marked on the axis and as a line across the chart, and
   the latest figure at the line's end. The colour is by height, not by
   sample: the same load is the same colour wherever it appears. Until ten minutes have passed it says how long it has so far.
@@ -187,6 +188,11 @@ it, and now and then they have moved more than it did over the window.
 Its own share then cannot be taken; the row reads `—`, the heading counts
 `1 row with a gap this poll`, and the next poll measures it again.
 
+A cgroup under a row whose `cpu.stat` or `memory.current` cannot be read
+leaves its usage inside that row's, so the row's own share is not known:
+it reads `—`, a line under the table says why, and the heading says
+`partial` and counts `1 row holding an unread cgroup's usage`.
+
 The first walk has nothing to subtract from, so %CPU waits for the next
 and the heading says when. The tree is walked only while the services
 view (or one service) is on screen, once a poll after the `/proc` pass,
@@ -197,7 +203,8 @@ and counted: `6 of 7 shown · 1 empty hidden`. `/` filters on the path,
 `u` narrows to the cgroups under your own `user.slice/user-<uid>.slice`
 (nothing, said so, when the accounting stops at `user.slice`), and `s`
 cycles %CPU, memory and processes. Everything is readable without root,
-so the heading says `complete`.
+so the heading says `complete` - or `partial` on a poll where a cgroup's
+files could not be read, as above.
 
 Instead of an empty table, the view names what stands in the way: `by
 service needs cgroup v2` on a v1 or hybrid host; `cpu accounting is off

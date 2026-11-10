@@ -487,6 +487,7 @@ fn main() {
                 opened = Some(Opened {
                     pid: proc.pid,
                     start: proc.start,
+                    started: started_from(&proc, sampled),
                     last: proc,
                     gone: false,
                     facts: None,
@@ -502,7 +503,10 @@ fn main() {
                 .iter()
                 .find(|p| p.pid == open.pid && p.start == open.start)
             {
-                Some(now) if !open.gone => open.last = now.clone(),
+                Some(now) if !open.gone => {
+                    open.last = now.clone();
+                    open.started = started_from(now, sampled);
+                }
                 _ => open.gone = true,
             }
         }
@@ -766,6 +770,17 @@ fn cached<'a>(
         *cache = Some((key, table));
     }
     &cache.as_ref().expect("just filled").1
+}
+
+/// When `proc` started, from the sample it was read in, taken `sampled`.
+fn started_from(proc: &Proc, sampled: Option<Instant>) -> Option<chrono::DateTime<chrono::Local>> {
+    proc.running.map(|running| {
+        view::started_at(
+            chrono::Local::now(),
+            sampled.map(|at| at.elapsed()),
+            running,
+        )
+    })
 }
 
 /// The open process as the latest table has it, if it is still the same

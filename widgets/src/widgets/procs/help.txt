@@ -48,7 +48,8 @@ enabled children taken out, so nothing is counted twice, and a cgroup
 without the controllers rolls up into the nearest one with them. The
 SERVICES rule, which stands where MACHINE and PROCESSES are, says how deep the accounting goes on this host, read from the
 tree each poll. Everything is readable without root, so the table is
-complete. Rows with no CPU, memory or processes are hidden and counted.
+complete; on a poll where a cgroup's files could not be read it says
+partial, and the row holding that cgroup's usage reads a dash. Rows with no CPU, memory or processes are hidden and counted.
 Without cgroup v2, or with both controllers off everywhere, the view says
 so and how to turn accounting on rather than drawing an empty table.
 macOS has no cgroups, so there is no services view there and g is not

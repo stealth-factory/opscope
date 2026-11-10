@@ -94,6 +94,10 @@ pub struct Opened {
     pub gone: bool,
     /// The last facts the poller read for it, kept for the same reason.
     pub facts: Option<Facts>,
+    /// When it started, worked out from the last sample it was alive in.
+    /// Once it has exited the latest sample's age says nothing about
+    /// `last`, so this is what the detail shows.
+    pub started: Option<chrono::DateTime<chrono::Local>>,
 }
 
 pub struct View<'a> {
@@ -1812,7 +1816,10 @@ pub fn draw_detail(view: &View, width: usize, p: &Palette, busy: Option<usize>) 
         .unwrap_or_else(|| not_on_mac.into());
     field(&mut rows, "nice", &nice, txt, width, p);
     if let Some(running) = proc.running {
-        let started = started_at(chrono::Local::now(), view.age, running);
+        let started = match (open.gone, open.started) {
+            (true, Some(kept)) => kept,
+            _ => started_at(chrono::Local::now(), view.age, running),
+        };
         let when = format!(
             "{} · running {}",
             started.format("%Y-%m-%d %H:%M:%S"),
@@ -2307,6 +2314,7 @@ mod tests {
             last: s.procs[1].clone(),
             gone: false,
             facts: None,
+            started: None,
         };
         let facts = |io: Io| Facts {
             pid: 1_204,
@@ -2375,9 +2383,18 @@ mod tests {
                     over: 2.0,
                 },
             }),
+            started: chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 1, 2, 3, 4, 5)
+                .single(),
         };
         let mut v = view(Some(&s));
         v.opened = Some(&open);
+        // A later sample's age must not move the start of a process that
+        // has gone: the time kept while it was alive is what is shown.
+        for age in [1, 60, 3_600] {
+            v.age = Some(Duration::from_secs(age));
+            let t = flat(&text(&draw_detail(&v, 80, &palette(), None)));
+            assert!(t.contains("2026-01-02 03:04:05"), "{age}: {t}");
+        }
         let t = flat(&text(&draw_detail(&v, 80, &palette(), None)));
         assert!(t.contains("exited: this is how it looked"), "{t}");
         assert!(t.contains("example-worker --once"), "{t}");
