@@ -1,0 +1,10 @@
+{
+  "required": {
+    "ps": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Every process row on macOS comes from ps."
+    }
+  },
+  "recommended": {}
+}

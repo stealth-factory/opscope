@@ -48,6 +48,8 @@ pub struct PidStat {
     pub utime: u64,
     /// Field 15, in clock ticks.
     pub stime: u64,
+    /// Field 19: -20 (most favoured) to 19.
+    pub nice: i64,
     /// Field 20.
     pub num_threads: i64,
     /// Field 22: when the process started, in clock ticks after boot.
@@ -79,6 +81,7 @@ pub fn parse_pid_stat(text: &str) -> Option<PidStat> {
         ppid: rest.get(1)?.parse().ok()?,
         utime: num(11)?,
         stime: num(12)?,
+        nice: rest.get(16)?.parse().ok()?,
         num_threads: rest.get(17)?.parse().ok()?,
         starttime: num(19)?,
         rss_pages: num(21)?,
@@ -174,6 +177,29 @@ pub fn unit_name(cgroup: &str) -> String {
 /// `/proc/uptime`: seconds since boot, the first of its two fields.
 pub fn parse_proc_uptime(text: &str) -> Option<f64> {
     text.split_whitespace().next()?.parse().ok()
+}
+
+/// `/proc/self/mountinfo`: whether `/proc` is mounted with a `hidepid`
+/// that hides other users' processes from listing (`invisible`, `2`, or
+/// `ptraceable`, `4`). `noaccess` (`1`) still lists them, so the total is
+/// still every process and the word `visible` would be wrong.
+pub fn parse_hidepid(mountinfo: &str) -> bool {
+    mountinfo.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(dash) = fields.iter().position(|f| *f == "-") else {
+            return false;
+        };
+        let mount_point = fields.get(4).copied().unwrap_or("");
+        let fstype = fields.get(dash + 1).copied().unwrap_or("");
+        if mount_point != "/proc" || fstype != "proc" {
+            return false;
+        }
+        let options = fields[5..].iter().chain(fields.get(dash + 3).into_iter());
+        options
+            .flat_map(|opts| opts.split(','))
+            .filter_map(|opt| opt.strip_prefix("hidepid="))
+            .any(|v| matches!(v, "2" | "invisible" | "4" | "ptraceable"))
+    })
 }
 
 /// How long a process has been running: uptime minus its `starttime`,
@@ -369,6 +395,32 @@ pub fn read_stat(pid: i32) -> Result<PidStat, String> {
     parse_pid_stat(&text).ok_or_else(|| format!("{}: not a stat line", path))
 }
 
+/// A machine-wide file under `/proc` as text - `stat`, `loadavg`,
+/// `meminfo` - or `Err("/proc/<name>: <io error>")`, so the reason a
+/// figure is missing can be drawn beside it.
+pub fn read_proc(name: &str) -> Result<String, String> {
+    read_text(&format!("/proc/{}", name))
+}
+
+/// The thread ids in `/proc/<pid>/task`, the main thread's (the pid)
+/// among them.
+pub fn tids(pid: i32) -> Result<Vec<i32>, String> {
+    let dir = format!("/proc/{}/task", pid);
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {}", dir, e))?;
+    Ok(entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect())
+}
+
+/// `/proc/<pid>/task/<tid>/stat`: one thread's line, the same shape as a
+/// process's, parsed by the same `parse_pid_stat`.
+pub fn read_task_stat(pid: i32, tid: i32) -> Result<PidStat, String> {
+    let path = format!("/proc/{}/task/{}/stat", pid, tid);
+    let text = read_text(&path)?;
+    parse_pid_stat(&text).ok_or_else(|| format!("{}: not a stat line", path))
+}
+
 /// `/proc/<pid>/io`, parsed. Another user's is closed to us, which is an
 /// `Err` like any other unreadable file.
 pub fn read_io(pid: i32) -> Result<PidIo, String> {
@@ -422,8 +474,22 @@ pub struct PidFiles {
     pub cmdline: Result<String, String>,
     pub comm: Result<String, String>,
     pub cwd: Result<String, String>,
-    /// The owner of `/proc/<pid>`, which is the process's real uid.
+    /// The owner of `/proc/<pid>`, which is the process's effective uid.
     pub uid: Result<u32, String>,
+}
+
+/// The owner of `/proc/<pid>`: the process's effective uid and gid, as
+/// `(uid, gid)`. Cheaper than `read_pid` when a table needs the owner and
+/// not the rest. A process that is not dumpable (`PR_SET_DUMPABLE` 0, as
+/// `ssh-agent` sets, or after a setuid exec) has the files *inside* this
+/// directory shown as root's, but the directory itself is mode 0555 and
+/// the kernel exempts it, so it keeps the process's own ids.
+pub fn read_owner(pid: i32) -> Result<(u32, u32), String> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = format!("/proc/{}", pid);
+    std::fs::metadata(&dir)
+        .map(|m| (m.uid(), m.gid()))
+        .map_err(|e| format!("{}: {}", dir, e))
 }
 
 /// Each of a process's files, read once. A pid that has gone since `pids()`
@@ -669,6 +735,7 @@ mod tests {
         // utime 14, stime 15, num_threads 20, starttime 22, rss 24, blkio 42.
         fields[14 - 5] = "310".into();
         fields[15 - 5] = "90".into();
+        fields[19 - 5] = "-5".into();
         fields[20 - 5] = "8".into();
         fields[22 - 5] = "50000".into();
         fields[24 - 5] = "300".into();
@@ -684,6 +751,7 @@ mod tests {
         assert_eq!(s.state, 'S');
         assert_eq!(s.ppid, 1);
         assert_eq!((s.utime, s.stime), (310, 90));
+        assert_eq!(s.nice, -5);
         assert_eq!(s.num_threads, 8);
         assert_eq!(s.starttime, 50000);
         assert_eq!(s.rss_pages, 300);
@@ -828,6 +896,22 @@ ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
     }
 
     #[test]
+    fn hidepid_is_read_from_the_proc_mount() {
+        let line = |opts: &str| {
+            format!(
+                "22 26 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc {opts}\n"
+            )
+        };
+        assert!(parse_hidepid(&line("rw,hidepid=invisible")));
+        assert!(parse_hidepid(&line("rw,hidepid=2")));
+        assert!(!parse_hidepid(&line("rw,hidepid=noaccess")), "still listed");
+        assert!(!parse_hidepid(&line("rw")));
+        assert!(!parse_hidepid(
+            "30 22 0:5 / /mnt/elsewhere rw - proc proc rw,hidepid=2\n"
+        ));
+    }
+
+    #[test]
     fn rss_is_counted_in_pages_of_this_kernel() {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
         assert_eq!(rss_bytes(3), 3 * page);
@@ -844,6 +928,7 @@ ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
         assert!(files.comm.is_err());
         assert!(files.cwd.is_err());
         assert!(files.uid.is_err());
+        assert!(read_owner(i32::MAX).is_err());
         // And the error says which file.
         assert!(files.stat.unwrap_err().contains("/stat"));
     }
@@ -857,5 +942,8 @@ ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
         let files = read_pid(me);
         assert_eq!(files.stat.expect("own stat").pid, me);
         assert!(files.io.is_ok() && files.comm.is_ok() && files.uid.is_ok());
+        let (uid, gid) = read_owner(me).expect("own /proc dir");
+        assert_eq!(uid, unsafe { libc::geteuid() });
+        assert_eq!(gid, unsafe { libc::getegid() });
     }
 }

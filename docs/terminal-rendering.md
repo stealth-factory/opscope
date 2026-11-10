@@ -25,6 +25,11 @@ same. Higher resolution does not imply more samples or faster polling.
 `github-prs` adds daily activity charts; `tailnet` adds detail traffic traces.
 `google-search-console` adds hourly bars, a daily window-against-window
 trace and a page or query's 28-day traces.
+`procs` adds a 10-minute load trace, dressed with an area, a heat ramp by
+height, the core count as a reference and a dot on the newest point; its
+per-core bars stand in tracks and are `as_text()`, since they change every
+poll and as an image were a whole upload each time (31 KB/s of raw RGBA at
+100 columns with eight cores).
 These use shared text fallbacks: block bars, Braille traces and reference marks.
 
 Meters and stacked bars are text in every mode, Kitty included (OPS-203):
@@ -409,6 +414,65 @@ that the label cell is not blanked. Kitty, Ghostty and WezTerm were not
 available in the build environment, so the z-index under a tinted cell was
 not watched on a real terminal.
 
+### Dressing a line chart
+
+A line chart can carry more than its strokes. Each is a builder on the
+`Plot`, does nothing to a filled plot, and draws only what the samples and
+the axis already say:
+
+```rust,ignore
+let plot = tc::Plot::new(x, y, cols, rows, chart)
+    .under_text()
+    .on_axis(0.0, hi)
+    // Everything under each line, down to the floor of the chart.
+    .area()
+    // Colour by height, not by trace: (fraction of the axis, colour) stops.
+    .ramp(vec![(0.0, tc::heat_on(0.0, false)), (1.0, tc::heat_on(1.0, false))])
+    // A capacity or limit the axis labels name, as a fraction of the axis.
+    .reference(cores / hi, &tc::ink(tc::Role::Muted))
+    // A dot on each trace's newest point (pixels only).
+    .end_dot();
+```
+
+| | Kitty pixels | Braille / text |
+| --- | --- | --- |
+| `area()` | the trace's colour under the line, opacity fixed by height (stronger at the top of the chart, faint at its floor) plus a lit edge six pixels deep just under the line | every dot under the line set |
+| `ramp(stops)` | each pixel takes the colour of its height, mixed between stops | each row of cells takes the colour at its middle dot |
+| `reference(at, colour)` | a dashed line, four pixels on and three off, over the area and under the strokes | a dot in each empty cell of that dot row; inside the area, the same dots cut out |
+| `end_dot()` | a disc on the newest point, its centre lifted toward white | nothing: the widget's reading already sits at the line's end |
+
+Any of the four makes a chart dressed: in pixels its stroke is then 1.5
+pixels wide with a two-pixel glow, whichever of them it has. Braille
+strokes are unchanged.
+
+A gap stays empty in both: there is nothing under a sample nobody took. A
+ramp colours a level, not a sample, so a warning colour marks where on the
+axis it begins. A stop that is not truecolour (under `NO_COLOR`, say) keeps
+the chart in Braille, with that stop's colour as it is.
+
+Every colour is a function of height or of the trace, never of the column,
+so the area does not move the bytes much: a new sample changes the pixels
+near where the line was and where it is, which the changed-rectangle edit
+sends as a few rows. A whole-pixel slide still works for an area, a ramp
+and a dot - the strip it uploads is widened to cover where the old dot
+lands, and the left edge to four pixels for the wider stroke's tail - but
+not for a reference, whose dashes belong to the chart and would slide with
+the samples. A change of look is never a slide.
+
+Bars that change every poll can stand in tracks, the full height of the
+scale drawn behind each bar, so an idle bar still shows how tall it could
+be:
+
+```rust,ignore
+// None is a gap between groups, with no track behind it.
+let cores = tc::Plot::bars_on_track(x, y, &columns, 3, 100.0, &tc::ink(tc::Role::Dim)).as_text();
+```
+
+In text a bar's partial cell is an eighth block with the track as its
+background, as a stacked bar shares a cell, and the next cell clears it.
+Under `NO_COLOR` the track is left out: a background there is drawn as
+reverse video and would read as the bar.
+
 For discrete data, use the other `Plot` constructors with the same viewport and
 drawing path:
 
@@ -517,7 +581,10 @@ zero traffic. Do not use interpolation to manufacture operational readings.
 
 `Plot::in_viewport` takes the same scroll offset and pinned header height as the
 text body; its `room` argument excludes the header and footer. It returns no plot
-when the region is offscreen. Core rejects plots on the title row and still
+when the region is offscreen. A plot wholly inside the pinned rows is returned
+unchanged at every scroll, so a widget that pins a panel of charts above a
+scrolling list (`procs`) passes its whole head height as `top` and the charts
+stay with their text. Core rejects plots on the title row and still
 sanitizes all widget text. Never embed graphics escapes in row strings or write
 around `draw_plots`. `draw` remains the text-only API and clears former images
 when a settings screen or other view takes over.
@@ -553,6 +620,7 @@ and intentional text presentation, not unimplemented widget migrations.
 | `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
 | `disk` | One shared pixel/Braille read-up, write-down I/O chart under the disk table: the total of every disk until the disk section has focus, then the selected disk; each half keeps its own peak. macOS draws one combined trace. Filesystem fill meters are eighth-cell text | Keep the filesystem and disk tables as text; a narrow pane stacks each mount point above its figures rather than cutting the path |
+| `procs` | Pixel/Braille load trace with an area, a heat ramp by height relative to the core count, the core count as a dashed reference and a dot on the newest point. Per-core bars stand in tracks as eighth-cell text in every mode; memory and swap bars are eighth-cell text, swap coloured by how full it is | Per-core bars stay text: as an image they re-uploaded every poll |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## OSC 8 hyperlinks

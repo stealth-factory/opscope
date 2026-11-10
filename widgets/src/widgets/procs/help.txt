@@ -1,0 +1,85 @@
+What this machine is running: every process, its CPU, memory and state.
+
+A process table for a wall: PID, COMMAND, USER, %CPU, MEM, RSS, STATE,
+RUNNING and CGROUP, every user's by default, sorted, filtered, and opened
+one at a time. On Linux every row comes from /proc and %CPU is measured
+over the poll, as a share of all cores, with the window named on the
+PROCESSES rule every frame. On macOS every row comes from one ps a poll, and %CPU
+is macOS's decaying average from ps, labelled as that rather than as the
+last few seconds.
+
+    procs [-n SECONDS]
+
+The screen is two parts, each under a rule: MACHINE, with when it was
+sampled and how often, and PROCESSES, with the count, the sort, what is
+hidden and what %CPU is a share of. What does not fit on a rule goes,
+whole, on the lines under it.
+
+Above the table, the machine: CPU with its core count, how busy it was
+and the load averages against the core count, a bar per core when four
+or more fit (otherwise one meter of the total); MEMORY as used,
+reclaimable and free, three parts that sum to the total, where used is
+total less MemAvailable; SWAP; and the 1-minute load over the last ten
+minutes, one point a poll, with the core count marked on its axis. On
+macOS the total is the sum of ps's decaying averages, memory comes from
+vm_stat and swap from sysctl vm.swapusage, and per-core CPU is not read;
+the panel says so rather than drawing empty bars.
+
+Columns leave as the pane narrows: CGROUP, then RUNNING, STATE, USER and
+MEM. A command too long for its column wraps onto the next line; nothing
+is cut. STATE D is waiting on disk. Zombies are counted on the rule and
+kept in the table; kernel threads are hidden and counted unless
+show_kernel_threads is on. With /proc mounted hidepid the counts are of
+the processes this user can see, and say visible; under hidepid=1,
+which lists other users' processes but closes their files, the rule
+counts the ones it could not read.
+
+The detail of one process shows its full command line, working
+directory, parent chain, owner, threads, nice, start time, cumulative CPU
+time, cgroup and, where /proc/<pid>/io is readable, its disk read and
+write rate over the last poll. Another user's process needs root for
+that, and the row says so. macOS reads none of cwd, threads, nice or
+disk I/O in this version, and says so on each.
+
+By service (Linux only, cgroup v2): g switches the table to one row per
+cgroup with the cpu or memory controller enabled. %CPU is that cgroup's
+own share of cpu.stat usage_usec over the window between two walks of
+the tree, of all cores; MEMORY its own share of memory.current; PROCS
+the processes in it from cgroup.procs. A parent's own share has its
+enabled children taken out, so nothing is counted twice, and a cgroup
+without the controllers rolls up into the nearest one with them. The
+SERVICES rule, which stands where MACHINE and PROCESSES are, says how deep the accounting goes on this host, read from the
+tree each poll. Everything is readable without root, so the table is
+complete; on a poll where a cgroup's files could not be read it says
+partial, and the row holding that cgroup's usage reads a dash. Rows with no CPU, memory or processes are hidden and counted.
+Without cgroup v2, or with both controllers off everywhere, the view says
+so and how to turn accounting on rather than drawing an empty table.
+macOS has no cgroups, so there is no services view there and g is not
+offered.
+
+Keys: up/down or j/k select, enter opens the detail (in the services
+view, the service's processes), esc goes back or clears the filter, s
+cycles the sort through cpu, memory and running (newest first) - by
+service through cpu, memory and procs - / opens the filter box (letters
+are text until enter keeps the filter or esc clears it; by service it
+reads the cgroup path), u switches between all users and only yours (by
+service: the cgroups under your own user slice), t shows or hides each
+process's threads under it (Linux only: a thread's own %CPU, state and
+age, never counted as a process; show_threads sets where it starts), g
+switches between by process and by service (Linux only), each keeping
+its own selection, r refreshes now, comma opens settings, q quits.
+
+Press ! to read this widget's notices - warnings that are not about a number
+on screen, such as a config file others can read or a recommended tool that is
+missing - and dismiss them for this session, for 7 days or for 30. A new notice
+shows under the footer for a minute, and a [!] count stays on the top row for
+as long as it is still true. Clicking the count opens the same screen.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. pgup, pgdn, home and end move that same view.
+They move the pane and never the selection, which is what the arrows are for.
+On a pane tall enough - the table keeping at least 6 rows and a third of
+the pane - everything down to the column header stays put, the panel's
+charts included, and only the table scrolls. On a shorter pane the
+whole body scrolls under the title instead, so nothing is out of reach.
+Click a row to select it; click the selected row to open it.

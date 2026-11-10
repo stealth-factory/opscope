@@ -175,29 +175,6 @@ pub fn parse_ps_names(text: &str) -> HashMap<i32, String> {
     found
 }
 
-/// `/proc/self/mountinfo`: whether `/proc` is mounted with a `hidepid`
-/// that hides other users' processes from listing (`invisible`, `2`, or
-/// `ptraceable`, `4`). `noaccess` (`1`) still lists them, so the total is
-/// still every process and the word `visible` would be wrong.
-pub fn parse_hidepid(mountinfo: &str) -> bool {
-    mountinfo.lines().any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let Some(dash) = fields.iter().position(|f| *f == "-") else {
-            return false;
-        };
-        let mount_point = fields.get(4).copied().unwrap_or("");
-        let fstype = fields.get(dash + 1).copied().unwrap_or("");
-        if mount_point != "/proc" || fstype != "proc" {
-            return false;
-        }
-        let options = fields[5..].iter().chain(fields.get(dash + 3).into_iter());
-        options
-            .flat_map(|opts| opts.split(','))
-            .filter_map(|opt| opt.strip_prefix("hidepid="))
-            .any(|v| matches!(v, "2" | "invisible" | "4" | "ptraceable"))
-    })
-}
-
 /// One process in the table: every readable one, with a rate once it has
 /// been seen twice.
 #[derive(Clone, Debug, PartialEq)]
@@ -1575,22 +1552,6 @@ mod tests {
             coverage(&mixed(3, 1, false, false)),
             "3 of 4 processes readable (yours) · the other 1 needs root"
         );
-    }
-
-    #[test]
-    fn hidepid_is_read_from_the_proc_mount() {
-        let line = |opts: &str| {
-            format!(
-                "22 26 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc {opts}\n"
-            )
-        };
-        assert!(parse_hidepid(&line("rw,hidepid=invisible")));
-        assert!(parse_hidepid(&line("rw,hidepid=2")));
-        assert!(!parse_hidepid(&line("rw,hidepid=noaccess")), "still listed");
-        assert!(!parse_hidepid(&line("rw")));
-        assert!(!parse_hidepid(
-            "30 22 0:5 / /mnt/elsewhere rw - proc proc rw,hidepid=2\n"
-        ));
     }
 
     #[test]

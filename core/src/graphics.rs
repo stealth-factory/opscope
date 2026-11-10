@@ -31,21 +31,27 @@ pub struct LineChart {
 
 impl LineChart {
     pub fn cells(&self, cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
+        self.cells_with(cols, rows, false)
+    }
+
+    /// The Braille cells, with every dot under each line set when `area`.
+    fn cells_with(&self, cols: usize, rows: usize, area: bool) -> Vec<Vec<(String, u8)>> {
         let layers: Vec<_> = self
             .traces
             .iter()
             .map(|t| {
-                (
-                    t.colour.clone(),
-                    braille_with_baseline(
-                        &t.values,
-                        self.slots,
-                        cols,
-                        rows,
-                        t.baseline,
-                        t.positions.as_deref(),
-                    ),
-                )
+                let mut grid = braille_with_baseline(
+                    &t.values,
+                    self.slots,
+                    cols,
+                    rows,
+                    t.baseline,
+                    t.positions.as_deref(),
+                );
+                if area {
+                    fill_below(&mut grid, cols, rows);
+                }
+                (t.colour.clone(), grid)
             })
             .collect();
         let mut cells = super::overlay(&layers, cols, rows);
@@ -128,7 +134,82 @@ pub struct Plot {
     axis: Option<(f64, f64)>,
     /// A weather picture for this cell. Absent on every other plot.
     sky: Option<Sky>,
+    /// How a line chart is dressed beyond its strokes. Default: plain.
+    look: Look,
 }
+
+/// A line chart's dressing: an area under each trace, a colour ramp by
+/// height, a reference level and a mark on the newest point. Every one of
+/// them is a function of the same samples and the same axis; none adds a
+/// reading. Text and Braille draw the area, the ramp and the reference;
+/// the mark is pixels only, since the widget's own label already sits at
+/// the line's end in text.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Look {
+    area: bool,
+    /// (fraction of the axis, colour), ascending. Empty: trace colours.
+    ramp: Vec<(f64, String)>,
+    reference: Option<(f64, String)>,
+    end_dot: bool,
+}
+
+impl Look {
+    fn plain(&self) -> bool {
+        *self == Look::default()
+    }
+
+    /// The ramp's colour at `value`, a fraction of the axis, or `fallback`
+    /// when there is no ramp or a stop is not truecolour.
+    fn rgb_at(&self, value: f64, fallback: [u8; 3]) -> [u8; 3] {
+        let stops: Vec<(f64, [u8; 3])> = self
+            .ramp
+            .iter()
+            .filter_map(|(at, c)| Some((*at, rgb(c)?)))
+            .collect();
+        if stops.is_empty() || stops.len() != self.ramp.len() {
+            return fallback;
+        }
+        let v = finite_fraction(value);
+        if v <= stops[0].0 {
+            return stops[0].1;
+        }
+        for pair in stops.windows(2) {
+            let ((a, ca), (b, cb)) = (pair[0], pair[1]);
+            if v <= b {
+                let t = if b > a { (v - a) / (b - a) } else { 1.0 };
+                return mix_rgb(ca, cb, t);
+            }
+        }
+        stops[stops.len() - 1].1
+    }
+
+    /// The ramp's colour at `value` as an escape; `fallback` when there is
+    /// no ramp. A stop that is not truecolour (no colour at all, say) is
+    /// used as it is, the nearest one below `value`.
+    fn ink_at(&self, value: f64, fallback: &str) -> String {
+        if self.ramp.is_empty() {
+            return fallback.to_string();
+        }
+        if self.ramp.iter().all(|(_, c)| rgb(c).is_some()) {
+            let [r, g, b] = self.rgb_at(value, [0; 3]);
+            return super::rgb(r, g, b);
+        }
+        self.ramp
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= value)
+            .or(self.ramp.first())
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn colours(&self) -> impl Iterator<Item = &String> {
+        self.ramp.iter().map(|(_, c)| c).chain(self.reference.as_ref().map(|(_, c)| c))
+    }
+}
+
+/// Radius, in pixels, of the mark `Plot::end_dot` puts on the newest point.
+const DOT_RADIUS: f64 = 3.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -184,6 +265,7 @@ impl Plot {
             under_text: false,
             axis: None,
             sky: None,
+            look: Look::default(),
         }
     }
 
@@ -228,6 +310,57 @@ impl Plot {
         self
     }
 
+    /// Fill under each trace down to the floor of the chart. In pixels the
+    /// fill is the trace's colour fading from the top of the chart toward
+    /// the floor, so a high reading carries a denser fill than a low one;
+    /// in Braille every dot under the line is set. A gap stays empty in
+    /// both: there is nothing under a sample nobody took.
+    pub fn area(mut self) -> Self {
+        if self.fill.is_none() {
+            self.look.area = true;
+        }
+        self
+    }
+
+    /// Colour the strokes, and the area, by the height they are drawn at
+    /// instead of by trace: `stops` are (fraction of the axis, colour),
+    /// ascending, and the colour between two stops is mixed. A level means
+    /// one colour wherever the chart reaches it, so a warning colour marks
+    /// where on the axis it begins, not a guess about any one sample. In
+    /// Braille each row of cells takes the colour at its middle.
+    pub fn ramp(mut self, stops: Vec<(f64, String)>) -> Self {
+        if self.fill.is_none() {
+            let mut stops: Vec<_> = stops
+                .into_iter()
+                .filter(|(at, _)| at.is_finite())
+                .map(|(at, c)| (at.clamp(0.0, 1.0), c))
+                .collect();
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+            self.look.ramp = stops;
+        }
+        self
+    }
+
+    /// A horizontal reference at `at`, a fraction of the axis: a capacity,
+    /// a limit, a target the widget labels on its axis. A thin line in
+    /// pixels, drawn over the area and under the strokes; a dotted row of
+    /// Braille in text, cut into the area where the area covers it.
+    pub fn reference(mut self, at: f64, colour: &str) -> Self {
+        if self.fill.is_none() && at.is_finite() {
+            self.look.reference = Some((at.clamp(0.0, 1.0), colour.to_string()));
+        }
+        self
+    }
+
+    /// A dot on each trace's newest point, in pixels. Text has the widget's
+    /// own reading at the end of the line already, so Braille is unchanged.
+    pub fn end_dot(mut self) -> Self {
+        if self.fill.is_none() {
+            self.look.end_dot = true;
+        }
+        self
+    }
+
     /// Discrete columns, one terminal cell per bucket. Both renderers share
     /// the same scale; downward bars retain fractional heights in pixels.
     pub fn bars(
@@ -269,6 +402,82 @@ impl Plot {
                     height: h,
                     colour: colour.clone(),
                 }
+            })
+            .collect();
+        Self::filled(x, y, columns.len(), height, rects, text)
+    }
+
+    /// Upward bars, each standing in its own track: the full height of the
+    /// scale drawn behind the bar in `track`, so an empty bar still shows
+    /// how tall it could be. `None` is a gap between groups, with no
+    /// track. In text the bar's partial cell is an eighth block on the
+    /// track as its background, the way a stacked bar shares a cell; with
+    /// no colour at all (`NO_COLOR`) the track is left out, since a
+    /// background there would be drawn as reverse video and read as the
+    /// bar. Not drawn as an image when `as_text` says so.
+    pub fn bars_on_track(
+        x: usize,
+        y: usize,
+        columns: &[Option<(f64, String)>],
+        height: usize,
+        peak: f64,
+        track: &str,
+    ) -> Self {
+        let peak = if peak.is_finite() && peak > 0.0 { peak } else { 1.0 };
+        let clean = |v: f64| if v.is_finite() { v.clamp(0.0, peak) } else { 0.0 };
+        let behind = rgb(track).filter(|_| !super::theme::no_color());
+        let mut rects = Vec::new();
+        for (i, column) in columns.iter().enumerate() {
+            let Some((v, colour)) = column else { continue };
+            if behind.is_some() {
+                rects.push(Rect { x: i as f64, y: 0.0, width: 1.0, height: height as f64, colour: track.to_string() });
+            }
+            let h = clean(*v) / peak * height as f64;
+            if h > 0.0 {
+                rects.push(Rect { x: i as f64, y: height as f64 - h, width: 1.0, height: h, colour: colour.clone() });
+            }
+        }
+        let text = (0..height)
+            .map(|r| {
+                let top = peak * (height - r) as f64 / height as f64;
+                let bottom = peak * (height - r - 1) as f64 / height as f64;
+                // Each cell's ink and glyph; a run of cells with the same
+                // ink is one segment, so a wide bar costs one escape a row.
+                let mut line: Vec<(String, String)> = Vec::new();
+                let mut background = false;
+                for column in columns {
+                    let (ink, ch) = match column {
+                        None => (String::new(), ' '),
+                        Some((v, colour)) => {
+                            let v = clean(*v);
+                            let ch = if v >= top {
+                                '█'
+                            } else if v <= bottom {
+                                ' '
+                            } else {
+                                let step = ((v - bottom) / (top - bottom) * 8.0) as usize;
+                                super::EIGHTHS[step.clamp(1, 8)]
+                            };
+                            match behind.filter(|_| ch != '█') {
+                                Some([r, g, b]) => (format!("{colour}\x1b[48;2;{r};{g};{b}m"), ch),
+                                None => (colour.clone(), ch),
+                            }
+                        }
+                    };
+                    let painted = ink.contains("\x1b[48;");
+                    match line.last_mut() {
+                        Some((last, text)) if last.trim_start_matches(super::NOBG) == ink => text.push(ch),
+                        _ => {
+                            let reset = if background && !painted { super::NOBG } else { "" };
+                            line.push((format!("{reset}{ink}"), ch.to_string()));
+                        }
+                    }
+                    background = painted;
+                }
+                if background {
+                    line.push((super::NOBG.to_string(), String::new()));
+                }
+                line
             })
             .collect();
         Self::filled(x, y, columns.len(), height, rects, text)
@@ -662,6 +871,12 @@ impl Plot {
         for trace in &mut self.chart.traces {
             trace.colour = f(&trace.colour);
         }
+        for (_, colour) in &mut self.look.ramp {
+            *colour = f(colour);
+        }
+        if let Some((_, colour)) = &mut self.look.reference {
+            *colour = f(colour);
+        }
         if let Some(fill) = &mut self.fill {
             for rect in &mut fill.rects {
                 rect.colour = f(&rect.colour);
@@ -676,7 +891,17 @@ impl Plot {
     }
 
     /// `top` is the pinned header height; `room` excludes the footer.
+    ///
+    /// A plot wholly inside the pinned rows is pinned with them: it keeps
+    /// its row and all of its height whatever the scroll, the way the text
+    /// beside it does. A widget that pins a panel above a scrolling list
+    /// would otherwise lose the panel's charts the moment it pinned them.
     pub fn in_viewport(mut self, scroll: usize, top: usize, room: usize) -> Option<Self> {
+        if self.height > 0 && self.y.saturating_add(self.height) <= top {
+            self.first_row = 0;
+            self.visible_rows = self.height;
+            return Some(self);
+        }
         let start = top.saturating_add(scroll);
         let end = start.saturating_add(room);
         let first = self.y.max(start);
@@ -802,6 +1027,65 @@ fn braille_with_baseline(
         },
     );
     grid
+}
+
+/// Every Braille dot under the topmost dot of its dot column: the area
+/// under a line. A column with no dot stays empty.
+fn fill_below(grid: &mut [Vec<u8>], cols: usize, rows: usize) {
+    for x in 0..cols * 2 {
+        let bit = |y: usize| super::BRAILLE[y % 4][x % 2];
+        let Some(top) = (0..rows * 4).find(|&y| grid[y / 4][x / 2] & bit(y) != 0) else {
+            continue;
+        };
+        for y in top + 1..rows * 4 {
+            grid[y / 4][x / 2] |= bit(y);
+        }
+    }
+}
+
+impl Plot {
+    /// A line chart's Braille cells with its look applied: the area, the
+    /// ramp by row and the reference row.
+    fn line_cells(&self) -> Vec<Vec<(String, u8)>> {
+        let (cols, rows) = (self.width, self.height);
+        let look = &self.look;
+        let mut cells = self.chart.cells_with(cols, rows, look.area);
+        if look.plain() || rows == 0 {
+            return cells;
+        }
+        if !look.ramp.is_empty() {
+            let dots = (rows * 4 - 1).max(1) as f64;
+            for (y, row) in cells.iter_mut().enumerate() {
+                // The colour at the row's middle dot.
+                let middle = 1.0 - (y as f64 * 4.0 + 1.5) / dots;
+                let mut ink = None;
+                for cell in row.iter_mut().filter(|cell| cell.1 != 0) {
+                    cell.0 = ink.get_or_insert_with(|| look.ink_at(middle, &cell.0)).clone();
+                }
+            }
+        }
+        if let Some((at, colour)) = &look.reference {
+            let dy = pixel_y(*at, rows * 4);
+            let (row, bit) = (dy / 4, dy % 4);
+            let dot = super::BRAILLE[bit][0];
+            for x in 0..cols {
+                // The dot above this one, to tell the area's inside from
+                // the line along its top.
+                let above = match bit {
+                    0 => row > 0 && cells[row - 1][x].1 & super::BRAILLE[3][0] != 0,
+                    _ => cells[row][x].1 & super::BRAILLE[bit - 1][0] != 0,
+                };
+                let cell = &mut cells[row][x];
+                if cell.1 == 0 {
+                    *cell = (colour.clone(), dot);
+                } else if look.area && above && cell.1 & dot != 0 {
+                    // Under the line: a dotted cut through the area.
+                    cell.1 &= !dot;
+                }
+            }
+        }
+        cells
+    }
 }
 
 /// Pixel row of a bottom-to-top chart fraction inside a bitmap `height` pixels tall.
@@ -1348,11 +1632,12 @@ pub(crate) fn compose(
                 .fill
                 .as_ref()
                 .is_none_or(|f| f.rects.iter().all(|r| rgb(&r.colour).is_some()))
-            && plot.chart.traces.iter().all(|t| rgb(&t.colour).is_some());
+            && plot.chart.traces.iter().all(|t| rgb(&t.colour).is_some())
+            && plot.look.colours().all(|c| rgb(c).is_some());
         let cells = if use_pixels || plot.fill.is_some() {
             Vec::new()
         } else {
-            plot.chart.cells(plot.width, plot.height)
+            plot.line_cells()
         };
         // A line chart under the text keeps whatever the widget drew there:
         // an axis value, a rate, the tint. Blanking those cells is what
@@ -1376,17 +1661,19 @@ pub(crate) fn compose(
             } else if let Some(fill) = &plot.fill {
                 fill.row(row + plot.first_row, cols)
             } else {
-                cells[row + plot.first_row]
-                    .iter()
-                    .take(cols)
-                    .map(|(c, mask)| {
-                        format!(
-                            "{}{}",
-                            c,
-                            char::from_u32(0x2800 + *mask as u32).unwrap_or(' ')
-                        )
-                    })
-                    .collect::<String>()
+                // A colour is written where it changes, not on every cell:
+                // a filled or ramped chart is one colour a row, and the
+                // escape is six times the size of the glyph it colours.
+                let mut out = String::new();
+                let mut last: Option<&str> = None;
+                for (c, mask) in cells[row + plot.first_row].iter().take(cols) {
+                    if last != Some(c.as_str()) && !(c.is_empty() && last.is_some()) {
+                        out.push_str(c);
+                        last = Some(c.as_str());
+                    }
+                    out.push(char::from_u32(0x2800 + *mask as u32).unwrap_or(' '));
+                }
+                out
             };
             text[plot.y + row] = replace_cells(&text[plot.y + row], plot.x, cols, &content);
         }
@@ -1970,6 +2257,10 @@ fn raster_pixels(plot: &Plot, cols: usize, cell_w: usize, cell_h: usize) -> Vec<
         }
         return pixels;
     }
+    if !plot.look.plain() {
+        raster_look(plot, &mut pixels, (x0, y0, w, h), (full_w, full_h));
+        return pixels;
+    }
     let order = (0..plot.chart.traces.len())
         .filter(|i| Some(*i) != plot.chart.focus)
         .chain(plot.chart.focus.filter(|i| *i < plot.chart.traces.len()));
@@ -2040,6 +2331,218 @@ fn raster_pixels(plot: &Plot, cols: usize, cell_w: usize, cell_h: usize) -> Vec<
         }
     }
     pixels
+}
+
+/// The area's opacity at the top of the chart and at its floor. Fixed by
+/// height, not by the line, so a sample that moves the line changes only
+/// the pixels near where it was and where it is: a few rows of edit, not
+/// the whole image.
+const AREA_TOP: f64 = 0.62;
+const AREA_FLOOR: f64 = 0.12;
+/// A lit edge just under the line, added to the area's opacity and gone
+/// `AREA_EDGE_PX` pixels down. Local to the line, so it moves the same few
+/// rows the line does.
+const AREA_EDGE: f64 = 0.25;
+const AREA_EDGE_PX: f64 = 6.0;
+/// The soft light either side of a dressed stroke, at its brightest.
+const GLOW: f64 = 0.22;
+/// Where the glow reaches from a stroke pixel, and how strongly, in 256ths:
+/// `1 - distance / 3`, out to two pixels.
+const GLOW_REACH: [(i64, i64, u32); 25] = {
+    let mut out = [(0, 0, 0); 25];
+    let mut k = 0;
+    while k < 25 {
+        let (dx, dy) = ((k % 5) as i64 - 2, (k / 5) as i64 - 2);
+        // sqrt is not const: the six distances that occur, by hand.
+        let weight = match dx * dx + dy * dy {
+            0 => 256,
+            1 => 171, // 1
+            2 => 135, // 1.41
+            4 => 85,  // 2
+            5 => 65,  // 2.24
+            _ => 14,  // 2.83
+        };
+        out[k] = (dx, dy, weight);
+        k += 1;
+    }
+    out
+};
+
+/// A line chart with a look: the areas, then the reference, then a glow
+/// and a stroke 1.5 pixels wide, then the dots. Every colour is a function
+/// of height (the ramp) or of the trace; nothing depends on the column, so
+/// a whole-pixel slide of the samples is a slide of the image.
+fn raster_look(
+    plot: &Plot,
+    pixels: &mut [u8],
+    (x0, y0, w, h): (usize, usize, usize, usize),
+    (full_w, full_h): (usize, usize),
+) {
+    let look = &plot.look;
+    let (x_end, y_end) = (x0 + w, y0 + h);
+    let span = full_h.saturating_sub(1).max(1) as f64;
+    let value_at = |y: usize| 1.0 - y as f64 / span;
+    let order: Vec<usize> = (0..plot.chart.traces.len())
+        .filter(|i| Some(*i) != plot.chart.focus)
+        .chain(plot.chart.focus.filter(|i| *i < plot.chart.traces.len()))
+        .collect();
+    let base = |i: usize| rgb(&plot.chart.traces[i].colour).unwrap_or([180, 200, 220]);
+    // Every colour is a function of height: one per visible row and trace.
+    let shades: Vec<Vec<[u8; 3]>> = (0..plot.chart.traces.len())
+        .map(|i| (y0..y_end).map(|y| look.rgb_at(value_at(y), base(i))).collect())
+        .collect();
+    let walk = |i: usize, emit: &mut dyn FnMut((usize, usize), (usize, usize))| {
+        let trace = &plot.chart.traces[i];
+        segments(
+            &trace.values,
+            plot.chart.slots,
+            full_w,
+            full_h,
+            trace.baseline,
+            trace.positions.as_deref(),
+            |a, b| emit(a, b),
+        );
+    };
+    if look.area {
+        for &i in &order {
+            // The highest pixel each column's line reaches; the area is
+            // everything under it.
+            let mut top = vec![usize::MAX; w];
+            walk(i, &mut |a, b| {
+                raster(a, b, |x, y| {
+                    if (x0..x_end).contains(&x) {
+                        let t = &mut top[x - x0];
+                        *t = (*t).min(y);
+                    }
+                });
+            });
+            for (cx, top) in top.into_iter().enumerate() {
+                if top == usize::MAX {
+                    continue;
+                }
+                for y in (top + 1).max(y0)..y_end {
+                    let down = y as f64 / span;
+                    let edge = (1.0 - (y - top) as f64 / AREA_EDGE_PX).max(0.0);
+                    let alpha = (AREA_TOP + (AREA_FLOOR - AREA_TOP) * down + AREA_EDGE * edge).min(1.0);
+                    let at = ((y - y0) * w + cx) * 4;
+                    blend(&mut pixels[at..at + 4], shades[i][y - y0], (alpha * 255.0).round() as u32);
+                }
+            }
+        }
+    }
+    if let Some((at, colour)) = &look.reference {
+        let y = pixel_y(*at, full_h);
+        if let (true, Some(colour)) = ((y0..y_end).contains(&y), rgb(colour)) {
+            // Dashed, anchored to the chart rather than the samples: four
+            // pixels on, three off.
+            for x in (0..w).filter(|x| (x + x0) % 7 < 4) {
+                let at = ((y - y0) * w + x) * 4;
+                blend(&mut pixels[at..at + 4], colour, 230);
+            }
+        }
+    }
+    for &i in &order {
+        // Coverage at twice the resolution, a three-subpixel stamp: a
+        // stroke one and a half pixels wide, its edges antialiased.
+        let (sw, sh) = (w * 2, h * 2);
+        let mut coverage = alloc_bytes(sw * sh);
+        walk(i, &mut |a, b| {
+            if a.1.max(b.1) + 1 < y0 || a.1.min(b.1) > y_end || a.0.min(b.0) > x_end {
+                return;
+            }
+            raster((a.0 * 2, a.1 * 2), (b.0 * 2, b.1 * 2), |x, y| {
+                for dy in 0..3 {
+                    for dx in 0..3 {
+                        let (sx, sy) = ((x + dx).wrapping_sub(1), (y + dy).wrapping_sub(1));
+                        if (x0 * 2..x_end * 2).contains(&sx)
+                            && (y0 * 2..y_end * 2).contains(&sy)
+                            && sx < full_w * 2
+                            && sy < full_h * 2
+                        {
+                            coverage[(sy - y0 * 2) * sw + (sx - x0 * 2)] = 1;
+                        }
+                    }
+                }
+            });
+        });
+        let mut alpha = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let at = y * 2 * sw + x * 2;
+                let count = coverage[at] + coverage[at + 1] + coverage[at + sw] + coverage[at + sw + 1];
+                alpha[y * w + x] = count as u32 * 255 / 4;
+            }
+        }
+        // The glow: each pixel takes the strongest stroke within two
+        // pixels, weakened by distance. Spread from the stroke's own
+        // pixels, which are a few a column, rather than gathered at every
+        // pixel of the image.
+        let mut glow = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let a = alpha[y * w + x];
+                if a == 0 {
+                    continue;
+                }
+                for (dx, dy, weight) in GLOW_REACH {
+                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                        continue;
+                    }
+                    let g = &mut glow[ny as usize * w + nx as usize];
+                    *g = (*g).max(a * weight / 256);
+                }
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let (g, a) = (glow[y * w + x], alpha[y * w + x]);
+                let at = (y * w + x) * 4;
+                if g > 0 {
+                    blend(&mut pixels[at..at + 4], shades[i][y], (g as f64 * GLOW).round() as u32);
+                }
+                if a > 0 {
+                    blend(&mut pixels[at..at + 4], shades[i][y], a);
+                }
+            }
+        }
+    }
+    if look.end_dot {
+        for &i in &order {
+            let trace = &plot.chart.traces[i];
+            let xs = point_xs(trace, plot.chart.slots, full_w);
+            let start = if trace.positions.is_some() {
+                0
+            } else {
+                trace.values.len().saturating_sub(plot.chart.slots)
+            };
+            let newest = xs.iter().enumerate().rev().find_map(|(k, x)| {
+                let v = trace.values[start + k]?;
+                Some(((*x)?, v))
+            });
+            let Some((cx, v)) = newest else { continue };
+            let cy = pixel_y(v, full_h);
+            let core = look.rgb_at(v, base(i));
+            // A bright centre on the trace's own colour.
+            let centre = mix_rgb(core, [255; 3], 0.35);
+            let reach = DOT_RADIUS.ceil() as i64 + 1;
+            for dy in -reach..=reach {
+                for dx in -reach..=reach {
+                    let (x, y) = (cx as i64 + dx, cy as i64 + dy);
+                    if x < x0 as i64 || y < y0 as i64 || x >= x_end as i64 || y >= y_end as i64 {
+                        continue;
+                    }
+                    let d = ((dx * dx + dy * dy) as f64).sqrt();
+                    let cover = (DOT_RADIUS + 0.5 - d).clamp(0.0, 1.0);
+                    if cover > 0.0 {
+                        let at = ((y as usize - y0) * w + (x as usize - x0)) * 4;
+                        let ink = if d <= DOT_RADIUS - 1.5 { centre } else { core };
+                        blend(&mut pixels[at..at + 4], ink, (cover * 255.0).round() as u32);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
@@ -2128,6 +2631,16 @@ fn frame_edit(
         || prev.chart.slots != next.chart.slots
         || prev.chart.focus != next.chart.focus
         || prev.chart.traces.len() != next.chart.traces.len()
+        || prev.look != next.look
+    {
+        return None;
+    }
+    // The dot is on the newest point, which a slide does not move: the old
+    // dot is carried left with the image. Positioned traces can end
+    // anywhere, so they are sent another way. A reference's dashes belong
+    // to the chart, not the samples, so a slide would move them.
+    if next.look.reference.is_some()
+        || (next.look.end_dot && next.chart.traces.iter().any(|t| t.positions.is_some()))
     {
         return None;
     }
@@ -2146,7 +2659,18 @@ fn frame_edit(
     let img_h = next.visible_rows * cell_h;
     // The join pixel sits one left of a dx-wide strip. Uploading dx columns
     // would leave that pixel as the old endpoint, missing the new segment.
-    let col_w = dx.checked_add(1)?;
+    // With a dot on the newest point, the strip also covers where the old
+    // dot lands after the shift, so the new raster paints over it. Any
+    // dressed stroke is wider and glows two pixels out, so a steep new
+    // segment paints left of the join even with no dot.
+    let pad = if next.look.end_dot {
+        DOT_RADIUS.ceil() as usize + 2
+    } else if !next.look.plain() {
+        2
+    } else {
+        0
+    };
+    let col_w = dx.checked_add(1 + pad)?;
     if col_w >= img_w || img_h == 0 || dx == 0 {
         return None;
     }
@@ -2158,7 +2682,13 @@ fn frame_edit(
     // The sample that just became oldest keeps the tail of the segment that
     // fell off the left. That stroke stays inside the sample's own column, so
     // one pixel there, taken from the new raster, makes the shift match.
-    let edge = column_rgba(&rgba, img_w, 0, 1);
+    // A dressed stroke is wider and glows two pixels out, so its tail
+    // reaches further into the image.
+    let edge_w = if next.look.plain() { 1 } else { 4 };
+    if edge_w + col_w >= img_w {
+        return None;
+    }
+    let edge = column_rgba(&rgba, img_w, 0, edge_w);
     let id = image_id(slot);
     let mut out = format!("\x1b_Ga=d,d=f,i={id},r=2,q=2\x1b\\");
     // Kitty returns EINVAL when a frame is composed onto itself and the
@@ -2172,7 +2702,7 @@ fn frame_edit(
     out.push_str(&format!(
         "\x1b_Ga=c,i={id},r=2,c=1,X={dx},Y=0,x=0,y=0,w={copied},h={img_h},C=1,q=1\x1b\\"
     ));
-    out.push_str(&frame_payload(id, 0, 0, 1, img_h, &edge));
+    out.push_str(&frame_payload(id, 0, 0, edge_w, img_h, &edge));
     out.push_str(&frame_payload(id, col_x, 0, col_w, img_h, &column));
     Some(out)
 }
@@ -2614,6 +3144,197 @@ mod tests {
             }],
             focus: None,
         }
+    }
+
+    fn dressed(values: Vec<Option<f64>>, cols: usize, rows: usize) -> Plot {
+        Plot::new(0, 1, cols, rows, chart(values))
+    }
+
+    #[test]
+    fn an_area_fills_under_the_line_in_both_renderers_and_a_gap_stays_empty() {
+        let flat = dressed(vec![Some(0.5); 4], 4, 2).area();
+        let cells = flat.line_cells();
+        // The line is the top dot row of the lower cells; under it, every dot.
+        assert!(cells[0].iter().all(|c| c.1 == 0), "{cells:?}");
+        assert!(cells[1].iter().all(|c| c.1 == 0xFF), "{cells:?}");
+        let plain = dressed(vec![Some(0.5); 4], 4, 2);
+        assert!(plain.line_cells()[1].iter().all(|c| c.1 != 0xFF));
+        let w = 4 * CELL_W;
+        let px = pixels(&flat);
+        assert_eq!(alpha_at(&px, w, 10, 2), 0, "nothing above the line");
+        assert!(alpha_at(&px, w, 10, 2 * CELL_H - 1) > 0, "the floor is filled");
+        // A run with no samples has nothing under it either.
+        let gappy = dressed(vec![Some(0.5), Some(0.5), None, None, Some(0.5), Some(0.5)], 6, 2).area();
+        let px = pixels(&gappy);
+        let w = 6 * CELL_W;
+        assert_eq!(alpha_at(&px, w, w / 2, 2 * CELL_H - 1), 0);
+        assert!(alpha_at(&px, w, 1, 2 * CELL_H - 1) > 0);
+        let cells = gappy.line_cells();
+        assert_eq!(cells[1][2].1 | cells[1][3].1, 0, "{cells:?}");
+    }
+
+    #[test]
+    fn a_ramp_colours_by_height_whatever_the_sample() {
+        let low = super::super::rgb(200, 40, 40);
+        let high = super::super::rgb(40, 40, 200);
+        let stops = vec![(0.0, low.clone()), (1.0, high.clone())];
+        let look = Look { ramp: stops.clone(), ..Look::default() };
+        assert_eq!(look.rgb_at(0.5, [0; 3]), [120, 40, 120]);
+        assert_eq!(look.rgb_at(-1.0, [0; 3]), [200, 40, 40]);
+        assert_eq!(look.ink_at(1.0, "x"), high);
+        // A rising line: its top row and its bottom row differ in colour,
+        // and neither is the trace's own.
+        let rising = dressed((0..8).map(|i| Some(i as f64 / 7.0)).collect(), 8, 2)
+            .area()
+            .ramp(stops.clone());
+        let cells = rising.line_cells();
+        let top = &cells[0].iter().find(|c| c.1 != 0).unwrap().0;
+        let bottom = &cells[1].iter().find(|c| c.1 != 0).unwrap().0;
+        assert_ne!(top, bottom);
+        assert_ne!(*top, chart(vec![]).traces[0].colour);
+        // Pixels: the same height is the same colour in two charts.
+        let other = dressed(vec![Some(0.9); 8], 8, 2).area().ramp(stops);
+        let (a, b) = (pixels(&rising), pixels(&other));
+        let w = 8 * CELL_W;
+        let at = ((2 * CELL_H - 2) * w + w - 2) * 4;
+        assert_eq!(a[at..at + 3], b[at..at + 3]);
+        // Not truecolour: the stop as it is, and no image.
+        let mono = dressed(vec![Some(0.5); 4], 4, 2).ramp(vec![(0.0, String::new())]);
+        assert!(mono.line_cells()[1].iter().all(|c| c.0.is_empty()));
+        assert!(mono.look.colours().any(|c| rgb(c).is_none()));
+    }
+
+    #[test]
+    fn a_reference_is_a_dotted_row_cut_into_the_area_and_dashed_in_pixels() {
+        let mark = super::super::rgb(120, 120, 120);
+        // Above the line: a dot in each empty cell, in the reference colour.
+        let low = dressed(vec![Some(0.1); 4], 4, 2).reference(0.75, &mark);
+        let dy = pixel_y(0.75, 8);
+        let cells = low.line_cells();
+        for cell in &cells[dy / 4] {
+            assert_eq!(*cell, (mark.clone(), super::super::BRAILLE[dy % 4][0]));
+        }
+        // Under the line, inside the area: that dot is cut out.
+        let high = dressed(vec![Some(0.9); 4], 4, 2).area().reference(0.25, &mark);
+        let dy = pixel_y(0.25, 8);
+        for cell in &high.line_cells()[dy / 4] {
+            assert_eq!(cell.1, 0xFF & !super::super::BRAILLE[dy % 4][0]);
+        }
+        let px = pixels(&low);
+        let w = 4 * CELL_W;
+        let y = pixel_y(0.75, 2 * CELL_H);
+        assert!(alpha_at(&px, w, 0, y) > 200);
+        assert_eq!(alpha_at(&px, w, 5, y), 0, "dashed: four on, three off");
+        assert!(alpha_at(&px, w, 7, y) > 200);
+    }
+
+    #[test]
+    fn a_dot_marks_the_newest_point_in_pixels_only() {
+        let plain = dressed(vec![Some(0.5); 4], 4, 2);
+        let dotted = plain.clone().end_dot();
+        assert_eq!(plain.line_cells(), dotted.line_cells());
+        let w = 4 * CELL_W;
+        let y = pixel_y(0.5, 2 * CELL_H);
+        let above = y - 3;
+        assert_eq!(alpha_at(&pixels(&plain), w, w - 1, above), 0);
+        assert!(alpha_at(&pixels(&dotted), w, w - 1, above) > 200);
+        // Elsewhere on the line, three pixels up is only the stroke's glow.
+        assert!(alpha_at(&pixels(&dotted), w, 0, above) < 64, "only the newest point");
+    }
+
+    #[test]
+    fn a_dressed_slide_matches_the_full_raster_and_a_reference_is_never_slid() {
+        let stops = vec![(0.0, super::super::rgb(90, 200, 120)), (1.0, super::super::rgb(220, 90, 80))];
+        let dotted = |p: Plot| p.area().ramp(stops.clone()).end_dot();
+        let undotted = |p: Plot| p.area().ramp(stops.clone());
+        let cell = (8, 16);
+        // The strip right of the join: the dot's reach with a dot, the
+        // glow's two pixels without one. The undotted case ends on a steep
+        // segment, whose glow paints left of the join.
+        let dot_pad = DOT_RADIUS.ceil() as usize + 2;
+        for (dress, last, pad) in [(&dotted as &dyn Fn(Plot) -> Plot, 0.9, dot_pad), (&undotted, 0.05, 2)] {
+            let old = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.95)])));
+            let new = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.95), Some(last)])));
+            let w = new.width * cell.0;
+            let before = raster_pixels(&old, old.width, cell.0, cell.1);
+            let after = raster_pixels(&new, new.width, cell.0, cell.1);
+            let dx = (w - 1) / 3;
+            let edit = frame_edit(&old, &new, 0, 40, cell, &after).expect("whole-pixel slide");
+            let (edge_w, col_w) = (4, dx + 1 + pad);
+            let col_x = w - col_w;
+            assert_eq!(frame_column(&edit, 0), column_rgba(&after, w, 0, edge_w));
+            assert_eq!(frame_column(&edit, col_x), column_rgba(&after, w, col_x, col_w));
+            // What the terminal holds after the shift and the two strips.
+            let row = w * 4;
+            let mut held = vec![0u8; after.len()];
+            for y in 0..after.len() / row {
+                for x in 0..w {
+                    let from = if x < edge_w || x >= col_x { (&after, x) } else { (&before, x + dx) };
+                    let (src, dst) = ((y * w + from.1) * 4, (y * w + x) * 4);
+                    held[dst..dst + 4].copy_from_slice(&from.0[src..src + 4]);
+                }
+            }
+            assert!(held == after, "pad {pad}: a slide leaves exactly the full raster");
+        }
+        let old = dotted(Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.5)])));
+        let new = dotted(Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.5), Some(0.9)])));
+        let after = raster_pixels(&new, new.width, cell.0, cell.1);
+        let marked = |p: &Plot| p.clone().reference(0.5, &super::super::rgb(120, 120, 120));
+        assert!(frame_edit(&marked(&old), &marked(&new), 0, 40, cell, &after).is_none());
+        assert!(frame_edit(&old, &new.clone().area(), 0, 40, cell, &after).is_some());
+        let restyled = new.clone().ramp(vec![(0.0, super::super::rgb(1, 2, 3))]);
+        assert!(frame_edit(&old, &restyled, 0, 40, cell, &after).is_none());
+    }
+
+    #[test]
+    fn bars_stand_in_tracks_and_a_gap_has_none() {
+        let hot = super::super::rgb(220, 90, 80);
+        let track = super::super::rgb(60, 66, 76);
+        let bg = "\x1b[48;2;60;66;76m";
+        let columns = vec![Some((50.0, hot.clone())), None, Some((100.0, hot.clone())), Some((0.0, hot.clone()))];
+        let bars = Plot::bars_on_track(1, 2, &columns, 2, 100.0, &track).as_text();
+        assert!(bars.is_text());
+        assert_eq!((bars.width, bars.height), (4, 2));
+        // Half full: the top cell is all track, the bottom all bar. The gap
+        // carries no track, a full cell needs none, and an idle bar still
+        // shows its own.
+        let top = bars.text_row(0);
+        let want = vec![
+            (format!("{hot}{bg}"), " ".to_string()),
+            (format!("{}", super::super::NOBG), " ".to_string()),
+            (hot.clone(), "█".to_string()),
+            (format!("{hot}{bg}"), " ".to_string()),
+            (super::super::NOBG.to_string(), String::new()),
+        ];
+        assert_eq!(top, want.as_slice());
+        let bottom = bars.text_row(1);
+        assert_eq!(bottom[0], (hot.clone(), "█".to_string()));
+        // Cells with the same ink are one segment.
+        let wide = Plot::bars_on_track(0, 1, &[Some((30.0, hot.clone())), Some((30.0, hot.clone())), None], 1, 100.0, &track);
+        assert_eq!(wide.text_row(0)[0], (format!("{hot}{bg}"), "▂▂".to_string()));
+        assert_eq!(wide.text_row(0)[1], (super::super::NOBG.to_string(), " ".to_string()));
+        // Partial cells are eighths, on the track.
+        let partial = Plot::bars_on_track(0, 1, &[Some((25.0, hot.clone()))], 2, 100.0, &track);
+        assert_eq!(partial.text_row(1)[0], (format!("{hot}{bg}"), "▄".to_string()));
+        // Pixels: the track is under the bar, full height.
+        let px = pixels(&Plot::bars_on_track(0, 1, &columns, 2, 100.0, &track));
+        let w = 4 * CELL_W;
+        assert_eq!(alpha_at(&px, w, 2, 0), 255);
+        assert_eq!(alpha_at(&px, w, CELL_W + 2, 0), 0);
+        assert_eq!(&px[0..3], &[60, 66, 76]);
+        assert_eq!(&px[((2 * CELL_H - 1) * w) * 4..((2 * CELL_H - 1) * w) * 4 + 3], &[220, 90, 80]);
+        // A track that is no truecolour is left out.
+        let bare = Plot::bars_on_track(0, 1, &columns, 2, 100.0, "");
+        assert!(bare.text_row(0).iter().all(|(ink, _)| !ink.contains("48;2")));
+    }
+
+    #[test]
+    fn a_braille_row_writes_its_colour_once_per_run() {
+        let rows = vec!["title".to_string(), String::new(), String::new()];
+        let chart = dressed(vec![Some(0.9); 12], 12, 2).area().ramp(vec![(0.0, super::super::rgb(1, 2, 3))]);
+        let plot = Plot { y: 1, ..chart };
+        let (text, _, _) = compose(&rows, &[plot], 20, 3, false, false, false, false);
+        assert_eq!(text[2].matches("\x1b[38;2;1;2;3m").count(), 1, "{:?}", text[2]);
     }
 
     #[test]
@@ -3164,6 +3885,26 @@ mod tests {
             (1, 8, 2, 4)
         );
         assert!(p.in_viewport(20, 1, 4).is_none());
+    }
+
+    #[test]
+    fn a_plot_in_the_pinned_head_stays_put_at_every_scroll() {
+        // Rows 0..6 pinned: a chart on rows 2..5 is part of the head.
+        let p = Plot::new(8, 2, 20, 3, chart(vec![Some(0.2)]));
+        for scroll in [0, 1, 7, 40] {
+            let kept = p.clone().in_viewport(scroll, 6, 10).unwrap();
+            assert_eq!(
+                (kept.y, kept.first_row, kept.visible_rows),
+                (2, 0, 3),
+                "scroll {scroll}"
+            );
+        }
+        // The same chart under a one-row head scrolls and crops as before.
+        let moved = p.clone().in_viewport(1, 1, 10).unwrap();
+        assert_eq!((moved.y, moved.first_row, moved.visible_rows), (1, 0, 3));
+        let cut = p.clone().in_viewport(2, 1, 10).unwrap();
+        assert_eq!((cut.y, cut.first_row, cut.visible_rows), (1, 1, 2));
+        assert!(p.in_viewport(4, 1, 10).is_none());
     }
 
     #[test]

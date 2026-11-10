@@ -295,7 +295,7 @@ pub fn sample_writers(source: &mut WriterSource, wanted: Wanted) -> Option<Write
     if !fresh {
         // Unreadable is not hidden: the count then says every process.
         let on = std::fs::read_to_string("/proc/self/mountinfo")
-            .map(|text| by_process::parse_hidepid(&text))
+            .map(|text| procfs::parse_hidepid(&text))
             .unwrap_or(false);
         source.hidepid = Some((on, Instant::now()));
     }
