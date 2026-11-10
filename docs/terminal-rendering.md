@@ -437,9 +437,13 @@ let plot = tc::Plot::new(x, y, cols, rows, chart)
 | | Kitty pixels | Braille / text |
 | --- | --- | --- |
 | `area()` | the trace's colour under the line, opacity fixed by height (stronger at the top of the chart, faint at its floor) plus a lit edge six pixels deep just under the line | every dot under the line set |
-| `ramp(stops)` | each pixel takes the colour of its height, mixed between stops; the stroke is 1.5 pixels wide with a two-pixel glow | each row of cells takes the colour at its middle dot |
+| `ramp(stops)` | each pixel takes the colour of its height, mixed between stops | each row of cells takes the colour at its middle dot |
 | `reference(at, colour)` | a dashed line, four pixels on and three off, over the area and under the strokes | a dot in each empty cell of that dot row; inside the area, the same dots cut out |
 | `end_dot()` | a disc on the newest point, its centre lifted toward white | nothing: the widget's reading already sits at the line's end |
+
+Any of the four makes a chart dressed: in pixels its stroke is then 1.5
+pixels wide with a two-pixel glow, whichever of them it has. Braille
+strokes are unchanged.
 
 A gap stays empty in both: there is nothing under a sample nobody took. A
 ramp colours a level, not a sample, so a warning colour marks where on the

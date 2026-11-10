@@ -2660,9 +2660,17 @@ fn frame_edit(
     // The join pixel sits one left of a dx-wide strip. Uploading dx columns
     // would leave that pixel as the old endpoint, missing the new segment.
     // With a dot on the newest point, the strip also covers where the old
-    // dot lands after the shift, so the new raster paints over it.
-    let dot = if next.look.end_dot { DOT_RADIUS.ceil() as usize + 2 } else { 0 };
-    let col_w = dx.checked_add(1 + dot)?;
+    // dot lands after the shift, so the new raster paints over it. Any
+    // dressed stroke is wider and glows two pixels out, so a steep new
+    // segment paints left of the join even with no dot.
+    let pad = if next.look.end_dot {
+        DOT_RADIUS.ceil() as usize + 2
+    } else if !next.look.plain() {
+        2
+    } else {
+        0
+    };
+    let col_w = dx.checked_add(1 + pad)?;
     if col_w >= img_w || img_h == 0 || dx == 0 {
         return None;
     }
@@ -3237,30 +3245,40 @@ mod tests {
     #[test]
     fn a_dressed_slide_matches_the_full_raster_and_a_reference_is_never_slid() {
         let stops = vec![(0.0, super::super::rgb(90, 200, 120)), (1.0, super::super::rgb(220, 90, 80))];
-        let dress = |p: Plot| p.area().ramp(stops.clone()).end_dot();
-        let old = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.5)])));
-        let new = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.5), Some(0.9)])));
+        let dotted = |p: Plot| p.area().ramp(stops.clone()).end_dot();
+        let undotted = |p: Plot| p.area().ramp(stops.clone());
         let cell = (8, 16);
-        let w = new.width * cell.0;
-        let before = raster_pixels(&old, old.width, cell.0, cell.1);
-        let after = raster_pixels(&new, new.width, cell.0, cell.1);
-        let dx = (w - 1) / 3;
-        let edit = frame_edit(&old, &new, 0, 40, cell, &after).expect("whole-pixel slide");
-        let (edge_w, col_w) = (4, dx + 1 + DOT_RADIUS.ceil() as usize + 2);
-        let col_x = w - col_w;
-        assert_eq!(frame_column(&edit, 0), column_rgba(&after, w, 0, edge_w));
-        assert_eq!(frame_column(&edit, col_x), column_rgba(&after, w, col_x, col_w));
-        // What the terminal holds after the shift and the two strips.
-        let row = w * 4;
-        let mut held = vec![0u8; after.len()];
-        for y in 0..after.len() / row {
-            for x in 0..w {
-                let from = if x < edge_w || x >= col_x { (&after, x) } else { (&before, x + dx) };
-                let (src, dst) = ((y * w + from.1) * 4, (y * w + x) * 4);
-                held[dst..dst + 4].copy_from_slice(&from.0[src..src + 4]);
+        // The strip right of the join: the dot's reach with a dot, the
+        // glow's two pixels without one. The undotted case ends on a steep
+        // segment, whose glow paints left of the join.
+        let dot_pad = DOT_RADIUS.ceil() as usize + 2;
+        for (dress, last, pad) in [(&dotted as &dyn Fn(Plot) -> Plot, 0.9, dot_pad), (&undotted, 0.05, 2)] {
+            let old = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.95)])));
+            let new = dress(Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.95), Some(last)])));
+            let w = new.width * cell.0;
+            let before = raster_pixels(&old, old.width, cell.0, cell.1);
+            let after = raster_pixels(&new, new.width, cell.0, cell.1);
+            let dx = (w - 1) / 3;
+            let edit = frame_edit(&old, &new, 0, 40, cell, &after).expect("whole-pixel slide");
+            let (edge_w, col_w) = (4, dx + 1 + pad);
+            let col_x = w - col_w;
+            assert_eq!(frame_column(&edit, 0), column_rgba(&after, w, 0, edge_w));
+            assert_eq!(frame_column(&edit, col_x), column_rgba(&after, w, col_x, col_w));
+            // What the terminal holds after the shift and the two strips.
+            let row = w * 4;
+            let mut held = vec![0u8; after.len()];
+            for y in 0..after.len() / row {
+                for x in 0..w {
+                    let from = if x < edge_w || x >= col_x { (&after, x) } else { (&before, x + dx) };
+                    let (src, dst) = ((y * w + from.1) * 4, (y * w + x) * 4);
+                    held[dst..dst + 4].copy_from_slice(&from.0[src..src + 4]);
+                }
             }
+            assert!(held == after, "pad {pad}: a slide leaves exactly the full raster");
         }
-        assert!(held == after, "a slide leaves exactly the full raster");
+        let old = dotted(Plot::new(2, 1, 8, 3, chart(vec![Some(0.2), Some(0.6), Some(0.3), Some(0.5)])));
+        let new = dotted(Plot::new(2, 1, 8, 3, chart(vec![Some(0.6), Some(0.3), Some(0.5), Some(0.9)])));
+        let after = raster_pixels(&new, new.width, cell.0, cell.1);
         let marked = |p: &Plot| p.clone().reference(0.5, &super::super::rgb(120, 120, 120));
         assert!(frame_edit(&marked(&old), &marked(&new), 0, 40, cell, &after).is_none());
         assert!(frame_edit(&old, &new.clone().area(), 0, 40, cell, &after).is_some());

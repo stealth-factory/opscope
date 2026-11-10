@@ -478,14 +478,40 @@ pub struct PidFiles {
     pub uid: Result<u32, String>,
 }
 
-/// The owner of `/proc/<pid>`: the process's uid and gid, as `(uid, gid)`.
-/// Cheaper than `read_pid` when a table needs the owner and not the rest.
+/// The process's effective uid and gid, as `(uid, gid)`: the owner of
+/// `/proc/<pid>`, which is cheaper than `read_pid` when a table needs the
+/// owner and not the rest. The kernel shows a process that is not dumpable
+/// (`PR_SET_DUMPABLE` 0, as `ssh-agent` sets, or after a setuid exec) as
+/// owned by root, so a root-owned directory is checked against
+/// `/proc/<pid>/status`; if that cannot be read, the directory's owner
+/// stands.
 pub fn read_owner(pid: i32) -> Result<(u32, u32), String> {
     use std::os::unix::fs::MetadataExt;
     let dir = format!("/proc/{}", pid);
-    std::fs::metadata(&dir)
+    let (uid, gid) = std::fs::metadata(&dir)
         .map(|m| (m.uid(), m.gid()))
-        .map_err(|e| format!("{}: {}", dir, e))
+        .map_err(|e| format!("{}: {}", dir, e))?;
+    if uid != 0 && gid != 0 {
+        return Ok((uid, gid));
+    }
+    Ok(read_text(&format!("{}/status", dir))
+        .ok()
+        .and_then(|text| parse_status_ids(&text))
+        .unwrap_or((uid, gid)))
+}
+
+/// `/proc/<pid>/status`: the effective uid and gid, the second of the four
+/// ids on its `Uid:` and `Gid:` lines (real, effective, saved, filesystem).
+pub fn parse_status_ids(text: &str) -> Option<(u32, u32)> {
+    let effective = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u32>()
+            .ok()
+    };
+    Some((effective("Uid:")?, effective("Gid:")?))
 }
 
 /// Each of a process's files, read once. A pid that has gone since `pids()`
@@ -912,6 +938,17 @@ ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
         assert_eq!(rss_bytes(3), 3 * page);
         assert!(clock_ticks() > 0.0);
+    }
+
+    /// The effective ids, not the real ones: a setuid process reads as
+    /// the user it runs as, which is what `geteuid()` is compared with.
+    #[test]
+    fn status_ids_are_the_effective_uid_and_gid() {
+        let status = "Name:\tssh-agent\nUmask:\t0077\nState:\tS (sleeping)\n\
+                      Uid:\t1000\t1001\t1001\t1001\nGid:\t100\t101\t101\t101\nGroups:\t100\n";
+        assert_eq!(parse_status_ids(status), Some((1001, 101)));
+        assert_eq!(parse_status_ids("Name:\tx\nUid:\t1000\n"), None);
+        assert_eq!(parse_status_ids(""), None);
     }
 
     #[test]

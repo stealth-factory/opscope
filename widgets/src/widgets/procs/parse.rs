@@ -241,14 +241,17 @@ pub fn core_count(cpus: &[CpuTimes]) -> Option<usize> {
 /// The share of the time between two readings of one CPU line that it
 /// was busy: everything but `idle` and `iowait`, over everything, so
 /// `steal` - time the hypervisor gave to someone else - counts as busy.
-/// `None` when no tick passed or a counter went backwards (a CPU taken
-/// offline and brought back), never a zero standing in for "not
-/// measured".
+/// `None` when no tick passed or the total or `idle` went backwards (a CPU
+/// taken offline and brought back), never a zero standing in for "not
+/// measured". `iowait` alone is documented as unreliable and can go
+/// backwards on a CPU that is working normally, so a drop in it counts as
+/// no iowait over the window rather than a reading that failed.
 pub fn core_busy(prev: &CpuTimes, next: &CpuTimes) -> Option<f64> {
     let total = |t: &[u64; 8]| t.iter().sum::<u64>();
-    let idle = |t: &[u64; 8]| t[3] + t[4];
     let all = total(&next.ticks).checked_sub(total(&prev.ticks))?;
-    let quiet = idle(&next.ticks).checked_sub(idle(&prev.ticks))?;
+    let idle = next.ticks[3].checked_sub(prev.ticks[3])?;
+    let iowait = next.ticks[4].saturating_sub(prev.ticks[4]);
+    let quiet = idle + iowait;
     if all == 0 {
         return None;
     }
@@ -601,6 +604,15 @@ procs_blocked 0
         // No tick passed, or a counter went backwards: not measured.
         assert_eq!(core_busy(&a[1], &a[1]), None);
         assert_eq!(core_busy(&b0, &a[1]), None);
+        // iowait alone going backwards, which the kernel allows: still a
+        // reading. 100 user and 100 idle with iowait 5 down is 195 ticks,
+        // 95 of them busy.
+        let mut dip = a[1];
+        dip.ticks[0] += 100;
+        dip.ticks[3] += 100;
+        dip.ticks[4] -= 5;
+        let busy = core_busy(&a[1], &dip).expect("an iowait dip is not a failed read");
+        assert!((busy - 95.0 / 195.0).abs() < 1e-9, "{busy}");
     }
 
     #[test]
