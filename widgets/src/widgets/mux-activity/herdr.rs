@@ -461,6 +461,7 @@ fn update_inventory(state: &mut State, pane_ids: Option<Vec<String>>, inventory_
 /// measured rather than guessed.
 #[derive(Default)]
 struct Seen {
+    logs: tc::agent_work::LogReader,
     since: HashMap<String, (String, f64, bool)>,
     cpu: HashMap<i32, (u64, f64)>,
     first_poll: bool,
@@ -629,9 +630,10 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             (Front::Unknown(why), _) => tc::agent_work::Work {
                 tasks: Vec::new(),
                 unread: Some(why.clone()),
+                ..Default::default()
             },
             _ => tc::agent_work::Work::default(),
-        };
+        }.with_logs(seen.logs.read(&text_at(entry, "agent"), &text_at(entry, "cwd"), None));
         agents.push(Agent {
             name: text_at(entry, "agent"),
             workspace_id: text_at(entry, "workspace_id"),
@@ -774,27 +776,36 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
 /// it is the explanation of an unread table, which is drawn dim.
 fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
     let max = room.saturating_sub(2).max(1);
-    let mut all = work.rows(width);
-    if all.len() <= max {
-        return all;
+    let all = work.rows(width);
+    if all.len() <= max { return all; }
+    let groups = work.task_rows(width);
+    let reason = work.unread.as_deref().or_else(|| work.logs.warnings.first().map(String::as_str));
+    let mut explanation: Vec<_> = reason.map(|why| tc::wrap_words(&format!(" ! {why}"), width.max(1))
+        .into_iter().map(|r| (true,r)).collect()).unwrap_or_default();
+    if groups.is_empty() {
+        explanation.truncate(max);
+        return explanation;
     }
-    // No jobs means the rows are the explanation of an unread table: it is
-    // kept, cut to the room, rather than counted as jobs.
-    if work.tasks.is_empty() {
-        all.truncate(max);
-        return all;
+    if max == 1 && reason.is_some() {
+        return tc::wrap_words(&format!(" +{}: {}",groups.len(),reason.unwrap_or("")),width.max(1))
+            .into_iter().take(1).map(|r|(true,r)).collect();
     }
+    // Preserve actual failure text, even when that leaves fewer task rows.
+    explanation.truncate(max.saturating_sub(1).min(2));
+    let task_room = max - explanation.len();
+    let task_height: usize = groups.iter().map(Vec::len).sum();
     let mut out = Vec::new();
-    let mut shown = 0;
-    for job in &work.tasks {
-        let rows = job.rows(width);
-        if out.len() + rows.len() > max - 1 {
-            break;
+    if task_height <= task_room {
+        out.extend(groups.into_iter().flatten());
+    } else {
+        let mut shown = 0;
+        for rows in &groups {
+            if out.len() + rows.len() > task_room.saturating_sub(1) { break; }
+            out.extend(rows.iter().cloned()); shown += 1;
         }
-        out.extend(rows.into_iter().map(|row| (false, row)));
-        shown += 1;
+        out.push((false, format!(" +{} more work",groups.len()-shown)));
     }
-    out.push((false, format!("   ├ +{} more  running", work.tasks.len() - shown)));
+    out.extend(explanation);
     out
 }
 
@@ -1467,7 +1478,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // then gets what the rows above leave, so the entry never grows
         // past the room by its heading.
         let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
-            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some());
+            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
+                || !work.logs.warnings.is_empty()
+                || work.logs.tasks.iter().any(|task| !task.state.finished()));
             2 + lead + some_work <= room
         };
         let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
@@ -2008,6 +2021,7 @@ mod tests {
         let work = tc::agent_work::Work {
             tasks: vec![job("npm test"), job("cargo build"), job("tail -f x.log")],
             unread: None,
+            ..Default::default()
         };
         // Room for all three beside the agent's two rows.
         assert_eq!(job_lines(&work, 60, 5).len(), 3);
@@ -2021,7 +2035,40 @@ mod tests {
         let lines = job_lines(&unread, 30, 4);
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|(unread, _)| *unread));
-        assert!(lines[0].1.contains("could not"));
+        assert!(lines[0].1.contains("ps timed out"));
+    }
+
+    #[test]
+    fn overflowing_work_keeps_a_bounded_source_failure_reason() {
+        let work=tc::agent_work::Work {
+            tasks:(0..3).map(|pid|tc::agent_work::Task{pid,label:"cargo test".into(),via:tc::agent_work::Via::Process}).collect(),
+            unread:Some("permission denied reading the session log".into()),..Default::default()
+        };
+        let rows=job_lines(&work,80,4);
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().any(|(_,r)|r.contains("+3 more")),"{rows:?}");
+        assert!(rows.iter().any(|(warning,r)|*warning&&r.contains("permission denied")),"{rows:?}");
+        let rows=job_lines(&work,80,3);
+        assert_eq!(rows.len(),1);
+        assert!(rows[0].0 && rows[0].1.contains("permission denied"),"{rows:?}");
+    }
+
+    #[test]
+    fn overflowing_work_counts_logs_and_shells_together() {
+        let mut work=tc::agent_work::Work::default();
+        work.logs.tasks=(0..3).map(|i|tc::agent_work::LogTask {
+            id:i.to_string(),label:format!("Explore-{i}"),state:tc::agent_work::Activity::Working,
+            updated:String::new(),
+        }).collect();
+        work.tasks.push(tc::agent_work::Task{pid:7,label:"cargo test".into(),via:tc::agent_work::Via::Process});
+        let rows=job_lines(&work,80,4);
+        assert_eq!(rows.len(),2);
+        assert!(rows[0].1.contains("Explore-0"),"{rows:?}");
+        assert!(rows[1].1.contains("+3 more"),"{rows:?}");
+        work.tasks.clear();
+        let rows=job_lines(&work,80,3);
+        assert_eq!(rows.len(),1);
+        assert!(rows[0].1.contains("+3 more"),"{rows:?}");
     }
 
     #[test]

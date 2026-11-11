@@ -335,6 +335,7 @@ fn rex(server: &str, rest: &[&str]) -> Result<String, Absence> {
 /// What carries over between reads: when each foreground was first seen.
 #[derive(Default)]
 struct Seen {
+    logs: tc::agent_work::LogReader,
     since: HashMap<String, (i64, f64, bool)>,
     first: bool,
     instance: String,
@@ -478,6 +479,38 @@ fn order(panes: &mut [Pane]) {
     });
 }
 
+/// Retained OSC reports can outlive their owner. Only a currently named
+/// agent in the foreground's process tree can supply local log work.
+fn live_log_agent(pane: &Pane, table: &tc::agent_work::Table, name: &str) -> Option<u32> {
+    if pane.remote || pane.doing != Doing::Running { return None; }
+    let fg = pane.fg.as_ref()?;
+    let pid = u32::try_from(fg.pid).ok()?;
+    let agent = table.named_agent_at(pid, name)?;
+    if let Some((app, Source::Report)) = &pane.agent {
+        if let Some(report) = pane.records.iter().find(|r| r.app.eq_ignore_ascii_case(app)) {
+            if let Some(owner) = report.owner_pid {
+                let owner = u32::try_from(owner).ok()?;
+                let process = table.get(owner)?;
+                if !report.owner_name.is_empty()
+                    && report.owner_name.rsplit('/').next() != process.comm.rsplit('/').next() {
+                    return None;
+                }
+                if table.named_agent_at(owner, name) != Some(agent) { return None; }
+            }
+        }
+    }
+    Some(agent)
+}
+
+/// Keep acquisition tied to the identified agent pid. Pane::cwd may be
+/// the cwd of a foreground build/test process in another directory.
+fn agent_log_work(reader: &mut tc::agent_work::LogReader, name: &str, agent: u32,
+    cwds: &HashMap<u32, Result<String, String>>) -> Result<tc::agent_work::LogWork, String> {
+    let cwd = cwds.get(&agent).ok_or("agent cwd was not acquired")?.as_ref()
+        .map_err(|why| format!("agent cwd: {why}"))?;
+    reader.read(name, cwd, None)
+}
+
 fn poll(
     state: &Arc<Mutex<State>>,
     server: &str,
@@ -522,9 +555,23 @@ fn poll(
                 pane.rss = Some(*rss);
             }
         }
-        let wanting = |p: &Pane| p.agent.is_some() && !p.remote && p.children().next().is_none();
+        let wanting = |p: &Pane| p.agent.is_some() && !p.remote;
         if board.panes.iter().any(wanting) {
             let table = tc::agent_work::read_process_table();
+            let mut log_agents = HashMap::new();
+            if let Ok(table) = &table {
+                for pane in board.panes.iter().filter(|p| wanting(p)) {
+                    let name = pane.agent.as_ref().map(|(name,_)|parse::agent_command(name,catalogue)).unwrap_or_default();
+                    if matches!(name.as_str(),"claude"|"codex"|"opencode") {
+                        if let Some(agent) = live_log_agent(pane,table,&name) {
+                            log_agents.insert(pane.block_id.clone(),agent);
+                        }
+                    }
+                }
+            }
+            let mut pids: Vec<_> = log_agents.values().copied().collect();
+            pids.sort_unstable(); pids.dedup();
+            let cwds = host::agent_cwds(&pids);
             for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
                 // The foreground may be a launcher or a job, not the agent.
                 let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
@@ -537,6 +584,12 @@ fn poll(
                     Err(_) => pid,
                 };
                 pane.work = tc::agent_work::Work::of(&table, agent);
+                if let Some(&agent) = log_agents.get(&pane.block_id) {
+                    pane.work = std::mem::take(&mut pane.work)
+                        .with_logs(agent_log_work(&mut seen.logs, &name, agent, &cwds));
+                }
+                let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
+                pane.work.covered_by(&reports);
             }
         }
     }
@@ -1405,6 +1458,9 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -
         out.push(("dim".into(), format!("   agent    {}", source.words())));
     }
     out.push((String::new(), String::new()));
+    if let Some(explanation) = pane.work.logs.explanation() {
+        out.push(("dim".into(), format!("   log source: {explanation}")));
+    }
     out.push(heading("STATUS REPORTS (OSC 7501)"));
     if pane.status_unread {
         out.push((
@@ -2559,6 +2615,47 @@ fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_lookup_uses_the_agent_cwd_instead_of_a_foreground_job_cwd() {
+        let root=std::env::temp_dir().join(format!("opscope-rex-cwd-{}-{}",std::process::id(),tc::now()));
+        for (folder,id) in [("-srv-repo","agent-child"),("-other","unrelated-child")] {
+            let project=root.join("claude/projects").join(folder);
+            std::fs::create_dir_all(&project).unwrap();
+            let body=serde_json::json!({"type":"user","toolUseResult":{"status":"async_launched","agentId":id}}).to_string()+"\n";
+            std::fs::write(project.join("parent.jsonl"),body).unwrap();
+        }
+        let table=tc::agent_work::parse_process_table("20 1 claude claude\n21 20 cargo cargo test\n").unwrap();
+        let pane=Pane { doing:Doing::Running, fg:Some(Foreground{pid:21,cwd:"/other".into(),..Default::default()}),..Default::default() };
+        let agent=live_log_agent(&pane,&table,"claude").unwrap();
+        assert_eq!(agent,20);
+        let mut reader=tc::agent_work::LogReader::at(root.join("claude"),root.join("codex"),root.join("opencode.db"));
+        let cwds=HashMap::from([(20,Ok("/srv/repo".into())),(21,Ok("/other".into()))]);
+        let work=agent_log_work(&mut reader,"claude",agent,&cwds).unwrap();
+        assert_eq!(work.tasks[0].id,"agent-child");
+        assert!(agent_log_work(&mut reader,"claude",agent,&HashMap::new()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_reports_do_not_attach_logs_to_an_exited_or_reused_owner() {
+        let table=tc::agent_work::parse_process_table("10 1 bash bash\n20 10 claude claude\n30 1 vim vim notes\n").unwrap();
+        let mut pane=Pane { agent:Some(("claude-code".into(),Source::Report)), doing:Doing::Running,
+            fg:Some(Foreground{pid:20,..Default::default()}),
+            records:vec![Record{app:"claude-code".into(),owner_pid:Some(20),owner_name:"claude".into(),..Default::default()}],
+            ..Default::default() };
+        assert_eq!(live_log_agent(&pane,&table,"claude"),Some(20));
+        pane.records[0].owner_pid=Some(99);
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_pid=Some(30);
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_pid=Some(20);
+        pane.records[0].owner_name="old-process".into();
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_name="claude".into();
+        pane.fg=Some(Foreground{pid:10,..Default::default()});pane.doing=Doing::Prompt;
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+    }
 
     const GATHER: &str = include_str!("fixtures/rex/gather.json");
     const GATHER_RECORDS: &str = include_str!("fixtures/rex/gather_records.json");

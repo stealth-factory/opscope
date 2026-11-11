@@ -67,3 +67,22 @@ pub fn ancestors() -> Vec<String> {
     }
     out
 }
+
+/// One native lsof read for the identified agents' working directories.
+/// An exited/unreadable process is an error for that pid only.
+pub fn agent_cwds(pids: &[u32]) -> HashMap<u32, Result<String, String>> {
+    if pids.is_empty() { return HashMap::new(); }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let read = tc::run_full(&["lsof", "-a", "-p", &list, "-d", "cwd", "-F0pn"], 5);
+    match read {
+        Err(why) => pids.iter().map(|&pid|(pid,Err(why.clone()))).collect(),
+        Ok(output) => {
+            // lsof can return 1 while still describing the surviving pids.
+            let mut cwds = parse::parse_process_cwds(&String::from_utf8_lossy(&output.stdout));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let why = stderr.lines().next().filter(|s|!s.trim().is_empty())
+                .unwrap_or("agent cwd was not returned: process exited or is not readable");
+            pids.iter().map(|&pid| (pid,cwds.remove(&pid).ok_or_else(||why.to_string()))).collect()
+        }
+    }
+}

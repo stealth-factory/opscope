@@ -189,8 +189,21 @@ impl Default for State {
 /// measured rather than guessed. UHP does not timestamp a state change.
 #[derive(Default)]
 struct Seen {
+    logs: tc::agent_work::LogReader,
     since: HashMap<String, (String, f64, bool)>,
     first_poll: bool,
+}
+
+/// A resumable ID is exact only when the server ties it to this pane.
+/// A cwd-only resumable entry does not identify this process or the newest
+/// session. With no binding the log reader chooses its own labelled guess.
+fn log_session_hint<'a>(agent: &'a Agent, sessions: &'a [parse::Resumable]) -> Option<(&'a str, bool)> {
+    if !agent.session_id.is_empty() { return Some((&agent.session_id, false)); }
+    if let Some(s) = sessions.iter().find(|s| !s.pane.is_empty() && s.pane == agent.pane
+        && s.kind == agent.kind && !s.session_id.is_empty()) {
+        return Some((&s.session_id, false));
+    }
+    None
 }
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
@@ -280,6 +293,13 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                     .and_then(|&root| table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind)));
                 agent.work = tc::agent_work::Work::of(table, pid);
             }
+            let hint = log_session_hint(agent, sessions.as_ref().ok().map(Vec::as_slice).unwrap_or(&[]));
+            let logs = seen.logs.read(&agent.kind, &agent.cwd, hint.map(|(id, _)| id))
+                .map(|mut logs| {
+                    logs.guessed |= hint.is_some_and(|(_, guessed)| guessed);
+                    logs
+                });
+            agent.work = std::mem::take(&mut agent.work).with_logs(logs);
             live.insert(key);
         }
         // A successful poll is the only moment it is safe to forget a
@@ -1729,6 +1749,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 w.saturating_sub(1),
             ));
             body.push(String::new());
+            if let Some(explanation) = agents.as_ref().ok().and_then(|agents|
+                agents.iter().find(|a| a.pane == d.pane)).and_then(|a| a.work.logs.explanation()) {
+                for text in tc::wrap_words(&format!("   log source: {explanation}"), w.saturating_sub(1)) {
+                    body.push(tc::seg(&[(p.dim.as_str(), text)], w.saturating_sub(1)));
+                }
+            }
             if !d.ready {
                 body.push(tc::seg(
                     &[(p.dim.as_str(), "   reading the evidence…".into())],
@@ -2777,6 +2803,19 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_id_is_exact_only_when_bound_to_the_pane() {
+        let mut agent = Agent { kind: "claude".into(), cwd: "/srv/repo".into(), pane: "p1".into(), ..Default::default() };
+        let a = parse::Resumable { kind: "claude".into(), cwd: "/srv/repo".into(), session_id: "one".into(), ..Default::default() };
+        assert_eq!(log_session_hint(&agent, std::slice::from_ref(&a)), None);
+        let mut b = a.clone(); b.session_id = "two".into();
+        assert_eq!(log_session_hint(&agent, &[a.clone(), b.clone()]), None);
+        b.pane = "p1".into();
+        assert_eq!(log_session_hint(&agent, &[a, b]), Some(("two", false)));
+        agent.session_id = "bound".into();
+        assert_eq!(log_session_hint(&agent, &[]), Some(("bound", false)));
+    }
 
     #[test]
     fn agents_group_by_workspace_with_the_most_urgent_workspace_first() {

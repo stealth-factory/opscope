@@ -51,9 +51,19 @@ reports `idle` or `done` while the job is still going. Each board draws that
 work as rows under the agent, from the best source it has:
 
 1. **What the agent reports.** OSC 7501 child records, which Rex carries
-   and the Rex board draws under the agent as `├ build/test`. An agent that
-   reports any is taken at its word and nothing else is added.
-2. **The process table.** A shell the agent started that is still running
+   and the Rex board draws under the agent as `├ build/test`. A matching
+   child ID replaces the corresponding log row. Report IDs are opaque, so
+   numeric components never suppress process rows by coincidence.
+2. **Session logs.** Claude Code subagent transcripts and parent launch/finish
+   records; Codex child rollouts linked by `parent_thread_id`; OpenCode V2
+   child sessions linked by `parent_id` and their persisted busy/idle times.
+   Rows say `├ Explore  working · via log`. A Claude child waiting on its own
+   background work stays visible until its final stop. Finished children
+   leave the mux board; the shared reader retains their state for consumers
+   that need it. Older OpenCode stores without persisted liveness say that
+   the source cannot be read; a child-session relationship alone is not
+   evidence that work is running.
+3. **The process table.** A shell the agent started that is still running
    something, read from one `ps -axww -o pid=,ppid=,comm=,args=` per read on
    this machine, and drawn as `├ npm test  running · via process`. Only
    shells count: an agent's MCP servers and its own helpers are its children
@@ -72,12 +82,26 @@ work as rows under the agent, from the best source it has:
    does not know, but a secret passed under a name it does not recognise is
    still drawn. Check a board before screenshotting one with jobs on it.
 
-The process table cannot see a **subagent**: those run inside the agent's own
-process. Reading them from the agent's session logs is the next step
-(OPS-271). A Rex pane on another machine has no local process table, so it
-shows only what its agent reports. When the table does not come back, each
-agent's row says `├ background work could not be read` and why, rather than
-reading as having nothing running.
+Logs come from `~/.claude/projects` (`CLAUDE_CONFIG_DIR` when set),
+`~/.codex/sessions` (`CODEX_HOME` when set), and
+`$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share`). No hooks
+are installed. Log state is the last recorded lifecycle, not a heartbeat.
+A crash that never writes a stop can leave work unfinished in the log.
+
+Rex and Herdr supply a cwd rather than an agent session ID, so the reader
+uses the newest root session for that cwd. Those rows say `session guessed`;
+Rex's explain screen also identifies the chosen session. Luvus uses a
+session ID bound to the pane when supplied. Unbound entries from `agent
+sessions` cannot establish the parent session; the reader chooses the newest
+log for the cwd and labels that match as a guess. Luvus's explain screen gives
+the chosen session too. Concurrent agents in the same directory can be
+misattributed until their multiplexer supplies an exact session binding.
+
+A Rex pane on another machine shows only what its agent reports: local
+processes and logs cannot describe it. An unreadable process table or log
+source says `├ background work could not be read` and why under the agent.
+A matching report ID is required to suppress a log fallback: matching the label
+`Explore` would incorrectly hide a different child with the same name.
 
 ## Where it runs
 
@@ -693,3 +717,16 @@ Requires `rex`, `herdr` or `luvus` on `PATH`: whichever multiplexer it runs
 in. Works on Linux and macOS. Under Herdr, CPU and memory are read from
 `/proc`, so on macOS those two columns stay empty, as they did in
 herdr-panes.
+
+Malformed Codex archive headers do not hide already identified children.
+The pane says the session-log inventory may be incomplete. The archive index
+is shared across panes for a short interval; selected child bodies remain
+current on each read. Rex only attaches local logs to a live, associated
+agent process, so an exited reporter cannot adopt a new foreground's logs.
+
+Under Rex, session lookup uses the identified agent process's own working
+directory, not the directory of a foreground build/test command. Linux
+reads it through core's procfs helpers; macOS makes one `lsof` cwd read for
+all identified agents per poll. An unavailable cwd is an explicit source
+error. Herdr preserves a bounded source-failure reason even when task rows
+overflow the pane.

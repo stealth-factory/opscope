@@ -16,6 +16,13 @@
     "ps": {
       "version": "*",
       "why": "Reads the local process table: the work an agent left running, shown under it on every board, and inside Luvus the process names and commands for the Opscope filter. Without it, each agent says its background work could not be read, and Luvus matches only its reported command labels."
+    },
+    "lsof": {
+      "version": "*",
+      "platforms": [
+        "macos"
+      ],
+      "why": "Reads each identified agent's own working directory on macOS for session-log lookup. If unavailable, the row explains that its log source could not be read."
     }
   }
 }

@@ -151,6 +151,22 @@ pub fn parse_process_value(value: &Value) -> Process {
     }
 }
 
+/// NUL-separated lsof fields for cwd descriptors (`lsof -a -p ... -d cwd -F0pn`).
+/// Process records may start after a structural newline; path newlines and
+/// trailing spaces are part of the value and must survive unchanged.
+pub fn parse_process_cwds(text: &str) -> std::collections::HashMap<u32, String> {
+    let mut found = std::collections::HashMap::new();
+    let mut pid = None;
+    for field in text.split('\0') {
+        let field = field.trim_start_matches('\n');
+        if let Some(value) = field.strip_prefix('p') { pid = value.parse::<u32>().ok(); }
+        else if let Some(path) = field.strip_prefix('n').filter(|p|p.starts_with('/')) {
+            if let Some(pid) = pid { found.insert(pid,path.to_string()); }
+        }
+    }
+    found
+}
+
 /// Whether the program Rex started in a block is a shell.
 ///
 /// "At a prompt" is the shell itself in the foreground. A pane started with
@@ -645,6 +661,14 @@ pub fn parse_capture(text: &str, n: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cwd_fields_keep_process_identity_and_literal_path_characters() {
+        let got=super::parse_process_cwds("p20\0\nn/srv/repo\0\np21\0\nn/other/path\nwith space \0\np22\0\nnunreadable\0\n");
+        assert_eq!(got.get(&20).map(String::as_str),Some("/srv/repo"));
+        assert_eq!(got.get(&21).map(String::as_str),Some("/other/path\nwith space "));
+        assert!(!got.contains_key(&22));
+    }
+
     use super::*;
 
     const GATHER: &str = include_str!("fixtures/rex/gather.json");

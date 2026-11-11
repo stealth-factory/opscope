@@ -395,6 +395,7 @@ dependencies = [
  "miniz_oxide",
  "rand",
  "rsa",
+ "rusqlite",
  "semver",
  "serde_json",
  "sha2",
