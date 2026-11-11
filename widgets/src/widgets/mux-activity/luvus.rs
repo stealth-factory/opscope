@@ -222,12 +222,25 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         }
     };
 
+    let mut processes = None;
     if let Ok(snapshot) = &mut snapshot {
         // One bounded local scan per poll, not one subprocess per pane. UHP
         // provides root PIDs; full command lines never travel over its wire.
-        let processes = local_processes();
-        parse::mark_opscope_processes(snapshot, processes.as_deref().map_err(String::from));
+        let read = local_processes();
+        parse::mark_opscope_processes(snapshot, read.as_deref().map_err(String::from));
+        processes = Some(read.and_then(|text| tc::agent_work::parse_process_table(&text)));
     }
+    // The same scan answers what each agent left running: the pane's root
+    // process is its shell, the agent is under it, and its shells under that.
+    let roots: HashMap<String, u32> = snapshot
+        .as_ref()
+        .map(|s| {
+            s.panes
+                .iter()
+                .filter_map(|pane| Some((pane.pane_id.clone(), pane.root_pid?)))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let agents = luvus_json(session, &["agent", "list"]).and_then(|text| parse::parse_agents(&text));
     let tasks = luvus_json(session, &["task", "list"]).and_then(|text| parse::parse_tasks(&text));
@@ -259,6 +272,14 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
             let (since, exact) = measure_since(seen, &key, &agent.state, at);
             agent.since = since;
             agent.exact = exact;
+            // With no root known the agent cannot be found, but a table
+            // that did not come back still says so on its row.
+            if let Some(table) = &processes {
+                let pid = roots
+                    .get(&agent.pane)
+                    .and_then(|&root| table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind)));
+                agent.work = tc::agent_work::Work::of(table, pid);
+            }
             live.insert(key);
         }
         // A successful poll is the only moment it is safe to forget a
@@ -2158,6 +2179,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     .map(|(c, t)| (c.as_str(), t.clone()))
                     .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
+                for (unread, text) in a.work.rows(w.saturating_sub(1)) {
+                    let mut line = vec![(c(if unread { &p.unknown } else { &p.working }), text)];
+                    if loud || here {
+                        line.push((tint.clone(), " ".repeat(w)));
+                    }
+                    let refs: Vec<(&str, String)> =
+                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    body.push(tc::seg(&refs, w.saturating_sub(1)));
+                }
                 spans.push(start..body.len());
                 at += 1;
             }

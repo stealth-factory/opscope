@@ -158,15 +158,7 @@ pub fn parse_process_value(value: &Value) -> Process {
 /// child in the foreground there is the command running, not a prompt. A
 /// login shell's argv0 starts with `-`, which settles it on its own.
 pub fn is_shell(name: &str, argv0: &str) -> bool {
-    const SHELLS: &[&str] = &[
-        "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh",
-        "pwsh", "ash", "yash", "oksh",
-    ];
-    if argv0.starts_with('-') {
-        return true;
-    }
-    let argv0 = base_name(argv0.split_whitespace().next().unwrap_or(""));
-    SHELLS.contains(&base_name(name)) || SHELLS.contains(&argv0)
+    argv0.starts_with('-') || opscope_core::agent_work::is_shell(name, argv0)
 }
 
 fn base_name(path: &str) -> &str {
@@ -230,6 +222,16 @@ fn app_matches(app: &str, command: &str) -> bool {
     let app = app.to_ascii_lowercase();
     let command = command.to_ascii_lowercase();
     app == command || app == format!("{}-code", command) || app == format!("{}-cli", command)
+}
+
+/// The catalogue command an agent's name stands for: a reported product
+/// name (`claude-code`) is its command (`claude`), which is what its
+/// process is called. A name the catalogue does not know is kept.
+pub fn agent_command(name: &str, catalogue: &[String]) -> String {
+    catalogue
+        .iter()
+        .find(|c| app_matches(name, c))
+        .map_or_else(|| name.to_string(), |c| c.to_ascii_lowercase())
 }
 
 /// How the widget came to call a pane an agent.
@@ -651,6 +653,14 @@ mod tests {
 
     fn catalogue() -> Vec<String> {
         ["claude", "codex"].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_reported_product_name_resolves_to_its_command() {
+        let catalogue = vec!["claude".to_string(), "codex".to_string()];
+        assert_eq!(agent_command("claude-code", &catalogue), "claude");
+        assert_eq!(agent_command("codex", &catalogue), "codex");
+        assert_eq!(agent_command("pi", &catalogue), "pi");
     }
 
     #[test]

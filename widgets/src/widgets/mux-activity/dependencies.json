@@ -15,7 +15,7 @@
     },
     "ps": {
       "version": "*",
-      "why": "Inside Luvus, reads local process names and commands for the Opscope filter; without it, only Luvus's reported command labels can be matched."
+      "why": "Reads the local process table: the work an agent left running, shown under it on every board, and inside Luvus the process names and commands for the Opscope filter. Without it, each agent says its background work could not be read, and Luvus matches only its reported command labels."
     }
   }
 }

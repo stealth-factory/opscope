@@ -142,6 +142,10 @@ struct Pane {
     seen_since: f64,
     seen_exact: bool,
     attention: Option<(f64, String)>,
+    /// Shells the agent started that are still running, read from this
+    /// machine's process table. Only filled for an agent that reported no
+    /// child records of its own: what the program says wins.
+    work: tc::agent_work::Work,
 }
 
 impl Pane {
@@ -516,6 +520,23 @@ fn poll(
             if let Some((cpu, rss)) = pane.fg.as_ref().and_then(|f| read.get(&f.pid)) {
                 pane.cpu = *cpu;
                 pane.rss = Some(*rss);
+            }
+        }
+        let wanting = |p: &Pane| p.agent.is_some() && !p.remote && p.children().next().is_none();
+        if board.panes.iter().any(wanting) {
+            let table = tc::agent_work::read_process_table();
+            for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
+                // The foreground may be a launcher or a job, not the agent.
+                let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                // A reported product name (`claude-code`) is looked for by
+                // its command (`claude`), which is what its process is called.
+                let name = pane.agent.as_ref().map(|(name, _)| name.as_str()).unwrap_or("");
+                let name = parse::agent_command(name, catalogue);
+                let agent = match &table {
+                    Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
+                    Err(_) => pid,
+                };
+                pane.work = tc::agent_work::Work::of(&table, agent);
             }
         }
     }
@@ -983,6 +1004,12 @@ fn render_pane(
                 prose(&mut rows, body, &facts.join(" · "));
             }
             children(&mut rows);
+            for (unread, text) in pane.work.rows(w.saturating_sub(2)) {
+                let colour = if unread { &p.unknown } else { colour_of("working", p) };
+                let mut line = vec![(c(colour), text)];
+                fill(&mut line);
+                rows.push(finish(line));
+            }
         }
         Section::Processes => {
             let unreadable = pane.doing == Doing::Unknown && pane.creator == TERMINAL;

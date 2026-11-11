@@ -268,6 +268,10 @@ pub(crate) struct Agent {
     exact: bool,
     cpu: Option<f64>,
     rss: Option<u64>,
+    /// Shells the agent started that are still running, one row each under
+    /// the agent. Herdr carries no child records, so this is the process
+    /// table's answer and the row says so.
+    work: tc::agent_work::Work,
 }
 
 /// The slice of a variable-height list that fits `room` rows and holds the
@@ -579,6 +583,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
 
     let at = tc::now();
     let mut agents = Vec::new();
+    // One process table for every agent, read only when there are agents.
+    let table = if listed["agents"].as_array().is_some_and(|a| !a.is_empty()) {
+        Some(tc::agent_work::read_process_table())
+    } else {
+        None
+    };
     for entry in listed["agents"].as_array().into_iter().flatten() {
         let pane_id = text_at(entry, "pane_id");
         let state_name = match entry["agent_status"].as_str() {
@@ -593,13 +603,34 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 .insert(pane_id.clone(), (state_name.clone(), at, !seen.first_poll));
         }
         let (_, began, exact) = seen.since[&pane_id].clone();
-        let (cpu, rss) = match foreground(&pane_id) {
-            Front::Running(pid, _, _, _) => cpu_of(seen, pid, at, hz),
+        let front = foreground(&pane_id);
+        let (cpu, rss) = match &front {
+            Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
             // An agent's state comes from `agent list`, not from the probe,
             // so a failed probe costs the row its CPU and memory and
             // nothing else - and those already draw as `-` and `--` when
             // there is no reading, which there is not.
             Front::Prompt | Front::Unknown(_) => (None, None),
+        };
+        let work = match (&front, &table) {
+            (Front::Running(pid, _, _, _), Some(table)) => {
+                // The first foreground process may be a launcher or a job
+                // rather than the agent, so the agent is looked for by name.
+                let name = text_at(entry, "agent");
+                let pid = u32::try_from(*pid).ok();
+                let agent = match table {
+                    Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
+                    Err(_) => pid,
+                };
+                tc::agent_work::Work::of(table, agent)
+            }
+            // An agent whose foreground could not be read has work that
+            // could not be read either, and its row says so.
+            (Front::Unknown(why), _) => tc::agent_work::Work {
+                tasks: Vec::new(),
+                unread: Some(why.clone()),
+            },
+            _ => tc::agent_work::Work::default(),
         };
         agents.push(Agent {
             name: text_at(entry, "agent"),
@@ -612,6 +643,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             exact,
             cpu,
             rss,
+            work,
             pane_id,
         });
     }
@@ -732,6 +764,38 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
     // Stable, so workspaces Herdr did not list keep the order they arrived in.
     groups.sort_by_key(|(worst, at, _)| (*worst, *at));
     groups.into_iter().flat_map(|(_, _, g)| g).collect()
+}
+
+/// The rows under an agent in a window `room` rows tall and `width`
+/// columns wide: every job, wrapped, while they fit beside the agent's own
+/// two rows; else the whole jobs that fit and a last row that counts the
+/// rest. The window never splits an entry, so this keeps one agent from
+/// outgrowing it and hiding jobs it cannot scroll to. Each row says whether
+/// it is the explanation of an unread table, which is drawn dim.
+fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
+    let max = room.saturating_sub(2).max(1);
+    let mut all = work.rows(width);
+    if all.len() <= max {
+        return all;
+    }
+    // No jobs means the rows are the explanation of an unread table: it is
+    // kept, cut to the room, rather than counted as jobs.
+    if work.tasks.is_empty() {
+        all.truncate(max);
+        return all;
+    }
+    let mut out = Vec::new();
+    let mut shown = 0;
+    for job in &work.tasks {
+        let rows = job.rows(width);
+        if out.len() + rows.len() > max - 1 {
+            break;
+        }
+        out.extend(rows.into_iter().map(|row| (false, row)));
+        shown += 1;
+    }
+    out.push((false, format!("   ├ +{} more  running", work.tasks.len() - shown)));
+    out
 }
 
 /// What goes above agent `i`: nothing for the section's first agent when
@@ -1398,11 +1462,22 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // the window cannot split an entry, so an entry taller than the
         // room is admitted whole and the truncate below cuts the section
         // headings after it instead.
-        let lead_fits = |lead: usize| 2 + lead <= room;
+        // The rows above an agent fit when they leave room for its two
+        // rows and at least one row of its work, if it has any; the work
+        // then gets what the rows above leave, so the entry never grows
+        // past the room by its heading.
+        let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
+            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some());
+            2 + lead + some_work <= room
+        };
+        let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                if lead_fits(lead) { 2 + lead } else { 2 }
+                let shown = lead_fits(lead, &agents[i].work);
+                let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, shown));
+                let own = 2 + jobs.len();
+                if shown { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
@@ -1481,7 +1556,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             let mut rule = Vec::new();
             let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
-            if lead_fits(lead.len()) {
+            let lead_shown = lead_fits(lead.len(), &a.work);
+            let jobs_room = job_room(lead.len(), lead_shown);
+            if lead_shown {
                 rows.extend(lead);
                 plots.extend(rule);
             }
@@ -1573,6 +1650,24 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     &[
                         (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
                         (&c(body), a.title.trim().to_string()),
+                        (
+                            &tint,
+                            if loud || here {
+                                " ".repeat(w)
+                            } else {
+                                String::new()
+                            },
+                        ),
+                    ],
+                    w - 1,
+                ));
+            }
+            // The window counts these rows in the agent's height, so
+            // they are the same ones `job_lines` gave it.
+            for (unread, line) in job_lines(&a.work, w.saturating_sub(1), jobs_room) {
+                rows.push(tc::seg(
+                    &[
+                        (&c(if unread { &p.unknown } else { &p.working }), line),
                         (
                             &tint,
                             if loud || here {
@@ -1899,7 +1994,34 @@ mod tests {
             exact: true,
             cpu: None,
             rss: None,
+            work: Default::default(),
         }
+    }
+
+    #[test]
+    fn jobs_that_outgrow_the_window_end_in_a_count_of_the_rest() {
+        let job = |label: &str| tc::agent_work::Task {
+            pid: 1,
+            label: label.into(),
+            via: tc::agent_work::Via::Process,
+        };
+        let work = tc::agent_work::Work {
+            tasks: vec![job("npm test"), job("cargo build"), job("tail -f x.log")],
+            unread: None,
+        };
+        // Room for all three beside the agent's two rows.
+        assert_eq!(job_lines(&work, 60, 5).len(), 3);
+        // Room for two job rows: one job, then a row counting the other two.
+        let lines = job_lines(&work, 60, 4);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].1.contains("npm test"));
+        assert!(lines[1].1.contains("+2 more"));
+        // An unread table too long for the room still says it is unread.
+        let unread = tc::agent_work::Work::of(&Err("ps timed out after five seconds".into()), Some(1));
+        let lines = job_lines(&unread, 30, 4);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|(unread, _)| *unread));
+        assert!(lines[0].1.contains("could not"));
     }
 
     #[test]

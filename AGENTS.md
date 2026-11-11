@@ -544,6 +544,12 @@ folder that holds `help.txt`. Parsers always compiled (`mod parse`);
 is the worked example; drop the same three files beside `main.rs` to give
 another widget a second source.
 
+`tc::agent_work` (`core/src/agent_work.rs`) is what a coding agent left
+running, for any widget that lists agents: `read_process_table()` and its
+`parse_process_table()`, `agent_below()` from a pane's root process and
+`background_shells()` under an agent, each row saying where it came from
+(`Via`). An agent's own OSC 7501 child records win where a widget has them.
+
 `tc::procfs` (`core/src/procfs.rs`) is where `/proc/<pid>/{stat,io,cgroup,
 cmdline,comm,cwd,fd}`, `/proc/uptime` and `ss -tine` are read: `parse_*`
 for each, ungated; `pids()` / `read_pid()` returning `Err` per unreadable

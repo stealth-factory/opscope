@@ -44,6 +44,41 @@ whichever multiplexer the pane is in.
  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
 
+## Work an agent left running
+
+An agent that hands a job to a background shell and goes back to its prompt
+reports `idle` or `done` while the job is still going. Each board draws that
+work as rows under the agent, from the best source it has:
+
+1. **What the agent reports.** OSC 7501 child records, which Rex carries
+   and the Rex board draws under the agent as `├ build/test`. An agent that
+   reports any is taken at its word and nothing else is added.
+2. **The process table.** A shell the agent started that is still running
+   something, read from one `ps -axww -o pid=,ppid=,comm=,args=` per read on
+   this machine, and drawn as `├ npm test  running · via process`. Only
+   shells count: an agent's MCP servers and its own helpers are its children
+   too, but they are started as themselves, and a command run for you goes
+   through a shell. A shell that hands itself over to a lone command
+   (`bash -c 'sleep 20'` can become `sleep`) leaves no shell to find, and
+   that job looks like one of the agent's own helpers, so it is not shown
+   rather than every MCP server being shown with it. Under Luvus the agent is found below the pane's root
+   process, which is the shell the pane was opened with.
+
+   A job is drawn by its command line, so anything on it that reads as a
+   credential is drawn as `***` instead: the login in a URL, a query
+   parameter, flag or variable named for a token, key, password or secret,
+   curl's `-u`, and an `Authorization:` header. It goes by names, so it
+   would rather hide a file after `--key` than show a token after a flag it
+   does not know, but a secret passed under a name it does not recognise is
+   still drawn. Check a board before screenshotting one with jobs on it.
+
+The process table cannot see a **subagent**: those run inside the agent's own
+process. Reading them from the agent's session logs is the next step
+(OPS-271). A Rex pane on another machine has no local process table, so it
+shows only what its agent reports. When the table does not come back, each
+agent's row says `├ background work could not be read` and why, rather than
+reading as having nothing running.
+
 ## Where it runs
 
 `mux-activity` reads the multiplexer whose pane it was started in. Each one marks
@@ -181,8 +216,11 @@ while the refresh timer keeps reading.
 
 The widget **never starts a Rex server**: every call carries
 `--autostart=false`, so with none running it says so instead of conjuring one.
-It never shows a socket path, an address or a login, because the pane gets
-screenshotted.
+Nothing it says about Rex itself shows a socket path, an address or a login,
+because the pane gets screenshotted. A job row is the job's own command line,
+which can name an address; a credential it recognises by name is drawn as
+`***`, and one it does not is not (see
+[Work an agent left running](#work-an-agent-left-running)).
 
 ### Keys
 
