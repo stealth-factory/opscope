@@ -346,9 +346,11 @@ fn is_named(comm: &str, args: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
+    let name = product(&name);
     let matches = |word: &str| {
         let word = base_name(word).to_ascii_lowercase();
-        word == name || word.strip_suffix(".js").is_some_and(|w| w == name)
+        let word = word.strip_suffix(".js").unwrap_or(&word);
+        product(word) == name
     };
     let mut words = args.split_whitespace();
     let program = words.next().unwrap_or("");
@@ -356,6 +358,16 @@ fn is_named(comm: &str, args: &str, name: &str) -> bool {
     // is Claude, but `tail /tmp/claude` and `rg claude` are not.
     let script = words.next().filter(|_| INTERPRETERS.contains(&base_name(program)));
     matches(comm) || matches(program) || script.is_some_and(matches)
+}
+
+/// A name with the suffix products and their commands differ by taken
+/// off, so `cursor` is `cursor-agent`, `claude-code` is `claude` and
+/// `gemini-cli` is `gemini`, whichever side a board reports.
+fn product(name: &str) -> &str {
+    ["-agent", "-code", "-cli"]
+        .iter()
+        .find_map(|s| name.strip_suffix(s).filter(|n| !n.is_empty()))
+        .unwrap_or(name)
 }
 
 /// Programs that run a script, so the script names what is running.
@@ -550,6 +562,17 @@ mod tests {
         assert_eq!(label("node /opt/bin/vite --port 5173", "node"), "vite --port 5173");
         assert_eq!(label("python3 -m http.server", "python3"), "python3 -m http.server");
         assert_eq!(label("", "/usr/bin/sleep"), "sleep");
+    }
+
+    // Herdr calls Cursor's agent `cursor` and its process is `cursor-agent`;
+    // a product name and its command are the same agent either way round.
+    #[test]
+    fn a_product_name_finds_its_command_and_a_command_its_product() {
+        assert!(is_named("cursor-agent", "cursor-agent", "cursor"));
+        assert!(is_named("cursor", "/usr/bin/cursor", "cursor-agent"));
+        assert!(is_named("2.1.317", "claude", "claude-code"));
+        assert!(is_named("gemini", "node /x/bin/gemini.js", "gemini-cli"));
+        assert!(!is_named("cursor", "cursor .", "claude"));
     }
 
     // The pane gets screenshotted: a credential on a job's command line is

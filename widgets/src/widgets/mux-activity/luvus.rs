@@ -272,8 +272,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
             let (since, exact) = measure_since(seen, &key, &agent.state, at);
             agent.since = since;
             agent.exact = exact;
-            if let (Some(table), Some(&root)) = (&processes, roots.get(&agent.pane)) {
-                let pid = table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind));
+            // With no root known the agent cannot be found, but a table
+            // that did not come back still says so on its row.
+            if let Some(table) = &processes {
+                let pid = roots
+                    .get(&agent.pane)
+                    .and_then(|&root| table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind)));
                 agent.work = tc::agent_work::Work::of(table, pid);
             }
             live.insert(key);
