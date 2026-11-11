@@ -55,6 +55,20 @@ pub struct Caches {
     /// A good reading taken before this is asked again rather than served
     /// out of its hold; see `cached`. Zero on every other pass.
     pub asked_at: f64,
+    /// The readings shared with every other pane on this machine, when
+    /// this pane is sharing; see `sharing.rs`.
+    pub store: Option<crate::sharing::Store>,
+    /// Why this pane is not sharing, when it meant to and cannot.
+    pub sharing_off: String,
+    /// key -> (when, pid) of the shared reading this pane last took or
+    /// gave: who fetched it, and when, even after a reader has dropped it
+    /// from `live` to have it asked again.
+    pub shared: HashMap<String, (f64, u32)>,
+    /// Every token this pass holds. No shared reading may contain one.
+    pub secrets: Vec<String>,
+    /// snapshot path -> the time of the Claude reading last written there,
+    /// so a held reading is not written again on every pass.
+    pub snapshot_at: HashMap<String, f64>,
 }
 
 /// One record a transcript reader keeps: day, billed model, tokens.
@@ -818,6 +832,7 @@ where
     F: FnOnce() -> Option<serde_json::Value>,
 {
     let at = now();
+    pull(caches, key, at);
     if let Some((when, value, held)) = caches.live.get(key) {
         // A refusal keeps its backoff even when asked: pressing `r` at an
         // endpoint that is rate-limiting us is how the limit is sustained.
@@ -833,6 +848,32 @@ where
             && caches.asked_at - when >= ASKED_FLOOR;
         if at - when < *held && !asked {
             return value.clone();
+        }
+    }
+    // Stale here. Before asking, ask the other panes: one of them may have
+    // just fetched it, or be fetching it now.
+    if let Some(store) = caches.store.as_mut() {
+        let known = caches
+            .live
+            .get(key)
+            .map(|e| e.0)
+            .or_else(|| caches.shared.get(key).map(|s| s.0));
+        match store.claim(key, known, at) {
+            Ok(crate::sharing::Got::Mine) => {}
+            Ok(crate::sharing::Got::Fresh(s)) => {
+                adopt_row(caches, key, s, at);
+                if let Some((_, value, _)) = caches.live.get(key) {
+                    return value.clone();
+                }
+            }
+            // Another pane is asking. Show what there is until it lands;
+            // with nothing at all to show, ask too - once, on a start.
+            Ok(crate::sharing::Got::Held(_)) => {
+                if let Some((_, value, _)) = caches.live.get(key) {
+                    return value.clone();
+                }
+            }
+            Err(why) => stop_sharing(caches, &why),
         }
     }
     let value = fetch();
@@ -854,7 +895,117 @@ where
         _ => {}
     }
     caches.live.insert(key.to_string(), (at, value.clone(), held));
+    if let Some(store) = caches.store.as_mut() {
+        let s = crate::sharing::Shared {
+            taken_at: at,
+            held,
+            value: value.clone(),
+            fails: caches.fails.get(key).copied().unwrap_or(0),
+            good: caches.good.get(key).cloned(),
+            fetched_by: store.me,
+        };
+        let me = store.me;
+        match store.publish(key, &s, &caches.secrets, at) {
+            Ok(_) => {
+                caches.shared.insert(key.to_string(), (at, me));
+            }
+            Err(why) => stop_sharing(caches, &why),
+        }
+    }
     value
+}
+
+/// Take what another pane has published under `key` since this pane last
+/// looked. Costs nothing when nobody has written.
+fn pull(caches: &mut Caches, key: &str, at: f64) {
+    let Some(store) = caches.store.as_mut() else {
+        return;
+    };
+    match store.load(key) {
+        Ok(Some(s)) => adopt_row(caches, key, s, at),
+        Ok(None) => {}
+        Err(why) => stop_sharing(caches, &why),
+    }
+}
+
+/// Put a shared reading in this pane's caches, when it is newer than what
+/// the pane holds.
+fn adopt_row(caches: &mut Caches, key: &str, s: crate::sharing::Shared, at: f64) {
+    let local = caches.live.get(key).map(|e| e.0);
+    if crate::lease::adopt(local, s.taken_at, at) {
+        caches.live.insert(key.to_string(), (s.taken_at, s.value, s.held));
+        if s.fails == 0 {
+            caches.fails.remove(key);
+        } else {
+            caches.fails.insert(key.to_string(), s.fails);
+        }
+        caches.shared.insert(key.to_string(), (s.taken_at, s.fetched_by));
+    }
+    if let Some((good_at, good)) = s.good {
+        if caches.good.get(key).is_none_or(|(l, _)| good_at > *l) {
+            caches.good.insert(key.to_string(), (good_at, good));
+        }
+    }
+}
+
+/// Go on alone, saying why. A store that failed once is not trusted for
+/// the rest of the run; the poller opens it again later.
+pub fn stop_sharing(caches: &mut Caches, why: &str) {
+    caches.store = None;
+    caches.sharing_off = why.to_string();
+}
+
+/// Replace the value held under `key` and, when this pane fetched it, the
+/// shared copy too - so a reason or a detail a reader adds after the fetch
+/// reaches the panes that did not fetch.
+pub fn set_live(caches: &mut Caches, key: &str, value: serde_json::Value) {
+    let Some((when, _, held)) = caches.live.get(key).cloned() else {
+        return;
+    };
+    caches.live.insert(key.to_string(), (when, Some(value.clone()), held));
+    let Some(store) = caches.store.as_mut() else {
+        return;
+    };
+    if caches.shared.get(key) != Some(&(when, store.me)) {
+        return;
+    }
+    if let Err(why) = store.annotate(key, when, &value) {
+        stop_sharing(caches, &why);
+    }
+}
+
+/// Note a token this pass holds, so no shared reading carries it.
+pub fn secret(caches: &mut Caches, token: &str) {
+    if !token.is_empty() && !caches.secrets.iter().any(|t| t == token) {
+        caches.secrets.push(token.to_string());
+    }
+}
+
+/// What the status line says about sharing: how many of the readings this
+/// pane holds another pane fetched, or why this pane is not sharing.
+pub fn sharing_status(caches: &Caches) -> String {
+    match &caches.store {
+        Some(store) => {
+            let others = caches
+                .live
+                .keys()
+                .filter(|k| caches.shared.get(*k).is_some_and(|(_, by)| *by != store.me))
+                .count();
+            let mut said = if others == 0 {
+                "readings shared".to_string()
+            } else {
+                format!("readings shared · {others} fetched by other panes")
+            };
+            if !store.notice.is_empty() {
+                said = format!("{said} · {}", store.notice);
+            }
+            said
+        }
+        None if !caches.sharing_off.is_empty() => {
+            format!("not sharing readings: {}", caches.sharing_off)
+        }
+        None => String::new(),
+    }
 }
 
 /// How long a good reading is kept on screen through failures in transit.
@@ -921,13 +1072,7 @@ pub fn remember_refusal(caches: &mut Caches, key: &str, why: &str) {
     if why.is_empty() {
         return;
     }
-    let Some((when, _, held)) = caches.live.get(key).cloned() else {
-        return;
-    };
-    caches.live.insert(
-        key.to_string(),
-        (when, Some(serde_json::json!({"why": why})), held),
-    );
+    set_live(caches, key, serde_json::json!({"why": why}));
 }
 
 pub fn read_json(path: &str) -> Option<serde_json::Value> {

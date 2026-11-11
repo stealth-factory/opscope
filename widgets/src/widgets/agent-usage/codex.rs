@@ -590,16 +590,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         // The refusal hold is `{"why"}` only. Put the inventory beside it
         // so the frames inside the backoff still draw the bank that arrived.
         if let Some(body) = carried_bank.clone() {
-            if let Some((when, _, held)) = caches.live.get("codex").cloned() {
-                caches.live.insert(
-                    "codex".to_string(),
-                    (
-                        when,
-                        Some(serde_json::json!({"why": &refuse, "bank": body})),
-                        held,
-                    ),
-                );
-            }
+            set_live(caches, "codex", serde_json::json!({"why": &refuse, "bank": body}));
             bank = bank_of(Some(&body), now());
         }
     }

@@ -2078,6 +2078,9 @@ struct Config {
     /// actually used. Fifteen leaves the mark for a reading that is
     /// genuinely late.
     grok_ping_minutes: f64,
+    /// Whether quota readings are shared with the other panes on this
+    /// machine, so one asks each service and the rest read its answer.
+    share_readings: bool,
     /// Notion's `token_v2` session cookie. Empty reads `notion_token_env`.
     notion_token: String,
     /// The environment variable holding that cookie when `notion_token` is
@@ -2154,6 +2157,10 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 15.0),
+        share_readings: raw
+            .get("share_readings")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
         notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
@@ -2708,6 +2715,37 @@ fn step_tab(at: i64, by: i64, count: usize) -> usize {
     (at + by).rem_euclid(count as i64) as usize
 }
 
+/// How long a store that could not be opened is left before it is tried
+/// again: a permission or a full disk does not fix itself in thirty
+/// seconds, and trying costs a few system calls and a line of noise.
+const SHARE_RETRY: f64 = 600.0;
+
+/// Open, keep or drop the store shared with the other panes, as the
+/// setting asks, and note at the start of a pass whether any of them has
+/// written since the last one.
+fn share_readings(caches: &mut shared::Caches, on: bool, tried: &mut f64, at: f64) {
+    if !on {
+        caches.store = None;
+        caches.sharing_off = "share_readings is off".into();
+        return;
+    }
+    if caches.store.is_none() && at - *tried >= SHARE_RETRY {
+        *tried = at;
+        match sharing::Store::open(&sharing::path()) {
+            Ok(s) => {
+                caches.store = Some(s);
+                caches.sharing_off.clear();
+            }
+            Err(why) => caches.sharing_off = why,
+        }
+    }
+    if let Some(store) = caches.store.as_mut() {
+        if let Err(why) = store.begin_pass() {
+            shared::stop_sharing(caches, &why);
+        }
+    }
+}
+
 fn check_status(fetched: f64) -> String {
     if fetched <= 0.0 {
         " Not checked yet".into()
@@ -2793,11 +2831,15 @@ fn main() {
         store::restore(&mut caches, &saved_at);
         let mut saver = store::Saver::new(now());
         let mut asked = false;
+        // When the shared store was last tried and could not be opened, so
+        // a store that cannot be made is not tried again on every pass.
+        let mut share_tried = f64::NEG_INFINITY;
         loop {
             let cfg = match poller_live.lock() {
                 Ok(g) => g.cfg.clone(),
                 Err(_) => return,
             };
+            share_readings(&mut caches, cfg.share_readings, &mut share_tried, now());
             // A directory dropped from the config is never read again.
             // Pruned on every pass, not only the first: settings can
             // remove one while its queue is still unfinished, and that
@@ -2840,6 +2882,7 @@ fn main() {
                     if let Ok(mut g) = poller.lock() {
                         *g = found;
                         g.fetched = now();
+                        g.sharing = shared::sharing_status(&caches);
                     }
                     // A save that fails costs the next start a slower first
                     // read and nothing else; there is nothing on screen it
@@ -3127,12 +3170,29 @@ fn main() {
             String::new()
         };
         let mut legend = "   · = detected".to_string();
-        if base.len() + hidden_txt.len() + legend.len() + where_.len() > w - 1 {
+        // Whether this pane's readings come from the others, or why not.
+        // Stands down after the legend: the scroll position and what is
+        // hidden say more about the screen in front of the reader.
+        let mut sharing = if snapshot.sharing.is_empty() {
+            String::new()
+        } else {
+            format!("   {}", snapshot.sharing)
+        };
+        let fits = |a: &str, b: &str| {
+            tc::display_width(&base) + tc::display_width(a) + tc::display_width(&hidden_txt)
+                + tc::display_width(b) + tc::display_width(&where_)
+                <= w - 1
+        };
+        if !fits(&legend, &sharing) {
             legend.clear();
+        }
+        if !fits(&legend, &sharing) {
+            sharing.clear();
         }
         rows[status_at] = tc::seg(
             &[
                 (p.dim.as_str(), base),
+                (p.dim.as_str(), sharing),
                 (p.dim.as_str(), legend),
                 (p.dim.as_str(), hidden_txt),
                 (p.accent.as_str(), where_),
@@ -3180,6 +3240,8 @@ fn main() {
 mod parse;
 mod shared;
 mod store;
+mod lease;
+mod sharing;
 mod antigravity;
 mod claude;
 mod notion;

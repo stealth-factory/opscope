@@ -239,6 +239,7 @@ fn read_with_home(caches: &mut Caches, cfg: &Config, shown: bool, home_dir: &str
     if key.is_empty() {
         return data;
     }
+    secret(caches, &key);
     let slot = cache_key(&key);
     let mut refused = String::new();
     let mut got = None;

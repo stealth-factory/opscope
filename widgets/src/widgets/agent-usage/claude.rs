@@ -662,27 +662,33 @@ fn account_marker_at(json_path: &str) -> Option<String> {
 
 #[allow(dead_code)]
 fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
-    write_snapshot(path, utilization, account_marker())
+    write_snapshot(path, utilization, account_marker(), now())
 }
 
-fn save_snapshot_for(path: &str, json_path: &str, utilization: &serde_json::Value) {
-    write_snapshot(path, utilization, account_marker_at(json_path))
+fn save_snapshot_for(path: &str, json_path: &str, utilization: &serde_json::Value, at: f64) {
+    write_snapshot(path, utilization, account_marker_at(json_path), at)
 }
 
 /// The write, against a named path so it can be tested without reaching for
 /// the real one or rewriting the environment out from under other tests.
-fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<String>) {
+/// `at` is when the reading was taken, which is what the file's age means.
+/// Written beside the file and moved into place, so a pane reading it while
+/// another writes never sees half of one.
+fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<String>, at: f64) {
     if let Some(dir) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let mut body = serde_json::json!({
-        "fetchedAtMs": now() * 1000.0,
+        "fetchedAtMs": at * 1000.0,
         "utilization": utilization,
     });
     if let Some(uuid) = uuid {
         body["accountUuid"] = serde_json::json!(uuid);
     }
-    let _ = std::fs::write(path, body.to_string());
+    let next = format!("{path}.{}.next", std::process::id());
+    if std::fs::write(&next, body.to_string()).is_ok() && std::fs::rename(&next, path).is_err() {
+        let _ = std::fs::remove_file(&next);
+    }
 }
 
 #[allow(dead_code)]
@@ -1058,10 +1064,16 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
             claude.quota_live = true;
             claude.quota_at = num(&got, "at");
             claude.quota_plan = text(&got, "plan");
-            // Kept for the next refresh that cannot reach the endpoint. The
-            // reading is held for LIVE_TTL either way, so this writes about
-            // once every two minutes rather than on every frame.
-            save_snapshot_for(&snapshot_path_for(&dir.path), &json, &got["u"]);
+            // Kept for the next refresh that cannot reach the endpoint.
+            // Written once per reading, stamped with the reading's own time:
+            // this ran on every pass that served a held reading, rewriting
+            // the file every thirty seconds and dating it to the pass, so a
+            // five-minute-old reading came back after a restart as new.
+            let path = snapshot_path_for(&dir.path);
+            if caches.snapshot_at.get(&path) != Some(&claude.quota_at) {
+                save_snapshot_for(&path, &json, &got["u"], claude.quota_at);
+                caches.snapshot_at.insert(path, claude.quota_at);
+            }
         }
         None => {
             if let Some((u, at)) = claude_stale_for(&dir.path) {

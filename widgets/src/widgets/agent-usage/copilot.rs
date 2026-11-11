@@ -199,6 +199,7 @@ fn cache_key(tok: Option<&str>) -> String {
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
     let tok = copilot_token();
+    secret(caches, tok.as_deref().unwrap_or_default());
     let key = cache_key(tok.as_deref());
     if let Some(got) = cached(caches, &key, LIVE_TTL, || copilot_live(tok.as_deref())) {
         if got["data"].is_object() {

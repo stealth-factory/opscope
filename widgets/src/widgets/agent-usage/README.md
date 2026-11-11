@@ -1455,6 +1455,57 @@ and this pass's reason, and the summary marks those lanes as cached. A refused
 or missing token, or a different account, never brings an old reading back:
 any failure that is not in transit drops what was kept.
 
+### Several panes ask once between them
+
+Each pane used to ask every service on its own, so three `agent-usage`
+panes asked Claude three times per hold, and Claude answered the third
+with "too many requests" — which every pane then showed, blaming
+"something else polling the same token". The something else was the other
+panes.
+
+Now the readings are shared. One pane fetches a reading when it goes
+stale, and every other pane on the machine reads its answer. There is no
+fixed leader: a pane claims one reading at a time, for one fetch, and gives
+the claim up when it publishes. A pane that goes away mid-fetch — a closed
+tab, a dropped SSH session — holds its claim for at most a minute and a
+half, and then the next pane that finds the reading stale takes it over.
+Nothing has to notice that it left.
+
+- A refusal is shared too, with its backoff, so no pane asks a service that
+  is rate-limiting until the wait is over — even a pane started in the
+  meantime.
+- A pane asks only for readings it would have asked for itself. Panes with
+  different agents, Claude directories or tokens keep separate readings.
+- `r` still asks for anything older than thirty seconds. When another pane
+  is already asking, this one shows what it has and takes the answer when
+  it lands.
+- The status line says `readings shared`, and how many of this pane's
+  readings another pane fetched. It says `not sharing readings:` and why
+  when it cannot share, and the pane then asks on its own as before.
+
+The readings live in one file, `~/.local/state/opscope/agent-usage.sqlite`,
+readable only by you. It is kept small and quiet on purpose:
+
+- **Only the latest reading** for each service, replaced and never added to.
+  A reading nobody has fetched for a day is deleted.
+- **A hard cap.** SQLite stops the file at 16 MB. A file found larger than
+  8 MB, damaged, or written by another version is deleted and started again,
+  which costs one request per service.
+- **Written only when a reading is fetched**: a claim and a publish, and
+  nothing in between. With every agent on, that is a handful of writes a
+  minute for the whole machine, however many panes are open. A pane whose
+  readings nobody has changed reads nothing back but a version counter.
+- **No forced flushes to disk.** A crash cannot damage the file; a power cut
+  could, and then it is started again.
+- **No tokens.** A reading that contains a token this pane holds is not
+  written at all.
+
+`share_readings` turns it off for one pane, which then asks on its own.
+
+| key | default | what it does |
+|---|---|---|
+| `share_readings` | `true` | share quota readings with every other `agent-usage` pane on this machine, so one asks each service and the rest read its answer. Off makes this pane ask on its own |
+
 ### Claude's fallback is our own snapshot, not Claude Code's
 
 Claude Code keeps a usage cache of its own, and this widget used to read it
@@ -1465,9 +1516,9 @@ was drawing it as a current percentage.
 
 So there are two fallbacks now, newest wins:
 
-1. **This widget's own snapshot**, written every time the live reading answers
-   — minutes old on a machine in use, and not dependent on another program's
-   cache still being maintained.
+1. **This widget's own snapshot**, written once for each new live reading and
+   dated to when that reading was taken — minutes old on a machine in use, and
+   not dependent on another program's cache still being maintained.
 2. **Claude Code's**, but only inside the hour Claude Code itself trusts it
    for.
 
