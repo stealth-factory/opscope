@@ -86,7 +86,18 @@ jobs:
     # code actually compiles on macOS. Keep this as an ordinary PR gate,
     # before the three-platform release build is allowed to be the first Mac
     # compiler that sees a change.
-    runs-on: macos-15
+    #
+    # Runs on the team's own Mac (a self-hosted runner) rather than a billed
+    # hosted image; see .agents/skills/self-hosted-macos-runner. Two escape
+    # hatches, both landing on the hosted image this job used before:
+    #   - a pull request from a fork always goes to macos-15. This repo is
+    #     public, and a self-hosted runner executes whatever the PR contains;
+    #   - the repo variable MACOS_RUNS_ON, as JSON, overrides the Mac for
+    #     everyone else: set it to '"macos-15"' while the Mac is off or being
+    #     upgraded, and delete it to come back. No commit needed.
+    # One runner instance runs one job, and each instance has its own _work
+    # checkout, so `target/` is never shared between concurrent jobs.
+    runs-on: ${{ fromJSON((github.event.pull_request.head.repo.fork && '"macos-15"') || vars.MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

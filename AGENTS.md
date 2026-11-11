@@ -247,6 +247,25 @@ the source did not report.
 - `widgets/src/launcher/` is the source for the public `opscope` command.
   It is the launcher, not a widget, and does not count as one.
 
+## Mac first, CI last
+
+Build and test anything that touches macOS on a Mac before you push: a
+`macos.rs`, a `cfg(target_os = "macos")` gate, core code a `macos.rs`
+calls, or a workflow's Mac job. CI is the final check, not the
+compiler you iterate against. Every push starts a Mac job on the team's
+shared runner, and those jobs queue behind one another.
+
+The `self-hosted-macos-runner` skill (`.agents/skills/self-hosted-macos-runner`)
+is the procedure. In short: run `cargo test --workspace --all-targets` and
+`cargo build --workspace --bins`, the same commands as the `macos` job, on
+the team's build Mac (or, when it is offline, the user's own Mac) in a
+worktree of your own, never in a runner's `_work`. A cloud container cannot
+do this; hand the build to a Mac and say so, and fall back to the hosted
+runners only when there is no Mac at all. Push once it passes.
+
+Never commit a Mac's name, address, or network details. The runner labels
+in the workflows are the generic `self-hosted`, `macOS`, `ARM64`.
+
 ## Before you commit
 
 Run `cargo test` from the root. Alongside each widget's own tests it runs
