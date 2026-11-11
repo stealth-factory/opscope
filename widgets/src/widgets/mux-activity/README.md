@@ -64,6 +64,12 @@ work as rows under the agent, from the best source it has:
    rather than every MCP server being shown with it. Under Luvus the agent is found below the pane's root
    process, which is the shell the pane was opened with.
 
+   A job is drawn by its command line, so anything on it that reads as a
+   credential is drawn as `***` instead: the login in a URL, the value of a
+   flag or variable named for a token, key, password or secret, curl's `-u`,
+   and an `Authorization:` header. It goes by names, so it would rather hide
+   a file after `--key` than show a token after a flag it does not know.
+
 The process table cannot see a **subagent**: those run inside the agent's own
 process. Reading them from the agent's session logs is the next step
 (OPS-271). A Rex pane on another machine has no local process table, so it

@@ -384,6 +384,9 @@ pub fn is_shell(comm: &str, args: &str) -> bool {
 ///
 /// An interpreter running a script is named by the script, the way the
 /// pane rows name one: `node /…/bin/npm test` reads `npm test`.
+///
+/// The pane gets screenshotted, so anything that reads as a credential is
+/// drawn as `***`: see [`redact`].
 pub fn label(args: &str, comm: &str) -> String {
     let words: Vec<&str> = args.split_whitespace().collect();
     let Some(first) = words.first() else {
@@ -399,7 +402,52 @@ pub fn label(args: &str, comm: &str) -> String {
     }
     let mut out = vec![program];
     out.extend_from_slice(&words[1..]);
-    out.join(" ")
+    redact(&out).join(" ")
+}
+
+/// A command line's words with every credential in them replaced by `***`:
+/// the login in a URL (`https://***@host`), the value of a flag or a
+/// variable whose name says secret (`--token ***`, `GH_TOKEN=***`), curl's
+/// `-u ***`, and everything after a header named for one
+/// (`'Authorization: ***`). Words are what `ps` hands over, quotes and all,
+/// so this reads names rather than parsing a shell; it would rather hide a
+/// file name after `--key` than show a token after a flag it did not know.
+fn redact(words: &[&str]) -> Vec<String> {
+    const HIDDEN: &str = "***";
+    let secret = |name: &str| {
+        let name = name.trim_matches(|c: char| c == '-' || c == '\'' || c == '"').to_ascii_lowercase();
+        ["token", "secret", "passw", "key", "auth", "credential", "cookie"]
+            .iter()
+            .any(|w| name.contains(w))
+    };
+    let mut out = Vec::with_capacity(words.len());
+    let mut hide_next = false;
+    let mut hide_rest = false;
+    for word in words {
+        if hide_rest || hide_next {
+            hide_next = false;
+            out.push(HIDDEN.to_string());
+            continue;
+        }
+        let assigned = word.split_once('=').map(|(name, _)| name).filter(|n| !n.contains("://") && secret(n));
+        if let Some(name) = assigned {
+            out.push(format!("{name}={HIDDEN}"));
+        } else if let Some(at) = word.find("://") {
+            let rest = &word[at + 3..];
+            let host_end = rest.find('/').unwrap_or(rest.len());
+            match rest[..host_end].rfind('@') {
+                Some(login) => out.push(format!("{}{HIDDEN}{}", &word[..at + 3], &rest[login..])),
+                None => out.push(word.to_string()),
+            }
+        } else if word.trim_end_matches(['\'', '"']).ends_with(':') && secret(word) {
+            out.push(word.to_string());
+            hide_rest = true;
+        } else {
+            hide_next = word.starts_with('-') && (secret(word) || *word == "-u" || *word == "--user");
+            out.push(word.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -502,6 +550,25 @@ mod tests {
         assert_eq!(label("node /opt/bin/vite --port 5173", "node"), "vite --port 5173");
         assert_eq!(label("python3 -m http.server", "python3"), "python3 -m http.server");
         assert_eq!(label("", "/usr/bin/sleep"), "sleep");
+    }
+
+    // The pane gets screenshotted: a credential on a job's command line is
+    // drawn as `***`, and the rest of the line is left as it was.
+    #[test]
+    fn a_credential_on_a_job_command_line_is_never_drawn() {
+        let cases = [
+            ("git clone https://me:hunter2@example.com/r.git", "git clone https://***@example.com/r.git"),
+            ("deploy --token abc123 --prod", "deploy --token *** --prod"),
+            ("deploy --api-key=abc123", "deploy --api-key=***"),
+            ("env GH_TOKEN=abc123 gh pr list", "env GH_TOKEN=*** gh pr list"),
+            ("curl -u me:hunter2 https://example.com", "curl -u *** https://example.com"),
+            ("curl -H 'Authorization: Bearer abc123' https://x", "curl -H 'Authorization: *** *** ***"),
+            ("npm test -- --watch", "npm test -- --watch"),
+            ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
+        ];
+        for (args, want) in cases {
+            assert_eq!(label(args, ""), want, "{args}");
+        }
     }
 
     #[test]
