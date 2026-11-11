@@ -370,6 +370,18 @@ fn product(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// A word read as a header: the flag it is attached to (`--header=`, or
+/// nothing), the header's name and what follows its `:`. A word whose `=`
+/// comes before its `:` and is not a flag's is an assignment, not a header.
+fn header(word: &str) -> Option<(&str, &str, &str)> {
+    let (flag, rest) = match word.split_once('=') {
+        Some((f, _)) if f.starts_with('-') && !f.contains(':') => word.split_at(f.len() + 1),
+        _ => ("", word),
+    };
+    let (name, value) = rest.split_once(':')?;
+    (!name.contains('=')).then_some((flag, name, value))
+}
+
 /// Programs that run a script, so the script names what is running.
 const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
 
@@ -472,14 +484,15 @@ fn redact(words: &[&str]) -> Vec<String> {
                 None => url,
             };
             out.push(url);
-        } else if let Some((name, value)) = word.split_once(':').filter(|(n, _)| !n.contains('=') && secret(n)) {
-            // A header, `Authorization: Bearer x` or `X-Api-Key:x`. Its value
-            // can run on past this word (`Authorization:Bearer x`), so the
-            // words after it go too.
+        } else if let Some((flag, name, value)) = header(word).filter(|(_, n, _)| secret(n)) {
+            // A header, `Authorization: Bearer x` or `X-Api-Key:x`, maybe
+            // attached to its flag (`--header=Authorization:`). Its value can
+            // run on past this word (`Authorization:Bearer x`), so the words
+            // after it go too.
             if value.trim_matches(['\'', '"']).is_empty() {
                 out.push(word.to_string());
             } else {
-                out.push(format!("{name}:{HIDDEN}"));
+                out.push(format!("{flag}{name}:{HIDDEN}"));
             }
             hide_rest = true;
         } else if let Some(user) = word.strip_prefix("--user=") {
@@ -627,6 +640,8 @@ mod tests {
             ("env API_KEY=a:b run", "env API_KEY=*** run"),
             ("curl -ume:hunter2 https://x", "curl -u*** https://x"),
             ("curl --user=me:hunter2 https://x", "curl --user=*** https://x"),
+            ("wget --header=Authorization: Bearer abc123 https://x", "wget --header=Authorization: *** *** ***"),
+            ("wget --header=X-Api-Key:abc123 https://x", "wget --header=X-Api-Key:*** ***"),
             ("npm test -- --watch", "npm test -- --watch"),
             ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
         ];
