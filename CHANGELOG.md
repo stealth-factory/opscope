@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.13.0] - 2026-11-11
+
+### CI
+
+- Run the macOS builds on the team's own Mac (OPS-272) (#609)
+
+### Features
+
+- **mux-activity**: Show work an agent left running under its row (#607)
+- **mux-activity**: Show subagents from local session logs (#612)
+
 ## [2.12.0] - 2026-11-10
 
 ### Features
