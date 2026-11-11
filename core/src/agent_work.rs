@@ -398,7 +398,7 @@ pub fn is_shell(comm: &str, args: &str) -> bool {
 /// pane rows name one: `node /…/bin/npm test` reads `npm test`.
 ///
 /// The pane gets screenshotted, so anything that reads as a credential is
-/// drawn as `***`: see [`redact`].
+/// drawn as `***`, script arguments included: see [`redact`].
 pub fn label(args: &str, comm: &str) -> String {
     let words: Vec<&str> = args.split_whitespace().collect();
     let Some(first) = words.first() else {
@@ -409,7 +409,7 @@ pub fn label(args: &str, comm: &str) -> String {
         if let Some(script) = words.get(1).filter(|w| !w.starts_with('-')) {
             let mut out = vec![base_name(script)];
             out.extend_from_slice(&words[2..]);
-            return out.join(" ");
+            return redact(&out).join(" ");
         }
     }
     let mut out = vec![program];
@@ -418,7 +418,8 @@ pub fn label(args: &str, comm: &str) -> String {
 }
 
 /// A command line's words with every credential in them replaced by `***`:
-/// the login in a URL (`https://***@host`), the value of a flag or a
+/// the login in a URL (`https://***@host`) and a query parameter named for
+/// a secret (`?token=***`), the value of a flag or a
 /// variable whose name says secret (`--token ***`, `GH_TOKEN=***`), curl's
 /// `-u ***`, and everything after a header named for one
 /// (`'Authorization: ***`). Words are what `ps` hands over, quotes and all,
@@ -446,11 +447,26 @@ fn redact(words: &[&str]) -> Vec<String> {
             out.push(format!("{name}={HIDDEN}"));
         } else if let Some(at) = word.find("://") {
             let rest = &word[at + 3..];
-            let host_end = rest.find('/').unwrap_or(rest.len());
-            match rest[..host_end].rfind('@') {
-                Some(login) => out.push(format!("{}{HIDDEN}{}", &word[..at + 3], &rest[login..])),
-                None => out.push(word.to_string()),
-            }
+            let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let url = match rest[..host_end].rfind('@') {
+                Some(login) => format!("{}{HIDDEN}{}", &word[..at + 3], &rest[login..]),
+                None => word.to_string(),
+            };
+            // A query parameter named for a secret (`?token=…`) is one too.
+            let url = match url.split_once('?') {
+                Some((base, query)) => {
+                    let query: Vec<String> = query
+                        .split('&')
+                        .map(|pair| match pair.split_once('=') {
+                            Some((name, _)) if secret(name) => format!("{name}={HIDDEN}"),
+                            _ => pair.to_string(),
+                        })
+                        .collect();
+                    format!("{base}?{}", query.join("&"))
+                }
+                None => url,
+            };
+            out.push(url);
         } else if word.trim_end_matches(['\'', '"']).ends_with(':') && secret(word) {
             out.push(word.to_string());
             hide_rest = true;
@@ -586,6 +602,8 @@ mod tests {
             ("env GH_TOKEN=abc123 gh pr list", "env GH_TOKEN=*** gh pr list"),
             ("curl -u me:hunter2 https://example.com", "curl -u *** https://example.com"),
             ("curl -H 'Authorization: Bearer abc123' https://x", "curl -H 'Authorization: *** *** ***"),
+            ("node /opt/bin/deploy.js --token abc123", "deploy.js --token ***"),
+            ("curl https://example.com/x?page=2&access_token=abc123", "curl https://example.com/x?page=2&access_token=***"),
             ("npm test -- --watch", "npm test -- --watch"),
             ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
         ];

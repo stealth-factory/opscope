@@ -65,10 +65,12 @@ work as rows under the agent, from the best source it has:
    process, which is the shell the pane was opened with.
 
    A job is drawn by its command line, so anything on it that reads as a
-   credential is drawn as `***` instead: the login in a URL, the value of a
-   flag or variable named for a token, key, password or secret, curl's `-u`,
-   and an `Authorization:` header. It goes by names, so it would rather hide
-   a file after `--key` than show a token after a flag it does not know.
+   credential is drawn as `***` instead: the login in a URL, a query
+   parameter, flag or variable named for a token, key, password or secret,
+   curl's `-u`, and an `Authorization:` header. It goes by names, so it
+   would rather hide a file after `--key` than show a token after a flag it
+   does not know, but a secret passed under a name it does not recognise is
+   still drawn. Check a board before screenshotting one with jobs on it.
 
 The process table cannot see a **subagent**: those run inside the agent's own
 process. Reading them from the agent's session logs is the next step
