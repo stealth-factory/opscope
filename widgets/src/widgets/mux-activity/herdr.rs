@@ -776,31 +776,36 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
 /// it is the explanation of an unread table, which is drawn dim.
 fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
     let max = room.saturating_sub(2).max(1);
-    let mut all = work.rows(width);
+    let all = work.rows(width);
     if all.len() <= max { return all; }
     let groups = work.task_rows(width);
+    let reason = work.unread.as_deref().or_else(|| work.logs.warnings.first().map(String::as_str));
+    let mut explanation: Vec<_> = reason.map(|why| tc::wrap_words(&format!(" ! {why}"), width.max(1))
+        .into_iter().map(|r| (true,r)).collect()).unwrap_or_default();
     if groups.is_empty() {
-        // These are unread-source explanations, not omitted jobs.
-        all.truncate(max);
-        return all;
+        explanation.truncate(max);
+        return explanation;
     }
-    let unread = work.unread.is_some() || !work.logs.warnings.is_empty();
+    if max == 1 && reason.is_some() {
+        return tc::wrap_words(&format!(" +{}: {}",groups.len(),reason.unwrap_or("")),width.max(1))
+            .into_iter().take(1).map(|r|(true,r)).collect();
+    }
+    // Preserve actual failure text, even when that leaves fewer task rows.
+    explanation.truncate(max.saturating_sub(1).min(2));
+    let task_room = max - explanation.len();
+    let task_height: usize = groups.iter().map(Vec::len).sum();
     let mut out = Vec::new();
-    let mut shown = 0;
-    for rows in &groups {
-        if out.len() + rows.len() > max - 1 { break; }
-        out.extend(rows.iter().cloned());
-        shown += 1;
-    }
-    let omitted = groups.len() - shown;
-    let summary = if unread && omitted > 0 {
-        format!(" +{omitted} · unread")
-    } else if unread {
-        " ! unread".into()
+    if task_height <= task_room {
+        out.extend(groups.into_iter().flatten());
     } else {
-        format!(" +{omitted} more work")
-    };
-    out.push((unread, summary));
+        let mut shown = 0;
+        for rows in &groups {
+            if out.len() + rows.len() > task_room.saturating_sub(1) { break; }
+            out.extend(rows.iter().cloned()); shown += 1;
+        }
+        out.push((false, format!(" +{} more work",groups.len()-shown)));
+    }
+    out.extend(explanation);
     out
 }
 
@@ -2030,7 +2035,22 @@ mod tests {
         let lines = job_lines(&unread, 30, 4);
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|(unread, _)| *unread));
-        assert!(lines[0].1.contains("could not"));
+        assert!(lines[0].1.contains("ps timed out"));
+    }
+
+    #[test]
+    fn overflowing_work_keeps_a_bounded_source_failure_reason() {
+        let work=tc::agent_work::Work {
+            tasks:(0..3).map(|pid|tc::agent_work::Task{pid,label:"cargo test".into(),via:tc::agent_work::Via::Process}).collect(),
+            unread:Some("permission denied reading the session log".into()),..Default::default()
+        };
+        let rows=job_lines(&work,80,4);
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().any(|(_,r)|r.contains("+3 more")),"{rows:?}");
+        assert!(rows.iter().any(|(warning,r)|*warning&&r.contains("permission denied")),"{rows:?}");
+        let rows=job_lines(&work,80,3);
+        assert_eq!(rows.len(),1);
+        assert!(rows[0].0 && rows[0].1.contains("permission denied"),"{rows:?}");
     }
 
     #[test]

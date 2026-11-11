@@ -723,3 +723,10 @@ The pane says the session-log inventory may be incomplete. The archive index
 is shared across panes for a short interval; selected child bodies remain
 current on each read. Rex only attaches local logs to a live, associated
 agent process, so an exited reporter cannot adopt a new foreground's logs.
+
+Under Rex, session lookup uses the identified agent process's own working
+directory, not the directory of a foreground build/test command. Linux
+reads it through core's procfs helpers; macOS makes one `lsof` cwd read for
+all identified agents per poll. An unavailable cwd is an explicit source
+error. Herdr preserves a bounded source-failure reason even when task rows
+overflow the pane.
