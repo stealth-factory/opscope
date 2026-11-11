@@ -52,7 +52,8 @@ work as rows under the agent, from the best source it has:
 
 1. **What the agent reports.** OSC 7501 child records, which Rex carries
    and the Rex board draws under the agent as `├ build/test`. A matching
-   child ID replaces the log or process row for that work. Other work stays.
+   child ID replaces the corresponding log row. Report IDs are opaque, so
+   numeric components never suppress process rows by coincidence.
 2. **Session logs.** Claude Code subagent transcripts and parent launch/finish
    records; Codex child rollouts linked by `parent_thread_id`; OpenCode V2
    child sessions linked by `parent_id` and their persisted busy/idle times.
@@ -90,16 +91,16 @@ A crash that never writes a stop can leave work unfinished in the log.
 Rex and Herdr supply a cwd rather than an agent session ID, so the reader
 uses the newest root session for that cwd. Those rows say `session guessed`;
 Rex's explain screen also identifies the chosen session. Luvus uses a
-session ID bound to the pane when supplied. A unique match from `agent
-sessions` by agent and cwd is still labelled a guess; multiple matches fall
-back to the newest log and keep that warning. Luvus's explain screen gives
+session ID bound to the pane when supplied. Unbound entries from `agent
+sessions` cannot establish the parent session; the reader chooses the newest
+log for the cwd and labels that match as a guess. Luvus's explain screen gives
 the chosen session too. Concurrent agents in the same directory can be
 misattributed until their multiplexer supplies an exact session binding.
 
 A Rex pane on another machine shows only what its agent reports: local
 processes and logs cannot describe it. An unreadable process table or log
 source says `├ background work could not be read` and why under the agent.
-A matching report ID is required to suppress a fallback: matching the label
+A matching report ID is required to suppress a log fallback: matching the label
 `Explore` would incorrectly hide a different child with the same name.
 
 ## Where it runs
@@ -716,3 +717,9 @@ Requires `rex`, `herdr` or `luvus` on `PATH`: whichever multiplexer it runs
 in. Works on Linux and macOS. Under Herdr, CPU and memory are read from
 `/proc`, so on macOS those two columns stay empty, as they did in
 herdr-panes.
+
+Malformed Codex archive headers do not hide already identified children.
+The pane says the session-log inventory may be incomplete. The archive index
+is shared across panes for a short interval; selected child bodies remain
+current on each read. Rex only attaches local logs to a live, associated
+agent process, so an exited reporter cannot adopt a new foreground's logs.

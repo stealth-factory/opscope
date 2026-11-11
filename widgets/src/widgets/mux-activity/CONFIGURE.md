@@ -51,7 +51,8 @@ and bundled into the widget binary.
 A multiplexer-provided session binding takes priority. Otherwise the newest
 root session for the pane cwd is a guess, stated on the row and on Rex and
 Luvus explain screens. Luvus's machine-wide resumable session list is not
-itself a pane binding: a unique cwd match still carries that warning.
+itself a pane binding and does not select the parent session. Without a
+binding, the log reader chooses the newest session and labels the guess.
 Do not describe guessed log state as an exact process association, and do
 not interpret an old unfinished record as a heartbeat. Older OpenCode
 stores without persisted liveness produce a visible explanation.

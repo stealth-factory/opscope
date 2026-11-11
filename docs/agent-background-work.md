@@ -7,7 +7,8 @@ states; mux draws only unfinished children. No prompts, model reasoning or
 tool output are retained in the cache or drawn as labels.
 
 The source order is reported OSC 7501 children, session logs for subagents,
-and processes for shells. Match complete IDs (including the final component
+and processes for shells. A report ID is not a process PID; process rows
+stay unless a reliable process association is available. Match complete log IDs (including the final component
 of a hierarchical report ID), not labels: two Explore agents can have the
 same label. An unidentifiable report cannot safely suppress another source.
 A record from a log is the last recorded lifecycle, not a liveness heartbeat.
@@ -57,10 +58,13 @@ internal guardian/compaction sessions, and follows the latest turn's
 are also defined in the upstream
 [protocol source](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs).
 
-Only rollout headers are indexed across the archive. Only selected child
-bodies are parsed, incrementally. Finished files are cached; partial final
-JSONL records wait for the writer's newline. An unreadable relevant record
-is an error on the pane, not an empty result.
+The completed rollout-header index is shared across all panes for a short
+interval. Only selected child bodies are parsed, incrementally. Finished files are cached; partial final
+JSONL records, including split UTF-8 characters, wait for the writer's
+newline. Unchanged malformed records keep a cached failure instead of
+replaying the file each poll. An unreadable relevant record is an error on
+the pane, not an empty result. Malformed unrelated headers produce an
+incomplete-inventory warning while known child tasks remain visible.
 
 ## OpenCode
 
@@ -81,8 +85,8 @@ infer that a child session is running merely because it exists.
 
 Rex and Herdr currently provide cwd rather than an agent session ID, so
 newest-session selection is explicitly a guess. Luvus session IDs are exact
-only with a pane binding; a unique agent/cwd match from `agent sessions`
-still says it was guessed. This matters for concurrent sessions in one cwd.
+only with a pane binding. Unbound `agent sessions` entries do not select
+a parent; the log reader chooses the newest cwd match and labels the guess. This matters for concurrent sessions in one cwd.
 
 The separate agent-activity widget's history depth remains a product
 choice. This change provides shared lifecycle data without introducing a

@@ -26,6 +26,7 @@ use std::{
     io::{BufRead, BufReader, Seek, SeekFrom},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -64,6 +65,8 @@ pub struct LogWork {
     pub session_id: String,
     /// No multiplexer-provided session ID: newest root transcript for this cwd.
     pub guessed: bool,
+    /// Archive records that could not be indexed; known tasks remain usable.
+    pub warnings: Vec<String>,
     /// Includes finished items for consumers that need history. Mux draws active work only.
     pub tasks: Vec<LogTask>,
 }
@@ -81,7 +84,8 @@ impl LogWork {
             )
         })
     }
-    pub(super) fn rows(&self, width: usize) -> Vec<(bool, String)> {
+    /// Each unfinished child as one group, so a consumer never splits a task.
+    pub(super) fn task_rows(&self, width: usize) -> Vec<Vec<(bool, String)>> {
         let mut rows = Vec::new();
         for task in self.tasks.iter().filter(|t| !t.state.finished()) {
             let suffix = if self.guessed {
@@ -89,7 +93,7 @@ impl LogWork {
             } else {
                 ""
             };
-            rows.extend(
+            rows.push(
                 branch(
                     &format!(
                         "{}  {} · {}{suffix}",
@@ -100,10 +104,15 @@ impl LogWork {
                     width,
                 )
                 .into_iter()
-                .map(|r| (task.state == Activity::Unknown, r)),
+                .map(|r| (task.state == Activity::Unknown, r))
+                .collect(),
             );
         }
         rows
+    }
+    /// Wrapped unfinished child rows, in source order.
+    pub fn rows(&self, width: usize) -> Vec<(bool, String)> {
+        self.task_rows(width).into_iter().flatten().collect()
     }
 }
 #[derive(Debug, Default)]
@@ -113,6 +122,42 @@ struct Cached {
     size: u64,
     modified: Option<SystemTime>,
     transcript: Transcript,
+    error: Option<String>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    identity: (u64, u64),
+    size: u64,
+    modified: SystemTime,
+}
+impl Stamp {
+    fn of(metadata: &fs::Metadata) -> Result<Self, String> {
+        Ok(Self {
+            identity: (metadata.dev(), metadata.ino()),
+            size: metadata.len(),
+            modified: metadata
+                .modified()
+                .map_err(|e| format!("rollout modification time: {e}"))?,
+        })
+    }
+}
+#[derive(Debug)]
+struct Header {
+    stamp: Stamp,
+    parsed: Result<Option<Transcript>, String>,
+}
+#[derive(Debug)]
+struct Indexed {
+    path: PathBuf,
+    header: Transcript,
+    modified: SystemTime,
+}
+#[derive(Debug, Default)]
+struct CodexIndex {
+    entries: HashMap<String, Indexed>,
+    roots: HashMap<String, String>,
+    children: HashMap<String, Vec<String>>,
+    warnings: Vec<String>,
 }
 #[derive(Debug)]
 pub struct LogReader {
@@ -120,8 +165,8 @@ pub struct LogReader {
     codex: PathBuf,
     opencode: PathBuf,
     files: HashMap<PathBuf, Cached>,
-    codex_paths: Vec<PathBuf>,
-    headers: HashMap<PathBuf, ((u64, u64), Transcript)>,
+    headers: HashMap<PathBuf, Header>,
+    codex_index: Arc<CodexIndex>,
     scanned: Option<SystemTime>,
 }
 impl Default for LogReader {
@@ -146,8 +191,8 @@ impl LogReader {
             codex,
             opencode,
             files: HashMap::new(),
-            codex_paths: Vec::new(),
             headers: HashMap::new(),
+            codex_index: Arc::new(CodexIndex::default()),
             scanned: None,
         }
     }
@@ -167,6 +212,7 @@ impl LogReader {
             _ => Ok(LogWork::default()),
         }
     }
+    /// Incrementally parse complete records; partial bytes never become errors.
     fn transcript(&mut self, path: &Path, claude: bool) -> Result<Transcript, String> {
         let m = fs::metadata(path).map_err(|e| format!("session log metadata: {e}"))?;
         let c = self.files.entry(path.into()).or_default();
@@ -175,8 +221,16 @@ impl LogReader {
         if c.identity != identity
             || m.len() < c.size
             || (m.len() == c.size && modified != c.modified)
+            || (c.error.is_some() && (m.len() != c.size || modified != c.modified))
         {
             *c = Cached::default();
+        }
+        // Unchanged corrupt files must not replay their parsed prefix on
+        // every poll. A changed file may have been repaired in place.
+        if let Some(error) = &c.error {
+            c.size = m.len();
+            c.modified = modified;
+            return Err(error.clone());
         }
         if c.size == m.len() && c.modified == modified {
             return Ok(c.transcript.clone());
@@ -185,31 +239,38 @@ impl LogReader {
         f.seek(SeekFrom::Start(c.offset))
             .map_err(|e| format!("session log seek: {e}"))?;
         let mut reader = BufReader::new(f);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes = reader
-                .read_line(&mut line)
-                .map_err(|e| format!("session log read: {e}"))?;
-            if bytes == 0 || !line.ends_with('\n') {
-                break;
-            } // writer may be mid-record
+        let mut bytes = Vec::new();
+        let result = loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Err(e) => return Err(format!("session log read: {e}")),
+                Ok(0) => break Ok(()),
+                Ok(_) if bytes.last() != Some(&b'\n') => break Ok(()),
+                Ok(_) => (),
+            }
+            let line = match std::str::from_utf8(&bytes) {
+                Ok(line) => line,
+                Err(e) => break Err(format!("invalid complete session log UTF-8: {e}")),
+            };
             if !line.trim().is_empty() {
                 let parsed = if claude {
-                    parse::parse_claude_record(&mut c.transcript, &line)
+                    parse::parse_claude_record(&mut c.transcript, line)
                 } else {
-                    parse::parse_codex_record(&mut c.transcript, &line)
+                    parse::parse_codex_record(&mut c.transcript, line)
                 };
                 if let Err(e) = parsed {
-                    self.files.remove(path);
-                    return Err(e);
+                    break Err(e);
                 }
             }
-            c.offset += bytes as u64;
-        }
+            c.offset += bytes.len() as u64;
+        };
         c.identity = identity;
         c.size = m.len();
         c.modified = modified;
+        if let Err(error) = result {
+            c.error = Some(error.clone());
+            return Err(error);
+        }
         Ok(c.transcript.clone())
     }
     fn claude(&mut self, cwd: &str, session: Option<&str>) -> Result<LogWork, String> {
@@ -289,106 +350,172 @@ impl LogReader {
             session_id: id,
             guessed: session.is_none(),
             tasks: tasks.into_values().collect(),
+            ..Default::default()
         })
     }
+    /// Publish one archive index per interval, shared by every pane. Only
+    /// the selected descendants' bodies are checked again on each read.
+    fn refresh_codex_index(&mut self) -> Result<(), String> {
+        let paths: Vec<_> = list(&self.codex.join("sessions"), true)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|s| s == "jsonl"))
+            .collect();
+        let live: HashSet<_> = paths.iter().cloned().collect();
+        self.headers.retain(|p, _| live.contains(p));
+        let codex = self.codex.clone();
+        self.files
+            .retain(|p, _| !p.starts_with(&codex) || live.contains(p));
+        let mut index = CodexIndex::default();
+        for path in paths {
+            let metadata = match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    index.warnings.push(format!("rollout metadata: {e}"));
+                    continue;
+                }
+            };
+            let stamp = match Stamp::of(&metadata) {
+                Ok(stamp) => stamp,
+                Err(error) => {
+                    index.warnings.push(error);
+                    continue;
+                }
+            };
+            let cached = self.headers.get(&path).is_some_and(|h| {
+                h.stamp == stamp
+                    || (h.parsed.as_ref().is_ok_and(|t| t.is_some())
+                        && h.stamp.identity == stamp.identity
+                        && stamp.size > h.stamp.size)
+            });
+            if !cached {
+                let file = match File::open(&path) {
+                    Ok(f) => f,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        index.warnings.push(format!("rollout header open: {e}"));
+                        continue;
+                    }
+                };
+                let mut bytes = Vec::new();
+                let parsed = BufReader::new(file)
+                    .read_until(b'\n', &mut bytes)
+                    .map_err(|e| format!("rollout header read: {e}"))
+                    .and_then(|_| {
+                        if bytes.last() != Some(&b'\n') {
+                            return Ok(None);
+                        }
+                        let line = std::str::from_utf8(&bytes)
+                            .map_err(|e| format!("rollout header UTF-8: {e}"))?;
+                        let mut header = Transcript::default();
+                        parse::parse_codex_record(&mut header, line)?;
+                        if header.id.is_empty() {
+                            return Err("rollout header has no session id".into());
+                        }
+                        Ok(Some(header))
+                    });
+                self.headers.insert(path.clone(), Header { stamp, parsed });
+            }
+            let header = match &self.headers[&path].parsed {
+                Ok(Some(header)) => header.clone(),
+                Ok(None) => continue, // the writer has not finished the header
+                Err(error) => {
+                    index.warnings.push(error.clone());
+                    continue;
+                }
+            };
+            // A reverted rollout shares the stable thread ID; retain only
+            // its newest body, including deterministic modification-time ties.
+            if index
+                .entries
+                .get(&header.id)
+                .is_none_or(|old| (stamp.modified, &path) > (old.modified, &old.path))
+            {
+                index.entries.insert(
+                    header.id.clone(),
+                    Indexed {
+                        path,
+                        header,
+                        modified: stamp.modified,
+                    },
+                );
+            }
+        }
+        for (id, entry) in &index.entries {
+            if let Some(parent) = &entry.header.parent {
+                index
+                    .children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(id.clone());
+            } else if !entry.header.cwd.is_empty() {
+                let newer = index.roots.get(&entry.header.cwd).is_none_or(|old_id| {
+                    let old = &index.entries[old_id];
+                    (entry.modified, &entry.path) > (old.modified, &old.path)
+                });
+                if newer {
+                    index.roots.insert(entry.header.cwd.clone(), id.clone());
+                }
+            }
+        }
+        for children in index.children.values_mut() {
+            children.sort();
+        }
+        self.codex_index = Arc::new(index);
+        self.scanned = Some(SystemTime::now());
+        Ok(())
+    }
+
     fn codex(&mut self, cwd: &str, session: Option<&str>) -> Result<LogWork, String> {
-        // Directory discovery is shared by all panes and cached for a poll interval.
         if self
             .scanned
             .is_none_or(|s| s.elapsed().map_or(true, |d| d.as_secs() >= 2))
         {
-            self.codex_paths = list(&self.codex.join("sessions"), true)?
-                .into_iter()
-                .filter(|p| p.extension().is_some_and(|s| s == "jsonl"))
-                .collect();
-            self.scanned = Some(SystemTime::now());
-            let live: HashSet<_> = self.codex_paths.iter().cloned().collect();
-            self.headers.retain(|p, _| live.contains(p));
-            let codex = self.codex.clone();
-            self.files
-                .retain(|p, _| !p.starts_with(&codex) || live.contains(p));
+            self.refresh_codex_index()?;
         }
-        // Only metadata is indexed across the archive. Reading every rollout
-        // body on startup can mean gigabytes unrelated to the open pane.
-        let mut entries: HashMap<String, (PathBuf, Transcript, SystemTime)> = HashMap::new();
-        for path in self.codex_paths.clone() {
-            let metadata =
-                fs::metadata(&path).map_err(|e| format!("Codex rollout metadata: {e}"))?;
-            let identity = (metadata.dev(), metadata.ino());
-            if self
-                .headers
-                .get(&path)
-                .is_none_or(|(had, _)| *had != identity)
-            {
-                let mut line = String::new();
-                BufReader::new(
-                    File::open(&path).map_err(|e| format!("Codex rollout header: {e}"))?,
-                )
-                .read_line(&mut line)
-                .map_err(|e| format!("Codex rollout header: {e}"))?;
-                if !line.ends_with('\n') {
-                    continue;
-                }
-                let mut header = Transcript::default();
-                parse::parse_codex_record(&mut header, &line)?;
-                self.headers.insert(path.clone(), (identity, header));
-            }
-            let header = self.headers[&path].1.clone();
-            let modified = metadata
-                .modified()
-                .map_err(|e| format!("Codex rollout modification time: {e}"))?;
-            // Reverted rollouts can share the stable thread ID. Use one,
-            // newest body per thread instead of resurrecting its old turn.
-            let replace = entries
-                .get(&header.id)
-                .is_none_or(|(old, _, time)| (modified, &path) > (*time, old));
-            if replace {
-                entries.insert(header.id.clone(), (path, header, modified));
-            }
-        }
-        let entries: Vec<_> = entries.into_values().collect();
-        let parent = entries
-            .iter()
-            .filter(|(_, t, _)| t.parent.is_none() && !t.id.is_empty())
-            .filter(|(_, t, _)| session.map_or(t.cwd == cwd && !cwd.is_empty(), |id| t.id == id))
-            .max_by_key(|(path, _, time)| (*time, path));
-        let Some((_, parent, _)) = parent else {
+        let index = Arc::clone(&self.codex_index);
+        let id = session.or_else(|| index.roots.get(cwd).map(String::as_str));
+        let parent = id
+            .and_then(|id| index.entries.get(id))
+            .filter(|e| e.header.parent.is_none());
+        let Some(parent) = parent else {
             return if session.is_some() {
                 Err("the supplied Codex session log was not found".into())
+            } else if !index.warnings.is_empty() {
+                Err(format!(
+                    "{} rollout headers could not be indexed; session lookup is incomplete",
+                    index.warnings.len()
+                ))
             } else {
                 Ok(LogWork::default())
             };
         };
-        let parent_id = parent.id.clone();
-        let mut ids = HashSet::from([parent_id.clone()]);
-        loop {
-            let n = ids.len();
-            for (_, t, _) in &entries {
-                if t.parent.as_ref().is_some_and(|p| ids.contains(p)) {
-                    ids.insert(t.id.clone());
-                }
-            }
-            if ids.len() == n {
-                break;
-            }
-        }
+        let parent_id = parent.header.id.clone();
+        let mut seen = HashSet::from([parent_id.clone()]);
+        let mut pending = vec![parent_id.clone()];
         let mut tasks = Vec::new();
-        for (path, header, _) in entries
-            .iter()
-            .filter(|(_, t, _)| t.id != parent_id && ids.contains(&t.id))
-        {
-            let t = self.transcript(path, false)?;
-            tasks.push(LogTask {
-                id: header.id.clone(),
-                label: t.label,
-                state: t.state,
-                updated: t.updated,
-            });
+        while let Some(id) = pending.pop() {
+            for child in index.children.get(&id).into_iter().flatten() {
+                if !seen.insert(child.clone()) {
+                    continue;
+                }
+                let entry = &index.entries[child];
+                let t = self.transcript(&entry.path, false)?;
+                tasks.push(LogTask {
+                    id: child.clone(),
+                    label: t.label,
+                    state: t.state,
+                    updated: t.updated,
+                });
+                pending.push(child.clone());
+            }
         }
+        tasks.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(LogWork {
             session_id: parent_id,
             guessed: session.is_none(),
             tasks,
+            warnings: index.warnings.clone(),
         })
     }
     fn opencode(&self, cwd: &str, session: Option<&str>) -> Result<LogWork, String> {
@@ -404,23 +531,26 @@ impl LogReader {
             Err(e) => return Err(format!("OpenCode store metadata: {e}")),
             Ok(_) => (),
         }
-        let read = || -> rusqlite::Result<LogWork> {
-            let mut c =
-                Connection::open_with_flags(&self.opencode, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            c.busy_timeout(std::time::Duration::from_millis(100))?;
-            let tx = c.transaction()?;
-            // V2 persists busy/idle timestamps. V1 keeps liveness in memory: do
-            // not mistake parentID alone for a running subagent.
-            let v2: bool = tx.query_row(
+        let sql_error = |e| format!("OpenCode session store: {e}");
+        let mut c = Connection::open_with_flags(&self.opencode, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(sql_error)?;
+        c.busy_timeout(std::time::Duration::from_millis(100))
+            .map_err(sql_error)?;
+        let tx = c.transaction().map_err(sql_error)?;
+        let v2: bool = tx
+            .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='session_v2')",
                 [],
                 |r| r.get(0),
-            )?;
-            if !v2 {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "OpenCode store has no persisted session liveness (requires session_v2)".into(),
-                ));
-            }
+            )
+            .map_err(sql_error)?;
+        if !v2 {
+            return Err(
+                "OpenCode session store has no persisted session liveness (requires session_v2)"
+                    .into(),
+            );
+        }
+        let read = || -> rusqlite::Result<LogWork> {
             let id: Option<String> = if let Some(id) = session {
                 tx.query_row(
                     "SELECT id FROM session_v2 WHERE id=?1 AND parent_id IS NULL",
@@ -461,6 +591,7 @@ impl LogReader {
                 session_id: id,
                 guessed: session.is_none(),
                 tasks,
+                ..Default::default()
             })
         };
         let work = read().map_err(|e| format!("OpenCode session store: {e}"))?;
@@ -596,6 +727,7 @@ mod tests {
         work.logs = LogWork {
             session_id: "parent".into(),
             guessed: true,
+            warnings: Vec::new(),
             tasks: vec![LogTask {
                 id: "one".into(),
                 label: "Explore".into(),
@@ -619,6 +751,127 @@ mod tests {
             .rows(80)
             .iter()
             .any(|(_, r)| r.contains("source unreadable")));
+    }
+
+    #[test]
+    fn a_partial_multibyte_character_waits_for_the_rest_of_the_record() {
+        let f = Fixture::new();
+        let path = f.write("claude/projects/-srv-repo/parent.jsonl", LAUNCH);
+        let mut out = fs::OpenOptions::new().append(true).open(path).unwrap();
+        out.write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"\xf0\x9f")
+            .unwrap();
+        let mut reader = f.reader();
+        assert_eq!(
+            reader
+                .read("claude", "/srv/repo", Some("parent"))
+                .unwrap()
+                .tasks
+                .len(),
+            1
+        );
+        out.write_all(b"\x98\x80\"}}\n").unwrap();
+        assert_eq!(
+            reader
+                .read("claude", "/srv/repo", Some("parent"))
+                .unwrap()
+                .tasks
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_bad_complete_record_keeps_its_cached_failure_and_position() {
+        let f = Fixture::new();
+        let path = f.write(
+            "claude/projects/-srv-repo/parent.jsonl",
+            &(LAUNCH.to_string() + "invalid\n"),
+        );
+        let mut reader = f.reader();
+        let first = reader
+            .read("claude", "/srv/repo", Some("parent"))
+            .unwrap_err();
+        assert!(
+            reader.files.contains_key(&path),
+            "a stable error must not evict the parsed prefix"
+        );
+        assert_eq!(reader.files[&path].offset, LAUNCH.len() as u64);
+        assert_eq!(
+            reader
+                .read("claude", "/srv/repo", Some("parent"))
+                .unwrap_err(),
+            first
+        );
+    }
+
+    #[test]
+    fn unrelated_bad_headers_do_not_hide_a_known_codex_child() {
+        let f = Fixture::new();
+        f.write("codex/sessions/root.jsonl","{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\",\"cwd\":\"/srv/repo\",\"source\":\"cli\"}}\n");
+        f.write("codex/sessions/child.jsonl","{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"root\"}}}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n");
+        f.write("codex/sessions/unrelated.jsonl", "invalid header\n");
+        let work = f.reader().read("codex", "/srv/repo", Some("root")).unwrap();
+        assert_eq!(work.tasks.len(), 1);
+        assert_eq!(work.tasks[0].state, Activity::Working);
+    }
+
+    #[test]
+    fn codex_shares_the_archive_index_but_reads_selected_child_appends() {
+        let f = Fixture::new();
+        f.write("codex/sessions/root.jsonl","{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\",\"cwd\":\"/srv/repo\",\"source\":\"cli\"}}\n");
+        let child=f.write("codex/sessions/child.jsonl","{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"root\"}}}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n");
+        let bad = f.write("codex/sessions/unrelated.jsonl", "invalid header\n");
+        let mut reader = f.reader();
+        let first = reader.read("codex", "/srv/repo", Some("root")).unwrap();
+        assert_eq!(first.warnings.len(), 1);
+        assert!(super::super::Work::default()
+            .with_logs(Ok(first))
+            .rows(80)
+            .iter()
+            .any(|(warn, row)| *warn && row.contains("incomplete")));
+        fs::remove_file(bad).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(child)
+            .unwrap()
+            .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+            .unwrap();
+        // Another pane uses the same completed index, even after an
+        // unrelated archive change. Its selected child is current now.
+        reader.scanned = Some(SystemTime::now());
+        let second = reader.read("codex", "/srv/repo", Some("root")).unwrap();
+        assert_eq!(second.warnings.len(), 1);
+        assert_eq!(second.tasks[0].state, Activity::Done);
+        reader.scanned = None;
+        assert!(reader
+            .read("codex", "/srv/repo", Some("root"))
+            .unwrap()
+            .warnings
+            .is_empty());
+    }
+
+    #[test]
+    fn unsupported_opencode_schema_is_explained_without_a_sql_parameter_error() {
+        let f = Fixture::new();
+        rusqlite::Connection::open(f.0.join("opencode.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE session(id TEXT);")
+            .unwrap();
+        let why = f.reader().read("opencode", "/srv/repo", None).unwrap_err();
+        assert!(why.contains("requires session_v2"), "{why}");
+        assert!(!why.contains("Invalid parameter"), "{why}");
+    }
+
+    #[test]
+    fn arbitrary_numeric_report_ids_do_not_identify_process_jobs() {
+        let mut work = super::super::Work::default();
+        work.tasks.push(super::super::Task {
+            pid: 73,
+            label: "cargo test".into(),
+            via: Via::Process,
+        });
+        work.covered_by(&["build/73".into(), "73".into()]);
+        assert_eq!(work.tasks.len(), 1);
     }
 
     #[test]

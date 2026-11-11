@@ -146,17 +146,25 @@ impl Work {
         self.logs.tasks.retain(|t| {
             !reports.iter().any(|id| id == &t.id || id.rsplit('/').next() == Some(t.id.as_str()))
         });
-        self.tasks.retain(|t| {
-            let pid = t.pid.to_string();
-            !reports.iter().any(|id| id == &pid || id.rsplit('/').next() == Some(pid.as_str()))
-        });
+        // OSC IDs are opaque task identifiers, not OS process IDs.
+        // There is no reliable process association in this input. Keep shells.
+    }
+
+    /// Unfinished log and process tasks, grouped so overflow handling can
+    /// count whole omitted tasks rather than wrapped display rows.
+    pub fn task_rows(&self, width: usize) -> Vec<Vec<(bool, String)>> {
+        let mut groups = self.logs.task_rows(width);
+        groups.extend(self.tasks.iter().map(|t| t.rows(width).into_iter().map(|r| (false, r)).collect()));
+        groups
     }
 
     /// The rows under the agent in `width` columns, each with whether it is
     /// the unread explanation (drawn dim) rather than a job.
     pub fn rows(&self, width: usize) -> Vec<(bool, String)> {
-        let mut out = self.logs.rows(width);
-        out.extend(self.tasks.iter().flat_map(|job| job.rows(width)).map(|row| (false, row)));
+        let mut out: Vec<_> = self.task_rows(width).into_iter().flatten().collect();
+        for warning in &self.logs.warnings {
+            out.extend(branch(&format!("session logs may be incomplete: {warning}"), width).into_iter().map(|r| (true, r)));
+        }
         if let Some(why) = &self.unread {
             let text = format!("background work could not be read: {why}");
             out.extend(branch(&text, width).into_iter().map(|row| (true, row)));
@@ -305,6 +313,13 @@ impl Table {
             queue.extend_from_slice(self.kids(kid));
         }
         pid
+    }
+
+    /// Like `agent_at`, but returns nothing when the foreground and its
+    /// relatives do not actually identify the requested agent.
+    pub fn named_agent_at(&self, pid: u32, name: &str) -> Option<u32> {
+        let agent = self.agent_at(pid, name);
+        self.get(agent).filter(|p| is_named(&p.comm, &p.args, name)).map(|_| agent)
     }
 
     /// The innermost process of that name under `pid`: a wrapper often

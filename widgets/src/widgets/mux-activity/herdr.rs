@@ -777,26 +777,30 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
 fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
     let max = room.saturating_sub(2).max(1);
     let mut all = work.rows(width);
-    if all.len() <= max {
-        return all;
-    }
-    // No jobs means the rows are the explanation of an unread table: it is
-    // kept, cut to the room, rather than counted as jobs.
-    if work.tasks.is_empty() {
+    if all.len() <= max { return all; }
+    let groups = work.task_rows(width);
+    if groups.is_empty() {
+        // These are unread-source explanations, not omitted jobs.
         all.truncate(max);
         return all;
     }
+    let unread = work.unread.is_some() || !work.logs.warnings.is_empty();
     let mut out = Vec::new();
     let mut shown = 0;
-    for job in &work.tasks {
-        let rows = job.rows(width);
-        if out.len() + rows.len() > max - 1 {
-            break;
-        }
-        out.extend(rows.into_iter().map(|row| (false, row)));
+    for rows in &groups {
+        if out.len() + rows.len() > max - 1 { break; }
+        out.extend(rows.iter().cloned());
         shown += 1;
     }
-    out.push((false, format!("   ├ +{} more  running", work.tasks.len() - shown)));
+    let omitted = groups.len() - shown;
+    let summary = if unread && omitted > 0 {
+        format!(" +{omitted} · unread")
+    } else if unread {
+        " ! unread".into()
+    } else {
+        format!(" +{omitted} more work")
+    };
+    out.push((unread, summary));
     out
 }
 
@@ -1469,7 +1473,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // then gets what the rows above leave, so the entry never grows
         // past the room by its heading.
         let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
-            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some());
+            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
+                || !work.logs.warnings.is_empty()
+                || work.logs.tasks.iter().any(|task| !task.state.finished()));
             2 + lead + some_work <= room
         };
         let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
@@ -2025,6 +2031,24 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|(unread, _)| *unread));
         assert!(lines[0].1.contains("could not"));
+    }
+
+    #[test]
+    fn overflowing_work_counts_logs_and_shells_together() {
+        let mut work=tc::agent_work::Work::default();
+        work.logs.tasks=(0..3).map(|i|tc::agent_work::LogTask {
+            id:i.to_string(),label:format!("Explore-{i}"),state:tc::agent_work::Activity::Working,
+            updated:String::new(),
+        }).collect();
+        work.tasks.push(tc::agent_work::Task{pid:7,label:"cargo test".into(),via:tc::agent_work::Via::Process});
+        let rows=job_lines(&work,80,4);
+        assert_eq!(rows.len(),2);
+        assert!(rows[0].1.contains("Explore-0"),"{rows:?}");
+        assert!(rows[1].1.contains("+3 more"),"{rows:?}");
+        work.tasks.clear();
+        let rows=job_lines(&work,80,3);
+        assert_eq!(rows.len(),1);
+        assert!(rows[0].1.contains("+3 more"),"{rows:?}");
     }
 
     #[test]

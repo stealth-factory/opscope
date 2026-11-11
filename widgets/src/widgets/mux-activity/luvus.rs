@@ -195,17 +195,15 @@ struct Seen {
 }
 
 /// A resumable ID is exact only when the server ties it to this pane.
-/// A unique cwd match is useful, but remains a guess on screen.
+/// A cwd-only resumable entry does not identify this process or the newest
+/// session. With no binding the log reader chooses its own labelled guess.
 fn log_session_hint<'a>(agent: &'a Agent, sessions: &'a [parse::Resumable]) -> Option<(&'a str, bool)> {
     if !agent.session_id.is_empty() { return Some((&agent.session_id, false)); }
     if let Some(s) = sessions.iter().find(|s| !s.pane.is_empty() && s.pane == agent.pane
         && s.kind == agent.kind && !s.session_id.is_empty()) {
         return Some((&s.session_id, false));
     }
-    let mut matches = sessions.iter().filter(|s| s.kind == agent.kind && s.cwd == agent.cwd
-        && !s.session_id.is_empty());
-    let first = matches.next()?;
-    matches.next().is_none().then_some((first.session_id.as_str(), true))
+    None
 }
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
@@ -2810,7 +2808,7 @@ mod tests {
     fn a_session_id_is_exact_only_when_bound_to_the_pane() {
         let mut agent = Agent { kind: "claude".into(), cwd: "/srv/repo".into(), pane: "p1".into(), ..Default::default() };
         let a = parse::Resumable { kind: "claude".into(), cwd: "/srv/repo".into(), session_id: "one".into(), ..Default::default() };
-        assert_eq!(log_session_hint(&agent, std::slice::from_ref(&a)), Some(("one", true)));
+        assert_eq!(log_session_hint(&agent, std::slice::from_ref(&a)), None);
         let mut b = a.clone(); b.session_id = "two".into();
         assert_eq!(log_session_hint(&agent, &[a.clone(), b.clone()]), None);
         b.pane = "p1".into();

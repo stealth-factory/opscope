@@ -479,6 +479,29 @@ fn order(panes: &mut [Pane]) {
     });
 }
 
+/// Retained OSC reports can outlive their owner. Only a currently named
+/// agent in the foreground's process tree can supply local log work.
+fn live_log_agent(pane: &Pane, table: &tc::agent_work::Table, name: &str) -> Option<u32> {
+    if pane.remote || pane.doing != Doing::Running { return None; }
+    let fg = pane.fg.as_ref()?;
+    let pid = u32::try_from(fg.pid).ok()?;
+    let agent = table.named_agent_at(pid, name)?;
+    if let Some((app, Source::Report)) = &pane.agent {
+        if let Some(report) = pane.records.iter().find(|r| r.app.eq_ignore_ascii_case(app)) {
+            if let Some(owner) = report.owner_pid {
+                let owner = u32::try_from(owner).ok()?;
+                let process = table.get(owner)?;
+                if !report.owner_name.is_empty()
+                    && report.owner_name.rsplit('/').next() != process.comm.rsplit('/').next() {
+                    return None;
+                }
+                if table.named_agent_at(owner, name) != Some(agent) { return None; }
+            }
+        }
+    }
+    Some(agent)
+}
+
 fn poll(
     state: &Arc<Mutex<State>>,
     server: &str,
@@ -537,8 +560,11 @@ fn poll(
                     Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
                     Err(_) => pid,
                 };
-                pane.work = tc::agent_work::Work::of(&table, agent)
-                    .with_logs(seen.logs.read(&name, &pane.cwd(), None));
+                pane.work = tc::agent_work::Work::of(&table, agent);
+                if table.as_ref().ok().and_then(|t| live_log_agent(pane, t, &name)).is_some() {
+                    pane.work = std::mem::take(&mut pane.work)
+                        .with_logs(seen.logs.read(&name, &pane.cwd(), None));
+                }
                 let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
                 pane.work.covered_by(&reports);
             }
@@ -2566,6 +2592,26 @@ fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_reports_do_not_attach_logs_to_an_exited_or_reused_owner() {
+        let table=tc::agent_work::parse_process_table("10 1 bash bash\n20 10 claude claude\n30 1 vim vim notes\n").unwrap();
+        let mut pane=Pane { agent:Some(("claude-code".into(),Source::Report)), doing:Doing::Running,
+            fg:Some(Foreground{pid:20,..Default::default()}),
+            records:vec![Record{app:"claude-code".into(),owner_pid:Some(20),owner_name:"claude".into(),..Default::default()}],
+            ..Default::default() };
+        assert_eq!(live_log_agent(&pane,&table,"claude"),Some(20));
+        pane.records[0].owner_pid=Some(99);
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_pid=Some(30);
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_pid=Some(20);
+        pane.records[0].owner_name="old-process".into();
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+        pane.records[0].owner_name="claude".into();
+        pane.fg=Some(Foreground{pid:10,..Default::default()});pane.doing=Doing::Prompt;
+        assert_eq!(live_log_agent(&pane,&table,"claude"),None);
+    }
 
     const GATHER: &str = include_str!("fixtures/rex/gather.json");
     const GATHER_RECORDS: &str = include_str!("fixtures/rex/gather_records.json");
