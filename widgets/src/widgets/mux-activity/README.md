@@ -218,7 +218,8 @@ The widget **never starts a Rex server**: every call carries
 `--autostart=false`, so with none running it says so instead of conjuring one.
 Nothing it says about Rex itself shows a socket path, an address or a login,
 because the pane gets screenshotted. A job row is the job's own command line,
-which can name an address; a credential on it is drawn as `***` (see
+which can name an address; a credential it recognises by name is drawn as
+`***`, and one it does not is not (see
 [Work an agent left running](#work-an-agent-left-running)).
 
 ### Keys
