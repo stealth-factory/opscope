@@ -442,7 +442,12 @@ fn redact(words: &[&str]) -> Vec<String> {
             out.push(HIDDEN.to_string());
             continue;
         }
-        let assigned = word.split_once('=').map(|(name, _)| name).filter(|n| !n.contains("://") && secret(n));
+        // Whichever of `=` and `:` comes first says what the word is: an
+        // assignment (`KEY=a:b`) or a header (`X-Api-Key:abc==`).
+        let assigned = word
+            .split_once('=')
+            .map(|(name, _)| name)
+            .filter(|n| !n.contains(':') && secret(n));
         if let Some(name) = assigned {
             out.push(format!("{name}={HIDDEN}"));
         } else if let Some(at) = word.find("://") {
@@ -467,7 +472,7 @@ fn redact(words: &[&str]) -> Vec<String> {
                 None => url,
             };
             out.push(url);
-        } else if let Some((name, value)) = word.split_once(':').filter(|(n, _)| secret(n)) {
+        } else if let Some((name, value)) = word.split_once(':').filter(|(n, _)| !n.contains('=') && secret(n)) {
             // A header, `Authorization: Bearer x` or `X-Api-Key:x`. Its value
             // can run on past this word (`Authorization:Bearer x`), so the
             // words after it go too.
@@ -613,6 +618,8 @@ mod tests {
             ("curl https://example.com/x?page=2&access_token=abc123", "curl https://example.com/x?page=2&access_token=***"),
             ("curl -H Authorization:Bearer abc123 https://x", "curl -H Authorization:*** *** ***"),
             ("curl -H X-Api-Key:abc123 https://x", "curl -H X-Api-Key:*** ***"),
+            ("curl -H X-Api-Key:YWJj== https://x", "curl -H X-Api-Key:*** ***"),
+            ("env API_KEY=a:b run", "env API_KEY=*** run"),
             ("npm test -- --watch", "npm test -- --watch"),
             ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
         ];
