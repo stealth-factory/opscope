@@ -334,8 +334,15 @@ fn is_named(comm: &str, args: &str, name: &str) -> bool {
         word == name || word.strip_suffix(".js").is_some_and(|w| w == name)
     };
     let mut words = args.split_whitespace();
-    matches(comm) || words.next().is_some_and(matches) || words.next().is_some_and(matches)
+    let program = words.next().unwrap_or("");
+    // The script is the name only under an interpreter: `node …/claude.js`
+    // is Claude, but `tail /tmp/claude` and `rg claude` are not.
+    let script = words.next().filter(|_| INTERPRETERS.contains(&base_name(program)));
+    matches(comm) || matches(program) || script.is_some_and(matches)
 }
+
+/// Programs that run a script, so the script names what is running.
+const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
 
 fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -366,7 +373,6 @@ pub fn label(args: &str, comm: &str) -> String {
         return base_name(comm).to_string();
     };
     let program = base_name(first);
-    const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
     if INTERPRETERS.contains(&program) {
         if let Some(script) = words.get(1).filter(|w| !w.starts_with('-')) {
             let mut out = vec![base_name(script)];
@@ -449,6 +455,10 @@ mod tests {
         let ps = "100 1 zsh -zsh\n110 100 sleep sleep 600\n120 100 node node /x/bin/codex.js\n";
         let table = parse_process_table(ps).expect("table");
         assert_eq!(table.agent_below(100, "codex"), Some(120));
+        // A command that only mentions the agent is not the agent.
+        let ps = "100 1 zsh -zsh\n110 100 tail tail /tmp/claude\n120 100 2.1.317 claude\n";
+        let mention = parse_process_table(ps).expect("table");
+        assert_eq!(mention.agent_below(100, "claude"), Some(120));
         // A launcher between the shell and the agent is looked through.
         let ps = "100 1 zsh -zsh\n110 100 npm npm exec claude\n120 110 2.1.317 claude\n\
                   130 120 bash bash -c x\n131 130 cargo cargo build\n";
