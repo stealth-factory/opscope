@@ -756,12 +756,28 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
     groups.into_iter().flat_map(|(_, _, g)| g).collect()
 }
 
-/// How many rows an agent's background jobs take in a window `room` rows
-/// tall: all of them while they fit beside the agent's own two rows, else
-/// as many as fit, the last of which counts the jobs left over. An entry
-/// is never split by the window, so this keeps one agent from outgrowing it.
-fn job_rows(jobs: usize, room: usize) -> usize {
-    jobs.min(room.saturating_sub(2).max(1))
+/// The rows an agent's background jobs take in a window `room` rows tall
+/// and `width` columns wide: every job, wrapped, while they fit beside the
+/// agent's own two rows; else the whole jobs that fit and a last row that
+/// counts the rest. The window never splits an entry, so this keeps one
+/// agent from outgrowing it and hiding jobs it cannot scroll to.
+fn job_lines(work: &[tc::agent_work::Task], width: usize, room: usize) -> Vec<String> {
+    let max = room.saturating_sub(2).max(1);
+    let all: Vec<Vec<String>> = work.iter().map(|job| job.rows(width)).collect();
+    if all.iter().map(Vec::len).sum::<usize>() <= max {
+        return all.concat();
+    }
+    let mut out = Vec::new();
+    let mut shown = 0;
+    for rows in &all {
+        if out.len() + rows.len() > max - 1 {
+            break;
+        }
+        out.extend_from_slice(rows);
+        shown += 1;
+    }
+    out.push(format!("   ├ +{} more  running", work.len() - shown));
+    out
 }
 
 /// What goes above agent `i`: nothing for the section's first agent when
@@ -1432,7 +1448,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                let own = 2 + job_rows(agents[i].work.len(), room);
+                let own = 2 + job_lines(&agents[i].work, w.saturating_sub(1), room).len();
                 if lead_fits(lead) { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
@@ -1616,21 +1632,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     w - 1,
                 ));
             }
-            // The window counts an agent's job rows in its height, so only
-            // as many are drawn as `job_rows` allowed for; the last says how
-            // many more there are rather than dropping them unsaid.
-            let shown = job_rows(a.work.len(), room);
-            for (k, job) in a.work.iter().take(shown).enumerate() {
-                let rest = a.work.len() - k;
-                let label = if k + 1 == shown && rest > 1 {
-                    format!("   ├ +{rest} more")
-                } else {
-                    format!("   ├ {}", job.label)
-                };
+            // The window counts these rows in the agent's height, so
+            // they are the same ones `job_lines` gave it.
+            for line in job_lines(&a.work, w.saturating_sub(1), room) {
                 rows.push(tc::seg(
                     &[
-                        (&c(&p.working), label),
-                        (&c(&p.dim), format!("  running · {}", job.via.words())),
+                        (&c(&p.working), line),
                         (
                             &tint,
                             if loud || here {
@@ -1959,6 +1966,23 @@ mod tests {
             rss: None,
             work: Vec::new(),
         }
+    }
+
+    #[test]
+    fn jobs_that_outgrow_the_window_end_in_a_count_of_the_rest() {
+        let job = |label: &str| tc::agent_work::Task {
+            pid: 1,
+            label: label.into(),
+            via: tc::agent_work::Via::Process,
+        };
+        let work = vec![job("npm test"), job("cargo build"), job("tail -f x.log")];
+        // Room for all three beside the agent's two rows.
+        assert_eq!(job_lines(&work, 60, 5).len(), 3);
+        // Room for two job rows: one job, then a row counting the other two.
+        let lines = job_lines(&work, 60, 4);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("npm test"));
+        assert!(lines[1].contains("+2 more"));
     }
 
     #[test]

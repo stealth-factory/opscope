@@ -2181,11 +2181,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     .map(|(c, t)| (c.as_str(), t.clone()))
                     .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
-                for job in &a.work {
-                    let mut line = vec![
-                        (c(&p.working), format!("   ├ {}", job.label)),
-                        (c(&p.dim), format!("  running · {}", job.via.words())),
-                    ];
+                for text in a.work.iter().flat_map(|job| job.rows(w.saturating_sub(1))) {
+                    let mut line = vec![(c(&p.working), text)];
                     if loud || here {
                         line.push((tint.clone(), " ".repeat(w)));
                     }

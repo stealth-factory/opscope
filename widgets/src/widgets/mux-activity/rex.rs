@@ -532,6 +532,10 @@ fn poll(
                     pane.work = pid.map(|pid| table.background_shells(pid)).unwrap_or_default();
                 }
             }
+        } else {
+            // Nothing needs the process table now, so an earlier failure
+            // to read it no longer stands.
+            crate::background_unread(None);
         }
     }
     tc::notices::when(board.api_revision > API_REVISION_BUILT_AGAINST, || {
@@ -998,19 +1002,10 @@ fn render_pane(
                 prose(&mut rows, body, &facts.join(" · "));
             }
             children(&mut rows);
-            for job in &pane.work {
-                let text = format!("{}  running · {}", job.label, job.via.words());
-                for (i, text) in tc::wrap_words(&text, w.saturating_sub(7))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let mut line = vec![(
-                        c(colour_of("working", p)),
-                        format!("   {} {}", if i == 0 { "├" } else { " " }, text),
-                    )];
-                    fill(&mut line);
-                    rows.push(finish(line));
-                }
+            for text in pane.work.iter().flat_map(|job| job.rows(w.saturating_sub(2))) {
+                let mut line = vec![(c(colour_of("working", p)), text)];
+                fill(&mut line);
+                rows.push(finish(line));
             }
         }
         Section::Processes => {

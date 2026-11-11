@@ -83,6 +83,20 @@ pub struct Task {
     pub via: Via,
 }
 
+impl Task {
+    /// The rows that draw this job under its agent in `width` columns:
+    /// `   ├ npm test  running · via process`, wrapped rather than clipped
+    /// so a long command keeps the arguments that tell it apart.
+    pub fn rows(&self, width: usize) -> Vec<String> {
+        let text = format!("{}  running · {}", self.label, self.via.words());
+        crate::wrap_words(&text, width.saturating_sub(5).max(1))
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| format!("   {} {line}", if i == 0 { "├" } else { " " }))
+            .collect()
+    }
+}
+
 /// Read `ps -axww -o pid=,ppid=,comm=,args=`.
 ///
 /// `comm` is taken as one field, so a name with a space in it shifts the
@@ -348,6 +362,21 @@ mod tests {
         assert!(parse_process_table("").is_err());
         assert!(parse_process_table("abc 1 x x").is_err());
         assert!(parse_process_table("10 zz x x").is_err());
+    }
+
+    #[test]
+    fn a_long_job_wraps_under_its_branch_instead_of_being_cut() {
+        let job = Task {
+            pid: 1,
+            label: "cargo test --workspace --all-features".into(),
+            via: Via::Process,
+        };
+        let rows = job.rows(30);
+        assert!(rows.len() > 1);
+        assert!(rows[0].starts_with("   ├ cargo"));
+        assert!(rows[1..].iter().all(|r| r.starts_with("     ")));
+        assert!(rows.iter().all(|r| crate::display_width(r) <= 30));
+        assert!(rows.last().unwrap().ends_with("via process"));
     }
 
     #[test]
