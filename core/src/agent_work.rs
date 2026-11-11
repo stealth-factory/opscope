@@ -482,6 +482,11 @@ fn redact(words: &[&str]) -> Vec<String> {
                 out.push(format!("{name}:{HIDDEN}"));
             }
             hide_rest = true;
+        } else if let Some(user) = word.strip_prefix("--user=") {
+            // curl's login, attached: `--user=me:pw`, `-ume:pw`.
+            out.push(format!("--user={}", if user.is_empty() { "" } else { HIDDEN }));
+        } else if word.len() > 2 && word.starts_with("-u") && !word.starts_with("--") {
+            out.push(format!("-u{HIDDEN}"));
         } else {
             hide_next = word.starts_with('-') && (secret(word) || *word == "-u" || *word == "--user");
             out.push(word.to_string());
@@ -620,6 +625,8 @@ mod tests {
             ("curl -H X-Api-Key:abc123 https://x", "curl -H X-Api-Key:*** ***"),
             ("curl -H X-Api-Key:YWJj== https://x", "curl -H X-Api-Key:*** ***"),
             ("env API_KEY=a:b run", "env API_KEY=*** run"),
+            ("curl -ume:hunter2 https://x", "curl -u*** https://x"),
+            ("curl --user=me:hunter2 https://x", "curl --user=*** https://x"),
             ("npm test -- --watch", "npm test -- --watch"),
             ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
         ];
