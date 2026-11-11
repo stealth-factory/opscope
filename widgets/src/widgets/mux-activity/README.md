@@ -58,7 +58,10 @@ work as rows under the agent, from the best source it has:
    this machine, and drawn as `├ npm test  running · via process`. Only
    shells count: an agent's MCP servers and its own helpers are its children
    too, but they are started as themselves, and a command run for you goes
-   through a shell. Under Luvus the agent is found below the pane's root
+   through a shell. A shell that hands itself over to a lone command
+   (`bash -c 'sleep 20'` can become `sleep`) leaves no shell to find, and
+   that job looks like one of the agent's own helpers, so it is not shown
+   rather than every MCP server being shown with it. Under Luvus the agent is found below the pane's root
    process, which is the shell the pane was opened with.
 
 The process table cannot see a **subagent**: those run inside the agent's own

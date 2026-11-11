@@ -273,6 +273,11 @@ impl Table {
     /// as themselves; a command the agent ran for you goes through a shell.
     /// A shell with nothing under it is a job that is ending or a builtin,
     /// and it is left out rather than drawn as `bash -c …`.
+    ///
+    /// A shell that execs a lone command leaves only the command, a direct
+    /// child the table cannot tell from an MCP server. It is left out: a
+    /// missed job is a gap, but every server drawn as running work would be
+    /// wrong on every agent. The agent's own records and logs fill the gap.
     pub fn background_shells(&self, agent: u32) -> Vec<Task> {
         let mut tasks = Vec::new();
         for &shell in self.kids(agent) {
