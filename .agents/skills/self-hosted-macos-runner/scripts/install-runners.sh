@@ -32,6 +32,8 @@ while [ $# -gt 0 ]; do
 done
 : "${RUNNER_TOKEN:?set RUNNER_TOKEN to a registration token}"
 [ -n "$url" ] || { echo "--url is required" >&2; exit 2; }
+case "$count" in ''|*[!0-9]*) count=0 ;; esac
+[ "$((10#$count))" -ge 1 ] || { echo "--count must be a positive whole number" >&2; exit 2; }
 # No silent Default: that group is usually shared with every repo in the org,
 # and the group is what limits which repos can run code on this Mac.
 [ -n "$group" ] || { echo "--group is required (a runner group limited to selected private repos)" >&2; exit 2; }

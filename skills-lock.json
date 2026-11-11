@@ -532,7 +532,7 @@
       "source": "stealth-factory/private-skills",
       "sourceType": "github",
       "skillPath": "skills/self-hosted-macos-runner/SKILL.md",
-      "computedHash": "e495b2d2806ea52ef69beff2697f638506df3d735ef3ac973a6f778cd8e82f99"
+      "computedHash": "eba2d5f3fb6c27ab5f6d829ace57062af647e1070b850fec26207054de661687"
     },
     "semantic-release-automation": {
       "source": "stealth-factory/skills",
