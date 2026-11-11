@@ -313,7 +313,7 @@ pub struct Agent {
     /// Shells the agent started that are still running, from this
     /// machine's process table under the pane's root process. Luvus does not
     /// pass on child records, so the process table is the only source here.
-    pub work: Vec<opscope_core::agent_work::Task>,
+    pub work: opscope_core::agent_work::Work,
 }
 
 /// Every agent in `luvus agent list`.
@@ -353,7 +353,7 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
             focused: entry["focused"].as_bool().unwrap_or(false),
             since: 0.0,
             exact: false,
-            work: Vec::new(),
+            work: Default::default(),
         });
     }
     Ok(found)

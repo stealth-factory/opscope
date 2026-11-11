@@ -64,8 +64,9 @@ work as rows under the agent, from the best source it has:
 The process table cannot see a **subagent**: those run inside the agent's own
 process. Reading them from the agent's session logs is the next step
 (OPS-271). A Rex pane on another machine has no local process table, so it
-shows only what its agent reports. When the table does not come back, a
-notice says so, rather than every agent reading as having nothing running.
+shows only what its agent reports. When the table does not come back, each
+agent's row says `├ background work could not be read` and why, rather than
+reading as having nothing running.
 
 ## Where it runs
 

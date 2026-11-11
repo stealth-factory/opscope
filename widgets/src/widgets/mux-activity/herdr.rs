@@ -271,7 +271,7 @@ pub(crate) struct Agent {
     /// Shells the agent started that are still running, one row each under
     /// the agent. Herdr carries no child records, so this is the process
     /// table's answer and the row says so.
-    work: Vec<tc::agent_work::Task>,
+    work: tc::agent_work::Work,
 }
 
 /// The slice of a variable-height list that fits `room` rows and holds the
@@ -589,10 +589,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     } else {
         None
     };
-    crate::background_unread(match &table {
-        Some(Err(why)) => Some(why.as_str()),
-        _ => None,
-    });
     for entry in listed["agents"].as_array().into_iter().flatten() {
         let pane_id = text_at(entry, "pane_id");
         let state_name = match entry["agent_status"].as_str() {
@@ -617,10 +613,10 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             Front::Prompt | Front::Unknown(_) => (None, None),
         };
         let work = match (&front, &table) {
-            (Front::Running(pid, _, _, _), Some(Ok(table))) => {
-                u32::try_from(*pid).map_or_else(|_| Vec::new(), |pid| table.background_shells(pid))
+            (Front::Running(pid, _, _, _), Some(table)) => {
+                tc::agent_work::Work::of(table, u32::try_from(*pid).ok())
             }
-            _ => Vec::new(),
+            _ => tc::agent_work::Work::default(),
         };
         agents.push(Agent {
             name: text_at(entry, "agent"),
@@ -756,27 +752,29 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
     groups.into_iter().flat_map(|(_, _, g)| g).collect()
 }
 
-/// The rows an agent's background jobs take in a window `room` rows tall
-/// and `width` columns wide: every job, wrapped, while they fit beside the
-/// agent's own two rows; else the whole jobs that fit and a last row that
-/// counts the rest. The window never splits an entry, so this keeps one
-/// agent from outgrowing it and hiding jobs it cannot scroll to.
-fn job_lines(work: &[tc::agent_work::Task], width: usize, room: usize) -> Vec<String> {
+/// The rows under an agent in a window `room` rows tall and `width`
+/// columns wide: every job, wrapped, while they fit beside the agent's own
+/// two rows; else the whole jobs that fit and a last row that counts the
+/// rest. The window never splits an entry, so this keeps one agent from
+/// outgrowing it and hiding jobs it cannot scroll to. Each row says whether
+/// it is the explanation of an unread table, which is drawn dim.
+fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
     let max = room.saturating_sub(2).max(1);
-    let all: Vec<Vec<String>> = work.iter().map(|job| job.rows(width)).collect();
-    if all.iter().map(Vec::len).sum::<usize>() <= max {
-        return all.concat();
+    let all = work.rows(width);
+    if all.len() <= max {
+        return all;
     }
     let mut out = Vec::new();
     let mut shown = 0;
-    for rows in &all {
+    for job in &work.tasks {
+        let rows = job.rows(width);
         if out.len() + rows.len() > max - 1 {
             break;
         }
-        out.extend_from_slice(rows);
+        out.extend(rows.into_iter().map(|row| (false, row)));
         shown += 1;
     }
-    out.push(format!("   ├ +{} more  running", work.len() - shown));
+    out.push((false, format!("   ├ +{} more  running", work.tasks.len() - shown)));
     out
 }
 
@@ -1634,10 +1632,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             // The window counts these rows in the agent's height, so
             // they are the same ones `job_lines` gave it.
-            for line in job_lines(&a.work, w.saturating_sub(1), room) {
+            for (unread, line) in job_lines(&a.work, w.saturating_sub(1), room) {
                 rows.push(tc::seg(
                     &[
-                        (&c(&p.working), line),
+                        (&c(if unread { &p.unknown } else { &p.working }), line),
                         (
                             &tint,
                             if loud || here {
@@ -1964,7 +1962,7 @@ mod tests {
             exact: true,
             cpu: None,
             rss: None,
-            work: Vec::new(),
+            work: Default::default(),
         }
     }
 
@@ -1975,14 +1973,17 @@ mod tests {
             label: label.into(),
             via: tc::agent_work::Via::Process,
         };
-        let work = vec![job("npm test"), job("cargo build"), job("tail -f x.log")];
+        let work = tc::agent_work::Work {
+            tasks: vec![job("npm test"), job("cargo build"), job("tail -f x.log")],
+            unread: None,
+        };
         // Room for all three beside the agent's two rows.
         assert_eq!(job_lines(&work, 60, 5).len(), 3);
         // Room for two job rows: one job, then a row counting the other two.
         let lines = job_lines(&work, 60, 4);
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("npm test"));
-        assert!(lines[1].contains("+2 more"));
+        assert!(lines[0].1.contains("npm test"));
+        assert!(lines[1].1.contains("+2 more"));
     }
 
     #[test]

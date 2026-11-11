@@ -88,13 +88,60 @@ impl Task {
     /// `   ├ npm test  running · via process`, wrapped rather than clipped
     /// so a long command keeps the arguments that tell it apart.
     pub fn rows(&self, width: usize) -> Vec<String> {
-        let text = format!("{}  running · {}", self.label, self.via.words());
-        crate::wrap_words(&text, width.saturating_sub(5).max(1))
-            .into_iter()
-            .enumerate()
-            .map(|(i, line)| format!("   {} {line}", if i == 0 { "├" } else { " " }))
-            .collect()
+        branch(&format!("{}  running · {}", self.label, self.via.words()), width)
     }
+}
+
+/// What an agent left running, or why that could not be read: the rows a
+/// widget draws under the agent. An unread table is said there, beside the
+/// agent, so an agent with nothing under it is never mistaken for one whose
+/// work could not be looked at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Work {
+    pub tasks: Vec<Task>,
+    /// Why the process table could not be read, when it could not.
+    pub unread: Option<String>,
+}
+
+impl Work {
+    /// The work under `agent`, read from a table that may have failed.
+    pub fn of(table: &Result<Table, String>, agent: Option<u32>) -> Self {
+        match table {
+            Ok(table) => Work {
+                tasks: agent.map(|pid| table.background_shells(pid)).unwrap_or_default(),
+                unread: None,
+            },
+            Err(why) => Work {
+                tasks: Vec::new(),
+                unread: Some(why.clone()),
+            },
+        }
+    }
+
+    /// The rows under the agent in `width` columns, each with whether it is
+    /// the unread explanation (drawn dim) rather than a job.
+    pub fn rows(&self, width: usize) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = self
+            .tasks
+            .iter()
+            .flat_map(|job| job.rows(width))
+            .map(|row| (false, row))
+            .collect();
+        if let Some(why) = &self.unread {
+            let text = format!("background work could not be read: {why}");
+            out.extend(branch(&text, width).into_iter().map(|row| (true, row)));
+        }
+        out
+    }
+}
+
+/// `text` wrapped under a `├` branch in `width` columns.
+fn branch(text: &str, width: usize) -> Vec<String> {
+    crate::wrap_words(text, width.saturating_sub(5).max(1))
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| format!("   {} {line}", if i == 0 { "├" } else { " " }))
+        .collect()
 }
 
 /// Read `ps -axww -o pid=,ppid=,comm=,args=`.
@@ -377,6 +424,18 @@ mod tests {
         assert!(rows[1..].iter().all(|r| r.starts_with("     ")));
         assert!(rows.iter().all(|r| crate::display_width(r) <= 30));
         assert!(rows.last().unwrap().ends_with("via process"));
+    }
+
+    #[test]
+    fn an_unread_table_is_said_under_the_agent_and_not_drawn_as_no_work() {
+        let work = Work::of(&Err("ps timed out".into()), Some(200));
+        let rows = work.rows(60);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].0);
+        assert!(rows[0].1.contains("could not be read: ps timed out"));
+        let table = parse_process_table(PS);
+        assert_eq!(Work::of(&table, Some(200)).rows(60).len(), 1);
+        assert!(Work::of(&table, None).rows(60).is_empty());
     }
 
     #[test]

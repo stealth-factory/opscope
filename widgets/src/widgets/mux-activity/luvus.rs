@@ -241,10 +241,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                 .collect()
         })
         .unwrap_or_default();
-    crate::background_unread(match &processes {
-        Some(Err(why)) => Some(why.as_str()),
-        _ => None,
-    });
 
     let agents = luvus_json(session, &["agent", "list"]).and_then(|text| parse::parse_agents(&text));
     let tasks = luvus_json(session, &["task", "list"]).and_then(|text| parse::parse_tasks(&text));
@@ -276,11 +272,9 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
             let (since, exact) = measure_since(seen, &key, &agent.state, at);
             agent.since = since;
             agent.exact = exact;
-            if let (Some(Ok(table)), Some(&root)) = (&processes, roots.get(&agent.pane)) {
-                agent.work = table
-                    .agent_below(root, &agent.kind)
-                    .map(|pid| table.background_shells(pid))
-                    .unwrap_or_default();
+            if let (Some(table), Some(&root)) = (&processes, roots.get(&agent.pane)) {
+                let pid = table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind));
+                agent.work = tc::agent_work::Work::of(table, pid);
             }
             live.insert(key);
         }
@@ -2181,8 +2175,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     .map(|(c, t)| (c.as_str(), t.clone()))
                     .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
-                for text in a.work.iter().flat_map(|job| job.rows(w.saturating_sub(1))) {
-                    let mut line = vec![(c(&p.working), text)];
+                for (unread, text) in a.work.rows(w.saturating_sub(1)) {
+                    let mut line = vec![(c(if unread { &p.unknown } else { &p.working }), text)];
                     if loud || here {
                         line.push((tint.clone(), " ".repeat(w)));
                     }

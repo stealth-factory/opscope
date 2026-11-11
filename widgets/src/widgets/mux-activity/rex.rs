@@ -145,7 +145,7 @@ struct Pane {
     /// Shells the agent started that are still running, read from this
     /// machine's process table. Only filled for an agent that reported no
     /// child records of its own: what the program says wins.
-    work: Vec<tc::agent_work::Task>,
+    work: tc::agent_work::Work,
 }
 
 impl Pane {
@@ -525,17 +525,10 @@ fn poll(
         let wanting = |p: &Pane| p.agent.is_some() && !p.remote && p.children().next().is_none();
         if board.panes.iter().any(wanting) {
             let table = tc::agent_work::read_process_table();
-            crate::background_unread(table.as_ref().err().map(String::as_str));
-            if let Ok(table) = &table {
-                for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
-                    let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
-                    pane.work = pid.map(|pid| table.background_shells(pid)).unwrap_or_default();
-                }
+            for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
+                let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                pane.work = tc::agent_work::Work::of(&table, pid);
             }
-        } else {
-            // Nothing needs the process table now, so an earlier failure
-            // to read it no longer stands.
-            crate::background_unread(None);
         }
     }
     tc::notices::when(board.api_revision > API_REVISION_BUILT_AGAINST, || {
@@ -1002,8 +995,9 @@ fn render_pane(
                 prose(&mut rows, body, &facts.join(" · "));
             }
             children(&mut rows);
-            for text in pane.work.iter().flat_map(|job| job.rows(w.saturating_sub(2))) {
-                let mut line = vec![(c(colour_of("working", p)), text)];
+            for (unread, text) in pane.work.rows(w.saturating_sub(2)) {
+                let colour = if unread { &p.unknown } else { colour_of("working", p) };
+                let mut line = vec![(c(colour), text)];
                 fill(&mut line);
                 rows.push(finish(line));
             }
