@@ -467,8 +467,15 @@ fn redact(words: &[&str]) -> Vec<String> {
                 None => url,
             };
             out.push(url);
-        } else if word.trim_end_matches(['\'', '"']).ends_with(':') && secret(word) {
-            out.push(word.to_string());
+        } else if let Some((name, value)) = word.split_once(':').filter(|(n, _)| secret(n)) {
+            // A header, `Authorization: Bearer x` or `X-Api-Key:x`. Its value
+            // can run on past this word (`Authorization:Bearer x`), so the
+            // words after it go too.
+            if value.trim_matches(['\'', '"']).is_empty() {
+                out.push(word.to_string());
+            } else {
+                out.push(format!("{name}:{HIDDEN}"));
+            }
             hide_rest = true;
         } else {
             hide_next = word.starts_with('-') && (secret(word) || *word == "-u" || *word == "--user");
@@ -604,6 +611,8 @@ mod tests {
             ("curl -H 'Authorization: Bearer abc123' https://x", "curl -H 'Authorization: *** *** ***"),
             ("node /opt/bin/deploy.js --token abc123", "deploy.js --token ***"),
             ("curl https://example.com/x?page=2&access_token=abc123", "curl https://example.com/x?page=2&access_token=***"),
+            ("curl -H Authorization:Bearer abc123 https://x", "curl -H Authorization:*** *** ***"),
+            ("curl -H X-Api-Key:abc123 https://x", "curl -H X-Api-Key:*** ***"),
             ("npm test -- --watch", "npm test -- --watch"),
             ("vite --port 5173 http://localhost:5173/", "vite --port 5173 http://localhost:5173/"),
         ];
