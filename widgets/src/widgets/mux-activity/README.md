@@ -44,6 +44,29 @@ whichever multiplexer the pane is in.
  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
 
+## Work an agent left running
+
+An agent that hands a job to a background shell and goes back to its prompt
+reports `idle` or `done` while the job is still going. Each board draws that
+work as rows under the agent, from the best source it has:
+
+1. **What the agent reports.** OSC 7501 child records, which Rex carries
+   and the Rex board draws under the agent as `├ build/test`. An agent that
+   reports any is taken at its word and nothing else is added.
+2. **The process table.** A shell the agent started that is still running
+   something, read from one `ps -axww -o pid=,ppid=,comm=,args=` per read on
+   this machine, and drawn as `├ npm test  running · via process`. Only
+   shells count: an agent's MCP servers and its own helpers are its children
+   too, but they are started as themselves, and a command run for you goes
+   through a shell. Under Luvus the agent is found below the pane's root
+   process, which is the shell the pane was opened with.
+
+The process table cannot see a **subagent**: those run inside the agent's own
+process. Reading them from the agent's session logs is the next step
+(OPS-271). A Rex pane on another machine has no local process table, so it
+shows only what its agent reports. When the table does not come back, a
+notice says so, rather than every agent reading as having nothing running.
+
 ## Where it runs
 
 `mux-activity` reads the multiplexer whose pane it was started in. Each one marks

@@ -69,6 +69,22 @@ mod host;
 
 use detect::{Ask, Markers, Mux};
 
+/// Say, once for whichever board is running, that the process table behind
+/// the rows under each agent did not come back, so an agent with nothing
+/// under it is not read as an agent with nothing running.
+pub(crate) fn background_unread(why: Option<&str>) {
+    tc::notices::when(why.is_some(), || {
+        tc::notices::Notice::warn(
+            "mux-activity-background-unread",
+            "Background work under agents could not be read",
+        )
+        .detail(format!(
+            "The process table did not come back: {}.",
+            why.unwrap_or_default()
+        ))
+    });
+}
+
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "mux-activity",
     section: "mux_activity",

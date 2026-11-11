@@ -31,6 +31,7 @@ pub mod google;
 pub mod notices;
 pub mod procfs;
 pub mod cgroup;
+pub mod agent_work;
 mod settings;
 pub mod statefile;
 mod terminal;

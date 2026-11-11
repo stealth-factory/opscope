@@ -142,6 +142,10 @@ struct Pane {
     seen_since: f64,
     seen_exact: bool,
     attention: Option<(f64, String)>,
+    /// Shells the agent started that are still running, read from this
+    /// machine's process table. Only filled for an agent that reported no
+    /// child records of its own: what the program says wins.
+    work: Vec<tc::agent_work::Task>,
 }
 
 impl Pane {
@@ -516,6 +520,17 @@ fn poll(
             if let Some((cpu, rss)) = pane.fg.as_ref().and_then(|f| read.get(&f.pid)) {
                 pane.cpu = *cpu;
                 pane.rss = Some(*rss);
+            }
+        }
+        let wanting = |p: &Pane| p.agent.is_some() && !p.remote && p.children().next().is_none();
+        if board.panes.iter().any(wanting) {
+            let table = tc::agent_work::read_process_table();
+            crate::background_unread(table.as_ref().err().map(String::as_str));
+            if let Ok(table) = &table {
+                for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
+                    let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                    pane.work = pid.map(|pid| table.background_shells(pid)).unwrap_or_default();
+                }
             }
         }
     }
@@ -983,6 +998,20 @@ fn render_pane(
                 prose(&mut rows, body, &facts.join(" · "));
             }
             children(&mut rows);
+            for job in &pane.work {
+                let text = format!("{}  running · {}", job.label, job.via.words());
+                for (i, text) in tc::wrap_words(&text, w.saturating_sub(7))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut line = vec![(
+                        c(colour_of("working", p)),
+                        format!("   {} {}", if i == 0 { "├" } else { " " }, text),
+                    )];
+                    fill(&mut line);
+                    rows.push(finish(line));
+                }
+            }
         }
         Section::Processes => {
             let unreadable = pane.doing == Doing::Unknown && pane.creator == TERMINAL;

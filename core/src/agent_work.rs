@@ -1,0 +1,298 @@
+// opscope - small dependency-free terminal widgets
+// Copyright (C) 2026 William Li
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Work a coding agent left running, for any widget that lists agents.
+//!
+//! An agent that hands a job to a background shell and comes back to its
+//! prompt reports `idle` or `done`, and so does the multiplexer, while the
+//! job is still running. The best source for that work is the agent itself,
+//! through OSC 7501 child records; a widget that has those (Rex carries
+//! them) draws them and does not ask here. Where an agent reports none, the
+//! next source is the process table: a shell the agent started that is
+//! still running something.
+//!
+//! What the process table cannot see is a subagent. Those run inside the
+//! agent's own process, so they leave no process behind; they are left to
+//! the agent's own records and, later, its session logs (OPS-271).
+//!
+//! The parser reads `ps -axww -o pid=,ppid=,comm=,args=` and compiles and is
+//! tested on every target; [`read_process_table`] is the one call that
+//! spawns it. Linux and macOS both ship `ps`.
+
+use std::collections::HashMap;
+
+/// The `ps` invocation whose output [`parse_process_table`] reads.
+pub const PS_ARGS: &[&str] = &["ps", "-axww", "-o", "pid=,ppid=,comm=,args="];
+
+/// Read the machine's process table, once, for every agent a frame shows.
+pub fn read_process_table() -> Result<Table, String> {
+    parse_process_table(&crate::run(PS_ARGS, 5)?)
+}
+
+/// One process, as `ps` named it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Proc {
+    pub ppid: u32,
+    /// The executable's name: `comm`, which macOS gives as a full path.
+    pub comm: String,
+    /// The whole command line.
+    pub args: String,
+}
+
+/// Every process on the machine, by pid, with its children indexed.
+#[derive(Clone, Debug, Default)]
+pub struct Table {
+    procs: HashMap<u32, Proc>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+/// Where a row under an agent came from, said on the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Via {
+    /// A shell the agent started, found in the process table.
+    Process,
+}
+
+impl Via {
+    pub fn words(self) -> &'static str {
+        match self {
+            Via::Process => "via process",
+        }
+    }
+}
+
+/// One piece of work running under an agent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Task {
+    pub pid: u32,
+    /// What is running, as a person would name it: `npm test`.
+    pub label: String,
+    pub via: Via,
+}
+
+/// Read `ps -axww -o pid=,ppid=,comm=,args=`.
+///
+/// `comm` is taken as one field, so a name with a space in it shifts the
+/// command line by a word; the label is read from `args`, which keeps the
+/// words in order whatever `comm` did.
+pub fn parse_process_table(text: &str) -> Result<Table, String> {
+    let mut table = Table::default();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let pid = fields
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&pid| pid > 0)
+            .ok_or("process table has an invalid pid")?;
+        let ppid = fields
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or("process table has an invalid parent pid")?;
+        let comm = fields
+            .next()
+            .ok_or("process table has a process with no name")?
+            .to_string();
+        let args = fields.collect::<Vec<_>>().join(" ");
+        table.children.entry(ppid).or_default().push(pid);
+        table.procs.insert(pid, Proc { ppid, comm, args });
+    }
+    if table.procs.is_empty() {
+        return Err("process table is empty".into());
+    }
+    for kids in table.children.values_mut() {
+        kids.sort_unstable();
+    }
+    Ok(table)
+}
+
+impl Table {
+    pub fn get(&self, pid: u32) -> Option<&Proc> {
+        self.procs.get(&pid)
+    }
+
+    fn kids(&self, pid: u32) -> &[u32] {
+        self.children.get(&pid).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The agent under a pane's root process: the root itself when it is not
+    /// a shell, otherwise the first process below it that is not a shell.
+    ///
+    /// Luvus names only the pane's root process, which is the shell the
+    /// pane was opened with; the agent is its child.
+    pub fn agent_below(&self, root: u32) -> Option<u32> {
+        let mut pid = root;
+        for _ in 0..8 {
+            let p = self.get(pid)?;
+            if !is_shell(&p.comm, &p.args) {
+                return Some(pid);
+            }
+            pid = *self.kids(pid).first()?;
+        }
+        None
+    }
+
+    /// The shells `agent` started that are still running something.
+    ///
+    /// Only shells count. An agent's MCP servers, language servers and its
+    /// own helpers (`rg`) are its direct children too, but they are started
+    /// as themselves; a command the agent ran for you goes through a shell.
+    /// A shell with nothing under it is a job that is ending or a builtin,
+    /// and it is left out rather than drawn as `bash -c …`.
+    pub fn background_shells(&self, agent: u32) -> Vec<Task> {
+        let mut tasks = Vec::new();
+        for &shell in self.kids(agent) {
+            let Some(p) = self.get(shell) else { continue };
+            if !is_shell(&p.comm, &p.args) {
+                continue;
+            }
+            if let Some(job) = self.first_job(shell) {
+                tasks.push(Task {
+                    pid: job,
+                    label: label(&self.procs[&job].args, &self.procs[&job].comm),
+                    via: Via::Process,
+                });
+            }
+        }
+        tasks
+    }
+
+    /// The first process under `shell` that is not itself a shell.
+    fn first_job(&self, shell: u32) -> Option<u32> {
+        let mut queue = self.kids(shell).to_vec();
+        let mut seen = 0;
+        while let Some(pid) = queue.first().copied() {
+            queue.remove(0);
+            seen += 1;
+            if seen > 64 {
+                return None;
+            }
+            let p = self.get(pid)?;
+            if !is_shell(&p.comm, &p.args) {
+                return Some(pid);
+            }
+            queue.extend_from_slice(self.kids(pid));
+        }
+        None
+    }
+}
+
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// The same shells `rex_parse::is_shell` knows, read off `comm` and the
+/// first word of the command line.
+fn is_shell(comm: &str, args: &str) -> bool {
+    const SHELLS: &[&str] = &[
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh",
+        "pwsh", "ash", "yash", "oksh",
+    ];
+    let first = args.split_whitespace().next().unwrap_or("");
+    let first = base_name(first.trim_start_matches('-'));
+    let comm = base_name(comm.trim_start_matches('-'));
+    SHELLS.contains(&comm) || SHELLS.contains(&first)
+}
+
+/// What a person would call a job: its command line with the program's
+/// directory dropped, so `/usr/bin/tail -f x.log` reads `tail -f x.log`.
+///
+/// An interpreter running a script is named by the script, the way the
+/// pane rows name one: `node /…/bin/npm test` reads `npm test`.
+pub fn label(args: &str, comm: &str) -> String {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let Some(first) = words.first() else {
+        return base_name(comm).to_string();
+    };
+    let program = base_name(first);
+    const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
+    if INTERPRETERS.contains(&program) {
+        if let Some(script) = words.get(1).filter(|w| !w.starts_with('-')) {
+            let mut out = vec![base_name(script)];
+            out.extend_from_slice(&words[2..]);
+            return out.join(" ");
+        }
+    }
+    let mut out = vec![program];
+    out.extend_from_slice(&words[1..]);
+    out.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An agent (claude) with an MCP server, a bundled rg, a background
+    // `npm test` behind Claude's shell wrapper, and a shell whose job has
+    // already gone; beside it an unrelated login shell.
+    const PS: &str = "\
+    1     0 launchd /sbin/launchd
+  100     1 -zsh -zsh
+  200   100 2.1.317 claude
+  210   200 node node /home/u/.npm/_npx/x/bin/mcp-server-github
+  211   200 rg /home/u/.local/share/claude/rg --files
+  220   200 bash /bin/bash -c -l eval 'npm test' < /dev/null
+  221   220 node node /usr/lib/node_modules/npm/bin/npm-cli.js test
+  230   200 zsh /bin/zsh -c sleep-wrapper
+  300     1 bash -bash
+  301   300 vim vim notes.md
+";
+
+    #[test]
+    fn a_shell_the_agent_started_is_its_background_work_and_its_servers_are_not() {
+        let table = parse_process_table(PS).expect("table");
+        let tasks = table.background_shells(200);
+        assert_eq!(
+            tasks,
+            vec![Task {
+                pid: 221,
+                label: "npm-cli.js test".into(),
+                via: Via::Process
+            }]
+        );
+    }
+
+    #[test]
+    fn the_agent_is_found_under_the_shell_a_pane_was_opened_with() {
+        let table = parse_process_table(PS).expect("table");
+        assert_eq!(table.agent_below(100), Some(200));
+        // A root that is not a shell is the agent itself.
+        assert_eq!(table.agent_below(200), Some(200));
+        // A shell with nothing under it has no agent.
+        assert_eq!(table.agent_below(230), None);
+    }
+
+    #[test]
+    fn a_job_is_named_without_its_directory_and_a_script_by_its_script() {
+        assert_eq!(label("/usr/bin/tail -f /var/log/x.log", "tail"), "tail -f /var/log/x.log");
+        assert_eq!(label("node /opt/bin/vite --port 5173", "node"), "vite --port 5173");
+        assert_eq!(label("python3 -m http.server", "python3"), "python3 -m http.server");
+        assert_eq!(label("", "/usr/bin/sleep"), "sleep");
+    }
+
+    #[test]
+    fn an_unreadable_table_is_an_error_and_not_an_agent_with_nothing_running() {
+        assert!(parse_process_table("").is_err());
+        assert!(parse_process_table("abc 1 x x").is_err());
+        assert!(parse_process_table("10 zz x x").is_err());
+    }
+
+    #[test]
+    fn a_job_nested_under_two_shells_is_still_found() {
+        let ps = "200 1 claude claude\n220 200 bash bash -c x\n221 220 sh sh -c y\n222 221 cargo cargo build\n";
+        let table = parse_process_table(ps).expect("table");
+        assert_eq!(table.background_shells(200)[0].label, "cargo build");
+    }
+}

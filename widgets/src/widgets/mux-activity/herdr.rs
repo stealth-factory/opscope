@@ -268,6 +268,10 @@ pub(crate) struct Agent {
     exact: bool,
     cpu: Option<f64>,
     rss: Option<u64>,
+    /// Shells the agent started that are still running, one row each under
+    /// the agent. Herdr carries no child records, so this is the process
+    /// table's answer and the row says so.
+    work: Vec<tc::agent_work::Task>,
 }
 
 /// The slice of a variable-height list that fits `room` rows and holds the
@@ -579,6 +583,16 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
 
     let at = tc::now();
     let mut agents = Vec::new();
+    // One process table for every agent, read only when there are agents.
+    let table = if listed["agents"].as_array().is_some_and(|a| !a.is_empty()) {
+        Some(tc::agent_work::read_process_table())
+    } else {
+        None
+    };
+    crate::background_unread(match &table {
+        Some(Err(why)) => Some(why.as_str()),
+        _ => None,
+    });
     for entry in listed["agents"].as_array().into_iter().flatten() {
         let pane_id = text_at(entry, "pane_id");
         let state_name = match entry["agent_status"].as_str() {
@@ -593,13 +607,20 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 .insert(pane_id.clone(), (state_name.clone(), at, !seen.first_poll));
         }
         let (_, began, exact) = seen.since[&pane_id].clone();
-        let (cpu, rss) = match foreground(&pane_id) {
-            Front::Running(pid, _, _, _) => cpu_of(seen, pid, at, hz),
+        let front = foreground(&pane_id);
+        let (cpu, rss) = match &front {
+            Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
             // An agent's state comes from `agent list`, not from the probe,
             // so a failed probe costs the row its CPU and memory and
             // nothing else - and those already draw as `-` and `--` when
             // there is no reading, which there is not.
             Front::Prompt | Front::Unknown(_) => (None, None),
+        };
+        let work = match (&front, &table) {
+            (Front::Running(pid, _, _, _), Some(Ok(table))) => {
+                u32::try_from(*pid).map_or_else(|_| Vec::new(), |pid| table.background_shells(pid))
+            }
+            _ => Vec::new(),
         };
         agents.push(Agent {
             name: text_at(entry, "agent"),
@@ -612,6 +633,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             exact,
             cpu,
             rss,
+            work,
             pane_id,
         });
     }
@@ -1402,7 +1424,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                if lead_fits(lead) { 2 + lead } else { 2 }
+                let own = 2 + agents[i].work.len();
+                if lead_fits(lead) { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
@@ -1573,6 +1596,26 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     &[
                         (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
                         (&c(body), a.title.trim().to_string()),
+                        (
+                            &tint,
+                            if loud || here {
+                                " ".repeat(w)
+                            } else {
+                                String::new()
+                            },
+                        ),
+                    ],
+                    w - 1,
+                ));
+            }
+            for job in &a.work {
+                if rows.len() >= h.saturating_sub(1) {
+                    break;
+                }
+                rows.push(tc::seg(
+                    &[
+                        (&c(&p.working), format!("   ├ {}", job.label)),
+                        (&c(&p.dim), format!("  running · {}", job.via.words())),
                         (
                             &tint,
                             if loud || here {
@@ -1899,6 +1942,7 @@ mod tests {
             exact: true,
             cpu: None,
             rss: None,
+            work: Vec::new(),
         }
     }
 
