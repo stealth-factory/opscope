@@ -224,6 +224,16 @@ fn app_matches(app: &str, command: &str) -> bool {
     app == command || app == format!("{}-code", command) || app == format!("{}-cli", command)
 }
 
+/// The catalogue command an agent's name stands for: a reported product
+/// name (`claude-code`) is its command (`claude`), which is what its
+/// process is called. A name the catalogue does not know is kept.
+pub fn agent_command(name: &str, catalogue: &[String]) -> String {
+    catalogue
+        .iter()
+        .find(|c| app_matches(name, c))
+        .map_or_else(|| name.to_string(), |c| c.to_ascii_lowercase())
+}
+
 /// How the widget came to call a pane an agent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
@@ -643,6 +653,14 @@ mod tests {
 
     fn catalogue() -> Vec<String> {
         ["claude", "codex"].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_reported_product_name_resolves_to_its_command() {
+        let catalogue = vec!["claude".to_string(), "codex".to_string()];
+        assert_eq!(agent_command("claude-code", &catalogue), "claude");
+        assert_eq!(agent_command("codex", &catalogue), "codex");
+        assert_eq!(agent_command("pi", &catalogue), "pi");
     }
 
     #[test]

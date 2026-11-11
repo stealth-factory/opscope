@@ -528,9 +528,12 @@ fn poll(
             for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
                 // The foreground may be a launcher or a job, not the agent.
                 let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                // A reported product name (`claude-code`) is looked for by
+                // its command (`claude`), which is what its process is called.
                 let name = pane.agent.as_ref().map(|(name, _)| name.as_str()).unwrap_or("");
+                let name = parse::agent_command(name, catalogue);
                 let agent = match &table {
-                    Ok(t) => pid.map(|pid| t.agent_at(pid, name)),
+                    Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
                     Err(_) => pid,
                 };
                 pane.work = tc::agent_work::Work::of(&table, agent);
