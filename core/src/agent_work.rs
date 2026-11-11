@@ -228,7 +228,7 @@ impl Table {
             }
         }
         match (named, found.as_slice()) {
-            (Some(pid), _) => Some(pid),
+            (Some(pid), _) => Some(self.innermost(pid, name)),
             (None, [only]) => Some(*only),
             _ => None,
         }
@@ -246,7 +246,7 @@ impl Table {
         let mut up = pid;
         for _ in 0..8 {
             if named(up) {
-                return up;
+                return self.innermost(up, name);
             }
             match self.get(up) {
                 // Shells are walked through too: a foreground job runs in
@@ -264,11 +264,28 @@ impl Table {
                 break;
             }
             if named(kid) {
-                return kid;
+                return self.innermost(kid, name);
             }
             queue.extend_from_slice(self.kids(kid));
         }
         pid
+    }
+
+    /// The innermost process of that name under `pid`: a wrapper often
+    /// runs the real agent under the same name (`node …/codex.js` runs the
+    /// native `codex`), and the agent's shells hang off the inner one.
+    fn innermost(&self, pid: u32, name: &str) -> u32 {
+        let mut at = pid;
+        for _ in 0..8 {
+            let inner = self.kids(at).iter().copied().find(|&kid| {
+                self.get(kid).is_some_and(|k| is_named(&k.comm, &k.args, name))
+            });
+            match inner {
+                Some(kid) => at = kid,
+                None => break,
+            }
+        }
+        at
     }
 
     /// The shells `agent` started that are still running something.
@@ -464,6 +481,13 @@ mod tests {
                   130 120 bash bash -c x\n131 130 cargo cargo build\n";
         let launched = parse_process_table(ps).expect("table");
         assert_eq!(launched.agent_below(100, "claude"), Some(120));
+        // A wrapper of the same name runs the native agent: the inner one
+        // owns the shells.
+        let ps = "100 1 zsh -zsh\n110 100 node node /opt/codex/bin/codex.js\n\
+                  120 110 codex /opt/codex/bin/codex\n130 120 bash bash -c x\n131 130 cargo cargo build\n";
+        let wrapped = parse_process_table(ps).expect("table");
+        assert_eq!(wrapped.agent_below(100, "codex"), Some(120));
+        assert_eq!(wrapped.agent_at(110, "codex"), 120);
         // Two candidates and neither named: no guess.
         assert_eq!(table.agent_below(100, "opencode"), None);
         // One candidate is the agent whatever it is called.
