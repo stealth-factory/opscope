@@ -461,6 +461,7 @@ fn update_inventory(state: &mut State, pane_ids: Option<Vec<String>>, inventory_
 /// measured rather than guessed.
 #[derive(Default)]
 struct Seen {
+    logs: tc::agent_work::LogReader,
     since: HashMap<String, (String, f64, bool)>,
     cpu: HashMap<i32, (u64, f64)>,
     first_poll: bool,
@@ -629,9 +630,10 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             (Front::Unknown(why), _) => tc::agent_work::Work {
                 tasks: Vec::new(),
                 unread: Some(why.clone()),
+                ..Default::default()
             },
             _ => tc::agent_work::Work::default(),
-        };
+        }.with_logs(seen.logs.read(&text_at(entry, "agent"), &text_at(entry, "cwd"), None));
         agents.push(Agent {
             name: text_at(entry, "agent"),
             workspace_id: text_at(entry, "workspace_id"),
@@ -2008,6 +2010,7 @@ mod tests {
         let work = tc::agent_work::Work {
             tasks: vec![job("npm test"), job("cargo build"), job("tail -f x.log")],
             unread: None,
+            ..Default::default()
         };
         // Room for all three beside the agent's two rows.
         assert_eq!(job_lines(&work, 60, 5).len(), 3);

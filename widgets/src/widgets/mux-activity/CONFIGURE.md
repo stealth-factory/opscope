@@ -39,3 +39,19 @@ Under Herdr, the board is read from full CLI snapshots, while a bounded Unix-dom
 Under Luvus, only one bounded event wait is used, for agent status changes, with a one-second minimum and a thirty-second maximum; the poller keeps the configured ceiling independently. Event payloads never patch the display; the next full read remains authoritative. Wait failures are shown separately from source-read failures. Nothing is written except the pane focus `↵` performs.
 
 Do not fabricate hostnames, account names, session names, workspace names, agent names, branches, task ids, reserved paths, pane ids, credentials, or successful readings. If a value cannot be established from the local environment or the user's explicit instruction, ask.
+
+## Background subagents
+
+No hooks or credentials are needed. The shared `tc::agent_work::LogReader`
+reads local Claude Code, Codex, and OpenCode V2 session stores. It honours
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `XDG_DATA_HOME`; it does not install
+or alter anything in those directories. OpenCode SQLite is opened read-only
+and bundled into the widget binary.
+
+A multiplexer-provided session binding takes priority. Otherwise the newest
+root session for the pane cwd is a guess, stated on the row and on Rex and
+Luvus explain screens. Luvus's machine-wide resumable session list is not
+itself a pane binding: a unique cwd match still carries that warning.
+Do not describe guessed log state as an exact process association, and do
+not interpret an old unfinished record as a heartbeat. Older OpenCode
+stores without persisted liveness produce a visible explanation.

@@ -51,9 +51,18 @@ reports `idle` or `done` while the job is still going. Each board draws that
 work as rows under the agent, from the best source it has:
 
 1. **What the agent reports.** OSC 7501 child records, which Rex carries
-   and the Rex board draws under the agent as `├ build/test`. An agent that
-   reports any is taken at its word and nothing else is added.
-2. **The process table.** A shell the agent started that is still running
+   and the Rex board draws under the agent as `├ build/test`. A matching
+   child ID replaces the log or process row for that work. Other work stays.
+2. **Session logs.** Claude Code subagent transcripts and parent launch/finish
+   records; Codex child rollouts linked by `parent_thread_id`; OpenCode V2
+   child sessions linked by `parent_id` and their persisted busy/idle times.
+   Rows say `├ Explore  working · via log`. A Claude child waiting on its own
+   background work stays visible until its final stop. Finished children
+   leave the mux board; the shared reader retains their state for consumers
+   that need it. Older OpenCode stores without persisted liveness say that
+   the source cannot be read; a child-session relationship alone is not
+   evidence that work is running.
+3. **The process table.** A shell the agent started that is still running
    something, read from one `ps -axww -o pid=,ppid=,comm=,args=` per read on
    this machine, and drawn as `├ npm test  running · via process`. Only
    shells count: an agent's MCP servers and its own helpers are its children
@@ -72,12 +81,26 @@ work as rows under the agent, from the best source it has:
    does not know, but a secret passed under a name it does not recognise is
    still drawn. Check a board before screenshotting one with jobs on it.
 
-The process table cannot see a **subagent**: those run inside the agent's own
-process. Reading them from the agent's session logs is the next step
-(OPS-271). A Rex pane on another machine has no local process table, so it
-shows only what its agent reports. When the table does not come back, each
-agent's row says `├ background work could not be read` and why, rather than
-reading as having nothing running.
+Logs come from `~/.claude/projects` (`CLAUDE_CONFIG_DIR` when set),
+`~/.codex/sessions` (`CODEX_HOME` when set), and
+`$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share`). No hooks
+are installed. Log state is the last recorded lifecycle, not a heartbeat.
+A crash that never writes a stop can leave work unfinished in the log.
+
+Rex and Herdr supply a cwd rather than an agent session ID, so the reader
+uses the newest root session for that cwd. Those rows say `session guessed`;
+Rex's explain screen also identifies the chosen session. Luvus uses a
+session ID bound to the pane when supplied. A unique match from `agent
+sessions` by agent and cwd is still labelled a guess; multiple matches fall
+back to the newest log and keep that warning. Luvus's explain screen gives
+the chosen session too. Concurrent agents in the same directory can be
+misattributed until their multiplexer supplies an exact session binding.
+
+A Rex pane on another machine shows only what its agent reports: local
+processes and logs cannot describe it. An unreadable process table or log
+source says `├ background work could not be read` and why under the agent.
+A matching report ID is required to suppress a fallback: matching the label
+`Explore` would incorrectly hide a different child with the same name.
 
 ## Where it runs
 

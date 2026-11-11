@@ -170,3 +170,10 @@ Luvus's reported command labels can be filtered.
 Refresh: agent status events wake a full read; task, lease, pane, Git and
 worktree-only changes are picked up at the configured idle ceiling. Manual
 r refreshes immediately, independent of the bounded event wait.
+
+Background work:
+  Agent child reports take priority over matching session-log and process
+  records. Claude Code, Codex and OpenCode V2 subagents say "via log";
+  background shells say "via process". No hooks are needed. A cwd-only
+  session match says "session guessed"; concurrent sessions may differ.
+  Mux shows unfinished work, with errors when a source cannot be read.

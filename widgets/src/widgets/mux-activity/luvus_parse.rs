@@ -294,6 +294,8 @@ fn array_at<'a>(result: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> 
 /// already in place when the widget started.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Agent {
+    /// Present only when Luvus binds a session to this pane.
+    pub session_id: String,
     pub name: String,
     pub kind: String,
     pub pane: String,
@@ -330,6 +332,7 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
         let kind = text_at(entry, "agent");
         let named = text_at(entry, "name");
         found.push(Agent {
+            session_id: text_at(entry, "session_id"),
             name: if named.is_empty() {
                 kind.clone()
             } else {
@@ -739,6 +742,7 @@ pub fn parse_worktrees(text: &str) -> Result<Vec<Worktree>, String> {
 /// kept so the screen can say which it means.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Resumable {
+    pub pane: String,
     pub kind: String,
     pub cwd: String,
     pub session_id: String,
@@ -763,6 +767,7 @@ pub fn parse_sessions(text: &str, open: Option<&[String]>) -> Result<Vec<Resumab
     for entry in array_at(&result, "sessions")? {
         let cwd = text_at(entry, "cwd");
         found.push(Resumable {
+            pane: any_of(entry, &["pane_id", "pane"]),
             kind: text_at(entry, "agent"),
             in_workspace: open.map(|ws| ws.iter().any(|w| cwd_is_inside(&cwd, w))),
             cwd,

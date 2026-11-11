@@ -35,6 +35,9 @@ miniz_oxide = "0.8"
 rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
 sha2 = { version = "0.10", features = ["oid"] }
 
+# OpenCode session stores; SQLite ships inside the binary.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [dev-dependencies]
 # Tests generate a throwaway key at test time, so no key material ever
 # enters the tree. Never reaches a release binary.

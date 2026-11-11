@@ -20,19 +20,22 @@
 //! prompt reports `idle` or `done`, and so does the multiplexer, while the
 //! job is still running. The best source for that work is the agent itself,
 //! through OSC 7501 child records; a widget that has those (Rex carries
-//! them) draws them and does not ask here. Where an agent reports none, the
-//! next source is the process table: a shell the agent started that is
-//! still running something.
+//! them) draws them first. Other work comes from its session log and the
+//! process table. Every row names its source; matching IDs remove duplicates.
 //!
 //! What the process table cannot see is a subagent. Those run inside the
 //! agent's own process, so they leave no process behind; they are left to
-//! the agent's own records and, later, its session logs (OPS-271).
+//! the agent's own records and its session logs (OPS-271).
 //!
 //! The parser reads `ps -axww -o pid=,ppid=,comm=,args=` and compiles and is
 //! tested on every target; [`read_process_table`] is the one call that
 //! spawns it. Linux and macOS both ship `ps`.
 
 use std::collections::HashMap;
+
+mod logs;
+mod parse;
+pub use logs::{Activity, LogReader, LogTask, LogWork};
 
 /// The `ps` invocation whose output [`parse_process_table`] reads.
 pub const PS_ARGS: &[&str] = &["ps", "-axww", "-o", "pid=,ppid=,comm=,args="];
@@ -62,6 +65,8 @@ pub struct Table {
 /// Where a row under an agent came from, said on the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
+    /// A subagent lifecycle in the agent's local session store.
+    Log,
     /// A shell the agent started, found in the process table.
     Process,
 }
@@ -70,6 +75,7 @@ impl Via {
     pub fn words(self) -> &'static str {
         match self {
             Via::Process => "via process",
+            Via::Log => "via log",
         }
     }
 }
@@ -98,6 +104,7 @@ impl Task {
 /// work could not be looked at.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Work {
+    pub logs: LogWork,
     pub tasks: Vec<Task>,
     /// Why the process table could not be read, when it could not.
     pub unread: Option<String>,
@@ -108,25 +115,48 @@ impl Work {
     pub fn of(table: &Result<Table, String>, agent: Option<u32>) -> Self {
         match table {
             Ok(table) => Work {
+                logs: LogWork::default(),
                 tasks: agent.map(|pid| table.background_shells(pid)).unwrap_or_default(),
                 unread: None,
             },
             Err(why) => Work {
+                logs: LogWork::default(),
                 tasks: Vec::new(),
                 unread: Some(why.clone()),
             },
         }
     }
 
+    /// Attach the log source; its failure never erases shells.
+    pub fn with_logs(mut self, logs: Result<LogWork, String>) -> Self {
+        match logs {
+            Ok(logs) => self.logs = logs,
+            Err(why) => self.unread = Some(match self.unread.take() {
+                Some(process) => format!("{process}; session logs: {why}"),
+                None => format!("session logs: {why}"),
+            }),
+        }
+        self
+    }
+
+    /// Remove work identified by a higher source. A report ID may be
+    /// hierarchical; match a complete final component, never a substring.
+    /// Labels cannot distinguish two different Explore agents.
+    pub fn covered_by(&mut self, reports: &[String]) {
+        self.logs.tasks.retain(|t| {
+            !reports.iter().any(|id| id == &t.id || id.rsplit('/').next() == Some(t.id.as_str()))
+        });
+        self.tasks.retain(|t| {
+            let pid = t.pid.to_string();
+            !reports.iter().any(|id| id == &pid || id.rsplit('/').next() == Some(pid.as_str()))
+        });
+    }
+
     /// The rows under the agent in `width` columns, each with whether it is
     /// the unread explanation (drawn dim) rather than a job.
     pub fn rows(&self, width: usize) -> Vec<(bool, String)> {
-        let mut out: Vec<(bool, String)> = self
-            .tasks
-            .iter()
-            .flat_map(|job| job.rows(width))
-            .map(|row| (false, row))
-            .collect();
+        let mut out = self.logs.rows(width);
+        out.extend(self.tasks.iter().flat_map(|job| job.rows(width)).map(|row| (false, row)));
         if let Some(why) = &self.unread {
             let text = format!("background work could not be read: {why}");
             out.extend(branch(&text, width).into_iter().map(|row| (true, row)));
@@ -137,6 +167,12 @@ impl Work {
 
 /// `text` wrapped under a `├` branch in `width` columns.
 fn branch(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if width <= 5 {
+        return crate::wrap_words(text, width);
+    }
     crate::wrap_words(text, width.saturating_sub(5).max(1))
         .into_iter()
         .enumerate()

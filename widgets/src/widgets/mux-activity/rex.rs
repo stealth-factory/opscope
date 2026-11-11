@@ -335,6 +335,7 @@ fn rex(server: &str, rest: &[&str]) -> Result<String, Absence> {
 /// What carries over between reads: when each foreground was first seen.
 #[derive(Default)]
 struct Seen {
+    logs: tc::agent_work::LogReader,
     since: HashMap<String, (i64, f64, bool)>,
     first: bool,
     instance: String,
@@ -522,7 +523,7 @@ fn poll(
                 pane.rss = Some(*rss);
             }
         }
-        let wanting = |p: &Pane| p.agent.is_some() && !p.remote && p.children().next().is_none();
+        let wanting = |p: &Pane| p.agent.is_some() && !p.remote;
         if board.panes.iter().any(wanting) {
             let table = tc::agent_work::read_process_table();
             for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
@@ -536,7 +537,10 @@ fn poll(
                     Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
                     Err(_) => pid,
                 };
-                pane.work = tc::agent_work::Work::of(&table, agent);
+                pane.work = tc::agent_work::Work::of(&table, agent)
+                    .with_logs(seen.logs.read(&name, &pane.cwd(), None));
+                let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
+                pane.work.covered_by(&reports);
             }
         }
     }
@@ -1405,6 +1409,9 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -
         out.push(("dim".into(), format!("   agent    {}", source.words())));
     }
     out.push((String::new(), String::new()));
+    if let Some(explanation) = pane.work.logs.explanation() {
+        out.push(("dim".into(), format!("   log source: {explanation}")));
+    }
     out.push(heading("STATUS REPORTS (OSC 7501)"));
     if pane.status_unread {
         out.push((
