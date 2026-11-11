@@ -624,6 +624,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 };
                 tc::agent_work::Work::of(table, agent)
             }
+            // An agent whose foreground could not be read has work that
+            // could not be read either, and its row says so.
+            (Front::Unknown(why), _) => tc::agent_work::Work {
+                tasks: Vec::new(),
+                unread: Some(why.clone()),
+            },
             _ => tc::agent_work::Work::default(),
         };
         agents.push(Agent {
@@ -1456,12 +1462,22 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // the window cannot split an entry, so an entry taller than the
         // room is admitted whole and the truncate below cuts the section
         // headings after it instead.
-        let lead_fits = |lead: usize| 2 + lead <= room;
+        // The rows above an agent fit when they leave room for its two
+        // rows and at least one row of its work, if it has any; the work
+        // then gets what the rows above leave, so the entry never grows
+        // past the room by its heading.
+        let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
+            let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some());
+            2 + lead + some_work <= room
+        };
+        let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                let own = 2 + job_lines(&agents[i].work, w.saturating_sub(1), room).len();
-                if lead_fits(lead) { own + lead } else { own }
+                let shown = lead_fits(lead, &agents[i].work);
+                let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, shown));
+                let own = 2 + jobs.len();
+                if shown { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
@@ -1540,7 +1556,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             let mut rule = Vec::new();
             let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
-            if lead_fits(lead.len()) {
+            let lead_shown = lead_fits(lead.len(), &a.work);
+            let jobs_room = job_room(lead.len(), lead_shown);
+            if lead_shown {
                 rows.extend(lead);
                 plots.extend(rule);
             }
@@ -1646,7 +1664,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             // The window counts these rows in the agent's height, so
             // they are the same ones `job_lines` gave it.
-            for (unread, line) in job_lines(&a.work, w.saturating_sub(1), room) {
+            for (unread, line) in job_lines(&a.work, w.saturating_sub(1), jobs_room) {
                 rows.push(tc::seg(
                     &[
                         (&c(if unread { &p.unknown } else { &p.working }), line),
