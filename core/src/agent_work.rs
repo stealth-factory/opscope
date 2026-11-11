@@ -238,8 +238,8 @@ impl Table {
     ///
     /// Herdr reports a pane's foreground process group, and the first in it
     /// need not be the agent: a launcher (`npx`) runs it as a child, and a
-    /// job the agent ran in the foreground sits below it. So the agent is
-    /// looked for at `pid`, then among its ancestors up to the pane's shell,
+    /// job the agent ran in the foreground sits below it, often behind its
+    /// shell. So the agent is looked for at `pid`, then among its ancestors,
     /// then below it; where no process carries the name, `pid` is taken.
     pub fn agent_at(&self, pid: u32, name: &str) -> u32 {
         let named = |pid: u32| self.get(pid).is_some_and(|p| is_named(&p.comm, &p.args, name));
@@ -249,7 +249,10 @@ impl Table {
                 return up;
             }
             match self.get(up) {
-                Some(p) if p.ppid > 1 && !is_shell(&p.comm, &p.args) => up = p.ppid,
+                // Shells are walked through too: a foreground job runs in
+                // the agent's own shell, and only a named process is taken,
+                // so walking past the pane's shell finds nothing wrong.
+                Some(p) if p.ppid > 1 => up = p.ppid,
                 _ => break,
             }
         }
@@ -430,6 +433,8 @@ mod tests {
         // A job the agent runs in the foreground: the agent is above it.
         assert_eq!(table.agent_at(130, "claude"), 120);
         assert_eq!(table.agent_at(120, "claude"), 120);
+        // A job behind the agent's shell: the shell is walked through.
+        assert_eq!(table.agent_at(141, "claude"), 120);
         // Nothing named: the reported pid stands.
         assert_eq!(table.agent_at(130, "codex"), 130);
     }
