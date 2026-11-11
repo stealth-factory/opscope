@@ -614,7 +614,15 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
         };
         let work = match (&front, &table) {
             (Front::Running(pid, _, _, _), Some(table)) => {
-                tc::agent_work::Work::of(table, u32::try_from(*pid).ok())
+                // The first foreground process may be a launcher or a job
+                // rather than the agent, so the agent is looked for by name.
+                let name = text_at(entry, "agent");
+                let pid = u32::try_from(*pid).ok();
+                let agent = match table {
+                    Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
+                    Err(_) => pid,
+                };
+                tc::agent_work::Work::of(table, agent)
             }
             _ => tc::agent_work::Work::default(),
         };

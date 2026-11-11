@@ -232,6 +232,40 @@ impl Table {
         }
     }
 
+    /// The agent `name` that a multiplexer's foreground `pid` belongs to.
+    ///
+    /// Herdr reports a pane's foreground process group, and the first in it
+    /// need not be the agent: a launcher (`npx`) runs it as a child, and a
+    /// job the agent ran in the foreground sits below it. So the agent is
+    /// looked for at `pid`, then among its ancestors up to the pane's shell,
+    /// then below it; where no process carries the name, `pid` is taken.
+    pub fn agent_at(&self, pid: u32, name: &str) -> u32 {
+        let named = |pid: u32| self.get(pid).is_some_and(|p| is_named(&p.comm, &p.args, name));
+        let mut up = pid;
+        for _ in 0..8 {
+            if named(up) {
+                return up;
+            }
+            match self.get(up) {
+                Some(p) if p.ppid > 1 && !is_shell(&p.comm, &p.args) => up = p.ppid,
+                _ => break,
+            }
+        }
+        let mut queue = self.kids(pid).to_vec();
+        let mut seen = 0;
+        while let Some(kid) = queue.pop() {
+            seen += 1;
+            if seen > 64 {
+                break;
+            }
+            if named(kid) {
+                return kid;
+            }
+            queue.extend_from_slice(self.kids(kid));
+        }
+        pid
+    }
+
     /// The shells `agent` started that are still running something.
     ///
     /// Only shells count. An agent's MCP servers, language servers and its
@@ -297,9 +331,10 @@ fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The same shells `rex_parse::is_shell` knows, read off `comm` and the
-/// first word of the command line.
-fn is_shell(comm: &str, args: &str) -> bool {
+/// Whether a process is a shell, read off `comm` and the first word of the
+/// command line, with a login shell's leading `-` dropped. Rex's prompt
+/// detection asks the same question through this list.
+pub fn is_shell(comm: &str, args: &str) -> bool {
     const SHELLS: &[&str] = &[
         "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh",
         "pwsh", "ash", "yash", "oksh",
@@ -376,6 +411,20 @@ mod tests {
         assert_eq!(table.agent_below(200, "claude"), Some(200));
         // A shell with nothing under it has no agent.
         assert_eq!(table.agent_below(230, "claude"), None);
+    }
+
+    #[test]
+    fn the_agent_is_found_from_a_launcher_or_a_job_in_the_foreground() {
+        let ps = "100 1 zsh -zsh\n110 100 npm npm exec claude\n120 110 2.1.317 claude\n\
+                  130 120 cargo cargo build\n140 120 bash bash -c x\n141 140 sleep sleep 9\n";
+        let table = parse_process_table(ps).expect("table");
+        // The launcher is in the foreground: the agent is below it.
+        assert_eq!(table.agent_at(110, "claude"), 120);
+        // A job the agent runs in the foreground: the agent is above it.
+        assert_eq!(table.agent_at(130, "claude"), 120);
+        assert_eq!(table.agent_at(120, "claude"), 120);
+        // Nothing named: the reported pid stands.
+        assert_eq!(table.agent_at(130, "codex"), 130);
     }
 
     #[test]

@@ -158,15 +158,7 @@ pub fn parse_process_value(value: &Value) -> Process {
 /// child in the foreground there is the command running, not a prompt. A
 /// login shell's argv0 starts with `-`, which settles it on its own.
 pub fn is_shell(name: &str, argv0: &str) -> bool {
-    const SHELLS: &[&str] = &[
-        "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh",
-        "pwsh", "ash", "yash", "oksh",
-    ];
-    if argv0.starts_with('-') {
-        return true;
-    }
-    let argv0 = base_name(argv0.split_whitespace().next().unwrap_or(""));
-    SHELLS.contains(&base_name(name)) || SHELLS.contains(&argv0)
+    argv0.starts_with('-') || opscope_core::agent_work::is_shell(name, argv0)
 }
 
 fn base_name(path: &str) -> &str {
