@@ -39,6 +39,13 @@ title = "opscope"
 placement = "split"
 command = ["./luvus/bin/opscope"]
 
+# Local coding agents, their subagents, and background shell work.
+[[panes]]
+id = "agent-activity"
+title = "agent-activity"
+placement = "split"
+command = ["./luvus/bin/opscope", "agent-activity"]
+
 # How much the coding agents on this machine have been used.
 [[panes]]
 id = "agent-usage"

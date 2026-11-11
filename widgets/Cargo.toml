@@ -34,6 +34,10 @@ proc-macro2 = "1"
 serde = "1"
 
 [[bin]]
+name = "agent-activity"
+path = "src/widgets/agent-activity/main.rs"
+
+[[bin]]
 name = "ports"
 path = "src/widgets/ports/main.rs"
 
