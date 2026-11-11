@@ -756,6 +756,14 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
     groups.into_iter().flat_map(|(_, _, g)| g).collect()
 }
 
+/// How many rows an agent's background jobs take in a window `room` rows
+/// tall: all of them while they fit beside the agent's own two rows, else
+/// as many as fit, the last of which counts the jobs left over. An entry
+/// is never split by the window, so this keeps one agent from outgrowing it.
+fn job_rows(jobs: usize, room: usize) -> usize {
+    jobs.min(room.saturating_sub(2).max(1))
+}
+
 /// What goes above agent `i`: nothing for the section's first agent when
 /// there is one workspace, a gap between two agents of one workspace, and
 /// a gap and the workspace's heading where a workspace begins. A heading
@@ -1424,7 +1432,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                let own = 2 + agents[i].work.len();
+                let own = 2 + job_rows(agents[i].work.len(), room);
                 if lead_fits(lead) { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
@@ -1608,13 +1616,20 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     w - 1,
                 ));
             }
-            for job in &a.work {
-                if rows.len() >= h.saturating_sub(1) {
-                    break;
-                }
+            // The window counts an agent's job rows in its height, so only
+            // as many are drawn as `job_rows` allowed for; the last says how
+            // many more there are rather than dropping them unsaid.
+            let shown = job_rows(a.work.len(), room);
+            for (k, job) in a.work.iter().take(shown).enumerate() {
+                let rest = a.work.len() - k;
+                let label = if k + 1 == shown && rest > 1 {
+                    format!("   ├ +{rest} more")
+                } else {
+                    format!("   ├ {}", job.label)
+                };
                 rows.push(tc::seg(
                     &[
-                        (&c(&p.working), format!("   ├ {}", job.label)),
+                        (&c(&p.working), label),
                         (&c(&p.dim), format!("  running · {}", job.via.words())),
                         (
                             &tint,

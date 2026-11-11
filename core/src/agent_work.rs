@@ -128,20 +128,47 @@ impl Table {
     }
 
     /// The agent under a pane's root process: the root itself when it is not
-    /// a shell, otherwise the first process below it that is not a shell.
+    /// a shell, otherwise the process below it that is the agent `name`
+    /// (`claude`, `codex`).
     ///
     /// Luvus names only the pane's root process, which is the shell the
-    /// pane was opened with; the agent is its child.
-    pub fn agent_below(&self, root: u32) -> Option<u32> {
-        let mut pid = root;
-        for _ in 0..8 {
-            let p = self.get(pid)?;
-            if !is_shell(&p.comm, &p.args) {
-                return Some(pid);
-            }
-            pid = *self.kids(pid).first()?;
+    /// pane was opened with; the agent is somewhere below it, and so may be
+    /// a job the shell started earlier (`sleep 600 &`). The agent is told
+    /// from those by its name. Where no process carries the name, a lone
+    /// process that is not a shell is taken; more than one is a guess, and
+    /// nothing is taken rather than the wrong one.
+    pub fn agent_below(&self, root: u32, name: &str) -> Option<u32> {
+        let p = self.get(root)?;
+        if !is_shell(&p.comm, &p.args) {
+            return Some(root);
         }
-        None
+        let mut found = Vec::new();
+        let mut queue = vec![root];
+        let mut seen = 0;
+        while let Some(pid) = queue.pop() {
+            seen += 1;
+            if seen > 256 {
+                break;
+            }
+            for &kid in self.kids(pid) {
+                let Some(k) = self.get(kid) else { continue };
+                if is_shell(&k.comm, &k.args) {
+                    queue.push(kid);
+                } else {
+                    found.push(kid);
+                }
+            }
+        }
+        found.sort_unstable();
+        let named = found.iter().copied().find(|&pid| {
+            let p = &self.procs[&pid];
+            is_named(&p.comm, &p.args, name)
+        });
+        match (named, found.as_slice()) {
+            (Some(pid), _) => Some(pid),
+            (None, [only]) => Some(*only),
+            _ => None,
+        }
     }
 
     /// The shells `agent` started that are still running something.
@@ -187,6 +214,22 @@ impl Table {
         }
         None
     }
+}
+
+/// Whether a process is the program `name`: by `comm`, by the program on
+/// its command line, or by the script an interpreter runs. Claude Code's
+/// `comm` is its version (`2.1.317`), but its command line starts `claude`.
+fn is_named(comm: &str, args: &str, name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    let matches = |word: &str| {
+        let word = base_name(word).to_ascii_lowercase();
+        word == name || word.strip_suffix(".js").is_some_and(|w| w == name)
+    };
+    let mut words = args.split_whitespace();
+    matches(comm) || words.next().is_some_and(matches) || words.next().is_some_and(matches)
 }
 
 fn base_name(path: &str) -> &str {
@@ -267,11 +310,29 @@ mod tests {
     #[test]
     fn the_agent_is_found_under_the_shell_a_pane_was_opened_with() {
         let table = parse_process_table(PS).expect("table");
-        assert_eq!(table.agent_below(100), Some(200));
+        assert_eq!(table.agent_below(100, "claude"), Some(200));
         // A root that is not a shell is the agent itself.
-        assert_eq!(table.agent_below(200), Some(200));
+        assert_eq!(table.agent_below(200, "claude"), Some(200));
         // A shell with nothing under it has no agent.
-        assert_eq!(table.agent_below(230), None);
+        assert_eq!(table.agent_below(230, "claude"), None);
+    }
+
+    #[test]
+    fn a_job_the_pane_shell_started_first_is_not_taken_for_the_agent() {
+        // `sleep 600 &` typed before `claude`: the sleep has the lower pid.
+        let ps = "100 1 zsh -zsh\n110 100 sleep sleep 600\n120 100 2.1.317 claude\n";
+        let table = parse_process_table(ps).expect("table");
+        assert_eq!(table.agent_below(100, "claude"), Some(120));
+        // An agent run by node is named by its script.
+        let ps = "100 1 zsh -zsh\n110 100 sleep sleep 600\n120 100 node node /x/bin/codex.js\n";
+        let table = parse_process_table(ps).expect("table");
+        assert_eq!(table.agent_below(100, "codex"), Some(120));
+        // Two candidates and neither named: no guess.
+        assert_eq!(table.agent_below(100, "opencode"), None);
+        // One candidate is the agent whatever it is called.
+        let ps = "100 1 zsh -zsh\n120 100 2.1.317 claude\n";
+        let table = parse_process_table(ps).expect("table");
+        assert_eq!(table.agent_below(100, "Claude Code"), Some(120));
     }
 
     #[test]

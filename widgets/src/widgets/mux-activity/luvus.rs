@@ -278,7 +278,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
             agent.exact = exact;
             if let (Some(Ok(table)), Some(&root)) = (&processes, roots.get(&agent.pane)) {
                 agent.work = table
-                    .agent_below(root)
+                    .agent_below(root, &agent.kind)
                     .map(|pid| table.background_shells(pid))
                     .unwrap_or_default();
             }
