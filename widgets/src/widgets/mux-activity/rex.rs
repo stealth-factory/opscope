@@ -526,8 +526,14 @@ fn poll(
         if board.panes.iter().any(wanting) {
             let table = tc::agent_work::read_process_table();
             for pane in board.panes.iter_mut().filter(|p| wanting(p)) {
+                // The foreground may be a launcher or a job, not the agent.
                 let pid = pane.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
-                pane.work = tc::agent_work::Work::of(&table, pid);
+                let name = pane.agent.as_ref().map(|(name, _)| name.as_str()).unwrap_or("");
+                let agent = match &table {
+                    Ok(t) => pid.map(|pid| t.agent_at(pid, name)),
+                    Err(_) => pid,
+                };
+                pane.work = tc::agent_work::Work::of(&table, agent);
             }
         }
     }

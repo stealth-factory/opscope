@@ -768,8 +768,14 @@ fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
 /// it is the explanation of an unread table, which is drawn dim.
 fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(bool, String)> {
     let max = room.saturating_sub(2).max(1);
-    let all = work.rows(width);
+    let mut all = work.rows(width);
     if all.len() <= max {
+        return all;
+    }
+    // No jobs means the rows are the explanation of an unread table: it is
+    // kept, cut to the room, rather than counted as jobs.
+    if work.tasks.is_empty() {
+        all.truncate(max);
         return all;
     }
     let mut out = Vec::new();
@@ -1992,6 +1998,12 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].1.contains("npm test"));
         assert!(lines[1].1.contains("+2 more"));
+        // An unread table too long for the room still says it is unread.
+        let unread = tc::agent_work::Work::of(&Err("ps timed out after five seconds".into()), Some(1));
+        let lines = job_lines(&unread, 30, 4);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|(unread, _)| *unread));
+        assert!(lines[0].1.contains("could not"));
     }
 
     #[test]

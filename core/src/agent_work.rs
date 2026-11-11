@@ -203,28 +203,30 @@ impl Table {
         if !is_shell(&p.comm, &p.args) {
             return Some(root);
         }
+        // The candidates are the first processes below the shells; the
+        // agent is looked for below those too, since a launcher (`npm exec
+        // claude`) is not the agent but runs it.
         let mut found = Vec::new();
-        let mut queue = vec![root];
+        let mut named = None;
+        let mut queue = vec![(root, true)];
         let mut seen = 0;
-        while let Some(pid) = queue.pop() {
+        while let Some((pid, under_shells)) = queue.pop() {
             seen += 1;
             if seen > 256 {
                 break;
             }
             for &kid in self.kids(pid) {
                 let Some(k) = self.get(kid) else { continue };
-                if is_shell(&k.comm, &k.args) {
-                    queue.push(kid);
-                } else {
+                let shell = is_shell(&k.comm, &k.args);
+                if !shell && named.is_none_or(|n| kid < n) && is_named(&k.comm, &k.args, name) {
+                    named = Some(kid);
+                }
+                if under_shells && !shell {
                     found.push(kid);
                 }
+                queue.push((kid, under_shells && shell));
             }
         }
-        found.sort_unstable();
-        let named = found.iter().copied().find(|&pid| {
-            let p = &self.procs[&pid];
-            is_named(&p.comm, &p.args, name)
-        });
         match (named, found.as_slice()) {
             (Some(pid), _) => Some(pid),
             (None, [only]) => Some(*only),
@@ -442,6 +444,11 @@ mod tests {
         let ps = "100 1 zsh -zsh\n110 100 sleep sleep 600\n120 100 node node /x/bin/codex.js\n";
         let table = parse_process_table(ps).expect("table");
         assert_eq!(table.agent_below(100, "codex"), Some(120));
+        // A launcher between the shell and the agent is looked through.
+        let ps = "100 1 zsh -zsh\n110 100 npm npm exec claude\n120 110 2.1.317 claude\n\
+                  130 120 bash bash -c x\n131 130 cargo cargo build\n";
+        let launched = parse_process_table(ps).expect("table");
+        assert_eq!(launched.agent_below(100, "claude"), Some(120));
         // Two candidates and neither named: no guess.
         assert_eq!(table.agent_below(100, "opencode"), None);
         // One candidate is the agent whatever it is called.
