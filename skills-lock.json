@@ -528,6 +528,12 @@
       "skillPath": "skills/misc/scaffold-exercises/SKILL.md",
       "computedHash": "354c91f6dbc9b058632f30594aacb4edc6d25012596585abb00402af8d7ec5e9"
     },
+    "self-hosted-macos-runner": {
+      "source": "stealth-factory/private-skills",
+      "sourceType": "github",
+      "skillPath": "skills/self-hosted-macos-runner/SKILL.md",
+      "computedHash": "e495b2d2806ea52ef69beff2697f638506df3d735ef3ac973a6f778cd8e82f99"
+    },
     "semantic-release-automation": {
       "source": "stealth-factory/skills",
       "sourceType": "github",
