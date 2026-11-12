@@ -273,19 +273,25 @@ impl LogReader {
                 let cwds = [bound.cwd.as_str(), cwd];
                 self.claude_in(&root, &cwds, Some(&bound.session_id), true)
             }
-            // No pid file: guess by cwd, but in the config dir the process
-            // itself was started with, where its environment names one.
-            Ok(None) => match claude_config_dir_of(pid).filter(|root| root.is_dir()) {
-                Some(root) => {
-                    self.add_root(root.clone());
-                    self.claude_in(&root, &[cwd], None, false)
+            // No pid file that binds: guess by cwd, but in the config dir
+            // the process itself was started with, where its environment
+            // names one, and say why when a pid file could not be read.
+            unbound => {
+                let guess = match claude_config_dir_of(pid).filter(|root| root.is_dir()) {
+                    Some(root) => {
+                        self.add_root(root.clone());
+                        self.claude_in(&root, &[cwd], None, false)
+                    }
+                    None => self.read(agent, cwd, None),
+                };
+                match unbound {
+                    Err(why) => guess.map(|mut work| {
+                        work.warnings.push(why);
+                        work
+                    }),
+                    _ => guess,
                 }
-                None => self.read(agent, cwd, None),
-            },
-            Err(why) => self.read(agent, cwd, None).map(|mut work| {
-                work.warnings.push(why);
-                work
-            }),
+            }
         }
     }
     /// The config dir a Claude process runs with, and its pid file there.
@@ -299,6 +305,7 @@ impl LogReader {
         let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let mut seen: Vec<PathBuf> = Vec::new();
         let mut found: Vec<(PathBuf, super::ClaudeSession, bool)> = Vec::new();
+        let mut failed: Option<String> = None;
         for root in candidates {
             let key = real(&root);
             if seen.contains(&key) {
@@ -309,9 +316,20 @@ impl LogReader {
             let text = match fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("Claude pid file: {e}")),
+                // Held until a file that is provably this process's has
+                // had its chance: an unrelated broken one must not hide it.
+                Err(e) => {
+                    failed.get_or_insert(format!("Claude pid file: {e}"));
+                    continue;
+                }
             };
-            let session = super::parse_claude_session(&text)?;
+            let session = match super::parse_claude_session(&text) {
+                Ok(session) => session,
+                Err(e) => {
+                    failed.get_or_insert(e);
+                    continue;
+                }
+            };
             if session.pid != pid || !super::jobs::same_process(&session) {
                 // Left behind by an earlier process with this pid.
                 continue;
@@ -327,6 +345,8 @@ impl LogReader {
         // two that both name the pid cannot be told apart, so neither binds.
         let pick = match found.iter().position(|(_, _, proven)| *proven) {
             Some(i) => Some(found.swap_remove(i)),
+            // A file that did not read may have been the one; say so.
+            None if failed.is_some() => return Err(failed.unwrap_or_default()),
             None if found.len() == 1 => found.pop(),
             None => None,
         };
@@ -979,6 +999,9 @@ mod tests {
             .unwrap();
         let pid = child.id();
         f.write(&format!("elsewhere/sessions/{pid}.json"), &pid_file(pid, "s", "/srv/repo", ""));
+        // A broken file naming the pid in another known dir does not hide
+        // the one in its own.
+        f.write(&format!("claude/sessions/{pid}.json"), "{\"pid\":");
         let mut reader = f.reader();
         // The environment of another process is readable only where /proc
         // is, and holds the new variable only once the child has exec'd.

@@ -423,8 +423,16 @@ pub fn read_jobs(roots: &[PathBuf], table: Option<&Result<Table, String>>) -> Jo
             let state = path.join("state.json");
             // A job folder with no state yet holds only Claude's scratch
             // space; it has never run, so it is not a job to report.
-            if !state.exists() {
-                continue;
+            // One that cannot be looked into is not that, and says so.
+            match std::fs::metadata(&state) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    let dir = path.display().to_string();
+                    let why = format!("state.json could not be read: {e}");
+                    all.push(Job { short, dir, unread: Some(why), ..Default::default() });
+                    continue;
+                }
             }
             // The last write, as a lower bound on how long whatever the
             // file says - or that it cannot be read - has been so.

@@ -2060,6 +2060,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .count();
         // Background agents are listed with the panes but hold none.
         let total = all.iter().filter(|n| n.job.is_none()).count();
+        // The filter row counts rows, background agents included, on both
+        // sides of its "of".
+        let listed = all.len();
         all.retain(|n| opscope_filter.visible(n.is_opscope));
         let agents: Vec<&Pane> = all
             .iter()
@@ -2210,7 +2213,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             ));
         }
         filters.extend(opscope_filter.description(hidden_opscope));
-        if let Some(said) = tc::filter_row(panes_now.len(), total, &filters) {
+        if let Some(said) = tc::filter_row(panes_now.len(), listed, &filters) {
             rows.extend(flow(&[(p.dim.as_str(), said)], w));
         }
         // The header is pinned when the pane has room for it and for a body
