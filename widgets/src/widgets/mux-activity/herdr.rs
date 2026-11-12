@@ -1523,7 +1523,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim) } else { hints };
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 

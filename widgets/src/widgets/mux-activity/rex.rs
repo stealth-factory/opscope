@@ -253,10 +253,12 @@ impl Pane {
     }
 
     /// What the `/` filter matches the row on: the words it shows - agent
-    /// or command, session, window, directory, title and what was reported.
+    /// or command, state, session, window, directory, title and what was
+    /// reported.
     fn search_fields(&self) -> Vec<String> {
         let mut out = vec![
             self.command(),
+            self.state(),
             self.session_label.clone(),
             self.window_label.clone(),
             self.cwd(),
@@ -268,6 +270,7 @@ impl Pane {
         }
         for r in &self.records {
             out.extend(r.id.clone());
+            out.push(r.state.clone());
             out.push(r.title.clone());
             out.push(r.msg.clone());
         }
@@ -2507,7 +2510,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim) } else { hints };
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
@@ -2821,6 +2824,23 @@ mod tests {
                 .unwrap_or_default(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_search_for_a_state_finds_the_panes_in_it() {
+        // A blocked agent with no message still answers /blocked.
+        let blocked = pane_in("alpha", 1, "a1", Some("blocked"));
+        let idle = pane_in("alpha", 1, "a2", Some("idle"));
+        assert!(super::super::search::matches("blocked", &blocked.search_fields()));
+        assert!(!super::super::search::matches("blocked", &idle.search_fields()));
+        // A child record's state counts too.
+        let mut parent = pane_in("beta", 2, "b1", Some("idle"));
+        parent.records.push(Record {
+            id: Some("worker".into()),
+            state: "error".into(),
+            ..Default::default()
+        });
+        assert!(super::super::search::matches("error", &parent.search_fields()));
     }
 
     #[test]

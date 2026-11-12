@@ -103,10 +103,17 @@ impl Search {
     }
 
     /// The footer while the query line is open: what is typed, then the two
-    /// keys that leave it.
-    pub fn typing_hints<'a>(&self, accent: &'a str, dim: &'a str) -> Vec<Vec<(&'a str, String)>> {
+    /// keys that leave it. `width` is what the footer is packed to; a query
+    /// longer than that shows its tail behind `…`, so the cursor stays on
+    /// screen and the row never wraps.
+    pub fn typing_hints<'a>(
+        &self,
+        accent: &'a str,
+        dim: &'a str,
+        width: usize,
+    ) -> Vec<Vec<(&'a str, String)>> {
         vec![
-            vec![(accent, format!("/{}▌", self.query))],
+            vec![(accent, query_line(&self.query, width))],
             vec![(dim, "[↵] keep".into())],
             vec![(dim, "[esc] clear".into())],
         ]
@@ -121,6 +128,30 @@ impl Search {
             vec![vec![(dim, "[/]filter".into())]]
         }
     }
+}
+
+/// `/query▌` in at most `width` columns: whole when it fits, otherwise
+/// `/…` and as much of the end as fits, since the end is where the typing
+/// is.
+fn query_line(query: &str, width: usize) -> String {
+    let whole = format!("/{}▌", query);
+    if tc::display_width(&whole) <= width {
+        return whole;
+    }
+    // `/`, `…` and `▌` are a column each.
+    let room = width.saturating_sub(3);
+    let mut used = 0;
+    let mut tail: Vec<char> = Vec::new();
+    for c in query.chars().rev() {
+        let cw = tc::display_width(c.encode_utf8(&mut [0; 4]));
+        if used + cw > room {
+            break;
+        }
+        used += cw;
+        tail.push(c);
+    }
+    let tail: String = tail.into_iter().rev().collect();
+    format!("/…{}▌", tail)
 }
 
 /// Where the cursor goes once the list is rebuilt: on the same row if it is
@@ -206,6 +237,20 @@ mod tests {
         s.key("esc");
         assert!(!s.typing && !s.active() && s.filter().is_none());
         assert!(s.take_changed());
+    }
+
+    #[test]
+    fn a_long_query_shows_its_end_within_the_width() {
+        // Short enough: shown whole.
+        assert_eq!(query_line("api", 20), "/api▌");
+        // Too long for 20 columns: the tail, still ending at the cursor.
+        let line = query_line("abcdefghijklmnopqrstuvwx", 20);
+        assert_eq!(tc::display_width(&line), 20);
+        assert_eq!(line, "/…hijklmnopqrstuvwx▌");
+        // Wide characters are measured as two columns.
+        let wide = query_line("日本語のテキスト検索", 12);
+        assert!(tc::display_width(&wide) <= 12, "{wide}");
+        assert!(wide.ends_with("検索▌"));
     }
 
     #[test]

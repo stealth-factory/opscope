@@ -1826,7 +1826,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim) } else { hints };
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
@@ -2142,8 +2142,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 )
             };
             // A query that leaves nothing on the whole board says so,
-            // rather than drawing six empty sections.
-            let emptied = if filtering && rows_now.is_empty() {
+            // rather than drawing six empty sections - but only when every
+            // reading answered. A failed one draws as an empty list, so the
+            // sections stay up to say which could not be read.
+            let all_read = snapshot.is_ok()
+                && agents.is_ok()
+                && tasks.is_ok()
+                && leases.is_ok()
+                && sessions.is_ok();
+            let emptied = if filtering && all_read && rows_now.is_empty() {
                 tc::filtered_to_nothing(board, &hidden_idle)
             } else {
                 None
