@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.15.0] - 2026-11-12
+
+### CI
+
+- Run Mac jobs on GitHub's standard hosted runners (#624)
+
+### Features
+
+- **mux-activity**: Fuzzy-search filter over agents and panes with / (OPS-277) (#620)
+- **mux-activity**: Show Claude background agents and bind sessions by pid (#618)
+
 ## [2.14.0] - 2026-11-12
 
 ### CI
