@@ -255,9 +255,17 @@ impl LogReader {
         if let Some(id) = session {
             // The id the multiplexer reported stays the identity; the pid
             // only says which config dir its transcript is in.
-            return match self.claude_binding(pid) {
-                Ok(Some((root, _))) => self.claude_in(&root, &[cwd], Some(id), false),
-                _ => self.read(agent, cwd, Some(id)),
+            let root = match self.claude_binding(pid) {
+                Ok(Some((root, _))) => Some(root),
+                // No pid file: the dir its environment names, if any.
+                _ => claude_config_dir_of(pid).filter(|root| root.is_dir()),
+            };
+            return match root {
+                Some(root) => {
+                    self.add_root(root.clone());
+                    self.claude_in(&root, &[cwd], Some(id), false)
+                }
+                None => self.read(agent, cwd, Some(id)),
             };
         }
         match self.claude_binding(pid) {
@@ -998,6 +1006,9 @@ mod tests {
         // With no pid file at all, the cwd guess is made in its own dir.
         std::fs::remove_file(f.0.join(format!("elsewhere/sessions/{pid}.json"))).unwrap();
         let guessed = f.reader().read_agent("claude", Some(pid), "/srv/repo", None);
+        // And a reported session id is looked for there too.
+        let mut late = f.reader();
+        let reported_late = late.read_agent("claude", Some(pid), "/srv/repo", Some("s"));
         let _ = child.kill();
         let _ = child.wait();
         if readable {
@@ -1010,6 +1021,8 @@ mod tests {
             let guessed = guessed.unwrap();
             assert_eq!(guessed.tasks[0].id, "custom");
             assert!(guessed.guessed);
+            assert_eq!(reported_late.unwrap().tasks[0].id, "custom");
+            assert!(late.claude_roots().contains(&custom));
         }
     }
     #[test]
