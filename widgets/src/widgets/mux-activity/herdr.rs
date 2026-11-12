@@ -1578,7 +1578,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // is one entry admitted that the truncate below then cuts - and the
         // row it cuts is the last one, which is where the cursor is when you
         // have just pressed end.
+        // Built before the window is sized, so the rows it takes come out
+        // of the room the lists get rather than off their bottom.
+        let hidden_rows: Vec<String> = hidden_why
+            .iter()
+            .flat_map(|why| tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3).max(1)))
+            .map(|line| tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1))
+            .collect();
         let chrome = rows.len()
+            + hidden_rows.len()                       // a warning the filter would hide
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
@@ -1683,11 +1691,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         } else {
             None
         };
-        if let Some(why) = &hidden_why {
-            for line in tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3).max(1)) {
-                rows.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1));
-            }
-        }
+        rows.extend(hidden_rows);
         if let Some(said) = emptied {
             for line in tc::wrap_words(&said, w.saturating_sub(3).max(1)) {
                 rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
