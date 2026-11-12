@@ -2361,7 +2361,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         // narrow, so the heading stays one line: a heading
                         // whose count wraps under it reads as two headings.
                         if filtering {
-                            format!("{} running", super::search::count(busy_list.len(), busy.len(), true))
+                            // Unread panes are listed but not known to be
+                            // running, so they stay out of both numbers.
+                            let running_shown = busy_list
+                                .iter()
+                                .filter(|n| !(n.doing == Doing::Unknown && n.creator == TERMINAL))
+                                .count();
+                            format!(
+                                "{} running",
+                                super::search::count(running_shown, busy.len() - unread, true)
+                            )
                         } else if w < 50 {
                             format!("{} running", busy.len() - unread)
                         } else {

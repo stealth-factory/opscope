@@ -277,11 +277,11 @@ pub(crate) struct Agent {
 impl Agent {
     /// What the `/` filter matches the row on: the words it shows - agent,
     /// state, workspace, directory, title and the work left running.
-    fn search_fields(&self, labels: &HashMap<String, String>) -> Vec<String> {
+    fn search_fields(&self, labels: Option<&HashMap<String, String>>) -> Vec<String> {
         let mut out = vec![
             self.name.clone(),
             self.state.clone(),
-            workspace_label(labels, &self.workspace_id),
+            shown_place(labels, &self.workspace_id, &self.pane_id),
             homely(&self.cwd),
             self.title.trim().to_string(),
         ];
@@ -289,6 +289,15 @@ impl Agent {
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
         out
+    }
+}
+
+/// Where a row points, as drawn: the workspace's label (or its bare id)
+/// while labels are shown, the pane's id while `labels` is `None`.
+fn shown_place(labels: Option<&HashMap<String, String>>, workspace_id: &str, pane_id: &str) -> String {
+    match labels {
+        Some(labels) => workspace_label(labels, workspace_id),
+        None => pane_id.to_string(),
     }
 }
 
@@ -439,14 +448,14 @@ pub(crate) struct Panel {
 impl Panel {
     /// What the `/` filter matches the row on: the command, or the words an
     /// unread pane shows in its place, the workspace and the directory.
-    fn search_fields(&self, labels: &HashMap<String, String>) -> Vec<String> {
+    fn search_fields(&self, labels: Option<&HashMap<String, String>>) -> Vec<String> {
         let mut out = vec![
             if self.doing == Doing::Unknown {
                 "could not be read".to_string()
             } else {
                 self.command.clone()
             },
-            workspace_label(labels, &self.workspace_id),
+            shown_place(labels, &self.workspace_id, &self.pane_id),
             homely(&self.cwd),
             self.why.clone(),
         ];
@@ -1324,19 +1333,22 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // matched better. The unfiltered lists still feed the summary and
         // the counts the headings are out of.
         let filtering = search.active();
+        // The filter matches the place a row shows: a label, or the pane id
+        // once [l] has hidden labels.
+        let shown = show_labels.then_some(&labels);
         let agents: Vec<Agent> = all_agents
             .iter()
-            .filter(|a| search.matches(&a.search_fields(&labels)))
+            .filter(|a| search.matches(&a.search_fields(shown)))
             .cloned()
             .collect();
         let busy_shown: Vec<&Panel> = busy
             .iter()
-            .filter(|n| search.matches(&n.search_fields(&labels)))
+            .filter(|n| search.matches(&n.search_fields(shown)))
             .copied()
             .collect();
         let resting_shown: Vec<&Panel> = resting
             .iter()
-            .filter(|n| search.matches(&n.search_fields(&labels)))
+            .filter(|n| search.matches(&n.search_fields(shown)))
             .copied()
             .collect();
         let before = std::mem::take(&mut rows_now);
@@ -1607,16 +1619,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Where a row points: the workspace's label when labels are shown
         // and it has one, else the bare id.
         let place_of = |workspace_id: &str, pane_id: &str| -> String {
-            if show_labels {
-                let label = labels.get(workspace_id).cloned().unwrap_or_default();
-                if label.is_empty() {
-                    workspace_id.to_string()
-                } else {
-                    label
-                }
-            } else {
-                pane_id.to_string()
-            }
+            shown_place(show_labels.then_some(&labels), workspace_id, pane_id)
         };
         let widest = |it: &mut dyn Iterator<Item = String>| -> usize {
             it.map(|t| tc::display_width(&t)).max().unwrap_or(0)
@@ -2733,12 +2736,25 @@ mod tests {
     fn the_filter_matches_the_words_a_row_shows() {
         let labels: HashMap<String, String> = [("w".to_string(), "opscope".to_string())].into();
         let a = agent("p", "w", "blocked");
-        assert!(super::super::search::matches("opsc", &a.search_fields(&labels)));
-        assert!(super::super::search::matches("block", &a.search_fields(&labels)));
+        assert!(super::super::search::matches("opsc", &a.search_fields(Some(&labels))));
+        assert!(super::super::search::matches("block", &a.search_fields(Some(&labels))));
         let unread = Panel { workspace_id: "w".into(), ..Default::default() };
-        let fields = unread.search_fields(&labels);
+        let fields = unread.search_fields(Some(&labels));
         assert!(fields.contains(&"could not be read".to_string()));
         assert!(fields.iter().all(|f| !f.is_empty()));
+    }
+
+    #[test]
+    fn with_labels_hidden_the_filter_matches_the_pane_id_shown() {
+        let labels: HashMap<String, String> = [("w".to_string(), "opscope".to_string())].into();
+        let mut a = agent("p", "w", "idle");
+        a.pane_id = "p-7".into();
+        // Labels shown: the label is on screen, the pane id is not.
+        assert!(super::super::search::matches("opsc", &a.search_fields(Some(&labels))));
+        assert!(!super::super::search::matches("p-7", &a.search_fields(Some(&labels))));
+        // Labels hidden: the pane id is what the row shows.
+        assert!(super::super::search::matches("p-7", &a.search_fields(None)));
+        assert!(!super::super::search::matches("opsc", &a.search_fields(None)));
     }
 
     #[test]
@@ -2747,13 +2763,13 @@ mod tests {
         // so /explore finds the agent.
         let labels: HashMap<String, String> = HashMap::new();
         let mut a = agent("p", "w", "working");
-        assert!(!super::super::search::matches("explore", &a.search_fields(&labels)));
+        assert!(!super::super::search::matches("explore", &a.search_fields(Some(&labels))));
         a.work.logs.tasks.push(tc::agent_work::LogTask {
             id: "1".into(),
             label: "Explore".into(),
             state: tc::agent_work::Activity::Working,
             updated: String::new(),
         });
-        assert!(super::super::search::matches("explore", &a.search_fields(&labels)));
+        assert!(super::super::search::matches("explore", &a.search_fields(Some(&labels))));
     }
 }

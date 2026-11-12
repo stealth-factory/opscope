@@ -619,7 +619,14 @@ impl Row {
                 n.branch.clone(),
                 parse::homely(&n.cwd),
             ],
-            Row::Resumable(r) => vec![r.kind.clone(), parse::homely(&r.cwd)],
+            // Both wordings of the membership, since the pane's width
+            // picks which one is drawn.
+            Row::Resumable(r) => vec![
+                r.kind.clone(),
+                parse::homely(&r.cwd),
+                membership_label(r.in_workspace, true).into(),
+                membership_label(r.in_workspace, false).into(),
+            ],
         };
         out.retain(|s| !s.is_empty());
         out
@@ -2665,13 +2672,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 (p.lbl.as_str(), " ── PANES ── ".into()),
                 (
                     p.dim.as_str(),
-                    // Unstated panes are listed here too, so a filtered
-                    // count is of every pane in the section.
+                    // Unstated panes are counted apart, as unfiltered: they
+                    // are listed here but not known to be off a prompt.
                     if filtering {
+                        let running_shown =
+                            busy_shown.iter().filter(|n| !n.status.is_empty()).count();
                         format!(
                             "{} pane{} not at a prompt",
-                            super::search::count(busy_shown.len(), busy.len(), true),
-                            plural(busy.len())
+                            super::search::count(running_shown, running, true),
+                            plural(running)
                         )
                     } else {
                         format!("{} pane{} not at a prompt", running, plural(running))
