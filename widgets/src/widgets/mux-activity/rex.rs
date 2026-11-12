@@ -256,6 +256,37 @@ impl Pane {
         }
     }
 
+    /// What the `/` filter matches the row on: the words it shows - agent
+    /// or command, state, session, window, directory, title and what was
+    /// reported.
+    fn search_fields(&self) -> Vec<String> {
+        let mut out = vec![
+            self.command(),
+            self.state(),
+            self.session_label.clone(),
+            self.window_label.clone(),
+            self.cwd(),
+            self.title.clone(),
+            self.label.clone(),
+        ];
+        if let Some((name, _)) = &self.agent {
+            out.push(name.clone());
+        }
+        for r in &self.records {
+            out.extend(r.id.clone());
+            out.push(r.state.clone());
+            out.push(r.title.clone());
+            out.push(r.msg.clone());
+        }
+        if let Some((_, said)) = &self.attention {
+            out.push(said.clone());
+        }
+        // Every row drawn under the pane: shells and session-log work.
+        out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
+        out.retain(|s| !s.is_empty());
+        out
+    }
+
     fn short_id(&self) -> String {
         let id = self.block_id.rsplit(':').next().unwrap_or(&self.block_id);
         id.chars()
@@ -1388,12 +1419,10 @@ fn at_cursor(panes: &[Pane], selected: usize) -> Option<Pane> {
 /// Where the cursor lands once the list is rebuilt. The cursor is a pane,
 /// not a position: a refresh that puts a newly blocked agent above it must
 /// not move `↵` onto somebody else. A pane that has gone leaves the index
-/// where it was, clamped by the caller.
-fn reselect(before: &[Pane], selected: usize, after: &[Pane]) -> usize {
-    before
-        .get(selected)
-        .and_then(|held| after.iter().position(|n| n.block_id == held.block_id))
-        .unwrap_or(selected)
+/// where it was, clamped by the caller - unless the `/` filter just hid it,
+/// and then the cursor goes to the first match.
+fn reselect(before: &[Pane], selected: usize, after: &[Pane], filter_changed: bool) -> usize {
+    super::search::reselect(before, selected, after, filter_changed, |a, b| a.block_id == b.block_id)
 }
 
 /// The server, as the pane may name it: never the setting itself, which
@@ -1701,6 +1730,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
     let mut opscope_filter = process_filter::Filter::default();
+    let mut search = super::search::Search::default();
     let mut selected = 0usize;
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut scroll = 0usize;
@@ -1727,6 +1757,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     loop {
         let tick = tc::animation_tick();
         let at = tc::now();
+        // The query line takes `!` as a character, not the notices screen.
+        if search.typing {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         if explaining.is_none() {
             if let Some(i) =
@@ -1738,6 +1772,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
         let board_now = state.lock().ok().and_then(|g| g.board.clone());
         for key in keys {
+            if search.takes(&key) {
+                search.key(&key);
+                moved = true;
+                continue;
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     quit(&mut keyboard);
@@ -1749,6 +1788,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 }
                 "r" | "R" => refresh_wake::request(&wake),
                 "esc" if explaining.is_some() => explaining = None,
+                "esc" if search.active() => {
+                    search.clear();
+                    moved = true;
+                }
+                "/" if explaining.is_none() => search.open(),
                 "e" | "E" => {
                     if explaining.is_some() {
                         explaining = None;
@@ -2062,7 +2106,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let total = all.iter().filter(|n| n.job.is_none()).count();
         // The filter row counts rows, background agents included, on both
         // sides of its "of".
-        let listed = all.len();
+        let rows_listed = all.len();
         all.retain(|n| opscope_filter.visible(n.is_opscope));
         let agents: Vec<&Pane> = all
             .iter()
@@ -2082,14 +2126,49 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let agents = by_session(agents);
         let busy = by_session(busy);
         let resting = by_session(resting);
+        // The `/` filter only includes or excludes: each section keeps the
+        // order above, so a blocked agent stays above an idle one that
+        // matched better. The unfiltered lists still feed the summary.
+        let filtering = search.active();
+        let shown = |list: &[&'_ Pane]| -> Vec<Pane> {
+            list.iter()
+                .filter(|n| search.matches(&n.search_fields()))
+                .map(|n| (*n).clone())
+                .collect()
+        };
+        let (agents_shown, busy_shown, resting_shown) = (shown(&agents), shown(&busy), shown(&resting));
+        // A pane the filter hides takes its row's warning with it, so the
+        // first such reason is kept to say above the sections: "nothing
+        // matches" must not be all a board says while a probe failed.
+        let hidden_why: Option<String> = if filtering {
+            all.iter()
+                .filter(|n| {
+                    !agents_shown
+                        .iter()
+                        .chain(busy_shown.iter())
+                        .chain(resting_shown.iter())
+                        .any(|s| s.block_id == n.block_id)
+                })
+                .find_map(|n| {
+                    if !n.why.is_empty() {
+                        Some(n.why.clone())
+                    } else if n.doing == Doing::Unknown && n.creator == TERMINAL {
+                        Some("no reason given".to_string())
+                    } else {
+                        super::search::work_warning(&n.work)
+                    }
+                })
+        } else {
+            None
+        };
         let before = std::mem::take(&mut panes_now);
-        panes_now = agents
+        panes_now = agents_shown
             .iter()
-            .chain(busy.iter())
-            .chain(resting.iter().filter(|_| show_idle))
-            .map(|n| (*n).clone())
+            .chain(busy_shown.iter())
+            .chain(resting_shown.iter().filter(|_| show_idle))
+            .cloned()
             .collect();
-        selected = reselect(&before, selected, &panes_now);
+        selected = reselect(&before, selected, &panes_now, search.take_changed());
         if !panes_now.is_empty() && selected >= panes_now.len() {
             selected = panes_now.len() - 1;
         }
@@ -2213,7 +2292,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             ));
         }
         filters.extend(opscope_filter.description(hidden_opscope));
-        if let Some(said) = tc::filter_row(panes_now.len(), listed, &filters) {
+        filters.extend(search.filter());
+        if let Some(said) = tc::filter_row(panes_now.len(), rows_listed, &filters) {
             rows.extend(flow(&[(p.dim.as_str(), said)], w));
         }
         // The header is pinned when the pane has room for it and for a body
@@ -2322,10 +2402,37 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     }
                 };
 
+                let agents_list: Vec<&Pane> = agents_shown.iter().collect();
+                let busy_list: Vec<&Pane> = busy_shown.iter().collect();
+                let resting_list: Vec<&Pane> = resting_shown.iter().collect();
+                let nothing = |of: usize| {
+                    tc::seg(
+                        &[(p.dim.as_str(), format!("   none of {} match{}", of, search.filter().map(|f| format!(" {}", f)).unwrap_or_default()))],
+                        w - 1,
+                    )
+                };
+                // A query that leaves nothing on the whole board says so,
+                // rather than drawing three empty sections.
+                let emptied = if filtering && panes_now.is_empty() {
+                    tc::filtered_to_nothing(rows_listed, &filters)
+                } else {
+                    None
+                };
+                if let Some(why) = &hidden_why {
+                    let said = super::search::hidden_warning(why);
+                    for line in tc::wrap_words(&said, w.saturating_sub(3)) {
+                        rows.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1));
+                    }
+                }
+                if let Some(said) = emptied {
+                    for line in tc::wrap_words(&said, w.saturating_sub(3)) {
+                        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
+                    }
+                } else {
                 rows.extend(flow(
                     &[
                         (p.lbl.as_str(), "── AGENTS ──".into()),
-                        (p.dim.as_str(), format!("{}", agents.len())),
+                        (p.dim.as_str(), super::search::count(agents_list.len(), agents.len(), filtering)),
                     ],
                     w,
                 ));
@@ -2334,6 +2441,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         &[(p.dim.as_str(), "   no coding agent in any pane".into())],
                         w - 1,
                     ));
+                } else if agents_list.is_empty() {
+                    rows.push(nothing(agents.len()));
                 } else {
                     sections.push(index);
                     // AGENT sits over the mark as well as the name, hence
@@ -2350,8 +2459,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         head += &format!(" {:<5} {}", "MEM", "WINDOW");
                     }
                     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
-                    for pane in &agents {
-                        emit(&mut rows, pane, index, &agents);
+                    for pane in &agents_list {
+                        emit(&mut rows, pane, index, &agents_list);
                         index += 1;
                     }
                 }
@@ -2368,7 +2477,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         // The same count in fewer words when the pane is
                         // narrow, so the heading stays one line: a heading
                         // whose count wraps under it reads as two headings.
-                        if w < 50 {
+                        if filtering {
+                            // Unread panes are listed but not known to be
+                            // running, so they stay out of both numbers.
+                            let running_shown = busy_list
+                                .iter()
+                                .filter(|n| !(n.doing == Doing::Unknown && n.creator == TERMINAL))
+                                .count();
+                            format!(
+                                "{} running",
+                                super::search::count(running_shown, busy.len() - unread, true)
+                            )
+                        } else if w < 50 {
                             format!("{} running", busy.len() - unread)
                         } else {
                             format!(
@@ -2411,6 +2531,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         )],
                         w - 1,
                     ));
+                } else if busy_list.is_empty() {
+                    rows.push(nothing(busy.len()));
                 } else {
                     sections.push(index);
                     if cols.wide {
@@ -2429,8 +2551,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         );
                         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     }
-                    for pane in &busy {
-                        emit(&mut rows, pane, index, &busy);
+                    for pane in &busy_list {
+                        emit(&mut rows, pane, index, &busy_list);
                         index += 1;
                     }
                 }
@@ -2442,7 +2564,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                             (p.lbl.as_str(), "── IDLE ──".into()),
                             (
                                 p.dim.as_str(),
-                                if w < 50 {
+                                if filtering {
+                                    format!("{} at a prompt", super::search::count(resting_list.len(), resting.len(), true))
+                                } else if w < 50 {
                                     format!("{} at a prompt", resting.len())
                                 } else {
                                     format!(
@@ -2455,11 +2579,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         ],
                         w,
                     ));
-                    sections.push(index);
-                    for pane in &resting {
-                        emit(&mut rows, pane, index, &resting);
+                    if resting_list.is_empty() {
+                        rows.push(nothing(resting.len()));
+                    } else {
+                        sections.push(index);
+                    }
+                    for pane in &resting_list {
+                        emit(&mut rows, pane, index, &resting_list);
                         index += 1;
                     }
+                }
                 }
             }
         }
@@ -2469,7 +2598,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let zoomed = at_cursor(&panes_now, selected).is_some_and(|c| c.zoomed);
         // herdr-panes' order, so the two footers read alike side by side;
         // zoom and explain are Rex's own and sit after the shared ones.
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = search.hints(&p.dim);
+        hints.extend(vec![
             vec![(
                 p.dim.as_str(),
                 format!(
@@ -2503,11 +2633,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             )],
             vec![(p.dim.as_str(), "[e]xplain".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-        ];
+        ]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
@@ -2824,6 +2955,23 @@ mod tests {
     }
 
     #[test]
+    fn a_search_for_a_state_finds_the_panes_in_it() {
+        // A blocked agent with no message still answers /blocked.
+        let blocked = pane_in("alpha", 1, "a1", Some("blocked"));
+        let idle = pane_in("alpha", 1, "a2", Some("idle"));
+        assert!(super::super::search::matches("blocked", &blocked.search_fields()));
+        assert!(!super::super::search::matches("blocked", &idle.search_fields()));
+        // A child record's state counts too.
+        let mut parent = pane_in("beta", 2, "b1", Some("idle"));
+        parent.records.push(Record {
+            id: Some("worker".into()),
+            state: "error".into(),
+            ..Default::default()
+        });
+        assert!(super::super::search::matches("error", &parent.search_fields()));
+    }
+
+    #[test]
     fn a_session_with_a_blocked_pane_comes_first_and_stays_together() {
         let quiet_a = pane_in("alpha", 1, "a1", Some("idle"));
         let blocked = pane_in("beta", 2, "b1", Some("blocked"));
@@ -3029,9 +3177,9 @@ mod tests {
         };
         let before = vec![named("a"), named("b")];
         let after = vec![named("new"), named("a"), named("b")];
-        assert_eq!(reselect(&before, 1, &after), 2, "still on b");
+        assert_eq!(reselect(&before, 1, &after, false), 2, "still on b");
         let gone = vec![named("a")];
-        assert_eq!(reselect(&before, 1, &gone), 1, "b went: left for the clamp");
+        assert_eq!(reselect(&before, 1, &gone, false), 1, "b went: left for the clamp");
     }
 
     #[test]

@@ -36,6 +36,9 @@ mod detect;
 #[path = "background.rs"]
 mod background;
 
+#[path = "search.rs"]
+mod search;
+
 #[path = "rex.rs"]
 mod rex;
 

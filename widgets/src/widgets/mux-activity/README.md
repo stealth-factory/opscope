@@ -40,9 +40,29 @@ whichever multiplexer the pane is in.
  ── IDLE ── 1 pane at a prompt
  ▫ ~/work/site                       site:1
 
- [o]show Opscope  ↑↓ select  ↵ switch to this pane  tab section  [i]dle hide
- [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
+ [/]filter  [o]show Opscope  ↑↓ select  ↵ switch to this pane  tab section
+ [i]dle hide  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
+
+## Filtering with `/`
+
+`/` opens a query line under every backend, and the boards narrow as you type
+to the agents and panes that fuzzy-match it — the letters in order, any case,
+a match at the start of a word preferred, the same match as the command
+palette. A row is matched on what it shows: agent or command, session or
+workspace, directory, branch, title and the message it reported.
+
+The match only includes or excludes. Each section keeps its own order —
+urgency first, then grouped by session — so a blocked agent that matches
+still sits above a working one that matches better.
+
+`↵` keeps the filter and returns to the list; `esc` clears it. With a filter
+kept, the footer offers `[/] edit filter` and `[esc] clear`. The headings
+count the subset (`── AGENTS ── 3 of 14`), the line under the counts names
+the filter (`4 of 22 shown · /api`), and a query that leaves nothing says
+`nothing matches · all 22 hidden by the filter · /api` rather than drawing an
+empty board. The cursor stays on its pane while that pane still matches, and
+moves to the first match when it does not.
 
 ## Work an agent left running
 
@@ -308,6 +328,8 @@ which can name an address; a credential it recognises by name is drawn as
 | `Enter` / `f` | **switch to this pane** — its window becomes active in its session and the pane focused |
 | `z` | zoom the pane to fill its window, or undo that |
 | `e` | explain the pane: every status record with every field, the program's identity, and the last lines its screen shows; `esc` or `e` goes back |
+| `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
+| `esc` | clear the filter, when one is kept |
 | `o` | show/hide opscope's own panes (hidden by default) |
 | `i` | show/hide the idle section |
 | `r` | refresh now |
@@ -352,7 +374,7 @@ and one keypress to get to any of it.
  ▫ work/site                  site
  ▫ …/another-monorepo         monorepo
 
- ↑↓ select   ↵ switch to this pane   [i]dle hide [l]abels [r]efresh [q]uit
+ [/]filter  ↑↓ select   ↵ switch to this pane   [i]dle hide [l]abels [r]efresh [q]uit
 ```
 
 ### Why it is ordered this way
@@ -443,6 +465,8 @@ behind it.
 | `Tab` | jump to the head of the next section, wrapping past the last |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
+| `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
+| `esc` | clear the filter, when one is kept |
 | `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
 | `i` | show/hide the idle section |
 | `l` | workspace labels vs pane ids |
@@ -507,7 +531,7 @@ get to any of it.
  ▫ work/docs                      docs
  ▫ ~                              home
 
- ↑↓ select  ↵ focus  tab section  [i]dle hide  [r]efresh  [,] settings  [q]uit
+ [/]filter  ↑↓ select  ↵ focus  tab section  [i]dle hide  [r]efresh  [,] settings  [q]uit
 ```
 
 ### Why it is ordered this way
@@ -723,6 +747,8 @@ snapshot before its cursor is reset.
 | `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
 | `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — focus the selected pane |
+| `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
+| `esc` | clear the filter, when one is kept |
 | `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
 | `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |

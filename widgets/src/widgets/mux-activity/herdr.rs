@@ -276,6 +276,44 @@ pub(crate) struct Agent {
     job: Option<tc::agent_work::Job>,
 }
 
+impl Agent {
+    /// What the `/` filter matches the row on: the words it shows - agent,
+    /// state, workspace, directory, title and the work left running.
+    fn search_fields(&self, labels: Option<&HashMap<String, String>>) -> Vec<String> {
+        let mut out = vec![
+            self.name.clone(),
+            self.state.clone(),
+            shown_place(labels, &self.workspace_id, &self.pane_id),
+            homely(&self.cwd),
+            self.title.trim().to_string(),
+        ];
+        // Every row drawn under the agent: shells and session-log work.
+        out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
+        out.retain(|s| !s.is_empty());
+        out
+    }
+}
+
+/// Where a row points, as drawn: the workspace's label (or its bare id)
+/// while labels are shown, the pane's id while `labels` is `None`.
+fn shown_place(labels: Option<&HashMap<String, String>>, workspace_id: &str, pane_id: &str) -> String {
+    if workspace_id == background::GROUP {
+        return "no pane".to_string();
+    }
+    match labels {
+        Some(labels) => workspace_label(labels, workspace_id),
+        None => pane_id.to_string(),
+    }
+}
+
+/// A workspace by its label, or its bare id when it has none.
+fn workspace_label(labels: &HashMap<String, String>, workspace_id: &str) -> String {
+    match labels.get(workspace_id) {
+        Some(label) if !label.is_empty() => label.clone(),
+        _ => workspace_id.to_string(),
+    }
+}
+
 /// The slice of a variable-height list that fits `room` rows and holds the
 /// cursor.
 ///
@@ -410,6 +448,25 @@ pub(crate) struct Panel {
     why: String,
     cpu: Option<f64>,
     rss: Option<u64>,
+}
+
+impl Panel {
+    /// What the `/` filter matches the row on: the command, or the words an
+    /// unread pane shows in its place, the workspace and the directory.
+    fn search_fields(&self, labels: Option<&HashMap<String, String>>) -> Vec<String> {
+        let mut out = vec![
+            if self.doing == Doing::Unknown {
+                "could not be read".to_string()
+            } else {
+                self.command.clone()
+            },
+            shown_place(labels, &self.workspace_id, &self.pane_id),
+            homely(&self.cwd),
+            self.why.clone(),
+        ];
+        out.retain(|s| !s.is_empty());
+        out
+    }
 }
 
 #[derive(Default)]
@@ -979,6 +1036,25 @@ enum Row {
     Process(Panel),
 }
 
+impl Row {
+    fn pane_id(&self) -> &str {
+        match self {
+            // A background agent has no pane; its job id stands in.
+            Row::Agent(a) => a.job.as_ref().map_or(a.pane_id.as_str(), |j| j.short.as_str()),
+            Row::Process(n) => &n.pane_id,
+        }
+    }
+}
+
+/// Where the cursor lands once the list is rebuilt: on the same pane while
+/// it is still listed, so a refresh that puts a newly blocked agent above
+/// it does not move `↵` onto somebody else. A pane that has gone leaves the
+/// index where it was, clamped by the caller - unless the `/` filter just
+/// hid it, and then the cursor goes to the first match.
+fn reselect(before: &[Row], selected: usize, after: &[Row], filter_changed: bool) -> usize {
+    super::search::reselect(before, selected, after, filter_changed, |a, b| a.pane_id() == b.pane_id())
+}
+
 struct Palette {
     blocked: String,
     blocked_lit: String,
@@ -1161,6 +1237,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let mut opscope_filter = process_filter::Filter::default();
+    let mut search = super::search::Search::default();
     let mut selected = 0usize;
     // Where each pane's rows landed on the frame now on screen. The three
     // sections share one index - agents, then busy, then the rest - which
@@ -1196,6 +1273,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // drift from what the keyboard does.
         // The list windows itself - rows outside `window_over` are never
         // built - so the frame is the body and there is nothing to subtract.
+        // The query line takes `!` as a character, not the notices screen.
+        if search.typing {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         if explaining.is_none() {
             if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
@@ -1221,6 +1302,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     _ => continue,
                 }
             }
+            if search.takes(&key) {
+                search.key(&key);
+                moved = true;
+                continue;
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     stop.store(true, Ordering::Relaxed);
@@ -1235,6 +1321,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 "r" | "R" => {
                     refresh_wake::request(&wake);
                 }
+                "esc" if search.active() => {
+                    search.clear();
+                    moved = true;
+                }
+                "/" => search.open(),
                 "l" | "L" => show_labels = !show_labels,
                 "e" | "E" => match rows_now.get(selected) {
                     Some(Row::Agent(a)) if a.job.is_some() => {
@@ -1328,7 +1419,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
 
         let (w, h) = tc::size();
-        let (agents, panels, labels, err, watcher_err, inventory_err) = match state.lock() {
+        let (all_agents, panels, labels, err, watcher_err, inventory_err) = match state.lock() {
             Ok(g) => (
                 g.agents.clone(),
                 g.panels.clone(),
@@ -1341,7 +1432,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         };
         // ── the explain screen, for a background agent ──
         if let Some(id) = explaining.clone() {
-            let Some(job) = agents.iter().find_map(|a| a.job.as_ref().filter(|j| j.short == id)) else {
+            let Some(job) = all_agents.iter().find_map(|a| a.job.as_ref().filter(|j| j.short == id)) else {
                 explaining = None;
                 note = Some(("that background agent is no longer listed".into(), false, tc::now() + 3.0));
                 continue;
@@ -1405,18 +1496,52 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let resting: Vec<&Panel> = panels.iter().filter(|n| n.doing == Doing::Prompt).collect();
         let unread: Vec<&&Panel> = busy.iter().filter(|n| n.doing == Doing::Unknown).collect();
         let running = busy.len() - unread.len();
+        // The `/` filter only includes or excludes: each section keeps the
+        // order above, so a blocked agent stays above an idle one that
+        // matched better. The unfiltered lists still feed the summary and
+        // the counts the headings are out of.
+        let filtering = search.active();
+        // The filter matches the place a row shows: a label, or the pane id
+        // once [l] has hidden labels.
+        let shown = show_labels.then_some(&labels);
+        let agents: Vec<Agent> = all_agents
+            .iter()
+            .filter(|a| search.matches(&a.search_fields(shown)))
+            .cloned()
+            .collect();
+        // An agent's work warning is drawn on its row, so one the filter
+        // hides is said above the sections instead.
+        let hidden_why: Option<String> = if filtering {
+            all_agents
+                .iter()
+                .filter(|a| !search.matches(&a.search_fields(shown)))
+                .find_map(|a| super::search::work_warning(&a.work))
+        } else {
+            None
+        };
+        let busy_shown: Vec<&Panel> = busy
+            .iter()
+            .filter(|n| search.matches(&n.search_fields(shown)))
+            .copied()
+            .collect();
+        let resting_shown: Vec<&Panel> = resting
+            .iter()
+            .filter(|n| search.matches(&n.search_fields(shown)))
+            .copied()
+            .collect();
+        let before = std::mem::take(&mut rows_now);
         rows_now = agents
             .iter()
             .cloned()
             .map(Row::Agent)
             .chain(
-                panels
+                busy_shown
                     .iter()
-                    .filter(|n| show_idle || n.doing != Doing::Prompt)
-                    .cloned()
-                    .map(Row::Process),
+                    .chain(resting_shown.iter().filter(|_| show_idle))
+                    .map(|n| Row::Process((*n).clone())),
             )
             .collect();
+        selected = reselect(&before, selected, &rows_now, search.take_changed());
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
@@ -1428,10 +1553,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
 
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for a in &agents {
+        for a in &all_agents {
             *counts.entry(a.state.as_str()).or_insert(0) += 1;
         }
-        let places: std::collections::HashSet<&str> = agents
+        let places: std::collections::HashSet<&str> = all_agents
             .iter()
             .map(|a| a.workspace_id.as_str())
             .filter(|w| *w != background::GROUP)
@@ -1451,7 +1576,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let mut summary = vec![
             (
                 p.dim.as_str(),
-                format!(" {} agent{}", agents.len(), plural(agents.len())),
+                format!(" {} agent{}", all_agents.len(), plural(all_agents.len())),
             ),
             (
                 p.dim.as_str(),
@@ -1467,11 +1592,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
         }
         rows.push(tc::seg(&summary, w - 1));
-        if !agents.is_empty() {
+        if !all_agents.is_empty() {
             let mut states: Vec<_> = counts.iter().collect();
             states.sort_by_key(|(state, _)| **state);
             let parts: Vec<_> = states.into_iter().map(|(state, n)|
-                (*n as f64 / agents.len() as f64, colour_of(state, &p).to_string())).collect();
+                (*n as f64 / all_agents.len() as f64, colour_of(state, &p).to_string())).collect();
             let width = w.saturating_sub(2);
             plots.push(tc::Plot::stacked_bar(1, rows.len(), width, &parts));
             let bar = tc::stacked_bar(&parts, width);
@@ -1525,11 +1650,20 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // a short list looking like a quiet Herdr. Drawn only when it is
         // holding something back: with nothing hidden there is nothing to
         // say, and saying it anyway is a row that never comes off.
-        let mut hidden_idle = idle_filter(show_idle, resting.len());
-        hidden_idle.extend(opscope_filter.description(hidden_opscope));
-        let shown = busy.len() + if show_idle { resting.len() } else { 0 };
-        if let Some(said) = tc::filter_row(shown, total_panels, &hidden_idle) {
-            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", said))], w - 1));
+        let mut filters = idle_filter(show_idle, resting.len());
+        filters.extend(opscope_filter.description(hidden_opscope));
+        filters.extend(search.filter());
+        // The `/` filter reaches the agents as well as the panes, so while
+        // it holds the count is out of both.
+        let (shown, total) = if filtering {
+            (rows_now.len(), all_agents.len() + total_panels)
+        } else {
+            (busy.len() + if show_idle { resting.len() } else { 0 }, total_panels)
+        };
+        if let Some(said) = tc::filter_row(shown, total, &filters) {
+            for line in tc::wrap_words(&said, w.saturating_sub(2).max(1)) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", line))], w - 1));
+            }
         }
         rows.push(String::new());
 
@@ -1540,7 +1674,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // it takes depends on the width, and the body cannot know its own
         // budget until that is settled. Each section budgeting for itself is
         // what drifted before, and left the footer written past the bottom.
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = search.hints(&p.dim);
+        hints.extend(vec![
             vec![(
                 p.dim.as_str(),
                 format!(
@@ -1577,16 +1712,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 format!("[l]abels {}", if show_labels { "hide" } else { "show" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-        ];
+        ]);
         // Only a background agent has an explain screen here, so the hint
         // shows only with the cursor on one.
         if matches!(rows_now.get(selected), Some(Row::Agent(a)) if a.job.is_some()) {
-            hints.insert(3, vec![(p.dim.as_str(), "[e]xplain".into())]);
+            hints.push(vec![(p.dim.as_str(), "[e]xplain".into())]);
         }
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
@@ -1602,8 +1738,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // rows is not somewhere tab can land, so it is left out.
         sections = [
             (0, !agents.is_empty()),
-            (agents.len(), !busy.is_empty()),
-            (agents.len() + busy.len(), idle_listed),
+            (agents.len(), !busy_shown.is_empty()),
+            (agents.len() + busy_shown.len(), idle_listed && !resting_shown.is_empty()),
         ]
         .into_iter()
         .filter_map(|(at, live)| live.then_some(at))
@@ -1618,24 +1754,28 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // is one entry admitted that the truncate below then cuts - and the
         // row it cuts is the last one, which is where the cursor is when you
         // have just pressed end.
+        // Built before the window is sized, so the rows it takes come out
+        // of the room the lists get rather than off their bottom.
+        let hidden_rows: Vec<String> = hidden_why
+            .iter()
+            .flat_map(|why| tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3).max(1)))
+            .map(|line| tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1))
+            .collect();
         let chrome = rows.len()
+            + hidden_rows.len()                       // a warning the filter would hide
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
             + usize::from(agents.is_empty())          // the line that stands in for a list
-            + usize::from(busy.is_empty())
+            + usize::from(busy_shown.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
+            + usize::from(idle_listed && resting_shown.is_empty())
             + footer.len()
             + 1; // the note line
         let room = h.saturating_sub(chrome).max(1);
         // A workspace's heading names it by its label, whatever `l` says
         // the rows show: the heading is where the label is for.
-        let name_of = |workspace_id: &str| -> String {
-            match labels.get(workspace_id) {
-                Some(label) if !label.is_empty() => label.clone(),
-                _ => workspace_id.to_string(),
-            }
-        };
+        let name_of = |workspace_id: &str| -> String { workspace_label(&labels, workspace_id) };
         // An agent takes two rows, plus the gap or workspace heading above
         // it, and a pane takes one, in the order the keys walk them. The
         // rows above an agent count as its own, so the window keeps them
@@ -1683,18 +1823,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Where a row points: the workspace's label when labels are shown
         // and it has one, else the bare id.
         let place_of = |workspace_id: &str, pane_id: &str| -> String {
-            if workspace_id == background::GROUP {
-                "no pane".to_string()
-            } else if show_labels {
-                let label = labels.get(workspace_id).cloned().unwrap_or_default();
-                if label.is_empty() {
-                    workspace_id.to_string()
-                } else {
-                    label
-                }
-            } else {
-                pane_id.to_string()
-            }
+            shown_place(show_labels.then_some(&labels), workspace_id, pane_id)
         };
         let widest = |it: &mut dyn Iterator<Item = String>| -> usize {
             it.map(|t| tc::display_width(&t)).max().unwrap_or(0)
@@ -1703,8 +1832,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             w,
             wide,
             [
-                widest(&mut agents.iter().map(|a| a.name.clone())),
-                widest(&mut agents.iter().map(|a| place_of(&a.workspace_id, &a.pane_id))),
+                // Fitted to every row, filtered or not, so the columns hold
+                // still while a query is typed.
+                widest(&mut all_agents.iter().map(|a| a.name.clone())),
+                widest(&mut all_agents.iter().map(|a| place_of(&a.workspace_id, &a.pane_id))),
                 widest(&mut busy.iter().map(|n| n.command.clone()))
                     .max(tc::display_width("could not be read")),
                 widest(&mut busy.iter().map(|n| place_of(&n.workspace_id, &n.pane_id))),
@@ -1725,364 +1856,278 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             idle_place_w,
         } = cols;
 
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), " ── AGENTS ── ".into()),
-                (p.dim.as_str(), format!("{}", agents.len())),
-                (p.dim.as_str(), showing(&window, 0, agents.len())),
-            ],
-            w - 1,
-        ));
-        // AGENT sits over the mark as well as the name, hence the two.
-        let mut head = format!(
-            " {:<nw$} {:<8} {:<6} {:<5}",
-            "AGENT",
-            "STATE",
-            "FOR",
-            "CPU",
-            nw = name_w + 2
-        );
-        if wide {
-            head += &format!(" {:<5} {}", "MEM", "WORKSPACE");
-        }
-        rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
-
-        for (i, a) in agents.iter().enumerate() {
-            if !window.contains(&i) {
-                continue;
-            }
-            let mut rule = Vec::new();
-            let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
-            let notes = notes_of(i);
-            let lead_shown = lead_fits(lead.len(), notes.len(), &a.work);
-            let jobs_room = job_room(lead.len(), notes.len(), lead_shown);
-            if lead_shown {
-                rows.extend(lead);
-                plots.extend(rule);
-            }
-            let from = rows.len();
-            let here = i == selected;
-            let colour = colour_of(&a.state, &p);
-            // Blocked keeps a tint of its own even unselected: it is the one
-            // row that has to be visible without being looked for. Done
-            // does not - a green ground read as a second state beside the
-            // one the row names.
-            let loud = a.state == "blocked" || a.state == "done";
-            let tint = if here {
-                tc::tint(tc::Role::Slot)
-            } else if a.state == "blocked" {
-                tc::tint_toward(tc::Role::Red)
-            } else {
-                String::new()
-            };
-            let c = |colour: &str| {
-                // Any colour that would not clear AA on this tint is swapped
-                // for its lighter twin. `dim` was measured first; a review
-                // found the others after the first fix shipped saying it was
-                // done, so they are here by measurement rather than by guess.
-                let colour = if tint.is_empty() {
-                    colour
-                } else if colour == p.dim {
-                    p.dim_lit.as_str()
-                } else if colour == p.idle {
-                    p.idle_lit.as_str()
-                } else if colour == p.unknown {
-                    p.unknown_lit.as_str()
-                } else if colour == p.blocked {
-                    p.blocked_lit.as_str()
-                } else if colour == p.idle_c {
-                    p.idle_c_lit.as_str()
-                } else {
-                    p.on_tint(colour)
-                };
-                format!("{}{}", tint, colour)
-            };
-            let name = tc::pad(&a.name, name_w);
-            let state_cell = if loud {
-                a.state.to_uppercase()
-            } else {
-                a.state.clone()
-            };
-            // `heat_on`, because this cell goes through the tint closure and
-            // the plain ramp's hot end cannot be read on any of the three
-            // tints above: 3.18 on the selection blue, 4.35 on blocked, 3.85
-            // on done. A pane at 100% CPU is the row you selected it to read.
-            let heat = match a.cpu {
-                Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
-                _ => p.dim.clone(),
-            };
-            let mut line = vec![
-                (
-                    c(colour),
-                    format!(
-                        "{}{} {}",
-                        if here { "▸" } else { " " },
-                        mark_of(&a.state, tick),
-                        name
-                    ),
-                ),
-                (c(colour), format!(" {:<8}", state_cell)),
-                (
-                    c(&p.dim),
-                    format!(
-                        " {:<6}",
-                        format!("{}{}", if a.exact { "" } else { "≥" }, ago(a.since))
-                    ),
-                ),
-                (c(&heat), percent(a.cpu)),
-            ];
-            if wide {
-                let place = place_of(&a.workspace_id, &a.pane_id);
-                line.push((c(&p.dim), format!(" {}", mem(a.rss))));
-                line.push((c(&p.accent), format!(" {}", tc::pad(&place, agent_place_w))));
-            }
-            if loud || here {
-                line.push((tint.clone(), " ".repeat(w)));
-            }
-            let refs: Vec<(&str, String)> =
-                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-            rows.push(tc::seg(&refs, w - 1));
-            if rows.len() < h.saturating_sub(1) {
-                let body = if loud || here { &p.txt } else { &p.dim };
-                rows.push(tc::seg(
-                    &[
-                        (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
-                        (&c(body), a.title.trim().to_string()),
-                        (
-                            &tint,
-                            if loud || here {
-                                " ".repeat(w)
-                            } else {
-                                String::new()
-                            },
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-            // A background agent's message and warning, wrapped rather
-            // than cut onto the title row; counted in its height above.
-            for (alarm, line) in notes {
-                let body = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
-                rows.push(tc::seg(
-                    &[
-                        (&c(body), line),
-                        (&tint, if loud || here { " ".repeat(w) } else { String::new() }),
-                    ],
-                    w - 1,
-                ));
-            }
-            // The window counts these rows in the agent's height, so
-            // they are the same ones `job_lines` gave it.
-            for (unread, line) in job_lines(&a.work, w.saturating_sub(1), jobs_room) {
-                rows.push(tc::seg(
-                    &[
-                        (&c(if unread { &p.unknown } else { &p.working }), line),
-                        (
-                            &tint,
-                            if loud || here {
-                                " ".repeat(w)
-                            } else {
-                                String::new()
-                            },
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-            rows_at.extend((from..rows.len()).map(|row| (row, i)));
-        }
-        if agents.is_empty() && err.is_empty() {
-            rows.push(tc::seg(
-                &[(p.dim.as_str(), "   no agents running".into())],
-                w - 1,
-            ));
-        }
-
-        rows.push(String::new());
-        let mut heading = vec![
-            (p.lbl.as_str(), " ── PROCESSES ── ".into()),
-            (
-                p.dim.as_str(),
-                format!("{} pane{} running something", running, plural(running)),
-            ),
-        ];
-        if !unread.is_empty() {
-            heading.push((
-                p.unknown.as_str(),
-                format!("  · {} could not be read", unread.len()),
-            ));
-        }
-        heading.push((p.dim.as_str(), showing(&window, agents.len(), busy.len())));
-        rows.push(tc::seg(&heading, w - 1));
-        if wide {
-            rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    tc::pad(
-                        &format!(
-                            " {:<cw$} {:<5} {:<5} {}",
-                            "COMMAND",
-                            "CPU",
-                            "MEM",
-                            "WORKSPACE",
-                            cw = command_w + 1
-                        ),
-                        w - 1,
-                    ),
-                )],
-                w - 1,
-            ));
-        }
-        // The reason, on a line of its own rather than after the count in
-        // the heading: on an eighty-column pane the heading runs out of room
-        // exactly where the reason starts, and the reason is the half worth
-        // keeping. They fail one reason at a time - the socket, or a pane
-        // going away between the listing and the probe - so the first one
-        // speaks for all of them.
-        if let Some(n) = unread.first() {
-            let why = if n.why.is_empty() {
-                "no reason given"
-            } else {
-                &n.why
-            };
-            rows.push(tc::seg(
-                &[(p.unknown.as_str(), format!("   ⚠ {}", why))],
-                w - 1,
-            ));
-        }
-        for (j, n) in busy.iter().enumerate() {
-            if !window.contains(&(agents.len() + j)) {
-                continue;
-            }
-            let from = rows.len();
-            let here = agents.len() + j == selected;
-            let tint = if here {
-                tc::tint(tc::Role::Slot)
-            } else {
-                String::new()
-            };
-            let c = |colour: &str| {
-                // Any colour that would not clear AA on this tint is swapped
-                // for its lighter twin. `dim` was measured first; a review
-                // found the others after the first fix shipped saying it was
-                // done, so they are here by measurement rather than by guess.
-                let colour = if tint.is_empty() {
-                    colour
-                } else if colour == p.dim {
-                    p.dim_lit.as_str()
-                } else if colour == p.idle {
-                    p.idle_lit.as_str()
-                } else if colour == p.unknown {
-                    p.unknown_lit.as_str()
-                } else if colour == p.blocked {
-                    p.blocked_lit.as_str()
-                } else if colour == p.idle_c {
-                    p.idle_c_lit.as_str()
-                } else {
-                    p.on_tint(colour)
-                };
-                format!("{}{}", tint, colour)
-            };
-            // The lifted ramp, for the same reason as the agent table above:
-            // a tinted row is where the number is least readable and most
-            // looked at.
-            let heat = match n.cpu {
-                Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
-                _ => p.dim.clone(),
-            };
-            // An unread pane says so in words where a command would go. A
-            // bare "?" is what a running pane with unparseable argv shows,
-            // and the two are not the same thing at all.
-            let unreadable = n.doing == Doing::Unknown;
-            let mut line = vec![
-                (
-                    c(if unreadable { &p.unknown } else { &p.proc }),
-                    format!(
-                        "{}{} ",
-                        if here { "▸" } else { " " },
-                        if unreadable { '⚠' } else { '▪' }
-                    ),
-                ),
-                (
-                    c(if unreadable { &p.unknown } else { &p.txt }),
-                    tc::pad(
-                        if unreadable {
-                            "could not be read"
-                        } else if n.command.is_empty() {
-                            "?"
-                        } else {
-                            &n.command
-                        },
-                        command_w,
-                    ),
-                ),
-                (c(&heat), percent(n.cpu)),
-            ];
-            if wide {
-                let place = place_of(&n.workspace_id, &n.pane_id);
-                line.push((c(&p.dim), format!(" {}", mem(n.rss))));
-                line.push((c(&p.accent), format!(" {}", tc::pad(&place, busy_place_w))));
-            }
-            if here {
-                line.push((tint.clone(), " ".repeat(w)));
-            }
-            let refs: Vec<(&str, String)> =
-                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-            rows.push(tc::seg(&refs, w - 1));
-            rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + j)));
-        }
-        // True only when nothing was unread either: an empty section with a
-        // pane the probe failed on is not a Herdr where everything rests.
-        if busy.is_empty() {
-            rows.push(tc::seg(
+        let nothing = |of: usize| {
+            tc::seg(
                 &[(
                     p.dim.as_str(),
                     format!(
-                        "   {}",
-                        process_filter::empty_message(
-                            hidden_opscope,
-                            resting.len(),
-                            "every other pane is idle at a prompt"
-                        )
+                        "   none of {} match{}",
+                        of,
+                        search.filter().map(|f| format!(" {}", f)).unwrap_or_default()
                     ),
                 )],
                 w - 1,
-            ));
-        }
-
-        // The idle section's heading is drawn whenever there is an idle
-        // section at all, and it is never what gets cut - that was OPS-34:
-        // dropping it silently left the footer offering [i]dle with nothing
-        // behind it. Rationing rows for it is no longer how that is kept.
-        // The window bounds the entries above, so the heading always fits,
-        // and it says how many are on screen when not all of them are.
-        if idle_listed {
-            rows.push(String::new());
+            )
+        };
+        // A query that leaves nothing on the whole board says so, rather
+        // than drawing three empty sections - unless a pane could not be
+        // read, whose reason PROCESSES carries.
+        let emptied = if filtering && unread.is_empty() && rows_now.is_empty() {
+            tc::filtered_to_nothing(total, &filters)
+        } else {
+            None
+        };
+        rows.extend(hidden_rows);
+        if let Some(said) = emptied {
+            for line in tc::wrap_words(&said, w.saturating_sub(3).max(1)) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
+            }
+        } else {
             rows.push(tc::seg(
                 &[
-                    (p.lbl.as_str(), " ── IDLE ── ".into()),
+                    (p.lbl.as_str(), " ── AGENTS ── ".into()),
                     (
                         p.dim.as_str(),
-                        format!(
-                            "{} pane{} at a prompt",
-                            resting.len(),
-                            plural(resting.len())
-                        ),
+                        super::search::count(agents.len(), all_agents.len(), filtering),
                     ),
-                    (
-                        p.dim.as_str(),
-                        showing(&window, agents.len() + busy.len(), resting.len()),
-                    ),
+                    (p.dim.as_str(), showing(&window, 0, agents.len())),
                 ],
                 w - 1,
             ));
-            for (j, n) in resting.iter().enumerate() {
-                if !window.contains(&(agents.len() + busy.len() + j)) {
+            // AGENT sits over the mark as well as the name, hence the two.
+            let mut head = format!(
+                " {:<nw$} {:<8} {:<6} {:<5}",
+                "AGENT",
+                "STATE",
+                "FOR",
+                "CPU",
+                nw = name_w + 2
+            );
+            if wide {
+                head += &format!(" {:<5} {}", "MEM", "WORKSPACE");
+            }
+            rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
+
+            for (i, a) in agents.iter().enumerate() {
+                if !window.contains(&i) {
+                    continue;
+                }
+                let mut rule = Vec::new();
+                let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
+                let notes = notes_of(i);
+                let lead_shown = lead_fits(lead.len(), notes.len(), &a.work);
+                let jobs_room = job_room(lead.len(), notes.len(), lead_shown);
+                if lead_shown {
+                    rows.extend(lead);
+                    plots.extend(rule);
+                }
+                let from = rows.len();
+                let here = i == selected;
+                let colour = colour_of(&a.state, &p);
+                // Blocked keeps a tint of its own even unselected: it is the one
+                // row that has to be visible without being looked for. Done
+                // does not - a green ground read as a second state beside the
+                // one the row names.
+                let loud = a.state == "blocked" || a.state == "done";
+                let tint = if here {
+                    tc::tint(tc::Role::Slot)
+                } else if a.state == "blocked" {
+                    tc::tint_toward(tc::Role::Red)
+                } else {
+                    String::new()
+                };
+                let c = |colour: &str| {
+                    // Any colour that would not clear AA on this tint is swapped
+                    // for its lighter twin. `dim` was measured first; a review
+                    // found the others after the first fix shipped saying it was
+                    // done, so they are here by measurement rather than by guess.
+                    let colour = if tint.is_empty() {
+                        colour
+                    } else if colour == p.dim {
+                        p.dim_lit.as_str()
+                    } else if colour == p.idle {
+                        p.idle_lit.as_str()
+                    } else if colour == p.unknown {
+                        p.unknown_lit.as_str()
+                    } else if colour == p.blocked {
+                        p.blocked_lit.as_str()
+                    } else if colour == p.idle_c {
+                        p.idle_c_lit.as_str()
+                    } else {
+                        p.on_tint(colour)
+                    };
+                    format!("{}{}", tint, colour)
+                };
+                let name = tc::pad(&a.name, name_w);
+                let state_cell = if loud {
+                    a.state.to_uppercase()
+                } else {
+                    a.state.clone()
+                };
+                // `heat_on`, because this cell goes through the tint closure and
+                // the plain ramp's hot end cannot be read on any of the three
+                // tints above: 3.18 on the selection blue, 4.35 on blocked, 3.85
+                // on done. A pane at 100% CPU is the row you selected it to read.
+                let heat = match a.cpu {
+                    Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
+                    _ => p.dim.clone(),
+                };
+                let mut line = vec![
+                    (
+                        c(colour),
+                        format!(
+                            "{}{} {}",
+                            if here { "▸" } else { " " },
+                            mark_of(&a.state, tick),
+                            name
+                        ),
+                    ),
+                    (c(colour), format!(" {:<8}", state_cell)),
+                    (
+                        c(&p.dim),
+                        format!(
+                            " {:<6}",
+                            format!("{}{}", if a.exact { "" } else { "≥" }, ago(a.since))
+                        ),
+                    ),
+                    (c(&heat), percent(a.cpu)),
+                ];
+                if wide {
+                    let place = place_of(&a.workspace_id, &a.pane_id);
+                    line.push((c(&p.dim), format!(" {}", mem(a.rss))));
+                    line.push((c(&p.accent), format!(" {}", tc::pad(&place, agent_place_w))));
+                }
+                if loud || here {
+                    line.push((tint.clone(), " ".repeat(w)));
+                }
+                let refs: Vec<(&str, String)> =
+                    line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                rows.push(tc::seg(&refs, w - 1));
+                if rows.len() < h.saturating_sub(1) {
+                    let body = if loud || here { &p.txt } else { &p.dim };
+                    rows.push(tc::seg(
+                        &[
+                            (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
+                            (&c(body), a.title.trim().to_string()),
+                            (
+                                &tint,
+                                if loud || here {
+                                    " ".repeat(w)
+                                } else {
+                                    String::new()
+                                },
+                            ),
+                        ],
+                        w - 1,
+                    ));
+                }
+                // A background agent's message and warning, wrapped rather
+                // than cut onto the title row; counted in its height above.
+                for (alarm, line) in notes {
+                    let body = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
+                    rows.push(tc::seg(
+                        &[
+                            (&c(body), line),
+                            (&tint, if loud || here { " ".repeat(w) } else { String::new() }),
+                        ],
+                        w - 1,
+                    ));
+                }
+                // The window counts these rows in the agent's height, so
+                // they are the same ones `job_lines` gave it.
+                for (unread, line) in job_lines(&a.work, w.saturating_sub(1), jobs_room) {
+                    rows.push(tc::seg(
+                        &[
+                            (&c(if unread { &p.unknown } else { &p.working }), line),
+                            (
+                                &tint,
+                                if loud || here {
+                                    " ".repeat(w)
+                                } else {
+                                    String::new()
+                                },
+                            ),
+                        ],
+                        w - 1,
+                    ));
+                }
+                rows_at.extend((from..rows.len()).map(|row| (row, i)));
+            }
+            if all_agents.is_empty() && err.is_empty() {
+                rows.push(tc::seg(
+                    &[(p.dim.as_str(), "   no agents running".into())],
+                    w - 1,
+                ));
+            } else if !all_agents.is_empty() && agents.is_empty() {
+                rows.push(nothing(all_agents.len()));
+            }
+
+            rows.push(String::new());
+            let mut heading = vec![
+                (p.lbl.as_str(), " ── PROCESSES ── ".into()),
+                (
+                    p.dim.as_str(),
+                    if filtering {
+                        format!(
+                            "{} pane{}",
+                            super::search::count(busy_shown.len(), busy.len(), true),
+                            plural(busy.len())
+                        )
+                    } else {
+                        format!("{} pane{} running something", running, plural(running))
+                    },
+                ),
+            ];
+            if !unread.is_empty() {
+                heading.push((
+                    p.unknown.as_str(),
+                    format!("  · {} could not be read", unread.len()),
+                ));
+            }
+            heading.push((p.dim.as_str(), showing(&window, agents.len(), busy_shown.len())));
+            rows.push(tc::seg(&heading, w - 1));
+            if wide {
+                rows.push(tc::seg(
+                    &[(
+                        p.dim.as_str(),
+                        tc::pad(
+                            &format!(
+                                " {:<cw$} {:<5} {:<5} {}",
+                                "COMMAND",
+                                "CPU",
+                                "MEM",
+                                "WORKSPACE",
+                                cw = command_w + 1
+                            ),
+                            w - 1,
+                        ),
+                    )],
+                    w - 1,
+                ));
+            }
+            // The reason, on a line of its own rather than after the count in
+            // the heading: on an eighty-column pane the heading runs out of room
+            // exactly where the reason starts, and the reason is the half worth
+            // keeping. They fail one reason at a time - the socket, or a pane
+            // going away between the listing and the probe - so the first one
+            // speaks for all of them.
+            if let Some(n) = unread.first() {
+                let why = if n.why.is_empty() {
+                    "no reason given"
+                } else {
+                    &n.why
+                };
+                rows.push(tc::seg(
+                    &[(p.unknown.as_str(), format!("   ⚠ {}", why))],
+                    w - 1,
+                ));
+            }
+            for (j, n) in busy_shown.iter().enumerate() {
+                if !window.contains(&(agents.len() + j)) {
                     continue;
                 }
                 let from = rows.len();
-                let here = agents.len() + busy.len() + j == selected;
+                let here = agents.len() + j == selected;
                 let tint = if here {
                     tc::tint(tc::Role::Slot)
                 } else {
@@ -2110,22 +2155,154 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     };
                     format!("{}{}", tint, colour)
                 };
-                let place = place_of(&n.workspace_id, &n.pane_id);
+                // The lifted ramp, for the same reason as the agent table above:
+                // a tinted row is where the number is least readable and most
+                // looked at.
+                let heat = match n.cpu {
+                    Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
+                    _ => p.dim.clone(),
+                };
+                // An unread pane says so in words where a command would go. A
+                // bare "?" is what a running pane with unparseable argv shows,
+                // and the two are not the same thing at all.
+                let unreadable = n.doing == Doing::Unknown;
                 let mut line = vec![
-                    (c(&p.idle_c), format!("{}▫ ", if here { "▸" } else { " " })),
                     (
-                        c(&p.idle_c),
-                        tc::pad(&tail_path(&homely(&n.cwd), dir_w), dir_w + 1),
+                        c(if unreadable { &p.unknown } else { &p.proc }),
+                        format!(
+                            "{}{} ",
+                            if here { "▸" } else { " " },
+                            if unreadable { '⚠' } else { '▪' }
+                        ),
                     ),
-                    (c(&p.accent), tc::pad(&place, idle_place_w)),
+                    (
+                        c(if unreadable { &p.unknown } else { &p.txt }),
+                        tc::pad(
+                            if unreadable {
+                                "could not be read"
+                            } else if n.command.is_empty() {
+                                "?"
+                            } else {
+                                &n.command
+                            },
+                            command_w,
+                        ),
+                    ),
+                    (c(&heat), percent(n.cpu)),
                 ];
+                if wide {
+                    let place = place_of(&n.workspace_id, &n.pane_id);
+                    line.push((c(&p.dim), format!(" {}", mem(n.rss))));
+                    line.push((c(&p.accent), format!(" {}", tc::pad(&place, busy_place_w))));
+                }
                 if here {
                     line.push((tint.clone(), " ".repeat(w)));
                 }
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
-                rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + busy.len() + j)));
+                rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + j)));
+            }
+            // True only when nothing was unread either: an empty section with a
+            // pane the probe failed on is not a Herdr where everything rests.
+            if busy.is_empty() {
+                rows.push(tc::seg(
+                    &[(
+                        p.dim.as_str(),
+                        format!(
+                            "   {}",
+                            process_filter::empty_message(
+                                hidden_opscope,
+                                resting.len(),
+                                "every other pane is idle at a prompt"
+                            )
+                        ),
+                    )],
+                    w - 1,
+                ));
+            } else if busy_shown.is_empty() {
+                rows.push(nothing(busy.len()));
+            }
+
+            // The idle section's heading is drawn whenever there is an idle
+            // section at all, and it is never what gets cut - that was OPS-34:
+            // dropping it silently left the footer offering [i]dle with nothing
+            // behind it. Rationing rows for it is no longer how that is kept.
+            // The window bounds the entries above, so the heading always fits,
+            // and it says how many are on screen when not all of them are.
+            if idle_listed {
+                rows.push(String::new());
+                rows.push(tc::seg(
+                    &[
+                        (p.lbl.as_str(), " ── IDLE ── ".into()),
+                        (
+                            p.dim.as_str(),
+                            format!(
+                                "{} pane{} at a prompt",
+                                super::search::count(resting_shown.len(), resting.len(), filtering),
+                                plural(resting.len())
+                            ),
+                        ),
+                        (
+                            p.dim.as_str(),
+                            showing(&window, agents.len() + busy_shown.len(), resting_shown.len()),
+                        ),
+                    ],
+                    w - 1,
+                ));
+                if resting_shown.is_empty() {
+                    rows.push(nothing(resting.len()));
+                }
+                for (j, n) in resting_shown.iter().enumerate() {
+                    if !window.contains(&(agents.len() + busy_shown.len() + j)) {
+                        continue;
+                    }
+                    let from = rows.len();
+                    let here = agents.len() + busy_shown.len() + j == selected;
+                    let tint = if here {
+                        tc::tint(tc::Role::Slot)
+                    } else {
+                        String::new()
+                    };
+                    let c = |colour: &str| {
+                        // Any colour that would not clear AA on this tint is swapped
+                        // for its lighter twin. `dim` was measured first; a review
+                        // found the others after the first fix shipped saying it was
+                        // done, so they are here by measurement rather than by guess.
+                        let colour = if tint.is_empty() {
+                            colour
+                        } else if colour == p.dim {
+                            p.dim_lit.as_str()
+                        } else if colour == p.idle {
+                            p.idle_lit.as_str()
+                        } else if colour == p.unknown {
+                            p.unknown_lit.as_str()
+                        } else if colour == p.blocked {
+                            p.blocked_lit.as_str()
+                        } else if colour == p.idle_c {
+                            p.idle_c_lit.as_str()
+                        } else {
+                            p.on_tint(colour)
+                        };
+                        format!("{}{}", tint, colour)
+                    };
+                    let place = place_of(&n.workspace_id, &n.pane_id);
+                    let mut line = vec![
+                        (c(&p.idle_c), format!("{}▫ ", if here { "▸" } else { " " })),
+                        (
+                            c(&p.idle_c),
+                            tc::pad(&tail_path(&homely(&n.cwd), dir_w), dir_w + 1),
+                        ),
+                        (c(&p.accent), tc::pad(&place, idle_place_w)),
+                    ];
+                    if here {
+                        line.push((tint.clone(), " ".repeat(w)));
+                    }
+                    let refs: Vec<(&str, String)> =
+                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    rows.push(tc::seg(&refs, w - 1));
+                    rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + busy_shown.len() + j)));
+                }
             }
         }
 
@@ -2785,5 +2962,60 @@ mod tests {
         assert!(doing_rank(Doing::Running) < doing_rank(Doing::Prompt));
         // A pane nobody has looked at yet is unread, not resting.
         assert_eq!(Doing::default(), Doing::Unknown);
+    }
+
+    #[test]
+    fn the_cursor_follows_its_pane_through_a_refresh() {
+        let before = vec![Row::Agent(agent("a", "w", "idle")), Row::Agent(agent("b", "w", "idle"))];
+        let after = vec![
+            Row::Agent(agent("new", "w", "blocked")),
+            Row::Agent(agent("a", "w", "idle")),
+            Row::Agent(agent("b", "w", "idle")),
+        ];
+        assert_eq!(reselect(&before, 1, &after, false), 2, "still on b");
+        let gone = vec![Row::Agent(agent("a", "w", "idle"))];
+        assert_eq!(reselect(&before, 1, &gone, false), 1, "b went: left for the clamp");
+        assert_eq!(reselect(&before, 1, &gone, true), 0, "the filter hid b: first match");
+    }
+
+    #[test]
+    fn the_filter_matches_the_words_a_row_shows() {
+        let labels: HashMap<String, String> = [("w".to_string(), "opscope".to_string())].into();
+        let a = agent("p", "w", "blocked");
+        assert!(super::super::search::matches("opsc", &a.search_fields(Some(&labels))));
+        assert!(super::super::search::matches("block", &a.search_fields(Some(&labels))));
+        let unread = Panel { workspace_id: "w".into(), ..Default::default() };
+        let fields = unread.search_fields(Some(&labels));
+        assert!(fields.contains(&"could not be read".to_string()));
+        assert!(fields.iter().all(|f| !f.is_empty()));
+    }
+
+    #[test]
+    fn with_labels_hidden_the_filter_matches_the_pane_id_shown() {
+        let labels: HashMap<String, String> = [("w".to_string(), "opscope".to_string())].into();
+        let mut a = agent("p", "w", "idle");
+        a.pane_id = "p-7".into();
+        // Labels shown: the label is on screen, the pane id is not.
+        assert!(super::super::search::matches("opsc", &a.search_fields(Some(&labels))));
+        assert!(!super::super::search::matches("p-7", &a.search_fields(Some(&labels))));
+        // Labels hidden: the pane id is what the row shows.
+        assert!(super::super::search::matches("p-7", &a.search_fields(None)));
+        assert!(!super::super::search::matches("opsc", &a.search_fields(None)));
+    }
+
+    #[test]
+    fn the_filter_finds_an_agent_by_its_session_log_work() {
+        // An Explore subagent from the session log is drawn under the agent,
+        // so /explore finds the agent.
+        let labels: HashMap<String, String> = HashMap::new();
+        let mut a = agent("p", "w", "working");
+        assert!(!super::super::search::matches("explore", &a.search_fields(Some(&labels))));
+        a.work.logs.tasks.push(tc::agent_work::LogTask {
+            id: "1".into(),
+            label: "Explore".into(),
+            state: tc::agent_work::Activity::Working,
+            updated: String::new(),
+        });
+        assert!(super::super::search::matches("explore", &a.search_fields(Some(&labels))));
     }
 }

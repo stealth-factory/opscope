@@ -58,6 +58,10 @@ pub const PALETTE_HINT: &str = palette::HINT;
 /// every footer: the picker has a key of its own as well as a row in the
 /// palette.
 pub const THEME_HINT: &str = picker::HINT;
+/// The palette's fuzzy match, for a widget whose `/` filter should find
+/// what the palette would: characters in order, case-insensitive, a match
+/// at the start of a word preferred. `None` when it does not match.
+pub use picker::fuzzy;
 pub use statefile::state_dir;
 
 use std::io::{Read, Write};

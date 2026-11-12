@@ -22,6 +22,17 @@ mouse wheel; none of them move the selection. Enter focuses the selected
 pane, i shows or hides the idle section, o shows or hides opscope's own
 panes (hidden by default), r refreshes now, comma opens settings, q quits.
 
+Press / to filter every board to the agents and panes that fuzzy-match what
+you type: the letters in order, any case, a match at the start of a word
+preferred. A row is matched on what it shows - agent or command, session or
+workspace, directory, branch, title and the message it reported. Rows keep
+their own order, worst first, so a blocked agent never drops below an idle
+one that matched better. Enter keeps the filter and returns to the list,
+esc clears it; with a filter kept, / edits it and esc clears it. The section
+headings count the subset (3 of 14) and the line under the counts names the
+filter, and a query that matches nothing says so instead of drawing an
+empty board.
+
 Press ! to read this widget's notices - warnings that are not about a number on
 screen, such as a config file others can read, a recommended tool that is
 missing or a Rex server on another API revision - and dismiss them for this

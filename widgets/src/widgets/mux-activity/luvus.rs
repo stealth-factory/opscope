@@ -619,7 +619,84 @@ impl Row {
             Row::Resumable(r) => r.kind.clone(),
         }
     }
+
+    /// What the `/` filter matches the row on: the words it shows - agent
+    /// or command, workspace, directory, branch, title and what it reported.
+    fn search_fields(&self) -> Vec<String> {
+        let mut out = match self {
+            Row::Agent(a) => {
+                let mut out = vec![
+                    a.name.clone(),
+                    a.kind.clone(),
+                    a.state.clone(),
+                    a.workspace.clone(),
+                    a.branch.clone(),
+                    a.project.clone(),
+                    parse::homely(&a.cwd),
+                    a.state_source.clone(),
+                ];
+                // What its place column shows in place of a workspace.
+                if a.job.is_some() {
+                    out.push(a.group_label.clone());
+                }
+                out.extend(a.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
+                out
+            }
+            Row::Task(t) => vec![t.id.clone(), t.status.clone(), t.title.clone(), t.holder.clone()],
+            Row::Lease(l) => {
+                let mut out = vec![l.task.clone(), l.holder.clone()];
+                out.extend(l.paths.iter().cloned());
+                out
+            }
+            Row::Pane(n) => vec![
+                n.command.clone(),
+                if n.status.is_empty() { "no state".into() } else { n.status.clone() },
+                n.workspace.clone(),
+                n.branch.clone(),
+                parse::homely(&n.cwd),
+            ],
+            // Both wordings of the membership, since the pane's width
+            // picks which one is drawn.
+            Row::Resumable(r) => vec![
+                r.kind.clone(),
+                parse::homely(&r.cwd),
+                membership_label(r.in_workspace, true).into(),
+                membership_label(r.in_workspace, false).into(),
+            ],
+        };
+        out.retain(|s| !s.is_empty());
+        out
+    }
+
+    /// Whether two rows are the same entry, across a rebuild of the list.
+    fn same(&self, other: &Row) -> bool {
+        match (self, other) {
+            // A background agent has no pane; its job id is its identity.
+            (Row::Agent(a), Row::Agent(b)) => match (&a.job, &b.job) {
+                (Some(x), Some(y)) => x.short == y.short,
+                (None, None) => a.pane == b.pane && a.name == b.name,
+                _ => false,
+            },
+            (Row::Task(a), Row::Task(b)) => a.id == b.id,
+            (Row::Lease(a), Row::Lease(b)) => a.id == b.id && a.task == b.task,
+            (Row::Pane(a), Row::Pane(b)) => a.pane_id == b.pane_id,
+            (Row::Resumable(a), Row::Resumable(b)) => {
+                a.session_id == b.session_id && a.kind == b.kind && a.cwd == b.cwd
+            }
+            _ => false,
+        }
+    }
 }
+
+/// Where the cursor lands once the list is rebuilt. The cursor is a row,
+/// not a position: a refresh that puts a newly blocked agent above it must
+/// not move `↵` onto somebody else. A row that has gone leaves the index
+/// where it was, clamped by the caller - unless the `/` filter just hid it,
+/// and then the cursor goes to the first match.
+fn reselect(before: &[Row], selected: usize, after: &[Row], filter_changed: bool) -> usize {
+    super::search::reselect(before, selected, after, filter_changed, |a, b| a.same(b))
+}
+
 
 struct Palette {
     blocked: String,
@@ -890,10 +967,11 @@ fn keep_live(seen: &mut Seen, live: &HashSet<String>) {
     seen.since.retain(|k, _| live.contains(k));
 }
 
-/// The count a heading may print. A failed source has no number.
-fn shown_count<T>(reading: &Result<Vec<T>, String>) -> String {
+/// The count a heading may print: `3 of 14` while the `/` filter holds
+/// some back. A failed source has no number.
+fn shown_count<T>(reading: &Result<Vec<T>, String>, shown: usize, filtering: bool) -> String {
     match reading {
-        Ok(rows) => rows.len().to_string(),
+        Ok(rows) => super::search::count(shown, rows.len(), filtering),
         Err(_) => "unread".into(),
     }
 }
@@ -1193,6 +1271,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
     let mut opscope_filter = process_filter::Filter::default();
+    let mut search = super::search::Search::default();
     let mut selected = 0usize;
     // How far down the body, in drawn rows, the window has scrolled. Kept
     // across frames so the view holds still while the cursor moves inside
@@ -1224,6 +1303,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
     loop {
         let tick = tc::animation_tick();
+        // The query line takes `!` as a character, not the notices screen.
+        if search.typing {
+            keyboard.typing();
+        }
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1242,6 +1325,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             moved = true;
         }
         for key in keys {
+            if search.takes(&key) {
+                search.key(&key);
+                moved = true;
+                continue;
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     stop.store(true, Ordering::Relaxed);
@@ -1329,6 +1417,13 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         ));
                     }
                 }
+                // The evidence panel keeps `esc` while it is open; on the
+                // board it clears the filter.
+                "esc" if detail.is_none() && search.active() => {
+                    search.clear();
+                    moved = true;
+                }
+                "/" if detail.is_none() => search.open(),
                 "esc" => {
                     detail = None;
                     detail_gen += 1;
@@ -1523,16 +1618,49 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let unstated = busy.iter().filter(|n| n.status.is_empty()).count();
         let running = busy.len() - unstated;
 
-        rows_now = agent_rows
+        // The `/` filter only includes or excludes: each section keeps the
+        // order above, so a blocked agent stays above an idle one that
+        // matched better. The unfiltered lists still feed the summary.
+        let filtering = search.active();
+        let keep = |row: Row| search.matches(&row.search_fields());
+        let agents_shown: Vec<Agent> =
+            agent_rows.iter().filter(|a| keep(Row::Agent((*a).clone()))).cloned().collect();
+        // An agent's work warning is drawn on its row, so one the filter
+        // hides is said above the sections instead.
+        let hidden_why: Option<String> = if filtering {
+            agent_rows
+                .iter()
+                .filter(|a| !keep(Row::Agent((*a).clone())))
+                .find_map(|a| super::search::work_warning(&a.work))
+        } else {
+            None
+        };
+        let tasks_shown: Vec<Task> =
+            task_rows.iter().filter(|t| keep(Row::Task((*t).clone()))).cloned().collect();
+        let leases_shown: Vec<Lease> =
+            lease_rows.iter().filter(|l| keep(Row::Lease((*l).clone()))).cloned().collect();
+        let resumable_shown: Vec<Resumable> = resumable_rows
+            .iter()
+            .filter(|r| keep(Row::Resumable((*r).clone())))
+            .cloned()
+            .collect();
+        let busy_shown: Vec<Pane> =
+            busy.iter().filter(|n| keep(Row::Pane((*n).clone()))).cloned().collect();
+        let resting_shown: Vec<Pane> =
+            resting.iter().filter(|n| keep(Row::Pane((*n).clone()))).cloned().collect();
+
+        let before = std::mem::take(&mut rows_now);
+        rows_now = agents_shown
             .iter()
             .cloned()
             .map(Row::Agent)
-            .chain(task_rows.iter().cloned().map(Row::Task))
-            .chain(lease_rows.iter().cloned().map(Row::Lease))
-            .chain(resumable_rows.iter().cloned().map(Row::Resumable))
-            .chain(busy.iter().cloned().map(Row::Pane))
-            .chain(resting.iter().filter(|_| show_idle).cloned().map(Row::Pane))
+            .chain(tasks_shown.iter().cloned().map(Row::Task))
+            .chain(leases_shown.iter().cloned().map(Row::Lease))
+            .chain(resumable_shown.iter().cloned().map(Row::Resumable))
+            .chain(busy_shown.iter().cloned().map(Row::Pane))
+            .chain(resting_shown.iter().filter(|_| show_idle).cloned().map(Row::Pane))
             .collect();
+        selected = reselect(&before, selected, &rows_now, search.take_changed());
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
@@ -1545,24 +1673,24 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         let idle_listed = show_idle && !resting.is_empty();
         sections = [
-            (0, !agent_rows.is_empty()),
-            (agent_rows.len(), !task_rows.is_empty()),
-            (agent_rows.len() + task_rows.len(), !lease_rows.is_empty()),
+            (0, !agents_shown.is_empty()),
+            (agents_shown.len(), !tasks_shown.is_empty()),
+            (agents_shown.len() + tasks_shown.len(), !leases_shown.is_empty()),
             (
-                agent_rows.len() + task_rows.len() + lease_rows.len(),
-                !resumable_rows.is_empty(),
+                agents_shown.len() + tasks_shown.len() + leases_shown.len(),
+                !resumable_shown.is_empty(),
             ),
             (
-                agent_rows.len() + task_rows.len() + lease_rows.len() + resumable_rows.len(),
-                !busy.is_empty(),
+                agents_shown.len() + tasks_shown.len() + leases_shown.len() + resumable_shown.len(),
+                !busy_shown.is_empty(),
             ),
             (
-                agent_rows.len()
-                    + task_rows.len()
-                    + lease_rows.len()
-                    + resumable_rows.len()
-                    + busy.len(),
-                idle_listed,
+                agents_shown.len()
+                    + tasks_shown.len()
+                    + leases_shown.len()
+                    + resumable_shown.len()
+                    + busy_shown.len(),
+                idle_listed && !resting_shown.is_empty(),
             ),
         ]
         .into_iter()
@@ -1717,8 +1845,20 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // report it as something the filter had hidden.
         // Held out of `head` until after the prune: that loop pops from
         // the bottom, and this row would be the first content it took.
-        let shown = busy.len() + if show_idle { resting.len() } else { 0 };
-        let filter_line = tc::filter_row(shown, total_others, &hidden_idle).map(|said| {
+        // The `/` filter reaches every section, so while it holds the count
+        // is every row listed against every row there is, not panes alone.
+        hidden_idle.extend(search.filter());
+        let board = agent_rows.len()
+            + task_rows.len()
+            + lease_rows.len()
+            + resumable_rows.len()
+            + total_others;
+        let (shown, of) = if filtering {
+            (rows_now.len(), board)
+        } else {
+            (busy.len() + if show_idle { resting.len() } else { 0 }, total_others)
+        };
+        let filter_line = tc::filter_row(shown, of, &hidden_idle).map(|said| {
             tc::seg(
                 &[(p.dim.as_str(), format!(" {}", said))],
                 w.saturating_sub(1),
@@ -1729,7 +1869,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // ---- the footer, built before the body ----
         // It wraps, so how many rows it takes depends on the width, and the
         // body cannot know its own budget until that is settled.
-        let mut hints: Vec<Vec<(&str, String)>> = vec![
+        let mut hints: Vec<Vec<(&str, String)>> = search.hints(&p.dim);
+        hints.extend(vec![
             vec![(
                 p.dim.as_str(),
                 format!(
@@ -1759,11 +1900,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
-        ];
+        ]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+        let hints = if search.typing { search.typing_hints(&p.accent, &p.dim, w.saturating_sub(2)) } else { hints };
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
         let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
@@ -2096,11 +2238,48 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 body.push(String::new());
             }
 
+            let nothing = |of: usize| {
+                tc::seg(
+                    &[(
+                        p.dim.as_str(),
+                        format!(
+                            "   none of {} match{}",
+                            of,
+                            search.filter().map(|f| format!(" {}", f)).unwrap_or_default()
+                        ),
+                    )],
+                    w.saturating_sub(1),
+                )
+            };
+            // A query that leaves nothing on the whole board says so,
+            // rather than drawing six empty sections - but only when every
+            // reading answered. A failed one draws as an empty list, so the
+            // sections stay up to say which could not be read.
+            let all_read = snapshot.is_ok()
+                && agents.is_ok()
+                && tasks.is_ok()
+                && leases.is_ok()
+                && sessions.is_ok();
+            let emptied = if filtering && all_read && rows_now.is_empty() {
+                tc::filtered_to_nothing(board, &hidden_idle)
+            } else {
+                None
+            };
+            if let Some(why) = &hidden_why {
+                for line in tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3)) {
+                    body.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w.saturating_sub(1)));
+                }
+            }
+            if let Some(said) = emptied {
+                for line in tc::wrap_words(&said, w.saturating_sub(3)) {
+                    body.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w.saturating_sub(1)));
+                }
+            } else {
             // ---- AGENTS ----
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── AGENTS ── ".into()),
-                    (p.dim.as_str(), shown_count(&agents)),
+                    (p.dim.as_str(), shown_count(&agents, agents_shown.len(), filtering)),
                 ],
                 w.saturating_sub(1),
             ));
@@ -2142,18 +2321,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 &[(p.dim.as_str(), tc::pad(&columns, w.saturating_sub(1)))],
                 w.saturating_sub(1),
             ));
-            let grouped = agent_rows
+            let grouped = agents_shown
                 .iter()
-                .any(|a| a.workspace != agent_rows[0].workspace);
-            for (i, a) in agent_rows.iter().enumerate() {
+                .any(|a| a.workspace != agents_shown[0].workspace);
+            for (i, a) in agents_shown.iter().enumerate() {
                 // A gap between two agents, and where a workspace begins
                 // its heading and rule - only when there are workspaces to
                 // tell apart. Above `start`, so a click there is no row's.
                 if i > 0 {
                     body.push(String::new());
                 }
-                if grouped && (i == 0 || agent_rows[i - 1].workspace != a.workspace) {
-                    let n = agent_rows.iter().filter(|o| o.workspace == a.workspace).count();
+                if grouped && (i == 0 || agents_shown[i - 1].workspace != a.workspace) {
+                    let n = agents_shown.iter().filter(|o| o.workspace == a.workspace).count();
                     let at_row = body.len();
                     body.extend(super::group_heading(
                         if a.job.is_some() { &a.group_label } else { workspace_name(&a.workspace) },
@@ -2324,6 +2503,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     )],
                     w.saturating_sub(1),
                 ));
+            } else if agents_shown.is_empty() {
+                body.push(nothing(agent_rows.len()));
             }
 
             // ---- TASKS ----
@@ -2331,7 +2512,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── TASKS ── ".into()),
-                    (p.dim.as_str(), shown_count(&tasks)),
+                    (p.dim.as_str(), shown_count(&tasks, tasks_shown.len(), filtering)),
                     // A list with tasks in it and nothing claimable are
                     // different sentences, and the count alone reads as
                     // though something were ready to pick up.
@@ -2350,7 +2531,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 ],
                 w.saturating_sub(1),
             ));
-            for t in &task_rows {
+            for t in &tasks_shown {
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
@@ -2409,6 +2590,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     )],
                     w.saturating_sub(1),
                 ));
+            } else if tasks_shown.is_empty() {
+                body.push(nothing(task_rows.len()));
             }
 
             // ---- LEASES ----
@@ -2416,11 +2599,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── LEASES ── ".into()),
-                    (p.dim.as_str(), shown_count(&leases)),
+                    (p.dim.as_str(), shown_count(&leases, leases_shown.len(), filtering)),
                 ],
                 w.saturating_sub(1),
             ));
-            for l in &lease_rows {
+            for l in &leases_shown {
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
@@ -2476,6 +2659,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     )],
                     w.saturating_sub(1),
                 ));
+            } else if leases_shown.is_empty() {
+                body.push(nothing(lease_rows.len()));
             }
 
             // ---- RESUMABLE ----
@@ -2492,7 +2677,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── RESUMABLE ── ".into()),
-                    (p.dim.as_str(), shown_count(&sessions)),
+                    (p.dim.as_str(), shown_count(&sessions, resumable_shown.len(), filtering)),
                     (
                         if membership_unread {
                             p.unknown.as_str()
@@ -2510,7 +2695,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 ],
                 w.saturating_sub(1),
             ));
-            for r in &resumable_rows {
+            for r in &resumable_shown {
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
@@ -2595,6 +2780,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     )],
                     w.saturating_sub(1),
                 ));
+            } else if resumable_shown.is_empty() {
+                body.push(nothing(resumable_rows.len()));
             }
 
             // ---- PANES ----
@@ -2603,7 +2790,19 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 (p.lbl.as_str(), " ── PANES ── ".into()),
                 (
                     p.dim.as_str(),
-                    format!("{} pane{} not at a prompt", running, plural(running)),
+                    // Unstated panes are counted apart, as unfiltered: they
+                    // are listed here but not known to be off a prompt.
+                    if filtering {
+                        let running_shown =
+                            busy_shown.iter().filter(|n| !n.status.is_empty()).count();
+                        format!(
+                            "{} pane{} not at a prompt",
+                            super::search::count(running_shown, running, true),
+                            plural(running)
+                        )
+                    } else {
+                        format!("{} pane{} not at a prompt", running, plural(running))
+                    },
                 ),
             ];
             if unstated > 0 {
@@ -2616,7 +2815,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A column head over no rows names columns that are not there.
             // The heading and its count still stand, because those are the
             // reading; the head is only a label for rows.
-            if wide && !busy.is_empty() {
+            if wide && !busy_shown.is_empty() {
                 body.push(tc::seg(
                     &[(
                         p.dim.as_str(),
@@ -2635,7 +2834,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     w.saturating_sub(1),
                 ));
             }
-            for n in &busy {
+            for n in &busy_shown {
                 let here = at == selected_row;
                 let start = body.len();
                 let tint = if here {
@@ -2732,6 +2931,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     )],
                     w.saturating_sub(1),
                 ));
+            } else if busy_shown.is_empty() {
+                body.push(nothing(busy.len()));
             }
 
             // ---- IDLE ----
@@ -2744,14 +2945,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                             p.dim.as_str(),
                             format!(
                                 "{} pane{} at a prompt",
-                                resting.len(),
+                                super::search::count(resting_shown.len(), resting.len(), filtering),
                                 plural(resting.len())
                             ),
                         ),
                     ],
                     w.saturating_sub(1),
                 ));
-                for n in &resting {
+                if resting_shown.is_empty() {
+                    body.push(nothing(resting.len()));
+                }
+                for n in &resting_shown {
                     let here = at == selected_row;
                     let start = body.len();
                     let tint = if here {
@@ -2794,6 +2998,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     spans.push(start..body.len());
                     at += 1;
                 }
+            }
             }
         }
 
@@ -3240,14 +3445,49 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_matches_what_each_row_shows() {
+        let agent = Row::Agent(Agent {
+            name: "claude".into(),
+            workspace: "api".into(),
+            branch: "feature/login".into(),
+            cwd: "/srv/api-server".into(),
+            ..Agent::default()
+        });
+        let fields = agent.search_fields();
+        assert!(super::super::search::matches("fl", &fields), "{fields:?}");
+        assert!(super::super::search::matches("api", &fields));
+        assert!(!fields.iter().any(String::is_empty));
+        let task = Row::Task(Task { id: "T-7".into(), title: "Fix the login page".into(), ..Task::default() });
+        assert!(super::super::search::matches("login", &task.search_fields()));
+        let pane = Row::Pane(Pane { command: "npm".into(), ..Pane::default() });
+        assert!(super::super::search::matches("no state", &pane.search_fields()));
+        assert!(!super::super::search::matches("zzz", &pane.search_fields()));
+    }
+
+    #[test]
+    fn the_cursor_follows_its_row_across_a_rebuild() {
+        let pane = |id: &str| Row::Pane(Pane { pane_id: id.into(), ..Pane::default() });
+        let before = vec![pane("a"), pane("b")];
+        let after = vec![pane("new"), pane("a"), pane("b")];
+        assert_eq!(reselect(&before, 1, &after, false), 2, "still on b");
+        let gone = vec![pane("a")];
+        assert_eq!(reselect(&before, 1, &gone, false), 1, "b went: left for the clamp");
+        assert_eq!(reselect(&before, 1, &gone, true), 0, "the filter hid b: first match");
+        // The same id in a different section is a different row.
+        let task = Row::Task(Task { id: "b".into(), ..Task::default() });
+        assert_eq!(reselect(&before, 1, &[task], true), 0);
+    }
+
+    #[test]
     fn a_failed_source_has_no_count_to_print() {
         let empty: Result<Vec<u8>, String> = Ok(Vec::new());
-        assert_eq!(shown_count(&empty), "0");
+        assert_eq!(shown_count(&empty, 0, false), "0");
         let listed: Result<Vec<u8>, String> = Ok(vec![1, 2]);
-        assert_eq!(shown_count(&listed), "2");
+        assert_eq!(shown_count(&listed, 2, false), "2");
+        assert_eq!(shown_count(&listed, 1, true), "1 of 2");
         let failed: Result<Vec<u8>, String> = Err("timeout".into());
-        assert_eq!(shown_count(&failed), "unread");
-        assert_ne!(shown_count(&failed), "0");
+        assert_eq!(shown_count(&failed, 0, false), "unread");
+        assert_ne!(shown_count(&failed, 0, true), "0");
     }
 
     fn said_of(line: &[(&str, String)]) -> String {
