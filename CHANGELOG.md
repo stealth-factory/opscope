@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.14.0] - 2026-11-12
+
+### CI
+
+- Install rustup on a self-hosted Mac without editing shell profiles (OPS-278) (#623)
+
+### Features
+
+- **agent-activity**: Show local agents and their child work (#615)
+- **agent-usage**: Share vendor readings across panes (OPS-274) (#619)
+
 ## [2.13.0] - 2026-11-11
 
 ### CI
