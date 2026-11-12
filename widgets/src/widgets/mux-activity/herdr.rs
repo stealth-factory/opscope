@@ -32,7 +32,7 @@ use opscope_core as tc;
 
 use super::herdr_events as events;
 use super::herdr_parse as parse;
-use super::{process_filter, refresh_wake};
+use super::{background, process_filter, refresh_wake};
 
 
 /// Worst first: the states that want a human are the reason to look.
@@ -272,6 +272,8 @@ pub(crate) struct Agent {
     /// the agent. Herdr carries no child records, so this is the process
     /// table's answer and the row says so.
     work: tc::agent_work::Work,
+    /// A Claude background agent with no pane, drawn as an agent row.
+    job: Option<tc::agent_work::Job>,
 }
 
 /// The slice of a variable-height list that fits `room` rows and holds the
@@ -483,6 +485,14 @@ fn cpu_of(seen: &mut Seen, pid: i32, at: f64, hz: f64) -> (Option<f64>, Option<u
     (cpu, Some(rss))
 }
 
+/// The session id Herdr's integration reported for an agent, when it did.
+fn reported_session(entry: &serde_json::Value) -> Option<String> {
+    let session = &entry["agent_session"];
+    (session["kind"].as_str() == Some("id"))
+        .then(|| text_at(session, "value"))
+        .filter(|s| !s.is_empty())
+}
+
 fn text_at(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
@@ -584,12 +594,9 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
 
     let at = tc::now();
     let mut agents = Vec::new();
-    // One process table for every agent, read only when there are agents.
-    let table = if listed["agents"].as_array().is_some_and(|a| !a.is_empty()) {
-        Some(tc::agent_work::read_process_table())
-    } else {
-        None
-    };
+    // One process table for every agent, and for the background agents,
+    // which no pane announces - so it is read every poll.
+    let table = Some(tc::agent_work::read_process_table());
     for entry in listed["agents"].as_array().into_iter().flatten() {
         let pane_id = text_at(entry, "pane_id");
         let state_name = match entry["agent_status"].as_str() {
@@ -613,12 +620,19 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             // there is no reading, which there is not.
             Front::Prompt | Front::Unknown(_) => (None, None),
         };
+        // The agent's own pid, which binds a Claude agent to its session.
+        let mut agent_pid = None;
         let work = match (&front, &table) {
             (Front::Running(pid, _, _, _), Some(table)) => {
                 // The first foreground process may be a launcher or a job
                 // rather than the agent, so the agent is looked for by name.
                 let name = text_at(entry, "agent");
                 let pid = u32::try_from(*pid).ok();
+                let agent = match table {
+                    Ok(t) => pid.and_then(|pid| t.named_agent_at(pid, &name)),
+                    Err(_) => None,
+                };
+                agent_pid = agent;
                 let agent = match table {
                     Ok(t) => pid.map(|pid| t.agent_at(pid, &name)),
                     Err(_) => pid,
@@ -633,7 +647,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 ..Default::default()
             },
             _ => tc::agent_work::Work::default(),
-        }.with_logs(seen.logs.read(&text_at(entry, "agent"), &text_at(entry, "cwd"), None));
+        }.with_logs(seen.logs.read_agent(
+            &text_at(entry, "agent"),
+            agent_pid,
+            &text_at(entry, "cwd"),
+            reported_session(entry).as_deref(),
+        ));
         agents.push(Agent {
             name: text_at(entry, "agent"),
             workspace_id: text_at(entry, "workspace_id"),
@@ -647,6 +666,49 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             rss,
             work,
             pane_id,
+            job: None,
+        });
+    }
+    let table = table.unwrap_or_else(|| Err("process table not read".into()));
+    let mut jobs = seen.logs.read_jobs(Some(&table));
+    // Herdr's hook reports a background agent too, credited to whichever
+    // pane started the daemon. That one keeps its row; the job adds its
+    // subagents to it rather than drawing the same agent twice.
+    let sessions: Vec<String> = listed["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(reported_session)
+        .collect();
+    for job in background::take_reported(&mut jobs, &sessions) {
+        let found = listed["agents"].as_array().into_iter().flatten().position(|e| {
+            reported_session(e).is_some_and(|s| job.is_session(&s))
+        });
+        if let Some(agent) = found.and_then(|i| agents.get_mut(i)) {
+            agent.work = std::mem::take(&mut agent.work).with_fan(&job.fan);
+        }
+    }
+    labels.insert(background::GROUP.to_string(), background::group_label(&jobs));
+    for job in jobs.shown {
+        let (since, exact) = job.held_since.unwrap_or((at, false));
+        let (cpu, rss) = match job.pid {
+            Some(pid) => cpu_of(seen, pid as i32, at, hz),
+            None => (None, None),
+        };
+        let work = background::work(&job, &table);
+        agents.push(Agent {
+            name: "claude".into(),
+            workspace_id: background::GROUP.into(),
+            title: background::title(&job),
+            cwd: job.cwd.clone(),
+            state: background::state_word(&job).into(),
+            since: at - since,
+            exact,
+            cpu,
+            rss,
+            work,
+            job: Some(job),
+            ..Default::default()
         });
     }
     agents.sort_by(|a, b| {
@@ -1106,6 +1168,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     // the three lists are split, and read by tab on the frame after - which
     // is the same one-frame lag `rows_now` itself already has.
     let mut sections: Vec<usize> = Vec::new();
+    // The background agent the explain screen is open on, by job id, and
+    // how far it is scrolled. Herdr's own panes have no explain screen.
+    let mut explaining: Option<String> = None;
+    let mut explain_scroll = 0usize;
 
     loop {
         let tick = tc::animation_tick();
@@ -1117,10 +1183,30 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // The list windows itself - rows outside `window_over` are never
         // built - so the frame is the body and there is nothing to subtract.
         let mut keys = keyboard.poll();
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
-            selected = at;
+        if explaining.is_none() {
+            if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
+                selected = at;
+            }
         }
         for key in keys {
+            if explaining.is_some() {
+                match key.as_str() {
+                    "e" | "E" | "esc" => {
+                        explaining = None;
+                        continue;
+                    }
+                    "up" | "ctrl-y" | "wheel-up" => {
+                        explain_scroll = explain_scroll.saturating_sub(1);
+                        continue;
+                    }
+                    "down" | "ctrl-e" | "wheel-down" => {
+                        explain_scroll += 1;
+                        continue;
+                    }
+                    "q" | "Q" | "," | "r" | "R" => {}
+                    _ => continue,
+                }
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     stop.store(true, Ordering::Relaxed);
@@ -1136,6 +1222,19 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     refresh_wake::request(&wake);
                 }
                 "l" | "L" => show_labels = !show_labels,
+                "e" | "E" => match rows_now.get(selected) {
+                    Some(Row::Agent(a)) if a.job.is_some() => {
+                        explaining = a.job.as_ref().map(|j| j.short.clone());
+                        explain_scroll = 0;
+                    }
+                    _ => {
+                        note = Some((
+                            "e explains a background agent; Herdr's panes have no explain screen".into(),
+                            false,
+                            tc::now() + 3.0,
+                        ));
+                    }
+                },
                 "o" | "O" => {
                     opscope_filter.toggle(&mut selected);
                     moved = true;
@@ -1182,6 +1281,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     if let Some(row) = rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
                         let (ok, what, pane) = match row {
+                            Row::Agent(a) if a.job.is_some() => {
+                                note = Some((background::NO_PANE.into(), false, tc::now() + 4.0));
+                                continue;
+                            }
                             Row::Agent(a) => (
                                 focus_agent(&a.tab_id, &a.pane_id),
                                 a.name.clone(),
@@ -1222,6 +1325,53 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             ),
             Err(_) => return,
         };
+        // ── the explain screen, for a background agent ──
+        if let Some(id) = explaining.clone() {
+            let Some(job) = agents.iter().find_map(|a| a.job.as_ref().filter(|j| j.short == id)) else {
+                explaining = None;
+                note = Some(("that background agent is no longer listed".into(), false, tc::now() + 3.0));
+                continue;
+            };
+            let mut rows = vec![tc::title_busy(
+                "mux activity · herdr · explain",
+                w,
+                &p.accent,
+                activity.tick(tick),
+            )];
+            let colour = |kind: &str| match kind {
+                "lbl" => p.lbl.clone(),
+                "txt" => p.txt.clone(),
+                "dim" => p.dim.clone(),
+                "" => String::new(),
+                other => colour_of(other, &p).to_string(),
+            };
+            let body = background::explain_rows(&background::explain_lines(job, tc::now(), ago), w, &colour);
+            let hints: Vec<Vec<(&str, String)>> = vec![
+                vec![(p.dim.as_str(), "[e] back".into())],
+                vec![(p.dim.as_str(), "esc back".into())],
+                vec![(p.dim.as_str(), "[q]uit".into())],
+            ];
+            let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+            let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+            let room = h.saturating_sub(rows.len() + footer.len() + 1).max(1);
+            explain_scroll = explain_scroll.min(body.len().saturating_sub(room));
+            rows.extend(body.iter().skip(explain_scroll).take(room).cloned());
+            while rows.len() < h.saturating_sub(footer.len() + 1) {
+                rows.push(String::new());
+            }
+            rows.push(match note.as_ref() {
+                Some((text, _, _)) => tc::seg(&[(p.dim.as_str(), format!(" {}", text))], w - 1),
+                None => String::new(),
+            });
+            let foot_top = rows.len();
+            rows.extend(footer);
+            placed.clear();
+            tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
+            keyboard.wait(Duration::from_millis(250));
+            continue;
+        }
+
         // Everything that is not known to be at a prompt shares the
         // PROCESSES section, unread panes at the top of it. They are counted
         // apart in the heading, because "running something" is a claim and
@@ -1267,8 +1417,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         for a in &agents {
             *counts.entry(a.state.as_str()).or_insert(0) += 1;
         }
-        let places: std::collections::HashSet<&str> =
-            agents.iter().map(|a| a.workspace_id.as_str()).collect();
+        let places: std::collections::HashSet<&str> = agents
+            .iter()
+            .map(|a| a.workspace_id.as_str())
+            .filter(|w| *w != background::GROUP)
+            .collect();
 
         let mut plots = Vec::new();
         let mut rows = vec![tc::title_busy(
@@ -1411,6 +1564,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ];
+        // Only a background agent has an explain screen here, so the hint
+        // shows only with the cursor on one.
+        if matches!(rows_now.get(selected), Some(Row::Agent(a)) if a.job.is_some()) {
+            hints.insert(3, vec![(p.dim.as_str(), "[e]xplain".into())]);
+        }
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), tc::PALETTE_HINT.into())]);
         hints.push(vec![(p.dim.as_str(), tc::THEME_HINT.into())]);
@@ -1480,7 +1638,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
             let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
                 || !work.logs.warnings.is_empty()
-                || work.logs.tasks.iter().any(|task| !task.state.finished()));
+                || work.logs.tasks.iter().any(|task| !task.state.finished())
+                || work.fan.iter().any(|f| f.done.is_none() && f.kind != "shell"));
             2 + lead + some_work <= room
         };
         let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
@@ -1488,8 +1647,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
                 let shown = lead_fits(lead, &agents[i].work);
+                let notes = agents[i].job.as_ref().map_or(0, |j| background::note_rows(j, w).len());
                 let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, shown));
-                let own = 2 + jobs.len();
+                let own = 2 + notes + jobs.len();
                 if shown { own + lead } else { own }
             })
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
@@ -1501,7 +1661,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Where a row points: the workspace's label when labels are shown
         // and it has one, else the bare id.
         let place_of = |workspace_id: &str, pane_id: &str| -> String {
-            if show_labels {
+            if workspace_id == background::GROUP {
+                "no pane".to_string()
+            } else if show_labels {
                 let label = labels.get(workspace_id).cloned().unwrap_or_default();
                 if label.is_empty() {
                     workspace_id.to_string()
@@ -1671,6 +1833,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                                 String::new()
                             },
                         ),
+                    ],
+                    w - 1,
+                ));
+            }
+            // A background agent's message and warning, wrapped rather
+            // than cut onto the title row; counted in its height above.
+            for (alarm, line) in a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default() {
+                let body = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
+                rows.push(tc::seg(
+                    &[
+                        (&c(body), line),
+                        (&tint, if loud || here { " ".repeat(w) } else { String::new() }),
                     ],
                     w - 1,
                 ));
@@ -2008,7 +2182,18 @@ mod tests {
             cpu: None,
             rss: None,
             work: Default::default(),
+            job: None,
         }
+    }
+
+    #[test]
+    fn only_a_session_id_herdr_reported_is_used_to_match_a_background_agent() {
+        let entry = |session: serde_json::Value| serde_json::json!({ "agent": "claude", "agent_session": session });
+        let id = serde_json::json!({ "kind": "id", "value": "s1", "source": "herdr:claude" });
+        assert_eq!(reported_session(&entry(id)), Some("s1".into()));
+        assert_eq!(reported_session(&entry(serde_json::json!({ "kind": "title", "value": "x" }))), None);
+        assert_eq!(reported_session(&entry(serde_json::json!({ "kind": "id", "value": "" }))), None);
+        assert_eq!(reported_session(&serde_json::json!({ "agent": "claude" })), None);
     }
 
     #[test]

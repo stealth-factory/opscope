@@ -33,6 +33,9 @@ mod refresh_wake;
 #[path = "detect.rs"]
 mod detect;
 
+#[path = "background.rs"]
+mod background;
+
 #[path = "rex.rs"]
 mod rex;
 

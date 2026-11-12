@@ -1,0 +1,17 @@
+{
+  "state": "done",
+  "detail": "pruned stale refs; main fast-forwarded",
+  "tempo": "idle",
+  "inFlight": {"tasks": 0, "queued": 0, "kinds": [], "drainableMonitors": 0},
+  "output": {"result": "done"},
+  "children": null,
+  "template": "bg",
+  "name": "docs",
+  "sessionId": "dddd4444-0000-4000-8000-000000000004",
+  "daemonShort": "dddd4444",
+  "cliVersion": "2.1.316",
+  "cwd": "/srv/docs",
+  "createdAt": "2026-10-06T08:46:00.187Z",
+  "updatedAt": "2026-11-06T02:34:31.669Z",
+  "backend": "daemon"
+}

@@ -257,6 +257,8 @@ pub enum Source {
     Report,
     /// Its foreground process is one of the catalogue's commands.
     Process,
+    /// A Claude background agent, from its own `jobs/<id>/state.json`.
+    Jobs,
 }
 
 impl Source {
@@ -264,6 +266,7 @@ impl Source {
         match self {
             Source::Report => "id via report",
             Source::Process => "id via process",
+            Source::Jobs => "via jobs",
         }
     }
 }

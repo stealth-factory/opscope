@@ -81,10 +81,73 @@ V1 stores do not persist the same liveness information. This reader reports
 that limitation and continues to show process-backed shells. It does not
 infer that a child session is running merely because it exists.
 
+## Claude background agents and pid files (OPS-276)
+
+`claude --bg` agents run on Claude's daemon, on a private terminal outside
+every multiplexer pane. Rex and Luvus never hear from them, and Herdr only
+through its hook, credited to the pane that started the daemon.
+`tc::agent_work::read_jobs` reads what the `claude agents` dashboard reads
+instead, with no hooks, and mux-activity draws each job as an agent row in
+a `background agents · via jobs` group on every board.
+
+Observed on 2026-11-12 on Linux with Claude Code 2.1.322 installed. The
+`state.json` files present carried `cliVersion` 2.1.312 to 2.1.319 (one had
+none); the pid files carried `version` 2.1.316 to 2.1.322. Both formats are
+undocumented and internal, so the parsers are pinned by fixtures under
+`core/src/agent_work/fixtures/jobs/`, every field is optional except the
+ones named below, and an unrecognised `state` is an error on a row rather
+than a guess.
+
+`<config dir>/jobs/<short id>/state.json`:
+
+* `state` is `working`, `blocked`, `done` or `stopped`, as the agent
+  reports it. Required.
+* `name`, `detail` (one line), `needs` (when blocked), `cwd`, `cliVersion`,
+  `updatedAt` (RFC 3339).
+* `sessionId` and `resumeSessionId`. A resumed job runs under the second, and
+  its pid file names that one; all of them are kept for matching.
+* `inFlight`: `{tasks, queued, kinds}`. Absent on some stopped jobs; absent
+  is not zero.
+* `fan`: `{id, kind, label, startedAt, doneAt}`, times in epoch ms.
+  Subagents (`kind: agent`) get a `doneAt`. Shells never did in any file
+  read here, including shells whose processes were long gone, so a shell
+  with no `doneAt` is not evidence that it runs. Rows draw only unfinished
+  subagents; live shells come from the process table under the job's pid.
+* `children` lists things it produced, such as pull requests, not subagents,
+  and is not read. `jobs/pins.json` lists pinned jobs and is not read.
+* A job folder holding only `tmp/` has never run and is not a job.
+
+`timeline.jsonl` beside it holds `{at, state, detail}` records. Only its
+last 64 KiB is read: the start of the run of the current state it ends with
+is when that state began. A run that reaches back past the cut is a lower
+bound, drawn with `≥`; with no timeline, `updatedAt` is the lower bound.
+
+`<config dir>/sessions/<pid>.json` is kept by every running Claude process,
+interactive or background: `pid`, `sessionId`, `cwd`, `status`
+(`busy`/`idle`/`shell`), `kind` (`interactive`/`bg`), `jobId` for a
+background one, and `procStart`. Files outlive their processes, so a file
+counts only while its pid is in the process table, and on Linux only while
+`procStart` equals the pid's `starttime` in `/proc/<pid>/stat`. A job is
+running when such a file names its `jobId`.
+
+The same file binds a pane's agent to its session: `LogReader::read_agent`
+looks up the agent pid's file before falling back to the cwd guess, and the
+row loses `session guessed`. The config dir is the agent's own:
+`CLAUDE_CONFIG_DIR` (else `$HOME/.claude`) from `/proc/<pid>/environ`, then
+any config dir already seen. A Mac has no readable environ, so there the
+pid file is found by looking in each known config dir. Every config dir
+found this way is also searched for background agents.
+
+Under Herdr, a job whose session id equals the `agent_session` id Herdr's
+hook reported is not drawn a second time: its subagents join that agent's
+row. Herdr did not carry a session id for Claude agents on the version
+checked, so this applies only once it does.
+
 ## Session association and follow-up
 
-Rex and Herdr currently provide cwd rather than an agent session ID, so
-newest-session selection is explicitly a guess. Luvus session IDs are exact
+Without a pid file (Codex, OpenCode, or a Claude that writes none), Rex and
+Herdr provide cwd rather than an agent session ID, so newest-session
+selection is explicitly a guess. Luvus session IDs are exact
 only with a pane binding. Unbound `agent sessions` entries do not select
 a parent; the log reader chooses the newest cwd match and labels the guess. This matters for concurrent sessions in one cwd.
 

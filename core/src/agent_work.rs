@@ -33,8 +33,13 @@
 
 use std::collections::HashMap;
 
+mod jobs;
 mod logs;
 mod parse;
+pub use jobs::{
+    parse_claude_session, parse_iso_seconds, parse_job_state, parse_job_timeline, read_jobs,
+    ClaudeSession, FanItem, InFlight, Job, JobState, Jobs,
+};
 pub use logs::{Activity, LogReader, LogTask, LogWork};
 
 /// The `ps` invocation whose output [`parse_process_table`] reads.
@@ -69,6 +74,8 @@ pub enum Via {
     Log,
     /// A shell the agent started, found in the process table.
     Process,
+    /// A Claude background agent's own `jobs/<id>/state.json`.
+    Jobs,
 }
 
 impl Via {
@@ -76,6 +83,7 @@ impl Via {
         match self {
             Via::Process => "via process",
             Via::Log => "via log",
+            Via::Jobs => "via jobs",
         }
     }
 }
@@ -106,6 +114,9 @@ impl Task {
 pub struct Work {
     pub logs: LogWork,
     pub tasks: Vec<Task>,
+    /// A background agent's own `fan`: the subagents and shells its
+    /// `state.json` lists. Only the unfinished ones are drawn.
+    pub fan: Vec<FanItem>,
     /// Why the process table could not be read, when it could not.
     pub unread: Option<String>,
 }
@@ -117,14 +128,25 @@ impl Work {
             Ok(table) => Work {
                 logs: LogWork::default(),
                 tasks: agent.map(|pid| table.background_shells(pid)).unwrap_or_default(),
+                fan: Vec::new(),
                 unread: None,
             },
             Err(why) => Work {
                 logs: LogWork::default(),
                 tasks: Vec::new(),
+                fan: Vec::new(),
                 unread: Some(why.clone()),
             },
         }
+    }
+
+    /// Attach a background agent's `fan`. Its subagents are the same ones
+    /// a session log names, so a log task with the same id gives way: the
+    /// agent's own list is the stronger claim.
+    pub fn with_fan(mut self, fan: &[FanItem]) -> Self {
+        self.logs.tasks.retain(|t| !fan.iter().any(|f| f.id == t.id));
+        self.fan = fan.to_vec();
+        self
     }
 
     /// Attach the log source; its failure never erases shells.
@@ -153,7 +175,22 @@ impl Work {
     /// Unfinished log and process tasks, grouped so overflow handling can
     /// count whole omitted tasks rather than wrapped display rows.
     pub fn task_rows(&self, width: usize) -> Vec<Vec<(bool, String)>> {
-        let mut groups = self.logs.task_rows(width);
+        let mut groups: Vec<Vec<(bool, String)>> = self
+            .fan
+            .iter()
+            // Claude records a finish for a subagent and never for a shell:
+            // shells long gone stay listed without one. A live shell is in
+            // the process table under the agent instead, with its pid.
+            .filter(|f| f.done.is_none() && f.kind != "shell")
+            .map(|f| {
+                let label = if f.label.is_empty() { f.id.as_str() } else { f.label.as_str() };
+                branch(&format!("{label}  working · {}", Via::Jobs.words()), width)
+                    .into_iter()
+                    .map(|r| (false, r))
+                    .collect()
+            })
+            .collect();
+        groups.extend(self.logs.task_rows(width));
         groups.extend(self.tasks.iter().map(|t| t.rows(width).into_iter().map(|r| (false, r)).collect()));
         groups
     }
@@ -592,6 +629,27 @@ mod tests {
             (11,"codex".into()), (12,"codex".into()), (13,"codex".into()), (20,"claude".into()), (30,"opencode".into())
         ]);
         assert!(table.agents(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_background_agents_fan_draws_unfinished_subagents_and_replaces_their_log_rows() {
+        let fan = |id: &str, kind: &str, done: Option<f64>| FanItem {
+            id: id.into(),
+            kind: kind.into(),
+            label: format!("{kind} {id}"),
+            started: Some(1.0),
+            done,
+        };
+        let mut work = Work::default();
+        work.logs.tasks.push(LogTask {
+            id: "a1".into(),
+            label: "Explore".into(),
+            state: Activity::Working,
+            updated: String::new(),
+        });
+        let work = work.with_fan(&[fan("a1", "agent", None), fan("a2", "agent", Some(2.0)), fan("b1", "shell", None)]);
+        let rows: Vec<String> = work.rows(80).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(rows, ["   ├ agent a1 working · via jobs"]);
     }
 
     // An agent (claude) with an MCP server, a bundled rg, a background

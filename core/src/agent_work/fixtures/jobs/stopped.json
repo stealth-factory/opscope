@@ -1,0 +1,17 @@
+{
+  "state": "stopped",
+  "detail": "ended while the background service was off",
+  "tempo": "idle",
+  "output": null,
+  "children": null,
+  "template": "bg",
+  "name": "monorepo",
+  "sessionId": "eeee5555-0000-4000-8000-000000000005",
+  "resumeSessionId": "eeee5555-0000-4000-8000-000000000005",
+  "daemonShort": "eeee5555",
+  "cwd": "/srv/monorepo",
+  "createdAt": "2026-10-06T19:51:57.668Z",
+  "updatedAt": "2026-10-23T18:52:47.184Z",
+  "backend": "daemon",
+  "deadEpochReapedAt": "2026-10-23T18:52:47.184Z"
+}

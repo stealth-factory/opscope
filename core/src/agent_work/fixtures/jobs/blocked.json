@@ -1,0 +1,24 @@
+{
+  "state": "blocked",
+  "detail": "Should I do that next?",
+  "tempo": "blocked",
+  "inFlight": {"tasks": 2, "queued": 1, "kinds": ["local_bash"], "drainableMonitors": 0},
+  "fan": [
+    {"id": "b00000002", "kind": "shell", "label": "pnpm dev", "startedAt": 1793186559753}
+  ],
+  "needs": "Should I do that next?",
+  "output": null,
+  "children": null,
+  "template": "bg",
+  "name": "web",
+  "nameSource": "user",
+  "sessionId": "cccc3333-0000-4000-8000-000000000003",
+  "resumeSessionId": "cccc3333-0000-4000-8000-000000000003",
+  "daemonShort": "cccc3333",
+  "cliVersion": "2.1.312",
+  "cwd": "/srv/web",
+  "createdAt": "2026-10-06T17:40:28.532Z",
+  "updatedAt": "2026-10-28T12:12:35.258Z",
+  "backend": "daemon",
+  "suggestedReply": "yes"
+}
