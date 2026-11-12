@@ -137,6 +137,20 @@ impl Search {
     }
 }
 
+/// Why an agent's background work could not be read, when it could not:
+/// the process table, or the first warning from its session log. Drawn on
+/// the agent's own row, so a board whose filter hides that row says it
+/// elsewhere.
+pub fn work_warning(work: &tc::agent_work::Work) -> Option<String> {
+    work.unread.clone().or_else(|| work.logs.warnings.first().cloned())
+}
+
+/// The line a board draws above its sections when a row the filter hides
+/// carried a warning: the reason must not go with the row.
+pub fn hidden_warning(why: &str) -> String {
+    format!("⚠ a row the filter hides could not be read in full: {}", why)
+}
+
 /// `/query▌` in at most `width` columns: whole when it fits, otherwise
 /// `/…` and as much of the end as fits, since the end is where the typing
 /// is.
@@ -255,6 +269,16 @@ mod tests {
         for k in ["ctrl-y", "ctrl-e", "wheel-up", "wheel-down"] {
             assert!(!s.takes(k), "{k}");
         }
+    }
+
+    #[test]
+    fn a_work_warning_is_the_table_first_then_the_log() {
+        let mut work = tc::agent_work::Work::default();
+        assert_eq!(work_warning(&work), None);
+        work.logs.warnings.push("log unreadable".into());
+        assert_eq!(work_warning(&work).as_deref(), Some("log unreadable"));
+        work.unread = Some("ps failed".into());
+        assert_eq!(work_warning(&work).as_deref(), Some("ps failed"));
     }
 
     #[test]

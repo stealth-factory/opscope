@@ -1341,6 +1341,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .filter(|a| search.matches(&a.search_fields(shown)))
             .cloned()
             .collect();
+        // An agent's work warning is drawn on its row, so one the filter
+        // hides is said above the sections instead.
+        let hidden_why: Option<String> = if filtering {
+            all_agents
+                .iter()
+                .filter(|a| !search.matches(&a.search_fields(shown)))
+                .find_map(|a| super::search::work_warning(&a.work))
+        } else {
+            None
+        };
         let busy_shown: Vec<&Panel> = busy
             .iter()
             .filter(|n| search.matches(&n.search_fields(shown)))
@@ -1673,6 +1683,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         } else {
             None
         };
+        if let Some(why) = &hidden_why {
+            for line in tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3).max(1)) {
+                rows.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1));
+            }
+        }
         if let Some(said) = emptied {
             for line in tc::wrap_words(&said, w.saturating_sub(3).max(1)) {
                 rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));

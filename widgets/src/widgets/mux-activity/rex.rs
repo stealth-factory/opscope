@@ -2079,7 +2079,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else if n.doing == Doing::Unknown && n.creator == TERMINAL {
                         Some("no reason given".to_string())
                     } else {
-                        None
+                        super::search::work_warning(&n.work)
                     }
                 })
         } else {
@@ -2332,7 +2332,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     None
                 };
                 if let Some(why) = &hidden_why {
-                    let said = format!("⚠ a pane the filter hides could not be read: {}", why);
+                    let said = super::search::hidden_warning(why);
                     for line in tc::wrap_words(&said, w.saturating_sub(3)) {
                         rows.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1));
                     }

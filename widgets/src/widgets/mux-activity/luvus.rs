@@ -1563,6 +1563,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let keep = |row: Row| search.matches(&row.search_fields());
         let agents_shown: Vec<Agent> =
             agent_rows.iter().filter(|a| keep(Row::Agent((*a).clone()))).cloned().collect();
+        // An agent's work warning is drawn on its row, so one the filter
+        // hides is said above the sections instead.
+        let hidden_why: Option<String> = if filtering {
+            agent_rows
+                .iter()
+                .filter(|a| !keep(Row::Agent((*a).clone())))
+                .find_map(|a| super::search::work_warning(&a.work))
+        } else {
+            None
+        };
         let tasks_shown: Vec<Task> =
             task_rows.iter().filter(|t| keep(Row::Task((*t).clone()))).cloned().collect();
         let leases_shown: Vec<Lease> =
@@ -2162,6 +2172,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             } else {
                 None
             };
+            if let Some(why) = &hidden_why {
+                for line in tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3)) {
+                    body.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w.saturating_sub(1)));
+                }
+            }
             if let Some(said) = emptied {
                 for line in tc::wrap_words(&said, w.saturating_sub(3)) {
                     body.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w.saturating_sub(1)));
