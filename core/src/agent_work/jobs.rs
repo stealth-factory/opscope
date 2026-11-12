@@ -206,7 +206,15 @@ pub fn parse_job_state(short: &str, text_in: &str) -> Result<Job, String> {
         .map(|f| FanItem {
             id: text(f, "id"),
             kind: text(f, "kind"),
-            label: text(f, "label"),
+            // A shell's label is its command line, drawn on a pane that
+            // gets screenshotted: credentials in it go the way they do on a
+            // process row.
+            label: if text(f, "kind") == "shell" {
+                let label = text(f, "label");
+                super::redact(&label.split_whitespace().collect::<Vec<_>>()).join(" ")
+            } else {
+                text(f, "label")
+            },
             started: millis(&f["startedAt"]),
             done: millis(&f["doneAt"]),
         })
@@ -567,6 +575,16 @@ mod tests {
         assert_eq!(job.fan[0].done, Some(1_794_000_100.0));
         assert_eq!(job.fan[1].done, None);
         assert_eq!(job.held_since.map(|h| h.1), Some(false));
+    }
+    #[test]
+    fn a_background_shells_label_hides_credentials() {
+        let state = r#"{"state":"working","fan":[
+            {"id":"b1","kind":"shell","label":"curl --token DEMO_CREDENTIAL https://example.com"},
+            {"id":"a1","kind":"agent","label":"Look at --token handling"}]}"#;
+        let job = parse_job_state("j", state).unwrap();
+        assert_eq!(job.fan[0].label, "curl --token *** https://example.com");
+        // A subagent's label is a description, not a command, and is kept.
+        assert_eq!(job.fan[1].label, "Look at --token handling");
     }
 
     #[test]
