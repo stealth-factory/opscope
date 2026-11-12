@@ -152,6 +152,25 @@ impl Data {
     }
 }
 
+/// Which account `~/.codex/auth.json` is signed in as, as a tag for shared
+/// keys: the account id with the refresh token, hashed - or the access
+/// token where there is no refresh token.
+fn codex_account() -> String {
+    let auth = read_json(&under_home(".codex/auth.json")).unwrap_or_default();
+    let field = |k: &str| match text(&auth["tokens"], k) {
+        s if !s.is_empty() => s,
+        _ => text(&auth, k),
+    };
+    let credential = match field("refresh_token") {
+        t if !t.is_empty() => t,
+        _ => field("access_token"),
+    };
+    if credential.is_empty() {
+        return account_tag("");
+    }
+    account_tag(&format!("{}\n{credential}", field("account_id")))
+}
+
 /// Account-wide quota, live from the same endpoint the Codex CLI uses.
 ///
 /// The rollouts carry a rate_limits snapshot, but only from whenever Codex
@@ -556,7 +575,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // Set inside the fetch, which `cached` does not run on a held reading.
     // A usage miss still carries the inventory body for this frame.
     let mut carried_bank: Option<String> = None;
-    let live = match cached(caches, "codex", LIVE_TTL, || match codex_live() {
+    // Keyed on the account, so a reading another pane stored before a
+    // sign-in as someone else is never served after it.
+    let key = format!("codex:{}", codex_account());
+    let live = match cached(caches, &key, LIVE_TTL, || match codex_live() {
         Some(got) if got.get("usage_miss").is_some() => {
             carried_bank = got["bank"].as_str().map(str::to_string);
             refuse = "ChatGPT's usage endpoint did not answer".into();
@@ -586,20 +608,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     };
     if !refuse.is_empty() {
         live_why = refuse.clone();
-        remember_refusal(caches, "codex", &refuse);
+        remember_refusal(caches, &key, &refuse);
         // The refusal hold is `{"why"}` only. Put the inventory beside it
         // so the frames inside the backoff still draw the bank that arrived.
         if let Some(body) = carried_bank.clone() {
-            if let Some((when, _, held)) = caches.live.get("codex").cloned() {
-                caches.live.insert(
-                    "codex".to_string(),
-                    (
-                        when,
-                        Some(serde_json::json!({"why": &refuse, "bank": body})),
-                        held,
-                    ),
-                );
-            }
+            set_live(caches, &key, serde_json::json!({"why": &refuse, "bank": body}));
             bank = bank_of(Some(&body), now());
         }
     }

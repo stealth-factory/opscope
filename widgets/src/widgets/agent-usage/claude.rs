@@ -511,6 +511,17 @@ fn claude_token_at(dir: &str) -> Option<(String, String)> {
     Some((tok, text(o, "subscriptionType")))
 }
 
+/// Which account is signed in under `dir`, as a tag for shared keys: the
+/// refresh token hashed, or the access token where there is none.
+fn claude_account_at(dir: &str) -> String {
+    let creds = read_json(&creds_path(dir)).unwrap_or_default();
+    let o = &creds["claudeAiOauth"];
+    match text(o, "refreshToken") {
+        t if !t.is_empty() => account_tag(&t),
+        _ => account_tag(&text(o, "accessToken")),
+    }
+}
+
 pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
     claude_try(url, tok).ok()
 }
@@ -662,27 +673,33 @@ fn account_marker_at(json_path: &str) -> Option<String> {
 
 #[allow(dead_code)]
 fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
-    write_snapshot(path, utilization, account_marker())
+    write_snapshot(path, utilization, account_marker(), now())
 }
 
-fn save_snapshot_for(path: &str, json_path: &str, utilization: &serde_json::Value) {
-    write_snapshot(path, utilization, account_marker_at(json_path))
+fn save_snapshot_for(path: &str, json_path: &str, utilization: &serde_json::Value, at: f64) {
+    write_snapshot(path, utilization, account_marker_at(json_path), at)
 }
 
 /// The write, against a named path so it can be tested without reaching for
 /// the real one or rewriting the environment out from under other tests.
-fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<String>) {
+/// `at` is when the reading was taken, which is what the file's age means.
+/// Written beside the file and moved into place, so a pane reading it while
+/// another writes never sees half of one.
+fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<String>, at: f64) {
     if let Some(dir) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let mut body = serde_json::json!({
-        "fetchedAtMs": now() * 1000.0,
+        "fetchedAtMs": at * 1000.0,
         "utilization": utilization,
     });
     if let Some(uuid) = uuid {
         body["accountUuid"] = serde_json::json!(uuid);
     }
-    let _ = std::fs::write(path, body.to_string());
+    let next = format!("{path}.{}.next", std::process::id());
+    if std::fs::write(&next, body.to_string()).is_ok() && std::fs::rename(&next, path).is_err() {
+        let _ = std::fs::remove_file(&next);
+    }
 }
 
 #[allow(dead_code)]
@@ -1034,8 +1051,11 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // The reason rides along in the cached value, so it is held and shown
     // for as long as the failure it describes rather than only on the frame
     // the request happened to be made. The key includes the dir so two
-    // Max accounts cannot share one held reading.
-    let live = cached(caches, &format!("claude:{}", dir.path), CLAUDE_LIVE_TTL, || {
+    // Max accounts cannot share one held reading, and the account signed in
+    // there, so a reading another pane stored before a sign-in as someone
+    // else is never served after it.
+    let account = claude_account_at(&dir.path);
+    let live = cached(caches, &format!("claude:{}:{account}", dir.path), CLAUDE_LIVE_TTL, || {
         let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
         };
@@ -1058,10 +1078,16 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
             claude.quota_live = true;
             claude.quota_at = num(&got, "at");
             claude.quota_plan = text(&got, "plan");
-            // Kept for the next refresh that cannot reach the endpoint. The
-            // reading is held for LIVE_TTL either way, so this writes about
-            // once every two minutes rather than on every frame.
-            save_snapshot_for(&snapshot_path_for(&dir.path), &json, &got["u"]);
+            // Kept for the next refresh that cannot reach the endpoint.
+            // Written once per reading, stamped with the reading's own time:
+            // this ran on every pass that served a held reading, rewriting
+            // the file every thirty seconds and dating it to the pass, so a
+            // five-minute-old reading came back after a restart as new.
+            let path = snapshot_path_for(&dir.path);
+            if caches.snapshot_at.get(&path) != Some(&claude.quota_at) {
+                save_snapshot_for(&path, &json, &got["u"], claude.quota_at);
+                caches.snapshot_at.insert(path, claude.quota_at);
+            }
         }
         None => {
             if let Some((u, at)) = claude_stale_for(&dir.path) {
@@ -1073,7 +1099,7 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     }
     claude.profile = cached(
         caches,
-        &format!("claude-plan:{}", dir.path),
+        &format!("claude-plan:{}:{account}", dir.path),
         PLAN_TTL,
         || {
             let (tok, plan) = claude_token_at(&dir.path)?;

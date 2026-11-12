@@ -346,6 +346,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
         }
     };
     let ttl = ping_ttl(cfg.grok_ping_minutes);
+    secret(caches, &key);
     let got = cached(caches, &ping, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.

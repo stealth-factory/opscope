@@ -283,6 +283,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         data.why = "no organization · set devin_org.".into();
         return data;
     }
+    secret(caches, &token);
     let key = cache_key(&token, &org);
     let mut refused = String::new();
     let mut got = None;

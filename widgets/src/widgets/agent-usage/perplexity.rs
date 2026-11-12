@@ -214,6 +214,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if token.is_empty() {
         return d;
     }
+    secret(caches, &token);
     let key = cache_key(&token);
     let mut refused = String::new();
     let mut got = None;

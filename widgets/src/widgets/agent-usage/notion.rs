@@ -164,6 +164,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         return d;
     }
     let wanted = cfg.notion_workspace.clone();
+    secret(caches, &token);
     let key = cache_key(&token, &wanted);
     let mut refused = String::new();
     let mut got = None;

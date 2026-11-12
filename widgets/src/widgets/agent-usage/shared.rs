@@ -55,6 +55,20 @@ pub struct Caches {
     /// A good reading taken before this is asked again rather than served
     /// out of its hold; see `cached`. Zero on every other pass.
     pub asked_at: f64,
+    /// The readings shared with every other pane on this machine, when
+    /// this pane is sharing; see `sharing.rs`.
+    pub store: Option<crate::sharing::Store>,
+    /// Why this pane is not sharing, when it meant to and cannot.
+    pub sharing_off: String,
+    /// key -> (when, pid) of the shared reading this pane last took or
+    /// gave: who fetched it, and when, even after a reader has dropped it
+    /// from `live` to have it asked again.
+    pub shared: HashMap<String, (f64, u32)>,
+    /// Every token this pass holds. No shared reading may contain one.
+    pub secrets: Vec<String>,
+    /// snapshot path -> the time of the Claude reading last written there,
+    /// so a held reading is not written again on every pass.
+    pub snapshot_at: HashMap<String, f64>,
 }
 
 /// One record a transcript reader keeps: day, billed model, tokens.
@@ -818,13 +832,11 @@ where
     F: FnOnce() -> Option<serde_json::Value>,
 {
     let at = now();
+    pull(caches, key, at, ttl);
     if let Some((when, value, held)) = caches.live.get(key) {
         // A refusal keeps its backoff even when asked: pressing `r` at an
         // endpoint that is rate-limiting us is how the limit is sustained.
-        // Antigravity holds its refusal under a name of its own.
-        let good = value
-            .as_ref()
-            .is_some_and(|v| v.get("why").is_none() && v.get("opscope_refusal").is_none());
+        let good = is_reading(value);
         // Aged at the press, not now: a reading kept for being under the
         // floor must not be asked later by a pass nobody pressed for.
         let asked = askable
@@ -833,6 +845,39 @@ where
             && caches.asked_at - when >= ASKED_FLOOR;
         if at - when < *held && !asked {
             return value.clone();
+        }
+    }
+    // Stale here. Before asking, ask the other panes: one of them may have
+    // just fetched it, or be fetching it now.
+    if let Some(store) = caches.store.as_mut() {
+        let known = caches
+            .live
+            .get(key)
+            .map(|e| e.0)
+            .or_else(|| caches.shared.get(key).map(|s| s.0));
+        match store.claim(key, known, at) {
+            Ok(crate::sharing::Got::Mine) => {}
+            Ok(crate::sharing::Got::Fresh(s)) => {
+                adopt_row(caches, key, s, at, ttl);
+                if let Some((_, value, _)) = caches.live.get(key) {
+                    return value.clone();
+                }
+            }
+            // Another pane is asking. Show what there is until it lands.
+            Ok(crate::sharing::Got::Held(_)) => {
+                if let Some((_, value, _)) = caches.live.get(key) {
+                    return value.clone();
+                }
+                // Nothing at all to show - a pane just started. Asking too
+                // is exactly the burst sharing exists to stop: six panes
+                // opened together would each ask Claude at once. Wait for
+                // the one that is asking instead; its fetch is no slower
+                // than this pane's would have been.
+                if let Some(value) = wait_for_holder(caches, key, ttl) {
+                    return value;
+                }
+            }
+            Err(why) => stop_sharing(caches, &why),
         }
     }
     let value = fetch();
@@ -847,14 +892,201 @@ where
         // thirty minutes is fine, but it must not exceed the hour.
         backoff(*n).min(ttl.max(BACKOFF_FROM))
     };
-    match &value {
-        Some(v) if v.get("why").is_none() && v.get("opscope_refusal").is_none() => {
-            caches.good.insert(key.to_string(), (at, v.clone()));
-        }
-        _ => {}
+    if let Some(v) = value.as_ref().filter(|_| is_reading(&value)) {
+        caches.good.insert(key.to_string(), (at, v.clone()));
     }
     caches.live.insert(key.to_string(), (at, value.clone(), held));
+    if let Some(store) = caches.store.as_mut() {
+        let s = crate::sharing::Shared {
+            taken_at: at,
+            held,
+            value: value.clone(),
+            fails: caches.fails.get(key).copied().unwrap_or(0),
+            good: caches.good.get(key).cloned(),
+            fetched_by: store.me,
+        };
+        let me = store.me;
+        match store.publish(key, &s, &caches.secrets, at) {
+            Ok(_) => {
+                caches.shared.insert(key.to_string(), (at, me));
+            }
+            Err(why) => stop_sharing(caches, &why),
+        }
+    }
     value
+}
+
+/// Whether a held value is a reading, rather than a refusal carrying its
+/// reason. Antigravity holds its refusal under a name of its own.
+fn is_reading(value: &Option<serde_json::Value>) -> bool {
+    value
+        .as_ref()
+        .is_some_and(|v| v.get("why").is_none() && v.get("opscope_refusal").is_none())
+}
+
+/// How often a pane waiting on another pane's fetch looks for its answer.
+const WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Wait for the pane holding `key`'s lease to publish, and take what it
+/// publishes.
+///
+/// `None` when this pane should fetch after all: the lease ran out or was
+/// given back without a reading - a reading too large or holding a token
+/// is kept by the pane that fetched it - or the store failed. A lease
+/// lasts `LEASE` at most, so this waits no longer than that.
+fn wait_for_holder(caches: &mut Caches, key: &str, ttl: f64) -> Option<Option<serde_json::Value>> {
+    let until = now() + crate::lease::LEASE + 5.0;
+    loop {
+        std::thread::sleep(WAIT_STEP);
+        let at = now();
+        let store = caches.store.as_mut()?;
+        match store.claim(key, None, at) {
+            Ok(crate::sharing::Got::Fresh(s)) => {
+                adopt_row(caches, key, s, at, ttl);
+                return caches.live.get(key).map(|e| e.1.clone());
+            }
+            // Ours now: the holder went without publishing.
+            Ok(crate::sharing::Got::Mine) => return None,
+            Ok(crate::sharing::Got::Held(_)) if at < until => {}
+            Ok(crate::sharing::Got::Held(_)) => return None,
+            // Another pane mid-write: look again.
+            Err(why) if crate::sharing::busy(&why) && at < until => {}
+            Err(why) => {
+                stop_sharing(caches, &why);
+                return None;
+            }
+        }
+    }
+}
+
+/// Take what another pane has published under `key` since this pane last
+/// looked. Costs nothing when nobody has written.
+fn pull(caches: &mut Caches, key: &str, at: f64, ttl: f64) {
+    let Some(store) = caches.store.as_mut() else {
+        return;
+    };
+    match store.load(key) {
+        Ok(Some(s)) => adopt_row(caches, key, s, at, ttl),
+        Ok(None) => {}
+        Err(why) => stop_sharing(caches, &why),
+    }
+}
+
+/// Put a shared reading in this pane's caches, when it is newer than what
+/// the pane holds.
+///
+/// A reading is held for this pane's own `ttl`, not the publisher's: a pane
+/// polling every minute must not be held to another's thirty. A refusal
+/// keeps the publisher's hold, which is the backoff every pane must honour.
+///
+/// The reading this pane already holds, changed since it was taken, is
+/// taken again: `set_live` writes a refusal's reason, or Codex's inventory,
+/// in after the publish, and a pane that read between the two would
+/// otherwise keep the bare refusal for the whole backoff.
+fn adopt_row(caches: &mut Caches, key: &str, s: crate::sharing::Shared, at: f64, ttl: f64) {
+    let local = caches.live.get(key).map(|e| e.0);
+    let same = local == Some(s.taken_at)
+        && caches.shared.get(key) == Some(&(s.taken_at, s.fetched_by));
+    if same {
+        if let Some(entry) = caches.live.get_mut(key) {
+            entry.1 = s.value.clone();
+        }
+    } else if crate::lease::adopt(local, s.taken_at, at) {
+        let held = if is_reading(&s.value) { ttl } else { s.held };
+        caches.live.insert(key.to_string(), (s.taken_at, s.value, held));
+        if s.fails == 0 {
+            caches.fails.remove(key);
+        } else {
+            caches.fails.insert(key.to_string(), s.fails);
+        }
+        caches.shared.insert(key.to_string(), (s.taken_at, s.fetched_by));
+    }
+    if let Some((good_at, good)) = s.good {
+        if caches.good.get(key).is_none_or(|(l, _)| good_at > *l) {
+            caches.good.insert(key.to_string(), (good_at, good));
+        }
+    }
+}
+
+/// Go on alone, saying why. A store that failed once is not trusted for
+/// the rest of the run; the poller opens it again later.
+pub fn stop_sharing(caches: &mut Caches, why: &str) {
+    caches.store = None;
+    caches.sharing_off = why.to_string();
+}
+
+/// Replace the value held under `key` and, when this pane fetched it, the
+/// shared copy too - so a reason or a detail a reader adds after the fetch
+/// reaches the panes that did not fetch.
+pub fn set_live(caches: &mut Caches, key: &str, value: serde_json::Value) {
+    let Some((when, _, held)) = caches.live.get(key).cloned() else {
+        return;
+    };
+    caches.live.insert(key.to_string(), (when, Some(value.clone()), held));
+    let Some(store) = caches.store.as_mut() else {
+        return;
+    };
+    if caches.shared.get(key) != Some(&(when, store.me)) {
+        return;
+    }
+    if let Err(why) = store.annotate(key, when, &value) {
+        stop_sharing(caches, &why);
+    }
+}
+
+/// A short tag for the account a credential belongs to, for the keys of
+/// readings shared between panes.
+///
+/// A shared reading outlives the pane that fetched it, so a key naming only
+/// the directory - or nothing, for Codex - served the account signed in
+/// before to the one signed in now. Hashing the credential changes the key
+/// when the account does; a refresh that rotates it costs one early fetch.
+/// FNV-1a, so every pane on this build computes the same tag, and only the
+/// hash is ever written.
+pub fn account_tag(credential: &str) -> String {
+    if credential.is_empty() {
+        return "none".into();
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in credential.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Note a token this pass holds, so no shared reading carries it.
+pub fn secret(caches: &mut Caches, token: &str) {
+    if !token.is_empty() && !caches.secrets.iter().any(|t| t == token) {
+        caches.secrets.push(token.to_string());
+    }
+}
+
+/// What the status line says about sharing: how many of the readings this
+/// pane holds another pane fetched, or why this pane is not sharing.
+pub fn sharing_status(caches: &Caches) -> String {
+    match &caches.store {
+        Some(store) => {
+            let others = caches
+                .live
+                .keys()
+                .filter(|k| caches.shared.get(*k).is_some_and(|(_, by)| *by != store.me))
+                .count();
+            let mut said = if others == 0 {
+                "readings shared".to_string()
+            } else {
+                format!("readings shared · {others} fetched by other panes")
+            };
+            if !store.notice.is_empty() {
+                said = format!("{said} · {}", store.notice);
+            }
+            said
+        }
+        None if !caches.sharing_off.is_empty() => {
+            format!("not sharing readings: {}", caches.sharing_off)
+        }
+        None => String::new(),
+    }
 }
 
 /// How long a good reading is kept on screen through failures in transit.
@@ -921,13 +1153,7 @@ pub fn remember_refusal(caches: &mut Caches, key: &str, why: &str) {
     if why.is_empty() {
         return;
     }
-    let Some((when, _, held)) = caches.live.get(key).cloned() else {
-        return;
-    };
-    caches.live.insert(
-        key.to_string(),
-        (when, Some(serde_json::json!({"why": why})), held),
-    );
+    set_live(caches, key, serde_json::json!({"why": why}));
 }
 
 pub fn read_json(path: &str) -> Option<serde_json::Value> {
@@ -1981,5 +2207,73 @@ mod tests {
         assert_eq!(two, Some(serde_json::json!(1)));
         let (_, _, held) = caches.live.get("probe").unwrap();
         assert_eq!(*held, 300.0);
+    }
+
+    /// Two panes on one store, as `share_readings` would open them.
+    fn two_panes(name: &str) -> (Caches, Caches) {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-held-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent-usage.sqlite").to_string_lossy().to_string();
+        let pane = |me: u32| {
+            let mut store = crate::sharing::Store::open(&path).unwrap();
+            store.me = me;
+            Caches { store: Some(store), ..Caches::default() }
+        };
+        (pane(41), pane(42))
+    }
+
+    #[test]
+    fn a_pane_that_starts_while_another_is_asking_waits_for_its_answer() {
+        let (mut a, mut b) = two_panes("wait");
+        let mut store = a.store.take().unwrap();
+        assert_eq!(store.claim("k", None, now()).unwrap(), crate::sharing::Got::Mine);
+        let asking = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let at = now();
+            let s = crate::sharing::Shared {
+                taken_at: at,
+                held: 120.0,
+                value: Some(serde_json::json!({"u": 1})),
+                fails: 0,
+                good: None,
+                fetched_by: store.me,
+            };
+            store.publish("k", &s, &[], at).unwrap();
+        });
+        let got = cached(&mut b, "k", 120.0, || panic!("asked while another pane was asking"));
+        asking.join().unwrap();
+        assert_eq!(got, Some(serde_json::json!({"u": 1})));
+        assert_eq!(b.shared.get("k").map(|s| s.1), Some(41));
+    }
+
+    #[test]
+    fn a_reason_written_after_the_publish_reaches_a_pane_that_read_before_it() {
+        let (mut a, mut b) = two_panes("annotate");
+        assert_eq!(cached(&mut a, "k", 120.0, || None), None);
+        b.store.as_mut().unwrap().begin_pass().unwrap();
+        assert_eq!(cached(&mut b, "k", 120.0, || panic!("asked inside the backoff")), None);
+        remember_refusal(&mut a, "k", "too many requests");
+        b.store.as_mut().unwrap().begin_pass().unwrap();
+        let got = cached(&mut b, "k", 120.0, || panic!("asked inside the backoff"));
+        assert_eq!(got, Some(serde_json::json!({"why": "too many requests"})));
+        assert_eq!(b.fails.get("k"), Some(&1));
+    }
+
+    #[test]
+    fn a_shared_reading_is_held_for_this_panes_interval_and_a_refusal_for_the_backoff() {
+        let (mut a, mut b) = two_panes("ttl");
+        cached(&mut a, "slow", 1800.0, || Some(serde_json::json!({"u": 1})));
+        cached(&mut a, "refused", 1800.0, || None);
+        b.store.as_mut().unwrap().begin_pass().unwrap();
+        cached(&mut b, "slow", 60.0, || panic!("asked for a reading another pane just took"));
+        cached(&mut b, "refused", 60.0, || panic!("asked inside the backoff"));
+        assert_eq!(b.live["slow"].2, 60.0);
+        assert_eq!(b.live["refused"].2, a.live["refused"].2);
     }
 }

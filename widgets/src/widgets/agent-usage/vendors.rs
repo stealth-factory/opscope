@@ -42,6 +42,8 @@ pub struct State {
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
+    /// Whether the readings are shared with the other panes, and how.
+    pub sharing: String,
 }
 
 /// Whether Notion may be asked, on the same terms: it sends the reader's
@@ -88,6 +90,9 @@ pub fn read_all(
     let devin_shown = devin_asked(&installed, cfg);
     let droid_shown = droid_asked(&installed, cfg);
     let antigravity_shown = antigravity_asked(&installed, cfg);
+    // Each reader notes the tokens it holds as it reads; a token from a
+    // pass before, since rotated, has nothing left to guard.
+    caches.secrets.clear();
     let mut state = State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -102,6 +107,7 @@ pub fn read_all(
         installed,
         fetched: 0.0,
         err: String::new(),
+        sharing: String::new(),
     };
     link_spacexsi(&mut state);
     state
