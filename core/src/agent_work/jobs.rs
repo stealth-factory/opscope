@@ -321,6 +321,17 @@ pub(super) fn same_process(session: &ClaudeSession) -> bool {
     }
 }
 
+/// Whether `/proc` gives the pid a start time and it is the one the file
+/// recorded: positive proof, where [`same_process`] only rules out a
+/// mismatch.
+pub(super) fn start_time_matches(session: &ClaudeSession) -> bool {
+    !session.proc_start.is_empty()
+        && i32::try_from(session.pid)
+            .ok()
+            .map(crate::procfs::read_stat)
+            .is_some_and(|stat| stat.is_ok_and(|stat| stat.starttime.to_string() == session.proc_start))
+}
+
 /// Every pid file in `<root>/sessions`, with the ones that did not parse.
 pub(super) fn read_sessions(root: &Path) -> Result<(Vec<ClaudeSession>, usize), String> {
     let dir = root.join("sessions");

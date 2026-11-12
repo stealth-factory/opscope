@@ -285,9 +285,18 @@ impl LogReader {
     /// read (Linux, same user); otherwise whichever known config dir holds
     /// a pid file for it, which is how a Mac finds it.
     fn claude_binding(&mut self, pid: u32) -> Result<Option<(PathBuf, super::ClaudeSession)>, String> {
-        let mut candidates: Vec<PathBuf> = claude_root_of(pid).into_iter().collect();
+        let own = claude_root_of(pid);
+        let mut candidates: Vec<PathBuf> = own.iter().cloned().collect();
         candidates.extend(self.claude_roots.iter().cloned());
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut found: Vec<(PathBuf, super::ClaudeSession, bool)> = Vec::new();
         for root in candidates {
+            let key = real(&root);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
             let path = root.join("sessions").join(format!("{pid}.json"));
             let text = match fs::read_to_string(&path) {
                 Ok(text) => text,
@@ -299,10 +308,24 @@ impl LogReader {
                 // Left behind by an earlier process with this pid.
                 continue;
             }
-            self.add_root(root.clone());
-            return Ok(Some((root, session)));
+            // The process's own config dir, or a start time that matched,
+            // proves the file is this process's. Anything else is only
+            // a file that names the pid.
+            let proven = own.as_ref().is_some_and(|own| real(own) == real(&root))
+                || super::jobs::start_time_matches(&session);
+            found.push((root, session, proven));
         }
-        Ok(None)
+        // One unproven file is the best there is (a Mac has no start time);
+        // two that both name the pid cannot be told apart, so neither binds.
+        let pick = match found.iter().position(|(_, _, proven)| *proven) {
+            Some(i) => Some(found.swap_remove(i)),
+            None if found.len() == 1 => found.pop(),
+            None => None,
+        };
+        Ok(pick.map(|(root, session, _)| {
+            self.add_root(root.clone());
+            (root, session)
+        }))
     }
     /// Remember a config dir, once: a `CLAUDE_CONFIG_DIR` that is a symlink
     /// to a dir already known is the same dir, or its jobs would be drawn
@@ -922,6 +945,19 @@ mod tests {
         if crate::procfs::read_stat(me as i32).is_ok() {
             assert!(work.guessed, "{work:?}");
         }
+    }
+    #[test]
+    fn two_unproven_pid_files_for_one_pid_bind_neither() {
+        let f = Fixture::new();
+        let me = std::process::id();
+        f.write("claude/projects/-srv-repo/one.jsonl", &launch("first"));
+        // No start time recorded, so neither file can prove it is ours.
+        f.write(&format!("claude/sessions/{me}.json"), &pid_file(me, "one", "/srv/repo", ""));
+        f.write(&format!("other/sessions/{me}.json"), &pid_file(me, "two", "/srv/repo", ""));
+        let mut reader = f.reader();
+        reader.add_root(f.0.join("other"));
+        let work = reader.read_agent("claude", Some(me), "/srv/repo", None).unwrap();
+        assert!(work.guessed, "{work:?}");
     }
     #[test]
     fn an_agent_with_its_own_config_dir_is_read_there() {
