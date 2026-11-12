@@ -79,6 +79,11 @@ pub fn why(job: &Job) -> String {
         (None, Some(JobState::Done)) if !job.unchecked.is_empty() => {
             format!("it says done, but whether its process still runs is unknown: {}", job.unchecked)
         }
+        // Without its process there is no shell list either, so an empty
+        // one must not read as no shells.
+        (None, _) if !job.unchecked.is_empty() => {
+            format!("its process and shells could not be checked: {}", job.unchecked)
+        }
         _ => String::new(),
     }
 }
@@ -290,6 +295,9 @@ mod tests {
         done.running = None;
         done.unchecked = "no process table was read".into();
         assert!(why(&done).contains("unknown: no process table was read"));
+        let mut blind = job("working");
+        blind.unchecked = "the process table could not be read: EPERM".into();
+        assert!(why(&blind).contains("shells could not be checked: the process table"));
         let unread = Job { short: "x".into(), dir: "/c/jobs/x".into(), unread: Some("state.json is not JSON".into()), ..Default::default() };
         assert_eq!(state_word(&unread), "unknown");
         assert!(why(&unread).contains("not JSON") && why(&unread).contains("/c/jobs/x"));

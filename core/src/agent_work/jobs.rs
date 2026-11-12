@@ -331,7 +331,12 @@ pub(super) fn read_sessions(root: &Path) -> Result<(Vec<ClaudeSession>, usize), 
     };
     let mut out = Vec::new();
     let mut bad = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        // An entry the walk could not read may be this job's pid file.
+        let Ok(entry) = entry else {
+            bad += 1;
+            continue;
+        };
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
@@ -385,7 +390,20 @@ pub fn read_jobs(roots: &[PathBuf], table: Option<&Result<Table, String>>) -> Jo
         };
         // Unreadable pid files leave whether a job runs unknown, not false.
         let sessions = read_sessions(root);
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                // A job the walk lost is said, not silently left out.
+                Err(e) => {
+                    all.push(Job {
+                        short: "jobs".into(),
+                        dir: dir.display().to_string(),
+                        unread: Some(format!("an entry in the jobs folder could not be read: {e}")),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() {
                 continue;

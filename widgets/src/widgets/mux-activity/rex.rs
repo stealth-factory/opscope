@@ -2148,6 +2148,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.push(tc::seg(&line, w.saturating_sub(1)));
             }
             let waiting = all.iter().filter(|n| n.wants_a_human()).count();
+            // A background agent waiting for you holds no pane.
+            let jobs_waiting = all.iter().filter(|n| n.job.is_some() && n.wants_a_human()).count();
+            let panes_waiting = waiting - jobs_waiting;
             if waiting > 0 {
                 let blocked = all.iter().any(|n| {
                     n.records
@@ -2162,7 +2165,14 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.extend(flow(
                     &[(
                         colour,
-                        format!("▸ {} pane{} waiting for you", waiting, plural(waiting)),
+                        match (panes_waiting, jobs_waiting) {
+                            (n, 0) => format!("▸ {} pane{} waiting for you", n, plural(n)),
+                            (0, j) => format!("▸ {} background agent{} waiting for you", j, plural(j)),
+                            (n, j) => format!(
+                                "▸ {} pane{} and {} background agent{} waiting for you",
+                                n, plural(n), j, plural(j)
+                            ),
+                        },
                     )],
                     w,
                 ));

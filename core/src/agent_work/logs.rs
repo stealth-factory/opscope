@@ -30,9 +30,15 @@ use std::{
     time::SystemTime,
 };
 
-/// The config dir a Claude process runs with, from its own environment:
-/// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. `None` where that cannot be
-/// read (no `/proc`, or another user's process).
+/// The `CLAUDE_CONFIG_DIR` a process was started with, from its own
+/// environment. `None` where it names none or that cannot be read (no
+/// `/proc`, or another user's process).
+fn claude_config_dir_of(pid: u32) -> Option<PathBuf> {
+    let env = crate::procfs::read_environ(pid as i32).ok()?;
+    crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR").map(PathBuf::from)
+}
+
+/// [`claude_config_dir_of`], or `$HOME/.claude` when the process names none.
 fn claude_root_of(pid: u32) -> Option<PathBuf> {
     let env = crate::procfs::read_environ(pid as i32).ok()?;
     crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR")
@@ -259,7 +265,15 @@ impl LogReader {
                 let cwds = [bound.cwd.as_str(), cwd];
                 self.claude_in(&root, &cwds, Some(&bound.session_id), true)
             }
-            Ok(None) => self.read(agent, cwd, None),
+            // No pid file: guess by cwd, but in the config dir the process
+            // itself was started with, where its environment names one.
+            Ok(None) => match claude_config_dir_of(pid).filter(|root| root.is_dir()) {
+                Some(root) => {
+                    self.add_root(root.clone());
+                    self.claude_in(&root, &[cwd], None, false)
+                }
+                None => self.read(agent, cwd, None),
+            },
             Err(why) => self.read(agent, cwd, None).map(|mut work| {
                 work.warnings.push(why);
                 work
@@ -285,12 +299,20 @@ impl LogReader {
                 // Left behind by an earlier process with this pid.
                 continue;
             }
-            if !self.claude_roots.contains(&root) {
-                self.claude_roots.push(root.clone());
-            }
+            self.add_root(root.clone());
             return Ok(Some((root, session)));
         }
         Ok(None)
+    }
+    /// Remember a config dir, once: a `CLAUDE_CONFIG_DIR` that is a symlink
+    /// to a dir already known is the same dir, or its jobs would be drawn
+    /// and counted twice.
+    fn add_root(&mut self, root: PathBuf) {
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let new = real(&root);
+        if !self.claude_roots.iter().any(|known| real(known) == new) {
+            self.claude_roots.push(root);
+        }
     }
     /// Every Claude config dir background agents are looked for in.
     pub fn claude_roots(&self) -> &[PathBuf] {
@@ -304,8 +326,8 @@ impl LogReader {
         if let Some(Ok(table)) = table {
             for (pid, _) in table.agents(&["claude"]) {
                 if let Some(root) = claude_root_of(pid) {
-                    if !self.claude_roots.contains(&root) && root.join("jobs").is_dir() {
-                        self.claude_roots.push(root);
+                    if root.join("jobs").is_dir() {
+                        self.add_root(root);
                     }
                 }
             }
@@ -937,6 +959,9 @@ mod tests {
         f.write("elsewhere/jobs/aaaa1111/state.json", include_str!("fixtures/jobs/working.json"));
         let table = Ok(super::super::parse_process_table(&format!("{pid} 1 claude claude --bg\n")).unwrap());
         let jobs = f.reader().read_jobs(Some(&table));
+        // With no pid file at all, the cwd guess is made in its own dir.
+        std::fs::remove_file(f.0.join(format!("elsewhere/sessions/{pid}.json"))).unwrap();
+        let guessed = f.reader().read_agent("claude", Some(pid), "/srv/repo", None);
         let _ = child.kill();
         let _ = child.wait();
         if readable {
@@ -946,6 +971,9 @@ mod tests {
             assert_eq!(reported.unwrap().tasks[0].id, "custom");
             assert_eq!(jobs.shown.len(), 1);
             assert_eq!(jobs.shown[0].short, "aaaa1111");
+            let guessed = guessed.unwrap();
+            assert_eq!(guessed.tasks[0].id, "custom");
+            assert!(guessed.guessed);
         }
     }
     #[test]
