@@ -103,6 +103,28 @@ jobs:
         with:
           persist-credentials: false
 
+      # A self-hosted Mac may have no rustup yet, and dtolnay's installer
+      # then runs rustup-init without --no-modify-path. That edits the
+      # runner account's shell profile, which a Mac can refuse (EPERM on
+      # ~/.zshenv), and the job dies before compiling anything - on both
+      # arches alike, so it reads like an x86_64 problem and is not one.
+      # Install it without touching any profile and put it on PATH for the
+      # job; dtolnay then finds rustup and only adds the toolchain. A Mac
+      # that already has rustup, and the hosted image, skip all of it.
+      - name: rustup, without editing shell profiles
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v rustup >/dev/null 2>&1 && exit 0
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          if [ ! -x "$bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
+              --location --silent --show-error --fail https://sh.rustup.rs \
+              | sh -s -- --default-toolchain none --no-modify-path -y
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.98.0"
