@@ -3063,6 +3063,15 @@ fn main() {
 
         let status_at = rows.len();
         rows.push(String::new()); // filled in once the scroll is resolved
+        // Whether this pane's readings come from the other panes, or why
+        // not. Its own row, wrapped rather than squeezed onto the status
+        // line: there it was the first thing to stand down, and these
+        // panes are narrow enough that it never showed at all.
+        if !snapshot.sharing.is_empty() {
+            for line in wrap_text(&snapshot.sharing, w.saturating_sub(2).max(8)) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w - 1));
+            }
+        }
         let gripe = if snapshot.err.is_empty() {
             config_complaints(&cfg)
         } else {
@@ -3170,29 +3179,12 @@ fn main() {
             String::new()
         };
         let mut legend = "   · = detected".to_string();
-        // Whether this pane's readings come from the others, or why not.
-        // Stands down after the legend: the scroll position and what is
-        // hidden say more about the screen in front of the reader.
-        let mut sharing = if snapshot.sharing.is_empty() {
-            String::new()
-        } else {
-            format!("   {}", snapshot.sharing)
-        };
-        let fits = |a: &str, b: &str| {
-            tc::display_width(&base) + tc::display_width(a) + tc::display_width(&hidden_txt)
-                + tc::display_width(b) + tc::display_width(&where_)
-                <= w - 1
-        };
-        if !fits(&legend, &sharing) {
+        if base.len() + hidden_txt.len() + legend.len() + where_.len() > w - 1 {
             legend.clear();
-        }
-        if !fits(&legend, &sharing) {
-            sharing.clear();
         }
         rows[status_at] = tc::seg(
             &[
                 (p.dim.as_str(), base),
-                (p.dim.as_str(), sharing),
                 (p.dim.as_str(), legend),
                 (p.dim.as_str(), hidden_txt),
                 (p.accent.as_str(), where_),
