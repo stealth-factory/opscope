@@ -63,11 +63,7 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.target }}
-    # `self-hosted-mac` is a placeholder, not a runner label: it stands for
-    # the team's own Mac, with the same two escape hatches as ci.yml's macos
-    # job (fork PRs and the MACOS_RUNS_ON repo variable both land on the
-    # hosted macos-15). Any other value is used as the label it is.
-    runs-on: ${{ matrix.runs-on != 'self-hosted-mac' && matrix.runs-on || fromJSON((github.event.pull_request.head.repo.fork && '"macos-15"') || vars.MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
+    runs-on: ${{ matrix.runs-on }}
     strategy:
       # Every platform reports, rather than the first failure hiding the
       # others. When something breaks on one arch it is worth knowing
@@ -81,34 +77,24 @@ jobs:
           # month. 22.04 is glibc 2.35.
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
-          # Both macOS arches are built on one Apple Silicon runner.
+          # Each macOS arch is built on its own kind of Mac, both
+          # GitHub's standard hosted images, which are free on a public
+          # repository. Building natively means the x86_64 binaries are
+          # tested and started, not just compiled and packaged.
           #
-          # macos-13, the Intel image, is retired: a job asking for it
-          # queues forever, which is what the first three runs of this
-          # workflow did while the other two got runners in seconds. The
-          # Intel images that replaced it are `-large` runners and bill
-          # even on a public repository, where the standard ones are free.
+          # macos-15-intel is GitHub's last Intel image, supported until
+          # about August 2027. When it goes, x86_64 falls back to being
+          # cross-compiled on the arm64 runner: Apple's toolchain targets
+          # x86_64 natively, but then the tests and the start check below
+          # cannot run for that target.
           #
-          # Cross-compiling costs nothing and Apple's toolchain does it
-          # natively - an arm64 Mac has always been able to target x86_64.
-          # What it cannot do is run the result, so the x86_64 binaries are
-          # built and packaged but their tests are not executed here. That
-          # is stated rather than hidden: `cross: true` is what turns those
-          # steps off, and OPS-40 already owns "what actually works on a
-          # Mac" as a question.
-          #
-          # macos-15 rather than macos-14: 14 is deprecated, and this is a
-          # pin either way, because `macos-latest` has silently changed
-          # arch before and would swap an artefact's contents without its
-          # name changing.
-          #
-          # Both now run on the team's own Mac (OPS-272), see `runs-on`
-          # above; macos-15 is where they fall back to.
+          # Pinned to 15 rather than `macos-latest`, which has silently
+          # changed arch before and would swap an artefact's contents
+          # without its name changing.
           - target: aarch64-apple-darwin
-            runs-on: self-hosted-mac
+            runs-on: macos-15
           - target: x86_64-apple-darwin
-            runs-on: self-hosted-mac
-            cross: true
+            runs-on: macos-15-intel
     steps:
       # Pinned to a commit, not a tag. A tag is mutable: re-running this
       # workflow on the same release tag could execute different action code
@@ -121,28 +107,6 @@ jobs:
           # stamps the commit into --version. A shallow clone has neither.
           fetch-depth: 0
           persist-credentials: false
-
-      # A self-hosted Mac may have no rustup yet, and dtolnay's installer
-      # then runs rustup-init without --no-modify-path. That edits the
-      # runner account's shell profile, which a Mac can refuse (EPERM on
-      # ~/.zshenv), and the job dies before compiling anything - on both
-      # arches alike, so it reads like an x86_64 problem and is not one.
-      # Install it without touching any profile and put it on PATH for the
-      # job; dtolnay then finds rustup and only adds the toolchain. A Mac
-      # that already has rustup, and the hosted image, skip all of it.
-      - name: rustup, without editing shell profiles
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v rustup >/dev/null 2>&1 && exit 0
-          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-          if [ ! -x "$bin/rustup" ]; then
-            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
-              --location --silent --show-error --fail https://sh.rustup.rs \
-              | sh -s -- --default-toolchain none --no-modify-path -y
-          fi
-          echo "$bin" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -199,12 +163,6 @@ jobs:
           fi
 
       - name: Tests
-        # Skipped for the cross-compiled target, which this runner cannot
-        # execute. The same sources are tested on the native arm64 leg in
-        # the same run, so the code is covered; what is not covered is
-        # x86_64-specific behaviour, and there is none in this tree that
-        # the arm64 build would not also show.
-        if: ${{ !matrix.cross }}
         env:
           # Where a release counts starts (OPS-127). Repository secrets, so
           # the project's analytics never appear in the source; a build
@@ -282,8 +240,6 @@ jobs:
           [ "$bad" = 0 ]
 
       - name: It runs, and says what it is
-        # Same reason: an x86_64 binary will not start on this host.
-        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           set -euo pipefail
@@ -903,9 +859,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runs-on: [ubuntu-22.04, self-hosted-mac]
-    # self-hosted-mac: the team's own Mac, as in `build`.
-    runs-on: ${{ matrix.runs-on != 'self-hosted-mac' && matrix.runs-on || fromJSON((github.event.pull_request.head.repo.fork && '"macos-15"') || vars.MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
+        runs-on: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.runs-on }}
     # No checkout. Nothing here reads the repository, and what is being
     # tested is what a stranger with node and nothing else gets.
     steps:
@@ -974,9 +929,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runs-on: [ubuntu-22.04, self-hosted-mac]
-    # self-hosted-mac: the team's own Mac, as in `build`.
-    runs-on: ${{ matrix.runs-on != 'self-hosted-mac' && matrix.runs-on || fromJSON((github.event.pull_request.head.repo.fork && '"macos-15"') || vars.MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
+        runs-on: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
