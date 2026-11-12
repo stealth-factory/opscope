@@ -1277,7 +1277,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             moved = true;
         }
         for key in keys {
-            if search.typing {
+            if search.takes(&key) {
                 search.key(&key);
                 moved = true;
                 continue;

@@ -285,7 +285,8 @@ impl Agent {
             homely(&self.cwd),
             self.title.trim().to_string(),
         ];
-        out.extend(self.work.tasks.iter().map(|t| t.label.clone()));
+        // Every row drawn under the agent: shells and session-log work.
+        out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
         out
     }
@@ -1188,7 +1189,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             selected = at;
         }
         for key in keys {
-            if search.typing {
+            if search.takes(&key) {
                 search.key(&key);
                 moved = true;
                 continue;
@@ -1662,8 +1663,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             )
         };
         // A query that leaves nothing on the whole board says so, rather
-        // than drawing three empty sections.
-        let emptied = if filtering && rows_now.is_empty() {
+        // than drawing three empty sections - unless a pane could not be
+        // read, whose reason PROCESSES carries.
+        let emptied = if filtering && unread.is_empty() && rows_now.is_empty() {
             tc::filtered_to_nothing(total, &filters)
         } else {
             None
@@ -2737,5 +2739,21 @@ mod tests {
         let fields = unread.search_fields(&labels);
         assert!(fields.contains(&"could not be read".to_string()));
         assert!(fields.iter().all(|f| !f.is_empty()));
+    }
+
+    #[test]
+    fn the_filter_finds_an_agent_by_its_session_log_work() {
+        // An Explore subagent from the session log is drawn under the agent,
+        // so /explore finds the agent.
+        let labels: HashMap<String, String> = HashMap::new();
+        let mut a = agent("p", "w", "working");
+        assert!(!super::super::search::matches("explore", &a.search_fields(&labels)));
+        a.work.logs.tasks.push(tc::agent_work::LogTask {
+            id: "1".into(),
+            label: "Explore".into(),
+            state: tc::agent_work::Activity::Working,
+            updated: String::new(),
+        });
+        assert!(super::super::search::matches("explore", &a.search_fields(&labels)));
     }
 }

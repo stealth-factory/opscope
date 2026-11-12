@@ -277,6 +277,8 @@ impl Pane {
         if let Some((_, said)) = &self.attention {
             out.push(said.clone());
         }
+        // Every row drawn under the pane: shells and session-log work.
+        out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
         out
     }
@@ -1720,7 +1722,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
         let board_now = state.lock().ok().and_then(|g| g.board.clone());
         for key in keys {
-            if search.typing {
+            if search.takes(&key) {
                 search.key(&key);
                 moved = true;
                 continue;

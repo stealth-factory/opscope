@@ -78,6 +78,13 @@ impl Search {
         self.typing = false;
     }
 
+    /// Whether the query line takes `key` as text. The wheel and its
+    /// `ctrl-y`/`ctrl-e` keys still scroll the board while it is open, so
+    /// the results can be read while the query is typed.
+    pub fn takes(&self, key: &str) -> bool {
+        self.typing && !matches!(key, "ctrl-y" | "ctrl-e" | "wheel-up" | "wheel-down")
+    }
+
     /// A key while the query line is open. Only `esc` and `enter` are
     /// navigation, or the query could never hold a `q`.
     pub fn key(&mut self, key: &str) {
@@ -237,6 +244,17 @@ mod tests {
         s.key("esc");
         assert!(!s.typing && !s.active() && s.filter().is_none());
         assert!(s.take_changed());
+    }
+
+    #[test]
+    fn scrolling_reaches_the_board_while_the_query_is_open() {
+        let mut s = Search::default();
+        assert!(!s.takes("a"));
+        s.open();
+        assert!(s.takes("a") && s.takes("backspace") && s.takes("esc"));
+        for k in ["ctrl-y", "ctrl-e", "wheel-up", "wheel-down"] {
+            assert!(!s.takes(k), "{k}");
+        }
     }
 
     #[test]
