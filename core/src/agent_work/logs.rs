@@ -30,20 +30,29 @@ use std::{
     time::SystemTime,
 };
 
-/// The `CLAUDE_CONFIG_DIR` a process was started with, from its own
-/// environment. `None` where it names none or that cannot be read (no
-/// `/proc`, or another user's process).
-fn claude_config_dir_of(pid: u32) -> Option<PathBuf> {
-    let env = crate::procfs::read_environ(pid as i32).ok()?;
-    crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR").map(PathBuf::from)
-}
-
-/// [`claude_config_dir_of`], or `$HOME/.claude` when the process names none.
+/// The config dir a process runs with, from its own environment: its
+/// `CLAUDE_CONFIG_DIR`, or `$HOME/.claude` when it names none. `None` where
+/// the environment cannot be read (no `/proc`, or another user's process).
 fn claude_root_of(pid: u32) -> Option<PathBuf> {
     let env = crate::procfs::read_environ(pid as i32).ok()?;
     crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| crate::procfs::parse_environ_var(&env, "HOME").map(|home| Path::new(home).join(".claude")))
+}
+
+/// Where to look for a Claude process's transcripts when no pid file binds
+/// it: the `CLAUDE_CONFIG_DIR` its environment names, or else its own
+/// `$HOME/.claude` when it runs under a different `HOME` from this widget
+/// (another user, a sandboxed home). Under the same `HOME` that dir is
+/// the default root already, so it is not named again.
+fn claude_fallback_root_of(pid: u32) -> Option<PathBuf> {
+    let env = crate::procfs::read_environ(pid as i32).ok()?;
+    if let Some(dir) = crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = crate::procfs::parse_environ_var(&env, "HOME")?;
+    let ours = std::env::var_os("HOME").map(PathBuf::from);
+    (ours.as_deref() != Some(Path::new(&home))).then(|| Path::new(&home).join(".claude"))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -257,8 +266,8 @@ impl LogReader {
             // only says which config dir its transcript is in.
             let root = match self.claude_binding(pid) {
                 Ok(Some((root, _))) => Some(root),
-                // No pid file: the dir its environment names, if any.
-                _ => claude_config_dir_of(pid).filter(|root| root.is_dir()),
+                // No pid file: the dir its own environment points at, if any.
+                _ => claude_fallback_root_of(pid).filter(|root| root.is_dir()),
             };
             return match root {
                 Some(root) => {
@@ -275,9 +284,9 @@ impl LogReader {
             }
             // No pid file that binds: guess by cwd, but in the config dir
             // the process itself was started with, where its environment
-            // names one, and say why when a pid file could not be read.
+            // points at one, and say why when a pid file could not be read.
             unbound => {
-                let guess = match claude_config_dir_of(pid).filter(|root| root.is_dir()) {
+                let guess = match claude_fallback_root_of(pid).filter(|root| root.is_dir()) {
                     Some(root) => {
                         self.add_root(root.clone());
                         self.claude_in(&root, &[cwd], None, false)
