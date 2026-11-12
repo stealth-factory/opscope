@@ -25,8 +25,11 @@
 //!
 //! **Small, and quiet on the disk.** One row per reading, replaced, never
 //! appended; rows nobody has published for a day are deleted; the file is
-//! capped by SQLite itself, and a file that is somehow larger, damaged, or
-//! from another version is deleted and started again rather than repaired.
+//! capped by SQLite itself, and a file that is somehow larger is emptied
+//! where it stands. A file that is damaged or from another version is
+//! deleted and started again rather than repaired - and only then: a file
+//! another pane is busy writing is healthy, and deleting it would split the
+//! panes across two files without either noticing.
 //! Writes happen when a fetch claims or publishes and at no other time -
 //! no heartbeat, no per-pane row. A pane that wrote nothing reads nothing
 //! either: `PRAGMA data_version` says whether anyone else has written since
@@ -121,49 +124,100 @@ fn sql(e: rusqlite::Error) -> String {
     e.to_string()
 }
 
-impl Store {
-    /// Open the store, or start it again when it cannot be used as it is.
-    pub fn open(path: &str) -> Result<Store, String> {
-        match Store::open_once(path) {
-            Ok(s) => Ok(s),
-            Err(first) => {
-                remove(path);
-                let mut s = Store::open_once(path)?;
-                s.notice = format!("shared store started again: {first}");
-                Ok(s)
-            }
-        }
+/// Why a store could not be opened, and whether that is the file's fault.
+#[derive(Debug)]
+struct OpenError {
+    why: String,
+    /// Damaged, not a database, or another version: delete it and start
+    /// again. Anything else - another pane holding a lock past `BUSY`, a
+    /// directory that cannot be written - leaves the file alone.
+    unusable: bool,
+}
+
+impl OpenError {
+    fn other(why: String) -> OpenError {
+        OpenError { why, unusable: false }
     }
 
-    fn open_once(path: &str) -> Result<Store, String> {
+    fn unusable(why: String) -> OpenError {
+        OpenError { why, unusable: true }
+    }
+}
+
+/// Whether SQLite said the file itself is bad, as opposed to busy.
+fn damaged(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    )
+}
+
+fn db(e: rusqlite::Error) -> OpenError {
+    OpenError { unusable: damaged(&e), why: e.to_string() }
+}
+
+/// Whether an error is another pane holding the file for longer than
+/// `BUSY` - which passes, and is no reason to doubt the store.
+pub fn busy(why: &str) -> bool {
+    why.contains("database is locked") || why.contains("database table is locked")
+}
+
+/// How many times opening a busy store is tried before giving up for now.
+const OPEN_TRIES: u32 = 3;
+
+impl Store {
+    /// Open the store, or start it again when the file cannot be used.
+    ///
+    /// Only a file SQLite calls damaged, or one written by another version,
+    /// is deleted. A busy one is tried again a few times and then left for
+    /// a later pass; the panes already using it carry on with it.
+    pub fn open(path: &str) -> Result<Store, String> {
+        let mut tries = 0;
+        let first = loop {
+            match Store::open_once(path) {
+                Ok(s) => return Ok(s),
+                Err(e) if e.unusable => break e.why,
+                Err(e) => {
+                    tries += 1;
+                    if tries >= OPEN_TRIES || !busy(&e.why) {
+                        return Err(e.why);
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        };
+        remove(path);
+        let mut s = Store::open_once(path).map_err(|e| e.why)?;
+        s.notice = format!("shared store started again: {first}");
+        Ok(s)
+    }
+
+    fn open_once(path: &str) -> Result<Store, OpenError> {
         use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| OpenError::other(format!("cannot make {}: {e}", dir.display())))?;
         }
         // Made before SQLite opens it, so it is 0600 whatever the umask; the
         // journal SQLite makes beside it takes the same mode.
         match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(format!("cannot create it: {e}")),
+            Err(e) => return Err(OpenError::other(format!("cannot create it: {e}"))),
         }
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if size > SHRINK_AT {
-            return Err(format!("it had grown to {} KB", size / 1024));
-        }
-        let conn = Connection::open(path).map_err(sql)?;
-        conn.busy_timeout(BUSY).map_err(sql)?;
-        conn.pragma_update(None, "page_size", PAGE).map_err(sql)?;
+        let conn = Connection::open(path).map_err(db)?;
+        conn.busy_timeout(BUSY).map_err(db)?;
+        conn.pragma_update(None, "page_size", PAGE).map_err(db)?;
         let _: String = conn
             .query_row("PRAGMA journal_mode=TRUNCATE", [], |r| r.get(0))
-            .map_err(sql)?;
-        conn.pragma_update(None, "synchronous", "OFF").map_err(sql)?;
+            .map_err(db)?;
+        conn.pragma_update(None, "synchronous", "OFF").map_err(db)?;
         let _: i64 = conn
             .query_row(&format!("PRAGMA max_page_count={MAX_PAGES}"), [], |r| r.get(0))
-            .map_err(sql)?;
-        let ok: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(sql)?;
+            .map_err(db)?;
+        let ok: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(db)?;
         if ok != "ok" {
-            return Err(format!("it was damaged ({ok})"));
+            return Err(OpenError::unusable(format!("it was damaged ({ok})")));
         }
         conn.execute_batch(
             "BEGIN IMMEDIATE;
@@ -176,14 +230,18 @@ impl Store {
                  key TEXT PRIMARY KEY, holder INTEGER NOT NULL, expires_at REAL NOT NULL);
              COMMIT;",
         )
-        .map_err(sql)?;
+        .map_err(|e| {
+            // A failed batch can leave its BEGIN open on this connection.
+            let _ = conn.execute_batch("ROLLBACK");
+            db(e)
+        })?;
         conn.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('version', ?1)", [VERSION])
-            .map_err(sql)?;
+            .map_err(db)?;
         let v: i64 = conn
             .query_row("SELECT v FROM meta WHERE k = 'version'", [], |r| r.get(0))
-            .map_err(sql)?;
+            .map_err(db)?;
         if v != VERSION {
-            return Err(format!("it was written by another version ({v})"));
+            return Err(OpenError::unusable(format!("it was written by another version ({v})")));
         }
         let mut store = Store {
             conn,
@@ -195,7 +253,14 @@ impl Store {
             writes: 0,
             notice: String::new(),
         };
-        store.begin_pass()?;
+        store.begin_pass().map_err(OpenError::other)?;
+        let size = store.size();
+        if size > SHRINK_AT {
+            store.keep_small().map_err(OpenError::other)?;
+            if store.notice.is_empty() {
+                store.notice = format!("shared store compacted: it had grown to {} KB", size / 1024);
+            }
+        }
         Ok(store)
     }
 
@@ -350,8 +415,12 @@ impl Store {
         Ok(())
     }
 
-    /// Vacuum a file that has grown past `SHRINK_AT`; start again if that
-    /// was not enough. Never let it grow.
+    /// Vacuum a file that has grown past `SHRINK_AT`; empty it if that was
+    /// not enough. Never let it grow.
+    ///
+    /// Emptied where it stands rather than deleted: the other panes hold it
+    /// open, and a new file under the same name is one they would never see
+    /// - each would go on with its own, and ask every vendor itself again.
     fn keep_small(&mut self) -> Result<(), String> {
         if self.size() <= SHRINK_AT {
             return Ok(());
@@ -360,13 +429,16 @@ impl Store {
         if self.size() <= SHRINK_AT {
             return Ok(());
         }
-        let path = self.path.clone();
-        remove(&path);
-        let mut fresh = Store::open_once(&path)?;
-        fresh.notice = "shared store started again: it had grown past its limit".into();
-        fresh.reads = self.reads;
-        fresh.writes = self.writes;
-        *self = fresh;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE; DELETE FROM readings; DELETE FROM leases; COMMIT;")
+            .map_err(|e| {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                sql(e)
+            })?;
+        self.conn.execute_batch("VACUUM").map_err(sql)?;
+        self.writes += 1;
+        self.seen.clear();
+        self.notice = "shared store emptied: it had grown past its limit".into();
         Ok(())
     }
 
@@ -536,6 +608,50 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert!(s.notice.contains("grown"), "{}", s.notice);
         assert!(s.size() < SHRINK_AT);
+    }
+
+    #[test]
+    fn a_store_another_pane_holds_busy_is_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let path = temp("busy");
+        let mut a = Store::open(&path).unwrap();
+        assert!(a.publish("k", &reading(NOW, serde_json::json!({"u": 1})), &[], NOW).unwrap());
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        // Another pane in the middle of a write that outlasts `BUSY`.
+        a.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let opened = Store::open(&path);
+        assert!(opened.is_err(), "a locked store must not open as a fresh one");
+        assert!(busy(&opened.err().unwrap()));
+        a.conn.execute_batch("COMMIT").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode, "the file was replaced");
+        let mut b = Store::open(&path).unwrap();
+        assert!(b.notice.is_empty(), "{}", b.notice);
+        assert_eq!(b.load("k").unwrap().unwrap().value, Some(serde_json::json!({"u": 1})));
+    }
+
+    #[test]
+    fn a_store_emptied_for_size_stays_the_file_every_pane_has_open() {
+        use std::os::unix::fs::MetadataExt;
+        let path = temp("empty-in-place");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        b.me = a.me + 1;
+        // More live readings than the file may hold past `SHRINK_AT`, so
+        // vacuuming alone cannot bring it back under.
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let body = serde_json::json!({ "u": "x".repeat(1024 * 1024) });
+        for i in 0..9 {
+            let mut r = reading(NOW, body.clone());
+            r.good = None;
+            a.publish(&format!("k{i}"), &r, &[], NOW).unwrap();
+        }
+        assert!(a.size() <= SHRINK_AT, "{}", a.size());
+        assert!(a.notice.contains("emptied"), "{}", a.notice);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        // The other pane still shares with this one, through the same file.
+        assert!(a.publish("after", &reading(NOW, serde_json::json!(7)), &[], NOW).unwrap());
+        b.begin_pass().unwrap();
+        assert_eq!(b.load("after").unwrap().unwrap().value, Some(serde_json::json!(7)));
     }
 
     #[test]
