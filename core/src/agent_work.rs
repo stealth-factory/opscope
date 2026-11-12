@@ -228,6 +228,28 @@ impl Table {
         self.procs.get(&pid)
     }
 
+    /// Named agent processes across the machine, without counting a direct
+    /// interpreter launch wrapper again. Native children remain separate processes.
+    /// This discovers processes, not proof of an active session or model turn.
+    pub fn agents(&self, names: &[&str]) -> Vec<(u32, String)> {
+        let mut found = Vec::new();
+        for (&pid, proc) in &self.procs {
+            let Some(&name) = names.iter().find(|name| is_named(&proc.comm, &proc.args, name)) else {
+                continue;
+            };
+            let program = proc.args.split_whitespace().next().unwrap_or("");
+            let wrapper = INTERPRETERS.contains(&base_name(&proc.comm))
+                || INTERPRETERS.contains(&base_name(program));
+            if wrapper && self.kids(pid).iter().any(|child| self.get(*child)
+                .is_some_and(|p| is_named(&p.comm, &p.args, name))) {
+                continue;
+            }
+            found.push((pid, name.to_string()));
+        }
+        found.sort_unstable();
+        found
+    }
+
     fn kids(&self, pid: u32) -> &[u32] {
         self.children.get(&pid).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -562,6 +584,15 @@ fn redact(words: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discover_agents_collapses_wrappers_but_keeps_independent_processes() {
+        let table = parse_process_table("10 1 node node /opt/codex/bin/codex.js\n11 10 codex /opt/codex/bin/codex\n12 10 codex codex exec task\n13 11 codex codex exec delegated\n20 1 2.1.317 claude\n21 20 bash bash -c tail /tmp/claude\n22 21 tail tail /tmp/claude\n30 1 opencode opencode\n").unwrap();
+        assert_eq!(table.agents(&["claude", "codex", "opencode"]), vec![
+            (11,"codex".into()), (12,"codex".into()), (13,"codex".into()), (20,"claude".into()), (30,"opencode".into())
+        ]);
+        assert!(table.agents(&[]).is_empty());
+    }
 
     // An agent (claude) with an MCP server, a bundled rg, a background
     // `npm test` behind Claude's shell wrapper, and a shell whose job has

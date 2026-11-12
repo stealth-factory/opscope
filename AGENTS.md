@@ -34,8 +34,8 @@ bypass warning, not a rejection. To stay off it:
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Twenty widget binaries plus the `opscope` launcher share `opscope-core`;
-build all twenty with `cargo build --release` from the root.
+Twenty-one widget binaries plus the `opscope` launcher share `opscope-core`;
+build all twenty-two with `cargo build --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
 gone, and `docs/port-decisions.md` records what the port changed and why.
@@ -440,8 +440,8 @@ which the compiler now makes impossible. It went with the Python.
   rebuild - it made it rebuild almost never, and `--version` reported a
   four-commit-old sha with a stale `-dirty` while the tree was clean. A
   full thirty-second rebuild did not move it. Watching nothing and watching
-  everything are both wrong: unconditional reruns relink all twenty-one
-  binaries on every no-op build, measured at 28s against 0.04s. Watch the
+  everything are both wrong: unconditional reruns relink every binary
+  on every no-op build, measured at 28s against 0.04s. Watch the
   git files `git rev-parse --git-path` resolves - the only form that works
   in a linked worktree, where `.git` is a file - plus the source trees.
 - **The commit that removes a secret is the likeliest place to restate it.**

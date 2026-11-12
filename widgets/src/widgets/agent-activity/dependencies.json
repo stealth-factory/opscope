@@ -1,0 +1,4 @@
+{
+  "required": { "ps": { "version": "*", "why": "Discovers named local agent processes and their running child shells." } },
+  "recommended": { "lsof": { "version": "*", "platforms": ["macos"], "why": "Reads each agent process's working directory for session-log association on macOS. If unavailable, source errors stay visible and shell jobs remain available." } }
+}

@@ -1,0 +1,11 @@
+{
+  "_comment": "Local Claude Code, Codex and OpenCode processes and their child work. No multiplexer or hooks required. Session guesses and source failures remain visible.",
+  "_schema": {
+    "refresh": { "minimum": 0.5, "maximum": 86400 },
+    "finished_per_agent": { "minimum": 0, "maximum": 100 }
+  },
+  "_refresh_comment": "Seconds between local process and session-log reads. Settings changes and r request a fresh sample immediately.",
+  "refresh": 2.0,
+  "_finished_per_agent_comment": "Maximum latest finished log children to show per live parent process in its matched session. Set 0 for unfinished work only. This excludes older sessions and exited parent processes; it is not total finished-work history.",
+  "finished_per_agent": 3
+}

@@ -1,0 +1,11 @@
+Local coding agents, their subagents, and background shell work.
+
+A standalone board of Claude Code, Codex and OpenCode processes on this machine, with child work from shared local session readers and the process table. No multiplexer or hooks required. Log states are last recorded; newest-session guesses and source failures are visible. Finished rows are bounded to the matched sessions of live parents.
+
+    agent-activity [-n SECONDS]
+
+Keys: up/down or j/k select, Enter opens sources, Esc returns, r refreshes,
+comma opens settings, q quits. In sources, up/down scroll.
+Wheel and Ctrl-Y/Ctrl-E scroll without moving the selection.
+PgUp/PgDn scroll a page; Home/End scroll to either end.
+Commands: Ctrl-K. Theme picker: Ctrl-T. Notices: !.

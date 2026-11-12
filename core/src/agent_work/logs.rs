@@ -636,15 +636,19 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            // macOS SystemTime has microsecond resolution: parallel tests can
+            // otherwise share a path and overwrite/remove each other's logs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "opscope-work-{}-{}",
+                "opscope-work-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
-            fs::create_dir_all(&path).unwrap();
+            fs::create_dir(&path).unwrap();
             Self(path)
         }
         fn write(&self, path: &str, body: &str) -> PathBuf {

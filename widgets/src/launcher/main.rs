@@ -52,6 +52,7 @@ macro_rules! widget {
 }
 
 const WIDGETS: &[Widget] = &[
+    widget!("agent-activity"),
     widget!("agent-usage"),
     widget!("clocks"),
     widget!("disk"),
@@ -652,7 +653,8 @@ mod tests {
         // height now: the list is whole, the description is under it, and
         // the example is under that.
         let p = palette();
-        let body = body_rows(90, 0, &p);
+        let usage = WIDGETS.iter().position(|w| w.stem == "agent-usage").expect("agent-usage is registered");
+        let body = body_rows(90, usage, &p);
         let rows: Vec<String> = body.iter().map(|r| plain(r)).collect();
         for widget in WIDGETS {
             assert!(
