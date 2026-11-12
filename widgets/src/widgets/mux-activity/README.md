@@ -108,20 +108,72 @@ Logs come from `~/.claude/projects` (`CLAUDE_CONFIG_DIR` when set),
 are installed. Log state is the last recorded lifecycle, not a heartbeat.
 A crash that never writes a stop can leave work unfinished in the log.
 
+A Claude agent is bound to its session by its own pid: Claude keeps
+`sessions/<pid>.json` for every running process, naming the exact session,
+so two Claude panes in one directory each show their own subagents. The
+config dir is the agent's, not the widget's: its `CLAUDE_CONFIG_DIR` read from
+`/proc/<pid>/environ` on Linux, and on a Mac whichever known config dir holds
+a pid file for it. A pid file left by an earlier process with the same pid is
+not believed where `/proc` gives a start time to check it against.
+
+Without a pid file - Codex and OpenCode, or a Claude older than that file -
 Rex and Herdr supply a cwd rather than an agent session ID, so the reader
 uses the newest root session for that cwd. Those rows say `session guessed`;
 Rex's explain screen also identifies the chosen session. Luvus uses a
 session ID bound to the pane when supplied. Unbound entries from `agent
 sessions` cannot establish the parent session; the reader chooses the newest
 log for the cwd and labels that match as a guess. Luvus's explain screen gives
-the chosen session too. Concurrent agents in the same directory can be
-misattributed until their multiplexer supplies an exact session binding.
+the chosen session too. A pid file that cannot be read says so under the
+agent beside the guess.
 
 A Rex pane on another machine shows only what its agent reports: local
 processes and logs cannot describe it. An unreadable process table or log
 source says `├ background work could not be read` and why under the agent.
 A matching report ID is required to suppress a log fallback: matching the label
 `Explore` would incorrectly hide a different child with the same name.
+
+## Background agents with no pane
+
+A Claude Code background agent (`claude --bg`, managed from `claude
+agents`) runs on Claude's daemon, on a terminal no pane holds, so no
+multiplexer can report it and no process tree under a pane contains it.
+Every board reads it from the file Claude writes for its own dashboard,
+`<config dir>/jobs/<id>/state.json`, and draws it the same way under Rex,
+Herdr and Luvus: as an agent in a group of its own,
+`background agents · via jobs`, sorted with the board's other agents. A
+`blocked` one is with the agents that need you and counts in the state bar.
+
+Each row has the state the agent reported (`working`, `blocked`, `done`;
+never inferred), how long it has held it from the job's `timeline.jsonl`
+(`≥` when that only gives a lower bound), its name, its one-line detail or
+what it is waiting for, and the `inFlight` count. Its unfinished subagents
+are drawn under it as `├ Explore  working · via jobs`, and the shells under
+its process as `via process`. `e` explains it: every field, every entry in
+its `fan` - subagents and shells, finished or not - with its age, and the
+file it came from. Claude records a finish for a subagent but never for a
+shell, so a shell is listed there and never claimed to be running.
+
+A job whose process is gone while its file still says `working` or `blocked`
+says so on the row. `done` jobs with no process holding them, and `stopped`
+ones, are counted in the group's heading (`2 finished not shown`) rather than
+drawn. A `done` job whose process could not be checked (no process table,
+or a pid file that did not read) stays on the board and says why. A pid
+counts as the job's process only while it is still a Claude, so a pid
+reused by another program never lends the job its CPU or shells. A
+`state.json` that cannot be read or names a state this widget does
+not know is a row of its own with the reason, never an empty group. `Enter`
+on one says that there is no pane and that `claude agents` opens it.
+
+Under Herdr, its integration hook runs inside a background agent too and
+reports it under whichever pane started the daemon. When that report carries
+a session id one of the jobs has gone by, the job is not drawn again: its
+subagents join that agent's row instead.
+
+Only this machine's config dirs are read: the default (`CLAUDE_CONFIG_DIR`
+or `~/.claude`) and any a running Claude agent was found using. The format
+is undocumented and internal to Claude Code; see
+[docs/agent-background-work.md](../../../../docs/agent-background-work.md)
+for the version it was read from.
 
 ## Where it runs
 
@@ -418,6 +470,7 @@ behind it.
 | `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
 | `i` | show/hide the idle section |
 | `l` | workspace labels vs pane ids |
+| `e` | explain the selected background agent (the only rows with an explain screen here); `esc` or `e` goes back |
 | `r` | refresh now |
 | `,` | open settings |
 | `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |

@@ -448,6 +448,26 @@ pub fn read_cmdline(pid: i32) -> Result<String, String> {
         .map_err(|e| format!("{}: {}", path, e))
 }
 
+/// `/proc/<pid>/environ` as text, NUL-separated as the kernel gives it.
+/// Only the process's owner can read it; another user's is an `Err`.
+pub fn read_environ(pid: i32) -> Result<String, String> {
+    let path = format!("/proc/{}/environ", pid);
+    std::fs::read(&path)
+        .map(|raw| String::from_utf8_lossy(&raw).to_string())
+        .map_err(|e| format!("{}: {}", path, e))
+}
+
+/// One variable from a NUL-separated environment block, as
+/// `/proc/<pid>/environ` holds it. An empty value is no value.
+pub fn parse_environ_var<'a>(environ: &'a str, name: &str) -> Option<&'a str> {
+    environ
+        .split('\0')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+}
+
 /// Where `/proc/<pid>/cwd` points.
 pub fn read_cwd(pid: i32) -> Result<String, String> {
     let path = format!("/proc/{}/cwd", pid);
@@ -741,6 +761,15 @@ mod tests {
         fields[24 - 5] = "300".into();
         fields[42 - 5] = "7".into();
         format!("{} ({}) {} {} {}", pid, comm, state, ppid, fields.join(" "))
+    }
+
+    #[test]
+    fn an_environ_variable_is_matched_by_its_whole_name() {
+        let env = "HOME=/home/u\0CLAUDE_CONFIG_DIR_OLD=/x\0CLAUDE_CONFIG_DIR=/srv/c\0EMPTY=\0";
+        assert_eq!(parse_environ_var(env, "CLAUDE_CONFIG_DIR"), Some("/srv/c"));
+        assert_eq!(parse_environ_var(env, "HOME"), Some("/home/u"));
+        assert_eq!(parse_environ_var(env, "EMPTY"), None);
+        assert_eq!(parse_environ_var(env, "PATH"), None);
     }
 
     #[test]

@@ -1,0 +1,31 @@
+{
+  "state": "working",
+  "detail": "Running cargo test",
+  "tempo": "active",
+  "inFlight": {"tasks": 2, "queued": 0, "kinds": ["local_agent", "local_bash"], "drainableMonitors": 0},
+  "fan": [
+    {"id": "a0000000000000001", "kind": "agent", "label": "Explore the parser", "startedAt": 1794000000000, "doneAt": 1794000100000},
+    {"id": "a0000000000000002", "kind": "agent", "label": "Review the diff", "startedAt": 1794000200000},
+    {"id": "b00000001", "kind": "shell", "label": "cargo test --workspace", "startedAt": 1794000300000}
+  ],
+  "tokens": 1000,
+  "output": null,
+  "children": [{"id": "1", "href": "https://example.com/org/repo/pull/1", "kind": "pr"}],
+  "template": "bg",
+  "respawnFlags": ["--permission-mode", "auto"],
+  "bgIsolation": "none",
+  "providerEnv": {},
+  "interactiveLineage": true,
+  "intent": "",
+  "name": "opscope",
+  "nameSource": "user",
+  "sessionId": "aaaa1111-0000-4000-8000-000000000001",
+  "resumeSessionId": "bbbb2222-0000-4000-8000-000000000002",
+  "daemonShort": "aaaa1111",
+  "cliVersion": "2.1.322",
+  "cwd": "/srv/repo",
+  "createdAt": "2026-11-10T00:00:00.000Z",
+  "updatedAt": "2026-11-12T02:06:11.665Z",
+  "firstTerminalAt": "2026-11-10T00:00:20.000Z",
+  "backend": "daemon"
+}

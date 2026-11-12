@@ -109,7 +109,9 @@ no change to mux-activity.
 Each row also carries the workspace, how long the agent has held its current
 state, and the real CPU and memory of its process.
 
-Keys under Herdr: l toggles workspace labels vs pane ids.
+Keys under Herdr: l toggles workspace labels vs pane ids. e explains a
+background agent, the only rows with an explain screen here; esc or e
+goes back.
 
 Refresh: pane lifecycle and agent-status events wake a full CLI read.
 Workspace label events, socket reconnects, and subscription renewal also
@@ -185,6 +187,17 @@ r refreshes immediately, independent of the bounded event wait.
 Background work:
   Agent child reports take priority over matching session-log records;
   opaque report IDs never stand in for process IDs. Claude Code, Codex and OpenCode V2 subagents say "via log";
-  background shells say "via process". No hooks are needed. A cwd-only
-  session match says "session guessed"; concurrent sessions may differ.
+  background shells say "via process". No hooks are needed. A Claude agent
+  is bound to its exact session by its own pid file; a cwd-only session
+  match says "session guessed"; concurrent sessions may differ.
   Mux shows unfinished work, with errors when a source cannot be read.
+
+Background agents:
+  Claude Code background agents (claude --bg) run in no pane. Every board
+  reads them from Claude's own jobs/<id>/state.json and lists them as
+  agents under "background agents · via jobs", a blocked one with the
+  agents that need you. Each row has the reported state, how long it has
+  held it, its name and detail, and how much is in flight; subagents it is
+  running say "via jobs". Press e on one to see every subagent and shell it
+  started, with their ages. Finished jobs are counted in the heading, not
+  drawn. Under Herdr, a job its hook already reports is drawn once.

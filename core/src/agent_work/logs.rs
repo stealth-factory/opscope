@@ -30,6 +30,31 @@ use std::{
     time::SystemTime,
 };
 
+/// The config dir a process runs with, from its own environment: its
+/// `CLAUDE_CONFIG_DIR`, or `$HOME/.claude` when it names none. `None` where
+/// the environment cannot be read (no `/proc`, or another user's process).
+fn claude_root_of(pid: u32) -> Option<PathBuf> {
+    let env = crate::procfs::read_environ(pid as i32).ok()?;
+    crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| crate::procfs::parse_environ_var(&env, "HOME").map(|home| Path::new(home).join(".claude")))
+}
+
+/// Where to look for a Claude process's transcripts when no pid file binds
+/// it: the `CLAUDE_CONFIG_DIR` its environment names, or else its own
+/// `$HOME/.claude` when it runs under a different `HOME` from this widget
+/// (another user, a sandboxed home). Under the same `HOME` that dir is
+/// the default root already, so it is not named again.
+fn claude_fallback_root_of(pid: u32) -> Option<PathBuf> {
+    let env = crate::procfs::read_environ(pid as i32).ok()?;
+    if let Some(dir) = crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = crate::procfs::parse_environ_var(&env, "HOME")?;
+    let ours = std::env::var_os("HOME").map(PathBuf::from);
+    (ours.as_deref() != Some(Path::new(&home))).then(|| Path::new(&home).join(".claude"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Activity {
     #[default]
@@ -65,6 +90,8 @@ pub struct LogWork {
     pub session_id: String,
     /// No multiplexer-provided session ID: newest root transcript for this cwd.
     pub guessed: bool,
+    /// The session came from the agent's own pid file (`sessions/<pid>.json`).
+    pub bound: bool,
     /// Archive records that could not be indexed; known tasks remain usable.
     pub warnings: Vec<String>,
     /// Includes finished items for consumers that need history. Mux draws active work only.
@@ -78,6 +105,8 @@ impl LogWork {
                 self.session_id,
                 if self.guessed {
                     "guess: newest session for this cwd; concurrent sessions may differ"
+                } else if self.bound {
+                    "session id from the agent's own pid file"
                 } else {
                     "session id supplied by the multiplexer"
                 }
@@ -162,6 +191,9 @@ struct CodexIndex {
 #[derive(Debug)]
 pub struct LogReader {
     claude: PathBuf,
+    /// Every Claude config dir seen: the default, then any an agent process
+    /// was found running with. Background agents are looked for in each.
+    claude_roots: Vec<PathBuf>,
     codex: PathBuf,
     opencode: PathBuf,
     files: HashMap<PathBuf, Cached>,
@@ -187,6 +219,7 @@ impl Default for LogReader {
 impl LogReader {
     pub fn at(claude: PathBuf, codex: PathBuf, opencode: PathBuf) -> Self {
         Self {
+            claude_roots: vec![claude.clone()],
             claude,
             codex,
             opencode,
@@ -211,6 +244,155 @@ impl LogReader {
             "opencode" => self.opencode(cwd, session),
             _ => Ok(LogWork::default()),
         }
+    }
+    /// [`read`](Self::read) for an agent whose pid is known. A Claude agent
+    /// is bound to its session through its own pid file, in the config dir
+    /// the process itself runs with; the cwd guess is only the fallback,
+    /// and a pid file that cannot be read says so beside the guess.
+    pub fn read_agent(
+        &mut self,
+        agent: &str,
+        pid: Option<u32>,
+        cwd: &str,
+        session: Option<&str>,
+    ) -> Result<LogWork, String> {
+        let claude = matches!(agent, "claude" | "claude-code");
+        let session = session.filter(|s| !s.is_empty());
+        let (Some(pid), true) = (pid, claude) else {
+            return self.read(agent, cwd, session);
+        };
+        if let Some(id) = session {
+            // The id the multiplexer reported stays the identity; the pid
+            // only says which config dir its transcript is in.
+            let root = match self.claude_binding(pid) {
+                Ok(Some((root, _))) => Some(root),
+                // No pid file: the dir its own environment points at, if any.
+                _ => claude_fallback_root_of(pid).filter(|root| root.is_dir()),
+            };
+            return match root {
+                Some(root) => {
+                    self.add_root(root.clone());
+                    self.claude_in(&root, &[cwd], Some(id), false)
+                }
+                None => self.read(agent, cwd, Some(id)),
+            };
+        }
+        match self.claude_binding(pid) {
+            Ok(Some((root, bound))) => {
+                let cwds = [bound.cwd.as_str(), cwd];
+                self.claude_in(&root, &cwds, Some(&bound.session_id), true)
+            }
+            // No pid file that binds: guess by cwd, but in the config dir
+            // the process itself was started with, where its environment
+            // points at one, and say why when a pid file could not be read.
+            unbound => {
+                let guess = match claude_fallback_root_of(pid).filter(|root| root.is_dir()) {
+                    Some(root) => {
+                        self.add_root(root.clone());
+                        self.claude_in(&root, &[cwd], None, false)
+                    }
+                    None => self.read(agent, cwd, None),
+                };
+                match unbound {
+                    Err(why) => guess.map(|mut work| {
+                        work.warnings.push(why);
+                        work
+                    }),
+                    _ => guess,
+                }
+            }
+        }
+    }
+    /// The config dir a Claude process runs with, and its pid file there.
+    /// The process's own `CLAUDE_CONFIG_DIR` where its environment can be
+    /// read (Linux, same user); otherwise whichever known config dir holds
+    /// a pid file for it, which is how a Mac finds it.
+    fn claude_binding(&mut self, pid: u32) -> Result<Option<(PathBuf, super::ClaudeSession)>, String> {
+        let own = claude_root_of(pid);
+        let mut candidates: Vec<PathBuf> = own.iter().cloned().collect();
+        candidates.extend(self.claude_roots.iter().cloned());
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut found: Vec<(PathBuf, super::ClaudeSession, bool)> = Vec::new();
+        let mut failed: Option<String> = None;
+        for root in candidates {
+            let key = real(&root);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let path = root.join("sessions").join(format!("{pid}.json"));
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // Held until a file that is provably this process's has
+                // had its chance: an unrelated broken one must not hide it.
+                Err(e) => {
+                    failed.get_or_insert(format!("Claude pid file: {e}"));
+                    continue;
+                }
+            };
+            let session = match super::parse_claude_session(&text) {
+                Ok(session) => session,
+                Err(e) => {
+                    failed.get_or_insert(e);
+                    continue;
+                }
+            };
+            if session.pid != pid || !super::jobs::same_process(&session) {
+                // Left behind by an earlier process with this pid.
+                continue;
+            }
+            // The process's own config dir, or a start time that matched,
+            // proves the file is this process's. Anything else is only
+            // a file that names the pid.
+            let proven = own.as_ref().is_some_and(|own| real(own) == real(&root))
+                || super::jobs::start_time_matches(&session);
+            found.push((root, session, proven));
+        }
+        // One unproven file is the best there is (a Mac has no start time);
+        // two that both name the pid cannot be told apart, so neither binds.
+        let pick = match found.iter().position(|(_, _, proven)| *proven) {
+            Some(i) => Some(found.swap_remove(i)),
+            // A file that did not read may have been the one; say so.
+            None if failed.is_some() => return Err(failed.unwrap_or_default()),
+            None if found.len() == 1 => found.pop(),
+            None => None,
+        };
+        Ok(pick.map(|(root, session, _)| {
+            self.add_root(root.clone());
+            (root, session)
+        }))
+    }
+    /// Remember a config dir, once: a `CLAUDE_CONFIG_DIR` that is a symlink
+    /// to a dir already known is the same dir, or its jobs would be drawn
+    /// and counted twice.
+    fn add_root(&mut self, root: PathBuf) {
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let new = real(&root);
+        if !self.claude_roots.iter().any(|known| real(known) == new) {
+            self.claude_roots.push(root);
+        }
+    }
+    /// Every Claude config dir background agents are looked for in.
+    pub fn claude_roots(&self) -> &[PathBuf] {
+        &self.claude_roots
+    }
+    /// Claude background agents under every known config dir, plus the
+    /// config dir of every Claude process in `table`: a background agent
+    /// started with its own `CLAUDE_CONFIG_DIR` holds no pane that would
+    /// have found that dir.
+    pub fn read_jobs(&mut self, table: Option<&Result<super::Table, String>>) -> super::Jobs {
+        if let Some(Ok(table)) = table {
+            for (pid, _) in table.agents(&["claude"]) {
+                if let Some(root) = claude_root_of(pid) {
+                    if root.join("jobs").is_dir() {
+                        self.add_root(root);
+                    }
+                }
+            }
+        }
+        super::read_jobs(&self.claude_roots, table)
     }
     /// Incrementally parse complete records; partial bytes never become errors.
     fn transcript(&mut self, path: &Path, claude: bool) -> Result<Transcript, String> {
@@ -274,29 +456,71 @@ impl LogReader {
         Ok(c.transcript.clone())
     }
     fn claude(&mut self, cwd: &str, session: Option<&str>) -> Result<LogWork, String> {
-        if cwd.is_empty() {
+        let root = self.claude.clone();
+        self.claude_in(&root, &[cwd], session, false)
+    }
+    /// The Claude session under `root`, in the first of `cwds` whose project
+    /// folder holds it. A session bound from a pid file may have no
+    /// transcript yet - nothing has been said in it - which is no work
+    /// rather than an error.
+    fn claude_in(
+        &mut self,
+        root: &Path,
+        cwds: &[&str],
+        session: Option<&str>,
+        bound: bool,
+    ) -> Result<LogWork, String> {
+        let cwds: Vec<&str> = cwds.iter().copied().filter(|c| !c.is_empty()).collect();
+        let Some(&cwd) = cwds.first() else {
             return if session.is_some() {
                 Err("Claude session lookup needs the pane cwd".into())
             } else {
                 Ok(LogWork::default())
             };
-        }
-        let encoded: String = cwd
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let project = self.claude.join("projects").join(encoded);
-        let paths = list(&project, false)?;
+        };
+        let encode = |cwd: &str| -> String {
+            cwd.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect()
+        };
+        let mut project = root.join("projects").join(encode(cwd));
         let path = if let Some(id) = session {
             if !safe_id(id) {
                 return Err("invalid Claude session id".into());
             }
-            let path = project.join(format!("{id}.jsonl"));
-            if !path.exists() {
-                return Err("the supplied Claude session log was not found".into());
+            // `exists()` is false for a transcript that cannot be looked at
+            // as well as for one that is not there, and only the second may
+            // read as an agent with nothing running.
+            let mut unreadable = None;
+            let found = cwds.iter().map(|c| root.join("projects").join(encode(c))).find(|p| {
+                match fs::metadata(p.join(format!("{id}.jsonl"))) {
+                    Ok(_) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => {
+                        unreadable.get_or_insert_with(|| format!("the Claude session log could not be read: {e}"));
+                        false
+                    }
+                }
+            });
+            if let (None, Some(why)) = (&found, unreadable) {
+                return Err(why);
             }
-            Some(path)
+            match found {
+                Some(p) => {
+                    project = p;
+                    Some(project.join(format!("{id}.jsonl")))
+                }
+                None if bound => {
+                    return Ok(LogWork {
+                        session_id: id.to_string(),
+                        bound: true,
+                        ..Default::default()
+                    })
+                }
+                None => return Err("the supplied Claude session log was not found".into()),
+            }
         } else {
+            let paths = list(&project, false)?;
             let mut dated = Vec::new();
             for path in paths
                 .into_iter()
@@ -349,6 +573,7 @@ impl LogReader {
         Ok(LogWork {
             session_id: id,
             guessed: session.is_none(),
+            bound,
             tasks: tasks.into_values().collect(),
             ..Default::default()
         })
@@ -514,6 +739,7 @@ impl LogReader {
         Ok(LogWork {
             session_id: parent_id,
             guessed: session.is_none(),
+            bound: false,
             tasks,
             warnings: index.warnings.clone(),
         })
@@ -703,6 +929,159 @@ mod tests {
             .read("claude", "/srv/repo", Some("../parent"))
             .is_err());
     }
+    fn pid_file(pid: u32, session: &str, cwd: &str, start: &str) -> String {
+        format!(
+            "{{\"pid\":{pid},\"sessionId\":\"{session}\",\"cwd\":\"{cwd}\",\"procStart\":\"{start}\",\"kind\":\"interactive\",\"status\":\"busy\"}}"
+        )
+    }
+    fn launch(id: &str) -> String {
+        LAUNCH.replace("\"child\"", &format!("\"{id}\""))
+    }
+    #[test]
+    fn two_claude_panes_in_one_cwd_are_bound_to_their_own_sessions_by_pid() {
+        let f = Fixture::new();
+        f.write("claude/projects/-srv-repo/one.jsonl", &launch("first"));
+        f.write("claude/projects/-srv-repo/two.jsonl", &launch("second"));
+        f.write("claude/sessions/900001.json", &pid_file(900001, "one", "/srv/repo", ""));
+        f.write("claude/sessions/900002.json", &pid_file(900002, "two", "/srv/repo", ""));
+        let mut reader = f.reader();
+        let one = reader.read_agent("claude", Some(900001), "/srv/repo", None).unwrap();
+        let two = reader.read_agent("claude", Some(900002), "/srv/repo", None).unwrap();
+        assert_eq!((one.session_id.as_str(), one.tasks[0].id.as_str()), ("one", "first"));
+        assert_eq!((two.session_id.as_str(), two.tasks[0].id.as_str()), ("two", "second"));
+        for work in [&one, &two] {
+            assert!(!work.guessed && work.bound);
+            assert!(work.rows(80).iter().all(|(_, r)| !r.contains("guessed")));
+            assert!(work.explanation().unwrap().contains("pid file"));
+        }
+        // No pid file: the newest transcript for the cwd, labelled a guess.
+        let guess = reader.read_agent("claude", Some(900003), "/srv/repo", None).unwrap();
+        assert!(guess.guessed && !guess.bound);
+        // Not Claude: the pid is not consulted.
+        assert!(reader.read_agent("codex", Some(900001), "/srv/repo", None).unwrap().tasks.is_empty());
+    }
+    #[test]
+    fn a_bound_session_with_no_transcript_yet_is_no_work_not_an_error() {
+        let f = Fixture::new();
+        f.write("claude/sessions/900004.json", &pid_file(900004, "fresh", "/srv/repo", ""));
+        let work = f.reader().read_agent("claude", Some(900004), "/srv/repo", None).unwrap();
+        assert_eq!(work.session_id, "fresh");
+        assert!(work.bound && work.tasks.is_empty());
+    }
+    #[test]
+    fn a_bound_transcript_that_cannot_be_looked_at_is_an_error_not_no_work() {
+        let f = Fixture::new();
+        // A file where the project folder should be: the lookup fails with
+        // something other than "not found", as a folder without search
+        // permission does, and that holds even for root.
+        f.write("claude/projects/-srv-repo", "");
+        f.write("claude/sessions/900009.json", &pid_file(900009, "hidden", "/srv/repo", ""));
+        let err = f.reader().read_agent("claude", Some(900009), "/srv/repo", None).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
+    }
+    #[test]
+    fn a_session_in_a_worktree_is_found_from_the_pid_files_cwd() {
+        let f = Fixture::new();
+        f.write("claude/projects/-srv-repo-wt/s.jsonl", &launch("deep"));
+        f.write("claude/sessions/900005.json", &pid_file(900005, "s", "/srv/repo/wt", ""));
+        let work = f.reader().read_agent("claude", Some(900005), "/srv/repo", None).unwrap();
+        assert_eq!(work.tasks[0].id, "deep");
+    }
+    #[test]
+    fn a_corrupt_pid_file_falls_back_to_the_guess_and_says_why() {
+        let f = Fixture::new();
+        f.write("claude/projects/-srv-repo/one.jsonl", &launch("first"));
+        f.write("claude/sessions/900006.json", "{\"pid\":");
+        let work = f.reader().read_agent("claude", Some(900006), "/srv/repo", None).unwrap();
+        assert!(work.guessed);
+        assert!(work.warnings[0].contains("pid file"), "{:?}", work.warnings);
+    }
+    #[test]
+    fn a_pid_file_left_by_an_earlier_process_with_that_pid_is_not_believed() {
+        let f = Fixture::new();
+        let me = std::process::id();
+        f.write("claude/projects/-srv-repo/one.jsonl", &launch("first"));
+        f.write(&format!("claude/sessions/{me}.json"), &pid_file(me, "stale", "/srv/repo", "1"));
+        let work = f.reader().read_agent("claude", Some(me), "/srv/repo", None).unwrap();
+        // Only where /proc gives a start time can the reuse be seen.
+        if crate::procfs::read_stat(me as i32).is_ok() {
+            assert!(work.guessed, "{work:?}");
+        }
+    }
+    #[test]
+    fn two_unproven_pid_files_for_one_pid_bind_neither() {
+        let f = Fixture::new();
+        let me = std::process::id();
+        f.write("claude/projects/-srv-repo/one.jsonl", &launch("first"));
+        // No start time recorded, so neither file can prove it is ours.
+        f.write(&format!("claude/sessions/{me}.json"), &pid_file(me, "one", "/srv/repo", ""));
+        f.write(&format!("other/sessions/{me}.json"), &pid_file(me, "two", "/srv/repo", ""));
+        let mut reader = f.reader();
+        reader.add_root(f.0.join("other"));
+        let work = reader.read_agent("claude", Some(me), "/srv/repo", None).unwrap();
+        assert!(work.guessed, "{work:?}");
+    }
+    #[test]
+    fn an_agent_with_its_own_config_dir_is_read_there() {
+        let f = Fixture::new();
+        let custom = f.0.join("elsewhere");
+        f.write("elsewhere/projects/-srv-repo/s.jsonl", &launch("custom"));
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .env("CLAUDE_CONFIG_DIR", &custom)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        f.write(&format!("elsewhere/sessions/{pid}.json"), &pid_file(pid, "s", "/srv/repo", ""));
+        // A broken file naming the pid in another known dir does not hide
+        // the one in its own.
+        f.write(&format!("claude/sessions/{pid}.json"), "{\"pid\":");
+        let mut reader = f.reader();
+        // The environment of another process is readable only where /proc
+        // is, and holds the new variable only once the child has exec'd.
+        let mut readable = false;
+        for _ in 0..200 {
+            match crate::procfs::read_environ(pid as i32) {
+                Ok(env) if env.contains("CLAUDE_CONFIG_DIR=") => {
+                    readable = true;
+                    break;
+                }
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+        let work = reader.read_agent("claude", Some(pid), "/srv/repo", None);
+        // A pane whose multiplexer reported the session id still reads it
+        // in the agent's own config dir.
+        let mut fresh = f.reader();
+        let reported = fresh.read_agent("claude", Some(pid), "/srv/repo", Some("s"));
+        // A background agent with its own config dir and no pane at all is
+        // found through the process table alone.
+        f.write("elsewhere/jobs/aaaa1111/state.json", include_str!("fixtures/jobs/working.json"));
+        let table = Ok(super::super::parse_process_table(&format!("{pid} 1 claude claude --bg\n")).unwrap());
+        let jobs = f.reader().read_jobs(Some(&table));
+        // With no pid file at all, the cwd guess is made in its own dir.
+        std::fs::remove_file(f.0.join(format!("elsewhere/sessions/{pid}.json"))).unwrap();
+        let guessed = f.reader().read_agent("claude", Some(pid), "/srv/repo", None);
+        // And a reported session id is looked for there too.
+        let mut late = f.reader();
+        let reported_late = late.read_agent("claude", Some(pid), "/srv/repo", Some("s"));
+        let _ = child.kill();
+        let _ = child.wait();
+        if readable {
+            let work = work.unwrap();
+            assert_eq!(work.tasks[0].id, "custom");
+            assert!(reader.claude_roots().contains(&custom));
+            assert_eq!(reported.unwrap().tasks[0].id, "custom");
+            assert_eq!(jobs.shown.len(), 1);
+            assert_eq!(jobs.shown[0].short, "aaaa1111");
+            let guessed = guessed.unwrap();
+            assert_eq!(guessed.tasks[0].id, "custom");
+            assert!(guessed.guessed);
+            assert_eq!(reported_late.unwrap().tasks[0].id, "custom");
+            assert!(late.claude_roots().contains(&custom));
+        }
+    }
     #[test]
     fn an_atomic_log_replacement_does_not_keep_the_previous_launch() {
         let f = Fixture::new();
@@ -731,6 +1110,7 @@ mod tests {
         work.logs = LogWork {
             session_id: "parent".into(),
             guessed: true,
+            bound: false,
             warnings: Vec::new(),
             tasks: vec![LogTask {
                 id: "one".into(),

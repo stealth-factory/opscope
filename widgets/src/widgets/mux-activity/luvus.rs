@@ -33,7 +33,7 @@ use opscope_core as tc;
 
 use super::luvus_events as events;
 use super::luvus_parse as parse;
-use super::{process_filter, refresh_wake};
+use super::{background, process_filter, refresh_wake};
 
 use parse::{
     Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
@@ -294,7 +294,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                 agent.work = tc::agent_work::Work::of(table, pid);
             }
             let hint = log_session_hint(agent, sessions.as_ref().ok().map(Vec::as_slice).unwrap_or(&[]));
-            let logs = seen.logs.read(&agent.kind, &agent.cwd, hint.map(|(id, _)| id))
+            let pid = processes.as_ref().and_then(|table| {
+                let table = table.as_ref().ok()?;
+                table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
+            });
+            let logs = seen.logs.read_agent(&agent.kind, pid, &agent.cwd, hint.map(|(id, _)| id))
                 .map(|mut logs| {
                     logs.guessed |= hint.is_some_and(|(_, guessed)| guessed);
                     logs
@@ -306,6 +310,29 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         // vanished agent: a failed one must not wipe history and then
         // hand the next success a fresh clock.
         keep_live(seen, &live);
+        // Background agents, which no Luvus pane holds. A process table
+        // that was not read still lets their files be read.
+        let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
+        let jobs = seen.logs.read_jobs(Some(&table));
+        let label = background::group_label(&jobs);
+        for job in jobs.shown {
+            let (since, exact) = job.held_since.unwrap_or((at, false));
+            listed.push(Agent {
+                name: background::title(&job),
+                kind: "claude".into(),
+                workspace: "no pane".into(),
+                cwd: job.cwd.clone(),
+                state: background::state_word(&job).into(),
+                state_source: "jobs".into(),
+                authority: "jobs".into(),
+                since: at - since,
+                exact,
+                work: background::work(&job, &table),
+                group_label: label.clone(),
+                job: Some(job),
+                ..Default::default()
+            });
+        }
         listed.sort_by(|a, b| {
             parse::rank_of(&a.state)
                 .cmp(&parse::rank_of(&b.state))
@@ -486,6 +513,9 @@ struct Detail {
     /// return. An empty panel and a panel still loading are opposite
     /// readings of the same screen.
     ready: bool,
+    /// A background agent's job id: explained from its own files, with no
+    /// pane for Luvus to ask about.
+    job: Option<String>,
 }
 
 /// Ask the server about one agent. Bounded like every other call.
@@ -507,6 +537,7 @@ fn explain_agent(session: &str, pane: &str, what: &str) -> Detail {
         )
         .and_then(|t| parse::parse_screen(&t)),
         ready: true,
+        job: None,
     }
 }
 
@@ -539,6 +570,7 @@ fn ask_explain(
                 explain: Err("explain stopped - see the pane it was started from".into()),
                 screen: Err("explain stopped - see the pane it was started from".into()),
                 ready: true,
+                job: None,
             },
         };
         if let Ok(mut guard) = inbox.lock() {
@@ -603,6 +635,10 @@ impl Row {
                     parse::homely(&a.cwd),
                     a.state_source.clone(),
                 ];
+                // What its place column shows in place of a workspace.
+                if a.job.is_some() {
+                    out.push(a.group_label.clone());
+                }
                 out.extend(a.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
                 out
             }
@@ -635,7 +671,12 @@ impl Row {
     /// Whether two rows are the same entry, across a rebuild of the list.
     fn same(&self, other: &Row) -> bool {
         match (self, other) {
-            (Row::Agent(a), Row::Agent(b)) => a.pane == b.pane && a.name == b.name,
+            // A background agent has no pane; its job id is its identity.
+            (Row::Agent(a), Row::Agent(b)) => match (&a.job, &b.job) {
+                (Some(x), Some(y)) => x.short == y.short,
+                (None, None) => a.pane == b.pane && a.name == b.name,
+                _ => false,
+            },
             (Row::Task(a), Row::Task(b)) => a.id == b.id,
             (Row::Lease(a), Row::Lease(b)) => a.id == b.id && a.task == b.task,
             (Row::Pane(a), Row::Pane(b)) => a.pane_id == b.pane_id,
@@ -1329,7 +1370,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
                         let pane = agent.pane.clone();
-                        if pane.is_empty() {
+                        if let Some(job) = &agent.job {
+                            detail_gen += 1;
+                            detail = Some(Detail {
+                                pane: String::new(),
+                                what: agent.name.clone(),
+                                explain: Err(String::new()),
+                                screen: Err(String::new()),
+                                ready: true,
+                                job: Some(job.short.clone()),
+                            });
+                            scroll = 0;
+                        } else if pane.is_empty() {
                             note = Some((
                                 format!("! {} is not in a pane to explain", agent.name),
                                 false,
@@ -1343,6 +1395,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                                 explain: Err(String::new()),
                                 screen: Err(String::new()),
                                 ready: false,
+                                job: None,
                             });
                             scroll = 0;
                             ask_explain(
@@ -1435,7 +1488,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     } else {
                         (String::new(), String::new())
                     };
-                    if !what.is_empty() || !pane.is_empty() {
+                    let background = match &detail {
+                        Some(d) => d.job.is_some(),
+                        None => matches!(
+                            rows_now.get(selected.min(rows_now.len().saturating_sub(1))),
+                            Some(Row::Agent(a)) if a.job.is_some()
+                        ),
+                    };
+                    if background {
+                        note = Some((background::NO_PANE.into(), false, tc::now() + 4.0));
+                    } else if !what.is_empty() || !pane.is_empty() {
                         note = Some(if pane.is_empty() {
                             // A task nobody has claimed is in no pane, and
                             // focusing something else would be a lie about
@@ -1867,7 +1929,38 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // selected one without counting rows a second time and disagreeing.
         let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
 
-        if let Some(d) = &detail {
+        if let Some(job) = detail.as_ref().and_then(|d| d.job.as_ref()) {
+            // A background agent, explained from its own files. Read from
+            // this frame's agents, so the panel follows the job as it runs.
+            let found = agents.as_ref().ok().and_then(|agents| {
+                agents.iter().find_map(|a| a.job.as_ref().filter(|j| &j.short == job))
+            });
+            match found {
+                Some(job) => {
+                    let colour = |kind: &str| match kind {
+                        "lbl" => p.lbl.clone(),
+                        "txt" => p.txt.clone(),
+                        "dim" => p.dim.clone(),
+                        "" => String::new(),
+                        other => colour_of(other, &p).to_string(),
+                    };
+                    body.extend(background::explain_rows(
+                        &background::explain_lines(job, tc::now(), parse::ago),
+                        w,
+                        &colour,
+                    ));
+                }
+                None => body.push(tc::seg(
+                    &[(p.unknown.as_str(), " that background agent is no longer listed".into())],
+                    w.saturating_sub(1),
+                )),
+            }
+            body.push(String::new());
+            body.push(tc::seg(
+                &[(p.dim.as_str(), " esc closes this and puts the sections back".into())],
+                w.saturating_sub(1),
+            ));
+        } else if let Some(d) = &detail {
             // Replaces the body rather than covering it: a panel drawn over
             // the rows would hide however many it covered, and a section
             // that is not drawn looks exactly like a section with nothing
@@ -2242,7 +2335,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     let n = agents_shown.iter().filter(|o| o.workspace == a.workspace).count();
                     let at_row = body.len();
                     body.extend(super::group_heading(
-                        workspace_name(&a.workspace),
+                        if a.job.is_some() { &a.group_label } else { workspace_name(&a.workspace) },
                         n,
                         w,
                         (&p.accent, &p.dim, &p.rule),
@@ -2375,6 +2468,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     .map(|(c, t)| (c.as_str(), t.clone()))
                     .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
+                for (alarm, text) in a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default() {
+                    let body_colour = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
+                    let mut line = vec![(c(body_colour), text)];
+                    if loud || here {
+                        line.push((tint.clone(), " ".repeat(w)));
+                    }
+                    let refs: Vec<(&str, String)> =
+                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    body.push(tc::seg(&refs, w.saturating_sub(1)));
+                }
                 for (unread, text) in a.work.rows(w.saturating_sub(1)) {
                     let mut line = vec![(c(if unread { &p.unknown } else { &p.working }), text)];
                     if loud || here {

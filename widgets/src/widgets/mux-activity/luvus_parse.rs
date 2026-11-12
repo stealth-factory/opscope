@@ -316,6 +316,11 @@ pub struct Agent {
     /// machine's process table under the pane's root process. Luvus does not
     /// pass on child records, so the process table is the only source here.
     pub work: opscope_core::agent_work::Work,
+    /// A Claude background agent with no pane, drawn as an agent row.
+    pub job: Option<opscope_core::agent_work::Job>,
+    /// The heading a background agent's group is drawn under, which counts
+    /// the finished jobs it leaves out.
+    pub group_label: String,
 }
 
 /// Every agent in `luvus agent list`.
@@ -357,6 +362,8 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
             since: 0.0,
             exact: false,
             work: Default::default(),
+            job: None,
+            group_label: String::new(),
         });
     }
     Ok(found)

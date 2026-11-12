@@ -48,7 +48,15 @@ reads local Claude Code, Codex, and OpenCode V2 session stores. It honours
 or alter anything in those directories. OpenCode SQLite is opened read-only
 and bundled into the widget binary.
 
-A multiplexer-provided session binding takes priority. Otherwise the newest
+Claude background agents (`claude --bg`) are read from
+`<config dir>/jobs/*/state.json`, and a Claude agent's exact session from
+`<config dir>/sessions/<pid>.json`; both are undocumented internal Claude
+Code files, read only, on this machine. The config dir is the agent
+process's own `CLAUDE_CONFIG_DIR` where it can be read, so an agent started
+with a different one needs no setting here. There is nothing to configure.
+
+A multiplexer-provided session binding takes priority, then Claude's own pid
+file. Otherwise the newest
 root session for the pane cwd is a guess, stated on the row and on Rex and
 Luvus explain screens. Luvus's machine-wide resumable session list is not
 itself a pane binding and does not select the parent session. Without a

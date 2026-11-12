@@ -33,7 +33,7 @@ use opscope_core as tc;
 
 use super::rex_events as events;
 use super::rex_parse as parse;
-use super::{host, process_filter, refresh_wake};
+use super::{background, host, process_filter, refresh_wake};
 
 use parse::{Absence, Foreground, Record, Source};
 
@@ -146,6 +146,8 @@ struct Pane {
     /// machine's process table. Only filled for an agent that reported no
     /// child records of its own: what the program says wins.
     work: tc::agent_work::Work,
+    /// A Claude background agent with no pane, drawn as an agent row.
+    job: Option<tc::agent_work::Job>,
 }
 
 impl Pane {
@@ -228,7 +230,9 @@ impl Pane {
     /// The window's tab position on its own - what a row under its
     /// session's sub-heading needs, since the heading already names it.
     fn window(&self) -> String {
-        if self.detached {
+        if self.job.is_some() {
+            "no pane".to_string()
+        } else if self.detached {
             "detached".to_string()
         } else {
             match (self.window_ord, self.floating) {
@@ -539,7 +543,41 @@ fn agent_log_work(reader: &mut tc::agent_work::LogReader, name: &str, agent: u32
     cwds: &HashMap<u32, Result<String, String>>) -> Result<tc::agent_work::LogWork, String> {
     let cwd = cwds.get(&agent).ok_or("agent cwd was not acquired")?.as_ref()
         .map_err(|why| format!("agent cwd: {why}"))?;
-    reader.read(name, cwd, None)
+    reader.read_agent(name, Some(agent), cwd, None)
+}
+
+/// A Claude background agent as a row on the board: an agent in a group
+/// of its own, in place of a session, so it sorts with the other agents.
+fn job_pane(job: tc::agent_work::Job, label: &str, table: &Result<tc::agent_work::Table, String>, at: f64) -> Pane {
+    let state = background::state_word(&job).to_string();
+    let (since, exact) = job.held_since.unwrap_or((at, false));
+    let root = Record {
+        state,
+        app: "claude-code".into(),
+        msg: background::message(&job),
+        // Only an exact start is a timestamp; a lower bound is timed as one.
+        updated_at: exact.then_some(since),
+        ..Default::default()
+    };
+    Pane {
+        session_id: background::GROUP.into(),
+        session_label: label.into(),
+        session_ord: usize::MAX,
+        block_id: format!("job:{}", job.short),
+        label: background::title(&job),
+        creator: background::GROUP.into(),
+        title: background::title(&job),
+        child_cwd: job.cwd.clone(),
+        records: vec![root],
+        doing: Doing::Running,
+        why: background::why(&job),
+        agent: Some(("claude".into(), Source::Jobs)),
+        seen_since: since,
+        seen_exact: false,
+        work: background::work(&job, table),
+        job: Some(job),
+        ..Default::default()
+    }
 }
 
 fn poll(
@@ -573,22 +611,11 @@ fn poll(
     let local = talks_to_local_server(server);
     let mut board = build(&gather, catalogue, seen, local, at);
     if local {
-        let pids: Vec<i64> = board
-            .panes
-            .iter()
-            .filter(|p| !p.remote && p.doing == Doing::Running)
-            .filter_map(|p| p.fg.as_ref().map(|f| f.pid))
-            .collect();
-        let read = usage.sample(&pids, at);
-        for pane in &mut board.panes {
-            if let Some((cpu, rss)) = pane.fg.as_ref().and_then(|f| read.get(&f.pid)) {
-                pane.cpu = *cpu;
-                pane.rss = Some(*rss);
-            }
-        }
         let wanting = |p: &Pane| p.agent.is_some() && !p.remote;
-        if board.panes.iter().any(wanting) {
-            let table = tc::agent_work::read_process_table();
+        // Read every poll on the local server: a background agent has no
+        // pane to ask for it, so nothing on the board says when to look.
+        let table = tc::agent_work::read_process_table();
+        {
             let mut log_agents = HashMap::new();
             if let Ok(table) = &table {
                 for pane in board.panes.iter().filter(|p| wanting(p)) {
@@ -621,6 +648,26 @@ fn poll(
                 }
                 let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
                 pane.work.covered_by(&reports);
+            }
+        }
+        let jobs = seen.logs.read_jobs(Some(&table));
+        let label = background::group_label(&jobs);
+        for job in jobs.shown {
+            board.panes.push(job_pane(job, &label, &table, at));
+        }
+        // One sample for panes and background agents alike: the sampler
+        // forgets every pid it is not handed, and a percentage needs two.
+        let usage_pid = |p: &Pane| match &p.job {
+            Some(job) => job.pid.map(i64::from),
+            None if !p.remote && p.doing == Doing::Running => p.fg.as_ref().map(|f| f.pid),
+            None => None,
+        };
+        let pids: Vec<i64> = board.panes.iter().filter_map(usage_pid).collect();
+        let read = usage.sample(&pids, at);
+        for pane in &mut board.panes {
+            if let Some((cpu, rss)) = usage_pid(pane).and_then(|pid| read.get(&pid)) {
+                pane.cpu = *cpu;
+                pane.rss = Some(*rss);
             }
         }
     }
@@ -855,6 +902,9 @@ fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
         // same kind of answer and is not one. A status that could not be
         // read is not this - its reason is drawn on its own row instead.
         out.push("no status reported".into());
+    }
+    if let Some(job) = &pane.job {
+        out.extend(background::facts(job));
     }
     if let Some((when, said)) = &pane.attention {
         out.push(format!(
@@ -1859,8 +1909,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         None => at_cursor(&panes_now, selected),
                     };
                     if let Some(pane) = target {
-                        note = Some(("focusing…".into(), true, at + 10.0));
-                        act("focus", pane, board_now.clone());
+                        if pane.job.is_some() {
+                            note = Some((background::NO_PANE.into(), false, at + 4.0));
+                        } else {
+                            note = Some(("focusing…".into(), true, at + 10.0));
+                            act("focus", pane, board_now.clone());
+                        }
                     }
                 }
                 "z" | "Z" => {
@@ -1869,8 +1923,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         None => at_cursor(&panes_now, selected),
                     };
                     if let Some(pane) = target {
-                        note = Some(("zooming…".into(), true, at + 10.0));
-                        act("zoom", pane, None);
+                        if pane.job.is_some() {
+                            note = Some((background::NO_PANE.into(), false, at + 4.0));
+                        } else {
+                            note = Some(("zooming…".into(), true, at + 10.0));
+                            act("zoom", pane, None);
+                        }
                     }
                 }
                 _ => {}
@@ -1915,7 +1973,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             )];
             let head = rows.len();
             let mut body: Vec<String> = Vec::new();
-            for (kind, text) in explain_lines(&pane, &board, &server, why, at) {
+            let lines = match &pane.job {
+                Some(job) => background::explain_lines(job, at, ago),
+                None => explain_lines(&pane, &board, &server, why, at),
+            };
+            for (kind, text) in lines {
                 let colour = match kind.as_str() {
                     "lbl" => p.lbl.clone(),
                     "txt" => p.txt.clone(),
@@ -1944,13 +2006,18 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     body.push(tc::seg(&[(colour.as_str(), line)], w.saturating_sub(1)));
                 }
             }
-            body.push(String::new());
-            body.push(tc::seg(
-                &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ──".into())],
-                w - 1,
-            ));
+            if pane.job.is_none() {
+                body.push(String::new());
+                body.push(tc::seg(
+                    &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ──".into())],
+                    w - 1,
+                ));
+            }
             let read = capture.lock().ok().and_then(|slot| slot.clone());
             match read {
+                // A background agent's screen is on Claude's daemon, not
+                // in any pane; its explanation above is all there is.
+                _ if pane.job.is_some() => {}
                 _ if pane.creator != TERMINAL => body.push(tc::seg(
                     &[(
                         p.dim.as_str(),
@@ -1981,7 +2048,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 )),
                 _ => body.push(tc::seg(&[(p.dim.as_str(), " reading…".into())], w - 1)),
             }
-            let hints: Vec<Vec<(&str, String)>> = vec![
+            let mut hints: Vec<Vec<(&str, String)>> = vec![
                 vec![
                     (p.accent.as_str(), "↵".into()),
                     (p.dim.as_str(), " focus".into()),
@@ -1998,6 +2065,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 vec![(p.dim.as_str(), "esc back".into())],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
+            if pane.job.is_some() {
+                // No pane to focus or zoom: the hints would name keys that
+                // only answer that there is none.
+                hints.drain(..2);
+            }
             let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
             let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
             let room = h.saturating_sub(head + footer.len() + 1).max(1);
@@ -2030,7 +2102,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .iter()
             .filter(|n| !opscope_filter.visible(n.is_opscope))
             .count();
-        let total = all.len();
+        // Background agents are listed with the panes but hold none.
+        let total = all.iter().filter(|n| n.job.is_none()).count();
+        // The filter row counts rows, background agents included, on both
+        // sides of its "of".
+        let rows_listed = all.len();
         all.retain(|n| opscope_filter.visible(n.is_opscope));
         let agents: Vec<&Pane> = all
             .iter()
@@ -2111,9 +2187,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     p.dim.as_str(),
                     // With one session there are no sub-headings to name it,
                     // so the count line does.
+                    // A background agent's group is not a Rex session.
                     match (
                         b.sessions,
-                        agents.first().or(busy.first()).or(resting.first()),
+                        agents.iter().chain(&busy).chain(&resting).find(|n| n.job.is_none()),
                     ) {
                         (1, Some(pane)) => format!("session {} ·", pane.session_label),
                         (n, _) => format!("{} session{} ·", n, plural(n)),
@@ -2153,6 +2230,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.push(tc::seg(&line, w.saturating_sub(1)));
             }
             let waiting = all.iter().filter(|n| n.wants_a_human()).count();
+            // A background agent waiting for you holds no pane.
+            let jobs_waiting = all.iter().filter(|n| n.job.is_some() && n.wants_a_human()).count();
+            let panes_waiting = waiting - jobs_waiting;
             if waiting > 0 {
                 let blocked = all.iter().any(|n| {
                     n.records
@@ -2167,7 +2247,14 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.extend(flow(
                     &[(
                         colour,
-                        format!("▸ {} pane{} waiting for you", waiting, plural(waiting)),
+                        match (panes_waiting, jobs_waiting) {
+                            (n, 0) => format!("▸ {} pane{} waiting for you", n, plural(n)),
+                            (0, j) => format!("▸ {} background agent{} waiting for you", j, plural(j)),
+                            (n, j) => format!(
+                                "▸ {} pane{} and {} background agent{} waiting for you",
+                                n, plural(n), j, plural(j)
+                            ),
+                        },
                     )],
                     w,
                 ));
@@ -2206,7 +2293,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
         filters.extend(opscope_filter.description(hidden_opscope));
         filters.extend(search.filter());
-        if let Some(said) = tc::filter_row(panes_now.len(), total, &filters) {
+        if let Some(said) = tc::filter_row(panes_now.len(), rows_listed, &filters) {
             rows.extend(flow(&[(p.dim.as_str(), said)], w));
         }
         // The header is pinned when the pane has room for it and for a body
@@ -2327,7 +2414,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // A query that leaves nothing on the whole board says so,
                 // rather than drawing three empty sections.
                 let emptied = if filtering && panes_now.is_empty() {
-                    tc::filtered_to_nothing(total, &filters)
+                    tc::filtered_to_nothing(rows_listed, &filters)
                 } else {
                     None
                 };
@@ -2983,6 +3070,51 @@ mod tests {
             why: "program_status: timed out".into(),
             agent: agent.then(|| ("claude".to_string(), Source::Process)),
             ..Default::default()
+        }
+    }
+
+    fn a_job(state: &str) -> tc::agent_work::Job {
+        let mut job = tc::agent_work::parse_job_state(
+            "abcd1234",
+            &format!(r#"{{"state":"{state}","name":"web","detail":"Should I do that next?","cwd":"/srv/web","updatedAt":"2026-11-12T00:00:00Z","fan":[{{"id":"a1","kind":"agent","label":"Explore","startedAt":1}}]}}"#),
+        )
+        .unwrap();
+        job.running = Some(false);
+        job
+    }
+
+    #[test]
+    fn a_blocked_background_agent_sorts_with_the_agents_that_need_you() {
+        let table = Err("no ps".to_string());
+        let job = job_pane(a_job("blocked"), "background agents · via jobs", &table, 2.0e9);
+        assert_eq!(job.section(), Section::Agents);
+        assert_eq!(job.window(), "no pane");
+        assert!(job.wants_a_human());
+        let mut working = pane_in("work", 1, "w1", Some("working"));
+        working.agent = Some(("claude".into(), Source::Report));
+        let mut panes = vec![working, job];
+        order(&mut panes);
+        assert!(panes[0].job.is_some(), "the blocked job comes first");
+        let grouped = by_session(panes.iter().collect());
+        assert_eq!(grouped[0].session_label, "background agents · via jobs");
+    }
+
+    #[test]
+    fn a_background_agent_row_says_its_state_message_warning_and_subagents() {
+        let table = Err("no ps".to_string());
+        let job = job_pane(a_job("working"), "background agents · via jobs", &table, 2.0e9);
+        let text = drawn(&job, 100);
+        assert!(text.contains("working"), "{text}");
+        assert!(text.contains("Should I do that next?"), "{text}");
+        assert!(text.contains("process is not running"), "{text}");
+        assert!(text.contains("Explore working · via jobs"), "{text}");
+        assert!(text.contains("no pane"), "{text}");
+        let p = palette();
+        for w in 20..=140 {
+            let cols = Columns::fit(w, &[&job]);
+            for row in render_pane(&job, true, w, &cols, &p, 0, 2.0e9) {
+                assert!(tc::display_width(&row) < w, "w={w} row {row:?}");
+            }
         }
     }
 

@@ -545,6 +545,10 @@ running, for any widget that lists agents: `read_process_table()` and its
 `parse_process_table()`, `agent_below()` from a pane's root process and
 `background_shells()` under an agent, each row saying where it came from
 (`Via`). An agent's own OSC 7501 child records win where a widget has them.
+`read_jobs()` reads Claude background agents, which run in no pane, from
+Claude's `jobs/*/state.json`, and `LogReader::read_agent()` binds a Claude
+agent to its exact session through its `sessions/<pid>.json`
+([docs/agent-background-work.md](docs/agent-background-work.md)).
 
 `tc::procfs` (`core/src/procfs.rs`) is where `/proc/<pid>/{stat,io,cgroup,
 cmdline,comm,cwd,fd}`, `/proc/uptime` and `ss -tine` are read: `parse_*`
