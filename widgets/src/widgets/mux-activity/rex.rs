@@ -2061,6 +2061,30 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 .collect()
         };
         let (agents_shown, busy_shown, resting_shown) = (shown(&agents), shown(&busy), shown(&resting));
+        // A pane the filter hides takes its row's warning with it, so the
+        // first such reason is kept to say above the sections: "nothing
+        // matches" must not be all a board says while a probe failed.
+        let hidden_why: Option<String> = if filtering {
+            all.iter()
+                .filter(|n| {
+                    !agents_shown
+                        .iter()
+                        .chain(busy_shown.iter())
+                        .chain(resting_shown.iter())
+                        .any(|s| s.block_id == n.block_id)
+                })
+                .find_map(|n| {
+                    if !n.why.is_empty() {
+                        Some(n.why.clone())
+                    } else if n.doing == Doing::Unknown && n.creator == TERMINAL {
+                        Some("no reason given".to_string())
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
         let before = std::mem::take(&mut panes_now);
         panes_now = agents_shown
             .iter()
@@ -2307,6 +2331,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 } else {
                     None
                 };
+                if let Some(why) = &hidden_why {
+                    let said = format!("⚠ a pane the filter hides could not be read: {}", why);
+                    for line in tc::wrap_words(&said, w.saturating_sub(3)) {
+                        rows.push(tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1));
+                    }
+                }
                 if let Some(said) = emptied {
                     for line in tc::wrap_words(&said, w.saturating_sub(3)) {
                         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
