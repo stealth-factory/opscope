@@ -2058,7 +2058,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .iter()
             .filter(|n| !opscope_filter.visible(n.is_opscope))
             .count();
-        let total = all.len();
+        // Background agents are listed with the panes but hold none.
+        let total = all.iter().filter(|n| n.job.is_none()).count();
         all.retain(|n| opscope_filter.visible(n.is_opscope));
         let agents: Vec<&Pane> = all
             .iter()
@@ -2104,9 +2105,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     p.dim.as_str(),
                     // With one session there are no sub-headings to name it,
                     // so the count line does.
+                    // A background agent's group is not a Rex session.
                     match (
                         b.sessions,
-                        agents.first().or(busy.first()).or(resting.first()),
+                        agents.iter().chain(&busy).chain(&resting).find(|n| n.job.is_none()),
                     ) {
                         (1, Some(pane)) => format!("session {} ·", pane.session_label),
                         (n, _) => format!("{} session{} ·", n, plural(n)),
