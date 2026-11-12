@@ -488,9 +488,23 @@ impl LogReader {
             if !safe_id(id) {
                 return Err("invalid Claude session id".into());
             }
+            // `exists()` is false for a transcript that cannot be looked at
+            // as well as for one that is not there, and only the second may
+            // read as an agent with nothing running.
+            let mut unreadable = None;
             let found = cwds.iter().map(|c| root.join("projects").join(encode(c))).find(|p| {
-                p.join(format!("{id}.jsonl")).exists()
+                match fs::metadata(p.join(format!("{id}.jsonl"))) {
+                    Ok(_) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => {
+                        unreadable.get_or_insert_with(|| format!("the Claude session log could not be read: {e}"));
+                        false
+                    }
+                }
             });
+            if let (None, Some(why)) = (&found, unreadable) {
+                return Err(why);
+            }
             match found {
                 Some(p) => {
                     project = p;
@@ -953,6 +967,17 @@ mod tests {
         let work = f.reader().read_agent("claude", Some(900004), "/srv/repo", None).unwrap();
         assert_eq!(work.session_id, "fresh");
         assert!(work.bound && work.tasks.is_empty());
+    }
+    #[test]
+    fn a_bound_transcript_that_cannot_be_looked_at_is_an_error_not_no_work() {
+        let f = Fixture::new();
+        // A file where the project folder should be: the lookup fails with
+        // something other than "not found", as a folder without search
+        // permission does, and that holds even for root.
+        f.write("claude/projects/-srv-repo", "");
+        f.write("claude/sessions/900009.json", &pid_file(900009, "hidden", "/srv/repo", ""));
+        let err = f.reader().read_agent("claude", Some(900009), "/srv/repo", None).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
     }
     #[test]
     fn a_session_in_a_worktree_is_found_from_the_pid_files_cwd() {
