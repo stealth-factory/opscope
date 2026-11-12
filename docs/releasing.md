@@ -224,9 +224,10 @@ build and verify that contract rather than maintaining a second diagram.
 **Each macOS architecture builds on its own kind of Mac.** `aarch64` runs
 on `macos-15` and `x86_64` on `macos-15-intel`, both GitHub's standard
 hosted images, which are free on this public repository. Both legs build,
-test and start their binaries natively. `macos-15-intel` is GitHub's last
-Intel image, supported until about August 2027; after that, `x86_64` goes
-back to being cross-compiled on the Apple Silicon runner, which Apple's
+test and start their binaries natively. GitHub has said `macos-15-intel`
+goes in about August 2027, and `macos-26-intel` is the newer standard Intel
+label, so move to whichever Intel label GitHub still lists. If none is left,
+`x86_64` can be cross-compiled on the Apple Silicon runner, which Apple's
 toolchain does natively, but its tests and start check can then no longer
 run.
 

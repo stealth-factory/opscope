@@ -82,11 +82,12 @@ jobs:
           # repository. Building natively means the x86_64 binaries are
           # tested and started, not just compiled and packaged.
           #
-          # macos-15-intel is GitHub's last Intel image, supported until
-          # about August 2027. When it goes, x86_64 falls back to being
-          # cross-compiled on the arm64 runner: Apple's toolchain targets
-          # x86_64 natively, but then the tests and the start check below
-          # cannot run for that target.
+          # GitHub has said macos-15-intel goes in about August 2027;
+          # macos-26-intel is the newer standard Intel label. Move to
+          # whichever Intel label GitHub still lists. If none is left,
+          # x86_64 can be cross-compiled on the arm64 runner (Apple's
+          # toolchain targets it natively), but then the tests and the
+          # start check below cannot run for that target.
           #
           # Pinned to 15 rather than `macos-latest`, which has silently
           # changed arch before and would swap an artefact's contents
