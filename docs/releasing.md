@@ -221,13 +221,14 @@ and platform boundary live in the
 [widget-creation wiki](../wiki/making-a-widget.md); the release workflows only
 build and verify that contract rather than maintaining a second diagram.
 
-**Both macOS architectures are built on one Apple Silicon runner.**
-`macos-13` is retired, so a job asking for it queues forever; the Intel
-images that replaced it are `-large` runners and bill even on a public
-repository. Apple's toolchain cross-compiles `x86_64` natively at no cost.
-What it cannot do is *run* the result, so that leg builds and packages but
-does not execute its tests — the same sources are tested on the native arm64
-leg in the same run.
+**Each macOS architecture builds on its own kind of Mac.** `aarch64` runs
+on `macos-15` and `x86_64` on `macos-15-intel`, both GitHub's standard
+hosted images, which are free on this public repository. Both legs build,
+test and start their binaries natively. `macos-15-intel` is GitHub's last
+Intel image, supported until about August 2027; after that, `x86_64` goes
+back to being cross-compiled on the Apple Silicon runner, which Apple's
+toolchain does natively, but its tests and start check can then no longer
+run.
 
 ## Analytics secrets
 
