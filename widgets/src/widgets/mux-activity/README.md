@@ -136,7 +136,11 @@ shell, so a shell is listed there and never claimed to be running.
 A job whose process is gone while its file still says `working` or `blocked`
 says so on the row. `done` jobs with no process holding them, and `stopped`
 ones, are counted in the group's heading (`2 finished not shown`) rather than
-drawn. A `state.json` that cannot be read or names a state this widget does
+drawn. A `done` job whose process could not be checked (no process table,
+or a pid file that did not read) stays on the board and says why. A pid
+counts as the job's process only while it is still a Claude, so a pid
+reused by another program never lends the job its CPU or shells. A
+`state.json` that cannot be read or names a state this widget does
 not know is a row of its own with the reason, never an empty group. `Enter`
 on one says that there is no pane and that `claude agents` opens it.
 

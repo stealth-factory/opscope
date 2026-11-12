@@ -871,6 +871,20 @@ fn job_lines(work: &tc::agent_work::Work, width: usize, room: usize) -> Vec<(boo
     out
 }
 
+/// A background agent's note rows, in at most what leaves `room` space for
+/// the agent's two rows and one row of work. Rows that do not fit are
+/// counted on the last one kept, and `e` shows the whole job.
+fn fit_notes(mut notes: Vec<(bool, String)>, room: usize) -> Vec<(bool, String)> {
+    let max = room.saturating_sub(3).max(1);
+    if notes.len() > max {
+        let more = notes.len() - (max - 1);
+        let alarm = notes[max - 1..].iter().any(|(alarm, _)| *alarm);
+        notes.truncate(max - 1);
+        notes.push((alarm, format!("   +{more} more, e shows all")));
+    }
+    notes
+}
+
 /// What goes above agent `i`: nothing for the section's first agent when
 /// there is one workspace, a gap between two agents of one workspace, and
 /// a gap and the workspace's heading where a workspace begins. A heading
@@ -1635,20 +1649,28 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // rows and at least one row of its work, if it has any; the work
         // then gets what the rows above leave, so the entry never grows
         // past the room by its heading.
-        let lead_fits = |lead: usize, work: &tc::agent_work::Work| {
+        // A background agent's message and warning rows sit between its two
+        // rows and its work, so they come out of the work's budget too: an
+        // entry taller than the room would be admitted whole and then cut.
+        let notes_of = |i: usize| -> Vec<(bool, String)> {
+            agents[i].job.as_ref().map(|j| fit_notes(background::note_rows(j, w), room)).unwrap_or_default()
+        };
+        let lead_fits = |lead: usize, notes: usize, work: &tc::agent_work::Work| {
             let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
                 || !work.logs.warnings.is_empty()
                 || work.logs.tasks.iter().any(|task| !task.state.finished())
                 || work.fan.iter().any(|f| f.done.is_none() && f.kind != "shell"));
-            2 + lead + some_work <= room
+            2 + lead + notes + some_work <= room
         };
-        let job_room = |lead: usize, shown: bool| if shown { room - lead } else { room };
+        let job_room = |lead: usize, notes: usize, shown: bool| {
+            room.saturating_sub(notes + if shown { lead } else { 0 })
+        };
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
-                let shown = lead_fits(lead, &agents[i].work);
-                let notes = agents[i].job.as_ref().map_or(0, |j| background::note_rows(j, w).len());
-                let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, shown));
+                let notes = notes_of(i).len();
+                let shown = lead_fits(lead, notes, &agents[i].work);
+                let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, notes, shown));
                 let own = 2 + notes + jobs.len();
                 if shown { own + lead } else { own }
             })
@@ -1731,8 +1753,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             let mut rule = Vec::new();
             let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
-            let lead_shown = lead_fits(lead.len(), &a.work);
-            let jobs_room = job_room(lead.len(), lead_shown);
+            let notes = notes_of(i);
+            let lead_shown = lead_fits(lead.len(), notes.len(), &a.work);
+            let jobs_room = job_room(lead.len(), notes.len(), lead_shown);
             if lead_shown {
                 rows.extend(lead);
                 plots.extend(rule);
@@ -1839,7 +1862,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             }
             // A background agent's message and warning, wrapped rather
             // than cut onto the title row; counted in its height above.
-            for (alarm, line) in a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default() {
+            for (alarm, line) in notes {
                 let body = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
                 rows.push(tc::seg(
                     &[
@@ -2236,6 +2259,23 @@ mod tests {
         let rows=job_lines(&work,80,3);
         assert_eq!(rows.len(),1);
         assert!(rows[0].0 && rows[0].1.contains("permission denied"),"{rows:?}");
+    }
+
+    #[test]
+    fn a_background_agents_notes_leave_room_for_its_rows_and_its_work() {
+        // Eight rows of room: two for the agent, one for work, five notes.
+        let notes: Vec<(bool, String)> = (0..9).map(|i| (i == 8, format!("   line {i}"))).collect();
+        let fitted = fit_notes(notes.clone(), 8);
+        assert_eq!(fitted.len(), 5);
+        assert_eq!(fitted[4], (true, "   +5 more, e shows all".to_string()));
+        // Notes that fit are left alone.
+        assert_eq!(fit_notes(notes[..3].to_vec(), 8), notes[..3].to_vec());
+        // With work taking what the notes leave, the entry fits the room.
+        let work = tc::agent_work::Work {
+            tasks: (0..6).map(|pid| tc::agent_work::Task { pid, label: "cargo test".into(), via: tc::agent_work::Via::Process }).collect(),
+            ..Default::default()
+        };
+        assert!(2 + fitted.len() + job_lines(&work, 80, 8 - fitted.len()).len() <= 8);
     }
 
     #[test]

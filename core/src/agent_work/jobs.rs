@@ -113,6 +113,8 @@ pub struct Job {
     /// Whether a live Claude process holds this job. `None` when that
     /// could not be told: no process table, or a pid file not readable.
     pub running: Option<bool>,
+    /// Why `running` is `None`, when it is.
+    pub unchecked: String,
     pub pid: Option<u32>,
 }
 
@@ -431,7 +433,9 @@ pub fn read_jobs(roots: &[PathBuf], table: Option<&Result<Table, String>>) -> Jo
     for job in all {
         let keep = match job.state {
             None | Some(JobState::Blocked | JobState::Working) => true,
-            Some(JobState::Done) => job.running == Some(true),
+            // A done job is put away only once its process is known to be
+            // gone; one nobody could check may still be running.
+            Some(JobState::Done) => job.running != Some(false),
             Some(JobState::Stopped) => false,
         };
         if keep {
@@ -454,14 +458,30 @@ fn bind_process(
     sessions: &Result<(Vec<ClaudeSession>, usize), String>,
     table: Option<&Result<Table, String>>,
 ) {
-    let Ok((sessions, bad)) = sessions else {
-        return;
+    let (sessions, bad) = match sessions {
+        Ok(found) => found,
+        Err(e) => {
+            job.unchecked = format!("the pid files could not be listed: {e}");
+            return;
+        }
     };
-    let Some(Ok(table)) = table else {
-        return;
+    let table = match table {
+        Some(Ok(table)) => table,
+        Some(Err(e)) => {
+            job.unchecked = format!("the process table could not be read: {e}");
+            return;
+        }
+        None => {
+            job.unchecked = "no process table was read".into();
+            return;
+        }
     };
+    // The pid must still be a Claude: a pid file left behind by an exited
+    // agent must not lend its job to whatever program got that pid next.
     let live = sessions.iter().find(|s| {
-        s.job_id == job.short && table.get(s.pid).is_some() && same_process(s)
+        s.job_id == job.short
+            && table.get(s.pid).is_some_and(|p| super::is_named(&p.comm, &p.args, "claude"))
+            && same_process(s)
     });
     match live {
         Some(s) => {
@@ -472,7 +492,10 @@ fn bind_process(
             }
         }
         // A pid file that did not parse may be this job's.
-        None if *bad > 0 => job.running = None,
+        None if *bad > 0 => {
+            job.running = None;
+            job.unchecked = format!("{bad} pid file{} could not be read", if *bad == 1 { "" } else { "s" });
+        }
         None => job.running = Some(false),
     }
 }
@@ -605,9 +628,18 @@ mod tests {
         assert_eq!(jobs.shown[1].running, Some(false));
         // done (no process) and stopped; the folder with no state is no job.
         assert_eq!(jobs.finished, 2);
-        // Without a process table nobody can say whether one runs.
+        // Without a process table nobody can say whether one runs, so the
+        // done job stays on screen, saying why.
         let blind = read_jobs(std::slice::from_ref(&dir), None);
         assert!(blind.shown.iter().all(|j| j.running.is_none()));
+        let done = blind.shown.iter().find(|j| j.short == "dddd").unwrap();
+        assert_eq!(done.unchecked, "no process table was read");
+        assert_eq!(blind.finished, 1);
+        // The job's pid now belongs to some other program: not its process.
+        let reused = read_jobs(std::slice::from_ref(&dir), Some(&table("4242 1 vim vim notes.txt\n")));
+        let working = reused.shown.iter().find(|j| j.short == "aaaa1111").unwrap();
+        assert_eq!(working.running, Some(false));
+        assert_eq!(working.pid, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

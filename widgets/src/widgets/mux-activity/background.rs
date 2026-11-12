@@ -76,6 +76,9 @@ pub fn why(job: &Job) -> String {
         (Some(false), Some(JobState::Working | JobState::Blocked)) => {
             "its process is not running; this is the last state it wrote".into()
         }
+        (None, Some(JobState::Done)) if !job.unchecked.is_empty() => {
+            format!("it says done, but whether its process still runs is unknown: {}", job.unchecked)
+        }
         _ => String::new(),
     }
 }
@@ -170,6 +173,7 @@ pub fn explain_lines(job: &Job, at: f64, ago: fn(f64) -> String) -> Vec<(String,
     let process = match (job.running, job.pid) {
         (Some(true), Some(pid)) => format!("pid {pid}, running"),
         (Some(false), _) => "no running Claude process holds this job".into(),
+        _ if !job.unchecked.is_empty() => format!("could not tell whether a process holds it: {}", job.unchecked),
         _ => "could not tell whether a process holds it".into(),
     };
     put("txt", field("process", &process));
@@ -282,6 +286,10 @@ mod tests {
         let mut done = job("done");
         done.running = Some(false);
         assert_eq!(why(&done), "");
+        // Done, but nobody could check its process: kept, and says why.
+        done.running = None;
+        done.unchecked = "no process table was read".into();
+        assert!(why(&done).contains("unknown: no process table was read"));
         let unread = Job { short: "x".into(), dir: "/c/jobs/x".into(), unread: Some("state.json is not JSON".into()), ..Default::default() };
         assert_eq!(state_word(&unread), "unknown");
         assert!(why(&unread).contains("not JSON") && why(&unread).contains("/c/jobs/x"));

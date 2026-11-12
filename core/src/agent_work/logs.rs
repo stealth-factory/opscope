@@ -30,6 +30,16 @@ use std::{
     time::SystemTime,
 };
 
+/// The config dir a Claude process runs with, from its own environment:
+/// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. `None` where that cannot be
+/// read (no `/proc`, or another user's process).
+fn claude_root_of(pid: u32) -> Option<PathBuf> {
+    let env = crate::procfs::read_environ(pid as i32).ok()?;
+    crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| crate::procfs::parse_environ_var(&env, "HOME").map(|home| Path::new(home).join(".claude")))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Activity {
     #[default]
@@ -232,9 +242,18 @@ impl LogReader {
         session: Option<&str>,
     ) -> Result<LogWork, String> {
         let claude = matches!(agent, "claude" | "claude-code");
-        let (Some(pid), true, None) = (pid, claude, session.filter(|s| !s.is_empty())) else {
+        let session = session.filter(|s| !s.is_empty());
+        let (Some(pid), true) = (pid, claude) else {
             return self.read(agent, cwd, session);
         };
+        if let Some(id) = session {
+            // The id the multiplexer reported stays the identity; the pid
+            // only says which config dir its transcript is in.
+            return match self.claude_binding(pid) {
+                Ok(Some((root, _))) => self.claude_in(&root, &[cwd], Some(id), false),
+                _ => self.read(agent, cwd, Some(id)),
+            };
+        }
         match self.claude_binding(pid) {
             Ok(Some((root, bound))) => {
                 let cwds = [bound.cwd.as_str(), cwd];
@@ -252,16 +271,7 @@ impl LogReader {
     /// read (Linux, same user); otherwise whichever known config dir holds
     /// a pid file for it, which is how a Mac finds it.
     fn claude_binding(&mut self, pid: u32) -> Result<Option<(PathBuf, super::ClaudeSession)>, String> {
-        let mut candidates = Vec::new();
-        if let Ok(env) = crate::procfs::read_environ(pid as i32) {
-            let root = crate::procfs::parse_environ_var(&env, "CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    crate::procfs::parse_environ_var(&env, "HOME")
-                        .map(|home| Path::new(home).join(".claude"))
-                });
-            candidates.extend(root);
-        }
+        let mut candidates: Vec<PathBuf> = claude_root_of(pid).into_iter().collect();
         candidates.extend(self.claude_roots.iter().cloned());
         for root in candidates {
             let path = root.join("sessions").join(format!("{pid}.json"));
@@ -286,8 +296,20 @@ impl LogReader {
     pub fn claude_roots(&self) -> &[PathBuf] {
         &self.claude_roots
     }
-    /// Claude background agents under every known config dir.
-    pub fn read_jobs(&self, table: Option<&Result<super::Table, String>>) -> super::Jobs {
+    /// Claude background agents under every known config dir, plus the
+    /// config dir of every Claude process in `table`: a background agent
+    /// started with its own `CLAUDE_CONFIG_DIR` holds no pane that would
+    /// have found that dir.
+    pub fn read_jobs(&mut self, table: Option<&Result<super::Table, String>>) -> super::Jobs {
+        if let Some(Ok(table)) = table {
+            for (pid, _) in table.agents(&["claude"]) {
+                if let Some(root) = claude_root_of(pid) {
+                    if !self.claude_roots.contains(&root) && root.join("jobs").is_dir() {
+                        self.claude_roots.push(root);
+                    }
+                }
+            }
+        }
         super::read_jobs(&self.claude_roots, table)
     }
     /// Incrementally parse complete records; partial bytes never become errors.
@@ -906,12 +928,24 @@ mod tests {
             }
         }
         let work = reader.read_agent("claude", Some(pid), "/srv/repo", None);
+        // A pane whose multiplexer reported the session id still reads it
+        // in the agent's own config dir.
+        let mut fresh = f.reader();
+        let reported = fresh.read_agent("claude", Some(pid), "/srv/repo", Some("s"));
+        // A background agent with its own config dir and no pane at all is
+        // found through the process table alone.
+        f.write("elsewhere/jobs/aaaa1111/state.json", include_str!("fixtures/jobs/working.json"));
+        let table = Ok(super::super::parse_process_table(&format!("{pid} 1 claude claude --bg\n")).unwrap());
+        let jobs = f.reader().read_jobs(Some(&table));
         let _ = child.kill();
         let _ = child.wait();
         if readable {
             let work = work.unwrap();
             assert_eq!(work.tasks[0].id, "custom");
             assert!(reader.claude_roots().contains(&custom));
+            assert_eq!(reported.unwrap().tasks[0].id, "custom");
+            assert_eq!(jobs.shown.len(), 1);
+            assert_eq!(jobs.shown[0].short, "aaaa1111");
         }
     }
     #[test]
