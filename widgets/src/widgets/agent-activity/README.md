@@ -45,6 +45,9 @@ agent cwd and is explicitly a guess. Concurrent sessions in one directory
 may be misattributed, and a shared guessed session can repeat under multiple
 processes; the header counts observed log rows, not unique tasks. Enter shows the session ID and association explanation.
 
+Source details mask credential-shaped command arguments with the shared
+shell-job labeler. Local paths and session text can still be private.
+
 Log states are the **last recorded lifecycle**, not a heartbeat. Unknown
 states remain unknown. OpenCode V1 cannot establish persisted liveness and
 shows that limitation. A shell that execs directly into a lone command can

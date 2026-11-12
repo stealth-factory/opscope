@@ -241,7 +241,7 @@ pub fn detail(s: &Snapshot, a: &Agent, present: bool, width: usize, recent: usiz
     );
     words(
         &mut body.rows,
-        &format!("Command: {}", a.command),
+        &format!("Command: {}", tc::agent_work::label(&a.command, &a.kind)),
         width,
         tc::Role::Fg,
         false,
@@ -258,7 +258,7 @@ pub fn detail(s: &Snapshot, a: &Agent, present: bool, width: usize, recent: usiz
     );
     if let Some(explain) = a.work.logs.explanation() {
         words(&mut body.rows, &explain, width, tc::Role::Orange, false);
-    } else {
+    } else if a.work.unread.is_none() && a.work.logs.warnings.is_empty() {
         words(
             &mut body.rows,
             "No matching session log found; process-backed shells can still be shown.",
@@ -322,6 +322,75 @@ mod tests {
             sampled: Some(std::time::Instant::now()),
             err: None,
         }
+    }
+
+    #[test]
+    fn source_details_hide_credentials_without_changing_selection_identity() {
+        let mut s = sample();
+        let raw = "/opt/bin/claude --token fixture-flag-value --endpoint https://fixture-user:fixture-password@example.invalid/api?api_key=fixture-query-value --resume keep-this";
+        s.agents[0].command = raw.into();
+        let identity = s.agents[0].key();
+        for width in [12, 80, 160] {
+            let text = detail(&s, &s.agents[0], true, width, 3)
+                .rows
+                .iter()
+                .map(|r| tc::source_text(r))
+                .collect::<String>();
+            for hidden in [
+                "fixture-flag-value",
+                "fixture-user",
+                "fixture-password",
+                "fixture-query-value",
+            ] {
+                assert!(
+                    !text.contains(hidden),
+                    "credential-shaped argument exposed at width {width}"
+                );
+            }
+            assert!(text.contains("***"));
+            assert!(text.contains("keep-this"));
+        }
+        assert_eq!(s.agents[0].command, raw);
+        assert_eq!(s.agents[0].key(), identity);
+    }
+
+    #[test]
+    fn unread_session_is_not_reported_as_a_missing_session() {
+        let mut s = sample();
+        s.agents[0].work = Work::default();
+        for why in [
+            "session logs: agent cwd: permission denied",
+            "session logs: invalid Claude record",
+        ] {
+            s.agents[0].work.unread = Some(why.into());
+            let text = detail(&s, &s.agents[0], true, 160, 3)
+                .rows
+                .iter()
+                .map(|r| tc::source_text(r))
+                .collect::<String>();
+            assert!(text.contains(why));
+            assert!(!text.contains("No matching session log found"));
+        }
+        s.agents[0].work.unread = None;
+        s.agents[0]
+            .work
+            .logs
+            .warnings
+            .push("fixture header malformed".into());
+        let text = detail(&s, &s.agents[0], true, 160, 3)
+            .rows
+            .iter()
+            .map(|r| tc::source_text(r))
+            .collect::<String>();
+        assert!(text.contains("fixture header malformed"));
+        assert!(!text.contains("No matching session log found"));
+        s.agents[0].work.logs.warnings.clear();
+        let text = detail(&s, &s.agents[0], true, 160, 3)
+            .rows
+            .iter()
+            .map(|r| tc::source_text(r))
+            .collect::<String>();
+        assert!(text.contains("No matching session log found"));
     }
 
     #[test]
