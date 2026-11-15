@@ -75,9 +75,10 @@ window or undoes that, e explains it - every status record, the program's
 identity, the last lines its screen shows and why mux-activity read Rex - and esc
 or e goes back.
 
-Focus is the server's: Rex makes the window active and the pane focused, and
-every app showing that session follows. When no Rex app is attached to the
-session, the note says so instead of claiming a screen moved.
+Focus starts on the server: Rex makes the window active and the pane focused.
+Then every Rex app attached to that session is asked to show it, with the
+app's own Go to Session. When no app is attached, or one would not switch,
+the note says so instead of claiming a screen moved.
 
 UNDER HERDR
 

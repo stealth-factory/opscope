@@ -337,11 +337,13 @@ which can name an address; a credential it recognises by name is drawn as
 | `!` | notices: read warnings not tied to a number, and dismiss them for this session, for 7 days or for 30 |
 | `q` | quit |
 
-Focus and zoom are the **server's**: Rex makes the window active and the pane
-focused in its session, and every app showing that session follows — so they
-work from a headless Linux server. Making an app *switch* to another session
-is a client action behind Rex's Remote Control, which this widget does not
-attempt; when no app is attached to the pane's session, the note says so.
+Focus and zoom start on the **server**: Rex makes the window active and the
+pane focused in its session, so they work from a headless Linux server. A Rex
+app stays attached to every session in its sidebar and shows one of them, so
+focus then asks each app attached to the pane's session to go there, with the
+app's own `session.select` (`rex -C <app> do session.select`) — the same as
+picking the session in the app. When no app is attached, the note says so;
+when an app would not switch, the note says why.
 A detached block is in no window and cannot be focused, and the note says
 that too.
 

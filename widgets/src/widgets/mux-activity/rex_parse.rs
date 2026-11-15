@@ -389,6 +389,7 @@ pub struct Session {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Client {
+    pub client_id: String,
     pub kind: String,
     pub platform: String,
     pub session_ids: Vec<String>,
@@ -475,6 +476,7 @@ pub fn parse_gather(input: &str) -> Result<Gather, String> {
     let clients = list(&value["clients"]["clients"])
         .iter()
         .map(|c| Client {
+            client_id: text(c, "client_id"),
             kind: text(&c["info"], "kind"),
             platform: text(&c["info"], "platform"),
             session_ids: list(&c["session_ids"])
