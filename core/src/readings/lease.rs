@@ -16,7 +16,7 @@
 
 //! Who fetches a shared reading, decided without touching the disk.
 //!
-//! Several panes on one machine read one store (`sharing.rs`). When a
+//! Several panes on one machine read one store (`store.rs`). When a
 //! reading goes stale, exactly one of them asks the vendor and the rest wait
 //! for what it publishes. There is no long-lived leader: each reading has a
 //! lease that lasts one fetch, so a pane that dies - a dropped SSH session,

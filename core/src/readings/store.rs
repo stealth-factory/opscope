@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::lease::{self, Claim, Lease};
+use super::lease::{self, Claim, Lease};
 
 /// Bumped whenever the tables change shape. A store of any other version
 /// is deleted and started again.
@@ -70,8 +70,10 @@ pub const MAX_VALUE: usize = 2 * 1024 * 1024;
 /// for this pass. Every transaction here is a handful of rows.
 const BUSY: Duration = Duration::from_millis(250);
 
-pub fn path() -> String {
-    format!("{}/opscope/agent-usage.sqlite", crate::claude::snapshot_state_home())
+/// The store of the widget named `name`: one file per widget, under
+/// [`crate::state_dir`], so widgets never share a file.
+pub fn path(name: &str) -> String {
+    crate::state_dir().join(format!("{name}.sqlite")).to_string_lossy().to_string()
 }
 
 /// One reading as it is stored.
@@ -486,6 +488,54 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("agent-usage.sqlite").to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn a_widgets_store_is_its_own_file_in_the_state_directory() {
+        let p = path("agent-usage");
+        assert!(p.ends_with("/agent-usage.sqlite"), "{p}");
+        assert_eq!(std::path::Path::new(&p).parent(), Some(crate::state_dir().as_path()));
+        assert_ne!(path("agent-usage"), path("github-actions"));
+    }
+
+    /// The file agent-usage wrote before the store moved to core, built
+    /// with the statements that code ran. An agent-usage from before the
+    /// move and one from after share it while panes of both are open, so
+    /// the new code must open it as it is - not start it again - and read
+    /// what the old one published.
+    #[test]
+    fn a_store_written_before_the_move_is_opened_and_read_as_it_is() {
+        let p = temp("before-the-move");
+        {
+            let conn = Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta(k TEXT PRIMARY KEY, v);
+                 CREATE TABLE readings(
+                     key TEXT PRIMARY KEY, taken_at REAL NOT NULL, held REAL NOT NULL,
+                     value TEXT, fails INTEGER NOT NULL, good_value TEXT, good_at REAL,
+                     fetched_by INTEGER NOT NULL);
+                 CREATE TABLE leases(
+                     key TEXT PRIMARY KEY, holder INTEGER NOT NULL, expires_at REAL NOT NULL);
+                 INSERT INTO meta(k, v) VALUES ('version', 1);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings VALUES ('claude:/home/u/.claude:0123456789abcdef', ?1, 120.0,
+                 '{\"five_hour\":{\"utilization\":12}}', 0, '{\"five_hour\":{\"utilization\":12}}', ?1, 4242)",
+                [crate::now() - 10.0],
+            )
+            .unwrap();
+        }
+        let mut s = Store::open(&p).unwrap();
+        assert_eq!(s.notice, "", "the old file was started again");
+        let got = s.load("claude:/home/u/.claude:0123456789abcdef").unwrap().unwrap();
+        assert_eq!(got.fetched_by, 4242);
+        assert_eq!(got.value, Some(serde_json::json!({"five_hour": {"utilization": 12}})));
+        assert_eq!(
+            s.claim("claude:/home/u/.claude:0123456789abcdef", Some(got.taken_at), crate::now()).unwrap(),
+            Got::Mine,
+            "the same reading this pane holds is not news, so a claim on it fetches"
+        );
     }
 
     fn reading(at: f64, v: serde_json::Value) -> Shared {

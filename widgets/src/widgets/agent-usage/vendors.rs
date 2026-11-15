@@ -92,7 +92,7 @@ pub fn read_all(
     let antigravity_shown = antigravity_asked(&installed, cfg);
     // Each reader notes the tokens it holds as it reads; a token from a
     // pass before, since rotated, has nothing left to guard.
-    caches.secrets.clear();
+    caches.readings.secrets.clear();
     let mut state = State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),

@@ -190,6 +190,38 @@ and then returns an `Err`, so a pane stopped mid-write cannot freeze the
 rest; notices then keeps the dismissal for the session. clocks, agent-usage, ports and google-trends still compute
 their state paths by hand; new code uses `state_dir()`.
 
+### Shared readings
+
+`core/src/readings.rs`, used as `tc::readings`, lets several panes of one
+widget on one machine ask a service once between them (OPS-274, moved out
+of agent-usage by OPS-283). A pane keeps each reading in a `Cache` for its
+own TTL. When one goes stale it asks the widget's store first: another pane
+may have published something newer, or be fetching it now. Only when
+nobody has does it claim a lease, fetch, and publish for the rest. A
+refusal is published with its backoff, so no pane asks before it runs out.
+
+`readings::lease` holds the rules as pure functions of times and holders,
+so the races are tested without a file. `readings::store` carries them out
+in one SQLite file per widget, `store::path(name)` under `state_dir()`,
+created `0600`, capped in size, with no fsync and no heartbeat: a pane that
+has nothing to fetch writes nothing, and reads a row only when
+`PRAGMA data_version` says another pane wrote. A lease lasts one fetch, so
+a pane that dies holds nothing for long, and the newest reading wins by its
+own time rather than by who wrote last.
+
+`cached(cache, key, ttl, fetch)` is the one call a reader makes;
+`cached_file` is the same for a reading keyed on a file, which `r` leaves
+alone. `kept` serves the last good reading through a failure in transit,
+`remember_refusal` writes the reason into a refused slot, and
+`sharing_status` is the line the pane draws. Keys carry a hash of any
+credential (`account_tag`), never the credential, and `secret` registers a
+token so no reading containing it is written.
+
+agent-usage is the only user so far. Its file is still
+`agent-usage.sqlite`, with the schema and keys it had, so a pane on a build
+from before the move and one from after keep sharing. OPS-284 adds what
+readings that take many requests need before other widgets use it.
+
 ### The mouse
 
 A click arrives as a key. That is the whole design: the mouse is a second

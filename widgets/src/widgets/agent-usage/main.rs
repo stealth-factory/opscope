@@ -2725,21 +2725,21 @@ const SHARE_RETRY: f64 = 600.0;
 /// written since the last one.
 fn share_readings(caches: &mut shared::Caches, on: bool, tried: &mut f64, at: f64) {
     if !on {
-        caches.store = None;
-        caches.sharing_off = "share_readings is off".into();
+        caches.readings.store = None;
+        caches.readings.sharing_off = "share_readings is off".into();
         return;
     }
-    if caches.store.is_none() && at - *tried >= SHARE_RETRY {
+    if caches.readings.store.is_none() && at - *tried >= SHARE_RETRY {
         *tried = at;
-        match sharing::Store::open(&sharing::path()) {
+        match tc::readings::Store::open(&tc::readings::store::path("agent-usage")) {
             Ok(s) => {
-                caches.store = Some(s);
-                caches.sharing_off.clear();
+                caches.readings.store = Some(s);
+                caches.readings.sharing_off.clear();
             }
-            Err(why) => caches.sharing_off = why,
+            Err(why) => caches.readings.sharing_off = why,
         }
     }
-    if let Some(store) = caches.store.as_mut() {
+    if let Some(store) = caches.readings.store.as_mut() {
         if let Err(why) = store.begin_pass() {
             shared::stop_sharing(caches, &why);
         }
@@ -2848,7 +2848,7 @@ fn main() {
             let refresh = refresh_override.unwrap_or(cfg.refresh);
             let work = poller_activity.start();
             if asked {
-                caches.asked_at = now();
+                caches.readings.asked_at = now();
             }
             // One budget for the whole pass, every agent's logs drawing on
             // it, so a pass is bounded however much history is on disk.
@@ -2876,7 +2876,7 @@ fn main() {
             // The press is spent on the pass it asked for. Left standing, a
             // reading kept for being under the floor would be asked again
             // by a later timed pass the moment it crossed it.
-            caches.asked_at = 0.0;
+            caches.readings.asked_at = 0.0;
             match read {
                 Ok(found) => {
                     if let Ok(mut g) = poller.lock() {
@@ -3232,8 +3232,6 @@ fn main() {
 mod parse;
 mod shared;
 mod store;
-mod lease;
-mod sharing;
 mod antigravity;
 mod claude;
 mod notion;

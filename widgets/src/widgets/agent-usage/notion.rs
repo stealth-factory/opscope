@@ -181,7 +181,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         }
         // A reading held past a reset it reported is the last window's,
         // so the cache gives way to a fresh one rather than outliving it.
-        caches.live.remove(&key);
+        caches.readings.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
     // A failure in transit keeps the last good reading on screen, labelled
@@ -591,7 +591,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, true);
-        assert!(caches.live.keys().all(|k| !k.starts_with("notion")));
+        assert!(caches.readings.live.keys().all(|k| !k.starts_with("notion")));
         assert!(why_no_lane(&d).contains("notion_token"));
         let all = plain(&tab(&d, 60, 20, &cfg, &palette()));
         assert!(all.contains("notion_token") && all.contains("token_v2"), "{all}");
@@ -602,7 +602,7 @@ mod tests {
         let cfg = Config { notion_token: "secret".into(), ..Config::default() };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, false);
-        assert!(caches.live.keys().all(|k| !k.starts_with("notion")));
+        assert!(caches.readings.live.keys().all(|k| !k.starts_with("notion")));
         assert!(why_no_lane(&d).contains("left out"));
     }
 

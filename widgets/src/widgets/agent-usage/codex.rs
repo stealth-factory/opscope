@@ -645,7 +645,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // The quota fallback reads the newest rollout's tail on every pass:
     // it stands in for a live call that failed this pass, not for history.
     codex.limits = newest_limits(&files);
-    let asked = caches.asked_at > 0.0;
+    let asked = caches.readings.asked_at > 0.0;
     let pass = caches
         .rollouts
         .pass((listed, complete), asked, at, &mut caches.budget, rollout_reader);

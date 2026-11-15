@@ -1144,7 +1144,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(l) = listed.first() {
         d.last = d.last.max(l.mtime as f64);
     }
-    let asked = caches.asked_at > 0.0;
+    let asked = caches.readings.asked_at > 0.0;
     caches.history.pass((listed, true), asked, at, &mut caches.budget, |_| Counted::default());
     d.prompts = caches.history.tails.get(&history).map_or(0, |t| t.parser.0);
     d.prompts_history = caches.history.history.clone();

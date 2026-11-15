@@ -108,6 +108,12 @@ fn shared_helpers_are_not_redefined_by_widgets() {
         "fn socket_owners(",
         "fn open_files(",
         "fn clock_ticks(",
+        // tc::readings (OPS-283): the shared-readings store and its cache.
+        "fn account_tag(",
+        "fn held_for(",
+        "fn backoff(",
+        "fn claimable(",
+        "fn supersedes(",
     ];
     let mut wrong = Vec::new();
     for (name, src) in widgets() {

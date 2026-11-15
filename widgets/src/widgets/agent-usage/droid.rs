@@ -254,7 +254,7 @@ fn read_with_home(caches: &mut Caches, cfg: &Config, shown: bool, home_dir: &str
         if !got.as_ref().is_some_and(reset_passed) {
             break;
         }
-        caches.live.remove(&slot);
+        caches.readings.live.remove(&slot);
     }
     remember_refusal(caches, &slot, &refused);
     // A failure in transit keeps the last good reading on screen, labelled
@@ -833,7 +833,7 @@ mod tests {
         let data = read_with_home(&mut caches, &cfg, true, &dir.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(data.source.is_empty());
-        assert!(caches.live.keys().all(|key| !key.starts_with("droid")));
+        assert!(caches.readings.live.keys().all(|key| !key.starts_with("droid")));
         assert!(why_no_lane(&data).contains("factory_api_key"));
     }
 
@@ -922,7 +922,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let data = read(&mut caches, &cfg, false);
-        assert!(caches.live.keys().all(|key| !key.starts_with("droid")));
+        assert!(caches.readings.live.keys().all(|key| !key.starts_with("droid")));
         assert!(why_no_lane(&data).contains("left out"));
     }
 

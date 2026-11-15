@@ -338,7 +338,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
             // refresh that has just run clears it, and then the last
             // live reading's time is what remains.
             let at = caches
-                .live
+                .readings.live
                 .get(&ping)
                 .map(|(when, _, _)| *when)
                 .unwrap_or(held_at);
@@ -350,7 +350,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     let got = cached(caches, &ping, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
-    let at = caches.live.get(&ping).map(|(when, _, _)| *when).unwrap_or(0.0);
+    let at = caches.readings.live.get(&ping).map(|(when, _, _)| *when).unwrap_or(0.0);
     match got.as_ref() {
         None => (
             fresher(held, from_log()),
@@ -362,7 +362,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
             Some(mut q) => {
                 let why = String::new();
                 q.taken = Some(at);
-                caches.live.insert(
+                caches.readings.live.insert(
                     LIVE_KEY.to_string(),
                     (
                         at,
@@ -413,7 +413,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
 /// does not. A missing marker is not a mismatch: the guard is simply not
 /// applied, the same as on a machine whose Claude Code never wrote the uuid.
 fn last_live_of(caches: &Caches, account: Option<&str>) -> Option<Quota> {
-    let (at, body, _) = caches.live.get(LIVE_KEY)?;
+    let (at, body, _) = caches.readings.live.get(LIVE_KEY)?;
     let body = body.as_ref()?;
     let held = text(body, "account");
     if let (false, Some(now_acct)) = (held.is_empty(), account) {
@@ -476,7 +476,7 @@ fn refresh_due(expiry: f64, at: f64, tried: Option<(f64, bool)>) -> Option<bool>
 
 /// The last refresh attempt recorded, as (expiry, after).
 fn refresh_tried(caches: &Caches) -> Option<(f64, bool)> {
-    let (_, v, _) = caches.live.get(EXPIRY_KEY)?;
+    let (_, v, _) = caches.readings.live.get(EXPIRY_KEY)?;
     let v = v.as_ref()?;
     Some((v["expiry"].as_f64()?, v["after"].as_bool().unwrap_or(false)))
 }
@@ -570,7 +570,7 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
         return;
     };
     refresh_token();
-    caches.live.insert(
+    caches.readings.live.insert(
         EXPIRY_KEY.to_string(),
         (
             now(),
@@ -578,7 +578,7 @@ fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
             f64::MAX,
         ),
     );
-    caches.live.remove(&ping_key(token_account().as_deref()));
+    caches.readings.live.remove(&ping_key(token_account().as_deref()));
 }
 
 /// What the session logs add up to, kept for the passes that read
@@ -625,7 +625,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         };
     }
     let newest = listed.first().map_or(0.0, |l| l.mtime as f64);
-    let asked = caches.asked_at > 0.0;
+    let asked = caches.readings.asked_at > 0.0;
     // Read once and then only as it grows: a transcript that has not been
     // appended to cannot have different deltas, and re-reading every
     // session on every refresh to learn that is the whole cost of this tab.
@@ -666,7 +666,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     if cfg.grok_ping && newest > 0.0 {
         let quiet = now() - newest;
         let handled = caches
-            .live
+            .readings.live
             .get(SEEN_KEY)
             .and_then(|(_, v, _)| v.as_ref())
             .and_then(|v| v.as_f64())
@@ -674,13 +674,13 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         if (SESSION_QUIET..SESSION_STALE).contains(&quiet) && newest > handled {
             refresh_token();
             refreshed = true;
-            caches.live.insert(
+            caches.readings.live.insert(
                 SEEN_KEY.to_string(),
                 (now(), Some(serde_json::json!(newest)), f64::MAX),
             );
             // The token is new, so the reading held from before it is not
             // the best one available any more.
-            caches.live.remove(&ping_key(token_account().as_deref()));
+            caches.readings.live.remove(&ping_key(token_account().as_deref()));
         }
     }
     // One read, one spawn. The expiry helper re-reads auth.json, so a
@@ -2437,7 +2437,7 @@ mod tests {
             }
         });
         let mut caches = Caches::default();
-        caches.live.insert(
+        caches.readings.live.insert(
             LIVE_KEY.to_string(),
             (
                 1_000_000.0,
