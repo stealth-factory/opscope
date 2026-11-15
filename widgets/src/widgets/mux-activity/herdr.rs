@@ -287,6 +287,8 @@ impl Agent {
             homely(&self.cwd),
             self.title.trim().to_string(),
         ];
+        // A background agent's detail, drawn under its row.
+        out.extend(self.job.iter().flat_map(background::search_words));
         // Every row drawn under the agent: shells and session-log work.
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
@@ -3001,6 +3003,19 @@ mod tests {
         // Labels hidden: the pane id is what the row shows.
         assert!(super::super::search::matches("p-7", &a.search_fields(None)));
         assert!(!super::super::search::matches("opsc", &a.search_fields(None)));
+    }
+
+    #[test]
+    fn the_filter_finds_a_background_agent_by_the_detail_under_its_row() {
+        let labels: HashMap<String, String> = HashMap::new();
+        let mut a = agent("p", background::GROUP, "blocked");
+        assert!(!super::super::search::matches("migration", &a.search_fields(Some(&labels))));
+        a.job = Some(tc::agent_work::parse_job_state(
+            "abcd1234",
+            r#"{"state":"blocked","name":"web","detail":"Running tests","needs":"Approve the migration?","sessionId":"s1"}"#,
+        )
+        .unwrap());
+        assert!(super::super::search::matches("migration", &a.search_fields(Some(&labels))));
     }
 
     #[test]

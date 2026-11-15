@@ -281,6 +281,8 @@ impl Pane {
         if let Some((_, said)) = &self.attention {
             out.push(said.clone());
         }
+        // A background agent's detail, drawn under its row.
+        out.extend(self.job.iter().flat_map(background::search_words));
         // Every row drawn under the pane: shells and session-log work.
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());

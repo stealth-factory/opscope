@@ -639,6 +639,8 @@ impl Row {
                 if a.job.is_some() {
                     out.push(a.group_label.clone());
                 }
+                // Its detail, drawn under the row.
+                out.extend(a.job.iter().flat_map(background::search_words));
                 out.extend(a.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
                 out
             }
@@ -3462,6 +3464,18 @@ mod tests {
         let pane = Row::Pane(Pane { command: "npm".into(), ..Pane::default() });
         assert!(super::super::search::matches("no state", &pane.search_fields()));
         assert!(!super::super::search::matches("zzz", &pane.search_fields()));
+    }
+
+    #[test]
+    fn the_filter_finds_a_background_agent_by_the_detail_under_its_row() {
+        let mut agent = Agent { name: "web".into(), state: "blocked".into(), ..Agent::default() };
+        assert!(!super::super::search::matches("migration", &Row::Agent(agent.clone()).search_fields()));
+        agent.job = Some(tc::agent_work::parse_job_state(
+            "abcd1234",
+            r#"{"state":"blocked","name":"web","detail":"Running tests","needs":"Approve the migration?","sessionId":"s1"}"#,
+        )
+        .unwrap());
+        assert!(super::super::search::matches("migration", &Row::Agent(agent).search_fields()));
     }
 
     #[test]
