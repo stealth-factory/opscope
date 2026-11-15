@@ -98,6 +98,14 @@ pub fn facts(job: &Job) -> Vec<String> {
     out
 }
 
+/// What the `/` filter matches a background agent on beyond its row's own
+/// columns: the lines `note_rows` draws under it - the message (its
+/// `needs` when blocked, else its `detail`), the in-flight count and any
+/// warning - unwrapped, so a phrase is never split across two fields.
+pub fn search_words(job: &Job) -> Vec<String> {
+    [message(job)].into_iter().chain(facts(job)).chain([why(job)]).filter(|s| !s.is_empty()).collect()
+}
+
 /// What a row that has no room for prose of its own says under a
 /// background agent, wrapped to `w` and never cut: the message and the
 /// in-flight count, then any warning (`true`), each indented three.
@@ -271,6 +279,15 @@ mod tests {
         assert_eq!(message(&job("working")), "Running tests");
         assert_eq!(state_word(&job("blocked")), "blocked");
         assert_eq!(facts(&job("working")), ["1 in flight"]);
+    }
+
+    #[test]
+    fn the_filter_reads_the_lines_drawn_under_a_background_agent() {
+        assert_eq!(search_words(&job("working")), ["Running tests", "1 in flight"]);
+        assert_eq!(search_words(&job("blocked"))[0], "Approve?");
+        let mut gone = job("working");
+        gone.running = Some(false);
+        assert!(search_words(&gone).iter().any(|w| w.contains("not running")));
     }
 
     #[test]
