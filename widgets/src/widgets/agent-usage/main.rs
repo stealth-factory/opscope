@@ -2731,7 +2731,10 @@ fn share_readings(caches: &mut shared::Caches, on: bool, tried: &mut f64, at: f6
     }
     if caches.readings.store.is_none() && at - *tried >= SHARE_RETRY {
         *tried = at;
-        match tc::readings::Store::open(&tc::readings::store::path("agent-usage")) {
+        // The path agent-usage has always used, not `store::path`, so a pane
+        // on a build from before the store moved to core opens the same file.
+        let path = format!("{}/opscope/agent-usage.sqlite", claude::snapshot_state_home());
+        match tc::readings::Store::open(&path) {
             Ok(s) => {
                 caches.readings.store = Some(s);
                 caches.readings.sharing_off.clear();

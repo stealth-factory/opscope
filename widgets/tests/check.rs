@@ -66,9 +66,43 @@ fn root() -> PathBuf {
 /// unnoticed. Those are the two shapes a reintroduced helper actually
 /// takes — nested inside an `impl`/`mod`, or published from the widget.
 fn is_moved_helper(line: &str, definition: &str) -> bool {
-    let line = line.trim_start();
-    let line = line.strip_prefix("pub ").unwrap_or(line);
-    line.starts_with(definition)
+    let mut line = line.trim_start();
+    // Any visibility: `pub`, `pub(crate)`, `pub(super)`, `pub(in path)`.
+    if let Some(rest) = line.strip_prefix("pub") {
+        if rest.starts_with(' ') || rest.starts_with('(') {
+            let rest = rest.trim_start();
+            line = match rest.strip_prefix('(') {
+                Some(inner) => inner.split_once(')').map_or(rest, |(_, after)| after).trim_start(),
+                None => rest,
+            };
+        }
+    }
+    // Qualifiers that may stand between the visibility and `fn`. `const`
+    // only when `fn` follows, since `const SPARK:` is itself a definition.
+    loop {
+        if let Some(rest) = line.strip_prefix("const ").filter(|r| r.trim_start().starts_with("fn ")) {
+            line = rest.trim_start();
+        } else if let Some(rest) = line.strip_prefix("async ").or_else(|| line.strip_prefix("unsafe ")) {
+            line = rest.trim_start();
+        } else if let Some(rest) = line.strip_prefix("extern ") {
+            let rest = rest.trim_start();
+            line = match rest.strip_prefix('"') {
+                Some(abi) => abi.split_once('"').map_or(rest, |(_, after)| after).trim_start(),
+                None => rest,
+            };
+        } else {
+            break;
+        }
+    }
+    match definition.strip_prefix("fn ").and_then(|d| d.strip_suffix('(')) {
+        // `fn name(` also matches a generic `fn name<T>(`, and not
+        // `fn name_longer(`.
+        Some(name) => line
+            .strip_prefix("fn ")
+            .and_then(|l| l.trim_start().strip_prefix(name))
+            .is_some_and(|after| after.starts_with('(') || after.starts_with('<')),
+        None => line.starts_with(definition),
+    }
 }
 
 #[test]
@@ -86,6 +120,18 @@ fn moved_helper_matcher_sees_indent_and_pub() {
     // A call is not a definition.
     assert!(!is_moved_helper("let now = tc::now();", "fn now("));
     assert!(!is_moved_helper("tc::run_quiet(&cmd)", "fn run_quiet("));
+    // Restricted visibility, qualifiers, and generics (OPS-283 review).
+    assert!(is_moved_helper("pub(crate) fn backoff(n: u32) -> f64 {", "fn backoff("));
+    assert!(is_moved_helper("    pub(super) fn backoff(n: u32) -> f64 {", "fn backoff("));
+    assert!(is_moved_helper("pub(in crate::shared) fn backoff(n: u32) {", "fn backoff("));
+    assert!(is_moved_helper("pub const fn backoff(n: u32) -> f64 {", "fn backoff("));
+    assert!(is_moved_helper("async fn backoff() {", "fn backoff("));
+    assert!(is_moved_helper("pub unsafe extern \"C\" fn backoff() {", "fn backoff("));
+    assert!(is_moved_helper("fn held_for<F>(", "fn held_for("));
+    assert!(is_moved_helper("pub(crate) const SPARK: [&str; 8] = [", "const SPARK:"));
+    // A longer name that starts the same is a different function.
+    assert!(!is_moved_helper("fn backoff_for(n: u32) {", "fn backoff("));
+    assert!(!is_moved_helper("pubfn backoff() {", "fn backoff("));
 }
 
 #[test]

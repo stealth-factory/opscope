@@ -348,12 +348,7 @@ impl Store {
     pub fn publish(&mut self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<bool, String> {
         let value = s.value.as_ref().map(|v| v.to_string());
         let good = s.good.as_ref().map(|(_, v)| v.to_string());
-        let size = value.as_ref().map_or(0, |v| v.len()) + good.as_ref().map_or(0, |v| v.len());
-        let leaks = secrets.iter().filter(|t| t.len() >= 8).any(|t| {
-            value.as_ref().is_some_and(|v| v.contains(t.as_str()))
-                || good.as_ref().is_some_and(|v| v.contains(t.as_str()))
-        });
-        if size > MAX_VALUE || leaks {
+        if unshareable(&[value.as_deref(), good.as_deref()], secrets) {
             self.release(key)?;
             return Ok(false);
         }
@@ -403,18 +398,32 @@ impl Store {
 
     /// Replace the value of a reading this pane just published with the
     /// reason it was refused, the way `remember_refusal` does in memory.
-    pub fn annotate(&mut self, key: &str, taken_at: f64, value: &serde_json::Value) -> Result<(), String> {
+    ///
+    /// Held to `publish`'s rules: a value that would carry any of `secrets`,
+    /// or is larger than `MAX_VALUE`, is not written and stays with this
+    /// pane. Returns whether it was written.
+    pub fn annotate(
+        &mut self,
+        key: &str,
+        taken_at: f64,
+        value: &serde_json::Value,
+        secrets: &[String],
+    ) -> Result<bool, String> {
+        let text = value.to_string();
+        if unshareable(&[Some(&text)], secrets) {
+            return Ok(false);
+        }
         let n = self
             .conn
             .execute(
                 "UPDATE readings SET value = ?3 WHERE key = ?1 AND taken_at = ?2 AND fetched_by = ?4",
-                params![key, taken_at, value.to_string(), self.me],
+                params![key, taken_at, text, self.me],
             )
             .map_err(sql)?;
         if n > 0 {
             self.writes += 1;
         }
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Vacuum a file that has grown past `SHRINK_AT`; empty it if that was
@@ -447,6 +456,18 @@ impl Store {
     pub fn size(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
+}
+
+/// Whether serialised readings are too large to share, or carry a token
+/// this pane holds. Tokens shorter than eight bytes are not looked for: they
+/// would match ordinary text and refuse readings that carry no secret.
+fn unshareable(texts: &[Option<&str>], secrets: &[String]) -> bool {
+    let size: usize = texts.iter().flatten().map(|t| t.len()).sum();
+    size > MAX_VALUE
+        || secrets
+            .iter()
+            .filter(|t| t.len() >= 8)
+            .any(|t| texts.iter().flatten().any(|v| v.contains(t.as_str())))
 }
 
 fn row(conn: &Connection, key: &str) -> rusqlite::Result<Option<Shared>> {
@@ -723,6 +744,24 @@ mod tests {
         let leaky = reading(NOW, serde_json::json!({"echo": token.clone()}));
         assert!(!s.publish("k", &leaky, std::slice::from_ref(&token), NOW).unwrap());
         assert!(s.publish("j", &reading(NOW, serde_json::json!({"u": 1})), std::slice::from_ref(&token), NOW).unwrap());
+        drop(s);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
+    }
+
+    /// A reason written in after the publish - `set_live` - is held to the
+    /// same rule as the publish itself.
+    #[test]
+    fn an_annotation_holding_a_secret_is_never_written() {
+        let path = temp("annotate-secret");
+        let token = "sk-fixture-token-0123456789".to_string();
+        let secrets = std::slice::from_ref(&token);
+        let mut s = Store::open(&path).unwrap();
+        assert!(s.publish("k", &reading(NOW, serde_json::json!({"u": 1})), secrets, NOW).unwrap());
+        let leaky = serde_json::json!({"why": format!("refused for {token}")});
+        assert!(!s.annotate("k", NOW, &leaky, secrets).unwrap());
+        let plain = serde_json::json!({"why": "too many requests"});
+        assert!(s.annotate("k", NOW, &plain, secrets).unwrap());
         drop(s);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));

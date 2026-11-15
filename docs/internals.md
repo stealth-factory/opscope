@@ -217,9 +217,10 @@ alone. `kept` serves the last good reading through a failure in transit,
 credential (`account_tag`), never the credential, and `secret` registers a
 token so no reading containing it is written.
 
-agent-usage is the only user so far. Its file is still
-`agent-usage.sqlite`, with the schema and keys it had, so a pane on a build
-from before the move and one from after keep sharing. OPS-284 adds what
+agent-usage is the only user so far. It still opens the file at the path
+it always computed itself rather than `store::path`, with the schema and
+keys it had, so a pane on a build from before the move and one from after
+keep sharing even where `XDG_STATE_HOME` is set but empty. OPS-284 adds what
 readings that take many requests need before other widgets use it.
 
 ### The mouse

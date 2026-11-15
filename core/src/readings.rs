@@ -322,7 +322,7 @@ pub fn set_live(cache: &mut Cache, key: &str, value: serde_json::Value) {
     if cache.shared.get(key) != Some(&(when, store.me)) {
         return;
     }
-    if let Err(why) = store.annotate(key, when, &value) {
+    if let Err(why) = store.annotate(key, when, &value, &cache.secrets) {
         stop_sharing(cache, &why);
     }
 }
