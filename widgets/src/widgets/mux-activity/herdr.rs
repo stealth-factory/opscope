@@ -2268,8 +2268,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.push(tc::seg(&refs, w - 1));
                 if rows.len() < h.saturating_sub(1) {
                     let body = if loud || here { &p.txt } else { &p.dim };
+                    // Grouped by state no heading names the workspace, and a
+                    // narrow pane has no place column to: this row says it.
+                    let place = if by_state && !wide { format!("   {}", agent_place(a)) } else { String::new() };
                     rows.push(tc::seg(
                         &[
+                            (&c(&p.accent), place),
                             (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
                             (&c(body), a.title.trim().to_string()),
                             (

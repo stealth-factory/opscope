@@ -1221,10 +1221,17 @@ fn render_pane(
             // The second row is herdr's: where it is, and what its title says.
             let title = pane.title.trim();
             let dir = homely(&pane.cwd());
-            let mut line = vec![(c(&p.dim), format!("   {}  ", dir))];
+            // Grouped by state no heading names the session, and a narrow
+            // pane has no place column to: the row says it before the
+            // directory instead.
+            let place = (cols.by_state && !cols.wide).then(|| cols.where_of(pane));
+            let mut line = match &place {
+                Some(place) => vec![(c(&p.accent), format!("   {}", place)), (c(&p.dim), format!("  {}  ", dir))],
+                None => vec![(c(&p.dim), format!("   {}  ", dir))],
+            };
             let room = w
                 .saturating_sub(1)
-                .checked_sub(tc::display_width(&line[0].1));
+                .checked_sub(line.iter().map(|(_, t)| tc::display_width(t)).sum());
             match room {
                 Some(room) if tc::display_width(title) <= room => {
                     line.push((c(body), title.to_string()));
@@ -1239,6 +1246,9 @@ fn render_pane(
                 // A directory wider than the pane wraps whole, so its
                 // distinguishing tail is still on screen.
                 None => {
+                    if let Some(place) = &place {
+                        prose(&mut rows, &p.accent, place);
+                    }
                     prose(&mut rows, &p.dim, &dir);
                     if !title.is_empty() {
                         prose(&mut rows, body, title);
@@ -3337,6 +3347,14 @@ mod tests {
         assert_eq!(cols.where_of(&blocked), "api:2");
         assert_eq!(cols.where_of(&process), process.window());
         assert_eq!(Columns::fit(100, &[&blocked]).where_of(&blocked), "2");
+        // Too narrow for the place column, the row still names its session.
+        let plain = |w: usize, by_state: bool| {
+            let cols = Columns::fit_grouped(w, &[&blocked], by_state);
+            render_pane(&blocked, false, w, &cols, &palette(), 0, 2.0e9).join("\n")
+        };
+        assert!(plain(40, true).contains("api:2"));
+        assert!(!plain(40, false).contains("api:2"));
+        assert_eq!(plain(100, true).matches("api:2").count(), 1, "said once when the column fits");
     }
 
     #[test]
