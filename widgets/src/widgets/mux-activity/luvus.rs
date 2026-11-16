@@ -206,6 +206,80 @@ fn log_session_hint<'a>(agent: &'a Agent, sessions: &'a [parse::Resumable]) -> O
     None
 }
 
+/// The place column of a background agent no workspace was found for.
+const NO_PANE: &str = "no pane";
+
+/// The Luvus pane a process's environment names, when it can be read: a job
+/// resumed in a pane inherits `LUVUS_PANE_ID` from that pane's shell. Luvus
+/// sets no workspace there, and a pane id is only an id within one session,
+/// so a `LUVUS_SESSION` naming another session is no answer.
+fn luvus_marker(pid: u32, session: &str) -> Option<String> {
+    let env = tc::procfs::read_environ(pid as i32).ok()?;
+    if tc::procfs::parse_environ_var(&env, "LUVUS_SESSION").is_some_and(|s| s != session) {
+        return None;
+    }
+    tc::procfs::parse_environ_var(&env, "LUVUS_PANE_ID").map(String::from)
+}
+
+/// Whether a background agent was filed under its workspace by directory.
+/// The environment names only a pane, which resolves to a pane on the board
+/// (that pane draws it) or to nothing, so every background agent filed under
+/// a workspace here was paired by directory.
+/// Add the background agents to the board, each in the workspace it belongs
+/// to (OPS-292): the pane its process runs in already draws it; else the
+/// one workspace with a pane open in its directory, said on the row; else
+/// the background group, under `label`.
+fn file_jobs(
+    listed: &mut Vec<Agent>,
+    panes: &[parse::Pane],
+    jobs: Vec<tc::agent_work::Job>,
+    label: &str,
+    table: &Result<tc::agent_work::Table, String>,
+    at: f64,
+    marker: impl Fn(u32) -> Option<String>,
+) {
+    let mut places: Vec<(&str, &str, &str)> =
+        panes.iter().map(|p| (p.workspace.as_str(), p.pane_id.as_str(), p.cwd.as_str())).collect();
+    for a in listed.iter().filter(|a| a.job.is_none()) {
+        if !places.iter().any(|(_, pane, _)| *pane == a.pane) {
+            places.push((a.workspace.as_str(), a.pane.as_str(), a.cwd.as_str()));
+        }
+    }
+    let mut filed = Vec::new();
+    for job in jobs {
+        let pane = job.pid.and_then(&marker);
+        let mark = pane.as_deref().and_then(|pane| places.iter().find(|(_, p, _)| *p == pane)).map(|(w, p, _)| (*w, *p));
+        let home = background::home(&job.dirs, mark, &places);
+        let by_directory = matches!(home, background::Home::ByDirectory(_));
+        let workspace = match home {
+            background::Home::InPane => continue,
+            background::Home::Exact(w) | background::Home::ByDirectory(w) => Some(w),
+            background::Home::Unpaired => None,
+        };
+        let (since, exact) = job.held_since.unwrap_or((at, false));
+        filed.push(Agent {
+            name: background::title(&job),
+            kind: "claude".into(),
+            group_label: match &workspace {
+                Some(w) => workspace_name(w).to_string(),
+                None => label.to_string(),
+            },
+            workspace: workspace.unwrap_or_else(|| NO_PANE.into()),
+            cwd: job.cwd.clone(),
+            state: background::state_word(&job).into(),
+            state_source: "jobs".into(),
+            authority: "jobs".into(),
+            since: at - since,
+            exact,
+            work: background::work(&job, table),
+            job: Some(job),
+            by_directory,
+            ..Default::default()
+        });
+    }
+    listed.extend(filed);
+}
+
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
@@ -315,24 +389,8 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
-        for job in jobs.shown {
-            let (since, exact) = job.held_since.unwrap_or((at, false));
-            listed.push(Agent {
-                name: background::title(&job),
-                kind: "claude".into(),
-                workspace: "no pane".into(),
-                cwd: job.cwd.clone(),
-                state: background::state_word(&job).into(),
-                state_source: "jobs".into(),
-                authority: "jobs".into(),
-                since: at - since,
-                exact,
-                work: background::work(&job, &table),
-                group_label: label.clone(),
-                job: Some(job),
-                ..Default::default()
-            });
-        }
+        let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
+        file_jobs(&mut listed, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
         listed.sort_by(|a, b| {
             parse::rank_of(&a.state)
                 .cmp(&parse::rank_of(&b.state))
@@ -641,6 +699,9 @@ impl Row {
                 }
                 // Its detail, drawn under the row.
                 out.extend(a.job.iter().flat_map(background::search_words));
+                if a.by_directory {
+                    out.push(background::BY_DIRECTORY.into());
+                }
                 out.extend(a.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
                 out
             }
@@ -1935,10 +1996,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A background agent, explained from its own files. Read from
             // this frame's agents, so the panel follows the job as it runs.
             let found = agents.as_ref().ok().and_then(|agents| {
-                agents.iter().find_map(|a| a.job.as_ref().filter(|j| &j.short == job))
+                agents.iter().find_map(|a| Some((a, a.job.as_ref().filter(|j| &j.short == job)?)))
             });
             match found {
-                Some(job) => {
+                Some((agent, job)) => {
                     let colour = |kind: &str| match kind {
                         "lbl" => p.lbl.clone(),
                         "txt" => p.txt.clone(),
@@ -1951,6 +2012,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         w,
                         &colour,
                     ));
+                    if agent.by_directory {
+                        for line in tc::wrap_words(background::BY_DIRECTORY, w.saturating_sub(3).max(1)) {
+                            body.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w.saturating_sub(1)));
+                        }
+                    }
                 }
                 None => body.push(tc::seg(
                     &[(p.unknown.as_str(), " that background agent is no longer listed".into())],
@@ -2470,7 +2536,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     .map(|(c, t)| (c.as_str(), t.clone()))
                     .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
-                for (alarm, text) in a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default() {
+                let mut notes = a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default();
+                if a.by_directory {
+                    notes.extend(
+                        tc::wrap_words(background::BY_DIRECTORY, w.saturating_sub(4).max(1))
+                            .into_iter()
+                            .map(|l| (false, format!("   {l}"))),
+                    );
+                }
+                for (alarm, text) in notes {
                     let body_colour = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
                     let mut line = vec![(c(body_colour), text)];
                     if loud || here {
@@ -3116,6 +3190,55 @@ mod tests {
         assert_eq!(log_session_hint(&agent, &[a, b]), Some(("two", false)));
         agent.session_id = "bound".into();
         assert_eq!(log_session_hint(&agent, &[]), Some(("bound", false)));
+    }
+
+    #[test]
+    fn background_agents_are_filed_under_the_workspace_they_belong_to() {
+        let table: Result<tc::agent_work::Table, String> = Err("no table".into());
+        let pane = |workspace: &str, id: &str, cwd: &str| parse::Pane {
+            workspace: workspace.into(),
+            pane_id: id.into(),
+            cwd: cwd.into(),
+            ..Default::default()
+        };
+        let panes = [pane("web", "1", "/srv/web/src")];
+        // An agent `agent list` reports but the snapshot does not hold.
+        let mut listed = vec![Agent { workspace: "api".into(), pane: "2".into(), cwd: "/srv/api".into(), ..Default::default() }];
+        let job = |name: &str, pid: u32, cwd: &str| {
+            let mut job = tc::agent_work::parse_job_state(name, &format!(r#"{{"state":"working","cwd":"{cwd}"}}"#)).unwrap();
+            job.pid = Some(pid);
+            job
+        };
+        let jobs = vec![
+            job("by-dir", 1, "/srv/web"),
+            job("in-pane", 2, "/srv/other"),
+            job("gone-pane", 3, "/srv/api"),
+            job("nowhere", 4, "/srv/other"),
+        ];
+        let marker = |pid: u32| match pid {
+            2 => Some("2".to_string()),
+            3 => Some("9".to_string()),
+            _ => None,
+        };
+        file_jobs(&mut listed, &panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
+        let find = |short: &str| listed.iter().find(|a| a.job.as_ref().is_some_and(|j| j.short == short));
+        // Its directory is open in exactly one workspace: filed there, and said.
+        let by_dir = find("by-dir").unwrap();
+        assert_eq!((by_dir.workspace.as_str(), by_dir.group_label.as_str()), ("web", "web"));
+        assert!(by_dir.by_directory);
+        assert!(Row::Agent(by_dir.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
+        // Its process runs in a pane on the board: that pane draws it.
+        assert!(find("in-pane").is_none());
+        // A pane id no longer on the board falls back to the directory.
+        assert_eq!(find("gone-pane").unwrap().workspace, "api");
+        // Nothing pairs it: the background group, under its own heading.
+        let nowhere = find("nowhere").unwrap();
+        assert_eq!((nowhere.workspace.as_str(), nowhere.group_label.as_str()), (NO_PANE, "background agents · via jobs"));
+        assert!(!nowhere.by_directory);
+        assert!(!Row::Agent(nowhere.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
+        // Grouped with the workspace it was filed under.
+        let order: Vec<String> = by_workspace(listed.clone()).into_iter().map(|a| a.workspace).collect();
+        assert_eq!(order, ["api", "api", "web", NO_PANE]);
     }
 
     #[test]

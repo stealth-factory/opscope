@@ -274,9 +274,27 @@ pub(crate) struct Agent {
     work: tc::agent_work::Work,
     /// A Claude background agent with no pane, drawn as an agent row.
     job: Option<tc::agent_work::Job>,
+    /// A background agent filed under a workspace because a pane there is
+    /// open in its directory, rather than because its process said so.
+    by_directory: bool,
 }
 
 impl Agent {
+    /// The lines drawn under a background agent's two rows, `w` wide: its
+    /// own notes, then why it sits in this workspace when that was a guess.
+    fn note_rows(&self, w: usize) -> Vec<(bool, String)> {
+        let Some(job) = &self.job else { return Vec::new() };
+        let mut out = background::note_rows(job, w);
+        if self.by_directory {
+            out.extend(
+                tc::wrap_words(background::BY_DIRECTORY, w.saturating_sub(4).max(1))
+                    .into_iter()
+                    .map(|l| (false, format!("   {l}"))),
+            );
+        }
+        out
+    }
+
     /// What the `/` filter matches the row on: the words it shows - agent,
     /// state, workspace, directory, title and the work left running.
     fn search_fields(&self, labels: Option<&HashMap<String, String>>) -> Vec<String> {
@@ -289,6 +307,9 @@ impl Agent {
         ];
         // A background agent's detail, drawn under its row.
         out.extend(self.job.iter().flat_map(background::search_words));
+        if self.by_directory {
+            out.push(background::BY_DIRECTORY.to_string());
+        }
         // Every row drawn under the agent: shells and session-log work.
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
@@ -304,6 +325,8 @@ fn shown_place(labels: Option<&HashMap<String, String>>, workspace_id: &str, pan
     }
     match labels {
         Some(labels) => workspace_label(labels, workspace_id),
+        // A background agent filed under a workspace still has no pane.
+        None if pane_id.is_empty() => "no pane".to_string(),
         None => pane_id.to_string(),
     }
 }
@@ -726,6 +749,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             work,
             pane_id,
             job: None,
+            by_directory: false,
         });
     }
     let table = table.unwrap_or_else(|| Err("process table not read".into()));
@@ -770,6 +794,22 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             ..Default::default()
         });
     }
+    // Every pane Herdr lists, agent or not, for pairing a background agent
+    // with the workspace it belongs to.
+    let open: Vec<(String, String, String)> = pane_listing
+        .as_ref()
+        .ok()
+        .and_then(|text| result_of(text).ok())
+        .map(|listing| {
+            listing["panes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| (text_at(p, "workspace_id"), text_at(p, "pane_id"), text_at(p, "cwd")))
+                .collect()
+        })
+        .unwrap_or_default();
+    file_jobs(&mut agents, &open, herdr_marker);
     agents.sort_by(|a, b| {
         rank_of(&a.state)
             .cmp(&rank_of(&b.state))
@@ -854,6 +894,51 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
         update_inventory(&mut guard, pane_ids, inventory_err);
     }
     seen.first_poll = false;
+}
+
+/// The Herdr workspace and pane a process's environment names, when it can
+/// be read: Herdr sets `HERDR_WORKSPACE_ID` and `HERDR_PANE_ID` in every
+/// pane it manages, and a job resumed in one inherits both.
+fn herdr_marker(pid: u32) -> Option<(String, String)> {
+    let env = tc::procfs::read_environ(pid as i32).ok()?;
+    let workspace = tc::procfs::parse_environ_var(&env, "HERDR_WORKSPACE_ID")?;
+    let pane = tc::procfs::parse_environ_var(&env, "HERDR_PANE_ID").unwrap_or("");
+    Some((workspace.to_string(), pane.to_string()))
+}
+
+/// File each background agent under the workspace it belongs to (OPS-292):
+/// the pane its process runs in already draws it, so its row goes; else the
+/// workspace its process names; else the one workspace with a pane open in
+/// its directory, said on the row; else it stays in the background group.
+/// `open` is every pane Herdr listed as (workspace, pane, cwd); the
+/// non-job agents count as places too.
+fn file_jobs(
+    agents: &mut Vec<Agent>,
+    open: &[(String, String, String)],
+    marker: impl Fn(u32) -> Option<(String, String)>,
+) {
+    let owned: Vec<(String, String, String)> = agents
+        .iter()
+        .filter(|a| a.job.is_none())
+        .map(|a| (a.workspace_id.clone(), a.pane_id.clone(), a.cwd.clone()))
+        .chain(open.iter().cloned())
+        .collect();
+    let places: Vec<(&str, &str, &str)> =
+        owned.iter().map(|(w, p, c)| (w.as_str(), p.as_str(), c.as_str())).collect();
+    agents.retain_mut(|agent| {
+        let Some(job) = &agent.job else { return true };
+        let mark = job.pid.and_then(&marker);
+        match background::home(&job.dirs, mark.as_ref().map(|(w, p)| (w.as_str(), p.as_str())), &places) {
+            background::Home::InPane => return false,
+            background::Home::Exact(w) => agent.workspace_id = w,
+            background::Home::ByDirectory(w) => {
+                agent.workspace_id = w;
+                agent.by_directory = true;
+            }
+            background::Home::Unpaired => {}
+        }
+        true
+    });
 }
 
 /// Agents regrouped by workspace, without losing who needs you.
@@ -1795,7 +1880,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // rows and its work, so they come out of the work's budget too: an
         // entry taller than the room would be admitted whole and then cut.
         let notes_of = |i: usize| -> Vec<(bool, String)> {
-            agents[i].job.as_ref().map(|j| fit_notes(background::note_rows(j, w), room)).unwrap_or_default()
+            if agents[i].job.is_some() { fit_notes(agents[i].note_rows(w), room) } else { Vec::new() }
         };
         let lead_fits = |lead: usize, notes: usize, work: &tc::agent_work::Work| {
             let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
@@ -2385,7 +2470,61 @@ mod tests {
             rss: None,
             work: Default::default(),
             job: None,
+            by_directory: false,
         }
+    }
+
+    #[test]
+    fn background_agents_are_filed_under_the_workspace_they_belong_to() {
+        let job = |short: &str, pid: u32, dir: &str| {
+            let mut a = agent("", background::GROUP, "working");
+            let mut job = tc::agent_work::parse_job_state(short, &format!(r#"{{"state":"working","cwd":"{dir}"}}"#)).unwrap();
+            job.pid = Some(pid);
+            a.job = Some(job);
+            a
+        };
+        let mut web = agent("w1:p1", "w1", "idle");
+        web.cwd = "/srv/web".into();
+        let mut agents = vec![
+            web,
+            job("by-dir", 1, "/srv/web"),
+            job("in-pane", 2, "/srv/api"),
+            job("marked", 4, "/srv/elsewhere"),
+            job("nowhere", 3, "/srv/other"),
+        ];
+        // A pane with no agent in it is a place too.
+        let open = vec![("w2".to_string(), "w2:p1".to_string(), "/srv/api/src".to_string())];
+        let marker = |pid: u32| match pid {
+            2 => Some(("w2".to_string(), "w2:p1".to_string())),
+            4 => Some(("w2".to_string(), "w2:p9".to_string())),
+            _ => None,
+        };
+        file_jobs(&mut agents, &open, marker);
+        let find = |short: &str| agents.iter().find(|a| a.job.as_ref().is_some_and(|j| j.short == short));
+        // Its directory is open in exactly one workspace: filed there, and said.
+        let by_dir = find("by-dir").unwrap();
+        assert_eq!(by_dir.workspace_id, "w1");
+        assert!(by_dir.by_directory);
+        assert!(by_dir.note_rows(40).iter().any(|(_, l)| l.trim() == background::BY_DIRECTORY));
+        assert!(by_dir.note_rows(12).iter().all(|(_, l)| tc::display_width(l) <= 12));
+        assert!(super::super::search::matches("by directory", &by_dir.search_fields(None)));
+        // Filed under a workspace, it still has no pane to name.
+        assert_eq!(shown_place(None, &by_dir.workspace_id, &by_dir.pane_id), "no pane");
+        // Its process runs in a pane on the board: that pane draws it.
+        assert!(find("in-pane").is_none());
+        // Its process names the workspace: filed there, nothing to explain.
+        let marked = find("marked").unwrap();
+        assert_eq!(marked.workspace_id, "w2");
+        assert!(!marked.by_directory);
+        assert!(!marked.note_rows(40).iter().any(|(_, l)| l.trim() == background::BY_DIRECTORY));
+        // Nothing pairs it: the background group.
+        assert_eq!(find("nowhere").unwrap().workspace_id, background::GROUP);
+        // And grouping puts the filed one beside its workspace's agent.
+        let order = vec!["w1".to_string(), "w2".to_string()];
+        let grouped: Vec<String> = by_workspace(agents, &order).iter().map(|a| a.workspace_id.clone()).collect();
+        let w1: Vec<usize> = grouped.iter().enumerate().filter(|(_, w)| *w == "w1").map(|(i, _)| i).collect();
+        assert_eq!(w1.len(), 2);
+        assert_eq!(w1[1], w1[0] + 1);
     }
 
     #[test]

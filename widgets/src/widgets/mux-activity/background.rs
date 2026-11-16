@@ -29,6 +29,54 @@ use tc::agent_work::{Job, JobState, Jobs, Table, Work};
 /// session or workspace. Not a real id any multiplexer hands out.
 pub const GROUP: &str = "\u{0}claude-jobs";
 
+/// Where a background agent belongs on a board grouped by session or
+/// workspace (OPS-292).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Home {
+    /// Its process runs in a pane already on the board, which draws it.
+    InPane,
+    /// Its process carries this group's marker in its environment.
+    Exact(String),
+    /// The one group with a pane open at or under a directory it names.
+    ByDirectory(String),
+    /// None of those: it stays in the background group.
+    Unpaired,
+}
+
+/// Where a job belongs. `marker` is the group and pane its process's
+/// environment names, when that could be read; `panes` is every pane on the
+/// board as (group, pane, cwd). A directory open in more than one group
+/// pairs it with none of them: a guess between two is not made.
+pub fn home(dirs: &[String], marker: Option<(&str, &str)>, panes: &[(&str, &str, &str)]) -> Home {
+    if let Some((group, pane)) = marker {
+        if panes.iter().any(|(g, p, _)| *g == group && *p == pane) {
+            return Home::InPane;
+        }
+        if panes.iter().any(|(g, _, _)| *g == group) {
+            return Home::Exact(group.to_string());
+        }
+    }
+    let mut groups: Vec<&str> = panes
+        .iter()
+        .filter(|(_, _, cwd)| dirs.iter().any(|d| at_or_under(cwd, d)))
+        .map(|(g, _, _)| *g)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    match groups.as_slice() {
+        [one] => Home::ByDirectory(one.to_string()),
+        _ => Home::Unpaired,
+    }
+}
+
+fn at_or_under(cwd: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches('/');
+    !dir.is_empty() && (cwd == dir || cwd.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// What a row paired by directory says, so a guess never reads as a fact.
+pub const BY_DIRECTORY: &str = "filed here by directory";
+
 /// Enter on a background agent: there is no pane to focus.
 pub const NO_PANE: &str = "a background agent has no pane - `claude agents` opens it";
 
@@ -279,6 +327,27 @@ mod tests {
         assert_eq!(message(&job("working")), "Running tests");
         assert_eq!(state_word(&job("blocked")), "blocked");
         assert_eq!(facts(&job("working")), ["1 in flight"]);
+    }
+
+    #[test]
+    fn a_job_goes_to_the_pane_its_process_runs_in_then_its_marker_then_its_directory() {
+        let dirs = vec!["/srv/api".to_string(), "/srv/api/.claude/worktrees/x".to_string()];
+        let panes = [("s1", "b1", "/srv/api/src"), ("s2", "b2", "/srv/web"), ("s3", "b3", "/srv/apiary")];
+        assert_eq!(home(&dirs, Some(("s2", "b2")), &panes), Home::InPane);
+        assert_eq!(home(&dirs, Some(("s2", "gone")), &panes), Home::Exact("s2".into()));
+        // A marker naming a group not on the board is no answer.
+        assert_eq!(home(&dirs, Some(("s9", "b9")), &panes), Home::ByDirectory("s1".into()));
+        // At or under, never a name that merely starts the same.
+        assert_eq!(home(&dirs, None, &panes), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&["/srv/api".into()], None, &[("s3", "b3", "/srv/apiary")]), Home::Unpaired);
+    }
+
+    #[test]
+    fn a_directory_open_in_two_groups_pairs_with_neither() {
+        let dirs = vec!["/srv/api".to_string()];
+        assert_eq!(home(&dirs, None, &[("s1", "a", "/srv/api"), ("s2", "b", "/srv/api/x")]), Home::Unpaired);
+        assert_eq!(home(&dirs, None, &[("s1", "a", "/srv/api"), ("s1", "b", "/srv/api/x")]), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&[], None, &[("s1", "a", "/")]), Home::Unpaired);
     }
 
     #[test]

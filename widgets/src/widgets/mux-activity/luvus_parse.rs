@@ -318,6 +318,9 @@ pub struct Agent {
     pub work: opscope_core::agent_work::Work,
     /// A Claude background agent with no pane, drawn as an agent row.
     pub job: Option<opscope_core::agent_work::Job>,
+    /// A background agent filed under a workspace because a pane there is
+    /// open in its directory (OPS-292).
+    pub by_directory: bool,
     /// The heading a background agent's group is drawn under, which counts
     /// the finished jobs it leaves out.
     pub group_label: String,
@@ -363,6 +366,7 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
             exact: false,
             work: Default::default(),
             job: None,
+            by_directory: false,
             group_label: String::new(),
         });
     }

@@ -148,6 +148,9 @@ struct Pane {
     work: tc::agent_work::Work,
     /// A Claude background agent with no pane, drawn as an agent row.
     job: Option<tc::agent_work::Job>,
+    /// A background agent filed under a session because a pane there is open
+    /// in its directory, rather than because its process said so.
+    by_directory: bool,
 }
 
 impl Pane {
@@ -582,6 +585,53 @@ fn job_pane(job: tc::agent_work::Job, label: &str, table: &Result<tc::agent_work
     }
 }
 
+/// The Rex session and block a process's environment names, when it can be
+/// read: a job resumed in a pane inherits both from that pane's shell.
+fn rex_marker(pid: u32) -> Option<(String, String)> {
+    let env = tc::procfs::read_environ(pid as i32).ok()?;
+    let session = tc::procfs::parse_environ_var(&env, "REX_SESSION")?;
+    let block = tc::procfs::parse_environ_var(&env, "REX_BLOCK").unwrap_or("");
+    Some((session.to_string(), block.to_string()))
+}
+
+/// Add the background agents to the board, each in the session it belongs
+/// to (OPS-292): the pane its process runs in already draws it; else the
+/// session its process names; else the one session with a pane open in its
+/// directory, said on the row; else the background group, under `label`.
+fn file_jobs(
+    panes: &mut Vec<Pane>,
+    jobs: Vec<tc::agent_work::Job>,
+    label: &str,
+    table: &Result<tc::agent_work::Table, String>,
+    at: f64,
+    marker: impl Fn(u32) -> Option<(String, String)>,
+) {
+    let open: Vec<(String, String, String, String, usize)> = panes
+        .iter()
+        .filter(|p| p.job.is_none() && !p.remote)
+        .map(|p| (p.session_id.clone(), p.block_id.clone(), p.cwd(), p.session_label.clone(), p.session_ord))
+        .collect();
+    let places: Vec<(&str, &str, &str)> = open.iter().map(|(s, b, c, _, _)| (s.as_str(), b.as_str(), c.as_str())).collect();
+    for job in jobs {
+        let mark = job.pid.and_then(&marker);
+        let home = background::home(&job.dirs, mark.as_ref().map(|(s, b)| (s.as_str(), b.as_str())), &places);
+        let session = match &home {
+            background::Home::InPane => continue,
+            background::Home::Exact(s) | background::Home::ByDirectory(s) => open.iter().find(|o| &o.0 == s),
+            background::Home::Unpaired => None,
+        };
+        let by_directory = matches!(home, background::Home::ByDirectory(_));
+        let mut pane = job_pane(job, label, table, at);
+        if let Some((id, _, _, name, ord)) = session {
+            pane.session_id = id.clone();
+            pane.session_label = name.clone();
+            pane.session_ord = *ord;
+            pane.by_directory = by_directory;
+        }
+        panes.push(pane);
+    }
+}
+
 fn poll(
     state: &Arc<Mutex<State>>,
     server: &str,
@@ -654,9 +704,7 @@ fn poll(
         }
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
-        for job in jobs.shown {
-            board.panes.push(job_pane(job, &label, &table, at));
-        }
+        file_jobs(&mut board.panes, jobs.shown, &label, &table, at, rex_marker);
         // One sample for panes and background agents alike: the sampler
         // forgets every pid it is not handed, and a percentage needs two.
         let usage_pid = |p: &Pane| match &p.job {
@@ -907,6 +955,9 @@ fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
     }
     if let Some(job) = &pane.job {
         out.extend(background::facts(job));
+    }
+    if pane.by_directory {
+        out.push(background::BY_DIRECTORY.into());
     }
     if let Some((when, said)) = &pane.attention {
         out.push(format!(
@@ -3118,6 +3169,49 @@ mod tests {
                 assert!(tc::display_width(&row) < w, "w={w} row {row:?}");
             }
         }
+    }
+
+    #[test]
+    fn background_agents_are_filed_under_the_session_they_belong_to() {
+        let table: Result<tc::agent_work::Table, String> = Err("no table".into());
+        let open = |session: &str, label: &str, block: &str, cwd: &str| Pane {
+            session_id: session.into(),
+            session_label: label.into(),
+            session_ord: 1,
+            block_id: block.into(),
+            child_cwd: cwd.into(),
+            ..Default::default()
+        };
+        let mut panes = vec![open("session:w", "web", "block:1", "/srv/web/src"), open("session:a", "api", "block:2", "/srv/api")];
+        let with_pid = |name: &str, pid: u32| {
+            let mut job = a_job("working");
+            job.short = name.into();
+            job.pid = Some(pid);
+            job
+        };
+        let mut elsewhere = with_pid("nowhere", 3);
+        elsewhere.dirs = vec!["/srv/other".into()];
+        let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere];
+        let marker = |pid: u32| match pid {
+            2 => Some(("session:a".to_string(), "block:2".to_string())),
+            4 => Some(("session:a".to_string(), "block:gone".to_string())),
+            _ => None,
+        };
+        file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
+        let job = |short: &str| panes.iter().find(|p| p.job.as_ref().is_some_and(|j| j.short == short));
+        // Its directory is open in exactly one session: filed there, and said.
+        let by_dir = job("by-dir").unwrap();
+        assert_eq!((by_dir.session_id.as_str(), by_dir.session_label.as_str()), ("session:w", "web"));
+        assert!(by_dir.by_directory);
+        assert!(detail_phrases(by_dir, 2.0e9).iter().any(|p| p == background::BY_DIRECTORY));
+        // Its process runs in a pane on the board: that pane draws it.
+        assert!(job("in-pane").is_none());
+        // Its process names the session: filed there, nothing to explain.
+        let marked = job("marked").unwrap();
+        assert_eq!(marked.session_id, "session:a");
+        assert!(!marked.by_directory);
+        // Nothing pairs it: the background group.
+        assert_eq!(job("nowhere").unwrap().session_id, background::GROUP);
     }
 
     fn drawn(pane: &Pane, w: usize) -> String {

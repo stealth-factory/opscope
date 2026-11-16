@@ -139,9 +139,30 @@ agents`) runs on Claude's daemon, on a terminal no pane holds, so no
 multiplexer can report it and no process tree under a pane contains it.
 Every board reads it from the file Claude writes for its own dashboard,
 `<config dir>/jobs/<id>/state.json`, and draws it the same way under Rex,
-Herdr and Luvus: as an agent in a group of its own,
-`background agents · via jobs`, sorted with the board's other agents. A
+Herdr and Luvus: as an agent, sorted with the board's other agents. A
 `blocked` one is with the agents that need you and counts in the state bar.
+
+It is filed under the session (or workspace) it belongs to, in this order:
+
+1. **Its process runs in a pane on the board** — a job resumed with
+   `claude --resume` in a pane, found through the pane markers in the
+   process's environment: `REX_SESSION` and `REX_BLOCK` under Rex,
+   `HERDR_WORKSPACE_ID` and `HERDR_PANE_ID` under Herdr, `LUVUS_PANE_ID`
+   under Luvus. That pane already draws it, so it is not drawn a second time.
+2. **Its process names a session or workspace** in its environment: it goes
+   there. Luvus sets no workspace id in a pane, so under Luvus this step
+   never applies.
+3. **Exactly one session has a pane open at or under a directory it names**
+   (`cwd`, `worktreePath` or `originCwd` in its `state.json`): it goes
+   there, and the row says `filed here by directory`, because that is
+   a match on a folder rather than something its process said.
+4. **Otherwise** it stays in a group of its own, `background agents · via
+   jobs`. A directory open in two sessions pairs it with neither; the
+   widget does not guess between them.
+
+A daemon agent's process descends from Claude's daemon, not from any pane,
+and carries no multiplexer's markers, so for most of them the directory is
+what there is.
 
 Each row has the state the agent reported (`working`, `blocked`, `done`;
 never inferred), how long it has held it from the job's `timeline.jsonl`
