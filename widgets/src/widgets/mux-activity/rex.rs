@@ -3301,6 +3301,29 @@ mod tests {
         assert_eq!(job("at-prompt").unwrap().session_id, "session:w");
     }
 
+    #[test]
+    fn a_subagent_the_pane_reports_is_not_drawn_again_from_the_jobs_fan() {
+        // The agent in block:2 is the job's process and reports subagent a1
+        // finished itself; the job still lists a1 as working.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n").map_err(String::from);
+        let mut pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 2, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            records: vec![Record { id: Some("tasks/a1".into()), state: "done".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        pane.work = tc::agent_work::Work::of(&table, Some(2));
+        let mut job = a_job("working");
+        job.pid = Some(2);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, |_| None);
+        assert_eq!(panes.len(), 1, "the pane draws the job");
+        assert!(panes[0].work.fan.iter().all(|f| f.id != "a1"), "a1 is drawn from the pane's report only");
+    }
+
     fn drawn(pane: &Pane, w: usize) -> String {
         let cols = Columns::fit(w, &[pane]);
         render_pane(pane, false, w, &cols, &palette(), 0, 2.0e9).join("\n")
