@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::lease::{self, Claim, Lease};
+use super::lease::{self, Claim, Lease};
 
 /// Bumped whenever the tables change shape. A store of any other version
 /// is deleted and started again.
@@ -70,8 +70,10 @@ pub const MAX_VALUE: usize = 2 * 1024 * 1024;
 /// for this pass. Every transaction here is a handful of rows.
 const BUSY: Duration = Duration::from_millis(250);
 
-pub fn path() -> String {
-    format!("{}/opscope/agent-usage.sqlite", crate::claude::snapshot_state_home())
+/// The store of the widget named `name`: one file per widget, under
+/// [`crate::state_dir`], so widgets never share a file.
+pub fn path(name: &str) -> String {
+    crate::state_dir().join(format!("{name}.sqlite")).to_string_lossy().to_string()
 }
 
 /// One reading as it is stored.
@@ -346,12 +348,7 @@ impl Store {
     pub fn publish(&mut self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<bool, String> {
         let value = s.value.as_ref().map(|v| v.to_string());
         let good = s.good.as_ref().map(|(_, v)| v.to_string());
-        let size = value.as_ref().map_or(0, |v| v.len()) + good.as_ref().map_or(0, |v| v.len());
-        let leaks = secrets.iter().filter(|t| t.len() >= 8).any(|t| {
-            value.as_ref().is_some_and(|v| v.contains(t.as_str()))
-                || good.as_ref().is_some_and(|v| v.contains(t.as_str()))
-        });
-        if size > MAX_VALUE || leaks {
+        if unshareable(&[value.as_deref(), good.as_deref()], secrets) {
             self.release(key)?;
             return Ok(false);
         }
@@ -401,18 +398,32 @@ impl Store {
 
     /// Replace the value of a reading this pane just published with the
     /// reason it was refused, the way `remember_refusal` does in memory.
-    pub fn annotate(&mut self, key: &str, taken_at: f64, value: &serde_json::Value) -> Result<(), String> {
+    ///
+    /// Held to `publish`'s rules: a value that would carry any of `secrets`,
+    /// or is larger than `MAX_VALUE`, is not written and stays with this
+    /// pane. Returns whether it was written.
+    pub fn annotate(
+        &mut self,
+        key: &str,
+        taken_at: f64,
+        value: &serde_json::Value,
+        secrets: &[String],
+    ) -> Result<bool, String> {
+        let text = value.to_string();
+        if unshareable(&[Some(&text)], secrets) {
+            return Ok(false);
+        }
         let n = self
             .conn
             .execute(
                 "UPDATE readings SET value = ?3 WHERE key = ?1 AND taken_at = ?2 AND fetched_by = ?4",
-                params![key, taken_at, value.to_string(), self.me],
+                params![key, taken_at, text, self.me],
             )
             .map_err(sql)?;
         if n > 0 {
             self.writes += 1;
         }
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Vacuum a file that has grown past `SHRINK_AT`; empty it if that was
@@ -445,6 +456,18 @@ impl Store {
     pub fn size(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
+}
+
+/// Whether serialised readings are too large to share, or carry a token
+/// this pane holds. Tokens shorter than eight bytes are not looked for: they
+/// would match ordinary text and refuse readings that carry no secret.
+fn unshareable(texts: &[Option<&str>], secrets: &[String]) -> bool {
+    let size: usize = texts.iter().flatten().map(|t| t.len()).sum();
+    size > MAX_VALUE
+        || secrets
+            .iter()
+            .filter(|t| t.len() >= 8)
+            .any(|t| texts.iter().flatten().any(|v| v.contains(t.as_str())))
 }
 
 fn row(conn: &Connection, key: &str) -> rusqlite::Result<Option<Shared>> {
@@ -486,6 +509,54 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("agent-usage.sqlite").to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn a_widgets_store_is_its_own_file_in_the_state_directory() {
+        let p = path("agent-usage");
+        assert!(p.ends_with("/agent-usage.sqlite"), "{p}");
+        assert_eq!(std::path::Path::new(&p).parent(), Some(crate::state_dir().as_path()));
+        assert_ne!(path("agent-usage"), path("github-actions"));
+    }
+
+    /// The file agent-usage wrote before the store moved to core, built
+    /// with the statements that code ran. An agent-usage from before the
+    /// move and one from after share it while panes of both are open, so
+    /// the new code must open it as it is - not start it again - and read
+    /// what the old one published.
+    #[test]
+    fn a_store_written_before_the_move_is_opened_and_read_as_it_is() {
+        let p = temp("before-the-move");
+        {
+            let conn = Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta(k TEXT PRIMARY KEY, v);
+                 CREATE TABLE readings(
+                     key TEXT PRIMARY KEY, taken_at REAL NOT NULL, held REAL NOT NULL,
+                     value TEXT, fails INTEGER NOT NULL, good_value TEXT, good_at REAL,
+                     fetched_by INTEGER NOT NULL);
+                 CREATE TABLE leases(
+                     key TEXT PRIMARY KEY, holder INTEGER NOT NULL, expires_at REAL NOT NULL);
+                 INSERT INTO meta(k, v) VALUES ('version', 1);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings VALUES ('claude:/home/u/.claude:0123456789abcdef', ?1, 120.0,
+                 '{\"five_hour\":{\"utilization\":12}}', 0, '{\"five_hour\":{\"utilization\":12}}', ?1, 4242)",
+                [crate::now() - 10.0],
+            )
+            .unwrap();
+        }
+        let mut s = Store::open(&p).unwrap();
+        assert_eq!(s.notice, "", "the old file was started again");
+        let got = s.load("claude:/home/u/.claude:0123456789abcdef").unwrap().unwrap();
+        assert_eq!(got.fetched_by, 4242);
+        assert_eq!(got.value, Some(serde_json::json!({"five_hour": {"utilization": 12}})));
+        assert_eq!(
+            s.claim("claude:/home/u/.claude:0123456789abcdef", Some(got.taken_at), crate::now()).unwrap(),
+            Got::Mine,
+            "the same reading this pane holds is not news, so a claim on it fetches"
+        );
     }
 
     fn reading(at: f64, v: serde_json::Value) -> Shared {
@@ -673,6 +744,24 @@ mod tests {
         let leaky = reading(NOW, serde_json::json!({"echo": token.clone()}));
         assert!(!s.publish("k", &leaky, std::slice::from_ref(&token), NOW).unwrap());
         assert!(s.publish("j", &reading(NOW, serde_json::json!({"u": 1})), std::slice::from_ref(&token), NOW).unwrap());
+        drop(s);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
+    }
+
+    /// A reason written in after the publish - `set_live` - is held to the
+    /// same rule as the publish itself.
+    #[test]
+    fn an_annotation_holding_a_secret_is_never_written() {
+        let path = temp("annotate-secret");
+        let token = "sk-fixture-token-0123456789".to_string();
+        let secrets = std::slice::from_ref(&token);
+        let mut s = Store::open(&path).unwrap();
+        assert!(s.publish("k", &reading(NOW, serde_json::json!({"u": 1})), secrets, NOW).unwrap());
+        let leaky = serde_json::json!({"why": format!("refused for {token}")});
+        assert!(!s.annotate("k", NOW, &leaky, secrets).unwrap());
+        let plain = serde_json::json!({"why": "too many requests"});
+        assert!(s.annotate("k", NOW, &plain, secrets).unwrap());
         drop(s);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));

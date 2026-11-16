@@ -298,7 +298,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         if !got.as_ref().is_some_and(reset_passed) {
             break;
         }
-        caches.live.remove(&key);
+        caches.readings.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
     // A failure in transit keeps the last good reading on screen, labelled
@@ -715,7 +715,7 @@ mod tests {
         // case under test; a value set outside the test would be a token.
         std::env::remove_var(TOKEN_ALIAS);
         let data = read(&mut caches, &cfg, true);
-        assert!(caches.live.keys().all(|key| !key.starts_with("devin")));
+        assert!(caches.readings.live.keys().all(|key| !key.starts_with("devin")));
         assert!(
             why_no_lane(&data).contains("devin_token"),
             "{}",
@@ -732,7 +732,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let data = read(&mut caches, &cfg, false);
-        assert!(caches.live.keys().all(|key| !key.starts_with("devin")));
+        assert!(caches.readings.live.keys().all(|key| !key.starts_with("devin")));
         assert!(why_no_lane(&data).contains("left out"));
     }
 
@@ -794,7 +794,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let data = read(&mut caches, &cfg, true);
-        assert!(caches.live.keys().all(|key| !key.starts_with("devin")));
+        assert!(caches.readings.live.keys().all(|key| !key.starts_with("devin")));
         assert!(why_no_lane(&data).contains("devin_org"));
     }
 }

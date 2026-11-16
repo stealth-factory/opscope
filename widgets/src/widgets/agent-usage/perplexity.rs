@@ -235,7 +235,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         // period's, and one held past a bonus's expiry still counts that
         // bonus in its balance, so the cache gives way rather than outliving
         // either.
-        caches.live.remove(&key);
+        caches.readings.live.remove(&key);
     }
     remember_refusal(caches, &key, &refused);
     // A failure in transit keeps the last good reading on screen, labelled
@@ -280,7 +280,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         if !stale {
             break;
         }
-        caches.live.remove(&qkey);
+        caches.readings.live.remove(&qkey);
     }
     remember_refusal(caches, &qkey, &refused);
     // A failure in transit keeps the last good reading on screen, labelled
@@ -1626,7 +1626,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, true);
-        assert!(caches.live.keys().all(|k| !k.starts_with("perplexity")));
+        assert!(caches.readings.live.keys().all(|k| !k.starts_with("perplexity")));
         assert!(why_no_lane(&d).contains("perplexity_token"));
         let all = plain(&tab(&d, 60, 20, &cfg, &palette()));
         assert!(all.contains("perplexity_token") && all.contains("session-token"), "{all}");
@@ -1668,7 +1668,7 @@ mod tests {
         let cfg = Config { perplexity_token: "secret".into(), ..Config::default() };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, false);
-        assert!(caches.live.keys().all(|k| !k.starts_with("perplexity")));
+        assert!(caches.readings.live.keys().all(|k| !k.starts_with("perplexity")));
         assert!(why_no_lane(&d).contains("left out"));
     }
 
