@@ -508,8 +508,10 @@ impl Store {
             )
             .optional()
             .map_err(sql)?;
+        // A row dated ahead of the clock is no successor's: `supersedes`
+        // replaces it below.
         let overtaken = claimed_at.is_some_and(|since| {
-            stored.as_ref().is_some_and(|r| r.3 != self.me && r.0 >= since)
+            stored.as_ref().is_some_and(|r| r.3 != self.me && r.0 >= since && r.0 <= now + lease::SKEW)
         });
         if other.is_some() || overtaken {
             tx.commit().map_err(sql)?;
@@ -1028,6 +1030,20 @@ mod tests {
         assert_eq!(a.claim_for("k", None, NOW + 400.0, 20.0).unwrap(), Got::Mine);
         let next = reading(NOW + 401.0, serde_json::json!(3));
         assert_eq!(a.publish_since("k", &next, &[], NOW + 401.0, Some(NOW + 400.0)).unwrap(), Publish::Written);
+    }
+
+    #[test]
+    fn a_row_dated_ahead_of_the_clock_is_not_a_successor() {
+        let path = temp("late-future");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.me = 1;
+        b.me = 2;
+        // b wrote before the clock went back an hour.
+        b.publish("k", &reading(NOW + 3600.0, serde_json::json!(2)), &[], NOW + 3600.0).unwrap();
+        assert_eq!(a.claim_for("k", None, NOW, 20.0).unwrap(), Got::Mine);
+        let mine = reading(NOW + 5.0, serde_json::json!(1));
+        assert_eq!(a.publish_since("k", &mine, &[], NOW + 5.0, Some(NOW)).unwrap(), Publish::Written);
     }
 
     #[test]

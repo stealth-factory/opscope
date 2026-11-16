@@ -183,7 +183,7 @@ where
                 // opened together would each ask Claude at once. Wait for
                 // the one that is asking instead; its fetch is no slower
                 // than this pane's would have been.
-                if let Some(value) = wait_for_holder(cache, key, ttl) {
+                if let Some(value) = wait_for_holder(cache, key, ttl, &mut claimed_at) {
                     return value;
                 }
             }
@@ -264,8 +264,14 @@ const WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(500);
 /// `None` when this pane should fetch after all: the lease ran out or was
 /// given back without a reading - a reading too large or holding a token
 /// is kept by the pane that fetched it - or the store failed. A lease
-/// lasts `LEASE` at most, so this waits no longer than that.
-fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serde_json::Value>> {
+/// lasts `LEASE` at most, so this waits no longer than that. When this
+/// pane takes the lease over, `claimed_at` says when.
+fn wait_for_holder(
+    cache: &mut Cache,
+    key: &str,
+    ttl: f64,
+    claimed_at: &mut Option<f64>,
+) -> Option<Option<serde_json::Value>> {
     let until = crate::now() + lease::LEASE + 5.0;
     loop {
         std::thread::sleep(WAIT_STEP);
@@ -277,7 +283,10 @@ fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serd
                 return cache.live.get(key).map(|e| e.1.clone());
             }
             // Ours now: the holder went without publishing.
-            Ok(store::Got::Mine) => return None,
+            Ok(store::Got::Mine) => {
+                *claimed_at = Some(at);
+                return None;
+            }
             Ok(store::Got::Held(_)) if at < until => {}
             Ok(store::Got::Held(_)) => return None,
             // Another pane mid-write: look again.
@@ -1238,6 +1247,34 @@ mod tests {
         asking.join().unwrap();
         assert_eq!(got, Some(serde_json::json!({"u": 1})));
         assert_eq!(b.shared.get("k").map(|s| s.1), Some(41));
+    }
+
+    #[test]
+    fn a_pane_that_took_the_lease_after_waiting_does_not_write_over_its_successor() {
+        let (mut a, mut b) = two_panes("wait-late");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let mut store = a.store.take().unwrap();
+        assert_eq!(store.claim("k", None, now()).unwrap(), Got::Mine);
+        // The holder gives the lease back without a reading, so b takes it.
+        let giving = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            store.release("k").unwrap();
+        });
+        let got = cached(&mut b, "k", 120.0, || {
+            // b's fetch outlives its lease; pane 43 takes over and answers.
+            let raw = rusqlite::Connection::open(&path).unwrap();
+            raw.execute("DELETE FROM leases WHERE key = 'k'", []).unwrap();
+            let mut c = Store::open(&path).unwrap();
+            c.me = 43;
+            let at = now();
+            let s = Shared { taken_at: at, held: 120.0, value: Some(serde_json::json!(2)), fails: 0, good: None, fetched_by: 43 };
+            assert_eq!(c.publish("k", &s, &[], at).unwrap(), Publish::Written);
+            Some(serde_json::json!(1))
+        });
+        giving.join().unwrap();
+        assert_eq!(got, Some(serde_json::json!(1)));
+        let mut other = Store::open(&path).unwrap();
+        assert_eq!(other.load("k").unwrap().unwrap().value, Some(serde_json::json!(2)), "the late answer wrote over the successor's");
     }
 
     #[test]
