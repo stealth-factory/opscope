@@ -334,6 +334,35 @@ fn shown_place(labels: Option<&HashMap<String, String>>, workspace_id: &str, pan
     }
 }
 
+/// Where an agent row points while agents are grouped by state (OPS-293):
+/// no workspace heading sits above it, so the row names its workspace -
+/// the label while labels are shown, else the workspace id beside the pane
+/// id the row would show.
+fn place_by_state(labels: Option<&HashMap<String, String>>, workspace_id: &str, pane_id: &str) -> String {
+    if workspace_id == background::GROUP {
+        return "no pane".to_string();
+    }
+    match labels {
+        Some(labels) => workspace_label(labels, workspace_id),
+        None if pane_id.is_empty() => format!("{workspace_id} · no pane"),
+        None => format!("{workspace_id}:{pane_id}"),
+    }
+}
+
+/// The group an agent is listed under: its workspace, or with `by_state`
+/// its state (OPS-293). A state outside the rank order is `unknown`, which
+/// is where the rank order puts it. Only agents have a state; the pane
+/// sections keep their own grouping.
+fn group_of(agent: &Agent, by_state: bool) -> String {
+    if !by_state {
+        agent.workspace_id.clone()
+    } else if rank_of(&agent.state) < RANK.len() {
+        agent.state.clone()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 /// A workspace by its label, or its bare id when it has none.
 fn workspace_label(labels: &HashMap<String, String>, workspace_id: &str) -> String {
     match labels.get(workspace_id) {
@@ -1056,21 +1085,29 @@ fn fit_notes(mut notes: Vec<(bool, String)>, room: usize) -> Vec<(bool, String)>
 /// only when there is more than one workspace to tell apart - with one, the
 /// heading would name the only thing there is.
 ///
+/// With `by_state` the groups are states, and every state gets its
+/// heading however few workspaces there are: it is what says how the
+/// agents are grouped.
+///
 /// The rows it returns are what the window counts, so `y` decides only
 /// where the heading's rule is placed, not how many rows there are.
+#[allow(clippy::too_many_arguments)]
 fn lead_rows(
     agents: &[Agent],
     i: usize,
     w: usize,
     name_of: &dyn Fn(&str) -> String,
+    by_state: bool,
     p: &Palette,
     y: usize,
     plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
-    let grouped = agents
-        .iter()
-        .any(|a| a.workspace_id != agents[0].workspace_id);
-    let starts = i == 0 || agents[i - 1].workspace_id != agents[i].workspace_id;
+    let group = group_of(&agents[i], by_state);
+    let grouped = by_state
+        || agents
+            .iter()
+            .any(|a| a.workspace_id != agents[0].workspace_id);
+    let starts = i == 0 || group_of(&agents[i - 1], by_state) != group;
     let mut out = Vec::new();
     if i > 0 {
         out.push(String::new());
@@ -1078,11 +1115,11 @@ fn lead_rows(
     if grouped && starts {
         let n = agents
             .iter()
-            .filter(|a| a.workspace_id == agents[i].workspace_id)
+            .filter(|a| group_of(a, by_state) == group)
             .count();
         let at = y + out.len();
         out.extend(super::group_heading(
-            &name_of(&agents[i].workspace_id),
+            &if by_state { group.clone() } else { name_of(&agents[i].workspace_id) },
             n,
             w,
             (&p.accent, &p.dim, &p.rule),
@@ -1371,6 +1408,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     // how far it is scrolled. Herdr's own panes have no explain screen.
     let mut explaining: Option<String> = None;
     let mut explain_scroll = 0usize;
+    // Agents grouped by state rather than by workspace (OPS-293).
+    let mut by_state = false;
 
     loop {
         let tick = tc::animation_tick();
@@ -1455,6 +1494,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 "i" | "I" => {
                     show_idle = !show_idle;
                     selected = 0;
+                    moved = true;
+                }
+                // The cursor stays on its agent: the rows are rebuilt below
+                // and `reselect` finds it again by pane id.
+                "g" | "G" => {
+                    by_state = !by_state;
                     moved = true;
                 }
                 "up" => {
@@ -1622,13 +1667,32 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // to them. `all_agents` still counts them for the summary and the
         // bar. `agents` is the seated ones shown, then the floating ones
         // shown, which is the order the keys walk.
+        // By state, the poll's order before it regrouped by workspace is
+        // the grouping: worst first. Stable, so this is that order exactly.
+        let mut all_agents = all_agents;
+        if by_state {
+            all_agents.sort_by(|a, b| {
+                rank_of(&a.state)
+                    .cmp(&rank_of(&b.state))
+                    .then(b.since.total_cmp(&a.since))
+            });
+        }
+        // By state an agent row names its workspace, so the filter matches
+        // that too.
+        let agent_fields = |a: &Agent| -> Vec<String> {
+            let mut fields = a.search_fields(shown);
+            if by_state {
+                fields.push(place_by_state(shown, &a.workspace_id, &a.pane_id));
+            }
+            fields
+        };
         let seated_all = all_agents.iter().filter(|a| a.workspace_id != background::GROUP).count();
         let floating_all = all_agents.len() - seated_all;
         let agents: Vec<Agent> = all_agents
             .iter()
             .filter(|a| a.workspace_id != background::GROUP)
             .chain(all_agents.iter().filter(|a| a.workspace_id == background::GROUP))
-            .filter(|a| search.matches(&a.search_fields(shown)))
+            .filter(|a| search.matches(&agent_fields(a)))
             .cloned()
             .collect();
         let seated = agents.iter().filter(|a| a.workspace_id != background::GROUP).count();
@@ -1641,7 +1705,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let hidden_why: Option<String> = if filtering {
             all_agents
                 .iter()
-                .filter(|a| !search.matches(&a.search_fields(shown)))
+                .filter(|a| !search.matches(&agent_fields(a)))
                 .find_map(|a| super::search::work_warning(&a.work))
         } else {
             None
@@ -1830,6 +1894,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 p.dim.as_str(),
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
             )],
+            // The grouping the next press moves to.
+            vec![(
+                p.dim.as_str(),
+                format!("[g]roup by {}", if by_state { "workspace" } else { "state" }),
+            )],
             // A column rather than rows, so no body line - the same call
             // `[t]stats` got - but the wording is the wording: a bare
             // `[l]abels` beside `[i]dle hide` is the same shape saying
@@ -1956,7 +2025,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
                 let (lo, hi) = section_of(i);
-                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, &p, 0, &mut Vec::new()).len();
+                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, by_state, &p, 0, &mut Vec::new()).len();
                 let notes = notes_of(i).len();
                 let shown = lead_fits(lead, notes, &agents[i].work);
                 let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, notes, shown));
@@ -1974,6 +2043,14 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let place_of = |workspace_id: &str, pane_id: &str| -> String {
             shown_place(show_labels.then_some(&labels), workspace_id, pane_id)
         };
+        // An agent row's place, which by state names its workspace too.
+        let agent_place = |a: &Agent| -> String {
+            if by_state {
+                place_by_state(show_labels.then_some(&labels), &a.workspace_id, &a.pane_id)
+            } else {
+                place_of(&a.workspace_id, &a.pane_id)
+            }
+        };
         let widest = |it: &mut dyn Iterator<Item = String>| -> usize {
             it.map(|t| tc::display_width(&t)).max().unwrap_or(0)
         };
@@ -1984,7 +2061,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // Fitted to every row, filtered or not, so the columns hold
                 // still while a query is typed.
                 widest(&mut all_agents.iter().map(|a| a.name.clone())),
-                widest(&mut all_agents.iter().map(|a| place_of(&a.workspace_id, &a.pane_id))),
+                widest(&mut all_agents.iter().map(agent_place)),
                 widest(&mut busy.iter().map(|n| n.command.clone()))
                     .max(tc::display_width("could not be read")),
                 widest(&mut busy.iter().map(|n| place_of(&n.workspace_id, &n.pane_id))),
@@ -2099,7 +2176,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 }
                 let mut rule = Vec::new();
                 let (lo, hi) = section_of(i);
-                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, &p, rows.len(), &mut rule);
+                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, by_state, &p, rows.len(), &mut rule);
                 let notes = notes_of(i);
                 let lead_shown = lead_fits(lead.len(), notes.len(), &a.work);
                 let jobs_room = job_room(lead.len(), notes.len(), lead_shown);
@@ -2179,7 +2256,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     (c(&heat), percent(a.cpu)),
                 ];
                 if wide {
-                    let place = place_of(&a.workspace_id, &a.pane_id);
+                    let place = agent_place(a);
                     line.push((c(&p.dim), format!(" {}", mem(a.rss))));
                     line.push((c(&p.accent), format!(" {}", tc::pad(&place, agent_place_w))));
                 }
@@ -2191,8 +2268,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.push(tc::seg(&refs, w - 1));
                 if rows.len() < h.saturating_sub(1) {
                     let body = if loud || here { &p.txt } else { &p.dim };
+                    // Grouped by state no heading names the workspace, and a
+                    // narrow pane has no place column to: this row says it.
+                    let place = if by_state && !wide { format!("   {}", agent_place(a)) } else { String::new() };
                     rows.push(tc::seg(
                         &[
+                            (&c(&p.accent), place),
                             (&c(&p.dim), format!("   {}  ", homely(&a.cwd))),
                             (&c(body), a.title.trim().to_string()),
                             (
@@ -2758,18 +2839,48 @@ mod tests {
         let p = palette();
         let name = |id: &str| id.to_string();
         let one = vec![agent("p1", "w1", "idle"), agent("p2", "w1", "idle")];
-        assert!(lead_rows(&one, 0, 80, &name, &p, 0, &mut Vec::new()).is_empty());
+        assert!(lead_rows(&one, 0, 80, &name, false, &p, 0, &mut Vec::new()).is_empty());
         // Between two agents of one workspace: a gap, and no line.
-        assert_eq!(lead_rows(&one, 1, 80, &name, &p, 0, &mut Vec::new()), [""]);
+        assert_eq!(lead_rows(&one, 1, 80, &name, false, &p, 0, &mut Vec::new()), [""]);
 
         let two = vec![agent("p1", "w1", "idle"), agent("p2", "w2", "idle")];
         let mut plots = Vec::new();
-        assert_eq!(lead_rows(&two, 0, 80, &name, &p, 0, &mut plots).len(), 1);
-        let second = lead_rows(&two, 1, 80, &name, &p, 10, &mut plots);
+        assert_eq!(lead_rows(&two, 0, 80, &name, false, &p, 0, &mut plots).len(), 1);
+        let second = lead_rows(&two, 1, 80, &name, false, &p, 10, &mut plots);
         assert_eq!(second.len(), 2, "a gap, then the heading");
         assert!(second[1].contains("w2") && second[1].contains('─'));
         // One rule per heading, each placed on its heading's row.
         assert_eq!(plots.len(), 2);
+    }
+
+    #[test]
+    fn grouped_by_state_agents_list_under_their_state_and_name_their_workspace() {
+        let p = palette();
+        let name = |id: &str| id.to_string();
+        let (blocked, working) = (agent("p1", "w1", "blocked"), agent("p2", "w2", "working"));
+        assert_eq!(group_of(&blocked, true), "blocked");
+        assert_eq!(group_of(&blocked, false), "w1");
+        // A state outside the rank order is filed where the order puts it.
+        assert_eq!(group_of(&agent("p3", "w1", "dreaming"), true), "unknown");
+
+        // One workspace still gets a heading per state: it says how they
+        // are grouped.
+        let one = vec![agent("p1", "w1", "blocked"), agent("p2", "w1", "blocked"), agent("p3", "w1", "idle")];
+        let first = lead_rows(&one, 0, 80, &name, true, &p, 0, &mut Vec::new());
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("blocked") && first[0].contains("· 2"));
+        assert_eq!(lead_rows(&one, 1, 80, &name, true, &p, 0, &mut Vec::new()), [""]);
+        let idle = lead_rows(&one, 2, 80, &name, true, &p, 0, &mut Vec::new());
+        assert_eq!(idle.len(), 2, "a gap, then the state's heading");
+        assert!(idle[1].contains("idle") && idle[1].contains("· 1"));
+
+        // With no workspace heading above it, a row names its workspace.
+        let labels: HashMap<String, String> = [("w1".to_string(), "api".to_string())].into();
+        assert_eq!(place_by_state(Some(&labels), &blocked.workspace_id, &blocked.pane_id), "api");
+        assert_eq!(place_by_state(Some(&labels), &working.workspace_id, &working.pane_id), "w2");
+        assert_eq!(place_by_state(None, &blocked.workspace_id, &blocked.pane_id), "w1:p1");
+        assert_eq!(place_by_state(None, "w1", ""), "w1 · no pane");
+        assert_eq!(place_by_state(None, background::GROUP, ""), "no pane");
     }
 
     #[test]
