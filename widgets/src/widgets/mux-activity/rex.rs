@@ -286,6 +286,9 @@ impl Pane {
         }
         // A background agent's detail, drawn under its row.
         out.extend(self.job.iter().flat_map(background::search_words));
+        if self.by_directory {
+            out.push(background::BY_DIRECTORY.into());
+        }
         // Every row drawn under the pane: shells and session-log work.
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
@@ -585,27 +588,36 @@ fn job_pane(job: tc::agent_work::Job, label: &str, table: &Result<tc::agent_work
     }
 }
 
-/// The Rex session and block a process's environment names, when it can be
-/// read: a job resumed in a pane inherits both from that pane's shell.
-fn rex_marker(pid: u32) -> Option<(String, String)> {
+/// The Rex session a process's environment names, when it can be read: a
+/// job started or resumed in a pane inherits it from that pane's shell.
+fn rex_marker(pid: u32) -> Option<String> {
     let env = tc::procfs::read_environ(pid as i32).ok()?;
-    let session = tc::procfs::parse_environ_var(&env, "REX_SESSION")?;
-    let block = tc::procfs::parse_environ_var(&env, "REX_BLOCK").unwrap_or("");
-    Some((session.to_string(), block.to_string()))
+    tc::procfs::parse_environ_var(&env, "REX_SESSION").map(String::from)
 }
 
 /// Add the background agents to the board, each in the session it belongs
-/// to (OPS-292): the pane its process runs in already draws it; else the
-/// session its process names; else the one session with a pane open in its
-/// directory, said on the row; else the background group, under `label`.
+/// to (OPS-292): a pane whose agent process is the job's already draws it;
+/// else the session its process names; else the one session with a pane
+/// open in its directory, said on the row; else the background group, under
+/// `label`.
 fn file_jobs(
     panes: &mut Vec<Pane>,
     jobs: Vec<tc::agent_work::Job>,
     label: &str,
     table: &Result<tc::agent_work::Table, String>,
     at: f64,
-    marker: impl Fn(u32) -> Option<(String, String)>,
+    marker: impl Fn(u32) -> Option<String>,
 ) {
+    // The agent process under each pane, from the process table: the one
+    // proof that a pane is showing this job rather than having started it.
+    let agents: Vec<Option<u32>> = match table {
+        Ok(t) => panes
+            .iter()
+            .filter(|p| p.job.is_none() && !p.remote)
+            .map(|p| p.child_pid.and_then(|pid| u32::try_from(pid).ok()).and_then(|pid| t.agent_below(pid, "claude")))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
     let open: Vec<(String, String, String, String, usize)> = panes
         .iter()
         .filter(|p| p.job.is_none() && !p.remote)
@@ -613,10 +625,12 @@ fn file_jobs(
         .collect();
     let places: Vec<(&str, &str, &str)> = open.iter().map(|(s, b, c, _, _)| (s.as_str(), b.as_str(), c.as_str())).collect();
     for job in jobs {
+        if background::drawn_by(&job, agents.iter().map(|pid| (*pid, ""))) {
+            continue;
+        }
         let mark = job.pid.and_then(&marker);
-        let home = background::home(&job.dirs, mark.as_ref().map(|(s, b)| (s.as_str(), b.as_str())), &places);
+        let home = background::home(&job.dirs, mark.as_deref(), &places);
         let session = match &home {
-            background::Home::InPane => continue,
             background::Home::Exact(s) | background::Home::ByDirectory(s) => open.iter().find(|o| &o.0 == s),
             background::Home::Unpaired => None,
         };
@@ -810,9 +824,7 @@ fn tail_path(path: &str, n: usize) -> String {
 
 /// The home-relative form of a directory, which is how a person names it.
 fn homely(path: &str) -> String {
-    let path = path
-        .strip_prefix("file://")
-        .map_or(path, |rest| rest.find('/').map_or(rest, |at| &rest[at..]));
+    let path = background::plain_dir(path);
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() {
         return path.to_string();
@@ -2027,7 +2039,13 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             let head = rows.len();
             let mut body: Vec<String> = Vec::new();
             let lines = match &pane.job {
-                Some(job) => background::explain_lines(job, at, ago),
+                Some(job) => {
+                    let mut lines = background::explain_lines(job, at, ago);
+                    if pane.by_directory {
+                        lines.push(("dim".into(), format!("   {}", background::BY_DIRECTORY)));
+                    }
+                    lines
+                }
                 None => explain_lines(&pane, &board, &server, why, at),
             };
             for (kind, text) in lines {
@@ -3211,16 +3229,21 @@ mod tests {
 
     #[test]
     fn background_agents_are_filed_under_the_session_they_belong_to() {
-        let table: Result<tc::agent_work::Table, String> = Err("no table".into());
-        let open = |session: &str, label: &str, block: &str, cwd: &str| Pane {
+        // block:2's shell (10) runs claude 2, the job resumed there.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n11 1 bash bash\n").map_err(String::from);
+        let open = |session: &str, label: &str, block: &str, cwd: &str, child: i64| Pane {
             session_id: session.into(),
             session_label: label.into(),
             session_ord: 1,
             block_id: block.into(),
             child_cwd: cwd.into(),
+            child_pid: Some(child),
             ..Default::default()
         };
-        let mut panes = vec![open("session:w", "web", "block:1", "/srv/web/src"), open("session:a", "api", "block:2", "/srv/api")];
+        let mut panes = vec![
+            open("session:w", "web", "block:1", "file://host/srv/web/src", 11),
+            open("session:a", "api", "block:2", "/srv/api", 10),
+        ];
         let with_pid = |name: &str, pid: u32| {
             let mut job = a_job("working");
             job.short = name.into();
@@ -3230,9 +3253,9 @@ mod tests {
         let mut elsewhere = with_pid("nowhere", 3);
         elsewhere.dirs = vec!["/srv/other".into()];
         let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere];
+        // 4 inherited block:2's markers but is not the agent running there.
         let marker = |pid: u32| match pid {
-            2 => Some(("session:a".to_string(), "block:2".to_string())),
-            4 => Some(("session:a".to_string(), "block:gone".to_string())),
+            2 | 4 => Some("session:a".to_string()),
             _ => None,
         };
         file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
@@ -3242,9 +3265,10 @@ mod tests {
         assert_eq!((by_dir.session_id.as_str(), by_dir.session_label.as_str()), ("session:w", "web"));
         assert!(by_dir.by_directory);
         assert!(detail_phrases(by_dir, 2.0e9).iter().any(|p| p == background::BY_DIRECTORY));
-        // Its process runs in a pane on the board: that pane draws it.
+        assert!(by_dir.search_fields().iter().any(|f| f == background::BY_DIRECTORY));
+        // The agent process under a pane is the job's: that pane draws it.
         assert!(job("in-pane").is_none());
-        // Its process names the session: filed there, nothing to explain.
+        // Its markers name a session, but no pane runs it: kept, filed there.
         let marked = job("marked").unwrap();
         assert_eq!(marked.session_id, "session:a");
         assert!(!marked.by_directory);

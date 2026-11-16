@@ -227,38 +227,12 @@ fn floating(agent: &Agent) -> bool {
     agent.job.is_some() && agent.workspace == NO_PANE
 }
 
-/// The BACKGROUND AGENTS heading and what follows it, `said`, wrapped at
-/// word boundaries onto as many rows as the pane needs rather than clipped.
-fn background_heading(said: &str, w: usize, lbl: &str, dim: &str) -> Vec<String> {
-    const HEADING: &str = "── BACKGROUND AGENTS ──";
-    let room = w.saturating_sub(2).max(1);
-    let said = said.trim();
-    if tc::display_width(HEADING) + 1 + tc::display_width(said) <= room {
-        return vec![tc::seg(
-            &[(lbl, format!(" {HEADING} ")), (dim, said.to_string())],
-            w.saturating_sub(1),
-        )];
-    }
-    let mut rows: Vec<String> = tc::wrap_words(HEADING, room)
-        .into_iter()
-        .map(|l| tc::seg(&[(lbl, format!(" {l}"))], w.saturating_sub(1)))
-        .collect();
-    rows.extend(
-        tc::wrap_words(said, room)
-            .into_iter()
-            .map(|l| tc::seg(&[(dim, format!(" {l}"))], w.saturating_sub(1))),
-    );
-    rows
-}
 
-/// Whether a background agent was filed under its workspace by directory.
-/// The environment names only a pane, which resolves to a pane on the board
-/// (that pane draws it) or to nothing, so every background agent filed under
-/// a workspace here was paired by directory.
 /// Add the background agents to the board, each in the workspace it belongs
-/// to (OPS-292): the pane its process runs in already draws it; else the
-/// one workspace with a pane open in its directory, said on the row; else
-/// the background group, under `label`.
+/// to (OPS-292): a row bound to its session or process already draws it;
+/// else the workspace of the pane its environment names; else the one
+/// workspace with a pane open in its directory, said on the row; else the
+/// background group, under `label`.
 fn file_jobs(
     listed: &mut Vec<Agent>,
     panes: &[parse::Pane],
@@ -275,14 +249,24 @@ fn file_jobs(
             places.push((a.workspace.as_str(), a.pane.as_str(), a.cwd.as_str()));
         }
     }
+    // What proves a row already draws a job: an agent Luvus binds to the
+    // job's Claude session, or the Claude process under a pane's root. The
+    // pane id in a job's environment is only where it was started.
+    let mut drawn: Vec<(Option<u32>, &str)> =
+        listed.iter().filter(|a| a.job.is_none()).map(|a| (None, a.session_id.as_str())).collect();
+    if let Ok(t) = table {
+        drawn.extend(panes.iter().filter_map(|p| p.root_pid).map(|root| (t.agent_below(root, "claude"), "")));
+    }
     let mut filed = Vec::new();
     for job in jobs {
+        if background::drawn_by(&job, drawn.iter().copied()) {
+            continue;
+        }
         let pane = job.pid.and_then(&marker);
-        let mark = pane.as_deref().and_then(|pane| places.iter().find(|(_, p, _)| *p == pane)).map(|(w, p, _)| (*w, *p));
+        let mark = pane.as_deref().and_then(|pane| places.iter().find(|(_, p, _)| *p == pane)).map(|(w, _, _)| *w);
         let home = background::home(&job.dirs, mark, &places);
         let by_directory = matches!(home, background::Home::ByDirectory(_));
         let workspace = match home {
-            background::Home::InPane => continue,
             background::Home::Exact(w) | background::Home::ByDirectory(w) => Some(w),
             background::Home::Unpaired => None,
         };
@@ -2452,7 +2436,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         super::search::count(floating_shown.len(), floating_rows.len(), filtering),
                         more
                     );
-                    body.extend(background_heading(&said, w, &p.lbl, &p.dim));
+                    body.extend(background::heading(&said, w, &p.lbl, &p.dim));
                     if floating_shown.is_empty() {
                         body.push(nothing(floating_rows.len()));
                     }
@@ -3265,29 +3249,42 @@ mod tests {
 
     #[test]
     fn background_agents_are_filed_under_the_workspace_they_belong_to() {
-        let table: Result<tc::agent_work::Table, String> = Err("no table".into());
+        // Pane 1's root shell (10) runs claude 6, a job resumed there.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n6 10 claude claude --resume\n").map_err(String::from);
         let pane = |workspace: &str, id: &str, cwd: &str| parse::Pane {
             workspace: workspace.into(),
             pane_id: id.into(),
             cwd: cwd.into(),
+            root_pid: Some(10),
             ..Default::default()
         };
         let panes = [pane("web", "1", "/srv/web/src")];
-        // An agent `agent list` reports but the snapshot does not hold.
-        let mut listed = vec![Agent { workspace: "api".into(), pane: "2".into(), cwd: "/srv/api".into(), ..Default::default() }];
+        // An agent `agent list` reports but the snapshot does not hold,
+        // bound to the Claude session `sess-2`.
+        let mut listed = vec![Agent {
+            workspace: "api".into(),
+            pane: "2".into(),
+            cwd: "/srv/api".into(),
+            session_id: "sess-2".into(),
+            ..Default::default()
+        }];
         let job = |name: &str, pid: u32, cwd: &str| {
             let mut job = tc::agent_work::parse_job_state(name, &format!(r#"{{"state":"working","cwd":"{cwd}"}}"#)).unwrap();
             job.pid = Some(pid);
             job
         };
+        let mut in_pane = job("in-pane", 2, "/srv/other");
+        in_pane.session_ids = vec!["sess-2".into()];
         let jobs = vec![
             job("by-dir", 1, "/srv/web"),
-            job("in-pane", 2, "/srv/other"),
+            in_pane,
+            job("under-root", 6, "/srv/other"),
+            job("inherited", 5, "/srv/other"),
             job("gone-pane", 3, "/srv/api"),
             job("nowhere", 4, "/srv/other"),
         ];
         let marker = |pid: u32| match pid {
-            2 => Some("2".to_string()),
+            2 | 5 => Some("2".to_string()),
             3 => Some("9".to_string()),
             _ => None,
         };
@@ -3298,8 +3295,14 @@ mod tests {
         assert_eq!((by_dir.workspace.as_str(), by_dir.group_label.as_str()), ("web", "web"));
         assert!(by_dir.by_directory);
         assert!(Row::Agent(by_dir.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
-        // Its process runs in a pane on the board: that pane draws it.
+        // A row bound to its session, or the Claude process under a pane's
+        // root, is the job: that row draws it.
         assert!(find("in-pane").is_none());
+        assert!(find("under-root").is_none());
+        // A pane id in its environment alone never hides it: kept, filed
+        // under that pane's workspace.
+        let inherited = find("inherited").unwrap();
+        assert_eq!((inherited.workspace.as_str(), inherited.by_directory), ("api", false));
         // A pane id no longer on the board falls back to the directory.
         assert_eq!(find("gone-pane").unwrap().workspace, "api");
         // Nothing pairs it: the background group, under its own heading.
@@ -3309,7 +3312,7 @@ mod tests {
         assert!(!Row::Agent(nowhere.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // Grouped with the workspace it was filed under.
         let order: Vec<String> = by_workspace(listed.clone()).into_iter().map(|a| a.workspace).collect();
-        assert_eq!(order, ["api", "api", "web", NO_PANE]);
+        assert_eq!(order, ["api", "api", "api", "web", NO_PANE]);
         // Only the unpaired one leaves AGENTS for BACKGROUND AGENTS.
         let floating_now: Vec<&str> =
             listed.iter().filter(|a| floating(a)).map(|a| a.job.as_ref().unwrap().short.as_str()).collect();
@@ -3332,11 +3335,11 @@ mod tests {
             }
             out
         };
-        let one = background_heading(said, 120, "", "");
+        let one = background::heading(said, 120, "", "");
         assert_eq!(one.len(), 1);
         assert!(plain(&one[0]).contains("── BACKGROUND AGENTS ── 1 of 2 · via jobs"));
         for w in 12..120 {
-            let rows = background_heading(said, w, "", "");
+            let rows = background::heading(said, w, "", "");
             let text: Vec<String> = rows.iter().map(|r| plain(r)).collect();
             for row in &text {
                 assert!(tc::display_width(row) < w, "{w}: {row:?}");

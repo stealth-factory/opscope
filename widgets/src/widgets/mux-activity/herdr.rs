@@ -277,6 +277,9 @@ pub(crate) struct Agent {
     /// A background agent filed under a workspace because a pane there is
     /// open in its directory, rather than because its process said so.
     by_directory: bool,
+    /// The agent's own process, when the process table found it: what proves
+    /// a background agent is this row rather than a second one.
+    pid: Option<u32>,
 }
 
 impl Agent {
@@ -750,6 +753,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             pane_id,
             job: None,
             by_directory: false,
+            pid: agent_pid,
         });
     }
     let table = table.unwrap_or_else(|| Err("process table not read".into()));
@@ -896,27 +900,29 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     seen.first_poll = false;
 }
 
-/// The Herdr workspace and pane a process's environment names, when it can
-/// be read: Herdr sets `HERDR_WORKSPACE_ID` and `HERDR_PANE_ID` in every
-/// pane it manages, and a job resumed in one inherits both.
-fn herdr_marker(pid: u32) -> Option<(String, String)> {
+/// The Herdr workspace a process's environment names, when it can be read:
+/// Herdr sets `HERDR_WORKSPACE_ID` in every pane it manages, and a job
+/// started or resumed in one inherits it.
+fn herdr_marker(pid: u32) -> Option<String> {
     let env = tc::procfs::read_environ(pid as i32).ok()?;
-    let workspace = tc::procfs::parse_environ_var(&env, "HERDR_WORKSPACE_ID")?;
-    let pane = tc::procfs::parse_environ_var(&env, "HERDR_PANE_ID").unwrap_or("");
-    Some((workspace.to_string(), pane.to_string()))
+    tc::procfs::parse_environ_var(&env, "HERDR_WORKSPACE_ID").map(String::from)
 }
 
 /// File each background agent under the workspace it belongs to (OPS-292):
-/// the pane its process runs in already draws it, so its row goes; else the
-/// workspace its process names; else the one workspace with a pane open in
+/// an agent row whose process is the job's already draws it, so its row
+/// goes; else the workspace its process names; else the one workspace with a pane open in
 /// its directory, said on the row; else it stays in the background group.
 /// `open` is every pane Herdr listed as (workspace, pane, cwd); the
 /// non-job agents count as places too.
 fn file_jobs(
     agents: &mut Vec<Agent>,
     open: &[(String, String, String)],
-    marker: impl Fn(u32) -> Option<(String, String)>,
+    marker: impl Fn(u32) -> Option<String>,
 ) {
+    // Agents whose process the table found: only one of those being the
+    // job's process says a row already draws it. A marker is inherited from
+    // the shell that started the job and says nothing about what runs there now.
+    let pids: Vec<Option<u32>> = agents.iter().filter(|a| a.job.is_none()).map(|a| a.pid).collect();
     let owned: Vec<(String, String, String)> = agents
         .iter()
         .filter(|a| a.job.is_none())
@@ -927,9 +933,11 @@ fn file_jobs(
         owned.iter().map(|(w, p, c)| (w.as_str(), p.as_str(), c.as_str())).collect();
     agents.retain_mut(|agent| {
         let Some(job) = &agent.job else { return true };
+        if background::drawn_by(job, pids.iter().map(|pid| (*pid, ""))) {
+            return false;
+        }
         let mark = job.pid.and_then(&marker);
-        match background::home(&job.dirs, mark.as_ref().map(|(w, p)| (w.as_str(), p.as_str())), &places) {
-            background::Home::InPane => return false,
+        match background::home(&job.dirs, mark.as_deref(), &places) {
             background::Home::Exact(w) => agent.workspace_id = w,
             background::Home::ByDirectory(w) => {
                 agent.workspace_id = w;
@@ -1519,7 +1527,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         };
         // ── the explain screen, for a background agent ──
         if let Some(id) = explaining.clone() {
-            let Some(job) = all_agents.iter().find_map(|a| a.job.as_ref().filter(|j| j.short == id)) else {
+            let Some(agent) = all_agents.iter().find(|a| a.job.as_ref().is_some_and(|j| j.short == id)) else {
                 explaining = None;
                 note = Some(("that background agent is no longer listed".into(), false, tc::now() + 3.0));
                 continue;
@@ -1537,7 +1545,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 "" => String::new(),
                 other => colour_of(other, &p).to_string(),
             };
-            let body = background::explain_rows(&background::explain_lines(job, tc::now(), ago), w, &colour);
+            let Some(job) = agent.job.as_ref() else { continue };
+            let mut lines = background::explain_lines(job, tc::now(), ago);
+            if agent.by_directory {
+                lines.push(("dim".into(), format!("   {}", background::BY_DIRECTORY)));
+            }
+            let body = background::explain_rows(&lines, w, &colour);
             let hints: Vec<Vec<(&str, String)>> = vec![
                 vec![(p.dim.as_str(), "[e] back".into())],
                 vec![(p.dim.as_str(), "esc back".into())],
@@ -1863,13 +1876,33 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .flat_map(|why| tc::wrap_words(&super::search::hidden_warning(why), w.saturating_sub(3).max(1)))
             .map(|line| tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1))
             .collect();
+        // The BACKGROUND AGENTS heading wraps on a narrow pane. Its height
+        // is counted with the longest `showing` note it can carry, since the
+        // window that decides the note is sized from this count.
+        let floating_more = {
+            let label = workspace_label(&labels, background::GROUP);
+            label.strip_prefix("background agents").unwrap_or(&label).to_string()
+        };
+        let floating_head_rows = background::heading(
+            &format!(
+                "{}{}  · showing {}-{}",
+                super::search::count(floating, floating_all, filtering),
+                floating_more,
+                floating_all,
+                floating_all
+            ),
+            w,
+            "",
+            "",
+        )
+        .len();
         let chrome = rows.len()
             + hidden_rows.len()                       // a warning the filter would hide
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
             + usize::from(seated == 0)                // the line that stands in for a list
-            + if floating_all > 0 { 2 } else { 0 }    // blank, BACKGROUND AGENTS
+            + if floating_all > 0 { 1 + floating_head_rows } else { 0 } // blank, BACKGROUND AGENTS
             + usize::from(floating_all > 0 && floating == 0)
             + usize::from(busy_shown.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
@@ -1991,20 +2024,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             if floating_all == 0 {
                 return;
             }
-            let label = workspace_label(&labels, background::GROUP);
-            let more = label.strip_prefix("background agents").unwrap_or(&label).to_string();
+            let more = &floating_more;
             rows.push(String::new());
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── BACKGROUND AGENTS ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!("{}{}", super::search::count(floating, floating_all, filtering), more),
-                    ),
-                    (p.dim.as_str(), showing(&window, seated, floating)),
-                ],
-                w - 1,
-            ));
+            // Wrapped rather than cut: the count and the finished jobs not
+            // drawn are said nowhere else.
+            let said = format!(
+                "{}{}{}",
+                super::search::count(floating, floating_all, filtering),
+                more,
+                showing(&window, seated, floating)
+            );
+            rows.extend(background::heading(&said, w, &p.lbl, &p.dim));
             if floating == 0 {
                 rows.push(nothing(floating_all));
             }
@@ -2526,6 +2556,7 @@ mod tests {
             work: Default::default(),
             job: None,
             by_directory: false,
+            pid: None,
         }
     }
 
@@ -2540,18 +2571,23 @@ mod tests {
         };
         let mut web = agent("w1:p1", "w1", "idle");
         web.cwd = "/srv/web".into();
+        // The agent in w3:p1 is process 2: the job resumed there.
+        let mut resumed = agent("w3:p1", "w3", "working");
+        resumed.pid = Some(2);
         let mut agents = vec![
             web,
+            resumed,
             job("by-dir", 1, "/srv/web"),
             job("in-pane", 2, "/srv/api"),
             job("marked", 4, "/srv/elsewhere"),
+            job("inherited", 5, "/srv/elsewhere"),
             job("nowhere", 3, "/srv/other"),
         ];
         // A pane with no agent in it is a place too.
         let open = vec![("w2".to_string(), "w2:p1".to_string(), "/srv/api/src".to_string())];
+        // 5 inherited w2:p1's markers, but no agent row there is it.
         let marker = |pid: u32| match pid {
-            2 => Some(("w2".to_string(), "w2:p1".to_string())),
-            4 => Some(("w2".to_string(), "w2:p9".to_string())),
+            2 | 4 | 5 => Some("w2".to_string()),
             _ => None,
         };
         file_jobs(&mut agents, &open, marker);
@@ -2565,8 +2601,10 @@ mod tests {
         assert!(super::super::search::matches("by directory", &by_dir.search_fields(None)));
         // Filed under a workspace, it still has no pane to name.
         assert_eq!(shown_place(None, &by_dir.workspace_id, &by_dir.pane_id), "no pane");
-        // Its process runs in a pane on the board: that pane draws it.
+        // An agent row on the board is its process: that row draws it.
         assert!(find("in-pane").is_none());
+        // Markers alone never hide a job: it is kept, under that workspace.
+        assert_eq!(find("inherited").unwrap().workspace_id, "w2");
         // Its process names the workspace: filed there, nothing to explain.
         let marked = find("marked").unwrap();
         assert_eq!(marked.workspace_id, "w2");
