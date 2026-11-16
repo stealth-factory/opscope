@@ -87,8 +87,11 @@ infer that a child session is running merely because it exists.
 every multiplexer pane. Rex and Luvus never hear from them, and Herdr only
 through its hook, credited to the pane that started the daemon.
 `tc::agent_work::read_jobs` reads what the `claude agents` dashboard reads
-instead, with no hooks, and mux-activity draws each job as an agent row in
-a `background agents · via jobs` group on every board.
+instead, with no hooks, and mux-activity draws each job as an agent row,
+filed under the session it belongs to when its process or its directory
+says which (OPS-292), and otherwise in a `background agents · via jobs`
+group. A job resumed in a terminal writes a pid file with no `jobId` but
+the job's own `sessionId`; that process is the job's too.
 
 Observed on 2026-11-12 on Linux with Claude Code 2.1.322 installed. The
 `state.json` files present carried `cliVersion` 2.1.312 to 2.1.319 (one had

@@ -29,6 +29,96 @@ use tc::agent_work::{Job, JobState, Jobs, Table, Work};
 /// session or workspace. Not a real id any multiplexer hands out.
 pub const GROUP: &str = "\u{0}claude-jobs";
 
+/// Where a background agent belongs on a board grouped by session or
+/// workspace (OPS-292).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Home {
+    /// Its process carries this group's marker in its environment.
+    Exact(String),
+    /// The one group with a pane open at or under a directory it names.
+    ByDirectory(String),
+    /// None of those: it stays in the background group.
+    Unpaired,
+}
+
+/// Where a job belongs. `marker` is the group its process's environment
+/// names, when that could be read; `panes` is every pane on the board as
+/// (group, pane, cwd). A directory open in more than one group pairs it with
+/// none of them: a guess between two is not made.
+///
+/// A marker never hides a job. A process inherits its markers from the shell
+/// that started it, and that pane may be back at a prompt or running
+/// something else, so only [`drawn_by`] - the same process or session on a
+/// row - says a pane already shows it.
+pub fn home(dirs: &[String], marker: Option<&str>, panes: &[(&str, &str, &str)]) -> Home {
+    if let Some(group) = marker {
+        if panes.iter().any(|(g, _, _)| *g == group) {
+            return Home::Exact(group.to_string());
+        }
+    }
+    let mut groups: Vec<&str> = panes
+        .iter()
+        .filter(|(_, _, cwd)| dirs.iter().any(|d| at_or_under(cwd, d)))
+        .map(|(g, _, _)| *g)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    match groups.as_slice() {
+        [one] => Home::ByDirectory(one.to_string()),
+        _ => Home::Unpaired,
+    }
+}
+
+/// Whether an agent row on the board is this job: its process (`pid`), or
+/// the Claude session it is bound to (`session`). Then that row draws it and
+/// the job's own row would be the same agent twice.
+pub fn drawn_by<'a>(job: &Job, rows: impl IntoIterator<Item = (Option<u32>, &'a str)>) -> bool {
+    rows.into_iter()
+        .any(|(pid, session)| (pid.is_some() && pid == job.pid) || job.is_session(session))
+}
+
+/// A pane's directory as a path: `file://host/srv` is `/srv`.
+pub fn plain_dir(cwd: &str) -> &str {
+    cwd.strip_prefix("file://")
+        .map_or(cwd, |rest| rest.find('/').map_or(rest, |at| &rest[at..]))
+}
+
+fn at_or_under(cwd: &str, dir: &str) -> bool {
+    let cwd = plain_dir(cwd);
+    if !dir.is_empty() && dir.trim_end_matches('/').is_empty() {
+        return cwd.starts_with('/');
+    }
+    let dir = dir.trim_end_matches('/');
+    !dir.is_empty() && (cwd == dir || cwd.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// What a row paired by directory says, so a guess never reads as a fact.
+pub const BY_DIRECTORY: &str = "filed here by directory";
+
+/// The BACKGROUND AGENTS heading and what follows it, `said`, wrapped at
+/// word boundaries onto as many rows as the pane needs rather than clipped.
+pub fn heading(said: &str, w: usize, lbl: &str, dim: &str) -> Vec<String> {
+    const HEADING: &str = "── BACKGROUND AGENTS ──";
+    let room = w.saturating_sub(2).max(1);
+    let said = said.trim();
+    if tc::display_width(HEADING) + 1 + tc::display_width(said) <= room {
+        return vec![tc::seg(
+            &[(lbl, format!(" {HEADING} ")), (dim, said.to_string())],
+            w.saturating_sub(1),
+        )];
+    }
+    let mut rows: Vec<String> = tc::wrap_words(HEADING, room)
+        .into_iter()
+        .map(|l| tc::seg(&[(lbl, format!(" {l}"))], w.saturating_sub(1)))
+        .collect();
+    rows.extend(
+        tc::wrap_words(said, room)
+            .into_iter()
+            .map(|l| tc::seg(&[(dim, format!(" {l}"))], w.saturating_sub(1))),
+    );
+    rows
+}
+
 /// Enter on a background agent: there is no pane to focus.
 pub const NO_PANE: &str = "a background agent has no pane - `claude agents` opens it";
 
@@ -40,6 +130,13 @@ pub fn group_label(jobs: &Jobs) -> String {
         label.push_str(&format!(" · {} finished not shown", jobs.finished));
     }
     label
+}
+
+/// Whether a group label counts finished jobs it leaves out. The heading
+/// that carries it is then drawn even with every live job filed in a
+/// session and none left under it, since nowhere else says so.
+pub fn counts_finished(label: &str) -> bool {
+    label.ends_with(" finished not shown")
 }
 
 /// The state word a board ranks and colours by: the reported one, or
@@ -282,6 +379,44 @@ mod tests {
     }
 
     #[test]
+    fn a_job_goes_to_the_group_its_marker_names_then_its_directory() {
+        let dirs = vec!["/srv/api".to_string(), "/srv/api/.claude/worktrees/x".to_string()];
+        let panes = [("s1", "b1", "/srv/api/src"), ("s2", "b2", "/srv/web"), ("s3", "b3", "/srv/apiary")];
+        assert_eq!(home(&dirs, Some("s2"), &panes), Home::Exact("s2".into()));
+        // A marker naming a group not on the board is no answer.
+        assert_eq!(home(&dirs, Some("s9"), &panes), Home::ByDirectory("s1".into()));
+        // At or under, never a name that merely starts the same.
+        assert_eq!(home(&dirs, None, &panes), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&["/srv/api".into()], None, &[("s3", "b3", "/srv/apiary")]), Home::Unpaired);
+    }
+
+    #[test]
+    fn the_root_and_a_file_url_are_directories_too() {
+        assert_eq!(home(&["/".into()], None, &[("s1", "a", "/srv")]), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&["/".into()], None, &[("s1", "a", "/")]), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&["/srv/web".into()], None, &[("s1", "a", "file://host/srv/web")]), Home::ByDirectory("s1".into()));
+    }
+
+    #[test]
+    fn only_the_same_process_or_session_on_a_row_draws_a_job() {
+        let mut j = job("working");
+        j.pid = Some(42);
+        assert!(drawn_by(&j, [(Some(42), "")]));
+        assert!(drawn_by(&j, [(None, "s1")]), "its session id");
+        assert!(!drawn_by(&j, [(Some(7), ""), (None, ""), (None, "other")]));
+        j.pid = None;
+        assert!(!drawn_by(&j, [(None, "")]), "no pid is no match");
+    }
+
+    #[test]
+    fn a_directory_open_in_two_groups_pairs_with_neither() {
+        let dirs = vec!["/srv/api".to_string()];
+        assert_eq!(home(&dirs, None, &[("s1", "a", "/srv/api"), ("s2", "b", "/srv/api/x")]), Home::Unpaired);
+        assert_eq!(home(&dirs, None, &[("s1", "a", "/srv/api"), ("s1", "b", "/srv/api/x")]), Home::ByDirectory("s1".into()));
+        assert_eq!(home(&[], None, &[("s1", "a", "/")]), Home::Unpaired);
+    }
+
+    #[test]
     fn the_filter_reads_the_lines_drawn_under_a_background_agent() {
         assert_eq!(search_words(&job("working")), ["Running tests", "1 in flight"]);
         assert_eq!(search_words(&job("blocked"))[0], "Approve?");
@@ -351,6 +486,8 @@ mod tests {
         assert_eq!(group_label(&Jobs::default()), "background agents · via jobs");
         let jobs = Jobs { finished: 3, ..Default::default() };
         assert_eq!(group_label(&jobs), "background agents · via jobs · 3 finished not shown");
+        assert!(counts_finished(&group_label(&jobs)));
+        assert!(!counts_finished(&group_label(&Jobs::default())));
     }
 
     #[test]

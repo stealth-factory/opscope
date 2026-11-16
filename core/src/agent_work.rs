@@ -142,10 +142,15 @@ impl Work {
 
     /// Attach a background agent's `fan`. Its subagents are the same ones
     /// a session log names, so a log task with the same id gives way: the
-    /// agent's own list is the stronger claim.
+    /// agent's own list is the stronger claim. Added to any fan already
+    /// attached, once per id, since two jobs can bind to the one agent.
     pub fn with_fan(mut self, fan: &[FanItem]) -> Self {
         self.logs.tasks.retain(|t| !fan.iter().any(|f| f.id == t.id));
-        self.fan = fan.to_vec();
+        for item in fan {
+            if !self.fan.iter().any(|f| f.id == item.id) {
+                self.fan.push(item.clone());
+            }
+        }
         self
     }
 
@@ -165,9 +170,9 @@ impl Work {
     /// hierarchical; match a complete final component, never a substring.
     /// Labels cannot distinguish two different Explore agents.
     pub fn covered_by(&mut self, reports: &[String]) {
-        self.logs.tasks.retain(|t| {
-            !reports.iter().any(|id| id == &t.id || id.rsplit('/').next() == Some(t.id.as_str()))
-        });
+        let covered = |id: &str| reports.iter().any(|r| r == id || r.rsplit('/').next() == Some(id));
+        self.logs.tasks.retain(|t| !covered(&t.id));
+        self.fan.retain(|f| !covered(&f.id));
         // OSC IDs are opaque task identifiers, not OS process IDs.
         // There is no reliable process association in this input. Keep shells.
     }
@@ -335,6 +340,47 @@ impl Table {
             (None, [only]) => Some(*only),
             _ => None,
         }
+    }
+
+    /// `agent_below`, but only when it cannot be another process: nothing
+    /// when two separate `name` processes run below the shell. The lowest
+    /// pid is a fair guess at which one a pane shows, not proof of it, and a
+    /// job the shell left running is just as likely to be that one.
+    pub fn sole_agent_below(&self, root: u32, name: &str) -> Option<u32> {
+        let agent = self.agent_below(root, name)?;
+        if agent == root {
+            return Some(agent);
+        }
+        // The innermost named processes: a launcher and the agent it runs
+        // are one agent, counted at the agent, while two agents under one
+        // launcher, like two beside each other, are two.
+        let named =
+            |pid: u32| self.get(pid).is_some_and(|p| !is_shell(&p.comm, &p.args) && is_named(&p.comm, &p.args, name));
+        let mut innermost = 0;
+        let mut queue = vec![root];
+        let mut seen = 0;
+        while let Some(pid) = queue.pop() {
+            seen += 1;
+            if seen > 256 {
+                return None;
+            }
+            for &kid in self.kids(pid) {
+                if named(kid) && !self.named_under(kid, name, 0) {
+                    innermost += 1;
+                }
+                queue.push(kid);
+            }
+        }
+        (innermost <= 1).then_some(agent)
+    }
+
+    /// Whether a process `name` runs anywhere below `pid`.
+    fn named_under(&self, pid: u32, name: &str, depth: usize) -> bool {
+        depth < 32
+            && self.kids(pid).iter().any(|&kid| {
+                self.get(kid).is_some_and(|k| !is_shell(&k.comm, &k.args) && is_named(&k.comm, &k.args, name))
+                    || self.named_under(kid, name, depth + 1)
+            })
     }
 
     /// The agent `name` that a multiplexer's foreground `pid` belongs to.
@@ -632,6 +678,19 @@ mod tests {
     }
 
     #[test]
+    fn two_claude_processes_below_one_shell_name_neither() {
+        let one = parse_process_table("10 1 bash bash\n11 10 npm npm exec claude\n12 11 claude claude\n").unwrap();
+        assert_eq!(one.sole_agent_below(10, "claude"), Some(12));
+        let two = parse_process_table("10 1 bash bash\n5 10 claude claude --resume\n12 10 claude claude\n").unwrap();
+        assert_eq!(two.agent_below(10, "claude"), Some(5));
+        assert_eq!(two.sole_agent_below(10, "claude"), None);
+        // Two agents under one wrapper that is itself named are two.
+        let wrapped =
+            parse_process_table("10 1 bash bash\n11 10 node node claude.js\n12 11 claude claude\n13 11 claude claude\n").unwrap();
+        assert_eq!(wrapped.sole_agent_below(10, "claude"), None);
+    }
+
+    #[test]
     fn a_background_agents_fan_draws_unfinished_subagents_and_replaces_their_log_rows() {
         let fan = |id: &str, kind: &str, done: Option<f64>| FanItem {
             id: id.into(),
@@ -648,6 +707,16 @@ mod tests {
             updated: String::new(),
         });
         let work = work.with_fan(&[fan("a1", "agent", None), fan("a2", "agent", Some(2.0)), fan("b1", "shell", None)]);
+        let rows: Vec<String> = work.rows(80).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(rows, ["   ├ agent a1 working · via jobs"]);
+        // Two jobs bound to one agent add up, once per id.
+        let work = work.with_fan(&[fan("a1", "agent", None), fan("c1", "agent", None)]);
+        let ids: Vec<&str> = work.fan.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["a1", "a2", "b1", "c1"]);
+        // A child the pane reports itself, by its whole id or its last
+        // component, is drawn from that report and not again from the fan.
+        let mut work = work;
+        work.covered_by(&["build/c1".into()]);
         let rows: Vec<String> = work.rows(80).into_iter().map(|(_, r)| r).collect();
         assert_eq!(rows, ["   ├ agent a1 working · via jobs"]);
     }

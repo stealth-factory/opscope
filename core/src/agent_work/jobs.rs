@@ -98,6 +98,9 @@ pub struct Job {
     /// What it is waiting for, when blocked.
     pub needs: String,
     pub cwd: String,
+    /// Every directory the job names - `cwd`, then `worktreePath` and
+    /// `originCwd` when set - for pairing it with the panes open there.
+    pub dirs: Vec<String>,
     /// Every session id this job has gone by: its own, the one it resumed
     /// and the one its running process holds. Any of them can be the id a
     /// hook reported to a multiplexer.
@@ -220,6 +223,13 @@ pub fn parse_job_state(short: &str, text_in: &str) -> Result<Job, String> {
         })
         .collect();
     let updated = parse_iso_seconds(&text(&v, "updatedAt"));
+    let mut dirs: Vec<String> = Vec::new();
+    for key in ["cwd", "worktreePath", "originCwd"] {
+        let dir = text(&v, key);
+        if !dir.is_empty() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
     Ok(Job {
         short: short.to_string(),
         state: Some(state),
@@ -227,6 +237,7 @@ pub fn parse_job_state(short: &str, text_in: &str) -> Result<Job, String> {
         detail: text(&v, "detail"),
         needs: text(&v, "needs"),
         cwd: text(&v, "cwd"),
+        dirs,
         session_ids,
         version: text(&v, "cliVersion"),
         in_flight,
@@ -523,11 +534,17 @@ fn bind_process(
     };
     // The pid must still be a Claude: a pid file left behind by an exited
     // agent must not lend its job to whatever program got that pid next.
-    let live = sessions.iter().find(|s| {
-        s.job_id == job.short
-            && table.get(s.pid).is_some_and(|p| super::is_named(&p.comm, &p.args, "claude"))
-            && same_process(s)
-    });
+    // A job resumed in a terminal (`claude --resume`) writes a pid file with
+    // no jobId but the job's own session id: that is the job too, running
+    // where it was resumed. A jobId match is preferred.
+    let alive = |s: &&ClaudeSession| {
+        table.get(s.pid).is_some_and(|p| super::is_named(&p.comm, &p.args, "claude")) && same_process(s)
+    };
+    let live = sessions
+        .iter()
+        .filter(alive)
+        .find(|s| s.job_id == job.short)
+        .or_else(|| sessions.iter().filter(alive).find(|s| s.job_id.is_empty() && job.is_session(&s.session_id)));
     match live {
         Some(s) => {
             job.running = Some(true);
@@ -576,6 +593,17 @@ mod tests {
         assert_eq!(job.fan[1].done, None);
         assert_eq!(job.held_since.map(|h| h.1), Some(false));
     }
+    #[test]
+    fn a_job_names_every_directory_it_works_in_once() {
+        let job = parse_job_state(
+            "j",
+            r#"{"state":"done","cwd":"/srv/repo","worktreePath":"/srv/repo/.claude/worktrees/x","originCwd":"/srv/repo"}"#,
+        )
+        .unwrap();
+        assert_eq!(job.dirs, ["/srv/repo", "/srv/repo/.claude/worktrees/x"]);
+        assert!(parse_job_state("j", r#"{"state":"done"}"#).unwrap().dirs.is_empty());
+    }
+
     #[test]
     fn a_background_shells_label_hides_credentials() {
         let state = r#"{"state":"working","fan":[
@@ -695,6 +723,14 @@ mod tests {
         let working = reused.shown.iter().find(|j| j.short == "aaaa1111").unwrap();
         assert_eq!(working.running, Some(false));
         assert_eq!(working.pid, None);
+        // The blocked job resumed in a terminal: a pid file with no jobId
+        // and the job's own session id is its process.
+        put("sessions/5151.json", r#"{"pid":5151,"sessionId":"cccc3333-0000-4000-8000-000000000003","kind":"interactive","status":"busy"}"#);
+        let resumed = read_jobs(std::slice::from_ref(&dir), Some(&table("4242 1 claude claude bg-spare\n5151 1 claude claude --resume\n")));
+        let blocked = resumed.shown.iter().find(|j| j.short == "bbbb").unwrap();
+        assert_eq!((blocked.running, blocked.pid), (Some(true), Some(5151)));
+        let working = resumed.shown.iter().find(|j| j.short == "aaaa1111").unwrap();
+        assert_eq!(working.pid, Some(4242), "a jobId match is unchanged");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

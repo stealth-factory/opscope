@@ -161,6 +161,10 @@ struct State {
     /// False until the first poll has answered, so "nothing here" is not
     /// drawn over a session nobody has looked at yet.
     read: bool,
+    /// The background agents' group label, which counts the finished jobs
+    /// not drawn. Kept apart from the rows because every live job may be
+    /// filed in a workspace, or drawn by an agent row, or there may be none.
+    jobs_label: String,
 }
 
 impl Default for State {
@@ -181,6 +185,7 @@ impl Default for State {
             snapshot_epoch: 0,
             event_cursor: None,
             read: false,
+            jobs_label: String::new(),
         }
     }
 }
@@ -204,6 +209,116 @@ fn log_session_hint<'a>(agent: &'a Agent, sessions: &'a [parse::Resumable]) -> O
         return Some((&s.session_id, false));
     }
     None
+}
+
+/// The place column of a background agent no workspace was found for.
+const NO_PANE: &str = "no pane";
+
+/// The Luvus pane a process's environment names, when it can be read: a job
+/// resumed in a pane inherits `LUVUS_PANE_ID` from that pane's shell. Luvus
+/// sets no workspace there, and a pane id is only an id within one session,
+/// so a `LUVUS_SESSION` naming another session is no answer.
+fn luvus_marker(pid: u32, session: &str) -> Option<String> {
+    let env = tc::procfs::read_environ(pid as i32).ok()?;
+    if tc::procfs::parse_environ_var(&env, "LUVUS_SESSION").is_some_and(|s| s != session) {
+        return None;
+    }
+    tc::procfs::parse_environ_var(&env, "LUVUS_PANE_ID").map(String::from)
+}
+
+/// A background agent no workspace claimed: drawn in BACKGROUND AGENTS, its
+/// own section after AGENTS (OPS-292), since it holds no pane to focus.
+fn floating(agent: &Agent) -> bool {
+    agent.job.is_some() && agent.workspace == NO_PANE
+}
+
+
+/// Add the background agents to the board, each in the workspace it belongs
+/// to (OPS-292): a row bound to its session or process already draws it;
+/// else the workspace of the pane its environment names; else the one
+/// workspace with a pane open in its directory, said on the row; else the
+/// background group, under `label`.
+fn file_jobs(
+    listed: &mut Vec<Agent>,
+    panes: &[parse::Pane],
+    jobs: Vec<tc::agent_work::Job>,
+    label: &str,
+    table: &Result<tc::agent_work::Table, String>,
+    at: f64,
+    marker: impl Fn(u32) -> Option<String>,
+) {
+    let mut places: Vec<(&str, &str, &str)> =
+        panes.iter().map(|p| (p.workspace.as_str(), p.pane_id.as_str(), p.cwd.as_str())).collect();
+    for a in listed.iter().filter(|a| a.job.is_none()) {
+        if !places.iter().any(|(_, pane, _)| *pane == a.pane) {
+            places.push((a.workspace.as_str(), a.pane.as_str(), a.cwd.as_str()));
+        }
+    }
+    // What proves a row already draws a job: an agent Luvus binds to the
+    // job's Claude session, or the one Claude process under the root of a
+    // pane Luvus lists a Claude agent in. A pane listing no agent draws no
+    // job, whatever its shell left running, and two Claude processes below
+    // one shell prove neither. The pane id in a job's environment
+    // is only where it was started.
+    // Each proof keeps the index of the row it belongs to, so a job that
+    // row draws can hand it its subagents.
+    let mut drawn: Vec<(Option<u32>, &str, usize)> = listed
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.job.is_none())
+        .map(|(i, a)| (None, a.session_id.as_str(), i))
+        .collect();
+    if let Ok(t) = table {
+        let shown =
+            |pane: &str| listed.iter().position(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
+        drawn.extend(panes.iter().filter_map(|p| {
+            let row = shown(&p.pane_id)?;
+            Some((t.sole_agent_below(p.root_pid?, "claude"), "", row))
+        }));
+    }
+    let mut fans = Vec::new();
+    let mut filed = Vec::new();
+    for job in jobs {
+        if let Some(&(_, _, row)) =
+            drawn.iter().find(|&&(pid, session, _)| background::drawn_by(&job, [(pid, session)]))
+        {
+            fans.push((row, job.fan));
+            continue;
+        }
+        let pane = job.pid.and_then(&marker);
+        let mark = pane.as_deref().and_then(|pane| places.iter().find(|(_, p, _)| *p == pane)).map(|(w, _, _)| *w);
+        let home = background::home(&job.dirs, mark, &places);
+        let by_directory = matches!(home, background::Home::ByDirectory(_));
+        let workspace = match home {
+            background::Home::Exact(w) | background::Home::ByDirectory(w) => Some(w),
+            background::Home::Unpaired => None,
+        };
+        let (since, exact) = job.held_since.unwrap_or((at, false));
+        filed.push(Agent {
+            name: background::title(&job),
+            kind: "claude".into(),
+            group_label: match &workspace {
+                Some(w) => workspace_name(w).to_string(),
+                None => label.to_string(),
+            },
+            workspace: workspace.unwrap_or_else(|| NO_PANE.into()),
+            cwd: job.cwd.clone(),
+            state: background::state_word(&job).into(),
+            state_source: "jobs".into(),
+            authority: "jobs".into(),
+            since: at - since,
+            exact,
+            work: background::work(&job, table),
+            job: Some(job),
+            by_directory,
+            ..Default::default()
+        });
+    }
+    for (row, fan) in fans {
+        let agent = &mut listed[row];
+        agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
+    }
+    listed.extend(filed);
 }
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
@@ -277,6 +392,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
+    let mut jobs_label = String::new();
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
         let mut live = HashSet::new();
@@ -315,24 +431,9 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
-        for job in jobs.shown {
-            let (since, exact) = job.held_since.unwrap_or((at, false));
-            listed.push(Agent {
-                name: background::title(&job),
-                kind: "claude".into(),
-                workspace: "no pane".into(),
-                cwd: job.cwd.clone(),
-                state: background::state_word(&job).into(),
-                state_source: "jobs".into(),
-                authority: "jobs".into(),
-                since: at - since,
-                exact,
-                work: background::work(&job, &table),
-                group_label: label.clone(),
-                job: Some(job),
-                ..Default::default()
-            });
-        }
+        jobs_label = label.clone();
+        let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
+        file_jobs(&mut listed, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
         listed.sort_by(|a, b| {
             parse::rank_of(&a.state)
                 .cmp(&parse::rank_of(&b.state))
@@ -347,6 +448,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     if let Ok(mut guard) = state.lock() {
         guard.snapshot = snapshot;
         guard.agents = agents;
+        guard.jobs_label = jobs_label;
         guard.tasks = tasks;
         guard.leases = leases;
         guard.next = next;
@@ -641,6 +743,9 @@ impl Row {
                 }
                 // Its detail, drawn under the row.
                 out.extend(a.job.iter().flat_map(background::search_words));
+                if a.by_directory {
+                    out.push(background::BY_DIRECTORY.into());
+                }
                 out.extend(a.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
                 out
             }
@@ -1545,6 +1650,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             sessions,
             git,
             worktrees,
+            jobs_label,
         ) = match state.lock() {
             Ok(g) => (
                 g.snapshot.clone(),
@@ -1559,6 +1665,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 g.sessions.clone(),
                 g.git.clone(),
                 g.worktrees.clone(),
+                g.jobs_label.clone(),
             ),
             Err(_) => return,
         };
@@ -1625,8 +1732,14 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // matched better. The unfiltered lists still feed the summary.
         let filtering = search.active();
         let keep = |row: Row| search.matches(&row.search_fields());
+        // Background agents no workspace claimed are a section of their own
+        // after AGENTS; `agent_rows` still counts them for the summary.
+        let seated: Vec<Agent> = agent_rows.iter().filter(|a| !floating(a)).cloned().collect();
+        let floating_rows: Vec<Agent> = agent_rows.iter().filter(|a| floating(a)).cloned().collect();
         let agents_shown: Vec<Agent> =
-            agent_rows.iter().filter(|a| keep(Row::Agent((*a).clone()))).cloned().collect();
+            seated.iter().filter(|a| keep(Row::Agent((*a).clone()))).cloned().collect();
+        let floating_shown: Vec<Agent> =
+            floating_rows.iter().filter(|a| keep(Row::Agent((*a).clone()))).cloned().collect();
         // An agent's work warning is drawn on its row, so one the filter
         // hides is said above the sections instead.
         let hidden_why: Option<String> = if filtering {
@@ -1656,6 +1769,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .iter()
             .cloned()
             .map(Row::Agent)
+            .chain(floating_shown.iter().cloned().map(Row::Agent))
             .chain(tasks_shown.iter().cloned().map(Row::Task))
             .chain(leases_shown.iter().cloned().map(Row::Lease))
             .chain(resumable_shown.iter().cloned().map(Row::Resumable))
@@ -1674,20 +1788,22 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         }
 
         let idle_listed = show_idle && !resting.is_empty();
+        let all_agents_shown = agents_shown.len() + floating_shown.len();
         sections = [
             (0, !agents_shown.is_empty()),
-            (agents_shown.len(), !tasks_shown.is_empty()),
-            (agents_shown.len() + tasks_shown.len(), !leases_shown.is_empty()),
+            (agents_shown.len(), !floating_shown.is_empty()),
+            (all_agents_shown, !tasks_shown.is_empty()),
+            (all_agents_shown + tasks_shown.len(), !leases_shown.is_empty()),
             (
-                agents_shown.len() + tasks_shown.len() + leases_shown.len(),
+                all_agents_shown + tasks_shown.len() + leases_shown.len(),
                 !resumable_shown.is_empty(),
             ),
             (
-                agents_shown.len() + tasks_shown.len() + leases_shown.len() + resumable_shown.len(),
+                all_agents_shown + tasks_shown.len() + leases_shown.len() + resumable_shown.len(),
                 !busy_shown.is_empty(),
             ),
             (
-                agents_shown.len()
+                all_agents_shown
                     + tasks_shown.len()
                     + leases_shown.len()
                     + resumable_shown.len()
@@ -1935,10 +2051,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A background agent, explained from its own files. Read from
             // this frame's agents, so the panel follows the job as it runs.
             let found = agents.as_ref().ok().and_then(|agents| {
-                agents.iter().find_map(|a| a.job.as_ref().filter(|j| &j.short == job))
+                agents.iter().find_map(|a| Some((a, a.job.as_ref().filter(|j| &j.short == job)?)))
             });
             match found {
-                Some(job) => {
+                Some((agent, job)) => {
                     let colour = |kind: &str| match kind {
                         "lbl" => p.lbl.clone(),
                         "txt" => p.txt.clone(),
@@ -1951,6 +2067,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         w,
                         &colour,
                     ));
+                    if agent.by_directory {
+                        for line in tc::wrap_words(background::BY_DIRECTORY, w.saturating_sub(3).max(1)) {
+                            body.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w.saturating_sub(1)));
+                        }
+                    }
                 }
                 None => body.push(tc::seg(
                     &[(p.unknown.as_str(), " that background agent is no longer listed".into())],
@@ -2281,7 +2402,13 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── AGENTS ── ".into()),
-                    (p.dim.as_str(), shown_count(&agents, agents_shown.len(), filtering)),
+                    (
+                        p.dim.as_str(),
+                        match &agents {
+                            Ok(_) => super::search::count(agents_shown.len(), seated.len(), filtering),
+                            Err(_) => "unread".into(),
+                        },
+                    ),
                 ],
                 w.saturating_sub(1),
             ));
@@ -2323,190 +2450,226 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 &[(p.dim.as_str(), tc::pad(&columns, w.saturating_sub(1)))],
                 w.saturating_sub(1),
             ));
-            let grouped = agents_shown
-                .iter()
-                .any(|a| a.workspace != agents_shown[0].workspace);
-            for (i, a) in agents_shown.iter().enumerate() {
-                // A gap between two agents, and where a workspace begins
-                // its heading and rule - only when there are workspaces to
-                // tell apart. Above `start`, so a click there is no row's.
-                if i > 0 {
-                    body.push(String::new());
-                }
-                if grouped && (i == 0 || agents_shown[i - 1].workspace != a.workspace) {
-                    let n = agents_shown.iter().filter(|o| o.workspace == a.workspace).count();
-                    let at_row = body.len();
-                    body.extend(super::group_heading(
-                        if a.job.is_some() { &a.group_label } else { workspace_name(&a.workspace) },
-                        n,
-                        w,
-                        (&p.accent, &p.dim, &p.rule),
-                        at_row,
-                        &mut plots,
-                    ));
-                }
-                let here = at == selected_row;
-                let start = body.len();
-                let colour = colour_of(&a.state, &p);
-                // Blocked keeps a tint of its own even unselected: it is the
-                // one row that has to be visible without being looked for.
-                // Done does not - a green ground read as a second state
-                // beside the one the row names.
-                let loud = a.state == "blocked" || a.state == "done";
-                let tint = if here {
-                    tc::tint(tc::Role::Slot)
-                } else if a.state == "blocked" {
-                    tc::tint_toward(tc::Role::Red)
-                } else {
-                    String::new()
-                };
-                let c = |colour: &str| {
-                    // Any colour that would not clear AA on this tint is
-                    // swapped for its lighter twin, inside the closure
-                    // rather than at each call site.
-                    let colour = if tint.is_empty() {
-                        colour
-                    } else if colour == p.dim {
-                        p.dim_lit.as_str()
-                    } else if colour == p.idle {
-                        p.idle_lit.as_str()
-                    } else if colour == p.unknown {
-                        p.unknown_lit.as_str()
-                    } else if colour == p.blocked {
-                        p.blocked_lit.as_str()
-                    } else if colour == p.idle_c {
-                        p.idle_c_lit.as_str()
-                    } else {
-                        p.on_tint(colour)
-                    };
-                    format!("{}{}", tint, colour)
-                };
-                let state_cell = if loud {
-                    a.state.to_uppercase()
-                } else {
-                    a.state.clone()
-                };
-                let mut line = vec![
-                    (
-                        c(colour),
-                        format!(
-                            "{}{} {}",
-                            if here { "▸" } else { " " },
-                            mark_of(&a.state, tick),
-                            tc::pad(&a.name, name_w)
-                        ),
-                    ),
-                    (c(colour), format!(" {:<8}", state_cell)),
-                    (
-                        c(&p.dim),
-                        format!(
-                            " {:<6}",
-                            format!("{}{}", if a.exact { "" } else { "≥" }, parse::ago(a.since))
-                        ),
-                    ),
-                    (
-                        c(&p.accent),
-                        format!(" {}", tc::pad(&a.workspace, agent_workspace_w)),
-                    ),
-                ];
-                if wide {
-                    let branch = branch_of(a);
-                    line.push((
-                        c(&p.dim),
-                        format!(" {}{}", branch, if a.worktree { " ⑂" } else { "" }),
-                    ));
-                }
-                if loud || here {
-                    line.push((tint.clone(), " ".repeat(w)));
-                }
-                let refs: Vec<(&str, String)> =
-                    line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-                body.push(tc::seg(&refs, w.saturating_sub(1)));
-                // The second row carries where the agent is and how much
-                // the state above is worth: a state read off screen text is
-                // a weaker claim than one an integration reported, and the
-                // screen must not flatten the two into one word.
-                let state_via = format!(
-                    "state via {}",
-                    if a.state_source.is_empty() {
-                        "—"
-                    } else {
-                        &a.state_source
+            // Two passes over one row drawer: the seated agents under AGENTS,
+            // then BACKGROUND AGENTS for those no workspace claimed.
+            for background_pass in [false, true] {
+                let list = if background_pass { &floating_shown } else { &agents_shown };
+                if background_pass {
+                    // The heading is drawn for the finished jobs it counts
+                    // even when every live one is filed in a workspace.
+                    let label = jobs_label.as_str();
+                    if floating_rows.is_empty() && !background::counts_finished(label) {
+                        break;
                     }
-                );
-                let id_via = if wide {
-                    format!(
-                        " · id via {}",
-                        if a.authority.is_empty() {
+                    body.push(String::new());
+                    // What the group's label says beyond its name: where the
+                    // rows come from and the finished jobs not drawn.
+                    let more = label.strip_prefix("background agents").unwrap_or(label);
+                    let said = format!(
+                        "{}{}",
+                        super::search::count(floating_shown.len(), floating_rows.len(), filtering),
+                        more
+                    );
+                    body.extend(background::heading(&said, w, &p.lbl, &p.dim));
+                    if floating_shown.is_empty() && !floating_rows.is_empty() {
+                        body.push(nothing(floating_rows.len()));
+                    }
+                }
+                // The background section's heading already names its one group.
+                let grouped = !background_pass && list.iter().any(|a| a.workspace != list[0].workspace);
+                for (i, a) in list.iter().enumerate() {
+                    // A gap between two agents, and where a workspace begins
+                    // its heading and rule - only when there are workspaces to
+                    // tell apart. Above `start`, so a click there is no row's.
+                    if i > 0 {
+                        body.push(String::new());
+                    }
+                    if grouped && (i == 0 || list[i - 1].workspace != a.workspace) {
+                        let n = list.iter().filter(|o| o.workspace == a.workspace).count();
+                        let at_row = body.len();
+                        body.extend(super::group_heading(
+                            if a.job.is_some() { &a.group_label } else { workspace_name(&a.workspace) },
+                            n,
+                            w,
+                            (&p.accent, &p.dim, &p.rule),
+                            at_row,
+                            &mut plots,
+                        ));
+                    }
+                    let here = at == selected_row;
+                    let start = body.len();
+                    let colour = colour_of(&a.state, &p);
+                    // Blocked keeps a tint of its own even unselected: it is the
+                    // one row that has to be visible without being looked for.
+                    // Done does not - a green ground read as a second state
+                    // beside the one the row names.
+                    let loud = a.state == "blocked" || a.state == "done";
+                    let tint = if here {
+                        tc::tint(tc::Role::Slot)
+                    } else if a.state == "blocked" {
+                        tc::tint_toward(tc::Role::Red)
+                    } else {
+                        String::new()
+                    };
+                    let c = |colour: &str| {
+                        // Any colour that would not clear AA on this tint is
+                        // swapped for its lighter twin, inside the closure
+                        // rather than at each call site.
+                        let colour = if tint.is_empty() {
+                            colour
+                        } else if colour == p.dim {
+                            p.dim_lit.as_str()
+                        } else if colour == p.idle {
+                            p.idle_lit.as_str()
+                        } else if colour == p.unknown {
+                            p.unknown_lit.as_str()
+                        } else if colour == p.blocked {
+                            p.blocked_lit.as_str()
+                        } else if colour == p.idle_c {
+                            p.idle_c_lit.as_str()
+                        } else {
+                            p.on_tint(colour)
+                        };
+                        format!("{}{}", tint, colour)
+                    };
+                    let state_cell = if loud {
+                        a.state.to_uppercase()
+                    } else {
+                        a.state.clone()
+                    };
+                    let mut line = vec![
+                        (
+                            c(colour),
+                            format!(
+                                "{}{} {}",
+                                if here { "▸" } else { " " },
+                                mark_of(&a.state, tick),
+                                tc::pad(&a.name, name_w)
+                            ),
+                        ),
+                        (c(colour), format!(" {:<8}", state_cell)),
+                        (
+                            c(&p.dim),
+                            format!(
+                                " {:<6}",
+                                format!("{}{}", if a.exact { "" } else { "≥" }, parse::ago(a.since))
+                            ),
+                        ),
+                        (
+                            c(&p.accent),
+                            format!(" {}", tc::pad(&a.workspace, agent_workspace_w)),
+                        ),
+                    ];
+                    if wide {
+                        let branch = branch_of(a);
+                        line.push((
+                            c(&p.dim),
+                            format!(" {}{}", branch, if a.worktree { " ⑂" } else { "" }),
+                        ));
+                    }
+                    if loud || here {
+                        line.push((tint.clone(), " ".repeat(w)));
+                    }
+                    let refs: Vec<(&str, String)> =
+                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    body.push(tc::seg(&refs, w.saturating_sub(1)));
+                    // The second row carries where the agent is and how much
+                    // the state above is worth: a state read off screen text is
+                    // a weaker claim than one an integration reported, and the
+                    // screen must not flatten the two into one word.
+                    let state_via = format!(
+                        "state via {}",
+                        if a.state_source.is_empty() {
                             "—"
                         } else {
-                            &a.authority
+                            &a.state_source
                         }
-                    )
-                } else {
-                    String::new()
-                };
-                // The directory takes what the provenance leaves, and never
-                // less than the 34 it always had.
-                let path_w = w
-                    .saturating_sub(1 + 3 + 2)
-                    .saturating_sub(tc::display_width(&state_via) + tc::display_width(&id_via))
-                    .max(34);
-                let mut detail = vec![
-                    (
-                        c(if loud || here { &p.txt } else { &p.dim }),
-                        format!("   {}  ", parse::tail_path(&parse::homely(&a.cwd), path_w)),
-                    ),
-                    (c(&p.dim), state_via),
-                ];
-                if wide {
-                    detail.push((c(&p.dim), id_via));
-                }
-                if loud || here {
-                    detail.push((tint.clone(), " ".repeat(w)));
-                }
-                let refs: Vec<(&str, String)> = detail
-                    .iter()
-                    .map(|(c, t)| (c.as_str(), t.clone()))
-                    .collect();
-                body.push(tc::seg(&refs, w.saturating_sub(1)));
-                for (alarm, text) in a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default() {
-                    let body_colour = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
-                    let mut line = vec![(c(body_colour), text)];
-                    if loud || here {
-                        line.push((tint.clone(), " ".repeat(w)));
+                    );
+                    let id_via = if wide {
+                        format!(
+                            " · id via {}",
+                            if a.authority.is_empty() {
+                                "—"
+                            } else {
+                                &a.authority
+                            }
+                        )
+                    } else {
+                        String::new()
+                    };
+                    // The directory takes what the provenance leaves, and never
+                    // less than the 34 it always had.
+                    let path_w = w
+                        .saturating_sub(1 + 3 + 2)
+                        .saturating_sub(tc::display_width(&state_via) + tc::display_width(&id_via))
+                        .max(34);
+                    let mut detail = vec![
+                        (
+                            c(if loud || here { &p.txt } else { &p.dim }),
+                            format!("   {}  ", parse::tail_path(&parse::homely(&a.cwd), path_w)),
+                        ),
+                        (c(&p.dim), state_via),
+                    ];
+                    if wide {
+                        detail.push((c(&p.dim), id_via));
                     }
-                    let refs: Vec<(&str, String)> =
-                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-                    body.push(tc::seg(&refs, w.saturating_sub(1)));
-                }
-                for (unread, text) in a.work.rows(w.saturating_sub(1)) {
-                    let mut line = vec![(c(if unread { &p.unknown } else { &p.working }), text)];
                     if loud || here {
-                        line.push((tint.clone(), " ".repeat(w)));
+                        detail.push((tint.clone(), " ".repeat(w)));
                     }
-                    let refs: Vec<(&str, String)> =
-                        line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    let refs: Vec<(&str, String)> = detail
+                        .iter()
+                        .map(|(c, t)| (c.as_str(), t.clone()))
+                        .collect();
                     body.push(tc::seg(&refs, w.saturating_sub(1)));
+                    let mut notes = a.job.as_ref().map(|j| background::note_rows(j, w)).unwrap_or_default();
+                    if a.by_directory {
+                        notes.extend(
+                            tc::wrap_words(background::BY_DIRECTORY, w.saturating_sub(4).max(1))
+                                .into_iter()
+                                .map(|l| (false, format!("   {l}"))),
+                        );
+                    }
+                    for (alarm, text) in notes {
+                        let body_colour = if alarm { &p.unknown } else if loud || here { &p.txt } else { &p.dim };
+                        let mut line = vec![(c(body_colour), text)];
+                        if loud || here {
+                            line.push((tint.clone(), " ".repeat(w)));
+                        }
+                        let refs: Vec<(&str, String)> =
+                            line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                        body.push(tc::seg(&refs, w.saturating_sub(1)));
+                    }
+                    for (unread, text) in a.work.rows(w.saturating_sub(1)) {
+                        let mut line = vec![(c(if unread { &p.unknown } else { &p.working }), text)];
+                        if loud || here {
+                            line.push((tint.clone(), " ".repeat(w)));
+                        }
+                        let refs: Vec<(&str, String)> =
+                            line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                        body.push(tc::seg(&refs, w.saturating_sub(1)));
+                    }
+                    spans.push(start..body.len());
+                    at += 1;
                 }
-                spans.push(start..body.len());
-                at += 1;
-            }
-            if agent_rows.is_empty() {
-                let (said, bad) = empty_or_why(&agents, "no agents under this session");
-                body.push(tc::seg(
-                    &[(
-                        if bad {
-                            p.unknown.as_str()
-                        } else {
-                            p.dim.as_str()
-                        },
-                        said,
-                    )],
-                    w.saturating_sub(1),
-                ));
-            } else if agents_shown.is_empty() {
-                body.push(nothing(agent_rows.len()));
+                if background_pass {
+                    continue;
+                }
+                if seated.is_empty() {
+                    let (said, bad) = empty_or_why(&agents, "no agents under this session");
+                    body.push(tc::seg(
+                        &[(
+                            if bad {
+                                p.unknown.as_str()
+                            } else {
+                                p.dim.as_str()
+                            },
+                            said,
+                        )],
+                        w.saturating_sub(1),
+                    ));
+                } else if agents_shown.is_empty() {
+                    body.push(nothing(seated.len()));
+                }
             }
 
             // ---- TASKS ----
@@ -3116,6 +3279,141 @@ mod tests {
         assert_eq!(log_session_hint(&agent, &[a, b]), Some(("two", false)));
         agent.session_id = "bound".into();
         assert_eq!(log_session_hint(&agent, &[]), Some(("bound", false)));
+    }
+
+    #[test]
+    fn background_agents_are_filed_under_the_workspace_they_belong_to() {
+        // Pane 1's root shell (10) runs claude 6, a job resumed there, and
+        // Luvus lists its Claude agent. Pane 3's shell (11) has claude 7 left
+        // below it, but Luvus lists no agent there: no row draws 7.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n6 10 claude claude --resume\n11 1 bash bash\n7 11 claude claude --resume\n\
+             20 1 bash bash\n8 20 claude claude --resume\n9 20 claude claude\n",
+        )
+        .map_err(String::from);
+        let pane = |workspace: &str, id: &str, cwd: &str, root: u32| parse::Pane {
+            workspace: workspace.into(),
+            pane_id: id.into(),
+            cwd: cwd.into(),
+            root_pid: Some(root),
+            ..Default::default()
+        };
+        // Pane 4's shell (20) has two: Luvus's agent and a job left running.
+        let panes = [
+            pane("web", "1", "/srv/web/src", 10),
+            pane("web", "3", "/srv/web/src", 11),
+            pane("web", "4", "/srv/web/src", 20),
+        ];
+        // An agent `agent list` reports but the snapshot does not hold,
+        // bound to the Claude session `sess-2`.
+        let mut listed = vec![Agent {
+            workspace: "api".into(),
+            pane: "2".into(),
+            cwd: "/srv/api".into(),
+            session_id: "sess-2".into(),
+            ..Default::default()
+        }];
+        for pane in ["1", "4"] {
+            listed.push(Agent { workspace: "web".into(), pane: pane.into(), cwd: "/srv/web/src".into(), kind: "claude".into(), ..Default::default() });
+        }
+        let job = |name: &str, pid: u32, cwd: &str| {
+            let mut job = tc::agent_work::parse_job_state(name, &format!(r#"{{"state":"working","cwd":"{cwd}"}}"#)).unwrap();
+            job.pid = Some(pid);
+            job
+        };
+        let mut in_pane = job("in-pane", 2, "/srv/other");
+        in_pane.session_ids = vec!["sess-2".into()];
+        let mut under_root = job("under-root", 6, "/srv/other");
+        under_root.fan = tc::agent_work::parse_job_state(
+            "fan",
+            r#"{"state":"working","fan":[{"id":"a1","kind":"agent","label":"Explore","startedAt":1}]}"#,
+        )
+        .unwrap()
+        .fan;
+        let jobs = vec![
+            job("by-dir", 1, "/srv/web"),
+            in_pane,
+            under_root,
+            job("inherited", 5, "/srv/other"),
+            job("gone-pane", 3, "/srv/api"),
+            job("nowhere", 4, "/srv/other"),
+            job("at-prompt", 7, "/srv/other"),
+            job("beside-agent", 8, "/srv/other"),
+        ];
+        let marker = |pid: u32| match pid {
+            2 | 5 => Some("2".to_string()),
+            3 => Some("9".to_string()),
+            _ => None,
+        };
+        file_jobs(&mut listed, &panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
+        let find = |short: &str| listed.iter().find(|a| a.job.as_ref().is_some_and(|j| j.short == short));
+        // Its directory is open in exactly one workspace: filed there, and said.
+        let by_dir = find("by-dir").unwrap();
+        assert_eq!((by_dir.workspace.as_str(), by_dir.group_label.as_str()), ("web", "web"));
+        assert!(by_dir.by_directory);
+        assert!(Row::Agent(by_dir.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
+        // A row bound to its session, or the Claude process under a pane's
+        // root, is the job: that row draws it.
+        assert!(find("in-pane").is_none());
+        assert!(find("under-root").is_none());
+        // The row that draws it is handed its subagents.
+        let pane_one = listed.iter().find(|a| a.job.is_none() && a.pane == "1").unwrap();
+        assert!(pane_one.work.fan.iter().any(|f| f.id == "a1"));
+        // Below a shell in a pane with no agent listed: no row draws it, kept.
+        assert_eq!(find("at-prompt").unwrap().workspace, NO_PANE);
+        // Beside the agent under one shell: which one the row shows is a guess, so kept.
+        assert_eq!(find("beside-agent").unwrap().workspace, NO_PANE);
+        // A pane id in its environment alone never hides it: kept, filed
+        // under that pane's workspace.
+        let inherited = find("inherited").unwrap();
+        assert_eq!((inherited.workspace.as_str(), inherited.by_directory), ("api", false));
+        // A pane id no longer on the board falls back to the directory.
+        assert_eq!(find("gone-pane").unwrap().workspace, "api");
+        // Nothing pairs it: the background group, under its own heading.
+        let nowhere = find("nowhere").unwrap();
+        assert_eq!((nowhere.workspace.as_str(), nowhere.group_label.as_str()), (NO_PANE, "background agents · via jobs"));
+        assert!(!nowhere.by_directory);
+        assert!(!Row::Agent(nowhere.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
+        // Grouped with the workspace it was filed under.
+        let order: Vec<String> = by_workspace(listed.clone()).into_iter().map(|a| a.workspace).collect();
+        assert_eq!(order, ["api", "api", "api", "web", "web", "web", NO_PANE, NO_PANE, NO_PANE]);
+        // Only the unpaired ones leave AGENTS for BACKGROUND AGENTS.
+        let floating_now: Vec<&str> =
+            listed.iter().filter(|a| floating(a)).map(|a| a.job.as_ref().unwrap().short.as_str()).collect();
+        assert_eq!(floating_now, ["nowhere", "at-prompt", "beside-agent"]);
+    }
+
+    #[test]
+    fn the_background_heading_fits_every_width() {
+        let said = "1 of 2 · via jobs · 2 finished not shown";
+        let plain = |row: &str| {
+            let mut out = String::new();
+            let mut esc = false;
+            for ch in row.chars() {
+                match (esc, ch) {
+                    (false, '\u{1b}') => esc = true,
+                    (true, 'm') => esc = false,
+                    (true, _) => {}
+                    (false, c) => out.push(c),
+                }
+            }
+            out
+        };
+        let one = background::heading(said, 120, "", "");
+        assert_eq!(one.len(), 1);
+        assert!(plain(&one[0]).contains("── BACKGROUND AGENTS ── 1 of 2 · via jobs"));
+        for w in 12..120 {
+            let rows = background::heading(said, w, "", "");
+            let text: Vec<String> = rows.iter().map(|r| plain(r)).collect();
+            for row in &text {
+                assert!(tc::display_width(row) < w, "{w}: {row:?}");
+            }
+            // Wrapped, never clipped: every word is still there.
+            let joined = text.join(" ");
+            for word in said.split_whitespace() {
+                assert!(joined.contains(word), "{w}: lost {word}");
+            }
+        }
     }
 
     #[test]
