@@ -69,6 +69,9 @@ pub struct Cache {
     /// Set when [`sharing_rows`] has drawn the store's notice, so the next
     /// [`share`] clears it: shown for one pass, not for the whole run.
     pub notice_drawn: std::sync::atomic::AtomicBool,
+    /// Keys whose [`set_live`] change the store was too busy to take; the
+    /// next [`pull`] of each writes it.
+    pub annotate_pending: std::collections::HashSet<String>,
 }
 
 /// How old a good reading must be before `r` asks for it again.
@@ -289,6 +292,9 @@ fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serd
 /// Take what another pane has published under `key` since this pane last
 /// looked. Costs nothing when nobody has written.
 fn pull(cache: &mut Cache, key: &str, at: f64, ttl: f64) {
+    if cache.annotate_pending.remove(key) {
+        annotate_shared(cache, key);
+    }
     let Some(store) = cache.store.as_mut() else {
         return;
     };
@@ -310,14 +316,19 @@ fn pull(cache: &mut Cache, key: &str, at: f64, ttl: f64) {
 /// The reading this pane already holds, changed since it was taken, is
 /// taken again: `set_live` writes a refusal's reason, or Codex's inventory,
 /// in after the publish, and a pane that read between the two would
-/// otherwise keep the bare refusal for the whole backoff.
+/// otherwise keep the bare refusal for the whole backoff. This pane's own
+/// reading is never taken back that way: its copy is the one `set_live`
+/// changed, and the stored one may be behind it.
 fn adopt_row(cache: &mut Cache, key: &str, s: store::Shared, at: f64, ttl: f64) {
     let local = cache.live.get(key).map(|e| e.0);
     let same = local == Some(s.taken_at)
         && cache.shared.get(key) == Some(&(s.taken_at, s.fetched_by));
+    let mine = cache.store.as_ref().is_some_and(|st| st.me == s.fetched_by);
     if same {
-        if let Some(entry) = cache.live.get_mut(key) {
-            entry.1 = s.value.clone();
+        if !mine {
+            if let Some(entry) = cache.live.get_mut(key) {
+                entry.1 = s.value.clone();
+            }
         }
     } else if lease::adopt(local, s.taken_at, at) {
         let held = if is_reading(&s.value) { ttl } else { s.held };
@@ -353,7 +364,16 @@ pub fn set_live(cache: &mut Cache, key: &str, value: serde_json::Value) {
     let Some((when, _, held)) = cache.live.get(key).cloned() else {
         return;
     };
-    cache.live.insert(key.to_string(), (when, Some(value.clone()), held));
+    cache.live.insert(key.to_string(), (when, Some(value), held));
+    annotate_shared(cache, key);
+}
+
+/// Write this pane's held value under `key` over its shared copy, when this
+/// pane fetched it. A busy store leaves it for the next [`pull`].
+fn annotate_shared(cache: &mut Cache, key: &str) {
+    let Some((when, Some(value), _)) = cache.live.get(key).cloned() else {
+        return;
+    };
     let Some(store) = cache.store.as_mut() else {
         return;
     };
@@ -362,7 +382,9 @@ pub fn set_live(cache: &mut Cache, key: &str, value: serde_json::Value) {
     }
     match store.annotate(key, when, &value, &cache.secrets) {
         Ok(_) => {}
-        Err(why) if store::busy(&why) => {}
+        Err(why) if store::busy(&why) => {
+            cache.annotate_pending.insert(key.to_string());
+        }
         Err(why) => stop_sharing(cache, &why),
     }
 }
@@ -1318,6 +1340,28 @@ mod tests {
         assert!(gate(&mut a, "core").is_some());
         follow(&mut b);
         assert!(gate(&mut b, "core").is_some(), "a gate that met a busy store never reached the other pane");
+    }
+
+    #[test]
+    fn a_detail_added_while_the_store_was_busy_is_kept_and_shared() {
+        let (mut a, mut b) = two_panes("annotate-busy");
+        let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("did not fetch") };
+        t.refuse("too many requests", Some(crate::now() + 600.0));
+        let mut noted = a.live.get("k").unwrap().1.clone().unwrap();
+        noted["bank"] = serde_json::json!(7);
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        set_live(&mut a, "k", noted);
+        other.execute_batch("ROLLBACK").unwrap();
+        // Another pane writes, so this one reads the row again.
+        shut(&mut b, "core", crate::now() + 300.0, "rate limit spent");
+        follow(&mut a);
+        let Take::Serve(Some(v)) = take(&mut a, "k", P) else { panic!("asked inside the reset") };
+        assert_eq!(v["bank"], 7, "the stored copy wrote over this pane's own detail");
+        follow(&mut b);
+        let Take::Serve(Some(v)) = take(&mut b, "k", P) else { panic!("asked inside the reset") };
+        assert_eq!(v["bank"], 7, "the detail never reached the other pane");
     }
 
     #[test]
