@@ -227,6 +227,10 @@ impl Pane {
     /// `work:2`, the session and the window's tab position - what `rex -s
     /// work -w 2` means - or what stands in for a window when there is none.
     fn place(&self) -> String {
+        if self.job.is_some() {
+            // No window to name: a colon would read as one.
+            return format!("{} · {}", self.session_label, self.window());
+        }
         format!("{}:{}", self.session_label, self.window())
     }
 
@@ -293,6 +297,18 @@ impl Pane {
         out.extend(self.work.rows(240).into_iter().map(|(_, text)| text.trim().to_string()));
         out.retain(|s| !s.is_empty());
         out
+    }
+
+    /// The group a row is listed under: its session, or with `by_state` an
+    /// agent's state (OPS-293). Processes and idle panes stay by session:
+    /// most report no state, and grouping them by one would invent it.
+    fn group(&self, by_state: bool) -> (String, String) {
+        if by_state && self.section() == Section::Agents {
+            let word = RANK.get(self.rank()).copied().unwrap_or("unknown");
+            (format!("\u{0}state:{}", word), word.to_string())
+        } else {
+            (self.session_id.clone(), self.session_label.clone())
+        }
     }
 
     fn short_id(&self) -> String {
@@ -1160,7 +1176,7 @@ fn render_pane(
             if cols.wide {
                 line.push((
                     c(&p.accent),
-                    format!(" {}", tc::pad(&pane.window(), cols.place)),
+                    format!(" {}", tc::pad(&cols.where_of(pane), cols.place)),
                 ));
             }
             fill(&mut line);
@@ -1330,6 +1346,8 @@ struct Columns {
     cpu: bool,
     /// More than one session on the board, so where a pane is says something.
     sessions: bool,
+    /// Agents are grouped by state, so their place names the session too.
+    by_state: bool,
     name: usize,
     command: usize,
     place: usize,
@@ -1338,7 +1356,23 @@ struct Columns {
 
 impl Columns {
     fn fit(w: usize, panes: &[&Pane]) -> Columns {
+        Columns::fit_grouped(w, panes, false)
+    }
+
+    /// Where a row says it is: its window under a session heading, or
+    /// `session:window` when agents are grouped by state and no heading
+    /// names the session.
+    fn where_of(&self, pane: &Pane) -> String {
+        if self.by_state && pane.section() == Section::Agents {
+            pane.place()
+        } else {
+            pane.window()
+        }
+    }
+
+    fn fit_grouped(w: usize, panes: &[&Pane], by_state: bool) -> Columns {
         let wide = w >= 66;
+        let where_of = |p: &Pane| if by_state && p.section() == Section::Agents { p.place() } else { p.window() };
         let widest = |f: &dyn Fn(&Pane) -> usize, sec: Section| -> usize {
             panes
                 .iter()
@@ -1358,8 +1392,8 @@ impl Columns {
             .max(tc::display_width("could not be read"));
         let place_want = panes
             .iter()
-            .map(|p| tc::display_width(&p.window()))
-            .chain(std::iter::once(tc::display_width("WINDOW")))
+            .map(|p| tc::display_width(&where_of(p)))
+            .chain(std::iter::once(tc::display_width(if by_state { "SESSION:WINDOW" } else { "WINDOW" })))
             .max()
             .unwrap_or(0);
         let dir_want = widest(&|p| tc::display_width(&homely(&p.cwd())), Section::Idle);
@@ -1405,6 +1439,7 @@ impl Columns {
             states,
             cpu,
             sessions,
+            by_state,
             name,
             command,
             place,
@@ -1796,6 +1831,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let mut show_idle = true;
     let mut opscope_filter = process_filter::Filter::default();
     let mut search = super::search::Search::default();
+    // Agents grouped by state rather than by session (OPS-293).
+    let mut by_state = false;
     let mut selected = 0usize;
     let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut scroll = 0usize;
@@ -1895,6 +1932,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                             });
                         }
                     }
+                }
+                "g" | "G" if explaining.is_none() => {
+                    by_state = !by_state;
+                    moved = true;
                 }
                 "i" | "I" if explaining.is_none() => {
                     show_idle = !show_idle;
@@ -2194,7 +2235,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Grouped by session inside each section, when there is more than
         // one: the flat index the keys walk is this order, so the cursor and
         // the sub-headings cannot disagree.
-        let agents = by_session(agents);
+        // By state, the order above is the grouping: worst first already.
+        let agents = if by_state { agents } else { by_session(agents) };
         // Background agents no session claimed (OPS-292) get a section of
         // their own after AGENTS: they hold no pane and Enter cannot focus
         // them. `agents` still counts them for the summary and the bar.
@@ -2428,7 +2470,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     }
                 }
                 let listed: Vec<&Pane> = panes_now.iter().collect();
-                let cols = Columns::fit(w, &listed);
+                let cols = Columns::fit_grouped(w, &listed, by_state);
                 let mut index = 0usize;
                 // A session's sub-heading goes above its first pane in each
                 // section, and only when the board holds more than one
@@ -2439,7 +2481,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 // how many rows it took, for the gap between two of its panes.
                 let mut previous: Option<(String, usize)> = None;
                 let mut emit = |rows: &mut Vec<String>, pane: &Pane, index: usize, of: &[&Pane]| {
-                    let at_group = of.iter().position(|o| o.session_id == pane.session_id);
+                    let (group, label) = pane.group(by_state);
+                    let grouped_by_state = group != pane.session_id;
+                    let at_group = of.iter().position(|o| o.group(by_state).0 == group);
                     let at_pane = of.iter().position(|o| o.block_id == pane.block_id);
                     if at_pane == Some(0) {
                         previous = None;
@@ -2447,18 +2491,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     let drawn = render_pane(pane, index == selected, w, &cols, &p, tick, at);
                     // The background section's heading already names its
                     // one group.
-                    if cols.sessions && at_group == at_pane && pane.session_id != background::GROUP {
+                    // By state, every state gets its heading, however few
+                    // sessions there are: it is what says how they are grouped.
+                    if (grouped_by_state || (cols.sessions && pane.session_id != background::GROUP)) && at_group == at_pane {
                         // A gap above every session but the section's
                         // first, so each reads as its own group.
                         if at_pane != Some(0) {
                             rows.push(String::new());
                         }
-                        let n = of
-                            .iter()
-                            .filter(|o| o.session_id == pane.session_id)
-                            .count();
+                        let n = of.iter().filter(|o| o.group(by_state).0 == group).count();
                         rows.extend(super::group_heading(
-                            &pane.session_label,
+                            &label,
                             n,
                             w,
                             (&p.accent, &p.dim, &p.rule),
@@ -2470,11 +2513,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         // rows gets a gap so its rows stay its own. A gap,
                         // not a line: the rule is kept for where one
                         // session ends and the next begins.
-                        if *session == pane.session_id && (*rows_before > 1 || drawn.len() > 1) {
+                        if *session == group && (*rows_before > 1 || drawn.len() > 1) {
                             rows.push(String::new());
                         }
                     }
-                    previous = Some((pane.session_id.clone(), drawn.len()));
+                    previous = Some((group.clone(), drawn.len()));
                     let from = rows.len();
                     rows.extend(drawn);
                     rows_at.extend((from..rows.len()).map(|row| (row, index)));
@@ -2537,7 +2580,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         nw = cols.name + 2
                     );
                     if cols.wide {
-                        head += &format!(" {:<5} {}", "MEM", "WINDOW");
+                        head += &format!(" {:<5} {}", "MEM", if by_state { "SESSION:WINDOW" } else { "WINDOW" });
                     }
                     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     for pane in &agents_list {
@@ -2731,6 +2774,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             vec![(
                 p.dim.as_str(),
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
+            )],
+            vec![(
+                p.dim.as_str(),
+                format!("[g]roup by {}", if by_state { "session" } else { "state" }),
             )],
             vec![(
                 p.dim.as_str(),
@@ -3225,6 +3272,32 @@ mod tests {
                 assert!(tc::display_width(&row) < w, "w={w} row {row:?}");
             }
         }
+    }
+
+    #[test]
+    fn grouped_by_state_agents_list_under_their_state_and_name_their_session() {
+        let agent = |session: &str, state: &str| Pane {
+            session_id: format!("session:{session}"),
+            session_label: session.into(),
+            window_ord: Some(2),
+            agent: Some(("claude".into(), Source::Process)),
+            records: vec![Record { state: state.into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let (blocked, working) = (agent("api", "blocked"), agent("web", "working"));
+        assert_eq!(blocked.group(true).1, "blocked");
+        assert_eq!(working.group(true).1, "working");
+        assert_ne!(blocked.group(true).0, blocked.session_id, "a state is never a session id");
+        // By session, as before.
+        assert_eq!(blocked.group(false), ("session:api".to_string(), "api".to_string()));
+        // A process reports no state to group by: it stays by session.
+        let process = Pane { session_id: "session:api".into(), doing: Doing::Running, ..Default::default() };
+        assert_eq!(process.group(true).0, "session:api");
+        // With no session heading above it, an agent's place names its session.
+        let cols = Columns::fit_grouped(100, &[&blocked, &process], true);
+        assert_eq!(cols.where_of(&blocked), "api:2");
+        assert_eq!(cols.where_of(&process), process.window());
+        assert_eq!(Columns::fit(100, &[&blocked]).where_of(&blocked), "2");
     }
 
     #[test]

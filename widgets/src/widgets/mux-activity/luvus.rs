@@ -1165,6 +1165,44 @@ fn by_workspace(agents: Vec<Agent>) -> Vec<Agent> {
     groups.into_iter().flatten().collect()
 }
 
+/// The group an agent is listed under, as a key and the heading's label:
+/// its workspace, or with `by_state` its state (OPS-293). Only agents are
+/// ever grouped by state; tasks, leases and panes report none to group by.
+fn group_of(agent: &Agent, by_state: bool) -> (String, String) {
+    if by_state {
+        let word = if agent.state.is_empty() { "unknown" } else { agent.state.as_str() };
+        (format!("\u{0}state:{}", word), word.to_string())
+    } else {
+        let label = if agent.job.is_some() { agent.group_label.as_str() } else { workspace_name(&agent.workspace) };
+        (agent.workspace.clone(), label.to_string())
+    }
+}
+
+/// Where an agent's row says it is. Under a workspace heading the column
+/// repeats it as Luvus reports it; grouped by state no heading names the
+/// workspace, so the column names it as a heading would.
+fn place_of(agent: &Agent, by_state: bool) -> String {
+    if by_state {
+        workspace_name(&agent.workspace).to_string()
+    } else {
+        agent.workspace.clone()
+    }
+}
+
+/// Agents in the order the grouping walks them: as polled (by workspace),
+/// or worst state first with the longest held first inside each state.
+fn in_group_order(mut agents: Vec<Agent>, by_state: bool) -> Vec<Agent> {
+    if by_state {
+        agents.sort_by(|a, b| {
+            parse::rank_of(&a.state)
+                .cmp(&parse::rank_of(&b.state))
+                .then(a.state.cmp(&b.state))
+                .then(b.since.total_cmp(&a.since))
+        });
+    }
+    agents
+}
+
 /// A workspace as its heading names it; Luvus can report an agent in none.
 fn workspace_name(workspace: &str) -> &str {
     if workspace.is_empty() {
@@ -1347,6 +1385,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
+    // Agents grouped by state rather than by workspace (OPS-293).
+    let mut by_state = false;
     let mut opscope_filter = process_filter::Filter::default();
     let mut search = super::search::Search::default();
     let mut selected = 0usize;
@@ -1424,6 +1464,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 "o" | "O" => {
                     if detail.is_none() {
                         opscope_filter.toggle(&mut selected);
+                        moved = true;
+                    }
+                }
+                "g" | "G" => {
+                    if detail.is_none() {
+                        by_state = !by_state;
                         moved = true;
                     }
                 }
@@ -1643,7 +1689,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // vectors are empty, but the Result beside them is what the
         // header and the empty-section lines read, so a timeout cannot
         // draw as zero.
-        let agent_rows: Vec<Agent> = agents.clone().unwrap_or_default();
+        // By state, the poll's workspace order is undone into worst first;
+        // the cursor keeps its row because `reselect` follows the row.
+        let agent_rows: Vec<Agent> = in_group_order(agents.clone().unwrap_or_default(), by_state);
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();
         let lease_rows: Vec<Lease> = leases.clone().unwrap_or_default();
         // Worst first here too: a session left in a directory nobody has
@@ -1984,6 +2032,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             vec![(
                 p.dim.as_str(),
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
+            )],
+            vec![(
+                p.dim.as_str(),
+                format!("[g]roup by {}", if by_state { "workspace" } else { "state" }),
             )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
         ]);
@@ -2392,7 +2444,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 wide,
                 [
                     widest(agent_rows.iter().map(|a| &a.name)),
-                    widest(agent_rows.iter().map(|a| &a.workspace)),
+                    widest(agent_rows.iter().map(|a| place_of(a, by_state))),
                     // The worktree mark rides after the branch.
                     widest(agent_rows.iter().map(branch_of)) + 2,
                     widest(busy.iter().map(|n| &n.command)).max(1),
@@ -2441,20 +2493,24 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         body.push(nothing(floating_rows.len()));
                     }
                 }
-                // The background section's heading already names its one group.
-                let grouped = !background_pass && list.iter().any(|a| a.workspace != list[0].workspace);
+                // The background section's heading already names its one
+                // group. By state, every state gets its heading, however few
+                // workspaces there are: it is what says how they are grouped.
+                let grouped = by_state
+                    || (!background_pass && list.iter().any(|a| a.workspace != list[0].workspace));
                 for (i, a) in list.iter().enumerate() {
-                    // A gap between two agents, and where a workspace begins
-                    // its heading and rule - only when there are workspaces to
-                    // tell apart. Above `start`, so a click there is no row's.
+                    // A gap between two agents, and where a group begins its
+                    // heading and rule - only when there are groups to tell
+                    // apart. Above `start`, so a click there is no row's.
                     if i > 0 {
                         body.push(String::new());
                     }
-                    if grouped && (i == 0 || list[i - 1].workspace != a.workspace) {
-                        let n = list.iter().filter(|o| o.workspace == a.workspace).count();
+                    let (group, label) = group_of(a, by_state);
+                    if grouped && (i == 0 || group_of(&list[i - 1], by_state).0 != group) {
+                        let n = list.iter().filter(|o| group_of(o, by_state).0 == group).count();
                         let at_row = body.len();
                         body.extend(super::group_heading(
-                            if a.job.is_some() { &a.group_label } else { workspace_name(&a.workspace) },
+                            &label,
                             n,
                             w,
                             (&p.accent, &p.dim, &p.rule),
@@ -2523,7 +2579,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         ),
                         (
                             c(&p.accent),
-                            format!(" {}", tc::pad(&a.workspace, agent_workspace_w)),
+                            format!(" {}", tc::pad(&place_of(a, by_state), agent_workspace_w)),
                         ),
                     ];
                     if wide {
@@ -3350,6 +3406,41 @@ mod tests {
                 assert!(joined.contains(word), "{w}: lost {word}");
             }
         }
+    }
+
+    #[test]
+    fn grouped_by_state_agents_list_under_their_state_and_name_their_workspace() {
+        let agent = |pane: &str, workspace: &str, state: &str, since: f64| Agent {
+            pane: pane.into(),
+            workspace: workspace.into(),
+            state: state.into(),
+            since,
+            ..Agent::default()
+        };
+        // As polled: grouped by workspace, worst first inside each.
+        let polled = vec![
+            agent("1", "api", "blocked", 5.0),
+            agent("2", "api", "working", 50.0),
+            agent("3", "web", "blocked", 9.0),
+            agent("4", "", "working", 10.0),
+        ];
+        let blocked = &polled[0];
+        assert_eq!(group_of(blocked, true).1, "blocked");
+        assert_ne!(group_of(blocked, true).0, blocked.workspace, "a state is never a workspace");
+        assert_eq!(group_of(blocked, false), ("api".to_string(), "api".to_string()));
+        // By state the order is worst first, longest held first within a state.
+        let order: Vec<String> = in_group_order(polled.clone(), true).into_iter().map(|a| a.pane).collect();
+        assert_eq!(order, ["3", "1", "2", "4"]);
+        // By workspace, the poll's order is left alone.
+        let order: Vec<String> = in_group_order(polled.clone(), false).into_iter().map(|a| a.pane).collect();
+        assert_eq!(order, ["1", "2", "3", "4"]);
+        // With no workspace heading above it, the place names the workspace
+        // as a heading would - including the one Luvus reported none for.
+        assert_eq!(place_of(&polled[2], true), "web");
+        assert_eq!(place_of(&polled[3], true), "no workspace");
+        assert_eq!(place_of(&polled[3], false), "");
+        // An agent with no state word is grouped as unknown, not as nothing.
+        assert_eq!(group_of(&agent("5", "api", "", 0.0), true).1, "unknown");
     }
 
     #[test]

@@ -44,6 +44,21 @@ whichever multiplexer the pane is in.
  [i]dle hide  [z]oom  [e]xplain  [r]efresh  [,] settings  [q]uit
 ```
 
+## Grouping by state with `g`
+
+Agents are grouped by session (Rex) or workspace (Herdr, Luvus), the group
+holding the most urgent agent first. `g` regroups the agent sections — AGENTS
+and BACKGROUND AGENTS — by state instead: a sub-heading per state, worst
+first (`blocked · 2`, `done · 3`, `working · 4`, …), each row naming its own
+session or workspace since no heading above it does. `g` again goes back. The
+footer names the grouping the next press gives: `[g]roup by state`, then
+`[g]roup by session` (or `workspace`).
+
+Only agents are regrouped. Processes, idle panes, tasks and leases report no
+state of their own — most process rows say nothing at all — and grouping them
+by one would invent it, so they keep their usual order. The cursor stays on
+the agent it was on, and `/` filters either grouping the same way.
+
 ## Filtering with `/`
 
 `/` opens a query line under every backend, and the boards narrow as you type
@@ -355,6 +370,7 @@ which can name an address; a credential it recognises by name is drawn as
 | `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
 | `esc` | clear the filter, when one is kept |
 | `o` | show/hide opscope's own panes (hidden by default) |
+| `g` | group the agent sections by state, or back by session; PROCESSES and IDLE stay by session (see [Grouping by state](#grouping-by-state-with-g)) |
 | `i` | show/hide the idle section |
 | `r` | refresh now |
 | `,` | open settings |
@@ -492,6 +508,7 @@ behind it.
 | `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
 | `esc` | clear the filter, when one is kept |
 | `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
+| `g` | group the agent sections by state, or back by workspace; the other sections keep their order (see [Grouping by state](#grouping-by-state-with-g)) |
 | `i` | show/hide the idle section |
 | `l` | workspace labels vs pane ids |
 | `e` | explain the selected background agent (the only rows with an explain screen here); `esc` or `e` goes back |
@@ -774,6 +791,7 @@ snapshot before its cursor is reset.
 | `/` | filter the boards to rows that fuzzy-match a query; `↵` keeps it, `esc` clears it (see [Filtering with `/`](#filtering-with-)) |
 | `esc` | clear the filter, when one is kept |
 | `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
+| `g` | group the agent sections by state, or back by workspace; the other sections keep their order (see [Grouping by state](#grouping-by-state-with-g)) |
 | `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |
 | `,` | open settings |
