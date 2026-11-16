@@ -30,6 +30,8 @@ use std::time::Duration;
 use chrono::Utc;
 use opscope_core as tc;
 
+mod parse;
+
 /// The environment variable a GitHub token is read from when `token_env`
 /// says nothing. Named once so the code and the schema cannot drift: the
 /// settings screen draws its default from `settings.json`, and a screen
@@ -125,11 +127,11 @@ fn api_host() -> Option<&'static str> {
 fn graphql(
     query: &str,
     tok: &str,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     gql_url: &str,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
-    let (out, headers) = tc::post_json(
+    let (status, out, headers) = tc::post_answer(
         gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -139,7 +141,10 @@ fn graphql(
         &body,
         45,
     )?;
-    take_rate(rate, &headers);
+    rate.take(status, &headers);
+    if !(200..300).contains(&status) {
+        return Err(tc::refused(status, &out));
+    }
     let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     graphql_payload(&data)
 }
@@ -177,11 +182,13 @@ fn graphql_payload(body: &serde_json::Value) -> Result<serde_json::Value, String
 fn rest_get(
     path: &str,
     tok: &str,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     rest_base: &str,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", rest_base, path);
-    let (body, headers) = tc::get_with_headers(
+    // `get_answer` rather than `get_with_headers`, so a refusal's headers
+    // are read too: a rate limit is said on the 403 or 429 itself.
+    let (status, body, headers) = tc::get_answer(
         &url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -191,32 +198,60 @@ fn rest_get(
         ],
         30,
     )?;
-    take_rate(rate, &headers);
+    rate.take(status, &headers);
+    if !(200..300).contains(&status) {
+        return Err(tc::refused(status, &body));
+    }
     tc::parse_source_json(&body).map_err(|e| e.to_string())
 }
 
-/// Remaining/limit from GitHub's rate-limit headers. GraphQL and REST
-/// have separate buckets; the last response wins, and a full poll ends
-/// on REST, which is what this widget spends.
-fn take_rate(rate: &mut Option<(i64, i64)>, headers: &[(String, String)]) {
-    if let Some(got) = rate_from_headers(headers) {
-        *rate = Some(got);
-    }
+/// What a pass has learned about GitHub's rate limits.
+///
+/// Carried out of every call so a later pass can stop asking until the
+/// reset (OPS-285). Today only `last` reaches the screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Budget {
+    /// The last answer that said both remaining and limit. GraphQL and REST
+    /// have separate buckets; the last response wins, and a full poll ends
+    /// on REST, which is what this widget spends. `resource` says which.
+    last: Option<parse::RateHeaders>,
+    /// The limit with the latest end that any answer this pass reported,
+    /// with GitHub's own reset or retry-after in it. `None` while no answer
+    /// said to stop.
+    stop: Option<parse::RateLimit>,
 }
 
-fn rate_from_headers(headers: &[(String, String)]) -> Option<(i64, i64)> {
-    let mut remaining = None;
-    let mut limit = None;
-    for (name, value) in headers {
-        match name.as_str() {
-            "x-ratelimit-remaining" => remaining = value.parse().ok(),
-            "x-ratelimit-limit" => limit = value.parse().ok(),
-            _ => {}
+impl Budget {
+    fn take(&mut self, status: u16, headers: &[(String, String)]) {
+        self.take_at(status, headers, tc::now() as i64);
+    }
+
+    fn take_at(&mut self, status: u16, headers: &[(String, String)], now: i64) {
+        let head: String = headers
+            .iter()
+            .map(|(name, value)| format!("{}: {}\n", name, value))
+            .collect();
+        let got = parse::parse_rate_headers(&head);
+        if matches!((got.remaining, got.limit), (Some(_), Some(max)) if max > 0) {
+            self.last = Some(got.clone());
+        }
+        let limit = parse::classify_rate(status, &got, now);
+        if let Some(until) = limit.until() {
+            let later = self
+                .stop
+                .as_ref()
+                .and_then(|s| s.until())
+                .is_none_or(|was| until >= was);
+            if later {
+                self.stop = Some(limit);
+            }
         }
     }
-    match (remaining, limit) {
-        (Some(left), Some(max)) if max > 0 => Some((left, max)),
-        _ => None,
+
+    /// Remaining over limit, for `tc::polled`.
+    fn remaining_of(&self) -> Option<(i64, i64)> {
+        let last = self.last.as_ref()?;
+        Some((last.remaining?, last.limit?))
     }
 }
 
@@ -883,7 +918,7 @@ struct State {
     /// produced a row", so one configured repo with a quiet window is
     /// still one repo.
     repos: usize,
-    rate: Option<(i64, i64)>,
+    rate: Budget,
     /// What the poller is working through right now.
     ///
     /// Not folded in by `apply_pass`: it belongs to the pass in flight, not
@@ -911,9 +946,12 @@ fn apply_pass(live: &mut State, got: State) {
         live.accounts = got.accounts;
         live.repos = got.repos;
     }
-    if got.rate.is_some() {
-        live.rate = got.rate;
+    if got.rate.last.is_some() {
+        live.rate.last = got.rate.last;
     }
+    // The newest pass says whether a limit is still in force: one that got
+    // through without being told to stop means the stop is over.
+    live.rate.stop = got.rate.stop;
     live.err = got.err;
 }
 
@@ -939,14 +977,15 @@ fn fetch_runs_for(
     repo: &str,
     tok: &str,
     hours: i64,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     rest_base: &str,
-) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
+) -> Result<(Vec<serde_json::Value>, Option<String>, f64), String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
     let mut raw: Vec<serde_json::Value> = Vec::new();
     let mut total = 0i64;
     let mut page = 1usize;
+    let mut fetched_at = 0.0;
     // REST pages by number rather than by cursor, and `total_count` says
     // where to stop, so this walks until it has them all. One repo on this
     // wall had 430 runs in a 48h window and showed a hundred of them - the
@@ -963,6 +1002,9 @@ fn fetch_runs_for(
         );
         let res = rest_get(&path, tok, rate, rest_base)?;
         if page == 1 {
+            // The reading is as old as its first page: what GitHub said
+            // then, not when the walk finished or the pane drew it.
+            fetched_at = tc::now();
             total = res["total_count"].as_i64().unwrap_or(0);
         }
         let got = res["workflow_runs"].as_array().cloned().unwrap_or_default();
@@ -990,7 +1032,19 @@ fn fetch_runs_for(
     } else {
         None
     };
-    Ok((out, note))
+    Ok((out, note, fetched_at))
+}
+
+/// When the board's figures were fetched: the oldest repo reading in it,
+/// since a board is only as current as its stalest part. Zero when no repo
+/// answered, which the pane draws as "--" rather than as a fresh poll.
+fn board_fetched(stamps: &[f64]) -> f64 {
+    stamps
+        .iter()
+        .copied()
+        .filter(|t| *t > 0.0)
+        .reduce(f64::min)
+        .unwrap_or(0.0)
 }
 
 /// Enough of a query-string escape that an ISO stamp survives the URL.
@@ -1009,7 +1063,7 @@ fn urlencoding_lite(s: &str) -> String {
 
 fn discover_accounts(
     tok: &str,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     gql_url: &str,
 ) -> Result<(String, Vec<String>), String> {
     let mut viewer = String::new();
@@ -1057,7 +1111,7 @@ fn discover_account_pages(
     tok: &str,
     acc: &str,
     since: f64,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     gql_url: &str,
 ) -> Result<(Vec<FoundRepo>, Option<String>), String> {
     let mut found = Vec::new();
@@ -1113,7 +1167,7 @@ fn discover_repos(
     pushed_days: i64,
     cap: usize,
     viewer: &str,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     gql_url: &str,
 ) -> Result<(Vec<String>, PickStats, Option<String>), String> {
     let since = tc::now() - (pushed_days as f64 * 86400.0);
@@ -1149,7 +1203,7 @@ fn discover_repos(
 
 fn viewer_login(
     tok: &str,
-    rate: &mut Option<(i64, i64)>,
+    rate: &mut Budget,
     gql_url: &str,
 ) -> Result<String, String> {
     let data = graphql("{ viewer { login } }", tok, rate, gql_url)?;
@@ -1215,7 +1269,7 @@ fn one_pass(
     let gql_url = tc::github_graphql_url(host);
     let rest_base = tc::github_rest_base_url(host);
     let mut err = String::new();
-    let mut rate = None;
+    let mut rate = Budget::default();
     let empty_stats = PickStats::default();
     note(live, |p| {
         p.clear();
@@ -1324,14 +1378,16 @@ fn one_pass(
         p.begin("runs");
     });
     let mut runs = Vec::new();
+    let mut stamps: Vec<f64> = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     for (done, repo) in repos.iter().enumerate() {
         note(live, |p| {
             p.count("runs", done, Some(repos.len()));
         });
         match fetch_runs_for(repo, tok, hours, &mut rate, &rest_base) {
-            Ok((got, note)) => {
+            Ok((got, note, fetched_at)) => {
                 runs.extend(got);
+                stamps.push(fetched_at);
                 if let Some(said) = note {
                     partial.push(said);
                 }
@@ -1369,7 +1425,7 @@ fn one_pass(
     Ok(State {
         runs,
         err,
-        fetched: tc::now(),
+        fetched: board_fetched(&stamps),
         scope: scope_sentence(
             is_explicit,
             repos.len(),
@@ -1410,7 +1466,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
             "/repos/{}/{}/actions/runs/{}/jobs?per_page=100&page={}",
             owner, name, id, page
         );
-        let res = match rest_get(&path, tok, &mut None, &rest_base) {
+        let res = match rest_get(&path, tok, &mut Budget::default(), &rest_base) {
             Ok(v) => v,
             // Whatever arrived is real and worth drawing; only a failure on
             // the first page leaves nothing to show.
@@ -1991,7 +2047,7 @@ fn main() {
                     g.viewer.clone(),
                     g.accounts,
                     g.repos,
-                    g.rate,
+                    g.rate.remaining_of(),
                     g.progress.steps().to_vec(),
                 ),
                 Err(_) => return,
@@ -3071,10 +3127,15 @@ mod tests {
             ("x-ratelimit-limit".into(), "5000".into()),
             ("x-ratelimit-resource".into(), "core".into()),
         ];
-        assert_eq!(rate_from_headers(&headers), Some((4840, 5000)));
-        assert_eq!(rate_from_headers(&[]), None);
+        let read = |headers: &[(String, String)]| {
+            let mut budget = Budget::default();
+            budget.take_at(200, headers, 0);
+            budget.remaining_of()
+        };
+        assert_eq!(read(&headers), Some((4840, 5000)));
+        assert_eq!(read(&[]), None);
         assert_eq!(
-            rate_from_headers(&[("x-ratelimit-remaining".into(), "10".into())]),
+            read(&[("x-ratelimit-remaining".into(), "10".into())]),
             None,
             "a remaining without a limit is not a reading"
         );
@@ -3087,6 +3148,51 @@ mod tests {
         // A poll that has just landed says seconds, not the "1m" a floor
         // of one minute used to report on a board that was current.
         assert_eq!(tc::ago(tc::now() - 4.0), "4s");
+    }
+
+    #[test]
+    fn the_board_is_stamped_with_its_oldest_reading_not_when_it_was_applied() {
+        // Three repos answered at 100, 90 and 120; one never answered.
+        assert_eq!(board_fetched(&[100.0, 90.0, 0.0, 120.0]), 90.0);
+        assert_eq!(board_fetched(&[]), 0.0, "nothing fetched is not a fresh poll");
+        let mut live = State { window_hours: 24, ..Default::default() };
+        apply_pass(
+            &mut live,
+            State {
+                runs: vec![sample_run(1)],
+                fetched: board_fetched(&[100.0, 90.0]),
+                window_hours: 24,
+                ..Default::default()
+            },
+        );
+        // Applied well after the fetch, the pane still says when GitHub
+        // answered, which is what "updated … ago" is measured from.
+        assert_eq!(live.fetched, 90.0);
+    }
+
+    #[test]
+    fn a_rate_limit_reply_is_carried_out_with_its_reset() {
+        let mut budget = Budget::default();
+        let spent = vec![
+            ("x-ratelimit-remaining".to_string(), "0".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), "5000".to_string()),
+            ("x-ratelimit-resource".to_string(), "core".to_string()),
+        ];
+        budget.take_at(403, &spent, 1000);
+        assert_eq!(budget.remaining_of(), Some((0, 5000)));
+        assert_eq!(budget.last.as_ref().and_then(|h| h.reset), Some(5000));
+        assert_eq!(budget.stop.as_ref().and_then(|s| s.until()), Some(5000));
+        // A later answer with an earlier end does not shorten the stop, and
+        // a healthy one does not clear it within the pass.
+        budget.take_at(429, &[("retry-after".to_string(), "60".to_string())], 1000);
+        budget.take_at(200, &[], 1000);
+        assert_eq!(budget.stop.as_ref().and_then(|s| s.until()), Some(5000));
+
+        let mut live = State { window_hours: 24, rate: budget, ..Default::default() };
+        apply_pass(&mut live, State { window_hours: 24, ..Default::default() });
+        assert_eq!(live.rate.stop, None, "a pass that was not stopped ends the stop");
+        assert_eq!(live.rate.remaining_of(), Some((0, 5000)), "the last reading stays");
     }
 
     fn sample_run(id: i64) -> serde_json::Value {
