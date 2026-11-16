@@ -199,7 +199,8 @@ Background agents:
   session it belongs to: the pane its process runs in (a job resumed there
   is drawn once), the session its process names, or the one session with a
   pane open in its directory - said on the row as "filed here by
-  directory". Anything else stays under "background agents · via jobs". Each row has the reported state, how long it has
+  directory". Anything else goes in a BACKGROUND AGENTS section of its own,
+  right after AGENTS. Each row has the reported state, how long it has
   held it, its name and detail, and how much is in flight; subagents it is
   running say "via jobs". Press e on one to see every subagent and shell it
   started, with their ages. Finished jobs are counted in the heading, not

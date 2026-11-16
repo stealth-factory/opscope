@@ -2177,6 +2177,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // one: the flat index the keys walk is this order, so the cursor and
         // the sub-headings cannot disagree.
         let agents = by_session(agents);
+        // Background agents no session claimed (OPS-292) get a section of
+        // their own after AGENTS: they hold no pane and Enter cannot focus
+        // them. `agents` still counts them for the summary and the bar.
+        let floating: Vec<&Pane> = agents.iter().filter(|n| n.session_id == background::GROUP).copied().collect();
+        let seated: Vec<&Pane> = agents.iter().filter(|n| n.session_id != background::GROUP).copied().collect();
         let busy = by_session(busy);
         let resting = by_session(resting);
         // The `/` filter only includes or excludes: each section keeps the
@@ -2189,7 +2194,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 .map(|n| (*n).clone())
                 .collect()
         };
-        let (agents_shown, busy_shown, resting_shown) = (shown(&agents), shown(&busy), shown(&resting));
+        let (agents_shown, floating_shown, busy_shown, resting_shown) =
+            (shown(&seated), shown(&floating), shown(&busy), shown(&resting));
         // A pane the filter hides takes its row's warning with it, so the
         // first such reason is kept to say above the sections: "nothing
         // matches" must not be all a board says while a probe failed.
@@ -2198,6 +2204,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 .filter(|n| {
                     !agents_shown
                         .iter()
+                        .chain(floating_shown.iter())
                         .chain(busy_shown.iter())
                         .chain(resting_shown.iter())
                         .any(|s| s.block_id == n.block_id)
@@ -2217,6 +2224,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         let before = std::mem::take(&mut panes_now);
         panes_now = agents_shown
             .iter()
+            .chain(floating_shown.iter())
             .chain(busy_shown.iter())
             .chain(resting_shown.iter().filter(|_| show_idle))
             .cloned()
@@ -2419,7 +2427,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         previous = None;
                     }
                     let drawn = render_pane(pane, index == selected, w, &cols, &p, tick, at);
-                    if cols.sessions && at_group == at_pane {
+                    // The background section's heading already names its
+                    // one group.
+                    if cols.sessions && at_group == at_pane && pane.session_id != background::GROUP {
                         // A gap above every session but the section's
                         // first, so each reads as its own group.
                         if at_pane != Some(0) {
@@ -2485,17 +2495,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 rows.extend(flow(
                     &[
                         (p.lbl.as_str(), "── AGENTS ──".into()),
-                        (p.dim.as_str(), super::search::count(agents_list.len(), agents.len(), filtering)),
+                        (p.dim.as_str(), super::search::count(agents_list.len(), seated.len(), filtering)),
                     ],
                     w,
                 ));
-                if agents.is_empty() {
+                if seated.is_empty() {
                     rows.push(tc::seg(
                         &[(p.dim.as_str(), "   no coding agent in any pane".into())],
                         w - 1,
                     ));
                 } else if agents_list.is_empty() {
-                    rows.push(nothing(agents.len()));
+                    rows.push(nothing(seated.len()));
                 } else {
                     sections.push(index);
                     // AGENT sits over the mark as well as the name, hence
@@ -2514,6 +2524,34 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
                     for pane in &agents_list {
                         emit(&mut rows, pane, index, &agents_list);
+                        index += 1;
+                    }
+                }
+
+                if !floating.is_empty() {
+                    let floating_list: Vec<&Pane> = floating_shown.iter().collect();
+                    rows.push(String::new());
+                    // What the group's label says beyond its name: where the
+                    // rows come from and the finished jobs not drawn.
+                    let label = &floating[0].session_label;
+                    let more = label.strip_prefix("background agents").unwrap_or(label);
+                    rows.extend(flow(
+                        &[
+                            (p.lbl.as_str(), "── BACKGROUND AGENTS ──".into()),
+                            (
+                                p.dim.as_str(),
+                                format!("{}{}", super::search::count(floating_list.len(), floating.len(), filtering), more),
+                            ),
+                        ],
+                        w,
+                    ));
+                    if floating_list.is_empty() {
+                        rows.push(nothing(floating.len()));
+                    } else {
+                        sections.push(index);
+                    }
+                    for pane in &floating_list {
+                        emit(&mut rows, pane, index, &floating_list);
                         index += 1;
                     }
                 }

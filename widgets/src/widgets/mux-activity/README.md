@@ -156,9 +156,12 @@ It is filed under the session (or workspace) it belongs to, in this order:
    (`cwd`, `worktreePath` or `originCwd` in its `state.json`): it goes
    there, and the row says `filed here by directory`, because that is
    a match on a folder rather than something its process said.
-4. **Otherwise** it stays in a group of its own, `background agents · via
-   jobs`. A directory open in two sessions pairs it with neither; the
-   widget does not guess between them.
+4. **Otherwise** it goes in a section of its own, `── BACKGROUND AGENTS ──`,
+   right after AGENTS and before PROCESSES, its heading counting the rows
+   and the finished jobs not drawn (`2 · via jobs · 1 finished not shown`).
+   A directory open in two sessions pairs it with neither; the widget does
+   not guess between them. These rows still count in the summary, the state
+   bar and "waiting for you", so a blocked one is never missed.
 
 A daemon agent's process descends from Claude's daemon, not from any pane,
 and carries no multiplexer's markers, so for most of them the directory is
@@ -343,7 +346,7 @@ which can name an address; a credential it recognises by name is drawn as
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `j` `k` `Home` `End` | select, across all three sections; the window follows |
+| `↑` `↓` `j` `k` `Home` `End` | select, across every section, BACKGROUND AGENTS included when it is there; the window follows |
 | `Tab` | jump to the head of the next section, wrapping past the last |
 | `Ctrl-Y` `Ctrl-E` `wheel` `PgUp` `PgDn` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **switch to this pane** — its window becomes active in its session and the pane focused |
@@ -482,7 +485,7 @@ behind it.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `Home` `End` | select, across all three sections; the window follows |
+| `↑` `↓` `Home` `End` | select, across every section, BACKGROUND AGENTS included when it is there; the window follows |
 | `Tab` | jump to the head of the next section, wrapping past the last |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
@@ -764,7 +767,7 @@ snapshot before its cursor is reset.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `j` `k` `Home` `End` | select, across the four sections and IDLE when it is shown; the window follows |
+| `↑` `↓` `j` `k` `Home` `End` | select, across the four sections, BACKGROUND AGENTS when it is there and IDLE when it is shown; the window follows |
 | `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
 | `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — focus the selected pane |

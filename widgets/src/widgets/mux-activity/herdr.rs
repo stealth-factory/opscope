@@ -1591,11 +1591,25 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // The filter matches the place a row shows: a label, or the pane id
         // once [l] has hidden labels.
         let shown = show_labels.then_some(&labels);
+        // Background agents no workspace claimed (OPS-292) get a section of
+        // their own after AGENTS: they hold no pane and enter cannot switch
+        // to them. `all_agents` still counts them for the summary and the
+        // bar. `agents` is the seated ones shown, then the floating ones
+        // shown, which is the order the keys walk.
+        let seated_all = all_agents.iter().filter(|a| a.workspace_id != background::GROUP).count();
+        let floating_all = all_agents.len() - seated_all;
         let agents: Vec<Agent> = all_agents
             .iter()
+            .filter(|a| a.workspace_id != background::GROUP)
+            .chain(all_agents.iter().filter(|a| a.workspace_id == background::GROUP))
             .filter(|a| search.matches(&a.search_fields(shown)))
             .cloned()
             .collect();
+        let seated = agents.iter().filter(|a| a.workspace_id != background::GROUP).count();
+        let floating = agents.len() - seated;
+        // Where agent `i` sits in `agents`: the bounds of its own section,
+        // which is all `lead_rows` may look at.
+        let section_of = move |i: usize| if i < seated { (0, seated) } else { (seated, seated + floating) };
         // An agent's work warning is drawn on its row, so one the filter
         // hides is said above the sections instead.
         let hidden_why: Option<String> = if filtering {
@@ -1824,7 +1838,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // doing something, then the ones at a prompt. A section with no
         // rows is not somewhere tab can land, so it is left out.
         sections = [
-            (0, !agents.is_empty()),
+            (0, seated > 0),
+            (seated, floating > 0),
             (agents.len(), !busy_shown.is_empty()),
             (agents.len() + busy_shown.len(), idle_listed && !resting_shown.is_empty()),
         ]
@@ -1853,7 +1868,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
-            + usize::from(agents.is_empty())          // the line that stands in for a list
+            + usize::from(seated == 0)                // the line that stands in for a list
+            + if floating_all > 0 { 2 } else { 0 }    // blank, BACKGROUND AGENTS
+            + usize::from(floating_all > 0 && floating == 0)
             + usize::from(busy_shown.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
             + usize::from(idle_listed && resting_shown.is_empty())
@@ -1894,7 +1911,8 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         };
         let heights: Vec<usize> = (0..agents.len())
             .map(|i| {
-                let lead = lead_rows(&agents, i, w, &name_of, &p, 0, &mut Vec::new()).len();
+                let (lo, hi) = section_of(i);
+                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, &p, 0, &mut Vec::new()).len();
                 let notes = notes_of(i).len();
                 let shown = lead_fits(lead, notes, &agents[i].work);
                 let jobs = job_lines(&agents[i].work, w.saturating_sub(1), job_room(lead, notes, shown));
@@ -1956,6 +1974,41 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 w - 1,
             )
         };
+        // What closes AGENTS when it has no rows to show.
+        let agents_tail = |rows: &mut Vec<String>| {
+            if seated_all == 0 && err.is_empty() {
+                let none = if floating_all == 0 { "   no agents running" } else { "   no agent in any pane" };
+                rows.push(tc::seg(&[(p.dim.as_str(), none.into())], w - 1));
+            } else if seated_all > 0 && seated == 0 {
+                rows.push(nothing(seated_all));
+            }
+        };
+        // BACKGROUND AGENTS, drawn after AGENTS whenever any exist. The
+        // heading names the group, so its rows get no workspace heading;
+        // what it adds is the group label beyond its name: where the rows
+        // come from and the finished jobs not drawn.
+        let floating_head = |rows: &mut Vec<String>| {
+            if floating_all == 0 {
+                return;
+            }
+            let label = workspace_label(&labels, background::GROUP);
+            let more = label.strip_prefix("background agents").unwrap_or(&label).to_string();
+            rows.push(String::new());
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── BACKGROUND AGENTS ── ".into()),
+                    (
+                        p.dim.as_str(),
+                        format!("{}{}", super::search::count(floating, floating_all, filtering), more),
+                    ),
+                    (p.dim.as_str(), showing(&window, seated, floating)),
+                ],
+                w - 1,
+            ));
+            if floating == 0 {
+                rows.push(nothing(floating_all));
+            }
+        };
         // A query that leaves nothing on the whole board says so, rather
         // than drawing three empty sections - unless a pane could not be
         // read, whose reason PROCESSES carries.
@@ -1975,9 +2028,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     (p.lbl.as_str(), " ── AGENTS ── ".into()),
                     (
                         p.dim.as_str(),
-                        super::search::count(agents.len(), all_agents.len(), filtering),
+                        super::search::count(seated, seated_all, filtering),
                     ),
-                    (p.dim.as_str(), showing(&window, 0, agents.len())),
+                    (p.dim.as_str(), showing(&window, 0, seated)),
                 ],
                 w - 1,
             ));
@@ -1996,11 +2049,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
 
             for (i, a) in agents.iter().enumerate() {
+                if i == seated {
+                    agents_tail(&mut rows);
+                    floating_head(&mut rows);
+                }
                 if !window.contains(&i) {
                     continue;
                 }
                 let mut rule = Vec::new();
-                let lead = lead_rows(&agents, i, w, &name_of, &p, rows.len(), &mut rule);
+                let (lo, hi) = section_of(i);
+                let lead = lead_rows(&agents[lo..hi], i - lo, w, &name_of, &p, rows.len(), &mut rule);
                 let notes = notes_of(i);
                 let lead_shown = lead_fits(lead.len(), notes.len(), &a.work);
                 let jobs_room = job_room(lead.len(), notes.len(), lead_shown);
@@ -2140,13 +2198,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 }
                 rows_at.extend((from..rows.len()).map(|row| (row, i)));
             }
-            if all_agents.is_empty() && err.is_empty() {
-                rows.push(tc::seg(
-                    &[(p.dim.as_str(), "   no agents running".into())],
-                    w - 1,
-                ));
-            } else if !all_agents.is_empty() && agents.is_empty() {
-                rows.push(nothing(all_agents.len()));
+            // No floating agent shown left the loop before either was drawn.
+            if floating == 0 {
+                agents_tail(&mut rows);
+                floating_head(&mut rows);
             }
 
             rows.push(String::new());
