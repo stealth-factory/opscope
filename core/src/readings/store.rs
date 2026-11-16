@@ -112,6 +112,9 @@ pub enum Publish {
     Older,
     /// Larger than the widget's cap: kept by this pane only.
     TooLarge,
+    /// This pane's lease ran out and another pane holds it now: that
+    /// pane's answer is the one shared, and this one stays here.
+    TakenOver,
     /// It carried a token this pane holds: kept by this pane only.
     HeldSecret,
 }
@@ -122,6 +125,7 @@ impl Publish {
         match self {
             Publish::TooLarge => Some("too large to share"),
             Publish::HeldSecret => Some("not shared: it carried a token"),
+            Publish::TakenOver => Some("not shared: another pane took over"),
             Publish::Written | Publish::Older => None,
         }
     }
@@ -353,9 +357,13 @@ impl Store {
         if self.seen.get(key) == Some(&self.version) {
             return Ok(None);
         }
-        self.seen.insert(key.to_string(), self.version);
         self.reads += 1;
-        row(&self.conn, key).map_err(sql)
+        let found = row(&self.conn, key).map_err(sql)?;
+        // Marked read only once the row was: a busy read is asked again
+        // at this version, or a gate written before it would stay unseen
+        // until somebody wrote something else.
+        self.seen.insert(key.to_string(), self.version);
+        Ok(found)
     }
 
     /// Ask to be the pane that fetches `key`. `known` is when the reading
@@ -439,7 +447,7 @@ impl Store {
     /// opened: another build deleted it and started again. The pane should
     /// open the store again, or it shares with nobody.
     pub fn replaced(&self) -> bool {
-        identity(&self.path).map_or(true, |f| f != self.file)
+        !identity(&self.path).is_ok_and(|f| f == self.file)
     }
 
     /// Give a lease back without publishing, so the next pane need not
@@ -476,6 +484,20 @@ impl Store {
             )
             .optional()
             .map_err(sql)?;
+        // A fetch that outlived its lease does not write over the pane
+        // that took it over, which is fetching the same reading now.
+        let other: Option<u32> = tx
+            .query_row(
+                "SELECT holder FROM leases WHERE key = ?1 AND holder != ?2 AND expires_at > ?3",
+                params![key, self.me, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        if other.is_some() {
+            tx.commit().map_err(sql)?;
+            return Ok(Publish::TakenOver);
+        }
         let wrote = lease::supersedes(stored.as_ref().map(|r| r.0), s.taken_at, now);
         if wrote {
             let same = stored.as_ref().is_some_and(|r| r.1 == value && r.2 == good);
@@ -500,9 +522,14 @@ impl Store {
         }
         tx.execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
             .map_err(sql)?;
-        // Housekeeping rides on a write that was happening anyway.
-        tx.execute("DELETE FROM readings WHERE taken_at < ?1", [now - self.caps.forget_after])
-            .map_err(sql)?;
+        // Housekeeping rides on a write that was happening anyway. A row
+        // still holding every pane off - a gate or a refusal waiting for a
+        // reset further off than `forget_after` - stays until it lifts.
+        tx.execute(
+            "DELETE FROM readings WHERE taken_at < ?1 AND taken_at + held <= ?2",
+            params![now - self.caps.forget_after, now],
+        )
+        .map_err(sql)?;
         tx.execute("DELETE FROM leases WHERE expires_at < ?1", [now - 2.0 * lease::MAX_LEASE])
             .map_err(sql)?;
         tx.commit().map_err(sql)?;
@@ -921,6 +948,37 @@ mod tests {
         assert_eq!(a.publish("after", &reading(NOW, serde_json::json!(7)), &[], NOW).unwrap(), Publish::Written);
         b.begin_pass().unwrap();
         assert_eq!(b.load("after").unwrap().unwrap().value, Some(serde_json::json!(7)));
+    }
+
+    #[test]
+    fn a_late_answer_does_not_write_over_the_pane_that_took_over() {
+        let path = temp("late");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.me = 1;
+        b.me = 2;
+        assert_eq!(a.claim_for("k", None, NOW, 20.0).unwrap(), Got::Mine);
+        // a hung past its lease; b took the reading over and is asking.
+        assert_eq!(b.claim_for("k", None, NOW + 30.0, 20.0).unwrap(), Got::Mine);
+        assert_eq!(a.publish("k", &reading(NOW + 35.0, serde_json::json!(1)), &[], NOW + 35.0).unwrap(), Publish::TakenOver);
+        assert_eq!(b.holder("k", NOW + 36.0).unwrap(), Some(2), "the late answer took b's lease");
+        assert!(b.load("k").unwrap().is_none(), "the late answer was written");
+        assert_eq!(b.publish("k", &reading(NOW + 40.0, serde_json::json!(2)), &[], NOW + 40.0).unwrap(), Publish::Written);
+    }
+
+    #[test]
+    fn a_gate_outlasting_the_retention_stays_until_it_lifts() {
+        let path = temp("gate-kept");
+        let mut s = Store::open(&path).unwrap();
+        let mut gate = reading(NOW - lease::FORGET_AFTER - 1.0, serde_json::json!({"opscope_refusal": {}}));
+        gate.held = lease::FORGET_AFTER + 60.0;
+        s.publish("gate/core", &gate, &[], NOW - lease::FORGET_AFTER - 1.0).unwrap();
+        s.publish("new", &reading(NOW, serde_json::json!(1)), &[], NOW).unwrap();
+        let mut other = Store::open(&path).unwrap();
+        assert!(other.load("gate/core").unwrap().is_some(), "a gate still in force was forgotten");
+        s.publish("later", &reading(NOW + 120.0, serde_json::json!(1)), &[], NOW + 120.0).unwrap();
+        other.begin_pass().unwrap();
+        assert!(other.load("gate/core").unwrap().is_none(), "a lifted gate was kept past the retention");
     }
 
     #[test]

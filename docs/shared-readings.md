@@ -29,13 +29,13 @@ adopting it.
 | Call | What it does |
 |---|---|
 | `share(cache, name, caps, on, now)` | Open, keep or drop the store as `share_readings` says. Retries a store that would not open after `SHARE_RETRY` (10 min); reopens at once if the file was replaced under it. Call it at the start of each pass. |
-| `follow(cache)` | Note whether another pane wrote. Call every `FOLLOW_EVERY` (5 s) on the poller thread, so a reading another pane fetched shows up within seconds rather than a full `refresh` later. No network, and no row reads when nothing changed. |
-| `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:fingerprint`. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written. Bump `shape` when what is stored under `unit` changes. |
+| `follow(cache)` | Note whether another pane wrote. Call every `FOLLOW_EVERY` (5 s) on the poller thread. No network and no row reads, and it shows nothing by itself: run `take` after each follow tick, so a reading another pane fetched shows up within seconds rather than a full `refresh` later. |
+| `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:fingerprint`, with `:` and `%` in a plain part escaped so two sets of parts never make one key. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written. Bump `shape` when what is stored under `unit` changes. |
 | `take(cache, key, Policy)` | `Serve(value)`, `Fetch(ticket)` or `Waiting { by, have }`. Never blocks. |
 | `ticket.renew()` | Before each request of a long fetch. `false` means another pane took over: stop. |
-| `ticket.publish(value)` | Hold it for this pane's `ttl` and share it. Returns why it stayed with this pane, if it did (too large, or it carried a token). |
+| `ticket.publish(value)` | Hold it for this pane's `ttl` and share it. Returns why it stayed with this pane, if it did (too large, it carried a token, or its lease ran out and another pane took over - that pane's answer is the one shared). |
 | `ticket.refuse(why, until)` | The service said no. Every pane waits until `until` if the service named a time, else the doubling backoff. |
-| `gate(cache, bucket)` / `shut(cache, bucket, until, why)` | A rate limit that covers every reading of the service. `shut` when the service says the limit is spent; check `gate` before asking anything. |
+| `gate(cache, bucket)` / `shut(cache, bucket, until, why)` | A rate limit that covers every reading of the service. `shut` when the service says the limit is spent; check `gate` before asking anything. A gate `shut` could not write because the store was busy is written by this pane's next `gate`. |
 | `provenance(cache, key, now)` / `provenance_rows(found, now, width)` | Where the readings on screen came from. Empty when every one is this pane's and fresh. |
 | `sharing_rows(cache, found, now, width)` | The line a widget draws: `not sharing readings: <why>` when this pane is polling alone, else `provenance_rows`. |
 
@@ -62,6 +62,9 @@ than its stalest part:
 - `cached 7m ago · too many requests, next ask in 3m`
 - `… · too large to share`
 
+A store started again, compacted or emptied says so on the next row for one
+pass; the next `share` clears it.
+
 The "updated" time a widget shows must be the reading's own `taken_at`, not
 when this pane drew it.
 
@@ -82,7 +85,8 @@ upgrade.
 Whatever the widget publishes, as JSON, in a file only its owner can read.
 For a list widget that includes titles - pull requests, issues, runs - so the
 widget's README says so, sets `Caps::forget_after` to hours (rows nobody has
-published for that long are deleted; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
+published for that long are deleted, except a gate or refusal still holding
+every pane off; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
 `store::Caps` sets the file and per-reading size limits per widget.
 
 ## Observed format

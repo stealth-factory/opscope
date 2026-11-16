@@ -66,6 +66,9 @@ pub struct Cache {
     pub share_path: String,
     pub caps: store::Caps,
     pub share_tried: Option<f64>,
+    /// Set when [`sharing_rows`] has drawn the store's notice, so the next
+    /// [`share`] clears it: shown for one pass, not for the whole run.
+    pub notice_drawn: std::sync::atomic::AtomicBool,
 }
 
 /// How old a good reading must be before `r` asks for it again.
@@ -510,6 +513,7 @@ pub fn share(cache: &mut Cache, name: &str, caps: store::Caps, on: bool, now: f6
     }
     cache.share_path = store::path(name);
     cache.caps = caps;
+    clear_drawn_notice(cache);
     if cache.store.as_ref().is_some_and(|s| s.replaced()) {
         cache.store = None;
         cache.share_tried = None;
@@ -525,6 +529,15 @@ pub fn share(cache: &mut Cache, name: &str, caps: store::Caps, on: bool, now: f6
         }
     }
     follow(cache);
+}
+
+/// Forget the store's notice once [`sharing_rows`] has drawn it.
+fn clear_drawn_notice(cache: &mut Cache) {
+    if cache.notice_drawn.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if let Some(store) = cache.store.as_mut() {
+            store.notice.clear();
+        }
+    }
 }
 
 /// Note whether another pane has written since this pane last looked, so
@@ -558,7 +571,9 @@ pub fn fingerprint(parts: &[&str]) -> String {
 ///
 /// `secret` parts - a token, an account's credential - go into the key only
 /// as a fingerprint, and are registered with [`secret`] in the same step,
-/// so no reading containing one is ever written. `shape` is bumped when
+/// so no reading containing one is ever written. A `:` or `%` in a plain
+/// part is escaped, so `["a:b", "c"]` and `["a", "b:c"]` are two keys.
+/// `shape` is bumped when
 /// what is stored under `unit` changes, so an older build and a newer one
 /// keep separate rows rather than reading each other's.
 pub fn key(cache: &mut Cache, unit: &str, shape: u32, plain: &[&str], secrets: &[&str]) -> String {
@@ -568,7 +583,7 @@ pub fn key(cache: &mut Cache, unit: &str, shape: u32, plain: &[&str], secrets: &
     let mut out = format!("{unit}/{shape}");
     for p in plain {
         out.push(':');
-        out.push_str(p);
+        out.push_str(&p.replace('%', "%25").replace(':', "%3A"));
     }
     if !secrets.is_empty() {
         out.push(':');
@@ -773,13 +788,29 @@ pub fn gate(cache: &mut Cache, bucket: &str) -> Option<(f64, String)> {
     let key = format!("gate/{bucket}");
     let at = crate::now();
     pull(cache, &key, at, 0.0);
+    publish_pending_gate(cache, &key, at);
     let (_, value, _) = cache.live.get(&key)?;
     let (why, until) = refusal(value.as_ref()?)?;
     (until > at).then_some((until, why))
 }
 
+/// Share a gate [`shut`] could not write - the store was busy, or not
+/// open yet - so the other panes stop asking too, rather than only this
+/// one. A gate taken from the store, or already written, is left alone.
+fn publish_pending_gate(cache: &mut Cache, key: &str, at: f64) {
+    let Some((taken_at, Some(value), held)) = cache.live.get(key).cloned() else {
+        return;
+    };
+    let written = cache.shared.get(key).is_some_and(|s| s.0 == taken_at);
+    let lifted = refusal(&value).is_none_or(|(_, until)| until <= at);
+    if cache.store.is_some() && !written && !lifted {
+        settle(cache, key, taken_at, Some(value), held);
+    }
+}
+
 /// Stop every pane of this widget asking `bucket` until `until`: the
-/// service said its limit is spent and when it resets.
+/// service said its limit is spent and when it resets. A store busy at
+/// that moment gets the gate on this pane's next [`gate`].
 pub fn shut(cache: &mut Cache, bucket: &str, until: f64, why: &str) {
     let key = format!("gate/{bucket}");
     let at = crate::now();
@@ -808,12 +839,14 @@ pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
     let (taken_at, value, held) = cache.live.get(key)?;
     let me = cache.store.as_ref().map(|s| s.me);
     let by = cache.shared.get(key).map(|s| s.1).filter(|by| Some(*by) != me && *by != 0);
-    let refused = value.as_ref().and_then(refusal).filter(|(_, until)| *until > now);
-    let (taken_at, by) = match (&refused, cache.good.get(key)) {
-        // A refusal says how old the reading still on screen is.
-        (Some(_), Some((at, _))) => (*at, by),
-        _ => (*taken_at, by),
+    let refusal_held = value.as_ref().and_then(refusal);
+    // A refusal, in force or lifted while the next ask is out, says how old
+    // the reading still on screen is, not when it was refused.
+    let taken_at = match (&refusal_held, cache.good.get(key)) {
+        (Some(_), Some((at, _))) => *at,
+        _ => *taken_at,
     };
+    let refused = refusal_held.filter(|(_, until)| *until > now);
     Some(Provenance {
         taken_at,
         by,
@@ -839,7 +872,7 @@ fn ago(seconds: f64) -> String {
 /// not sharing, when it meant to and cannot, else [`provenance_rows`]. Drawn
 /// where the freshness line goes, so a pane polling alone says so in the
 /// same place another says who fetched its numbers (OPS-282). A store
-/// started again or emptied says so there once too.
+/// started again or emptied says so there too, until the next [`share`].
 pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize) -> Vec<String> {
     if cache.store.is_none() && !cache.sharing_off.is_empty() {
         return crate::wrap_words(&format!("not sharing readings: {}", cache.sharing_off), width.max(1));
@@ -847,6 +880,7 @@ pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize)
     let mut rows = provenance_rows(found, now, width);
     if let Some(notice) = cache.store.as_ref().map(|s| s.notice.as_str()).filter(|n| !n.is_empty()) {
         rows.extend(crate::wrap_words(notice, width.max(1)));
+        cache.notice_drawn.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     rows
 }
@@ -877,7 +911,9 @@ pub fn provenance_rows(found: &[Provenance], now: f64, width: usize) -> Vec<Stri
     let mut text = if refused.is_some() || asking.is_some() || stale {
         format!("cached {age} ago")
     } else {
-        match oldest.by.or(other) {
+        // The oldest reading's own fetcher: another pane's newer reading
+        // must not lend it a pane that never fetched it.
+        match oldest.by {
             Some(pid) => format!("fetched {age} ago by pane {pid}"),
             None => format!("fetched {age} ago by this pane"),
         }
@@ -1249,6 +1285,73 @@ mod tests {
         let (until, why) = gate(&mut b, "core").expect("the other pane did not see the limit");
         assert_eq!(why, "rate limit spent");
         assert!(until > crate::now() + 290.0);
+    }
+
+    #[test]
+    fn a_gate_written_while_the_store_was_busy_reaches_the_other_panes() {
+        let (mut a, mut b) = two_panes("gate-busy");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        other.execute_batch("ROLLBACK").unwrap();
+        follow(&mut b);
+        assert_eq!(gate(&mut b, "core"), None, "the gate was written through an exclusive lock");
+        assert!(gate(&mut a, "core").is_some());
+        follow(&mut b);
+        assert!(gate(&mut b, "core").is_some(), "a gate that met a busy store never reached the other pane");
+    }
+
+    #[test]
+    fn a_gate_read_while_the_store_was_busy_is_read_again() {
+        let (mut a, mut b) = two_panes("gate-reread");
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        follow(&mut b);
+        assert_eq!(gate(&mut b, "core"), None);
+        other.execute_batch("ROLLBACK").unwrap();
+        follow(&mut b);
+        assert!(gate(&mut b, "core").is_some(), "a busy read marked the gate as seen");
+    }
+
+    #[test]
+    fn a_lifted_refusal_still_dates_the_reading_on_screen() {
+        let mut c = Cache::default();
+        let now = 10_000.0;
+        c.good.insert("k".into(), (now - 3600.0, serde_json::json!(1)));
+        c.live.insert("k".into(), (now - 121.0, Some(refusal_value("too many requests", now - 1.0)), 120.0));
+        let p = provenance(&c, "k", now).unwrap();
+        assert_eq!(p.taken_at, now - 3600.0);
+        assert_eq!(p.refused, None);
+    }
+
+    #[test]
+    fn the_oldest_reading_is_dated_by_the_pane_that_fetched_it() {
+        let now = 10_000.0;
+        let mine = Provenance { taken_at: now - 300.0, by: None, stale: false, asking: None, refused: None, unshared: None };
+        let theirs = Provenance { taken_at: now - 10.0, by: Some(42), ..mine.clone() };
+        assert_eq!(provenance_rows(&[mine, theirs], now, 80), ["fetched 5m ago by this pane"]);
+    }
+
+    #[test]
+    fn a_colon_in_a_plain_part_cannot_make_two_readings_one_key() {
+        let mut c = Cache::default();
+        assert_ne!(key(&mut c, "u", 1, &["a:b", "c"], &[]), key(&mut c, "u", 1, &["a", "b:c"], &[]));
+        assert_ne!(key(&mut c, "u", 1, &["a%3Ab"], &[]), key(&mut c, "u", 1, &["a:b"], &[]));
+        assert_eq!(key(&mut c, "u", 1, &["host:8080"], &[]), "u/1:host%3A8080");
+    }
+
+    #[test]
+    fn a_store_notice_is_shown_for_one_pass() {
+        let (mut a, _b) = two_panes("notice");
+        a.store.as_mut().unwrap().notice = "shared store started again: damaged".into();
+        clear_drawn_notice(&mut a);
+        assert!(sharing_rows(&a, &[], 0.0, 80).iter().any(|r| r.contains("started again")), "cleared before it was drawn");
+        // The next pass's `share` clears what this one drew.
+        clear_drawn_notice(&mut a);
+        assert!(sharing_rows(&a, &[], 0.0, 80).is_empty(), "the notice came back on the next pass");
     }
 
     #[test]
