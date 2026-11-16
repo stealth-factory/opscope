@@ -86,8 +86,10 @@ Whatever the widget publishes, as JSON, in a file only its owner can read.
 For a list widget that includes titles - pull requests, issues, runs - so the
 widget's README says so, sets `Caps::forget_after` to hours (rows nobody has
 published for that long are deleted, except a gate or refusal still holding
-every pane off; the deleting rides on the next publish, so it is a lower bound
-on how long a row lasts, not a deadline; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
+every pane off; it is the age at which routine cleanup deletes a row, not a
+deadline, since the deleting rides on the next publish, and not a promise
+either, since a file still over its size limit after vacuuming is emptied of
+everything but gates in force; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
 `store::Caps` sets the file and per-reading size limits per widget.
 
 ## Observed format
