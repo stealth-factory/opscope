@@ -1001,10 +1001,10 @@ fn fetch_runs_for(
             urlencoding_lite(&created)
         );
         let res = rest_get(&path, tok, rate, rest_base)?;
+        // When GitHub last answered for this repo: its last page, not when
+        // the pass finished or the pane drew it.
+        fetched_at = tc::now();
         if page == 1 {
-            // The reading is as old as its first page: what GitHub said
-            // then, not when the walk finished or the pane drew it.
-            fetched_at = tc::now();
             total = res["total_count"].as_i64().unwrap_or(0);
         }
         let got = res["workflow_runs"].as_array().cloned().unwrap_or_default();
@@ -1035,15 +1035,16 @@ fn fetch_runs_for(
     Ok((out, note, fetched_at))
 }
 
-/// When the board's figures were fetched: the oldest repo reading in it,
-/// since a board is only as current as its stalest part. Zero when no repo
-/// answered, which the pane draws as "--" rather than as a fresh poll.
+/// When the newest figure on the board came back from GitHub: what
+/// "updated … ago" says. Anything older than its hold is the freshness
+/// line's to say (OPS-282), not this one's. Zero when no repo answered,
+/// which the pane draws as "--" rather than as a fresh poll.
 fn board_fetched(stamps: &[f64]) -> f64 {
     stamps
         .iter()
         .copied()
         .filter(|t| *t > 0.0)
-        .reduce(f64::min)
+        .reduce(f64::max)
         .unwrap_or(0.0)
 }
 
@@ -3151,9 +3152,9 @@ mod tests {
     }
 
     #[test]
-    fn the_board_is_stamped_with_its_oldest_reading_not_when_it_was_applied() {
+    fn the_board_is_stamped_with_its_newest_reading_not_when_it_was_applied() {
         // Three repos answered at 100, 90 and 120; one never answered.
-        assert_eq!(board_fetched(&[100.0, 90.0, 0.0, 120.0]), 90.0);
+        assert_eq!(board_fetched(&[100.0, 90.0, 0.0, 120.0]), 120.0);
         assert_eq!(board_fetched(&[]), 0.0, "nothing fetched is not a fresh poll");
         let mut live = State { window_hours: 24, ..Default::default() };
         apply_pass(
@@ -3167,7 +3168,7 @@ mod tests {
         );
         // Applied well after the fetch, the pane still says when GitHub
         // answered, which is what "updated … ago" is measured from.
-        assert_eq!(live.fetched, 90.0);
+        assert_eq!(live.fetched, 100.0);
     }
 
     #[test]
