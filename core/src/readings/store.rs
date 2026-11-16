@@ -582,12 +582,16 @@ impl Store {
         if self.size() <= self.caps.shrink_at() {
             return Ok(());
         }
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE; DELETE FROM readings; DELETE FROM leases; COMMIT;")
-            .map_err(|e| {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                sql(e)
-            })?;
+        // A gate still in force stays: it is a few bytes, and losing it
+        // would let every pane ask a service that said to wait.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
+        tx.execute(
+            "DELETE FROM readings WHERE NOT (key LIKE 'gate/%' AND taken_at + held > ?1)",
+            [crate::now()],
+        )
+        .map_err(sql)?;
+        tx.execute("DELETE FROM leases", []).map_err(sql)?;
+        tx.commit().map_err(sql)?;
         self.conn.execute_batch("VACUUM").map_err(sql)?;
         self.writes += 1;
         self.seen.clear();
@@ -923,6 +927,23 @@ mod tests {
         let mut b = Store::open(&path).unwrap();
         assert!(b.notice.is_empty(), "{}", b.notice);
         assert_eq!(b.load("k").unwrap().unwrap().value, Some(serde_json::json!({"u": 1})));
+    }
+
+    #[test]
+    fn a_store_emptied_for_size_keeps_a_gate_still_in_force() {
+        let path = temp("empty-keeps-gate");
+        let mut a = Store::open(&path).unwrap();
+        a.publish("gate/core", &reading(NOW, serde_json::json!({"opscope_refusal": {}})), &[], NOW).unwrap();
+        let body = serde_json::json!({ "u": "x".repeat(1024 * 1024) });
+        for i in 0..9 {
+            let mut r = reading(NOW, body.clone());
+            r.good = None;
+            a.publish(&format!("k{i}"), &r, &[], NOW).unwrap();
+        }
+        assert!(a.notice.contains("emptied"), "{}", a.notice);
+        let mut other = Store::open(&path).unwrap();
+        assert!(other.load("gate/core").unwrap().is_some(), "emptying the store dropped a gate still in force");
+        assert!(other.load("k0").unwrap().is_none());
     }
 
     #[test]

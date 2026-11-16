@@ -30,7 +30,7 @@ adopting it.
 |---|---|
 | `share(cache, name, caps, on, now)` | Open, keep or drop the store as `share_readings` says. Retries a store that would not open after `SHARE_RETRY` (10 min); reopens at once if the file was replaced under it. Call it at the start of each pass. |
 | `follow(cache)` | Note whether another pane wrote. Call every `FOLLOW_EVERY` (5 s) on the poller thread. No network and no row reads, and it shows nothing by itself: run `take` after each follow tick, so a reading another pane fetched shows up within seconds rather than a full `refresh` later. |
-| `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:fingerprint`, with `:` and `%` in a plain part escaped so two sets of parts never make one key. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written. Bump `shape` when what is stored under `unit` changes. |
+| `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:fingerprint`, with `:` and `%` in a plain part escaped so two sets of parts never make one key. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written. Only tokens of eight bytes or more are looked for: a shorter one would match ordinary text, so it is not a secret this check can keep. Bump `shape` when what is stored under `unit` changes. |
 | `take(cache, key, Policy)` | `Serve(value)`, `Fetch(ticket)` or `Waiting { by, have }`. Never blocks. |
 | `ticket.renew()` | Before each request of a long fetch. `false` means another pane took over: stop. |
 | `ticket.publish(value)` | Hold it for this pane's `ttl` and share it. Returns why it stayed with this pane, if it did (too large, it carried a token, or its lease ran out and another pane took over - that pane's answer is the one shared). |
@@ -86,7 +86,8 @@ Whatever the widget publishes, as JSON, in a file only its owner can read.
 For a list widget that includes titles - pull requests, issues, runs - so the
 widget's README says so, sets `Caps::forget_after` to hours (rows nobody has
 published for that long are deleted, except a gate or refusal still holding
-every pane off; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
+every pane off; the deleting rides on the next publish, so it is a lower bound
+on how long a row lasts, not a deadline; agent-usage keeps a day), and `share_readings: false` keeps everything in the pane.
 `store::Caps` sets the file and per-reading size limits per widget.
 
 ## Observed format

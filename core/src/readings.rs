@@ -530,6 +530,9 @@ pub fn share(cache: &mut Cache, name: &str, caps: store::Caps, on: bool, now: f6
             Ok(s) => {
                 cache.store = Some(s);
                 cache.sharing_off.clear();
+                // A gate this pane wrote to a store it no longer has open
+                // is written again to this one by the next `gate`.
+                cache.shared.retain(|key, _| !key.starts_with("gate/"));
             }
             Err(why) => cache.sharing_off = why,
         }
@@ -1380,6 +1383,24 @@ mod tests {
         let p = provenance(&a, "k", at).unwrap();
         assert_eq!(p.by, Some(42));
         assert_eq!(p.unshared, None, "a reading pane 42 shared still said it was too large to share");
+    }
+
+    #[test]
+    fn a_gate_reaches_a_store_started_again_under_it() {
+        use crate::statefile::tests::{env_lock, temp_dir, EnvVar};
+        let _guard = env_lock();
+        let dir = temp_dir("gate-replaced");
+        let _xdg = EnvVar::set("XDG_STATE_HOME", Some(dir.as_os_str()));
+        let mut a = Cache::default();
+        share(&mut a, "gate-replaced", store::Caps::default(), true, 1_000.0);
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        let path = store::path("gate-replaced");
+        std::fs::remove_file(&path).unwrap();
+        let _ = Store::open(&path).unwrap();
+        share(&mut a, "gate-replaced", store::Caps::default(), true, 1_010.0);
+        assert!(gate(&mut a, "core").is_some());
+        let mut b = Store::open(&path).unwrap();
+        assert!(b.load("gate/core").unwrap().is_some(), "the gate never reached the store started again");
     }
 
     #[test]
