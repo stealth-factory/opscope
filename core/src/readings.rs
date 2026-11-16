@@ -29,7 +29,7 @@ use std::collections::HashMap;
 pub mod lease;
 pub mod store;
 
-pub use store::{Got, Shared, Store};
+pub use store::{Caps, Got, Publish, Shared, Store};
 
 /// Readings held between passes, and the store they are shared through.
 #[derive(Default)]
@@ -56,6 +56,22 @@ pub struct Cache {
     pub shared: HashMap<String, (f64, u32)>,
     /// Every token this pass holds. No shared reading may contain one.
     pub secrets: Vec<String>,
+    /// key -> the pane fetching it now, as last seen by `take`, for the
+    /// `pane 48213 asking now` a stale reading says.
+    pub asking: HashMap<String, u32>,
+    /// key -> why the reading this pane fetched stayed with it: too large
+    /// to share, or it carried a token.
+    pub unshared: HashMap<String, &'static str>,
+    /// The store [`share`] opens, its limits, and when it last tried.
+    pub share_path: String,
+    pub caps: store::Caps,
+    pub share_tried: Option<f64>,
+    /// Set when [`sharing_rows`] has drawn the store's notice, so the next
+    /// [`share`] clears it: shown for one pass, not for the whole run.
+    pub notice_drawn: std::sync::atomic::AtomicBool,
+    /// Keys whose [`set_live`] change the store was too busy to take; the
+    /// next [`pull`] of each writes it.
+    pub annotate_pending: std::collections::HashSet<String>,
 }
 
 /// How old a good reading must be before `r` asks for it again.
@@ -142,6 +158,7 @@ where
     }
     // Stale here. Before asking, ask the other panes: one of them may have
     // just fetched it, or be fetching it now.
+    let mut claimed_at = None;
     if let Some(store) = cache.store.as_mut() {
         let known = cache
             .live
@@ -149,7 +166,7 @@ where
             .map(|e| e.0)
             .or_else(|| cache.shared.get(key).map(|s| s.0));
         match store.claim(key, known, at) {
-            Ok(store::Got::Mine) => {}
+            Ok(store::Got::Mine) => claimed_at = Some(at),
             Ok(store::Got::Fresh(s)) => {
                 adopt_row(cache, key, s, at, ttl);
                 if let Some((_, value, _)) = cache.live.get(key) {
@@ -166,14 +183,22 @@ where
                 // opened together would each ask Claude at once. Wait for
                 // the one that is asking instead; its fetch is no slower
                 // than this pane's would have been.
-                if let Some(value) = wait_for_holder(cache, key, ttl) {
+                if let Some(value) = wait_for_holder(cache, key, ttl, &mut claimed_at) {
                     return value;
                 }
             }
+            // Another pane mid-write past `BUSY`: not this pass. Fetch
+            // alone this once rather than give up sharing for ten minutes,
+            // which is the moment sharing matters most.
+            Err(why) if store::busy(&why) => {}
             Err(why) => stop_sharing(cache, &why),
         }
     }
     let value = fetch();
+    // The reading's own time is when the answer arrived, not when it was
+    // asked for: a fetch slower than the TTL would otherwise land already
+    // stale, and be asked for again on the next pass (OPS-284).
+    let at = crate::now();
     let held = if value.is_some() {
         cache.fails.remove(key);
         ttl
@@ -199,14 +224,27 @@ where
             fetched_by: store.me,
         };
         let me = store.me;
-        match store.publish(key, &s, &cache.secrets, at) {
-            Ok(_) => {
+        match store.publish_since(key, &s, &cache.secrets, at, claimed_at) {
+            Ok(done) => {
                 cache.shared.insert(key.to_string(), (at, me));
+                note_unshared(cache, key, done);
             }
+            Err(why) if store::busy(&why) => {}
             Err(why) => stop_sharing(cache, &why),
         }
     }
     value
+}
+
+fn note_unshared(cache: &mut Cache, key: &str, done: store::Publish) {
+    match done.unshared() {
+        Some(why) => {
+            cache.unshared.insert(key.to_string(), why);
+        }
+        None => {
+            cache.unshared.remove(key);
+        }
+    }
 }
 
 /// Whether a held value is a reading, rather than a refusal carrying its
@@ -226,8 +264,14 @@ const WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(500);
 /// `None` when this pane should fetch after all: the lease ran out or was
 /// given back without a reading - a reading too large or holding a token
 /// is kept by the pane that fetched it - or the store failed. A lease
-/// lasts `LEASE` at most, so this waits no longer than that.
-fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serde_json::Value>> {
+/// lasts `LEASE` at most, so this waits no longer than that. When this
+/// pane takes the lease over, `claimed_at` says when.
+fn wait_for_holder(
+    cache: &mut Cache,
+    key: &str,
+    ttl: f64,
+    claimed_at: &mut Option<f64>,
+) -> Option<Option<serde_json::Value>> {
     let until = crate::now() + lease::LEASE + 5.0;
     loop {
         std::thread::sleep(WAIT_STEP);
@@ -239,7 +283,10 @@ fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serd
                 return cache.live.get(key).map(|e| e.1.clone());
             }
             // Ours now: the holder went without publishing.
-            Ok(store::Got::Mine) => return None,
+            Ok(store::Got::Mine) => {
+                *claimed_at = Some(at);
+                return None;
+            }
             Ok(store::Got::Held(_)) if at < until => {}
             Ok(store::Got::Held(_)) => return None,
             // Another pane mid-write: look again.
@@ -255,12 +302,16 @@ fn wait_for_holder(cache: &mut Cache, key: &str, ttl: f64) -> Option<Option<serd
 /// Take what another pane has published under `key` since this pane last
 /// looked. Costs nothing when nobody has written.
 fn pull(cache: &mut Cache, key: &str, at: f64, ttl: f64) {
+    if cache.annotate_pending.remove(key) {
+        annotate_shared(cache, key);
+    }
     let Some(store) = cache.store.as_mut() else {
         return;
     };
     match store.load(key) {
         Ok(Some(s)) => adopt_row(cache, key, s, at, ttl),
         Ok(None) => {}
+        Err(why) if store::busy(&why) => {}
         Err(why) => stop_sharing(cache, &why),
     }
 }
@@ -275,14 +326,19 @@ fn pull(cache: &mut Cache, key: &str, at: f64, ttl: f64) {
 /// The reading this pane already holds, changed since it was taken, is
 /// taken again: `set_live` writes a refusal's reason, or Codex's inventory,
 /// in after the publish, and a pane that read between the two would
-/// otherwise keep the bare refusal for the whole backoff.
+/// otherwise keep the bare refusal for the whole backoff. This pane's own
+/// reading is never taken back that way: its copy is the one `set_live`
+/// changed, and the stored one may be behind it.
 fn adopt_row(cache: &mut Cache, key: &str, s: store::Shared, at: f64, ttl: f64) {
     let local = cache.live.get(key).map(|e| e.0);
     let same = local == Some(s.taken_at)
         && cache.shared.get(key) == Some(&(s.taken_at, s.fetched_by));
+    let mine = cache.store.as_ref().is_some_and(|st| st.me == s.fetched_by);
     if same {
-        if let Some(entry) = cache.live.get_mut(key) {
-            entry.1 = s.value.clone();
+        if !mine {
+            if let Some(entry) = cache.live.get_mut(key) {
+                entry.1 = s.value.clone();
+            }
         }
     } else if lease::adopt(local, s.taken_at, at) {
         let held = if is_reading(&s.value) { ttl } else { s.held };
@@ -293,6 +349,9 @@ fn adopt_row(cache: &mut Cache, key: &str, s: store::Shared, at: f64, ttl: f64) 
             cache.fails.insert(key.to_string(), s.fails);
         }
         cache.shared.insert(key.to_string(), (s.taken_at, s.fetched_by));
+        // Why this pane's own reading stayed here no longer describes the
+        // one on screen, which another pane did share.
+        cache.unshared.remove(key);
     }
     if let Some((good_at, good)) = s.good {
         if cache.good.get(key).is_none_or(|(l, _)| good_at > *l) {
@@ -315,15 +374,28 @@ pub fn set_live(cache: &mut Cache, key: &str, value: serde_json::Value) {
     let Some((when, _, held)) = cache.live.get(key).cloned() else {
         return;
     };
-    cache.live.insert(key.to_string(), (when, Some(value.clone()), held));
+    cache.live.insert(key.to_string(), (when, Some(value), held));
+    annotate_shared(cache, key);
+}
+
+/// Write this pane's held value under `key` over its shared copy, when this
+/// pane fetched it. A busy store leaves it for the next [`pull`].
+fn annotate_shared(cache: &mut Cache, key: &str) {
+    let Some((when, Some(value), _)) = cache.live.get(key).cloned() else {
+        return;
+    };
     let Some(store) = cache.store.as_mut() else {
         return;
     };
     if cache.shared.get(key) != Some(&(when, store.me)) {
         return;
     }
-    if let Err(why) = store.annotate(key, when, &value, &cache.secrets) {
-        stop_sharing(cache, &why);
+    match store.annotate(key, when, &value, &cache.secrets) {
+        Ok(_) => {}
+        Err(why) if store::busy(&why) => {
+            cache.annotate_pending.insert(key.to_string());
+        }
+        Err(why) => stop_sharing(cache, &why),
     }
 }
 
@@ -447,6 +519,474 @@ pub fn remember_refusal(cache: &mut Cache, key: &str, why: &str) {
         return;
     }
     set_live(cache, key, serde_json::json!({"why": why}));
+}
+
+// ── readings that take many requests (OPS-284) ──────────────────────────
+
+/// How long to wait after a store could not be opened before trying again:
+/// a permission or a full disk does not fix itself in a pass.
+pub const SHARE_RETRY: f64 = 600.0;
+
+/// How often a pane looks for a reading another pane published, between
+/// its own passes. Costs one page of the file's header and no network when
+/// nothing changed; a widget's poller calls [`follow`] this often.
+pub const FOLLOW_EVERY: f64 = 5.0;
+
+/// Open, keep or drop this widget's store, as `share_readings` asks, and
+/// note whether another pane has written since the last call.
+///
+/// `name` is the widget's own: one file per widget, never shared with
+/// another widget. A store that will not open is tried again after
+/// `SHARE_RETRY`; a store whose file was replaced under it - another build
+/// started it again - is opened again at once, or this pane would share
+/// with nobody.
+pub fn share(cache: &mut Cache, name: &str, caps: store::Caps, on: bool, now: f64) {
+    if !on {
+        cache.store = None;
+        cache.sharing_off = "share_readings is off".into();
+        // Turned back on, it opens at once: the retry wait is for a store
+        // that would not open, not for one the reader closed.
+        cache.share_tried = None;
+        return;
+    }
+    cache.share_path = store::path(name);
+    cache.caps = caps;
+    clear_drawn_notice(cache);
+    if cache.store.as_ref().is_some_and(|s| s.replaced()) {
+        cache.store = None;
+        cache.share_tried = None;
+    }
+    if cache.store.is_none() && cache.share_tried.is_none_or(|t| now - t >= SHARE_RETRY) {
+        cache.share_tried = Some(now);
+        match Store::open_with(&cache.share_path, caps) {
+            Ok(s) => {
+                cache.store = Some(s);
+                cache.sharing_off.clear();
+                // A gate this pane wrote to a store it no longer has open
+                // is written again to this one by the next `gate`.
+                cache.shared.retain(|key, _| !key.starts_with("gate/"));
+            }
+            Err(why) => cache.sharing_off = why,
+        }
+    }
+    follow(cache);
+}
+
+/// Forget the store's notice once [`sharing_rows`] has drawn it.
+fn clear_drawn_notice(cache: &mut Cache) {
+    if cache.notice_drawn.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if let Some(store) = cache.store.as_mut() {
+            store.notice.clear();
+        }
+    }
+}
+
+/// Note whether another pane has written since this pane last looked, so
+/// the next `take` reads only the rows that changed. Call it every
+/// `FOLLOW_EVERY` on the poller thread, never the render thread.
+pub fn follow(cache: &mut Cache) {
+    if let Some(store) = cache.store.as_mut() {
+        match store.begin_pass() {
+            Ok(()) => {}
+            Err(why) if store::busy(&why) => {}
+            Err(why) => stop_sharing(cache, &why),
+        }
+    }
+}
+
+/// A short, stable fingerprint of `parts`: SHA-256 over a fixed prefix and
+/// the parts, the first 16 bytes in hex. The same on every build and every
+/// toolchain, which `std`'s hasher does not promise.
+pub fn fingerprint(parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"opscope-readings");
+    for p in parts {
+        h.update([0u8]);
+        h.update(p.as_bytes());
+    }
+    h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The key of one reading: `unit/shape:plain…:%sfingerprint`.
+///
+/// `secret` parts - a token, an account's credential - go into the key only
+/// as a fingerprint, and are registered with [`secret`] in the same step,
+/// so no reading containing one is ever written. A `:` or `%` in a plain
+/// part is escaped, so `["a:b", "c"]` and `["a", "b:c"]` are two keys, and
+/// the fingerprint is marked `%s`, which no escaped plain part can contain,
+/// so a plain part equal to a fingerprint is not that fingerprint.
+/// `shape` is bumped when
+/// what is stored under `unit` changes, so an older build and a newer one
+/// keep separate rows rather than reading each other's.
+pub fn key(cache: &mut Cache, unit: &str, shape: u32, plain: &[&str], secrets: &[&str]) -> String {
+    for s in secrets {
+        secret(cache, s);
+    }
+    let mut out = format!("{unit}/{shape}");
+    for p in plain {
+        out.push(':');
+        out.push_str(&p.replace('%', "%25").replace(':', "%3A"));
+    }
+    if !secrets.is_empty() {
+        out.push_str(":%s");
+        out.push_str(&fingerprint(secrets));
+    }
+    out
+}
+
+/// How one reading is held and asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Policy {
+    /// This pane's own hold for a good reading.
+    pub ttl: f64,
+    /// One request of the fetch: its timeout and a margin. The lease is
+    /// renewed for this long before each request, so a pane that dies
+    /// mid-fetch holds the reading for one request, not a whole pass.
+    pub lease_for: f64,
+    /// Whether `r` asks for it again; false for a reading keyed on a file.
+    pub askable: bool,
+}
+
+impl Policy {
+    pub fn new(ttl: f64, lease_for: f64) -> Policy {
+        Policy { ttl, lease_for, askable: true }
+    }
+}
+
+/// What a pane should do about one reading.
+pub enum Take<'a> {
+    /// Show this: fresh here, or just published by another pane. A
+    /// refusal is served too, for its backoff; [`refusal`] reads it.
+    Serve(Option<serde_json::Value>),
+    /// Fetch it: this pane holds the lease. Renew it before each request,
+    /// then publish or refuse. Dropped, it gives the lease back.
+    Fetch(Ticket<'a>),
+    /// Another pane is fetching it (`by`, 0 when unknown), or the store was
+    /// busy this pass. Show what this pane has, and look again next pass.
+    Waiting { by: u32, have: Option<serde_json::Value> },
+}
+
+/// Decide what to do about `key`, without ever waiting on another pane.
+///
+/// The non-blocking counterpart of `cached`, for a fetch that is many
+/// requests and may take minutes: the pane keeps drawing what it has while
+/// another pane asks.
+pub fn take<'a>(cache: &'a mut Cache, key: &str, p: Policy) -> Take<'a> {
+    let at = crate::now();
+    pull(cache, key, at, p.ttl);
+    let have = |cache: &Cache| cache.live.get(key).and_then(|e| e.1.clone());
+    if let Some((when, value, held)) = cache.live.get(key) {
+        let asked = p.askable
+            && is_reading(value)
+            && *when < cache.asked_at
+            && cache.asked_at - when >= cache.asked_floor(p.ttl);
+        if at - when < *held && !asked {
+            cache.asking.remove(key);
+            return Take::Serve(value.clone());
+        }
+    }
+    let mut claimed = None;
+    if let Some(store) = cache.store.as_mut() {
+        let known = cache.live.get(key).map(|e| e.0).or_else(|| cache.shared.get(key).map(|s| s.0));
+        match store.claim_for(key, known, at, p.lease_for) {
+            Ok(store::Got::Mine) => claimed = Some(at),
+            Ok(store::Got::Fresh(s)) => {
+                adopt_row(cache, key, s, at, p.ttl);
+                cache.asking.remove(key);
+                return Take::Serve(have(cache));
+            }
+            Ok(store::Got::Held(by)) => {
+                cache.asking.insert(key.to_string(), by);
+                return Take::Waiting { by, have: have(cache) };
+            }
+            Err(why) if store::busy(&why) => return Take::Waiting { by: 0, have: have(cache) },
+            Err(why) => stop_sharing(cache, &why),
+        }
+    }
+    cache.asking.remove(key);
+    Take::Fetch(Ticket { cache, key: key.to_string(), policy: p, claimed, done: false })
+}
+
+impl Cache {
+    /// `r`'s floor for a reading held `ttl`: thirty seconds, or the hold
+    /// itself when that is shorter.
+    fn asked_floor(&self, ttl: f64) -> f64 {
+        ASKED_FLOOR.min(ttl)
+    }
+}
+
+/// The lease on one reading while this pane fetches it.
+pub struct Ticket<'a> {
+    cache: &'a mut Cache,
+    key: String,
+    policy: Policy,
+    /// When this pane claimed the lease, if it did.
+    claimed: Option<f64>,
+    done: bool,
+}
+
+impl Ticket<'_> {
+    /// Hold the lease for one more request. `false` when it ran out and
+    /// another pane took it: stop, and show what that pane publishes.
+    pub fn renew(&mut self) -> bool {
+        if self.claimed.is_none() {
+            return true;
+        }
+        let Some(store) = self.cache.store.as_mut() else {
+            return true;
+        };
+        match store.renew(&self.key, crate::now(), self.policy.lease_for) {
+            Ok(mine) => mine,
+            Err(why) if store::busy(&why) => true,
+            Err(why) => {
+                stop_sharing(self.cache, &why);
+                true
+            }
+        }
+    }
+
+    /// Hold `value` for this pane's `ttl` and share it, stamped now - when
+    /// the answer arrived. Returns why it stayed with this pane, if it did.
+    pub fn publish(mut self, value: serde_json::Value) -> Option<&'static str> {
+        self.done = true;
+        self.cache.fails.remove(&self.key);
+        let at = crate::now();
+        self.cache.good.insert(self.key.clone(), (at, value.clone()));
+        settle(self.cache, &self.key, at, Some(value), self.policy.ttl, self.claimed)
+    }
+
+    /// The service said no. Every pane waits until `until` when the
+    /// service named a time (a rate limit's reset), else for the doubling
+    /// backoff, never longer than this reading's own `ttl` would allow.
+    pub fn refuse(mut self, why: &str, until: Option<f64>) {
+        self.done = true;
+        let at = crate::now();
+        let n = {
+            let n = self.cache.fails.entry(self.key.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        let held = match until {
+            Some(u) if u > at => u - at,
+            _ => backoff(n).min(self.policy.ttl.max(BACKOFF_FROM)),
+        };
+        let value = refusal_value(why, at + held);
+        settle(self.cache, &self.key, at, Some(value), held, self.claimed);
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        if self.done || self.claimed.is_none() {
+            return;
+        }
+        // Not published: an error, a panic unwinding, a pass cut short.
+        // Give the lease back so the next pane need not wait it out.
+        if let Some(store) = self.cache.store.as_mut() {
+            let _ = store.release(&self.key);
+        }
+    }
+}
+
+fn refusal_value(why: &str, until: f64) -> serde_json::Value {
+    serde_json::json!({"opscope_refusal": {"why": why, "until": until}})
+}
+
+/// A refusal `Ticket::refuse` stored: why, and until when no pane asks.
+pub fn refusal(value: &serde_json::Value) -> Option<(String, f64)> {
+    let r = value.get("opscope_refusal")?;
+    Some((r["why"].as_str().unwrap_or("").to_string(), r["until"].as_f64().unwrap_or(0.0)))
+}
+
+/// Put a fetched reading (or refusal) in this pane and in the store.
+/// `claimed_at` is when this pane claimed the lease for it, if it did.
+fn settle(
+    cache: &mut Cache,
+    key: &str,
+    at: f64,
+    value: Option<serde_json::Value>,
+    held: f64,
+    claimed_at: Option<f64>,
+) -> Option<&'static str> {
+    cache.live.insert(key.to_string(), (at, value.clone(), held));
+    let store = cache.store.as_mut()?;
+    let s = store::Shared {
+        taken_at: at,
+        held,
+        value,
+        fails: cache.fails.get(key).copied().unwrap_or(0),
+        good: cache.good.get(key).cloned(),
+        fetched_by: store.me,
+    };
+    let me = store.me;
+    match store.publish_since(key, &s, &cache.secrets, at, claimed_at) {
+        Ok(done) => {
+            cache.shared.insert(key.to_string(), (at, me));
+            note_unshared(cache, key, done);
+            done.unshared()
+        }
+        Err(why) if store::busy(&why) => None,
+        Err(why) => {
+            stop_sharing(cache, &why);
+            None
+        }
+    }
+}
+
+/// Whether this widget's rate limit is spent, and until when: the record
+/// [`shut`] left under `bucket`, by this pane or another.
+pub fn gate(cache: &mut Cache, bucket: &str) -> Option<(f64, String)> {
+    let key = format!("gate/{bucket}");
+    let at = crate::now();
+    pull(cache, &key, at, 0.0);
+    publish_pending_gate(cache, &key, at);
+    let (_, value, _) = cache.live.get(&key)?;
+    let (why, until) = refusal(value.as_ref()?)?;
+    (until > at).then_some((until, why))
+}
+
+/// Share a gate [`shut`] could not write - the store was busy, or not
+/// open yet - so the other panes stop asking too, rather than only this
+/// one. A gate taken from the store, or already written, is left alone.
+fn publish_pending_gate(cache: &mut Cache, key: &str, at: f64) {
+    let Some((taken_at, Some(value), held)) = cache.live.get(key).cloned() else {
+        return;
+    };
+    let written = cache.shared.get(key).is_some_and(|s| s.0 == taken_at);
+    let lifted = refusal(&value).is_none_or(|(_, until)| until <= at);
+    if cache.store.is_some() && !written && !lifted {
+        settle(cache, key, taken_at, Some(value), held, None);
+    }
+}
+
+/// Stop every pane of this widget asking `bucket` until `until`: the
+/// service said its limit is spent and when it resets. A store busy at
+/// that moment gets the gate on this pane's next [`gate`].
+pub fn shut(cache: &mut Cache, bucket: &str, until: f64, why: &str) {
+    let key = format!("gate/{bucket}");
+    let at = crate::now();
+    let held = (until - at).max(0.0);
+    settle(cache, &key, at, Some(refusal_value(why, until)), held, None);
+}
+
+/// Where the reading on screen came from, and how fresh it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Provenance {
+    pub taken_at: f64,
+    /// The pane that fetched it, or `None` for this one.
+    pub by: Option<u32>,
+    /// Past this pane's hold.
+    pub stale: bool,
+    /// Another pane is fetching it now.
+    pub asking: Option<u32>,
+    /// A refusal every pane is waiting out: why, and until when.
+    pub refused: Option<(String, f64)>,
+    /// Why this pane's own reading was not shared.
+    pub unshared: Option<&'static str>,
+}
+
+/// Where `key`'s reading came from, as of `now`; `None` before there is one.
+pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
+    let (taken_at, value, held) = cache.live.get(key)?;
+    let me = cache.store.as_ref().map(|s| s.me);
+    // Who fetched the reading on screen, and only that one: a reading this
+    // pane fetched but could not share leaves the previous fetcher's entry.
+    let by = cache
+        .shared
+        .get(key)
+        .filter(|s| s.0 == *taken_at)
+        .map(|s| s.1)
+        .filter(|by| Some(*by) != me && *by != 0);
+    let refusal_held = value.as_ref().and_then(refusal);
+    // A refusal, in force or lifted while the next ask is out, says how old
+    // the reading still on screen is, not when it was refused.
+    let taken_at = match (&refusal_held, cache.good.get(key)) {
+        (Some(_), Some((at, _))) => *at,
+        _ => *taken_at,
+    };
+    let refused = refusal_held.filter(|(_, until)| *until > now);
+    Some(Provenance {
+        taken_at,
+        by,
+        stale: now - taken_at >= *held,
+        asking: cache.asking.get(key).copied(),
+        refused,
+        unshared: cache.unshared.get(key).copied(),
+    })
+}
+
+/// A duration as a pane says it: `40s`, `7m`, `2h05m`, `3d`.
+fn ago(seconds: f64) -> String {
+    let s = seconds.max(0.0) as i64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86399 => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+        _ => format!("{}d", s / 86400),
+    }
+}
+
+/// The pane's one line about sharing, wrapped to `width`: why this pane is
+/// not sharing, when it meant to and cannot, else [`provenance_rows`]. Drawn
+/// where the freshness line goes, so a pane polling alone says so in the
+/// same place another says who fetched its numbers (OPS-282). A store
+/// started again or emptied says so there too, until the next [`share`].
+pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize) -> Vec<String> {
+    if cache.store.is_none() && !cache.sharing_off.is_empty() {
+        return crate::wrap_words(&format!("not sharing readings: {}", cache.sharing_off), width.max(1));
+    }
+    let mut rows = provenance_rows(found, now, width);
+    if let Some(notice) = cache.store.as_ref().map(|s| s.notice.as_str()).filter(|n| !n.is_empty()) {
+        rows.extend(crate::wrap_words(notice, width.max(1)));
+        cache.notice_drawn.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    rows
+}
+
+/// The one wording every widget gives for where its readings came from,
+/// wrapped to `width`, from the readings on screen: nothing when every
+/// one was fetched by this pane and is fresh, else the oldest of them, and
+/// what is happening to it.
+///
+/// `fetched 2m ago by pane 48213`, `cached 7m ago · pane 48213 asking now`,
+/// `cached 7m ago · too many requests, next ask in 3m`.
+pub fn provenance_rows(found: &[Provenance], now: f64, width: usize) -> Vec<String> {
+    let Some(oldest) = found.iter().min_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) else {
+        return Vec::new();
+    };
+    let asking = found.iter().find_map(|p| p.asking);
+    let refused = found
+        .iter()
+        .filter_map(|p| p.refused.clone())
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    let unshared = found.iter().find_map(|p| p.unshared);
+    let other = found.iter().find_map(|p| p.by);
+    let stale = found.iter().any(|p| p.stale);
+    if asking.is_none() && refused.is_none() && unshared.is_none() && other.is_none() && !stale {
+        return Vec::new();
+    }
+    let age = ago(now - oldest.taken_at);
+    let mut text = if refused.is_some() || asking.is_some() || stale {
+        format!("cached {age} ago")
+    } else {
+        // The oldest reading's own fetcher: another pane's newer reading
+        // must not lend it a pane that never fetched it.
+        match oldest.by {
+            Some(pid) => format!("fetched {age} ago by pane {pid}"),
+            None => format!("fetched {age} ago by this pane"),
+        }
+    };
+    if let Some(pid) = asking.filter(|p| *p != 0) {
+        text.push_str(&format!(" · pane {pid} asking now"));
+    }
+    if let Some((why, until)) = refused {
+        text.push_str(&format!(" · {why}, next ask in {}", ago(until - now)));
+    }
+    if let Some(why) = unshared {
+        text.push_str(&format!(" · {why}"));
+    }
+    crate::wrap_words(&text, width.max(1))
 }
 
 #[cfg(test)]
@@ -710,6 +1250,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_that_took_the_lease_after_waiting_does_not_write_over_its_successor() {
+        let (mut a, mut b) = two_panes("wait-late");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let mut store = a.store.take().unwrap();
+        assert_eq!(store.claim("k", None, now()).unwrap(), Got::Mine);
+        // The holder gives the lease back without a reading, so b takes it.
+        let giving = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            store.release("k").unwrap();
+        });
+        let got = cached(&mut b, "k", 120.0, || {
+            // b's fetch outlives its lease; pane 43 takes over and answers.
+            let raw = rusqlite::Connection::open(&path).unwrap();
+            raw.execute("DELETE FROM leases WHERE key = 'k'", []).unwrap();
+            let mut c = Store::open(&path).unwrap();
+            c.me = 43;
+            let at = now();
+            let s = Shared { taken_at: at, held: 120.0, value: Some(serde_json::json!(2)), fails: 0, good: None, fetched_by: 43 };
+            assert_eq!(c.publish("k", &s, &[], at).unwrap(), Publish::Written);
+            Some(serde_json::json!(1))
+        });
+        giving.join().unwrap();
+        assert_eq!(got, Some(serde_json::json!(1)));
+        let mut other = Store::open(&path).unwrap();
+        assert_eq!(other.load("k").unwrap().unwrap().value, Some(serde_json::json!(2)), "the late answer wrote over the successor's");
+    }
+
+    #[test]
     fn a_reason_written_after_the_publish_reaches_a_pane_that_read_before_it() {
         let (mut a, mut b) = two_panes("annotate");
         assert_eq!(cached(&mut a, "k", 120.0, || None), None);
@@ -732,5 +1300,313 @@ mod tests {
         cached(&mut b, "refused", 60.0, || panic!("asked inside the backoff"));
         assert_eq!(b.live["slow"].2, 60.0);
         assert_eq!(b.live["refused"].2, a.live["refused"].2);
+    }
+
+    // ── OPS-284 ──
+
+    const P: Policy = Policy { ttl: 120.0, lease_for: 30.0, askable: true };
+
+    #[test]
+    fn a_fetch_published_by_one_pane_is_served_to_the_next_and_says_who() {
+        let (mut a, mut b) = two_panes("take");
+        match take(&mut a, "k", P) {
+            Take::Fetch(t) => assert_eq!(t.publish(serde_json::json!({"n": 1})), None),
+            _ => panic!("the first pane did not fetch"),
+        }
+        follow(&mut b);
+        match take(&mut b, "k", P) {
+            Take::Serve(v) => assert_eq!(v, Some(serde_json::json!({"n": 1}))),
+            _ => panic!("the second pane did not take the published reading"),
+        }
+        let now = crate::now();
+        let p = provenance(&b, "k", now).unwrap();
+        assert_eq!(p.by, Some(41));
+        assert_eq!(provenance_rows(&[p], now, 80), ["fetched 0s ago by pane 41"]);
+        // The pane that fetched it says nothing: fresh, and its own.
+        let own = provenance(&a, "k", now).unwrap();
+        assert!(provenance_rows(&[own], now, 80).is_empty());
+    }
+
+    #[test]
+    fn a_pane_never_waits_for_another_panes_long_fetch() {
+        let (mut a, mut b) = two_panes("waiting");
+        let Take::Fetch(mut ticket) = take(&mut a, "k", P) else { panic!("did not fetch") };
+        let started = std::time::Instant::now();
+        match take(&mut b, "k", P) {
+            Take::Waiting { by, have } => {
+                assert_eq!((by, have), (41, None));
+            }
+            _ => panic!("did not wait for the pane holding the lease"),
+        }
+        assert!(started.elapsed() < std::time::Duration::from_millis(400), "it blocked");
+        assert!(ticket.renew(), "the holder lost its own lease");
+        drop(ticket);
+        // Given back unpublished, the lease is free for the next pane.
+        assert!(matches!(take(&mut b, "k", P), Take::Fetch(_)));
+        let p = provenance(&b, "k", crate::now());
+        assert!(p.is_none(), "a reading appeared from nowhere");
+    }
+
+    #[test]
+    fn a_refusal_with_a_reset_time_holds_every_pane_until_then() {
+        let (mut a, mut b) = two_panes("refuse");
+        let until = crate::now() + 600.0;
+        let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("did not fetch") };
+        t.refuse("too many requests", Some(until));
+        follow(&mut b);
+        let Take::Serve(Some(v)) = take(&mut b, "k", P) else { panic!("asked inside the reset") };
+        let (why, at) = refusal(&v).unwrap();
+        assert_eq!(why, "too many requests");
+        assert!((at - until).abs() < 1.0);
+        let now = crate::now();
+        let rows = provenance_rows(&[provenance(&b, "k", now).unwrap()], now, 80);
+        assert!(rows[0].contains("too many requests, next ask in 9m"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_spent_rate_limit_shuts_every_pane_of_the_widget() {
+        let (mut a, mut b) = two_panes("gate");
+        assert_eq!(gate(&mut b, "core"), None);
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        follow(&mut b);
+        let (until, why) = gate(&mut b, "core").expect("the other pane did not see the limit");
+        assert_eq!(why, "rate limit spent");
+        assert!(until > crate::now() + 290.0);
+    }
+
+    #[test]
+    fn a_gate_written_while_the_store_was_busy_reaches_the_other_panes() {
+        let (mut a, mut b) = two_panes("gate-busy");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        other.execute_batch("ROLLBACK").unwrap();
+        follow(&mut b);
+        assert_eq!(gate(&mut b, "core"), None, "the gate was written through an exclusive lock");
+        assert!(gate(&mut a, "core").is_some());
+        follow(&mut b);
+        assert!(gate(&mut b, "core").is_some(), "a gate that met a busy store never reached the other pane");
+    }
+
+    #[test]
+    fn a_detail_added_while_the_store_was_busy_is_kept_and_shared() {
+        let (mut a, mut b) = two_panes("annotate-busy");
+        let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("did not fetch") };
+        t.refuse("too many requests", Some(crate::now() + 600.0));
+        let mut noted = a.live.get("k").unwrap().1.clone().unwrap();
+        noted["bank"] = serde_json::json!(7);
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        set_live(&mut a, "k", noted);
+        other.execute_batch("ROLLBACK").unwrap();
+        // Another pane writes, so this one reads the row again.
+        shut(&mut b, "core", crate::now() + 300.0, "rate limit spent");
+        follow(&mut a);
+        let Take::Serve(Some(v)) = take(&mut a, "k", P) else { panic!("asked inside the reset") };
+        assert_eq!(v["bank"], 7, "the stored copy wrote over this pane's own detail");
+        follow(&mut b);
+        let Take::Serve(Some(v)) = take(&mut b, "k", P) else { panic!("asked inside the reset") };
+        assert_eq!(v["bank"], 7, "the detail never reached the other pane");
+    }
+
+    #[test]
+    fn a_gate_read_while_the_store_was_busy_is_read_again() {
+        let (mut a, mut b) = two_panes("gate-reread");
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        follow(&mut b);
+        assert_eq!(gate(&mut b, "core"), None);
+        other.execute_batch("ROLLBACK").unwrap();
+        follow(&mut b);
+        assert!(gate(&mut b, "core").is_some(), "a busy read marked the gate as seen");
+    }
+
+    #[test]
+    fn a_lifted_refusal_still_dates_the_reading_on_screen() {
+        let mut c = Cache::default();
+        let now = 10_000.0;
+        c.good.insert("k".into(), (now - 3600.0, serde_json::json!(1)));
+        c.live.insert("k".into(), (now - 121.0, Some(refusal_value("too many requests", now - 1.0)), 120.0));
+        let p = provenance(&c, "k", now).unwrap();
+        assert_eq!(p.taken_at, now - 3600.0);
+        assert_eq!(p.refused, None);
+    }
+
+    #[test]
+    fn a_reading_this_pane_could_not_share_is_not_credited_to_the_last_fetcher() {
+        let mut c = Cache::default();
+        let now = 10_000.0;
+        c.shared.insert("k".into(), (now - 500.0, 41));
+        c.live.insert("k".into(), (now, Some(serde_json::json!(2)), 300.0));
+        assert_eq!(provenance(&c, "k", now).unwrap().by, None);
+        c.live.insert("k".into(), (now - 500.0, Some(serde_json::json!(1)), 300.0));
+        assert_eq!(provenance(&c, "k", now).unwrap().by, Some(41));
+    }
+
+    #[test]
+    fn the_oldest_reading_is_dated_by_the_pane_that_fetched_it() {
+        let now = 10_000.0;
+        let mine = Provenance { taken_at: now - 300.0, by: None, stale: false, asking: None, refused: None, unshared: None };
+        let theirs = Provenance { taken_at: now - 10.0, by: Some(42), ..mine.clone() };
+        assert_eq!(provenance_rows(&[mine, theirs], now, 80), ["fetched 5m ago by this pane"]);
+    }
+
+    #[test]
+    fn a_colon_in_a_plain_part_cannot_make_two_readings_one_key() {
+        let mut c = Cache::default();
+        assert_ne!(key(&mut c, "u", 1, &["a:b", "c"], &[]), key(&mut c, "u", 1, &["a", "b:c"], &[]));
+        assert_ne!(key(&mut c, "u", 1, &["a%3Ab"], &[]), key(&mut c, "u", 1, &["a:b"], &[]));
+        assert_eq!(key(&mut c, "u", 1, &["host:8080"], &[]), "u/1:host%3A8080");
+    }
+
+    #[test]
+    fn a_plain_part_equal_to_a_fingerprint_is_not_that_fingerprint() {
+        let mut c = Cache::default();
+        let token = "fixture-token-0123456789";
+        let print = fingerprint(&[token]);
+        assert_ne!(key(&mut c, "u", 1, &[], &[token]), key(&mut c, "u", 1, &[&print], &[]));
+    }
+
+    #[test]
+    fn sharing_turned_off_and_on_again_opens_the_store_at_once() {
+        use crate::statefile::tests::{env_lock, temp_dir, EnvVar};
+        let _guard = env_lock();
+        let dir = temp_dir("share-toggle");
+        let _xdg = EnvVar::set("XDG_STATE_HOME", Some(dir.as_os_str()));
+        let mut c = Cache::default();
+        share(&mut c, "toggle-test", store::Caps::default(), true, 1_000.0);
+        assert!(c.store.is_some(), "{}", c.sharing_off);
+        share(&mut c, "toggle-test", store::Caps::default(), false, 1_010.0);
+        assert!(c.store.is_none());
+        share(&mut c, "toggle-test", store::Caps::default(), true, 1_020.0);
+        assert!(c.store.is_some(), "turned back on, still not sharing: {}", c.sharing_off);
+    }
+
+    #[test]
+    fn a_shared_replacement_drops_the_reason_this_panes_reading_stayed_here() {
+        let (mut a, mut b) = two_panes("unshared");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let mut small = Store::open_with(&path, store::Caps { max_value: 8, ..store::Caps::default() }).unwrap();
+        small.me = 41;
+        a.store = Some(small);
+        let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("a did not fetch") };
+        assert_eq!(t.publish(serde_json::json!("far too large to share")), Some("too large to share"));
+        let at = crate::now() + 1.0;
+        settle(&mut b, "k", at, Some(serde_json::json!(1)), 300.0, None);
+        follow(&mut a);
+        pull(&mut a, "k", at, 300.0);
+        let p = provenance(&a, "k", at).unwrap();
+        assert_eq!(p.by, Some(42));
+        assert_eq!(p.unshared, None, "a reading pane 42 shared still said it was too large to share");
+    }
+
+    #[test]
+    fn a_gate_reaches_a_store_started_again_under_it() {
+        use crate::statefile::tests::{env_lock, temp_dir, EnvVar};
+        let _guard = env_lock();
+        let dir = temp_dir("gate-replaced");
+        let _xdg = EnvVar::set("XDG_STATE_HOME", Some(dir.as_os_str()));
+        let mut a = Cache::default();
+        share(&mut a, "gate-replaced", store::Caps::default(), true, 1_000.0);
+        shut(&mut a, "core", crate::now() + 300.0, "rate limit spent");
+        let path = store::path("gate-replaced");
+        std::fs::remove_file(&path).unwrap();
+        let _ = Store::open(&path).unwrap();
+        share(&mut a, "gate-replaced", store::Caps::default(), true, 1_010.0);
+        assert!(gate(&mut a, "core").is_some());
+        let mut b = Store::open(&path).unwrap();
+        assert!(b.load("gate/core").unwrap().is_some(), "the gate never reached the store started again");
+    }
+
+    #[test]
+    fn a_store_notice_is_shown_for_one_pass() {
+        let (mut a, _b) = two_panes("notice");
+        a.store.as_mut().unwrap().notice = "shared store started again: damaged".into();
+        clear_drawn_notice(&mut a);
+        assert!(sharing_rows(&a, &[], 0.0, 80).iter().any(|r| r.contains("started again")), "cleared before it was drawn");
+        // The next pass's `share` clears what this one drew.
+        clear_drawn_notice(&mut a);
+        assert!(sharing_rows(&a, &[], 0.0, 80).is_empty(), "the notice came back on the next pass");
+    }
+
+    #[test]
+    fn a_key_carries_a_fingerprint_of_a_token_and_never_the_token() {
+        let mut c = Cache::default();
+        let token = "ghp_fixture0123456789abcdef";
+        let k = key(&mut c, "gha.runs", 1, &["github.com", "acme/app"], &[token]);
+        assert!(k.starts_with("gha.runs/1:github.com:acme/app:"), "{k}");
+        assert!(!k.contains(token));
+        assert!(c.secrets.iter().any(|s| s == token), "the token was not registered");
+        assert_eq!(fingerprint(&[token]).len(), 32);
+        assert_eq!(fingerprint(&[token]), fingerprint(&[token]));
+        assert_ne!(fingerprint(&["a", "bc"]), fingerprint(&["ab", "c"]));
+        assert_eq!(key(&mut c, "linear.board", 2, &[], &[]), "linear.board/2");
+    }
+
+    #[test]
+    fn a_busy_store_is_not_this_pass_and_sharing_goes_on() {
+        let (mut a, _b) = two_panes("busy");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(matches!(take(&mut a, "k", P), Take::Waiting { by: 0, .. }));
+        let _ = cached(&mut a, "j", 120.0, || Some(serde_json::json!(1)));
+        other.execute_batch("ROLLBACK").unwrap();
+        assert!(a.store.is_some(), "one busy moment stopped sharing: {}", a.sharing_off);
+    }
+
+    #[test]
+    fn a_reading_is_stamped_when_its_answer_arrives() {
+        let mut c = Cache::default();
+        let before = crate::now();
+        cached(&mut c, "slow", 1.0, || {
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            Some(serde_json::json!(1))
+        });
+        assert!(c.live["slow"].0 >= before + 1.0, "stamped when it was asked for");
+        // A fetch slower than its hold still lands fresh.
+        cached(&mut c, "slow", 1.0, || panic!("asked again for a reading that just arrived"));
+    }
+
+    #[test]
+    fn provenance_rows_fit_every_width() {
+        let now = 10_000.0;
+        let p = Provenance {
+            taken_at: now - 420.0,
+            by: Some(48213),
+            stale: true,
+            asking: Some(48213),
+            refused: Some(("too many requests".into(), now + 180.0)),
+            unshared: Some("too large to share"),
+        };
+        let wide = provenance_rows(std::slice::from_ref(&p), now, 200);
+        assert_eq!(
+            wide,
+            ["cached 7m ago · pane 48213 asking now · too many requests, next ask in 3m · too large to share"]
+        );
+        for w in 12..=120 {
+            for row in provenance_rows(std::slice::from_ref(&p), now, w) {
+                assert!(crate::display_width(&row) <= w, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_polling_alone_says_why_where_the_freshness_line_goes() {
+        let mut c = Cache::default();
+        assert!(sharing_rows(&c, &[], 0.0, 80).is_empty(), "nothing to say, said something");
+        c.sharing_off = "share_readings is off".into();
+        assert_eq!(sharing_rows(&c, &[], 0.0, 80), ["not sharing readings: share_readings is off"]);
+        for w in 12..=80 {
+            for row in sharing_rows(&c, &[], 0.0, w) {
+                assert!(crate::display_width(&row) <= w, "{w}: {row:?}");
+            }
+        }
+        let (a, _b) = two_panes("rows");
+        assert!(sharing_rows(&a, &[], 0.0, 80).is_empty(), "a pane sharing fresh readings of its own said something");
     }
 }

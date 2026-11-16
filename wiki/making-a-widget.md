@@ -603,6 +603,14 @@ where the number would have been; it raises nothing on the `!` channel.
 `unwrap_or_default()` on its own line, because that shape hands the pane an
 empty list and draws a source with nothing in it.
 
+**Several panes of one widget ask once between them.** A widget that polls
+a service with a rate limit shares what it fetched with its other panes on
+the machine through `tc::readings`, in a store file of its own: one pane
+fetches each reading and the rest read it, a spent limit stops every pane
+until the reset, and the pane says where its numbers came from. A
+`share_readings` setting (on by default) turns it off. Read
+[docs/shared-readings.md](../docs/shared-readings.md) before wiring it.
+
 Related: **never let a bare catch-all swallow a programming error.**
 `discover_teams` turned a type error into "no teams found" and the board
 quietly showed 3 projects instead of 21.
