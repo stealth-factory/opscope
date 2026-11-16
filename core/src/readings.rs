@@ -847,7 +847,14 @@ pub struct Provenance {
 pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
     let (taken_at, value, held) = cache.live.get(key)?;
     let me = cache.store.as_ref().map(|s| s.me);
-    let by = cache.shared.get(key).map(|s| s.1).filter(|by| Some(*by) != me && *by != 0);
+    // Who fetched the reading on screen, and only that one: a reading this
+    // pane fetched but could not share leaves the previous fetcher's entry.
+    let by = cache
+        .shared
+        .get(key)
+        .filter(|s| s.0 == *taken_at)
+        .map(|s| s.1)
+        .filter(|by| Some(*by) != me && *by != 0);
     let refusal_held = value.as_ref().and_then(refusal);
     // A refusal, in force or lifted while the next ask is out, says how old
     // the reading still on screen is, not when it was refused.
@@ -1334,6 +1341,17 @@ mod tests {
         let p = provenance(&c, "k", now).unwrap();
         assert_eq!(p.taken_at, now - 3600.0);
         assert_eq!(p.refused, None);
+    }
+
+    #[test]
+    fn a_reading_this_pane_could_not_share_is_not_credited_to_the_last_fetcher() {
+        let mut c = Cache::default();
+        let now = 10_000.0;
+        c.shared.insert("k".into(), (now - 500.0, 41));
+        c.live.insert("k".into(), (now, Some(serde_json::json!(2)), 300.0));
+        assert_eq!(provenance(&c, "k", now).unwrap().by, None);
+        c.live.insert("k".into(), (now - 500.0, Some(serde_json::json!(1)), 300.0));
+        assert_eq!(provenance(&c, "k", now).unwrap().by, Some(41));
     }
 
     #[test]
