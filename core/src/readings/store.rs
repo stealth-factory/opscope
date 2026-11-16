@@ -469,6 +469,20 @@ impl Store {
     /// than the widget's cap, or when it contains any of `secrets` - the
     /// lease is given back either way. Returns what came of it.
     pub fn publish(&mut self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<Publish, String> {
+        self.publish_since(key, s, secrets, now, None)
+    }
+
+    /// [`publish`](Self::publish) for a fetch this pane claimed at
+    /// `claimed_at`: a reading another pane published since then - it took
+    /// the lease over once this one ran out - is not written over.
+    pub fn publish_since(
+        &mut self,
+        key: &str,
+        s: &Shared,
+        secrets: &[String],
+        now: f64,
+        claimed_at: Option<f64>,
+    ) -> Result<Publish, String> {
         let value = s.value.as_ref().map(|v| v.to_string());
         let good = s.good.as_ref().map(|(_, v)| v.to_string());
         if let Some(why) = unshareable(&[value.as_deref(), good.as_deref()], secrets, self.caps.max_value) {
@@ -476,11 +490,11 @@ impl Store {
             return Ok(why);
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
-        let stored: Option<(f64, Option<String>, Option<String>)> = tx
+        let stored: Option<(f64, Option<String>, Option<String>, u32)> = tx
             .query_row(
-                "SELECT taken_at, value, good_value FROM readings WHERE key = ?1",
+                "SELECT taken_at, value, good_value, fetched_by FROM readings WHERE key = ?1",
                 [key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()
             .map_err(sql)?;
@@ -494,7 +508,10 @@ impl Store {
             )
             .optional()
             .map_err(sql)?;
-        if other.is_some() {
+        let overtaken = claimed_at.is_some_and(|since| {
+            stored.as_ref().is_some_and(|r| r.3 != self.me && r.0 >= since)
+        });
+        if other.is_some() || overtaken {
             tx.commit().map_err(sql)?;
             return Ok(Publish::TakenOver);
         }
@@ -990,6 +1007,27 @@ mod tests {
         assert_eq!(b.holder("k", NOW + 36.0).unwrap(), Some(2), "the late answer took b's lease");
         assert!(b.load("k").unwrap().is_none(), "the late answer was written");
         assert_eq!(b.publish("k", &reading(NOW + 40.0, serde_json::json!(2)), &[], NOW + 40.0).unwrap(), Publish::Written);
+    }
+
+    #[test]
+    fn a_late_answer_does_not_write_over_what_the_pane_that_took_over_published() {
+        let path = temp("late-after");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.me = 1;
+        b.me = 2;
+        assert_eq!(a.claim_for("k", None, NOW, 20.0).unwrap(), Got::Mine);
+        assert_eq!(b.claim_for("k", None, NOW + 30.0, 20.0).unwrap(), Got::Mine);
+        // b answers and lets its lease go before a's late answer lands.
+        assert_eq!(b.publish("k", &reading(NOW + 32.0, serde_json::json!(2)), &[], NOW + 32.0).unwrap(), Publish::Written);
+        let late = reading(NOW + 35.0, serde_json::json!(1));
+        assert_eq!(a.publish_since("k", &late, &[], NOW + 35.0, Some(NOW)).unwrap(), Publish::TakenOver);
+        let mut other = Store::open(&path).unwrap();
+        assert_eq!(other.load("k").unwrap().unwrap().value, Some(serde_json::json!(2)), "the late answer was written over b's");
+        // A pane that claimed after b published still writes.
+        assert_eq!(a.claim_for("k", None, NOW + 400.0, 20.0).unwrap(), Got::Mine);
+        let next = reading(NOW + 401.0, serde_json::json!(3));
+        assert_eq!(a.publish_since("k", &next, &[], NOW + 401.0, Some(NOW + 400.0)).unwrap(), Publish::Written);
     }
 
     #[test]

@@ -158,6 +158,7 @@ where
     }
     // Stale here. Before asking, ask the other panes: one of them may have
     // just fetched it, or be fetching it now.
+    let mut claimed_at = None;
     if let Some(store) = cache.store.as_mut() {
         let known = cache
             .live
@@ -165,7 +166,7 @@ where
             .map(|e| e.0)
             .or_else(|| cache.shared.get(key).map(|s| s.0));
         match store.claim(key, known, at) {
-            Ok(store::Got::Mine) => {}
+            Ok(store::Got::Mine) => claimed_at = Some(at),
             Ok(store::Got::Fresh(s)) => {
                 adopt_row(cache, key, s, at, ttl);
                 if let Some((_, value, _)) = cache.live.get(key) {
@@ -223,7 +224,7 @@ where
             fetched_by: store.me,
         };
         let me = store.me;
-        match store.publish(key, &s, &cache.secrets, at) {
+        match store.publish_since(key, &s, &cache.secrets, at, claimed_at) {
             Ok(done) => {
                 cache.shared.insert(key.to_string(), (at, me));
                 note_unshared(cache, key, done);
@@ -676,11 +677,11 @@ pub fn take<'a>(cache: &'a mut Cache, key: &str, p: Policy) -> Take<'a> {
             return Take::Serve(value.clone());
         }
     }
-    let mut claimed = false;
+    let mut claimed = None;
     if let Some(store) = cache.store.as_mut() {
         let known = cache.live.get(key).map(|e| e.0).or_else(|| cache.shared.get(key).map(|s| s.0));
         match store.claim_for(key, known, at, p.lease_for) {
-            Ok(store::Got::Mine) => claimed = true,
+            Ok(store::Got::Mine) => claimed = Some(at),
             Ok(store::Got::Fresh(s)) => {
                 adopt_row(cache, key, s, at, p.ttl);
                 cache.asking.remove(key);
@@ -711,7 +712,8 @@ pub struct Ticket<'a> {
     cache: &'a mut Cache,
     key: String,
     policy: Policy,
-    claimed: bool,
+    /// When this pane claimed the lease, if it did.
+    claimed: Option<f64>,
     done: bool,
 }
 
@@ -719,7 +721,7 @@ impl Ticket<'_> {
     /// Hold the lease for one more request. `false` when it ran out and
     /// another pane took it: stop, and show what that pane publishes.
     pub fn renew(&mut self) -> bool {
-        if !self.claimed {
+        if self.claimed.is_none() {
             return true;
         }
         let Some(store) = self.cache.store.as_mut() else {
@@ -742,7 +744,7 @@ impl Ticket<'_> {
         self.cache.fails.remove(&self.key);
         let at = crate::now();
         self.cache.good.insert(self.key.clone(), (at, value.clone()));
-        settle(self.cache, &self.key, at, Some(value), self.policy.ttl)
+        settle(self.cache, &self.key, at, Some(value), self.policy.ttl, self.claimed)
     }
 
     /// The service said no. Every pane waits until `until` when the
@@ -761,13 +763,13 @@ impl Ticket<'_> {
             _ => backoff(n).min(self.policy.ttl.max(BACKOFF_FROM)),
         };
         let value = refusal_value(why, at + held);
-        settle(self.cache, &self.key, at, Some(value), held);
+        settle(self.cache, &self.key, at, Some(value), held, self.claimed);
     }
 }
 
 impl Drop for Ticket<'_> {
     fn drop(&mut self) {
-        if self.done || !self.claimed {
+        if self.done || self.claimed.is_none() {
             return;
         }
         // Not published: an error, a panic unwinding, a pass cut short.
@@ -789,7 +791,15 @@ pub fn refusal(value: &serde_json::Value) -> Option<(String, f64)> {
 }
 
 /// Put a fetched reading (or refusal) in this pane and in the store.
-fn settle(cache: &mut Cache, key: &str, at: f64, value: Option<serde_json::Value>, held: f64) -> Option<&'static str> {
+/// `claimed_at` is when this pane claimed the lease for it, if it did.
+fn settle(
+    cache: &mut Cache,
+    key: &str,
+    at: f64,
+    value: Option<serde_json::Value>,
+    held: f64,
+    claimed_at: Option<f64>,
+) -> Option<&'static str> {
     cache.live.insert(key.to_string(), (at, value.clone(), held));
     let store = cache.store.as_mut()?;
     let s = store::Shared {
@@ -801,7 +811,7 @@ fn settle(cache: &mut Cache, key: &str, at: f64, value: Option<serde_json::Value
         fetched_by: store.me,
     };
     let me = store.me;
-    match store.publish(key, &s, &cache.secrets, at) {
+    match store.publish_since(key, &s, &cache.secrets, at, claimed_at) {
         Ok(done) => {
             cache.shared.insert(key.to_string(), (at, me));
             note_unshared(cache, key, done);
@@ -837,7 +847,7 @@ fn publish_pending_gate(cache: &mut Cache, key: &str, at: f64) {
     let written = cache.shared.get(key).is_some_and(|s| s.0 == taken_at);
     let lifted = refusal(&value).is_none_or(|(_, until)| until <= at);
     if cache.store.is_some() && !written && !lifted {
-        settle(cache, key, taken_at, Some(value), held);
+        settle(cache, key, taken_at, Some(value), held, None);
     }
 }
 
@@ -848,7 +858,7 @@ pub fn shut(cache: &mut Cache, bucket: &str, until: f64, why: &str) {
     let key = format!("gate/{bucket}");
     let at = crate::now();
     let held = (until - at).max(0.0);
-    settle(cache, &key, at, Some(refusal_value(why, until)), held);
+    settle(cache, &key, at, Some(refusal_value(why, until)), held, None);
 }
 
 /// Where the reading on screen came from, and how fresh it is.
@@ -1449,7 +1459,7 @@ mod tests {
         let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("a did not fetch") };
         assert_eq!(t.publish(serde_json::json!("far too large to share")), Some("too large to share"));
         let at = crate::now() + 1.0;
-        settle(&mut b, "k", at, Some(serde_json::json!(1)), 300.0);
+        settle(&mut b, "k", at, Some(serde_json::json!(1)), 300.0, None);
         follow(&mut a);
         pull(&mut a, "k", at, 300.0);
         let p = provenance(&a, "k", at).unwrap();
