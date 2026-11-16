@@ -608,13 +608,15 @@ fn file_jobs(
     at: f64,
     marker: impl Fn(u32) -> Option<String>,
 ) {
-    // The agent process under each pane, from the process table: the one
-    // proof that a pane is showing this job rather than having started it.
+    // The Claude process each agent row draws, found from its pane's
+    // foreground: the one proof that a pane is showing this job rather than
+    // having started it. A job left below a shell back at its prompt is not
+    // in the foreground, and a pane drawn as no agent draws no job.
     let agents: Vec<Option<u32>> = match table {
         Ok(t) => panes
             .iter()
-            .filter(|p| p.job.is_none() && !p.remote)
-            .map(|p| p.child_pid.and_then(|pid| u32::try_from(pid).ok()).and_then(|pid| t.agent_below(pid, "claude")))
+            .filter(|p| p.job.is_none() && !p.remote && p.agent.is_some())
+            .map(|p| p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok()).and_then(|pid| t.named_agent_at(pid, "claude")))
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -3229,21 +3231,26 @@ mod tests {
 
     #[test]
     fn background_agents_are_filed_under_the_session_they_belong_to() {
-        // block:2's shell (10) runs claude 2, the job resumed there.
-        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n11 1 bash bash\n").map_err(String::from);
-        let open = |session: &str, label: &str, block: &str, cwd: &str, child: i64| Pane {
+        // block:2's shell (10) runs claude 2, the job resumed there, in its
+        // foreground. block:1's shell (11) is back at its prompt with claude 5
+        // still below it: no row draws 5.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n2 10 claude claude --resume\n11 1 bash bash\n5 11 claude claude --resume\n",
+        )
+        .map_err(String::from);
+        let open = |session: &str, label: &str, block: &str, cwd: &str, child: i64, fg: i64| Pane {
             session_id: session.into(),
             session_label: label.into(),
             session_ord: 1,
             block_id: block.into(),
             child_cwd: cwd.into(),
             child_pid: Some(child),
+            fg: Some(Foreground { pid: fg, ..Default::default() }),
             ..Default::default()
         };
-        let mut panes = vec![
-            open("session:w", "web", "block:1", "file://host/srv/web/src", 11),
-            open("session:a", "api", "block:2", "/srv/api", 10),
-        ];
+        let mut api = open("session:a", "api", "block:2", "/srv/api", 10, 2);
+        api.agent = Some(("claude".into(), Source::Process));
+        let mut panes = vec![open("session:w", "web", "block:1", "file://host/srv/web/src", 11, 11), api];
         let with_pid = |name: &str, pid: u32| {
             let mut job = a_job("working");
             job.short = name.into();
@@ -3252,7 +3259,9 @@ mod tests {
         };
         let mut elsewhere = with_pid("nowhere", 3);
         elsewhere.dirs = vec!["/srv/other".into()];
-        let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere];
+        let mut at_prompt = with_pid("at-prompt", 5);
+        at_prompt.dirs = vec!["/srv/web".into()];
+        let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere, at_prompt];
         // 4 inherited block:2's markers but is not the agent running there.
         let marker = |pid: u32| match pid {
             2 | 4 => Some("session:a".to_string()),
@@ -3274,6 +3283,8 @@ mod tests {
         assert!(!marked.by_directory);
         // Nothing pairs it: the background group.
         assert_eq!(job("nowhere").unwrap().session_id, background::GROUP);
+        // Below a shell at its prompt, so no row draws it: kept.
+        assert_eq!(job("at-prompt").unwrap().session_id, "session:w");
     }
 
     fn drawn(pane: &Pane, w: usize) -> String {
