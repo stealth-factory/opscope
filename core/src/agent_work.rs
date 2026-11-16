@@ -342,6 +342,35 @@ impl Table {
         }
     }
 
+    /// `agent_below`, but only when it cannot be another process: nothing
+    /// when two separate `name` processes run below the shell. The lowest
+    /// pid is a fair guess at which one a pane shows, not proof of it, and a
+    /// job the shell left running is just as likely to be that one.
+    pub fn sole_agent_below(&self, root: u32, name: &str) -> Option<u32> {
+        let agent = self.agent_below(root, name)?;
+        if agent == root {
+            return Some(agent);
+        }
+        // The outermost named processes: one inside another is a launcher
+        // and the agent it runs, not two agents.
+        let mut outer = 0;
+        let mut queue = vec![root];
+        let mut seen = 0;
+        while let Some(pid) = queue.pop() {
+            seen += 1;
+            if seen > 256 {
+                return None;
+            }
+            for &kid in self.kids(pid) {
+                match self.get(kid) {
+                    Some(k) if !is_shell(&k.comm, &k.args) && is_named(&k.comm, &k.args, name) => outer += 1,
+                    _ => queue.push(kid),
+                }
+            }
+        }
+        (outer <= 1).then_some(agent)
+    }
+
     /// The agent `name` that a multiplexer's foreground `pid` belongs to.
     ///
     /// Herdr reports a pane's foreground process group, and the first in it
@@ -634,6 +663,15 @@ mod tests {
             (11,"codex".into()), (12,"codex".into()), (13,"codex".into()), (20,"claude".into()), (30,"opencode".into())
         ]);
         assert!(table.agents(&[]).is_empty());
+    }
+
+    #[test]
+    fn two_claude_processes_below_one_shell_name_neither() {
+        let one = parse_process_table("10 1 bash bash\n11 10 npm npm exec claude\n12 11 claude claude\n").unwrap();
+        assert_eq!(one.sole_agent_below(10, "claude"), Some(12));
+        let two = parse_process_table("10 1 bash bash\n5 10 claude claude --resume\n12 10 claude claude\n").unwrap();
+        assert_eq!(two.agent_below(10, "claude"), Some(5));
+        assert_eq!(two.sole_agent_below(10, "claude"), None);
     }
 
     #[test]
