@@ -835,6 +835,22 @@ fn ago(seconds: f64) -> String {
     }
 }
 
+/// The pane's one line about sharing, wrapped to `width`: why this pane is
+/// not sharing, when it meant to and cannot, else [`provenance_rows`]. Drawn
+/// where the freshness line goes, so a pane polling alone says so in the
+/// same place another says who fetched its numbers (OPS-282). A store
+/// started again or emptied says so there once too.
+pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize) -> Vec<String> {
+    if cache.store.is_none() && !cache.sharing_off.is_empty() {
+        return crate::wrap_words(&format!("not sharing readings: {}", cache.sharing_off), width.max(1));
+    }
+    let mut rows = provenance_rows(found, now, width);
+    if let Some(notice) = cache.store.as_ref().map(|s| s.notice.as_str()).filter(|n| !n.is_empty()) {
+        rows.extend(crate::wrap_words(notice, width.max(1)));
+    }
+    rows
+}
+
 /// The one wording every widget gives for where its readings came from,
 /// wrapped to `width`, from the readings on screen: nothing when every
 /// one was fetched by this pane and is fresh, else the oldest of them, and
@@ -1295,5 +1311,20 @@ mod tests {
                 assert!(crate::display_width(&row) <= w, "{w}: {row:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_pane_polling_alone_says_why_where_the_freshness_line_goes() {
+        let mut c = Cache::default();
+        assert!(sharing_rows(&c, &[], 0.0, 80).is_empty(), "nothing to say, said something");
+        c.sharing_off = "share_readings is off".into();
+        assert_eq!(sharing_rows(&c, &[], 0.0, 80), ["not sharing readings: share_readings is off"]);
+        for w in 12..=80 {
+            for row in sharing_rows(&c, &[], 0.0, w) {
+                assert!(crate::display_width(&row) <= w, "{w}: {row:?}");
+            }
+        }
+        let (a, _b) = two_panes("rows");
+        assert!(sharing_rows(&a, &[], 0.0, 80).is_empty(), "a pane sharing fresh readings of its own said something");
     }
 }

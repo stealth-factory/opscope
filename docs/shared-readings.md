@@ -37,6 +37,7 @@ adopting it.
 | `ticket.refuse(why, until)` | The service said no. Every pane waits until `until` if the service named a time, else the doubling backoff. |
 | `gate(cache, bucket)` / `shut(cache, bucket, until, why)` | A rate limit that covers every reading of the service. `shut` when the service says the limit is spent; check `gate` before asking anything. |
 | `provenance(cache, key, now)` / `provenance_rows(found, now, width)` | Where the readings on screen came from. Empty when every one is this pane's and fresh. |
+| `sharing_rows(cache, found, now, width)` | The line a widget draws: `not sharing readings: <why>` when this pane is polling alone, else `provenance_rows`. |
 
 A dropped `Ticket` gives the lease back, including while a panic unwinds, so
 another pane does not wait out a lease nobody is using.
@@ -51,6 +52,8 @@ when it has nothing to show. New widgets use `take`.
 ## What the pane says
 
 One row, wrapped to the pane, under the status line - never squeezed onto it.
+Draw it with `sharing_rows`, so a pane that cannot share says
+`not sharing readings: <why>` in the same place, not on the `!` screen.
 Built from every reading on screen, so the pane never claims to be fresher
 than its stalest part:
 
