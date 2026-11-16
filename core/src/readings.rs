@@ -328,6 +328,9 @@ fn adopt_row(cache: &mut Cache, key: &str, s: store::Shared, at: f64, ttl: f64) 
             cache.fails.insert(key.to_string(), s.fails);
         }
         cache.shared.insert(key.to_string(), (s.taken_at, s.fetched_by));
+        // Why this pane's own reading stayed here no longer describes the
+        // one on screen, which another pane did share.
+        cache.unshared.remove(key);
     }
     if let Some((good_at, good)) = s.good {
         if cache.good.get(key).is_none_or(|(l, _)| good_at > *l) {
@@ -1359,6 +1362,24 @@ mod tests {
         assert!(c.store.is_none());
         share(&mut c, "toggle-test", store::Caps::default(), true, 1_020.0);
         assert!(c.store.is_some(), "turned back on, still not sharing: {}", c.sharing_off);
+    }
+
+    #[test]
+    fn a_shared_replacement_drops_the_reason_this_panes_reading_stayed_here() {
+        let (mut a, mut b) = two_panes("unshared");
+        let path = a.store.as_ref().unwrap().path_for_tests();
+        let mut small = Store::open_with(&path, store::Caps { max_value: 8, ..store::Caps::default() }).unwrap();
+        small.me = 41;
+        a.store = Some(small);
+        let Take::Fetch(t) = take(&mut a, "k", P) else { panic!("a did not fetch") };
+        assert_eq!(t.publish(serde_json::json!("far too large to share")), Some("too large to share"));
+        let at = crate::now() + 1.0;
+        settle(&mut b, "k", at, Some(serde_json::json!(1)), 300.0);
+        follow(&mut a);
+        pull(&mut a, "k", at, 300.0);
+        let p = provenance(&a, "k", at).unwrap();
+        assert_eq!(p.by, Some(42));
+        assert_eq!(p.unshared, None, "a reading pane 42 shared still said it was too large to share");
     }
 
     #[test]
