@@ -1897,10 +1897,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             let label = workspace_label(&labels, background::GROUP);
             label.strip_prefix("background agents").unwrap_or(&label).to_string()
         };
-        // Drawn for the finished jobs the label counts even when every live
-        // one is filed in a workspace and none is left under it.
-        let floating_heading =
-            floating_all > 0 || (all_agents.iter().any(|a| a.job.is_some()) && background::counts_finished(&floating_more));
+        // Drawn for the finished jobs the label counts even when no live
+        // one is left under it: filed in a workspace, drawn by an agent's
+        // row, or none running.
+        let floating_heading = floating_all > 0 || background::counts_finished(&floating_more);
         let floating_count = super::search::count(floating, floating_all, filtering);
         let floating_head_rows = [format!("  · showing {floating_all}-{floating_all}"), "  · none on screen".to_string()]
             .iter()

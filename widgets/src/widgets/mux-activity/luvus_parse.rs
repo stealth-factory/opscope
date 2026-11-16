@@ -324,10 +324,6 @@ pub struct Agent {
     /// The heading a background agent's group is drawn under, which counts
     /// the finished jobs it leaves out.
     pub group_label: String,
-    /// A background agent's group label, kept when the agent is filed in a
-    /// workspace: the finished jobs it counts are said under BACKGROUND
-    /// AGENTS even when no row is left there.
-    pub jobs_label: String,
 }
 
 /// Every agent in `luvus agent list`.
@@ -372,7 +368,6 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
             job: None,
             by_directory: false,
             group_label: String::new(),
-            jobs_label: String::new(),
         });
     }
     Ok(found)

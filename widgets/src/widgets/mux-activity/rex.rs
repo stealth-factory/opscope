@@ -108,10 +108,6 @@ enum Section {
 /// One block, with everything the screen says about it.
 #[derive(Clone, Debug, Default)]
 struct Pane {
-    /// A background agent's group label, kept when the agent is filed in a
-    /// session: the finished jobs it counts are said under BACKGROUND
-    /// AGENTS even when no row is left there.
-    jobs_label: String,
     session_id: String,
     session_label: String,
     session_ord: usize,
@@ -329,6 +325,10 @@ struct Board {
     rex_version: String,
     api_revision: u64,
     local_usage: bool,
+    /// The background agents' group label, which counts the finished jobs
+    /// not drawn. Kept apart from the rows because every live job may be
+    /// filed in a session, or drawn by a pane, or there may be none.
+    jobs_label: String,
 }
 
 #[derive(Default)]
@@ -509,6 +509,7 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
         rex_version: g.server.rex_version.clone(),
         api_revision: g.server.api_revision,
         local_usage: local,
+        jobs_label: String::new(),
     }
 }
 
@@ -668,7 +669,6 @@ fn file_jobs(
         };
         let by_directory = matches!(home, background::Home::ByDirectory(_));
         let mut pane = job_pane(job, label, table, at);
-        pane.jobs_label = label.to_string();
         if let Some((id, _, _, name, ord)) = session {
             pane.session_id = id.clone();
             pane.session_label = name.clone();
@@ -752,6 +752,7 @@ fn poll(
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
         file_jobs(&mut board.panes, jobs.shown, &label, &table, at, catalogue, rex_marker);
+        board.jobs_label = label;
         // One sample for panes and background agents alike: the sampler
         // forgets every pid it is not handed, and a percentage needs two.
         let usage_pid = |p: &Pane| match &p.job {
@@ -2581,7 +2582,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
                 // The heading is drawn for the finished jobs it counts even
                 // when every live one is filed in a session.
-                let jobs_label = agents.iter().find(|n| n.job.is_some()).map(|n| n.jobs_label.as_str()).unwrap_or("");
+                let jobs_label = board.as_ref().map_or("", |b| b.jobs_label.as_str());
                 if !floating.is_empty() || background::counts_finished(jobs_label) {
                     let floating_list: Vec<&Pane> = floating_shown.iter().collect();
                     rows.push(String::new());
@@ -3320,9 +3321,6 @@ mod tests {
         let marked = job("marked").unwrap();
         assert_eq!(marked.session_id, "session:a");
         assert!(!marked.by_directory);
-        // Filed in a session, it still carries the group label, which is
-        // what says the finished jobs under BACKGROUND AGENTS.
-        assert_eq!(marked.jobs_label, "background agents · via jobs");
         // Nothing pairs it: the background group.
         assert_eq!(job("nowhere").unwrap().session_id, background::GROUP);
         // Below a shell at its prompt, so no row draws it: kept.

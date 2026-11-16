@@ -161,6 +161,10 @@ struct State {
     /// False until the first poll has answered, so "nothing here" is not
     /// drawn over a session nobody has looked at yet.
     read: bool,
+    /// The background agents' group label, which counts the finished jobs
+    /// not drawn. Kept apart from the rows because every live job may be
+    /// filed in a workspace, or drawn by an agent row, or there may be none.
+    jobs_label: String,
 }
 
 impl Default for State {
@@ -181,6 +185,7 @@ impl Default for State {
             snapshot_epoch: 0,
             event_cursor: None,
             read: false,
+            jobs_label: String::new(),
         }
     }
 }
@@ -296,7 +301,6 @@ fn file_jobs(
                 Some(w) => workspace_name(w).to_string(),
                 None => label.to_string(),
             },
-            jobs_label: label.to_string(),
             workspace: workspace.unwrap_or_else(|| NO_PANE.into()),
             cwd: job.cwd.clone(),
             state: background::state_word(&job).into(),
@@ -388,6 +392,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
+    let mut jobs_label = String::new();
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
         let mut live = HashSet::new();
@@ -426,6 +431,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
+        jobs_label = label.clone();
         let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
         file_jobs(&mut listed, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
         listed.sort_by(|a, b| {
@@ -442,6 +448,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     if let Ok(mut guard) = state.lock() {
         guard.snapshot = snapshot;
         guard.agents = agents;
+        guard.jobs_label = jobs_label;
         guard.tasks = tasks;
         guard.leases = leases;
         guard.next = next;
@@ -1643,6 +1650,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             sessions,
             git,
             worktrees,
+            jobs_label,
         ) = match state.lock() {
             Ok(g) => (
                 g.snapshot.clone(),
@@ -1657,6 +1665,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 g.sessions.clone(),
                 g.git.clone(),
                 g.worktrees.clone(),
+                g.jobs_label.clone(),
             ),
             Err(_) => return,
         };
@@ -2448,7 +2457,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 if background_pass {
                     // The heading is drawn for the finished jobs it counts
                     // even when every live one is filed in a workspace.
-                    let label = agent_rows.iter().find(|a| a.job.is_some()).map(|a| a.jobs_label.as_str()).unwrap_or("");
+                    let label = jobs_label.as_str();
                     if floating_rows.is_empty() && !background::counts_finished(label) {
                         break;
                     }
@@ -3341,9 +3350,6 @@ mod tests {
         // Its directory is open in exactly one workspace: filed there, and said.
         let by_dir = find("by-dir").unwrap();
         assert_eq!((by_dir.workspace.as_str(), by_dir.group_label.as_str()), ("web", "web"));
-        // Filed in a workspace, it still carries the group label, which is
-        // what says the finished jobs under BACKGROUND AGENTS.
-        assert_eq!(by_dir.jobs_label, "background agents · via jobs");
         assert!(by_dir.by_directory);
         assert!(Row::Agent(by_dir.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // A row bound to its session, or the Claude process under a pane's
