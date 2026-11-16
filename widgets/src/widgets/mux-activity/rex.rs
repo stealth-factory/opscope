@@ -631,13 +631,15 @@ fn file_jobs(
                     && p.agent.as_ref().is_some_and(|(name, _)| parse::agent_command(name, catalogue) == "claude")
             })
             .map(|(i, p)| {
-                // A shell back at its prompt is not running the job below
-                // it, whatever a report it kept says the pane is.
-                let fg = p
-                    .fg
-                    .as_ref()
-                    .and_then(|f| u32::try_from(f.pid).ok())
-                    .filter(|&pid| t.get(pid).is_some_and(|q| !tc::agent_work::is_shell(&q.comm, &q.args)));
+                // The pane's own shell back at its prompt is not running
+                // the job below it, whatever a report it kept says the pane
+                // is. A shell running a command under an agent still leads
+                // up to that agent.
+                let at_prompt = |pid: u32| {
+                    p.child_pid == Some(i64::from(pid))
+                        && t.get(pid).is_some_and(|q| tc::agent_work::is_shell(&q.comm, &q.args))
+                };
+                let fg = p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok()).filter(|&pid| !at_prompt(pid));
                 (fg.and_then(|pid| t.named_agent_at(pid, "claude")), i)
             })
             .collect(),
@@ -3369,6 +3371,27 @@ mod tests {
         let mut panes = vec![pane];
         file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
         assert_eq!(panes.len(), 2, "the job is drawn on its own row");
+    }
+
+    #[test]
+    fn a_shell_running_a_command_under_claude_still_stands_for_that_claude() {
+        // block:2's Claude (2) runs a command through its shell (20), which
+        // Rex reports as the foreground; the job is that Claude.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n20 2 bash bash -c make\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 20, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(2);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 1, "the pane draws the job");
     }
 
     #[test]
