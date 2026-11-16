@@ -620,7 +620,12 @@ fn unshareable(texts: &[Option<&str>], secrets: &[String], max_value: usize) -> 
     secrets
         .iter()
         .filter(|t| t.len() >= 8)
-        .any(|t| texts.iter().flatten().any(|v| v.contains(t.as_str())))
+        .any(|t| {
+            // The texts are JSON, where a `"` or `\` in a token is escaped.
+            let json = serde_json::to_string(t).unwrap_or_default();
+            let escaped = json.get(1..json.len().saturating_sub(1)).unwrap_or("");
+            texts.iter().flatten().any(|v| v.contains(t.as_str()) || (!escaped.is_empty() && v.contains(escaped)))
+        })
         .then_some(Publish::HeldSecret)
 }
 
@@ -1024,6 +1029,16 @@ mod tests {
         drop(s);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
+    }
+
+    #[test]
+    fn a_token_escaped_in_the_reading_is_still_found() {
+        // The reading is stored as JSON, so a `"` in the token is written `\"`.
+        let path = temp("secret-escaped");
+        let token = r#"fixture"token\0123456789"#.to_string();
+        let mut s = Store::open(&path).unwrap();
+        let leaky = reading(NOW, serde_json::json!({"echo": token.clone()}));
+        assert_eq!(s.publish("k", &leaky, std::slice::from_ref(&token), NOW).unwrap(), Publish::HeldSecret);
     }
 
     /// A reason written in after the publish - `set_live` - is held to the

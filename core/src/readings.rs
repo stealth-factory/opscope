@@ -576,12 +576,14 @@ pub fn fingerprint(parts: &[&str]) -> String {
     h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The key of one reading: `unit/shape:plain…:fingerprint`.
+/// The key of one reading: `unit/shape:plain…:%sfingerprint`.
 ///
 /// `secret` parts - a token, an account's credential - go into the key only
 /// as a fingerprint, and are registered with [`secret`] in the same step,
 /// so no reading containing one is ever written. A `:` or `%` in a plain
-/// part is escaped, so `["a:b", "c"]` and `["a", "b:c"]` are two keys.
+/// part is escaped, so `["a:b", "c"]` and `["a", "b:c"]` are two keys, and
+/// the fingerprint is marked `%s`, which no escaped plain part can contain,
+/// so a plain part equal to a fingerprint is not that fingerprint.
 /// `shape` is bumped when
 /// what is stored under `unit` changes, so an older build and a newer one
 /// keep separate rows rather than reading each other's.
@@ -595,7 +597,7 @@ pub fn key(cache: &mut Cache, unit: &str, shape: u32, plain: &[&str], secrets: &
         out.push_str(&p.replace('%', "%25").replace(':', "%3A"));
     }
     if !secrets.is_empty() {
-        out.push(':');
+        out.push_str(":%s");
         out.push_str(&fingerprint(secrets));
     }
     out
@@ -1368,6 +1370,14 @@ mod tests {
         assert_ne!(key(&mut c, "u", 1, &["a:b", "c"], &[]), key(&mut c, "u", 1, &["a", "b:c"], &[]));
         assert_ne!(key(&mut c, "u", 1, &["a%3Ab"], &[]), key(&mut c, "u", 1, &["a:b"], &[]));
         assert_eq!(key(&mut c, "u", 1, &["host:8080"], &[]), "u/1:host%3A8080");
+    }
+
+    #[test]
+    fn a_plain_part_equal_to_a_fingerprint_is_not_that_fingerprint() {
+        let mut c = Cache::default();
+        let token = "fixture-token-0123456789";
+        let print = fingerprint(&[token]);
+        assert_ne!(key(&mut c, "u", 1, &[], &[token]), key(&mut c, "u", 1, &[&print], &[]));
     }
 
     #[test]
