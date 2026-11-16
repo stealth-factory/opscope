@@ -612,11 +612,17 @@ fn file_jobs(
     // foreground: the one proof that a pane is showing this job rather than
     // having started it. A job left below a shell back at its prompt is not
     // in the foreground, and a pane drawn as no agent draws no job.
-    let agents: Vec<Option<u32>> = match table {
+    // Each keeps its pane's index, so a job that pane draws can hand it
+    // its subagents.
+    let agents: Vec<(Option<u32>, usize)> = match table {
         Ok(t) => panes
             .iter()
-            .filter(|p| p.job.is_none() && !p.remote && p.agent.is_some())
-            .map(|p| p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok()).and_then(|pid| t.named_agent_at(pid, "claude")))
+            .enumerate()
+            .filter(|(_, p)| p.job.is_none() && !p.remote && p.agent.is_some())
+            .map(|(i, p)| {
+                let fg = p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                (fg.and_then(|pid| t.named_agent_at(pid, "claude")), i)
+            })
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -627,7 +633,9 @@ fn file_jobs(
         .collect();
     let places: Vec<(&str, &str, &str)> = open.iter().map(|(s, b, c, _, _)| (s.as_str(), b.as_str(), c.as_str())).collect();
     for job in jobs {
-        if background::drawn_by(&job, agents.iter().map(|pid| (*pid, ""))) {
+        if let Some(&(_, at)) = agents.iter().find(|(pid, _)| background::drawn_by(&job, [(*pid, "")])) {
+            let pane = &mut panes[at];
+            pane.work = std::mem::take(&mut pane.work).with_fan(&job.fan);
             continue;
         }
         let mark = job.pid.and_then(&marker);
@@ -3277,6 +3285,9 @@ mod tests {
         assert!(by_dir.search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // The agent process under a pane is the job's: that pane draws it.
         assert!(job("in-pane").is_none());
+        // ... and is handed the job's subagents.
+        let api = panes.iter().find(|p| p.job.is_none() && p.block_id == "block:2").unwrap();
+        assert!(api.work.fan.iter().any(|f| f.id == "a1"));
         // Its markers name a session, but no pane runs it: kept, filed there.
         let marked = job("marked").unwrap();
         assert_eq!(marked.session_id, "session:a");

@@ -254,21 +254,29 @@ fn file_jobs(
     // Luvus lists a Claude agent in. A pane listing no agent draws no job,
     // whatever its shell left running. The pane id in a job's environment
     // is only where it was started.
-    let mut drawn: Vec<(Option<u32>, &str)> =
-        listed.iter().filter(|a| a.job.is_none()).map(|a| (None, a.session_id.as_str())).collect();
+    // Each proof keeps the index of the row it belongs to, so a job that
+    // row draws can hand it its subagents.
+    let mut drawn: Vec<(Option<u32>, &str, usize)> = listed
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.job.is_none())
+        .map(|(i, a)| (None, a.session_id.as_str(), i))
+        .collect();
     if let Ok(t) = table {
-        let shown = |pane: &str| listed.iter().any(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
-        drawn.extend(
-            panes
-                .iter()
-                .filter(|p| shown(&p.pane_id))
-                .filter_map(|p| p.root_pid)
-                .map(|root| (t.agent_below(root, "claude"), "")),
-        );
+        let shown =
+            |pane: &str| listed.iter().position(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
+        drawn.extend(panes.iter().filter_map(|p| {
+            let row = shown(&p.pane_id)?;
+            Some((t.agent_below(p.root_pid?, "claude"), "", row))
+        }));
     }
+    let mut fans = Vec::new();
     let mut filed = Vec::new();
     for job in jobs {
-        if background::drawn_by(&job, drawn.iter().copied()) {
+        if let Some(&(_, _, row)) =
+            drawn.iter().find(|&&(pid, session, _)| background::drawn_by(&job, [(pid, session)]))
+        {
+            fans.push((row, job.fan));
             continue;
         }
         let pane = job.pid.and_then(&marker);
@@ -299,6 +307,10 @@ fn file_jobs(
             by_directory,
             ..Default::default()
         });
+    }
+    for (row, fan) in fans {
+        let agent = &mut listed[row];
+        agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
     }
     listed.extend(filed);
 }
@@ -3290,10 +3302,17 @@ mod tests {
         };
         let mut in_pane = job("in-pane", 2, "/srv/other");
         in_pane.session_ids = vec!["sess-2".into()];
+        let mut under_root = job("under-root", 6, "/srv/other");
+        under_root.fan = tc::agent_work::parse_job_state(
+            "fan",
+            r#"{"state":"working","fan":[{"id":"a1","kind":"agent","label":"Explore","startedAt":1}]}"#,
+        )
+        .unwrap()
+        .fan;
         let jobs = vec![
             job("by-dir", 1, "/srv/web"),
             in_pane,
-            job("under-root", 6, "/srv/other"),
+            under_root,
             job("inherited", 5, "/srv/other"),
             job("gone-pane", 3, "/srv/api"),
             job("nowhere", 4, "/srv/other"),
@@ -3315,6 +3334,9 @@ mod tests {
         // root, is the job: that row draws it.
         assert!(find("in-pane").is_none());
         assert!(find("under-root").is_none());
+        // The row that draws it is handed its subagents.
+        let pane_one = listed.iter().find(|a| a.job.is_none() && a.pane == "1").unwrap();
+        assert!(pane_one.work.fan.iter().any(|f| f.id == "a1"));
         // Below a shell in a pane with no agent listed: no row draws it, kept.
         assert_eq!(find("at-prompt").unwrap().workspace, NO_PANE);
         // A pane id in its environment alone never hides it: kept, filed
