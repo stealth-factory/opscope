@@ -296,6 +296,7 @@ fn file_jobs(
                 Some(w) => workspace_name(w).to_string(),
                 None => label.to_string(),
             },
+            jobs_label: label.to_string(),
             workspace: workspace.unwrap_or_else(|| NO_PANE.into()),
             cwd: job.cwd.clone(),
             state: background::state_word(&job).into(),
@@ -2445,13 +2446,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             for background_pass in [false, true] {
                 let list = if background_pass { &floating_shown } else { &agents_shown };
                 if background_pass {
-                    if floating_rows.is_empty() {
+                    // The heading is drawn for the finished jobs it counts
+                    // even when every live one is filed in a workspace.
+                    let label = agent_rows.iter().find(|a| a.job.is_some()).map(|a| a.jobs_label.as_str()).unwrap_or("");
+                    if floating_rows.is_empty() && !background::counts_finished(label) {
                         break;
                     }
                     body.push(String::new());
                     // What the group's label says beyond its name: where the
                     // rows come from and the finished jobs not drawn.
-                    let label = &floating_rows[0].group_label;
                     let more = label.strip_prefix("background agents").unwrap_or(label);
                     let said = format!(
                         "{}{}",
@@ -2459,7 +2462,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         more
                     );
                     body.extend(background::heading(&said, w, &p.lbl, &p.dim));
-                    if floating_shown.is_empty() {
+                    if floating_shown.is_empty() && !floating_rows.is_empty() {
                         body.push(nothing(floating_rows.len()));
                     }
                 }
@@ -3338,6 +3341,9 @@ mod tests {
         // Its directory is open in exactly one workspace: filed there, and said.
         let by_dir = find("by-dir").unwrap();
         assert_eq!((by_dir.workspace.as_str(), by_dir.group_label.as_str()), ("web", "web"));
+        // Filed in a workspace, it still carries the group label, which is
+        // what says the finished jobs under BACKGROUND AGENTS.
+        assert_eq!(by_dir.jobs_label, "background agents · via jobs");
         assert!(by_dir.by_directory);
         assert!(Row::Agent(by_dir.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // A row bound to its session, or the Claude process under a pane's

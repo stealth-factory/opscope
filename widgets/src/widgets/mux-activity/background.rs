@@ -132,6 +132,13 @@ pub fn group_label(jobs: &Jobs) -> String {
     label
 }
 
+/// Whether a group label counts finished jobs it leaves out. The heading
+/// that carries it is then drawn even with every live job filed in a
+/// session and none left under it, since nowhere else says so.
+pub fn counts_finished(label: &str) -> bool {
+    label.ends_with(" finished not shown")
+}
+
 /// The state word a board ranks and colours by: the reported one, or
 /// `unknown` for a job whose file could not be read.
 pub fn state_word(job: &Job) -> &'static str {
@@ -479,6 +486,8 @@ mod tests {
         assert_eq!(group_label(&Jobs::default()), "background agents · via jobs");
         let jobs = Jobs { finished: 3, ..Default::default() };
         assert_eq!(group_label(&jobs), "background agents · via jobs · 3 finished not shown");
+        assert!(counts_finished(&group_label(&jobs)));
+        assert!(!counts_finished(&group_label(&Jobs::default())));
     }
 
     #[test]

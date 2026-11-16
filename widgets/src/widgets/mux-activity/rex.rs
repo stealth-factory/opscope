@@ -108,6 +108,10 @@ enum Section {
 /// One block, with everything the screen says about it.
 #[derive(Clone, Debug, Default)]
 struct Pane {
+    /// A background agent's group label, kept when the agent is filed in a
+    /// session: the finished jobs it counts are said under BACKGROUND
+    /// AGENTS even when no row is left there.
+    jobs_label: String,
     session_id: String,
     session_label: String,
     session_ord: usize,
@@ -662,6 +666,7 @@ fn file_jobs(
         };
         let by_directory = matches!(home, background::Home::ByDirectory(_));
         let mut pane = job_pane(job, label, table, at);
+        pane.jobs_label = label.to_string();
         if let Some((id, _, _, name, ord)) = session {
             pane.session_id = id.clone();
             pane.session_label = name.clone();
@@ -2572,12 +2577,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     }
                 }
 
-                if !floating.is_empty() {
+                // The heading is drawn for the finished jobs it counts even
+                // when every live one is filed in a session.
+                let jobs_label = agents.iter().find(|n| n.job.is_some()).map(|n| n.jobs_label.as_str()).unwrap_or("");
+                if !floating.is_empty() || background::counts_finished(jobs_label) {
                     let floating_list: Vec<&Pane> = floating_shown.iter().collect();
                     rows.push(String::new());
                     // What the group's label says beyond its name: where the
                     // rows come from and the finished jobs not drawn.
-                    let label = &floating[0].session_label;
+                    let label = jobs_label;
                     let more = label.strip_prefix("background agents").unwrap_or(label);
                     rows.extend(flow(
                         &[
@@ -2589,10 +2597,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         ],
                         w,
                     ));
-                    if floating_list.is_empty() {
-                        rows.push(nothing(floating.len()));
-                    } else {
-                        sections.push(index);
+                    if !floating.is_empty() {
+                        if floating_list.is_empty() {
+                            rows.push(nothing(floating.len()));
+                        } else {
+                            sections.push(index);
+                        }
                     }
                     for pane in &floating_list {
                         emit(&mut rows, pane, index, &floating_list);
@@ -3308,6 +3318,9 @@ mod tests {
         let marked = job("marked").unwrap();
         assert_eq!(marked.session_id, "session:a");
         assert!(!marked.by_directory);
+        // Filed in a session, it still carries the group label, which is
+        // what says the finished jobs under BACKGROUND AGENTS.
+        assert_eq!(marked.jobs_label, "background agents · via jobs");
         // Nothing pairs it: the background group.
         assert_eq!(job("nowhere").unwrap().session_id, background::GROUP);
         // Below a shell at its prompt, so no row draws it: kept.

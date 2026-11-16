@@ -1897,6 +1897,10 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             let label = workspace_label(&labels, background::GROUP);
             label.strip_prefix("background agents").unwrap_or(&label).to_string()
         };
+        // Drawn for the finished jobs the label counts even when every live
+        // one is filed in a workspace and none is left under it.
+        let floating_heading =
+            floating_all > 0 || (all_agents.iter().any(|a| a.job.is_some()) && background::counts_finished(&floating_more));
         let floating_count = super::search::count(floating, floating_all, filtering);
         let floating_head_rows = [format!("  · showing {floating_all}-{floating_all}"), "  · none on screen".to_string()]
             .iter()
@@ -1909,7 +1913,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
             + usize::from(seated == 0)                // the line that stands in for a list
-            + if floating_all > 0 { 1 + floating_head_rows } else { 0 } // blank, BACKGROUND AGENTS
+            + if floating_heading { 1 + floating_head_rows } else { 0 } // blank, BACKGROUND AGENTS
             + usize::from(floating_all > 0 && floating == 0)
             + usize::from(busy_shown.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
@@ -2028,7 +2032,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // what it adds is the group label beyond its name: where the rows
         // come from and the finished jobs not drawn.
         let floating_head = |rows: &mut Vec<String>| {
-            if floating_all == 0 {
+            if !floating_heading {
                 return;
             }
             let more = &floating_more;
@@ -2042,7 +2046,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 showing(&window, seated, floating)
             );
             rows.extend(background::heading(&said, w, &p.lbl, &p.dim));
-            if floating == 0 {
+            if floating == 0 && floating_all > 0 {
                 rows.push(nothing(floating_all));
             }
         };
