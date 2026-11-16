@@ -351,9 +351,12 @@ impl Table {
         if agent == root {
             return Some(agent);
         }
-        // The outermost named processes: one inside another is a launcher
-        // and the agent it runs, not two agents.
-        let mut outer = 0;
+        // The innermost named processes: a launcher and the agent it runs
+        // are one agent, counted at the agent, while two agents under one
+        // launcher, like two beside each other, are two.
+        let named =
+            |pid: u32| self.get(pid).is_some_and(|p| !is_shell(&p.comm, &p.args) && is_named(&p.comm, &p.args, name));
+        let mut innermost = 0;
         let mut queue = vec![root];
         let mut seen = 0;
         while let Some(pid) = queue.pop() {
@@ -362,13 +365,22 @@ impl Table {
                 return None;
             }
             for &kid in self.kids(pid) {
-                match self.get(kid) {
-                    Some(k) if !is_shell(&k.comm, &k.args) && is_named(&k.comm, &k.args, name) => outer += 1,
-                    _ => queue.push(kid),
+                if named(kid) && !self.named_under(kid, name, 0) {
+                    innermost += 1;
                 }
+                queue.push(kid);
             }
         }
-        (outer <= 1).then_some(agent)
+        (innermost <= 1).then_some(agent)
+    }
+
+    /// Whether a process `name` runs anywhere below `pid`.
+    fn named_under(&self, pid: u32, name: &str, depth: usize) -> bool {
+        depth < 32
+            && self.kids(pid).iter().any(|&kid| {
+                self.get(kid).is_some_and(|k| !is_shell(&k.comm, &k.args) && is_named(&k.comm, &k.args, name))
+                    || self.named_under(kid, name, depth + 1)
+            })
     }
 
     /// The agent `name` that a multiplexer's foreground `pid` belongs to.
@@ -672,6 +684,10 @@ mod tests {
         let two = parse_process_table("10 1 bash bash\n5 10 claude claude --resume\n12 10 claude claude\n").unwrap();
         assert_eq!(two.agent_below(10, "claude"), Some(5));
         assert_eq!(two.sole_agent_below(10, "claude"), None);
+        // Two agents under one wrapper that is itself named are two.
+        let wrapped =
+            parse_process_table("10 1 bash bash\n11 10 node node claude.js\n12 11 claude claude\n13 11 claude claude\n").unwrap();
+        assert_eq!(wrapped.sole_agent_below(10, "claude"), None);
     }
 
     #[test]
