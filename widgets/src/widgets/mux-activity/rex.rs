@@ -627,7 +627,13 @@ fn file_jobs(
                     && p.agent.as_ref().is_some_and(|(name, _)| parse::agent_command(name, catalogue) == "claude")
             })
             .map(|(i, p)| {
-                let fg = p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
+                // A shell back at its prompt is not running the job below
+                // it, whatever a report it kept says the pane is.
+                let fg = p
+                    .fg
+                    .as_ref()
+                    .and_then(|f| u32::try_from(f.pid).ok())
+                    .filter(|&pid| t.get(pid).is_some_and(|q| !tc::agent_work::is_shell(&q.comm, &q.args)));
                 (fg.and_then(|pid| t.named_agent_at(pid, "claude")), i)
             })
             .collect(),
@@ -3329,6 +3335,27 @@ mod tests {
         file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
         assert_eq!(panes.len(), 1, "the pane draws the job");
         assert!(panes[0].work.fan.iter().all(|f| f.id != "a1"), "a1 is drawn from the pane's report only");
+    }
+
+    #[test]
+    fn a_report_kept_by_a_shell_at_its_prompt_does_not_hide_the_job_below_it() {
+        // block:2's shell (10) is back at its prompt with Claude 3, a job it
+        // started, still below it. The pane kept an old Claude report.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n3 10 claude claude --resume\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 10, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(3);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 2, "the job is drawn on its own row");
     }
 
     #[test]
