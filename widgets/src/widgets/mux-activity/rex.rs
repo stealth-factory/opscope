@@ -636,6 +636,9 @@ fn file_jobs(
         if let Some(&(_, at)) = agents.iter().find(|(pid, _)| background::drawn_by(&job, [(*pid, "")])) {
             let pane = &mut panes[at];
             pane.work = std::mem::take(&mut pane.work).with_fan(&job.fan);
+            // A child the pane reports itself is drawn from that report.
+            let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
+            pane.work.covered_by(&reports);
             continue;
         }
         let mark = job.pid.and_then(&marker);
