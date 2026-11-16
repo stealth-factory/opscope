@@ -32,6 +32,7 @@ pub mod notices;
 pub mod procfs;
 pub mod cgroup;
 pub mod agent_work;
+pub mod readings;
 mod settings;
 pub mod statefile;
 mod terminal;

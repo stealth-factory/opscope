@@ -905,7 +905,7 @@ pub struct Built {
 /// A pass that read nothing new hands back what the last one built.
 fn claude_history_at(caches: &mut Caches, projects: &str) -> Built {
     let at = now();
-    let asked = caches.asked_at > 0.0;
+    let asked = caches.readings.asked_at > 0.0;
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
     //
@@ -4216,7 +4216,7 @@ mod tests {
         drop(f);
         // Asked, as `r` would: within five minutes of the last read a grown
         // log otherwise waits for the history cadence.
-        grown.asked_at = now();
+        grown.readings.asked_at = now();
         let incremental = claude_daily_at(&mut grown, &projects);
         let whole = claude_daily_at(&mut Caches::default(), &projects);
         assert!(!whole.is_empty());
@@ -4277,7 +4277,7 @@ mod tests {
         claude_daily_at(&mut caches, &projects);
         assert_eq!(caches.transcripts[&projects].tails.len(), 1);
         assert_eq!(caches.transcripts[&elsewhere].tails.len(), 1);
-        caches.asked_at = now();
+        caches.readings.asked_at = now();
         let after = claude_daily_at(&mut caches, &projects);
         assert_eq!(after, claude_daily_at(&mut Caches::default(), &projects));
         let _ = std::fs::remove_dir_all(&root);

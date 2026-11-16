@@ -1829,10 +1829,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let last_plan = format!("cursor-plan-last:{me}");
     match d.plan.as_ref() {
         Some(plan) => {
-            caches.live.insert(last_plan, (now(), Some(plan.clone()), f64::INFINITY));
+            caches.readings.live.insert(last_plan, (now(), Some(plan.clone()), f64::INFINITY));
         }
         None => {
-            d.plan = caches.live.get(&last_plan).and_then(|(_, v, _)| v.clone());
+            d.plan = caches.readings.live.get(&last_plan).and_then(|(_, v, _)| v.clone());
         }
     }
     // Best-effort beside the usage call, and never able to take it down:

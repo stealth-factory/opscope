@@ -161,6 +161,10 @@ struct State {
     /// False until the first poll has answered, so "nothing here" is not
     /// drawn over a session nobody has looked at yet.
     read: bool,
+    /// The background agents' group label, which counts the finished jobs
+    /// not drawn. Kept apart from the rows because every live job may be
+    /// filed in a workspace, or drawn by an agent row, or there may be none.
+    jobs_label: String,
 }
 
 impl Default for State {
@@ -181,6 +185,7 @@ impl Default for State {
             snapshot_epoch: 0,
             event_cursor: None,
             read: false,
+            jobs_label: String::new(),
         }
     }
 }
@@ -250,16 +255,34 @@ fn file_jobs(
         }
     }
     // What proves a row already draws a job: an agent Luvus binds to the
-    // job's Claude session, or the Claude process under a pane's root. The
-    // pane id in a job's environment is only where it was started.
-    let mut drawn: Vec<(Option<u32>, &str)> =
-        listed.iter().filter(|a| a.job.is_none()).map(|a| (None, a.session_id.as_str())).collect();
+    // job's Claude session, or the one Claude process under the root of a
+    // pane Luvus lists a Claude agent in. A pane listing no agent draws no
+    // job, whatever its shell left running, and two Claude processes below
+    // one shell prove neither. The pane id in a job's environment
+    // is only where it was started.
+    // Each proof keeps the index of the row it belongs to, so a job that
+    // row draws can hand it its subagents.
+    let mut drawn: Vec<(Option<u32>, &str, usize)> = listed
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.job.is_none())
+        .map(|(i, a)| (None, a.session_id.as_str(), i))
+        .collect();
     if let Ok(t) = table {
-        drawn.extend(panes.iter().filter_map(|p| p.root_pid).map(|root| (t.agent_below(root, "claude"), "")));
+        let shown =
+            |pane: &str| listed.iter().position(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
+        drawn.extend(panes.iter().filter_map(|p| {
+            let row = shown(&p.pane_id)?;
+            Some((t.sole_agent_below(p.root_pid?, "claude"), "", row))
+        }));
     }
+    let mut fans = Vec::new();
     let mut filed = Vec::new();
     for job in jobs {
-        if background::drawn_by(&job, drawn.iter().copied()) {
+        if let Some(&(_, _, row)) =
+            drawn.iter().find(|&&(pid, session, _)| background::drawn_by(&job, [(pid, session)]))
+        {
+            fans.push((row, job.fan));
             continue;
         }
         let pane = job.pid.and_then(&marker);
@@ -290,6 +313,10 @@ fn file_jobs(
             by_directory,
             ..Default::default()
         });
+    }
+    for (row, fan) in fans {
+        let agent = &mut listed[row];
+        agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
     }
     listed.extend(filed);
 }
@@ -365,6 +392,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
+    let mut jobs_label = String::new();
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
         let mut live = HashSet::new();
@@ -403,6 +431,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
+        jobs_label = label.clone();
         let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
         file_jobs(&mut listed, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
         listed.sort_by(|a, b| {
@@ -419,6 +448,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     if let Ok(mut guard) = state.lock() {
         guard.snapshot = snapshot;
         guard.agents = agents;
+        guard.jobs_label = jobs_label;
         guard.tasks = tasks;
         guard.leases = leases;
         guard.next = next;
@@ -1666,6 +1696,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             sessions,
             git,
             worktrees,
+            jobs_label,
         ) = match state.lock() {
             Ok(g) => (
                 g.snapshot.clone(),
@@ -1680,6 +1711,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 g.sessions.clone(),
                 g.git.clone(),
                 g.worktrees.clone(),
+                g.jobs_label.clone(),
             ),
             Err(_) => return,
         };
@@ -2475,13 +2507,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             for background_pass in [false, true] {
                 let list = if background_pass { &floating_shown } else { &agents_shown };
                 if background_pass {
-                    if floating_rows.is_empty() {
+                    // The heading is drawn for the finished jobs it counts
+                    // even when every live one is filed in a workspace.
+                    let label = jobs_label.as_str();
+                    if floating_rows.is_empty() && !background::counts_finished(label) {
                         break;
                     }
                     body.push(String::new());
                     // What the group's label says beyond its name: where the
                     // rows come from and the finished jobs not drawn.
-                    let label = &floating_rows[0].group_label;
                     let more = label.strip_prefix("background agents").unwrap_or(label);
                     let said = format!(
                         "{}{}",
@@ -2489,7 +2523,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         more
                     );
                     body.extend(background::heading(&said, w, &p.lbl, &p.dim));
-                    if floating_shown.is_empty() {
+                    if floating_shown.is_empty() && !floating_rows.is_empty() {
                         body.push(nothing(floating_rows.len()));
                     }
                 }
@@ -3305,16 +3339,27 @@ mod tests {
 
     #[test]
     fn background_agents_are_filed_under_the_workspace_they_belong_to() {
-        // Pane 1's root shell (10) runs claude 6, a job resumed there.
-        let table = tc::agent_work::parse_process_table("10 1 bash bash\n6 10 claude claude --resume\n").map_err(String::from);
-        let pane = |workspace: &str, id: &str, cwd: &str| parse::Pane {
+        // Pane 1's root shell (10) runs claude 6, a job resumed there, and
+        // Luvus lists its Claude agent. Pane 3's shell (11) has claude 7 left
+        // below it, but Luvus lists no agent there: no row draws 7.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n6 10 claude claude --resume\n11 1 bash bash\n7 11 claude claude --resume\n\
+             20 1 bash bash\n8 20 claude claude --resume\n9 20 claude claude\n",
+        )
+        .map_err(String::from);
+        let pane = |workspace: &str, id: &str, cwd: &str, root: u32| parse::Pane {
             workspace: workspace.into(),
             pane_id: id.into(),
             cwd: cwd.into(),
-            root_pid: Some(10),
+            root_pid: Some(root),
             ..Default::default()
         };
-        let panes = [pane("web", "1", "/srv/web/src")];
+        // Pane 4's shell (20) has two: Luvus's agent and a job left running.
+        let panes = [
+            pane("web", "1", "/srv/web/src", 10),
+            pane("web", "3", "/srv/web/src", 11),
+            pane("web", "4", "/srv/web/src", 20),
+        ];
         // An agent `agent list` reports but the snapshot does not hold,
         // bound to the Claude session `sess-2`.
         let mut listed = vec![Agent {
@@ -3324,6 +3369,9 @@ mod tests {
             session_id: "sess-2".into(),
             ..Default::default()
         }];
+        for pane in ["1", "4"] {
+            listed.push(Agent { workspace: "web".into(), pane: pane.into(), cwd: "/srv/web/src".into(), kind: "claude".into(), ..Default::default() });
+        }
         let job = |name: &str, pid: u32, cwd: &str| {
             let mut job = tc::agent_work::parse_job_state(name, &format!(r#"{{"state":"working","cwd":"{cwd}"}}"#)).unwrap();
             job.pid = Some(pid);
@@ -3331,13 +3379,22 @@ mod tests {
         };
         let mut in_pane = job("in-pane", 2, "/srv/other");
         in_pane.session_ids = vec!["sess-2".into()];
+        let mut under_root = job("under-root", 6, "/srv/other");
+        under_root.fan = tc::agent_work::parse_job_state(
+            "fan",
+            r#"{"state":"working","fan":[{"id":"a1","kind":"agent","label":"Explore","startedAt":1}]}"#,
+        )
+        .unwrap()
+        .fan;
         let jobs = vec![
             job("by-dir", 1, "/srv/web"),
             in_pane,
-            job("under-root", 6, "/srv/other"),
+            under_root,
             job("inherited", 5, "/srv/other"),
             job("gone-pane", 3, "/srv/api"),
             job("nowhere", 4, "/srv/other"),
+            job("at-prompt", 7, "/srv/other"),
+            job("beside-agent", 8, "/srv/other"),
         ];
         let marker = |pid: u32| match pid {
             2 | 5 => Some("2".to_string()),
@@ -3355,6 +3412,13 @@ mod tests {
         // root, is the job: that row draws it.
         assert!(find("in-pane").is_none());
         assert!(find("under-root").is_none());
+        // The row that draws it is handed its subagents.
+        let pane_one = listed.iter().find(|a| a.job.is_none() && a.pane == "1").unwrap();
+        assert!(pane_one.work.fan.iter().any(|f| f.id == "a1"));
+        // Below a shell in a pane with no agent listed: no row draws it, kept.
+        assert_eq!(find("at-prompt").unwrap().workspace, NO_PANE);
+        // Beside the agent under one shell: which one the row shows is a guess, so kept.
+        assert_eq!(find("beside-agent").unwrap().workspace, NO_PANE);
         // A pane id in its environment alone never hides it: kept, filed
         // under that pane's workspace.
         let inherited = find("inherited").unwrap();
@@ -3368,11 +3432,11 @@ mod tests {
         assert!(!Row::Agent(nowhere.clone()).search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // Grouped with the workspace it was filed under.
         let order: Vec<String> = by_workspace(listed.clone()).into_iter().map(|a| a.workspace).collect();
-        assert_eq!(order, ["api", "api", "api", "web", NO_PANE]);
-        // Only the unpaired one leaves AGENTS for BACKGROUND AGENTS.
+        assert_eq!(order, ["api", "api", "api", "web", "web", "web", NO_PANE, NO_PANE, NO_PANE]);
+        // Only the unpaired ones leave AGENTS for BACKGROUND AGENTS.
         let floating_now: Vec<&str> =
             listed.iter().filter(|a| floating(a)).map(|a| a.job.as_ref().unwrap().short.as_str()).collect();
-        assert_eq!(floating_now, ["nowhere"]);
+        assert_eq!(floating_now, ["nowhere", "at-prompt", "beside-agent"]);
     }
 
     #[test]

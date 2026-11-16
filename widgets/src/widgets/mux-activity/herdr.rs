@@ -960,6 +960,19 @@ fn file_jobs(
         .collect();
     let places: Vec<(&str, &str, &str)> =
         owned.iter().map(|(w, p, c)| (w.as_str(), p.as_str(), c.as_str())).collect();
+    // A job whose process already has a row hands that row its subagents
+    // before going, as a job Herdr's hook reported by session does.
+    let fans: Vec<(Option<u32>, Vec<tc::agent_work::FanItem>)> = agents
+        .iter()
+        .filter_map(|a| a.job.as_ref())
+        .filter(|job| background::drawn_by(job, pids.iter().map(|pid| (*pid, ""))))
+        .map(|job| (job.pid, job.fan.clone()))
+        .collect();
+    for (pid, fan) in fans {
+        if let Some(agent) = agents.iter_mut().find(|a| a.job.is_none() && a.pid.is_some() && a.pid == pid) {
+            agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
+        }
+    }
     agents.retain_mut(|agent| {
         let Some(job) = &agent.job else { return true };
         if background::drawn_by(job, pids.iter().map(|pid| (*pid, ""))) {
@@ -1946,32 +1959,30 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             .map(|line| tc::seg(&[(p.unknown.as_str(), format!("  {}", line))], w - 1))
             .collect();
         // The BACKGROUND AGENTS heading wraps on a narrow pane. Its height
-        // is counted with the longest `showing` note it can carry, since the
-        // window that decides the note is sized from this count.
+        // is counted with the tallest note `showing` can give it, a range or
+        // `none on screen`, since the window that decides the note is sized
+        // from this count.
         let floating_more = {
             let label = workspace_label(&labels, background::GROUP);
             label.strip_prefix("background agents").unwrap_or(&label).to_string()
         };
-        let floating_head_rows = background::heading(
-            &format!(
-                "{}{}  · showing {}-{}",
-                super::search::count(floating, floating_all, filtering),
-                floating_more,
-                floating_all,
-                floating_all
-            ),
-            w,
-            "",
-            "",
-        )
-        .len();
+        // Drawn for the finished jobs the label counts even when no live
+        // one is left under it: filed in a workspace, drawn by an agent's
+        // row, or none running.
+        let floating_heading = floating_all > 0 || background::counts_finished(&floating_more);
+        let floating_count = super::search::count(floating, floating_all, filtering);
+        let floating_head_rows = [format!("  · showing {floating_all}-{floating_all}"), "  · none on screen".to_string()]
+            .iter()
+            .map(|note| background::heading(&format!("{floating_count}{floating_more}{note}"), w, "", "").len())
+            .max()
+            .unwrap_or(1);
         let chrome = rows.len()
             + hidden_rows.len()                       // a warning the filter would hide
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
             + usize::from(!unread.is_empty())         // why they could not be read
             + usize::from(seated == 0)                // the line that stands in for a list
-            + if floating_all > 0 { 1 + floating_head_rows } else { 0 } // blank, BACKGROUND AGENTS
+            + if floating_heading { 1 + floating_head_rows } else { 0 } // blank, BACKGROUND AGENTS
             + usize::from(floating_all > 0 && floating == 0)
             + usize::from(busy_shown.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
@@ -2098,7 +2109,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // what it adds is the group label beyond its name: where the rows
         // come from and the finished jobs not drawn.
         let floating_head = |rows: &mut Vec<String>| {
-            if floating_all == 0 {
+            if !floating_heading {
                 return;
             }
             let more = &floating_more;
@@ -2112,7 +2123,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 showing(&window, seated, floating)
             );
             rows.extend(background::heading(&said, w, &p.lbl, &p.dim));
-            if floating == 0 {
+            if floating == 0 && floating_all > 0 {
                 rows.push(nothing(floating_all));
             }
         };

@@ -341,6 +341,10 @@ struct Board {
     rex_version: String,
     api_revision: u64,
     local_usage: bool,
+    /// The background agents' group label, which counts the finished jobs
+    /// not drawn. Kept apart from the rows because every live job may be
+    /// filed in a session, or drawn by a pane, or there may be none.
+    jobs_label: String,
 }
 
 #[derive(Default)]
@@ -521,6 +525,7 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
         rex_version: g.server.rex_version.clone(),
         api_revision: g.server.api_revision,
         local_usage: local,
+        jobs_label: String::new(),
     }
 }
 
@@ -622,15 +627,38 @@ fn file_jobs(
     label: &str,
     table: &Result<tc::agent_work::Table, String>,
     at: f64,
+    catalogue: &[String],
     marker: impl Fn(u32) -> Option<String>,
 ) {
-    // The agent process under each pane, from the process table: the one
-    // proof that a pane is showing this job rather than having started it.
-    let agents: Vec<Option<u32>> = match table {
+    // The Claude process each agent row draws, found from its pane's
+    // foreground: the one proof that a pane is showing this job rather than
+    // having started it. A job left below a shell back at its prompt is not
+    // in the foreground, and a pane drawn as no agent draws no job.
+    // Each keeps its pane's index, so a job that pane draws can hand it
+    // its subagents. Only a row drawn as Claude counts: another agent that
+    // launched a Claude job has it below, and taking that as the job's
+    // row would lose the job's own state.
+    let agents: Vec<(Option<u32>, usize)> = match table {
         Ok(t) => panes
             .iter()
-            .filter(|p| p.job.is_none() && !p.remote)
-            .map(|p| p.child_pid.and_then(|pid| u32::try_from(pid).ok()).and_then(|pid| t.agent_below(pid, "claude")))
+            .enumerate()
+            .filter(|(_, p)| {
+                p.job.is_none()
+                    && !p.remote
+                    && p.agent.as_ref().is_some_and(|(name, _)| parse::agent_command(name, catalogue) == "claude")
+            })
+            .map(|(i, p)| {
+                // The pane's own shell back at its prompt is not running
+                // the job below it, whatever a report it kept says the pane
+                // is. A shell running a command under an agent still leads
+                // up to that agent.
+                let at_prompt = |pid: u32| {
+                    p.child_pid == Some(i64::from(pid))
+                        && t.get(pid).is_some_and(|q| tc::agent_work::is_shell(&q.comm, &q.args))
+                };
+                let fg = p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok()).filter(|&pid| !at_prompt(pid));
+                (fg.and_then(|pid| t.named_agent_at(pid, "claude")), i)
+            })
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -641,7 +669,12 @@ fn file_jobs(
         .collect();
     let places: Vec<(&str, &str, &str)> = open.iter().map(|(s, b, c, _, _)| (s.as_str(), b.as_str(), c.as_str())).collect();
     for job in jobs {
-        if background::drawn_by(&job, agents.iter().map(|pid| (*pid, ""))) {
+        if let Some(&(_, at)) = agents.iter().find(|(pid, _)| background::drawn_by(&job, [(*pid, "")])) {
+            let pane = &mut panes[at];
+            pane.work = std::mem::take(&mut pane.work).with_fan(&job.fan);
+            // A child the pane reports itself is drawn from that report.
+            let reports: Vec<String> = pane.children().filter_map(|r| r.id.clone()).collect();
+            pane.work.covered_by(&reports);
             continue;
         }
         let mark = job.pid.and_then(&marker);
@@ -734,7 +767,8 @@ fn poll(
         }
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
-        file_jobs(&mut board.panes, jobs.shown, &label, &table, at, rex_marker);
+        file_jobs(&mut board.panes, jobs.shown, &label, &table, at, catalogue, rex_marker);
+        board.jobs_label = label;
         // One sample for panes and background agents alike: the sampler
         // forgets every pid it is not handed, and a percentage needs two.
         let usage_pid = |p: &Pane| match &p.job {
@@ -2589,12 +2623,15 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                     }
                 }
 
-                if !floating.is_empty() {
+                // The heading is drawn for the finished jobs it counts even
+                // when every live one is filed in a session.
+                let jobs_label = board.as_ref().map_or("", |b| b.jobs_label.as_str());
+                if !floating.is_empty() || background::counts_finished(jobs_label) {
                     let floating_list: Vec<&Pane> = floating_shown.iter().collect();
                     rows.push(String::new());
                     // What the group's label says beyond its name: where the
                     // rows come from and the finished jobs not drawn.
-                    let label = &floating[0].session_label;
+                    let label = jobs_label;
                     let more = label.strip_prefix("background agents").unwrap_or(label);
                     rows.extend(flow(
                         &[
@@ -2606,10 +2643,12 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                         ],
                         w,
                     ));
-                    if floating_list.is_empty() {
-                        rows.push(nothing(floating.len()));
-                    } else {
-                        sections.push(index);
+                    if !floating.is_empty() {
+                        if floating_list.is_empty() {
+                            rows.push(nothing(floating.len()));
+                        } else {
+                            sections.push(index);
+                        }
                     }
                     for pane in &floating_list {
                         emit(&mut rows, pane, index, &floating_list);
@@ -3302,21 +3341,26 @@ mod tests {
 
     #[test]
     fn background_agents_are_filed_under_the_session_they_belong_to() {
-        // block:2's shell (10) runs claude 2, the job resumed there.
-        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n11 1 bash bash\n").map_err(String::from);
-        let open = |session: &str, label: &str, block: &str, cwd: &str, child: i64| Pane {
+        // block:2's shell (10) runs claude 2, the job resumed there, in its
+        // foreground. block:1's shell (11) is back at its prompt with claude 5
+        // still below it: no row draws 5.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n2 10 claude claude --resume\n11 1 bash bash\n5 11 claude claude --resume\n",
+        )
+        .map_err(String::from);
+        let open = |session: &str, label: &str, block: &str, cwd: &str, child: i64, fg: i64| Pane {
             session_id: session.into(),
             session_label: label.into(),
             session_ord: 1,
             block_id: block.into(),
             child_cwd: cwd.into(),
             child_pid: Some(child),
+            fg: Some(Foreground { pid: fg, ..Default::default() }),
             ..Default::default()
         };
-        let mut panes = vec![
-            open("session:w", "web", "block:1", "file://host/srv/web/src", 11),
-            open("session:a", "api", "block:2", "/srv/api", 10),
-        ];
+        let mut api = open("session:a", "api", "block:2", "/srv/api", 10, 2);
+        api.agent = Some(("claude".into(), Source::Process));
+        let mut panes = vec![open("session:w", "web", "block:1", "file://host/srv/web/src", 11, 11), api];
         let with_pid = |name: &str, pid: u32| {
             let mut job = a_job("working");
             job.short = name.into();
@@ -3325,13 +3369,15 @@ mod tests {
         };
         let mut elsewhere = with_pid("nowhere", 3);
         elsewhere.dirs = vec!["/srv/other".into()];
-        let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere];
+        let mut at_prompt = with_pid("at-prompt", 5);
+        at_prompt.dirs = vec!["/srv/web".into()];
+        let jobs = vec![with_pid("by-dir", 1), with_pid("in-pane", 2), with_pid("marked", 4), elsewhere, at_prompt];
         // 4 inherited block:2's markers but is not the agent running there.
         let marker = |pid: u32| match pid {
             2 | 4 => Some("session:a".to_string()),
             _ => None,
         };
-        file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
+        file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, &[], marker);
         let job = |short: &str| panes.iter().find(|p| p.job.as_ref().is_some_and(|j| j.short == short));
         // Its directory is open in exactly one session: filed there, and said.
         let by_dir = job("by-dir").unwrap();
@@ -3341,12 +3387,103 @@ mod tests {
         assert!(by_dir.search_fields().iter().any(|f| f == background::BY_DIRECTORY));
         // The agent process under a pane is the job's: that pane draws it.
         assert!(job("in-pane").is_none());
+        // ... and is handed the job's subagents.
+        let api = panes.iter().find(|p| p.job.is_none() && p.block_id == "block:2").unwrap();
+        assert!(api.work.fan.iter().any(|f| f.id == "a1"));
         // Its markers name a session, but no pane runs it: kept, filed there.
         let marked = job("marked").unwrap();
         assert_eq!(marked.session_id, "session:a");
         assert!(!marked.by_directory);
         // Nothing pairs it: the background group.
         assert_eq!(job("nowhere").unwrap().session_id, background::GROUP);
+        // Below a shell at its prompt, so no row draws it: kept.
+        assert_eq!(job("at-prompt").unwrap().session_id, "session:w");
+    }
+
+    #[test]
+    fn a_subagent_the_pane_reports_is_not_drawn_again_from_the_jobs_fan() {
+        // The agent in block:2 is the job's process and reports subagent a1
+        // finished itself; the job still lists a1 as working.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n").map_err(String::from);
+        let mut pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 2, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            records: vec![Record { id: Some("tasks/a1".into()), state: "done".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        pane.work = tc::agent_work::Work::of(&table, Some(2));
+        let mut job = a_job("working");
+        job.pid = Some(2);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 1, "the pane draws the job");
+        assert!(panes[0].work.fan.iter().all(|f| f.id != "a1"), "a1 is drawn from the pane's report only");
+    }
+
+    #[test]
+    fn a_report_kept_by_a_shell_at_its_prompt_does_not_hide_the_job_below_it() {
+        // block:2's shell (10) is back at its prompt with Claude 3, a job it
+        // started, still below it. The pane kept an old Claude report.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n3 10 claude claude --resume\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 10, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(3);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 2, "the job is drawn on its own row");
+    }
+
+    #[test]
+    fn a_shell_running_a_command_under_claude_still_stands_for_that_claude() {
+        // block:2's Claude (2) runs a command through its shell (20), which
+        // Rex reports as the foreground; the job is that Claude.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 claude claude --resume\n20 2 bash bash -c make\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 20, ..Default::default() }),
+            agent: Some(("claude".into(), Source::Report)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(2);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 1, "the pane draws the job");
+    }
+
+    #[test]
+    fn a_claude_job_another_agent_launched_keeps_its_own_row() {
+        // block:2 runs codex (2), which started the resumed Claude job (3)
+        // as a child. The codex row is not the job's row.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 codex codex\n3 2 claude claude --resume\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 2, ..Default::default() }),
+            agent: Some(("codex".into(), Source::Process)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(3);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 2, "the job is drawn on its own row");
     }
 
     fn drawn(pane: &Pane, w: usize) -> String {
