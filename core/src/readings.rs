@@ -509,6 +509,9 @@ pub fn share(cache: &mut Cache, name: &str, caps: store::Caps, on: bool, now: f6
     if !on {
         cache.store = None;
         cache.sharing_off = "share_readings is off".into();
+        // Turned back on, it opens at once: the retry wait is for a store
+        // that would not open, not for one the reader closed.
+        cache.share_tried = None;
         return;
     }
     cache.share_path = store::path(name);
@@ -1341,6 +1344,21 @@ mod tests {
         assert_ne!(key(&mut c, "u", 1, &["a:b", "c"], &[]), key(&mut c, "u", 1, &["a", "b:c"], &[]));
         assert_ne!(key(&mut c, "u", 1, &["a%3Ab"], &[]), key(&mut c, "u", 1, &["a:b"], &[]));
         assert_eq!(key(&mut c, "u", 1, &["host:8080"], &[]), "u/1:host%3A8080");
+    }
+
+    #[test]
+    fn sharing_turned_off_and_on_again_opens_the_store_at_once() {
+        use crate::statefile::tests::{env_lock, temp_dir, EnvVar};
+        let _guard = env_lock();
+        let dir = temp_dir("share-toggle");
+        let _xdg = EnvVar::set("XDG_STATE_HOME", Some(dir.as_os_str()));
+        let mut c = Cache::default();
+        share(&mut c, "toggle-test", store::Caps::default(), true, 1_000.0);
+        assert!(c.store.is_some(), "{}", c.sharing_off);
+        share(&mut c, "toggle-test", store::Caps::default(), false, 1_010.0);
+        assert!(c.store.is_none());
+        share(&mut c, "toggle-test", store::Caps::default(), true, 1_020.0);
+        assert!(c.store.is_some(), "turned back on, still not sharing: {}", c.sharing_off);
     }
 
     #[test]
