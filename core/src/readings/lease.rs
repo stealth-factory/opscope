@@ -36,6 +36,12 @@
 /// half of an older reading.
 pub const LEASE: f64 = 90.0;
 
+/// The longest lease any claim may ask for (OPS-284). A reading fetched in
+/// many requests renews its lease before each one, so this bounds one
+/// request, not a whole pass: a lease further ahead than twice this was
+/// written before the clock went back.
+pub const MAX_LEASE: f64 = 300.0;
+
 /// How far ahead of this clock a time may be before it is distrusted.
 ///
 /// Every pane sharing a store runs on one machine, so their clocks are one
@@ -78,7 +84,7 @@ pub enum Claim {
 pub fn claimable(lease: Option<Lease>, me: u32, now: f64) -> bool {
     match lease {
         None => true,
-        Some(l) => l.holder == me || l.expires_at <= now || l.expires_at > now + 2.0 * LEASE,
+        Some(l) => l.holder == me || l.expires_at <= now || l.expires_at > now + 2.0 * MAX_LEASE,
     }
 }
 
@@ -186,8 +192,9 @@ mod tests {
 
     #[test]
     fn a_lease_from_the_future_can_be_claimed() {
-        assert!(claimable(lease(THEM, NOW + 2.0 * LEASE + 1.0), ME, NOW));
+        assert!(claimable(lease(THEM, NOW + 2.0 * MAX_LEASE + 1.0), ME, NOW));
         assert!(!claimable(lease(THEM, NOW + LEASE), ME, NOW));
+        assert!(!claimable(lease(THEM, NOW + MAX_LEASE), ME, NOW));
     }
 
     #[test]

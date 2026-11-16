@@ -53,8 +53,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::lease::{self, Claim, Lease};
 
-/// Bumped whenever the tables change shape. A store of any other version
-/// is deleted and started again.
+/// Bumped only when the tables change in a way an older build cannot read.
+/// A column that is added, nullable, never bumps it: older builds name
+/// their columns and keep working. A store of another version is left
+/// alone - panes on that build still have it open - and this pane fetches
+/// on its own; a change that needs a bump takes a new file name instead.
 pub const VERSION: i64 = 1;
 
 /// The most SQLite will let the file grow to: 4096 pages of 4 KB.
@@ -69,6 +72,60 @@ pub const MAX_VALUE: usize = 2 * 1024 * 1024;
 /// How long a write waits for another pane's transaction before giving up
 /// for this pass. Every transaction here is a handful of rows.
 const BUSY: Duration = Duration::from_millis(250);
+
+/// How large one widget's store may grow, and the largest reading it
+/// shares. agent-usage's figures are the default; a widget that shares
+/// lists - pull requests, issues, runs - asks for more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Caps {
+    /// The most pages of `PAGE` bytes SQLite lets the file grow to.
+    pub max_pages: i64,
+    /// A reading larger than this, serialised, is kept by the pane that
+    /// fetched it and not shared.
+    pub max_value: usize,
+    /// A reading nobody has published for this long is deleted. A widget
+    /// that stores titles - pull requests, issues, runs - keeps them for
+    /// hours, not the day agent-usage's figures are kept.
+    pub forget_after: f64,
+}
+
+impl Default for Caps {
+    fn default() -> Caps {
+        Caps { max_pages: MAX_PAGES, max_value: MAX_VALUE, forget_after: lease::FORGET_AFTER }
+    }
+}
+
+impl Caps {
+    /// Past this the writer vacuums, and if that does not bring it back
+    /// under, empties the file. Half the cap.
+    pub fn shrink_at(&self) -> u64 {
+        (self.max_pages * PAGE / 2) as u64
+    }
+}
+
+/// What came of publishing a reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publish {
+    /// In the store for every pane.
+    Written,
+    /// A newer reading was already there, so this one was dropped.
+    Older,
+    /// Larger than the widget's cap: kept by this pane only.
+    TooLarge,
+    /// It carried a token this pane holds: kept by this pane only.
+    HeldSecret,
+}
+
+impl Publish {
+    /// Why the reading stayed with this pane, when it did.
+    pub fn unshared(self) -> Option<&'static str> {
+        match self {
+            Publish::TooLarge => Some("too large to share"),
+            Publish::HeldSecret => Some("not shared: it carried a token"),
+            Publish::Written | Publish::Older => None,
+        }
+    }
+}
 
 /// The store of the widget named `name`: one file per widget, under
 /// [`crate::state_dir`], so widgets never share a file.
@@ -104,6 +161,10 @@ pub enum Got {
 pub struct Store {
     conn: Connection,
     path: String,
+    caps: Caps,
+    /// (device, inode) of the file when it was opened, so a file replaced
+    /// under the same name - by a build that started it again - is noticed.
+    file: (u64, u64),
     pub me: u32,
     /// `data_version` as of the start of this pass.
     version: i64,
@@ -170,13 +231,18 @@ const OPEN_TRIES: u32 = 3;
 impl Store {
     /// Open the store, or start it again when the file cannot be used.
     ///
-    /// Only a file SQLite calls damaged, or one written by another version,
-    /// is deleted. A busy one is tried again a few times and then left for
+    /// Only a file SQLite calls damaged is deleted. One written by another
+    /// version is left for the panes using it, and this pane goes on alone. A busy one is tried again a few times and then left for
     /// a later pass; the panes already using it carry on with it.
     pub fn open(path: &str) -> Result<Store, String> {
+        Store::open_with(path, Caps::default())
+    }
+
+    /// [`open`](Self::open) with the size limits of this widget.
+    pub fn open_with(path: &str, caps: Caps) -> Result<Store, String> {
         let mut tries = 0;
         let first = loop {
-            match Store::open_once(path) {
+            match Store::open_once(path, caps) {
                 Ok(s) => return Ok(s),
                 Err(e) if e.unusable => break e.why,
                 Err(e) => {
@@ -189,12 +255,12 @@ impl Store {
             }
         };
         remove(path);
-        let mut s = Store::open_once(path).map_err(|e| e.why)?;
+        let mut s = Store::open_once(path, caps).map_err(|e| e.why)?;
         s.notice = format!("shared store started again: {first}");
         Ok(s)
     }
 
-    fn open_once(path: &str) -> Result<Store, OpenError> {
+    fn open_once(path: &str, caps: Caps) -> Result<Store, OpenError> {
         use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(dir)
@@ -215,7 +281,7 @@ impl Store {
             .map_err(db)?;
         conn.pragma_update(None, "synchronous", "OFF").map_err(db)?;
         let _: i64 = conn
-            .query_row(&format!("PRAGMA max_page_count={MAX_PAGES}"), [], |r| r.get(0))
+            .query_row(&format!("PRAGMA max_page_count={}", caps.max_pages), [], |r| r.get(0))
             .map_err(db)?;
         let ok: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(db)?;
         if ok != "ok" {
@@ -243,11 +309,16 @@ impl Store {
             .query_row("SELECT v FROM meta WHERE k = 'version'", [], |r| r.get(0))
             .map_err(db)?;
         if v != VERSION {
-            return Err(OpenError::unusable(format!("it was written by another version ({v})")));
+            return Err(OpenError::other(format!(
+                "the shared store was written by another version of opscope ({v}, this is {VERSION})"
+            )));
         }
+        let file = identity(path).map_err(OpenError::other)?;
         let mut store = Store {
             conn,
             path: path.to_string(),
+            caps,
+            file,
             me: std::process::id(),
             version: 0,
             seen: HashMap::new(),
@@ -257,7 +328,7 @@ impl Store {
         };
         store.begin_pass().map_err(OpenError::other)?;
         let size = store.size();
-        if size > SHRINK_AT {
+        if size > caps.shrink_at() {
             store.keep_small().map_err(OpenError::other)?;
             if store.notice.is_empty() {
                 store.notice = format!("shared store compacted: it had grown to {} KB", size / 1024);
@@ -290,6 +361,13 @@ impl Store {
     /// Ask to be the pane that fetches `key`. `known` is when the reading
     /// this pane holds was taken.
     pub fn claim(&mut self, key: &str, known: Option<f64>, now: f64) -> Result<Got, String> {
+        self.claim_for(key, known, now, lease::LEASE)
+    }
+
+    /// [`claim`](Self::claim) with a lease of `lease_for` seconds, at most
+    /// `MAX_LEASE`: long enough for one request of this widget's fetch.
+    pub fn claim_for(&mut self, key: &str, known: Option<f64>, now: f64, lease_for: f64) -> Result<Got, String> {
+        let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let stored: Option<(f64, f64)> = tx
             .query_row("SELECT taken_at, held FROM readings WHERE key = ?1", [key], |r| {
@@ -308,7 +386,7 @@ impl Store {
                 tx.execute(
                     "INSERT INTO leases(key, holder, expires_at) VALUES (?1, ?2, ?3)
                      ON CONFLICT(key) DO UPDATE SET holder = ?2, expires_at = ?3",
-                    params![key, self.me, now + lease::LEASE],
+                    params![key, self.me, now + lease_for],
                 )
                 .map_err(sql)?;
                 self.writes += 1;
@@ -327,6 +405,43 @@ impl Store {
         Ok(got)
     }
 
+    /// Hold a lease this pane has for another `lease_for` seconds, before the
+    /// next request of a long fetch. `false` when it is no longer this
+    /// pane's: it ran out and another pane took it.
+    pub fn renew(&mut self, key: &str, now: f64, lease_for: f64) -> Result<bool, String> {
+        let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        let n = self
+            .conn
+            .execute(
+                "UPDATE leases SET expires_at = ?3 WHERE key = ?1 AND holder = ?2",
+                params![key, self.me, now + lease_for],
+            )
+            .map_err(sql)?;
+        if n > 0 {
+            self.writes += 1;
+        }
+        Ok(n > 0)
+    }
+
+    /// Who holds `key`'s lease now, if anyone does and it has not run out.
+    pub fn holder(&self, key: &str, now: f64) -> Result<Option<u32>, String> {
+        self.conn
+            .query_row(
+                "SELECT holder FROM leases WHERE key = ?1 AND expires_at > ?2",
+                params![key, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)
+    }
+
+    /// Whether the file at this store's path is no longer the one it
+    /// opened: another build deleted it and started again. The pane should
+    /// open the store again, or it shares with nobody.
+    pub fn replaced(&self) -> bool {
+        identity(&self.path).map_or(true, |f| f != self.file)
+    }
+
     /// Give a lease back without publishing, so the next pane need not
     /// wait for it to run out.
     pub fn release(&mut self, key: &str) -> Result<(), String> {
@@ -343,14 +458,14 @@ impl Store {
     /// Put a reading this pane fetched in the store and let its lease go.
     ///
     /// Not written when a newer one is already there, when it is larger
-    /// than `MAX_VALUE`, or when it contains any of `secrets` - the lease
-    /// is given back either way. Returns whether it was written.
-    pub fn publish(&mut self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<bool, String> {
+    /// than the widget's cap, or when it contains any of `secrets` - the
+    /// lease is given back either way. Returns what came of it.
+    pub fn publish(&mut self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<Publish, String> {
         let value = s.value.as_ref().map(|v| v.to_string());
         let good = s.good.as_ref().map(|(_, v)| v.to_string());
-        if unshareable(&[value.as_deref(), good.as_deref()], secrets) {
+        if let Some(why) = unshareable(&[value.as_deref(), good.as_deref()], secrets, self.caps.max_value) {
             self.release(key)?;
-            return Ok(false);
+            return Ok(why);
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let stored: Option<(f64, Option<String>, Option<String>)> = tx
@@ -386,14 +501,14 @@ impl Store {
         tx.execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
             .map_err(sql)?;
         // Housekeeping rides on a write that was happening anyway.
-        tx.execute("DELETE FROM readings WHERE taken_at < ?1", [now - lease::FORGET_AFTER])
+        tx.execute("DELETE FROM readings WHERE taken_at < ?1", [now - self.caps.forget_after])
             .map_err(sql)?;
-        tx.execute("DELETE FROM leases WHERE expires_at < ?1", [now - 2.0 * lease::LEASE])
+        tx.execute("DELETE FROM leases WHERE expires_at < ?1", [now - 2.0 * lease::MAX_LEASE])
             .map_err(sql)?;
         tx.commit().map_err(sql)?;
         self.writes += 1;
         self.keep_small()?;
-        Ok(wrote)
+        Ok(if wrote { Publish::Written } else { Publish::Older })
     }
 
     /// Replace the value of a reading this pane just published with the
@@ -410,7 +525,7 @@ impl Store {
         secrets: &[String],
     ) -> Result<bool, String> {
         let text = value.to_string();
-        if unshareable(&[Some(&text)], secrets) {
+        if unshareable(&[Some(&text)], secrets, self.caps.max_value).is_some() {
             return Ok(false);
         }
         let n = self
@@ -433,11 +548,11 @@ impl Store {
     /// open, and a new file under the same name is one they would never see
     /// - each would go on with its own, and ask every vendor itself again.
     fn keep_small(&mut self) -> Result<(), String> {
-        if self.size() <= SHRINK_AT {
+        if self.size() <= self.caps.shrink_at() {
             return Ok(());
         }
         self.conn.execute_batch("VACUUM").map_err(sql)?;
-        if self.size() <= SHRINK_AT {
+        if self.size() <= self.caps.shrink_at() {
             return Ok(());
         }
         self.conn
@@ -453,6 +568,11 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn path_for_tests(&self) -> String {
+        self.path.clone()
+    }
+
     pub fn size(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
@@ -461,13 +581,24 @@ impl Store {
 /// Whether serialised readings are too large to share, or carry a token
 /// this pane holds. Tokens shorter than eight bytes are not looked for: they
 /// would match ordinary text and refuse readings that carry no secret.
-fn unshareable(texts: &[Option<&str>], secrets: &[String]) -> bool {
+fn unshareable(texts: &[Option<&str>], secrets: &[String], max_value: usize) -> Option<Publish> {
     let size: usize = texts.iter().flatten().map(|t| t.len()).sum();
-    size > MAX_VALUE
-        || secrets
-            .iter()
-            .filter(|t| t.len() >= 8)
-            .any(|t| texts.iter().flatten().any(|v| v.contains(t.as_str())))
+    if size > max_value {
+        return Some(Publish::TooLarge);
+    }
+    secrets
+        .iter()
+        .filter(|t| t.len() >= 8)
+        .any(|t| texts.iter().flatten().any(|v| v.contains(t.as_str())))
+        .then_some(Publish::HeldSecret)
+}
+
+/// (device, inode) of the file at `path`.
+fn identity(path: &str) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| (m.dev(), m.ino()))
+        .map_err(|e| format!("cannot read the store's file: {e}"))
 }
 
 fn row(conn: &Connection, key: &str) -> rusqlite::Result<Option<Shared>> {
@@ -611,7 +742,7 @@ mod tests {
         b.me = a.me + 1;
         assert_eq!(a.claim("k", None, NOW).unwrap(), Got::Mine);
         assert_eq!(b.claim("k", None, NOW).unwrap(), Got::Held(a.me));
-        assert!(a.publish("k", &reading(NOW, serde_json::json!({"u": 1})), &[], NOW).unwrap());
+        assert_eq!(a.publish("k", &reading(NOW, serde_json::json!({"u": 1})), &[], NOW).unwrap(), Publish::Written);
         match b.claim("k", None, NOW + 1.0).unwrap() {
             Got::Fresh(s) => {
                 assert_eq!(s.value, Some(serde_json::json!({"u": 1})));
@@ -625,8 +756,8 @@ mod tests {
     fn a_late_older_publish_is_discarded() {
         let path = temp("late");
         let mut a = Store::open(&path).unwrap();
-        assert!(a.publish("k", &reading(NOW, serde_json::json!(2)), &[], NOW).unwrap());
-        assert!(!a.publish("k", &reading(NOW - 60.0, serde_json::json!(1)), &[], NOW).unwrap());
+        assert_eq!(a.publish("k", &reading(NOW, serde_json::json!(2)), &[], NOW).unwrap(), Publish::Written);
+        assert_eq!(a.publish("k", &reading(NOW - 60.0, serde_json::json!(1)), &[], NOW).unwrap(), Publish::Older);
         let mut b = Store::open(&path).unwrap();
         assert_eq!(b.load("k").unwrap().unwrap().value, Some(serde_json::json!(2)));
     }
@@ -659,15 +790,82 @@ mod tests {
     }
 
     #[test]
-    fn a_store_from_another_version_is_started_again() {
+    fn a_store_from_another_version_is_left_to_the_panes_using_it() {
+        // Panes on the build that wrote it still have it open. Deleting it
+        // would split them from it without either side noticing, and the
+        // next of them to start would delete this one's in turn.
         let path = temp("version");
         {
             let s = Store::open(&path).unwrap();
             s.conn.execute("UPDATE meta SET v = 99 WHERE k = 'version'", []).unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO readings VALUES ('theirs', 1.0, 1.0, '1', 0, NULL, NULL, 7)",
+                    [],
+                )
+                .unwrap();
         }
-        let mut s = Store::open(&path).unwrap();
-        assert!(s.notice.contains("another version"), "{}", s.notice);
-        assert!(s.load("anything").unwrap().is_none());
+        let why = Store::open(&path).err().expect("opened another version's store");
+        assert!(why.contains("another version"), "{why}");
+        let conn = Connection::open(&path).unwrap();
+        let kept: i64 = conn.query_row("SELECT count(*) FROM readings", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "the other version's readings were deleted");
+    }
+
+    #[test]
+    fn a_store_replaced_under_its_name_is_noticed() {
+        let path = temp("replaced");
+        let s = Store::open(&path).unwrap();
+        assert!(!s.replaced());
+        remove(&path);
+        let _other = Store::open(&path).unwrap();
+        assert!(s.replaced());
+    }
+
+    #[test]
+    fn a_long_fetch_renews_its_lease_and_another_pane_waits_for_it() {
+        let path = temp("renew");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.me = 1;
+        b.me = 2;
+        assert_eq!(a.claim_for("k", None, NOW, 20.0).unwrap(), Got::Mine);
+        assert_eq!(b.holder("k", NOW + 1.0).unwrap(), Some(1));
+        // Twenty seconds in, the first request is done; the next renews.
+        assert!(a.renew("k", NOW + 19.0, 20.0).unwrap());
+        b.begin_pass().unwrap();
+        assert_eq!(b.claim_for("k", None, NOW + 30.0, 20.0).unwrap(), Got::Held(1));
+        // A pane that died stops renewing, and the lease runs out after one
+        // request's length, not after the whole pass would have.
+        assert_eq!(b.claim_for("k", None, NOW + 40.0, 20.0).unwrap(), Got::Mine);
+        assert!(!a.renew("k", NOW + 41.0, 20.0).unwrap(), "renewed a lease another pane took");
+        // No claim asks for longer than MAX_LEASE.
+        assert_eq!(a.claim_for("j", None, NOW, 1e9).unwrap(), Got::Mine);
+        let until: f64 = a
+            .conn
+            .query_row("SELECT expires_at FROM leases WHERE key = 'j'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(until, NOW + lease::MAX_LEASE);
+    }
+
+    #[test]
+    fn a_widget_that_stores_titles_forgets_them_sooner() {
+        let path = temp("forget");
+        let mut s = Store::open_with(&path, Caps { forget_after: 2.0 * 3600.0, ..Caps::default() }).unwrap();
+        s.publish("old", &reading(NOW - 3.0 * 3600.0, serde_json::json!({"title": "x"})), &[], NOW - 3.0 * 3600.0).unwrap();
+        s.publish("new", &reading(NOW, serde_json::json!(1)), &[], NOW).unwrap();
+        let n: i64 = s.conn.query_row("SELECT count(*) FROM readings WHERE key = 'old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "a three-hour-old title outlived a two-hour limit");
+    }
+
+    #[test]
+    fn a_reading_over_the_widgets_cap_is_kept_and_said_so() {
+        let path = temp("caps");
+        let mut s = Store::open_with(&path, Caps { max_value: 64, ..Caps::default() }).unwrap();
+        let big = reading(NOW, serde_json::json!({"titles": "x".repeat(100)}));
+        assert_eq!(s.publish("k", &big, &[], NOW).unwrap(), Publish::TooLarge);
+        assert_eq!(Publish::TooLarge.unshared(), Some("too large to share"));
+        assert!(s.load("k").unwrap().is_none());
     }
 
     #[test]
@@ -686,7 +884,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let path = temp("busy");
         let mut a = Store::open(&path).unwrap();
-        assert!(a.publish("k", &reading(NOW, serde_json::json!({"u": 1})), &[], NOW).unwrap());
+        assert_eq!(a.publish("k", &reading(NOW, serde_json::json!({"u": 1})), &[], NOW).unwrap(), Publish::Written);
         let inode = std::fs::metadata(&path).unwrap().ino();
         // Another pane in the middle of a write that outlasts `BUSY`.
         a.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
@@ -720,7 +918,7 @@ mod tests {
         assert!(a.notice.contains("emptied"), "{}", a.notice);
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
         // The other pane still shares with this one, through the same file.
-        assert!(a.publish("after", &reading(NOW, serde_json::json!(7)), &[], NOW).unwrap());
+        assert_eq!(a.publish("after", &reading(NOW, serde_json::json!(7)), &[], NOW).unwrap(), Publish::Written);
         b.begin_pass().unwrap();
         assert_eq!(b.load("after").unwrap().unwrap().value, Some(serde_json::json!(7)));
     }
@@ -742,8 +940,8 @@ mod tests {
         let token = "sk-fixture-token-0123456789".to_string();
         let mut s = Store::open(&path).unwrap();
         let leaky = reading(NOW, serde_json::json!({"echo": token.clone()}));
-        assert!(!s.publish("k", &leaky, std::slice::from_ref(&token), NOW).unwrap());
-        assert!(s.publish("j", &reading(NOW, serde_json::json!({"u": 1})), std::slice::from_ref(&token), NOW).unwrap());
+        assert_eq!(s.publish("k", &leaky, std::slice::from_ref(&token), NOW).unwrap(), Publish::HeldSecret);
+        assert_eq!(s.publish("j", &reading(NOW, serde_json::json!({"u": 1})), std::slice::from_ref(&token), NOW).unwrap(), Publish::Written);
         drop(s);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
@@ -757,7 +955,7 @@ mod tests {
         let token = "sk-fixture-token-0123456789".to_string();
         let secrets = std::slice::from_ref(&token);
         let mut s = Store::open(&path).unwrap();
-        assert!(s.publish("k", &reading(NOW, serde_json::json!({"u": 1})), secrets, NOW).unwrap());
+        assert_eq!(s.publish("k", &reading(NOW, serde_json::json!({"u": 1})), secrets, NOW).unwrap(), Publish::Written);
         let leaky = serde_json::json!({"why": format!("refused for {token}")});
         assert!(!s.annotate("k", NOW, &leaky, secrets).unwrap());
         let plain = serde_json::json!({"why": "too many requests"});

@@ -220,8 +220,13 @@ token so no reading containing it is written.
 agent-usage is the only user so far. It still opens the file at the path
 it always computed itself rather than `store::path`, with the schema and
 keys it had, so a pane on a build from before the move and one from after
-keep sharing even where `XDG_STATE_HOME` is set but empty. OPS-284 adds what
-readings that take many requests need before other widgets use it.
+keep sharing even where `XDG_STATE_HOME` is set but empty.
+
+A widget whose fetch is many requests uses `take` instead of `cached`: it
+never waits on another pane, renews its lease before each request, and
+publishes or refuses through a `Ticket`. `share`, `key`, `gate`/`shut` and
+`provenance_rows` are the rest; see
+[shared-readings.md](shared-readings.md).
 
 ### The mouse
 
