@@ -606,6 +606,7 @@ fn file_jobs(
     label: &str,
     table: &Result<tc::agent_work::Table, String>,
     at: f64,
+    catalogue: &[String],
     marker: impl Fn(u32) -> Option<String>,
 ) {
     // The Claude process each agent row draws, found from its pane's
@@ -613,12 +614,18 @@ fn file_jobs(
     // having started it. A job left below a shell back at its prompt is not
     // in the foreground, and a pane drawn as no agent draws no job.
     // Each keeps its pane's index, so a job that pane draws can hand it
-    // its subagents.
+    // its subagents. Only a row drawn as Claude counts: another agent that
+    // launched a Claude job has it below, and taking that as the job's
+    // row would lose the job's own state.
     let agents: Vec<(Option<u32>, usize)> = match table {
         Ok(t) => panes
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.job.is_none() && !p.remote && p.agent.is_some())
+            .filter(|(_, p)| {
+                p.job.is_none()
+                    && !p.remote
+                    && p.agent.as_ref().is_some_and(|(name, _)| parse::agent_command(name, catalogue) == "claude")
+            })
             .map(|(i, p)| {
                 let fg = p.fg.as_ref().and_then(|f| u32::try_from(f.pid).ok());
                 (fg.and_then(|pid| t.named_agent_at(pid, "claude")), i)
@@ -731,7 +738,7 @@ fn poll(
         }
         let jobs = seen.logs.read_jobs(Some(&table));
         let label = background::group_label(&jobs);
-        file_jobs(&mut board.panes, jobs.shown, &label, &table, at, rex_marker);
+        file_jobs(&mut board.panes, jobs.shown, &label, &table, at, catalogue, rex_marker);
         // One sample for panes and background agents alike: the sampler
         // forgets every pid it is not handed, and a percentage needs two.
         let usage_pid = |p: &Pane| match &p.job {
@@ -3278,7 +3285,7 @@ mod tests {
             2 | 4 => Some("session:a".to_string()),
             _ => None,
         };
-        file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, marker);
+        file_jobs(&mut panes, jobs, "background agents · via jobs", &table, 2.0e9, &[], marker);
         let job = |short: &str| panes.iter().find(|p| p.job.as_ref().is_some_and(|j| j.short == short));
         // Its directory is open in exactly one session: filed there, and said.
         let by_dir = job("by-dir").unwrap();
@@ -3319,9 +3326,30 @@ mod tests {
         let mut job = a_job("working");
         job.pid = Some(2);
         let mut panes = vec![pane];
-        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, |_| None);
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
         assert_eq!(panes.len(), 1, "the pane draws the job");
         assert!(panes[0].work.fan.iter().all(|f| f.id != "a1"), "a1 is drawn from the pane's report only");
+    }
+
+    #[test]
+    fn a_claude_job_another_agent_launched_keeps_its_own_row() {
+        // block:2 runs codex (2), which started the resumed Claude job (3)
+        // as a child. The codex row is not the job's row.
+        let table = tc::agent_work::parse_process_table("10 1 bash bash\n2 10 codex codex\n3 2 claude claude --resume\n")
+            .map_err(String::from);
+        let pane = Pane {
+            session_id: "session:a".into(),
+            block_id: "block:2".into(),
+            child_pid: Some(10),
+            fg: Some(Foreground { pid: 2, ..Default::default() }),
+            agent: Some(("codex".into(), Source::Process)),
+            ..Default::default()
+        };
+        let mut job = a_job("working");
+        job.pid = Some(3);
+        let mut panes = vec![pane];
+        file_jobs(&mut panes, vec![job], "background agents · via jobs", &table, 2.0e9, &[], |_| None);
+        assert_eq!(panes.len(), 2, "the job is drawn on its own row");
     }
 
     fn drawn(pane: &Pane, w: usize) -> String {
