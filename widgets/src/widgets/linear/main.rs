@@ -28,6 +28,8 @@ use std::time::Duration;
 use chrono::{NaiveDateTime, Utc};
 use opscope_core as tc;
 
+mod parse;
+
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "linear",
     section: "linear",
@@ -67,14 +69,40 @@ struct Quota {
     requests: Option<i64>,
 }
 
+/// Why a request brought back no data.
+///
+/// `said` is what the screen shows, worded exactly as it always was.
+/// `limit` is what the answer's status and headers said about the hour's
+/// allowance, and is `None` only when there was no answer at all - curl
+/// could not reach the server.
+#[derive(Clone, Debug, Default)]
+struct Failure {
+    said: String,
+    // Read by the backoff OPS-286 adds; nothing on screen uses it yet.
+    #[allow(dead_code)]
+    limit: Option<parse::RateLimit>,
+}
+
+impl From<String> for Failure {
+    fn from(said: String) -> Self {
+        Failure { said, limit: None }
+    }
+}
+
+impl From<Failure> for String {
+    fn from(failure: Failure) -> Self {
+        failure.said
+    }
+}
+
 fn graphql(
     query: &str,
     tok: &str,
     variables: serde_json::Value,
     quota: &Arc<Mutex<Quota>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, Failure> {
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
-    let (text, headers) = tc::post_json(
+    let (status, text, headers) = tc::post_answer(
         API,
         &[
             ("Authorization", tok),
@@ -84,23 +112,27 @@ fn graphql(
         &body,
         30,
     )?;
-    for (name, value) in &headers {
-        if name == "x-ratelimit-requests-remaining" {
-            if let Ok(left) = value.parse() {
-                if let Ok(mut guard) = quota.lock() {
-                    guard.requests = Some(left);
-                }
-            }
+    let limit = parse::rate_limit(status, &headers, &text);
+    if !(200..300).contains(&status) {
+        return Err(Failure {
+            said: tc::refused(status, &text),
+            limit: Some(limit),
+        });
+    }
+    if let Some(left) = limit.remaining {
+        if let Ok(mut guard) = quota.lock() {
+            guard.requests = Some(left);
         }
     }
-    let data = tc::parse_source_json(&text).map_err(|e| e.to_string())?;
+    let data = tc::parse_source_json(&text).map_err(|e| Failure {
+        said: e.to_string(),
+        limit: Some(limit),
+    })?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
-        return Err(first["message"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect());
+        return Err(Failure {
+            said: first["message"].as_str().unwrap_or("").chars().take(80).collect(),
+            limit: Some(limit),
+        });
     }
     Ok(data["data"].clone())
 }
@@ -115,7 +147,7 @@ fn pages(
     path: &[&str],
     variables: &serde_json::Value,
     quota: &Arc<Mutex<Quota>>,
-) -> Result<(Vec<serde_json::Value>, bool), String> {
+) -> Result<(Vec<serde_json::Value>, bool), Failure> {
     let mut out = Vec::new();
     let mut cursor = serde_json::Value::Null;
     for _ in 0..PAGE_CAP {
@@ -379,7 +411,7 @@ fn fetch_project(id: &str, tok: &str, quota: &Arc<Mutex<Quota>>) -> serde_json::
     let vars = serde_json::json!({ "id": id });
     match graphql(PROJECT_QUERY, tok, vars, quota) {
         Ok(v) => v["project"].clone(),
-        Err(said) => serde_json::json!({ "_error": said }),
+        Err(failure) => serde_json::json!({ "_error": failure.said }),
     }
 }
 
@@ -572,37 +604,187 @@ fn team_wanted(keep: &[String], exclude: &[String], key: &str) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn one_pass(
+/// Everything the board shows that does not depend on the window.
+///
+/// The nodes as Linear returned them - already trimmed by the queries to
+/// the fields the screen reads - and filtered by nothing. Which teams count
+/// is each pane's own business, so a fetch made for one pane can be derived
+/// by another with a different team list. The cap flags ride with the nodes
+/// they describe, because a count read from a capped walk is a floor
+/// wherever it ends up being read.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Board {
+    teams: Vec<serde_json::Value>,
+    open: Vec<serde_json::Value>,
+    cycles: Vec<serde_json::Value>,
+    projects: Vec<serde_json::Value>,
+    teams_capped: bool,
+    open_capped: bool,
+    cycles_capped: bool,
+    projects_capped: bool,
+    /// When the walk finished, in Unix seconds.
+    fetched: f64,
+}
+
+/// What arrived and what left since the window began.
+///
+/// Apart from `Board` because it is the half that depends on the window:
+/// two panes on different windows share the board and not this.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Flow {
+    /// The window in days, and the instant Linear was asked to count from.
+    window: i64,
+    since: String,
+    created: Vec<serde_json::Value>,
+    completed: Vec<serde_json::Value>,
+    created_capped: bool,
+    completed_capped: bool,
+    /// When the walk finished, in Unix seconds.
+    fetched: f64,
+}
+
+// The shared reading OPS-286 adds stores these as JSON; nothing else
+// round-trips them yet.
+#[allow(dead_code)]
+impl Board {
+    fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "teams": self.teams,
+            "open": self.open,
+            "cycles": self.cycles,
+            "projects": self.projects,
+            "teams_capped": self.teams_capped,
+            "open_capped": self.open_capped,
+            "cycles_capped": self.cycles_capped,
+            "projects_capped": self.projects_capped,
+            "fetched": self.fetched,
+        })
+    }
+
+    /// `None` for anything that is not a whole board. A stored reading
+    /// with a list missing would otherwise derive as a workspace with
+    /// nothing in it.
+    fn from_value(v: &serde_json::Value) -> Option<Board> {
+        Some(Board {
+            teams: v["teams"].as_array()?.clone(),
+            open: v["open"].as_array()?.clone(),
+            cycles: v["cycles"].as_array()?.clone(),
+            projects: v["projects"].as_array()?.clone(),
+            teams_capped: v["teams_capped"].as_bool()?,
+            open_capped: v["open_capped"].as_bool()?,
+            cycles_capped: v["cycles_capped"].as_bool()?,
+            projects_capped: v["projects_capped"].as_bool()?,
+            fetched: v["fetched"].as_f64()?,
+        })
+    }
+}
+
+#[allow(dead_code)]
+impl Flow {
+    fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "window": self.window,
+            "since": self.since,
+            "created": self.created,
+            "completed": self.completed,
+            "created_capped": self.created_capped,
+            "completed_capped": self.completed_capped,
+            "fetched": self.fetched,
+        })
+    }
+
+    fn from_value(v: &serde_json::Value) -> Option<Flow> {
+        Some(Flow {
+            window: v["window"].as_i64()?,
+            since: v["since"].as_str()?.to_string(),
+            created: v["created"].as_array()?.clone(),
+            completed: v["completed"].as_array()?.clone(),
+            created_capped: v["created_capped"].as_bool()?,
+            completed_capped: v["completed_capped"].as_bool()?,
+            fetched: v["fetched"].as_f64()?,
+        })
+    }
+}
+
+/// Walk the window-independent half of the workspace.
+///
+/// `seen_teams` is handed the team list the moment it arrives, before the
+/// slower walks behind it, which is what lets a pane's first frame stop
+/// saying "collecting…" early.
+fn fetch_board(
     tok: &str,
-    days: i64,
-    keep: &[String],
-    exclude: &[String],
-    state: &Arc<Mutex<State>>,
     quota: &Arc<Mutex<Quota>>,
-) -> Result<(), String> {
-    let wanted = |key: &str| team_wanted(keep, exclude, key);
+    seen_teams: impl FnOnce(&[serde_json::Value]),
+) -> Result<Board, Failure> {
+    let none = serde_json::json!({});
+    let (teams, teams_capped) = pages(tok, TEAMS_QUERY, &["teams"], &none, quota)?;
+    seen_teams(&teams);
+    let (open, open_capped) = pages(tok, &open_query(), &["issues"], &none, quota)?;
+    let (cycles, cycles_capped) = pages(tok, CYCLES_QUERY, &["cycles"], &none, quota)?;
+    let (projects, projects_capped) = pages(tok, PROJECTS_QUERY, &["projects"], &none, quota)?;
+    Ok(Board {
+        teams,
+        open,
+        cycles,
+        projects,
+        teams_capped,
+        open_capped,
+        cycles_capped,
+        projects_capped,
+        fetched: tc::now(),
+    })
+}
+
+/// Walk the issues created and completed in the last `days` days.
+fn fetch_flow(tok: &str, days: i64, quota: &Arc<Mutex<Quota>>) -> Result<Flow, Failure> {
     let since = (Utc::now() - chrono::Duration::days(days - 1))
         .format("%Y-%m-%dT00:00:00.000Z")
         .to_string();
+    let vars = serde_json::json!({ "since": since });
+    let (created, created_capped) = pages(tok, &created_query(), &["issues"], &vars, quota)?;
+    let (completed, completed_capped) = pages(tok, &done_query(), &["issues"], &vars, quota)?;
+    Ok(Flow {
+        window: days,
+        since,
+        created,
+        completed,
+        created_capped,
+        completed_capped,
+        fetched: tc::now(),
+    })
+}
 
+/// The teams this pane counts, as key and name, in the order Linear gave.
+fn wanted_teams(
+    nodes: &[serde_json::Value],
+    keep: &[String],
+    exclude: &[String],
+) -> Vec<(String, String)> {
+    nodes
+        .iter()
+        .map(|t| (text(t, "key"), text(t, "name")))
+        .filter(|(key, _)| team_wanted(keep, exclude, key))
+        .collect()
+}
+
+/// One pane's board, from a fetch that may have been made for another.
+///
+/// Pure: the same readings, team filter and `at` give the same `State`, so
+/// every pane derives - the one that fetched included.
+fn derive(
+    board: &Board,
+    flow: &Flow,
+    keep: &[String],
+    exclude: &[String],
+    at: NaiveDateTime,
+) -> State {
     // Every counter below is filtered through these keys, so a team left
     // off the end of the first page understates all of them at once. The
     // cap joins the board's own truncation marker for that reason.
-    let (team_nodes, cap_teams) =
-        pages(tok, TEAMS_QUERY, &["teams"], &serde_json::json!({}), quota)?;
-    let teams: Vec<(String, String)> = team_nodes
-        .iter()
-        .map(|t| (text(t, "key"), text(t, "name")))
-        .filter(|(key, _)| wanted(key))
-        .collect();
+    let teams = wanted_teams(&board.teams, keep, exclude);
     let keys: Vec<String> = teams.iter().map(|(k, _)| k.clone()).collect();
-    if let Ok(mut guard) = state.lock() {
-        guard.teams = teams.clone();
-    }
 
     // What is outstanding right now, at any age.
-    let (rows, capped) = pages(tok, &open_query(), &["issues"], &serde_json::json!({}), quota)?;
     let mut states: HashMap<String, usize> = HashMap::new();
     let mut by_team: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut proj_open: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -610,9 +792,8 @@ fn one_pass(
     let mut proj_oldest: HashMap<String, (f64, String)> = HashMap::new();
     let mut cycle_state: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut cycle_issues: HashMap<String, Vec<Issue>> = HashMap::new();
-    let at = Utc::now().naive_utc();
     let (mut oldest_open, mut oldest_wip): (Extreme, Extreme) = (None, None);
-    for it in &rows {
+    for it in &board.open {
         let key = text(&it["team"], "key");
         if !keys.contains(&key) {
             continue;
@@ -682,25 +863,18 @@ fn one_pass(
     }
 
     // The running cycles, each already carrying its own burndown.
-    let (cycle_nodes, cycles_capped) =
-        pages(tok, CYCLES_QUERY, &["cycles"], &serde_json::json!({}), quota)?;
-    let cycles: Vec<serde_json::Value> = cycle_nodes
-        .into_iter()
+    let cycles: Vec<serde_json::Value> = board
+        .cycles
+        .iter()
         .filter(|c| keys.contains(&text(&c["team"], "key")))
+        .cloned()
         .collect();
 
     // Every project, filed under each team that owns it. A project can be
     // shared, so one node lands in more than one team's list.
-    let (proj_rows, cap4) = pages(
-        tok,
-        PROJECTS_QUERY,
-        &["projects"],
-        &serde_json::json!({}),
-        quota,
-    )?;
     let mut projects: HashMap<String, Vec<Proj>> = HashMap::new();
     let mut all_projects: Vec<Proj> = Vec::new();
-    for pr in &proj_rows {
+    for pr in &board.projects {
         let owners: Vec<String> = pr["teams"]["nodes"]
             .as_array()
             .into_iter()
@@ -738,19 +912,16 @@ fn one_pass(
     all_projects.sort_by(&order);
 
     // Arrivals and departures over the window.
-    let vars = serde_json::json!({ "since": since });
-    let (made, cap2) = pages(tok, &created_query(), &["issues"], &vars, quota)?;
-    let (done, cap3) = pages(tok, &done_query(), &["issues"], &vars, quota)?;
     let mut created: HashMap<String, usize> = HashMap::new();
     let mut completed: HashMap<String, usize> = HashMap::new();
     let (mut lead, mut ctime): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
     let (mut quickest, mut slowest): (Extreme, Extreme) = (None, None);
-    for it in &made {
+    for it in &flow.created {
         if keys.contains(&text(&it["team"], "key")) {
             *created.entry(day(&text(it, "createdAt"))).or_insert(0) += 1;
         }
     }
-    for it in &done {
+    for it in &flow.completed {
         if !keys.contains(&text(&it["team"], "key")) {
             continue;
         }
@@ -783,39 +954,69 @@ fn one_pass(
     }
 
     for (key, slot) in by_team.iter_mut() {
-        let n = done
+        let n = flow
+            .completed
             .iter()
             .filter(|it| text(&it["team"], "key") == *key)
             .count();
         slot.insert("done".into(), n);
     }
 
-    if let Ok(mut guard) = state.lock() {
-        guard.states = states;
-        guard.by_team = by_team;
-        guard.projects = projects;
-        guard.all_projects = all_projects;
-        guard.proj_open = proj_open;
-        guard.proj_state = proj_state;
-        guard.proj_oldest = proj_oldest;
-        guard.cycle_state = cycle_state;
-        guard.cycle_issues = cycle_issues;
-        guard.cycles = cycles;
-        guard.created = created;
-        guard.completed = completed;
-        guard.lead = lead;
-        guard.cycle_time = ctime;
-        guard.quickest = quickest;
-        guard.slowest = slowest;
-        guard.oldest_open = oldest_open;
-        guard.oldest_wip = oldest_wip;
-        guard.window = days;
-        guard.truncated = capped || cap2 || cap3 || cap4 || cap_teams;
-        guard.cycles_capped = cycles_capped;
-        guard.fetched = tc::now();
+    State {
+        teams,
+        states,
+        by_team,
+        projects,
+        all_projects,
+        proj_open,
+        proj_state,
+        proj_oldest,
+        cycle_state,
+        cycle_issues,
+        cycles,
+        created,
+        completed,
+        lead,
+        cycle_time: ctime,
+        quickest,
+        slowest,
+        oldest_open,
+        oldest_wip,
+        window: flow.window,
+        truncated: board.open_capped
+            || flow.created_capped
+            || flow.completed_capped
+            || board.projects_capped
+            || board.teams_capped,
+        cycles_capped: board.cycles_capped,
+        // The later of the two, which is when a pass that fetched both
+        // finished - what "updated" has always meant. Once the halves are
+        // shared and can be fetched apart, the older one is the honest
+        // figure; that is OPS-286's to decide.
+        fetched: board.fetched.max(flow.fetched),
         // A config file others can read is a notice now, raised by core
         // from load_config, rather than an error on a pass that worked.
-        guard.err = String::new();
+        err: String::new(),
+    }
+}
+
+fn one_pass(
+    tok: &str,
+    days: i64,
+    keep: &[String],
+    exclude: &[String],
+    state: &Arc<Mutex<State>>,
+    quota: &Arc<Mutex<Quota>>,
+) -> Result<(), String> {
+    let board = fetch_board(tok, quota, |teams| {
+        if let Ok(mut guard) = state.lock() {
+            guard.teams = wanted_teams(teams, keep, exclude);
+        }
+    })?;
+    let flow = fetch_flow(tok, days, quota)?;
+    let derived = derive(&board, &flow, keep, exclude, Utc::now().naive_utc());
+    if let Ok(mut guard) = state.lock() {
+        *guard = derived;
     }
     Ok(())
 }
@@ -4037,6 +4238,195 @@ mod tests {
         // A named team wins even when it is also excluded, which is the
         // branch the test-local copy could never have got wrong.
         assert!(team_wanted(&of(&["OPS"]), &of(&["OPS"]), "OPS"));
+    }
+
+    /// A small workspace: two teams, a third nobody asked about, and a
+    /// project shared between the first two.
+    fn a_board() -> Board {
+        let j = |s: &str| -> Vec<serde_json::Value> { serde_json::from_str(s).unwrap() };
+        Board {
+            teams: j(r#"[{"key":"AAA","name":"Team A"},{"key":"BBB","name":"Team B"},
+                        {"key":"CCC","name":"Team C"}]"#),
+            open: j(r#"[
+                {"identifier":"AAA-1","title":"one","url":"u1","estimate":2,
+                 "createdAt":"2026-01-01T00:00:00.000Z","startedAt":"2026-01-05T00:00:00.000Z",
+                 "state":{"type":"started"},"team":{"key":"AAA"},
+                 "project":{"id":"p1"},"cycle":{"id":"c1"}},
+                {"identifier":"AAA-2","title":"two","url":"u2","estimate":null,
+                 "createdAt":"2026-01-08T00:00:00.000Z","startedAt":null,
+                 "state":{"type":"backlog"},"team":{"key":"AAA"},
+                 "project":null,"cycle":{"id":"c1"}},
+                {"identifier":"BBB-1","title":"three","url":"u3",
+                 "createdAt":"2026-01-09T00:00:00.000Z",
+                 "state":{"type":"triage"},"team":{"key":"BBB"},
+                 "project":{"id":"p1"},"cycle":null},
+                {"identifier":"CCC-1","title":"four","url":"u4",
+                 "createdAt":"2025-01-01T00:00:00.000Z",
+                 "state":{"type":"started"},"team":{"key":"CCC"},
+                 "project":{"id":"p2"},"cycle":null}
+            ]"#),
+            cycles: j(r#"[{"id":"c1","number":3,"team":{"key":"AAA","name":"Team A"}},
+                         {"id":"c2","number":4,"team":{"key":"CCC","name":"Team C"}}]"#),
+            projects: j(r#"[
+                {"id":"p1","name":"Shared","progress":0.5,"targetDate":"",
+                 "status":{"name":"In Progress","type":"started"},"lead":{"name":"Lead"},
+                 "teams":{"nodes":[{"key":"AAA"},{"key":"BBB"}]}},
+                {"id":"p2","name":"Theirs","progress":0.1,
+                 "status":{"name":"Planned","type":"planned"},"lead":null,
+                 "teams":{"nodes":[{"key":"CCC"}]}},
+                {"id":"p3","name":"Done","progress":1.0,
+                 "status":{"name":"Completed","type":"completed"},"lead":null,
+                 "teams":{"nodes":[{"key":"AAA"}]}}
+            ]"#),
+            fetched: 100.0,
+            ..Default::default()
+        }
+    }
+
+    fn a_flow() -> Flow {
+        let j = |s: &str| -> Vec<serde_json::Value> { serde_json::from_str(s).unwrap() };
+        Flow {
+            window: 14,
+            since: "2026-01-01T00:00:00.000Z".into(),
+            created: j(r#"[
+                {"createdAt":"2026-01-08T00:00:00.000Z","team":{"key":"AAA"}},
+                {"createdAt":"2026-01-09T00:00:00.000Z","team":{"key":"BBB"}},
+                {"createdAt":"2026-01-09T00:00:00.000Z","team":{"key":"CCC"}}
+            ]"#),
+            completed: j(r#"[
+                {"identifier":"AAA-9","team":{"key":"AAA"},
+                 "createdAt":"2026-01-01T00:00:00.000Z","startedAt":"2026-01-02T00:00:00.000Z",
+                 "completedAt":"2026-01-03T00:00:00.000Z"},
+                {"identifier":"AAA-8","team":{"key":"AAA"},
+                 "createdAt":"2026-01-06T00:00:00.000Z","startedAt":null,
+                 "completedAt":"2026-01-06T12:00:00.000Z"},
+                {"identifier":"CCC-9","team":{"key":"CCC"},
+                 "createdAt":"2025-01-01T00:00:00.000Z",
+                 "completedAt":"2026-01-04T00:00:00.000Z"}
+            ]"#),
+            fetched: 105.0,
+            ..Default::default()
+        }
+    }
+
+    fn noon_on_the_tenth() -> NaiveDateTime {
+        parse("2026-01-10T12:00:00").unwrap()
+    }
+
+    #[test]
+    fn derive_counts_only_the_teams_this_pane_wants() {
+        let ex = vec!["CCC".to_string()];
+        let s = derive(&a_board(), &a_flow(), &[], &ex, noon_on_the_tenth());
+        assert_eq!(
+            s.teams,
+            vec![("AAA".into(), "Team A".into()), ("BBB".into(), "Team B".into())]
+        );
+        assert_eq!(s.states.get("started"), Some(&1));
+        assert_eq!(s.states.get("backlog"), Some(&1));
+        assert_eq!(s.states.get("triage"), Some(&1));
+        assert_eq!(s.by_team["AAA"]["open"], 2);
+        assert_eq!(s.by_team["AAA"]["done"], 2);
+        assert_eq!(s.by_team["BBB"]["done"], 0);
+        assert!(!s.by_team.contains_key("CCC"));
+        // The issue in no project lands in the empty bucket.
+        assert_eq!(s.proj_open["AAA"][""], 1);
+        assert_eq!(s.proj_open["AAA"]["p1"], 1);
+        // A shared project counts both teams' issues on its own screen.
+        assert_eq!(s.proj_state["p1"].values().sum::<usize>(), 2);
+        assert_eq!(s.proj_oldest["p1"].1, "AAA-1");
+        // Only the wanted team's cycle, with its issues worked-first.
+        assert_eq!(s.cycles.len(), 1);
+        let idents: Vec<&str> = s.cycle_issues["c1"].iter().map(|i| i.ident.as_str()).collect();
+        assert_eq!(idents, vec!["AAA-1", "AAA-2"]);
+        assert_eq!(s.cycle_issues["c1"][0].points, Some(2.0));
+        assert_eq!(s.cycle_issues["c1"][1].points, None);
+        // The shared project is filed under both owners; the unwanted
+        // team's project nowhere; finished work sorts last.
+        let names: Vec<&str> = s.all_projects.iter().map(|q| q.name.as_str()).collect();
+        assert_eq!(names, vec!["Shared", "Done"]);
+        assert_eq!(s.projects["BBB"].len(), 1);
+        assert_eq!(s.all_projects[0].teams, vec!["AAA".to_string(), "BBB".to_string()]);
+        // Flow, by day, for wanted teams only.
+        assert_eq!(s.created.values().sum::<usize>(), 2);
+        assert_eq!(s.completed.values().sum::<usize>(), 2);
+        assert_eq!(s.lead.len(), 2);
+        assert_eq!(s.cycle_time.len(), 1);
+        assert_eq!(s.quickest.as_ref().map(|q| q.1.as_str()), Some("AAA-8"));
+        assert_eq!(s.slowest.as_ref().map(|q| q.1.as_str()), Some("AAA-9"));
+        // Ages are measured against the `at` it was handed.
+        let (age, who) = s.oldest_open.clone().unwrap();
+        assert_eq!(who, "AAA-1");
+        assert_eq!(age, 9.0 * 24.0 + 12.0);
+        assert_eq!(s.oldest_wip.as_ref().map(|q| q.0), Some(5.0 * 24.0 + 12.0));
+        assert_eq!(s.window, 14);
+        assert_eq!(s.fetched, 105.0);
+        assert!(s.err.is_empty());
+    }
+
+    #[test]
+    fn derive_lets_a_named_team_win_over_the_exclusions() {
+        let only = vec!["CCC".to_string()];
+        let s = derive(&a_board(), &a_flow(), &only, &only, noon_on_the_tenth());
+        assert_eq!(s.teams, vec![("CCC".into(), "Team C".into())]);
+        assert_eq!(s.cycles.len(), 1);
+        assert_eq!(s.by_team["CCC"]["done"], 1);
+        assert_eq!(s.all_projects.len(), 1);
+        assert_eq!(s.created.values().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn derive_keeps_the_cycle_cap_apart_from_the_rest() {
+        let mut board = a_board();
+        board.cycles_capped = true;
+        let s = derive(&board, &a_flow(), &[], &[], noon_on_the_tenth());
+        assert!(s.cycles_capped);
+        assert!(!s.truncated);
+        // Every other walk's cap marks the board's counts as floors.
+        for cap in 0..5 {
+            let (mut board, mut flow) = (a_board(), a_flow());
+            match cap {
+                0 => board.teams_capped = true,
+                1 => board.open_capped = true,
+                2 => board.projects_capped = true,
+                3 => flow.created_capped = true,
+                _ => flow.completed_capped = true,
+            }
+            let s = derive(&board, &flow, &[], &[], noon_on_the_tenth());
+            assert!(s.truncated, "cap {cap} went unmarked");
+            assert!(!s.cycles_capped);
+        }
+    }
+
+    #[test]
+    fn derive_from_nothing_is_an_empty_board() {
+        let s = derive(&Board::default(), &Flow::default(), &[], &[], noon_on_the_tenth());
+        assert!(s.teams.is_empty() && s.states.is_empty() && s.all_projects.is_empty());
+        assert!(s.oldest_open.is_none() && s.quickest.is_none());
+    }
+
+    #[test]
+    fn the_readings_survive_a_round_trip_through_json() {
+        let board = a_board();
+        assert_eq!(Board::from_value(&board.to_value()), Some(board));
+        let flow = a_flow();
+        assert_eq!(Flow::from_value(&flow.to_value()), Some(flow));
+        // Anything less than a whole reading is refused rather than read
+        // as a workspace with nothing in it.
+        let mut torn = a_board().to_value();
+        torn.as_object_mut().unwrap().remove("open");
+        assert_eq!(Board::from_value(&torn), None);
+        assert_eq!(Flow::from_value(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_failure_reads_as_the_message_it_always_was() {
+        let f = Failure {
+            said: "HTTP 429: slow down".into(),
+            limit: Some(parse::rate_limit(429, &[], "")),
+        };
+        assert!(f.limit.is_some_and(|l| l.limited));
+        let shown: String = f.into();
+        assert_eq!(shown, "HTTP 429: slow down");
     }
 }
 
