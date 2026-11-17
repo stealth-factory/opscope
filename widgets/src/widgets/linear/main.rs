@@ -22,6 +22,7 @@
 //! property and the page count is what costs.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -67,6 +68,9 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 #[derive(Clone, Copy, Default)]
 struct Quota {
     requests: Option<i64>,
+    /// When Linear said it, so a pane can tell its own figure from a newer
+    /// one that rode in on a reading another pane fetched.
+    at: f64,
 }
 
 /// Why a request brought back no data.
@@ -78,14 +82,15 @@ struct Quota {
 #[derive(Clone, Debug, Default)]
 struct Failure {
     said: String,
-    // Read by the backoff OPS-286 adds; nothing on screen uses it yet.
-    #[allow(dead_code)]
     limit: Option<parse::RateLimit>,
+    /// The walk stopped because another pane took its lease over: not a
+    /// failure of Linear's, and that pane's answer is the one to show.
+    lost_lease: bool,
 }
 
 impl From<String> for Failure {
     fn from(said: String) -> Self {
-        Failure { said, limit: None }
+        Failure { said, limit: None, lost_lease: false }
     }
 }
 
@@ -117,21 +122,25 @@ fn graphql(
         return Err(Failure {
             said: tc::refused(status, &text),
             limit: Some(limit),
+            lost_lease: false,
         });
     }
     if let Some(left) = limit.remaining {
         if let Ok(mut guard) = quota.lock() {
             guard.requests = Some(left);
+            guard.at = tc::now();
         }
     }
     let data = tc::parse_source_json(&text).map_err(|e| Failure {
         said: e.to_string(),
         limit: Some(limit),
+        lost_lease: false,
     })?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(Failure {
             said: first["message"].as_str().unwrap_or("").chars().take(80).collect(),
             limit: Some(limit),
+            lost_lease: false,
         });
     }
     Ok(data["data"].clone())
@@ -140,17 +149,27 @@ fn graphql(
 /// Follow pageInfo to the end, or to PAGE_CAP, and return every node.
 ///
 /// The bool says the cap was hit, so the screen can mark the count as a
-/// floor rather than reporting a truncated total as a total.
+/// floor rather than reporting a truncated total as a total. `renew` is
+/// asked before every request: `false` means another pane took the
+/// reading over, and the walk stops rather than ask twice.
 fn pages(
     tok: &str,
     query: &str,
     path: &[&str],
     variables: &serde_json::Value,
     quota: &Arc<Mutex<Quota>>,
+    renew: &mut dyn FnMut() -> bool,
 ) -> Result<(Vec<serde_json::Value>, bool), Failure> {
     let mut out = Vec::new();
     let mut cursor = serde_json::Value::Null;
     for _ in 0..PAGE_CAP {
+        if !renew() {
+            return Err(Failure {
+                said: "another pane took over".into(),
+                limit: None,
+                lost_lease: true,
+            });
+        }
         let mut v = variables.clone();
         v["after"] = cursor.clone();
         let mut conn = graphql(query, tok, v, quota)?;
@@ -588,6 +607,13 @@ struct State {
     cycles_capped: bool,
     err: String,
     fetched: f64,
+    /// Requests left this hour, from the newest reading that carried the
+    /// figure, and when Linear said it.
+    left: Option<(i64, f64)>,
+    /// Where the readings on screen came from, as `tc::readings` words it:
+    /// empty while this pane fetched them and they are fresh. Wrapped to
+    /// the pane where it is drawn.
+    sharing: String,
 }
 
 /// Whether a team key counts toward the board.
@@ -624,6 +650,10 @@ struct Board {
     projects_capped: bool,
     /// When the walk finished, in Unix seconds.
     fetched: f64,
+    /// Linear's own count of this hour's requests left, as the walk's last
+    /// answer gave it - so a pane that did not fetch shows the figure the
+    /// one that did was told, rather than one of its own from an hour ago.
+    left: Option<i64>,
 }
 
 /// What arrived and what left since the window began.
@@ -641,11 +671,10 @@ struct Flow {
     completed_capped: bool,
     /// When the walk finished, in Unix seconds.
     fetched: f64,
+    /// Requests left this hour, as for `Board::left`.
+    left: Option<i64>,
 }
 
-// The shared reading OPS-286 adds stores these as JSON; nothing else
-// round-trips them yet.
-#[allow(dead_code)]
 impl Board {
     fn to_value(&self) -> serde_json::Value {
         serde_json::json!({
@@ -658,6 +687,7 @@ impl Board {
             "cycles_capped": self.cycles_capped,
             "projects_capped": self.projects_capped,
             "fetched": self.fetched,
+            "left": self.left,
         })
     }
 
@@ -675,11 +705,11 @@ impl Board {
             cycles_capped: v["cycles_capped"].as_bool()?,
             projects_capped: v["projects_capped"].as_bool()?,
             fetched: v["fetched"].as_f64()?,
+            left: v["left"].as_i64(),
         })
     }
 }
 
-#[allow(dead_code)]
 impl Flow {
     fn to_value(&self) -> serde_json::Value {
         serde_json::json!({
@@ -690,6 +720,7 @@ impl Flow {
             "created_capped": self.created_capped,
             "completed_capped": self.completed_capped,
             "fetched": self.fetched,
+            "left": self.left,
         })
     }
 
@@ -702,6 +733,7 @@ impl Flow {
             created_capped: v["created_capped"].as_bool()?,
             completed_capped: v["completed_capped"].as_bool()?,
             fetched: v["fetched"].as_f64()?,
+            left: v["left"].as_i64(),
         })
     }
 }
@@ -714,14 +746,16 @@ impl Flow {
 fn fetch_board(
     tok: &str,
     quota: &Arc<Mutex<Quota>>,
+    renew: &mut dyn FnMut() -> bool,
     seen_teams: impl FnOnce(&[serde_json::Value]),
 ) -> Result<Board, Failure> {
     let none = serde_json::json!({});
-    let (teams, teams_capped) = pages(tok, TEAMS_QUERY, &["teams"], &none, quota)?;
+    let (teams, teams_capped) = pages(tok, TEAMS_QUERY, &["teams"], &none, quota, renew)?;
     seen_teams(&teams);
-    let (open, open_capped) = pages(tok, &open_query(), &["issues"], &none, quota)?;
-    let (cycles, cycles_capped) = pages(tok, CYCLES_QUERY, &["cycles"], &none, quota)?;
-    let (projects, projects_capped) = pages(tok, PROJECTS_QUERY, &["projects"], &none, quota)?;
+    let (open, open_capped) = pages(tok, &open_query(), &["issues"], &none, quota, renew)?;
+    let (cycles, cycles_capped) = pages(tok, CYCLES_QUERY, &["cycles"], &none, quota, renew)?;
+    let (projects, projects_capped) =
+        pages(tok, PROJECTS_QUERY, &["projects"], &none, quota, renew)?;
     Ok(Board {
         teams,
         open,
@@ -732,25 +766,42 @@ fn fetch_board(
         cycles_capped,
         projects_capped,
         fetched: tc::now(),
+        left: quota.lock().ok().and_then(|g| g.requests),
     })
 }
 
-/// Walk the issues created and completed in the last `days` days.
-fn fetch_flow(tok: &str, days: i64, quota: &Arc<Mutex<Quota>>) -> Result<Flow, Failure> {
-    let since = (Utc::now() - chrono::Duration::days(days - 1))
+/// The instant a window of `days` days counts from: midnight UTC, `days - 1`
+/// days before `today`. The same for every pane on the same day, which is
+/// what lets two panes on one window share one walk.
+fn flow_since(days: i64, today: chrono::DateTime<Utc>) -> String {
+    (today - chrono::Duration::days(days - 1))
         .format("%Y-%m-%dT00:00:00.000Z")
-        .to_string();
+        .to_string()
+}
+
+/// Walk the issues created and completed since `since`, the start of a
+/// window of `days` days.
+fn fetch_flow(
+    tok: &str,
+    days: i64,
+    since: &str,
+    quota: &Arc<Mutex<Quota>>,
+    renew: &mut dyn FnMut() -> bool,
+) -> Result<Flow, Failure> {
     let vars = serde_json::json!({ "since": since });
-    let (created, created_capped) = pages(tok, &created_query(), &["issues"], &vars, quota)?;
-    let (completed, completed_capped) = pages(tok, &done_query(), &["issues"], &vars, quota)?;
+    let (created, created_capped) =
+        pages(tok, &created_query(), &["issues"], &vars, quota, renew)?;
+    let (completed, completed_capped) =
+        pages(tok, &done_query(), &["issues"], &vars, quota, renew)?;
     Ok(Flow {
         window: days,
-        since,
+        since: since.to_string(),
         created,
         completed,
         created_capped,
         completed_capped,
         fetched: tc::now(),
+        left: quota.lock().ok().and_then(|g| g.requests),
     })
 }
 
@@ -989,36 +1040,245 @@ fn derive(
             || board.projects_capped
             || board.teams_capped,
         cycles_capped: board.cycles_capped,
-        // The later of the two, which is when a pass that fetched both
-        // finished - what "updated" has always meant. Once the halves are
-        // shared and can be fetched apart, the older one is the honest
-        // figure; that is OPS-286's to decide.
+        // The newer of the two: "updated" is when the newest piece of what
+        // is on screen came back from Linear, whichever pane asked. A half
+        // older than its hold is said by the freshness line under it.
         fetched: board.fetched.max(flow.fetched),
+        left: [(board.left, board.fetched), (flow.left, flow.fetched)]
+            .into_iter()
+            .filter_map(|(left, at)| left.map(|n| (n, at)))
+            .max_by(|a, b| a.1.total_cmp(&b.1)),
         // A config file others can read is a notice now, raised by core
         // from load_config, rather than an error on a pass that worked.
         err: String::new(),
+        sharing: String::new(),
     }
 }
 
+/// This widget's store: one file, shared by every linear pane and by no
+/// other widget.
+const STORE: &str = "linear";
+/// Linear's hourly allowance covers every query this widget makes, so one
+/// spent limit stops every reading.
+const BUCKET: &str = "linear";
+/// One request's lease: its thirty-second timeout and a margin. Renewed
+/// before every page, so a pane that dies mid-walk holds the reading up for
+/// one request rather than the whole walk.
+const LEASE_FOR: f64 = 45.0;
+
+/// The store's limits.
+///
+/// Issue titles are stored, so rows nobody has published for two hours are
+/// forgotten. A board at the walk's cap of 3,000 open issues serialises to
+/// a little over a megabyte, and a publish writes it twice - the reading and
+/// the last good copy kept beside it - so one value may take four. The file
+/// holds that board and a flow per window anyone has open.
+fn caps() -> tc::readings::Caps {
+    tc::readings::Caps {
+        max_pages: 8192,
+        max_value: 4 * 1024 * 1024,
+        forget_after: 2.0 * 3600.0,
+    }
+}
+
+/// What this pane last derived from, so a pass that brought nothing new
+/// does not derive again - and so a window just asked for, whose flow is not
+/// in yet, goes on drawing the last flow it had, marked as another window.
+#[derive(Default)]
+struct Drawn {
+    board: Option<Board>,
+    flow: Option<Flow>,
+    /// `fetched` of the board and flow derived from, and the team filter's
+    /// result is fixed for the run, so these say whether anything changed.
+    from: Option<(f64, f64)>,
+    /// When the board and flow readings decoded were taken.
+    decoded: (Option<f64>, Option<f64>),
+}
+
+/// Bring one shared reading up to date.
+///
+/// Serves it when it is fresh here or another pane has just published it,
+/// leaves it to the pane asking for it, and asks Linear only when this pane
+/// holds the lease and the rate gate is open. A refusal is shared like a
+/// reading; a rate limit that names its reset shuts the gate on every
+/// reading until then.
+fn bring_up_to_date(
+    cache: &mut tc::readings::Cache,
+    key: &str,
+    policy: tc::readings::Policy,
+    gated: bool,
+    activity: &tc::Refresh,
+    fetch: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<serde_json::Value, Failure>,
+) {
+    // While the gate is shut a reading already in hand is all there is to
+    // show, so the store is not even asked for a lease.
+    if gated && cache.good.contains_key(key) {
+        return;
+    }
+    let mut ticket = match tc::readings::take(cache, key, policy) {
+        tc::readings::Take::Fetch(ticket) => ticket,
+        _ => return,
+    };
+    if gated {
+        // Dropped: the lease goes back, and nothing is asked.
+        return;
+    }
+    let work = activity.start();
+    let got = fetch(&mut || ticket.renew());
+    drop(work);
+    match got {
+        Ok(value) => {
+            ticket.publish(value);
+        }
+        // The pane that took over publishes; this one shows what it does.
+        Err(failure) if failure.lost_lease => {}
+        Err(failure) => {
+            let limit = failure.limit.filter(|l| l.limited);
+            let until = limit.and_then(|l| parse::retry_at(&l, tc::now()));
+            let why = if limit.is_some() {
+                "too many requests".to_string()
+            } else {
+                failure.said
+            };
+            ticket.refuse(&why, until);
+            if let Some(until) = until {
+                tc::readings::shut(cache, BUCKET, until, &why);
+            }
+        }
+    }
+}
+
+/// A span until a moment, as the freshness line says it.
+fn until_text(until: f64, now: f64) -> String {
+    let s = (until - now).max(0.0) as i64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// One poll: bring the board and this window's flow up to date, from
+/// another pane or from Linear, and derive this pane's own view of them.
+#[allow(clippy::too_many_arguments)]
 fn one_pass(
+    cache: &mut tc::readings::Cache,
+    drawn: &mut Drawn,
     tok: &str,
     days: i64,
+    refresh: f64,
     keep: &[String],
     exclude: &[String],
     state: &Arc<Mutex<State>>,
     quota: &Arc<Mutex<Quota>>,
-) -> Result<(), String> {
-    let board = fetch_board(tok, quota, |teams| {
-        if let Ok(mut guard) = state.lock() {
-            guard.teams = wanted_teams(teams, keep, exclude);
+    activity: &tc::Refresh,
+) {
+    let since = flow_since(days, Utc::now());
+    let (board_key, flow_key) = reading_keys(cache, tok, days, &since);
+    let gate = tc::readings::gate(cache, BUCKET);
+    let policy = tc::readings::Policy::new(refresh, LEASE_FOR);
+    let first = drawn.board.is_none();
+    bring_up_to_date(cache, &board_key, policy, gate.is_some(), activity, |renew| {
+        fetch_board(tok, quota, renew, |teams| {
+            if first {
+                if let Ok(mut guard) = state.lock() {
+                    guard.teams = wanted_teams(teams, keep, exclude);
+                }
+            }
+        })
+        .map(|b| b.to_value())
+    });
+    bring_up_to_date(cache, &flow_key, policy, gate.is_some(), activity, |renew| {
+        fetch_flow(tok, days, &since, quota, renew).map(|f| f.to_value())
+    });
+
+    // Decoded only when a newer reading arrived: the board is most of a
+    // megabyte, and this runs every few seconds.
+    if let Some((at, v)) = cache.good.get(&board_key).filter(|(at, _)| drawn.decoded.0 != Some(*at)) {
+        drawn.decoded.0 = Some(*at);
+        if let Some(board) = Board::from_value(v) {
+            drawn.board = Some(board);
         }
-    })?;
-    let flow = fetch_flow(tok, days, quota)?;
-    let derived = derive(&board, &flow, keep, exclude, Utc::now().naive_utc());
-    if let Ok(mut guard) = state.lock() {
-        *guard = derived;
     }
-    Ok(())
+    if let Some((at, v)) = cache.good.get(&flow_key).filter(|(at, _)| drawn.decoded.1 != Some(*at)) {
+        drawn.decoded.1 = Some(*at);
+        if let Some(flow) = Flow::from_value(v) {
+            drawn.flow = Some(flow);
+        }
+    }
+
+    let complete = drawn.board.is_some() && drawn.flow.is_some();
+    let (err, sharing) = report(cache, &board_key, &flow_key, gate.as_ref(), complete, tc::now());
+
+    let derived = match (&drawn.board, &drawn.flow) {
+        (Some(board), Some(flow)) if drawn.from != Some((board.fetched, flow.fetched)) => {
+            drawn.from = Some((board.fetched, flow.fetched));
+            Some(derive(board, flow, keep, exclude, Utc::now().naive_utc()))
+        }
+        _ => None,
+    };
+    if let Ok(mut guard) = state.lock() {
+        if let Some(derived) = derived {
+            *guard = derived;
+        }
+        guard.err = err;
+        guard.sharing = sharing;
+    }
+}
+
+/// The keys of the two shared readings: the board, the same for every pane
+/// holding this API key, and the flow, which also depends on the window and
+/// the day it starts. The key goes in only as a fingerprint.
+fn reading_keys(cache: &mut tc::readings::Cache, tok: &str, days: i64, since: &str) -> (String, String) {
+    let day: String = since.chars().take(10).collect();
+    let board = tc::readings::key(cache, "linear.board", 1, &[], &[tok]);
+    let flow = tc::readings::key(cache, "linear.flow", 1, &[&days.to_string(), &day], &[tok]);
+    (board, flow)
+}
+
+/// What the pane says about its readings: an error when it has nothing to
+/// draw and why, and the freshness line.
+fn report(
+    cache: &tc::readings::Cache,
+    board_key: &str,
+    flow_key: &str,
+    gate: Option<&(f64, String)>,
+    complete: bool,
+    now: f64,
+) -> (String, String) {
+    // Why a half is missing, when it is: a refusal in force on a reading
+    // this pane has nothing of, or the gate.
+    let refused = |cache: &tc::readings::Cache, key: &str| {
+        if cache.good.contains_key(key) {
+            return None;
+        }
+        let (_, value, _) = cache.live.get(key)?;
+        tc::readings::refusal(value.as_ref()?)
+    };
+    let mut err = String::new();
+    if !complete {
+        if let Some((until, why)) = gate {
+            err = format!("Linear: {why} · next ask in {}", until_text(*until, now));
+        } else if let Some((why, until)) =
+            refused(cache, board_key).or_else(|| refused(cache, flow_key))
+        {
+            err = format!("{why} · next ask in {}", until_text(until, now));
+        }
+    }
+
+    // Every reading on screen, so the line never claims to be fresher than
+    // the stalest of them. A shut gate holds every one of them off.
+    let mut found: Vec<tc::readings::Provenance> = [board_key, flow_key]
+        .iter()
+        .filter_map(|k| tc::readings::provenance(cache, k, now))
+        .collect();
+    if let Some((until, why)) = gate {
+        for p in found.iter_mut().filter(|p| p.refused.is_none()) {
+            p.refused = Some((why.clone(), *until));
+        }
+    }
+    let sharing = tc::readings::sharing_rows(cache, &found, now, usize::MAX / 2).join("\n");
+    (err, sharing)
 }
 
 struct Palette {
@@ -2082,6 +2342,7 @@ fn main() {
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let exclude: Vec<String> = tc::cfg_strings(&cfg, "exclude_teams", &[]);
     let start_window = (tc::cfg_f64(&cfg, "window_days", 14.0) as i64).max(1);
+    let share_on = cfg.get("share_readings").and_then(|v| v.as_bool()).unwrap_or(true);
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut keep: Vec<String> = Vec::new();
@@ -2109,6 +2370,8 @@ fn main() {
     let quota = Arc::new(Mutex::new(Quota::default()));
     let days = Arc::new(Mutex::new(start_window));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
+    // `r` asks again; `w` only wakes the poller for a window it may not have.
+    let asked_again = Arc::new(AtomicBool::new(false));
     let activity = tc::Refresh::default();
 
     let (tok, _source) = token(&cfg);
@@ -2124,43 +2387,63 @@ fn main() {
     let poller_days = Arc::clone(&days);
     let poller_quota = Arc::clone(&quota);
     let poller_activity = activity.clone();
-    std::thread::spawn(move || loop {
-        if tok.is_empty() {
-            if let Ok(mut guard) = poller.lock() {
-                guard.err = tc::missing_config(&format!(
-                    "no key: set linear.token or ${}",
-                    env_name
-                ));
-            }
-        } else {
-            let work = poller_activity.start();
-            let want = poller_days.lock().map(|g| *g).unwrap_or(14);
-            if let Err(said) = one_pass(
-                &tok,
-                want,
-                &keep,
-                &exclude,
-                &poller,
-                &poller_quota,
-            ) {
+    let poller_asked = Arc::clone(&asked_again);
+    // Every pane polls the shared readings, not Linear: a pass every few
+    // seconds costs a look at the store's version counter, and Linear is
+    // asked only when a reading has outlived `refresh` and this pane wins
+    // the lease on it. So a reading another pane fetched is on screen within
+    // seconds, and several panes make one walk between them.
+    let tick = tc::readings::FOLLOW_EVERY.min(refresh);
+    std::thread::spawn(move || {
+        let mut cache = tc::readings::Cache::default();
+        let mut drawn = Drawn::default();
+        let mut shared_at = f64::NEG_INFINITY;
+        loop {
+            if tok.is_empty() {
                 if let Ok(mut guard) = poller.lock() {
-                    guard.err = said;
+                    guard.err = tc::missing_config(&format!(
+                        "no key: set linear.token or ${}",
+                        env_name
+                    ));
                 }
+            } else {
+                let now = tc::now();
+                if poller_asked.swap(false, Ordering::Relaxed) {
+                    cache.asked_at = now;
+                }
+                if now - shared_at >= refresh {
+                    tc::readings::share(&mut cache, STORE, caps(), share_on, now);
+                    shared_at = now;
+                } else {
+                    tc::readings::follow(&mut cache);
+                }
+                let want = poller_days.lock().map(|g| *g).unwrap_or(14);
+                one_pass(
+                    &mut cache,
+                    &mut drawn,
+                    &tok,
+                    want,
+                    refresh,
+                    &keep,
+                    &exclude,
+                    &poller,
+                    &poller_quota,
+                    &poller_activity,
+                );
             }
-            drop(work);
-        }
-        let (lock, cond) = &*poller_wake;
-        let mut asked = match lock.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if !*asked {
-            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                Ok((g, _)) => g,
+            let (lock, cond) = &*poller_wake;
+            let mut asked = match lock.lock() {
+                Ok(g) => g,
                 Err(_) => return,
             };
+            if !*asked {
+                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(tick)) {
+                    Ok((g, _)) => g,
+                    Err(_) => return,
+                };
+            }
+            *asked = false;
         }
-        *asked = false;
     });
 
     tc::setup();
@@ -2269,6 +2552,7 @@ fn main() {
                     if let Ok(mut g) = held.lock() {
                         g.clear();
                     }
+                    asked_again.store(true, Ordering::Relaxed);
                     let (lock, cond) = &*wake;
                     if let Ok(mut asked) = lock.lock() {
                         *asked = true;
@@ -2486,7 +2770,14 @@ fn main() {
         // The counters describe the window they were fetched for, which is
         // not the one the key has just asked for.
         let stale = s.window != want;
-        let left = quota.lock().map(|g| g.requests).unwrap_or(None);
+        // This pane's own figure, or the one a newer reading carried in -
+        // whichever Linear said last.
+        let own = quota.lock().ok().and_then(|g| g.requests.map(|n| (n, g.at)));
+        let left = [own, s.left]
+            .into_iter()
+            .flatten()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(n, _)| n);
 
         let mut plots = Vec::new();
         let busy = activity.tick(tick);
@@ -2516,6 +2807,13 @@ fn main() {
             ));
         }
         rows.push(tc::seg(&head, w - 1));
+        // Where the readings came from, on a line of its own under the
+        // status line, never squeezed onto it.
+        for line in s.sharing.lines() {
+            for part in tc::wrap_words(line, w.saturating_sub(2).max(1)) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!(" {part}"))], w - 1));
+            }
+        }
         if !s.err.is_empty() {
             rows.extend(tc::error_rows(p.bad.as_str(), &s.err, w));
         }
@@ -4423,10 +4721,184 @@ mod tests {
         let f = Failure {
             said: "HTTP 429: slow down".into(),
             limit: Some(parse::rate_limit(429, &[], "")),
+            lost_lease: false,
         };
         assert!(f.limit.is_some_and(|l| l.limited));
         let shown: String = f.into();
         assert_eq!(shown, "HTTP 429: slow down");
+    }
+
+    /// Two panes on one store, as `share_readings` would open them.
+    fn two_panes(name: &str) -> (tc::readings::Cache, tc::readings::Cache) {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-linear-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("linear.sqlite").to_string_lossy().to_string();
+        let pane = |me: u32| {
+            let mut store = tc::readings::Store::open_with(&path, caps()).unwrap();
+            store.me = me;
+            tc::readings::Cache { store: Some(store), ..Default::default() }
+        };
+        (pane(41), pane(42))
+    }
+
+    const TOKEN: &str = "lin_api_not_a_real_key_0000";
+
+    fn policy() -> tc::readings::Policy {
+        tc::readings::Policy::new(120.0, LEASE_FOR)
+    }
+
+    fn board_of(cache: &tc::readings::Cache, key: &str) -> Board {
+        Board::from_value(&cache.good[key].1).unwrap()
+    }
+
+    fn flow_of(cache: &tc::readings::Cache, key: &str) -> Flow {
+        Flow::from_value(&cache.good[key].1).unwrap()
+    }
+
+    #[test]
+    fn two_panes_with_different_teams_make_one_fetch_and_draw_two_boards() {
+        let (mut one, mut two) = two_panes("one-fetch");
+        let since = "2026-01-01T00:00:00.000Z";
+        let activity = tc::Refresh::default();
+        let mut asked = 0;
+        for pane in [&mut one, &mut two] {
+            let (board_key, flow_key) = reading_keys(pane, TOKEN, 14, since);
+            bring_up_to_date(pane, &board_key, policy(), false, &activity, |renew| {
+                assert!(renew());
+                asked += 1;
+                Ok(a_board().to_value())
+            });
+            bring_up_to_date(pane, &flow_key, policy(), false, &activity, |renew| {
+                assert!(renew());
+                asked += 1;
+                Ok(a_flow().to_value())
+            });
+        }
+        assert_eq!(asked, 2, "the second pane asked Linear for what the first had published");
+        let (board_key, flow_key) = reading_keys(&mut two, TOKEN, 14, since);
+        let (board, flow) = (board_of(&two, &board_key), flow_of(&two, &flow_key));
+        // The caps and the fetch time travel with the reading.
+        assert_eq!(board, a_board());
+        assert_eq!(flow, a_flow());
+        let only_c = derive(&board, &flow, &["CCC".to_string()], &[], noon_on_the_tenth());
+        let not_c = derive(&board, &flow, &[], &["CCC".to_string()], noon_on_the_tenth());
+        assert_eq!(only_c.teams.len(), 1);
+        assert_eq!(not_c.teams.len(), 2);
+        assert_ne!(only_c.by_team.keys().collect::<Vec<_>>(), not_c.by_team.keys().collect::<Vec<_>>());
+        // The pane that did not fetch says who did.
+        let (_, said) = report(&two, &board_key, &flow_key, None, true, tc::now());
+        assert!(said.contains("by pane 41"), "{said}");
+        // And nothing that went into the store carries the key itself.
+        assert!(!board_key.contains(TOKEN) && !flow_key.contains(TOKEN));
+    }
+
+    #[test]
+    fn panes_on_different_windows_share_the_board_and_not_the_flow() {
+        let mut cache = tc::readings::Cache::default();
+        let (board_7, flow_7) = reading_keys(&mut cache, TOKEN, 7, "2026-01-04T00:00:00.000Z");
+        let (board_14, flow_14) = reading_keys(&mut cache, TOKEN, 14, "2025-12-28T00:00:00.000Z");
+        assert_eq!(board_7, board_14);
+        assert_ne!(flow_7, flow_14);
+        // The next day is a new window start, so a new flow.
+        let (_, tomorrow) = reading_keys(&mut cache, TOKEN, 7, "2026-01-05T00:00:00.000Z");
+        assert_ne!(flow_7, tomorrow);
+        // Another key is another workspace.
+        let (other, _) = reading_keys(&mut cache, "lin_api_another_fake_key_1111", 7, "2026-01-04");
+        assert_ne!(board_7, other);
+    }
+
+    #[test]
+    fn every_pane_on_a_day_counts_from_the_same_midnight() {
+        let morning = chrono::DateTime::parse_from_rfc3339("2026-01-14T00:00:01Z").unwrap();
+        let night = chrono::DateTime::parse_from_rfc3339("2026-01-14T23:59:59Z").unwrap();
+        let (morning, night) = (morning.with_timezone(&Utc), night.with_timezone(&Utc));
+        assert_eq!(flow_since(14, morning), "2026-01-01T00:00:00.000Z");
+        assert_eq!(flow_since(14, morning), flow_since(14, night));
+        assert_eq!(flow_since(1, night), "2026-01-14T00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_rate_limit_stops_every_pane_and_each_says_when_it_asks_again() {
+        let (mut one, mut two) = two_panes("rate-limit");
+        let since = "2026-01-01T00:00:00.000Z";
+        let activity = tc::Refresh::default();
+        let (board_key, flow_key) = reading_keys(&mut one, TOKEN, 14, since);
+        // The second pane has a board from earlier, the first has nothing.
+        bring_up_to_date(&mut two, &board_key, policy(), false, &activity, |_| {
+            Ok(a_board().to_value())
+        });
+        // Asked for the flow, Linear says the hour is spent for ten minutes.
+        bring_up_to_date(&mut one, &flow_key, policy(), false, &activity, |_| {
+            let headers = vec![("retry-after".to_string(), "600".to_string())];
+            Err(Failure {
+                said: "HTTP 429".into(),
+                limit: Some(parse::rate_limit(429, &headers, "")),
+                lost_lease: false,
+            })
+        });
+        let now = tc::now();
+        for pane in [&mut one, &mut two] {
+            let gate = tc::readings::gate(pane, BUCKET);
+            let (until, why) = gate.clone().expect("the gate is shut for every pane");
+            assert!(until > now + 590.0 && until <= now + 601.0);
+            assert_eq!(why, "too many requests");
+            // Nothing is asked while it is shut, even for a reading the pane
+            // has never had.
+            let (board_key, flow_key) = reading_keys(pane, TOKEN, 7, since);
+            for key in [&board_key, &flow_key] {
+                bring_up_to_date(pane, key, policy(), true, &activity, |_| {
+                    panic!("asked Linear through a shut gate")
+                });
+            }
+            let complete = pane.good.contains_key(&board_key) && pane.good.contains_key(&flow_key);
+            let (err, said) = report(pane, &board_key, &flow_key, gate.as_ref(), complete, now);
+            let told = format!("{err} {said}");
+            assert!(told.contains("next ask in 9m") || told.contains("next ask in 10m"), "{told}");
+        }
+        // The pane with a board says so on its freshness line, not as an error.
+        let gate = tc::readings::gate(&mut two, BUCKET);
+        let (_, said) = report(&two, &board_key, &flow_key, gate.as_ref(), true, now);
+        assert!(said.contains("too many requests, next ask in"), "{said}");
+    }
+
+    #[test]
+    fn a_walk_another_pane_took_over_stops_without_asking_again() {
+        let quota = Arc::new(Mutex::new(Quota::default()));
+        let mut asks = 0;
+        let got = pages(TOKEN, TEAMS_QUERY, &["teams"], &serde_json::json!({}), &quota, &mut || {
+            asks += 1;
+            false
+        });
+        assert!(got.is_err_and(|f| f.lost_lease));
+        assert_eq!(asks, 1);
+    }
+
+    #[test]
+    fn a_board_at_the_walk_cap_fits_the_store() {
+        // The open-issue walk stops at PAGE * PAGE_CAP; every field the
+        // query asks for, at a generous length.
+        let issue = serde_json::json!({
+            "identifier": "ABCDE-12345",
+            "title": "x".repeat(120),
+            "url": format!("https://linear.app/some-workspace/issue/ABCDE-12345/{}", "x".repeat(60)),
+            "estimate": 8, "startedAt": "2026-01-01T00:00:00.000Z",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "state": {"type": "unstarted"}, "team": {"key": "ABCDE"},
+            "project": {"id": "00000000-0000-0000-0000-000000000000"},
+            "cycle": {"id": "00000000-0000-0000-0000-000000000000"},
+        });
+        let board = Board { open: vec![issue; PAGE * PAGE_CAP], ..Default::default() };
+        let size = board.to_value().to_string().len();
+        // Published, a reading is written twice: the value and the last
+        // good copy beside it.
+        assert!(2 * size < caps().max_value, "{size} bytes");
+        assert!(size > 900_000, "the estimate is not at the cap: {size} bytes");
     }
 }
 
