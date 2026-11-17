@@ -35,8 +35,8 @@ use super::herdr_parse as parse;
 use super::{background, process_filter, refresh_wake};
 
 
-/// Worst first: the states that want a human are the reason to look.
-const RANK: &[&str] = &["blocked", "done", "working", "idle", "unknown"];
+/// What is busy first, then what wants a human, then what is at rest.
+const RANK: &[&str] = &["working", "blocked", "done", "idle", "unknown"];
 
 fn rank_of(state: &str) -> usize {
     RANK.iter().position(|s| *s == state).unwrap_or(9)
@@ -1774,7 +1774,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 format!(" · {} workspace{}", places.len(), plural(places.len())),
             ),
         ];
-        for state_name in ["blocked", "done", "working", "idle"] {
+        for state_name in ["working", "blocked", "done", "idle"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((
                     colour_of(state_name, &p),
@@ -2800,23 +2800,23 @@ mod tests {
     }
 
     #[test]
-    fn agents_group_by_workspace_with_the_most_urgent_workspace_first() {
-        // Already worst-first, as poll sorts them before grouping.
+    fn agents_group_by_workspace_with_the_first_ranked_workspace_first() {
+        // Already in state order, as poll sorts them before grouping.
         let sorted = vec![
+            agent("p4", "w1", "working"),
             agent("p1", "w2", "blocked"),
             agent("p2", "w1", "done"),
-            agent("p3", "w2", "idle"),
-            agent("p4", "w1", "working"),
             agent("p5", "w3", "done"),
+            agent("p3", "w2", "idle"),
         ];
         let order = ["w1".to_string(), "w2".to_string(), "w3".to_string()];
         let panes: Vec<String> = by_workspace(sorted, &order)
             .into_iter()
             .map(|a| a.pane_id)
             .collect();
-        // w2 holds the blocked agent, so it leads; w1 and w3 tie on done
-        // and keep Herdr's order. Inside each, the order it already had.
-        assert_eq!(panes, ["p1", "p3", "p2", "p4", "p5"]);
+        // w1 holds the working agent, so it leads; then w2 with the
+        // blocked one, then w3. Inside each, the order it already had.
+        assert_eq!(panes, ["p4", "p2", "p1", "p3", "p5"]);
 
         // Workspaces Herdr did not list come after the listed ones of the
         // same urgency, in the order they arrived.
@@ -3189,10 +3189,10 @@ mod tests {
     }
 
     #[test]
-    fn the_states_that_want_a_human_sort_first() {
+    fn working_sorts_first_then_the_states_that_want_a_human() {
+        assert!(rank_of("working") < rank_of("blocked"));
         assert!(rank_of("blocked") < rank_of("done"));
-        assert!(rank_of("done") < rank_of("working"));
-        assert!(rank_of("working") < rank_of("idle"));
+        assert!(rank_of("done") < rank_of("idle"));
         assert!(rank_of("idle") < rank_of("unknown"));
         // A state Herdr grows later sorts last rather than crashing.
         assert!(rank_of("reticulating") > rank_of("unknown"));
