@@ -112,6 +112,7 @@ struct Pane {
     session_label: String,
     session_ord: usize,
     window_ord: Option<usize>,
+    window_id: String,
     window_label: String,
     /// `Some(minimised)` when the block sits in a floating layer.
     floating: Option<bool>,
@@ -338,6 +339,8 @@ struct Board {
     apps: usize,
     /// Session ids some app is attached to.
     app_sessions: Vec<String>,
+    /// Each attached app: its client id and the sessions it is attached to.
+    app_clients: Vec<(String, Vec<String>)>,
     rex_version: String,
     api_revision: u64,
     local_usage: bool,
@@ -434,6 +437,7 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
                 session_label: s.label.clone(),
                 session_ord: s.ordinal,
                 window_ord: window.map(|w| w.ordinal),
+                window_id: b.window_id.clone(),
                 window_label: window.map(|w| w.label.clone()).unwrap_or_default(),
                 floating: window.and_then(|w| w.floating.get(&b.block_id).copied()),
                 block_id: b.block_id.clone(),
@@ -521,6 +525,11 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
         app_sessions: apps
             .iter()
             .flat_map(|c| c.session_ids.iter().cloned())
+            .collect(),
+        app_clients: apps
+            .iter()
+            .filter(|c| !c.client_id.is_empty())
+            .map(|c| (c.client_id.clone(), c.session_ids.clone()))
             .collect(),
         rex_version: g.server.rex_version.clone(),
         api_revision: g.server.api_revision,
@@ -1858,13 +1867,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let act = |what: &'static str, pane: Pane, board: Option<Board>| {
         let (acted, wake, server) = (Arc::clone(&acted), Arc::clone(&wake), server.clone());
         std::thread::spawn(move || {
-            let answer = if what == "zoom" {
-                zoom(&server, &pane, tc::now())
+            let (text, ok, lasts) = if what == "zoom" {
+                zoom(&server, &pane)
             } else {
-                focus(&server, &pane, board.as_ref(), tc::now())
+                focus(&server, &pane, board.as_ref())
             };
+            // The note's time starts once the answer is in, not when the
+            // key was pressed: focus runs one command per app, each allowed
+            // the whole run timeout, and a deadline taken before them would
+            // clear a slow failure on the pass it arrived.
             if let Ok(mut slot) = acted.lock() {
-                *slot = Some(answer);
+                *slot = Some((text, ok, tc::now() + lasts));
             }
             refresh_wake::request(&wake);
         });
@@ -2961,17 +2974,21 @@ fn note_row(note: &Option<(String, bool, f64)>, p: &Palette, w: usize) -> String
 /// Bring a pane to the front, on the server, and say what that did.
 ///
 /// Focus is session state in Rex - the window becomes active and the block
-/// focused - so it works from a headless server with no app attached. What
-/// it cannot do is make an app *show* that session; that is a client action
-/// behind Remote Control, and this widget does not attempt it. So when no
-/// app is attached to the session, the note says so rather than claiming
-/// something moved on a screen.
-fn focus(server: &str, pane: &Pane, board: Option<&Board>, at: f64) -> (String, bool, f64) {
+/// focused - so it works from a headless server with no app attached. It
+/// does not make an app *show* that session: an app now stays attached to
+/// every session in its sidebar and shows one, so after the server focus
+/// each app attached to the pane's session is asked to go there with its own
+/// `session.select`. When no app is attached, or one would not switch, the
+/// note says so rather than claiming something moved on a screen.
+///
+/// Returns the note, whether it is good news, and how many seconds to show
+/// it for, counted from when this returns.
+fn focus(server: &str, pane: &Pane, board: Option<&Board>) -> (String, bool, f64) {
     if pane.detached {
         return (
             "detached · rex cannot focus a block that is in no window".into(),
             false,
-            at + 4.0,
+            4.0,
         );
     }
     let what = if pane.label.is_empty() {
@@ -2984,34 +3001,100 @@ fn focus(server: &str, pane: &Pane, board: Option<&Board>, at: f64) -> (String, 
         &["block", "focus", "-s", &pane.session_id, &pane.block_id],
     ) {
         Ok(_) => {
-            let shown = board.is_some_and(|b| b.app_sessions.contains(&pane.session_id));
-            (
-                if shown {
-                    format!("focused {} in {}", what, pane.place())
-                } else {
-                    format!(
-                        "focused on the server · no app is showing session {} - pick it in Rex",
-                        pane.session_label
-                    )
-                },
-                true,
-                at + 4.0,
-            )
+            let apps = apps_showing(board.map_or(&[][..], |b| &b.app_clients), &pane.session_id);
+            let failed: Vec<String> = apps
+                .iter()
+                .filter_map(|client| {
+                    let mut argv = vec!["-C", client, "do", "session.select"];
+                    let args = select_args(&pane.session_id, &pane.window_id);
+                    argv.extend(args.iter().map(String::as_str));
+                    rex(server, &argv).err().map(|why| absence_words(&why))
+                })
+                .collect();
+            switch_note(&what, &pane.place(), &pane.session_label, apps.len(), &failed)
         }
-        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, at + 3.0),
-        Err(Absence::NoServer) => ("no Rex server is running".into(), false, at + 3.0),
-        Err(Absence::Unreachable) => ("the server did not answer".into(), false, at + 3.0),
-        Err(Absence::Other(why)) => (format!("! could not focus: {}", why), false, at + 4.0),
+        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, 3.0),
+        Err(Absence::NoServer) => ("no Rex server is running".into(), false, 3.0),
+        Err(Absence::Unreachable) => ("the server did not answer".into(), false, 3.0),
+        Err(Absence::Other(why)) => (format!("! could not focus: {}", why), false, 4.0),
+    }
+}
+
+/// The apps attached to `session`, by client id.
+fn apps_showing<'a>(apps: &'a [(String, Vec<String>)], session: &str) -> Vec<&'a str> {
+    apps.iter()
+        .filter(|(_, sessions)| sessions.iter().any(|s| s == session))
+        .map(|(id, _)| id.as_str())
+        .collect()
+}
+
+/// The `KEY=VALUE` pairs for an app's `session.select`: the session, and
+/// the window when the pane is in one.
+fn select_args(session: &str, window: &str) -> Vec<String> {
+    let mut out = vec![format!("session_id={}", session)];
+    if !window.is_empty() {
+        out.push(format!("window_id={}", window));
+    }
+    out
+}
+
+fn absence_words(why: &Absence) -> String {
+    match why {
+        Absence::Gone => "the session is gone".into(),
+        Absence::NoServer => "no Rex server is running".into(),
+        Absence::Unreachable => "the server did not answer".into(),
+        Absence::Other(text) => text.clone(),
+    }
+}
+
+/// The note after the server focused a pane and `apps` apps were asked to
+/// show it, `failed` holding why each one that would not switch said no.
+fn switch_note(
+    what: &str,
+    place: &str,
+    session_label: &str,
+    apps: usize,
+    failed: &[String],
+) -> (String, bool, f64) {
+    if apps == 0 {
+        return (
+            format!(
+                "focused on the server · no app is showing session {} - pick it in Rex",
+                session_label
+            ),
+            true,
+            4.0,
+        );
+    }
+    match failed.first() {
+        None => (format!("focused {} in {}", what, place), true, 4.0),
+        Some(why) if failed.len() == apps => (
+            format!("! focused on the server, but the app did not switch: {}", why),
+            false,
+            6.0,
+        ),
+        Some(why) => (
+            format!(
+                "focused {} in {} · {} of {} apps did not switch: {}",
+                what,
+                place,
+                failed.len(),
+                apps,
+                why
+            ),
+            false,
+            6.0,
+        ),
     }
 }
 
 /// Zoom a pane to fill its window, or undo it. Rex zooms by focusing too.
-fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
+fn zoom(server: &str, pane: &Pane) -> (String, bool, f64) {
     if pane.detached {
         return (
             "detached · a block in no window has nothing to fill".into(),
             false,
-            at + 4.0,
+            4.0,
         );
     }
     let flag = if pane.zoomed { "--off" } else { "--on" };
@@ -3026,12 +3109,12 @@ fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
                 format!("zoomed {}", pane.place())
             },
             true,
-            at + 3.0,
+            3.0,
         ),
-        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, at + 3.0),
-        Err(Absence::NoServer) => ("no Rex server is running".into(), false, at + 3.0),
-        Err(Absence::Unreachable) => ("the server did not answer".into(), false, at + 3.0),
-        Err(Absence::Other(why)) => (format!("! could not zoom: {}", why), false, at + 4.0),
+        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, 3.0),
+        Err(Absence::NoServer) => ("no Rex server is running".into(), false, 3.0),
+        Err(Absence::Unreachable) => ("the server did not answer".into(), false, 3.0),
+        Err(Absence::Other(why)) => (format!("! could not zoom: {}", why), false, 4.0),
     }
 }
 
@@ -3118,6 +3201,10 @@ mod tests {
         assert_eq!(opscope, 4, "four panes run npm exec opscope@latest");
         assert!(b.panes.iter().all(|p| p.doing != Doing::Unknown));
         assert!(b.apps >= 1, "the fixture has an app attached");
+        // Each app keeps the client id that `rex -C` is given to switch it.
+        assert_eq!(b.app_clients.len(), b.apps);
+        assert!(b.app_clients.iter().all(|(id, _)| id.starts_with("client:")));
+        assert!(b.panes.iter().filter(|p| !p.detached).all(|p| !p.window_id.is_empty()));
     }
 
     #[test]
@@ -3681,5 +3768,39 @@ mod tests {
     #[test]
     fn only_the_local_socket_has_pids_of_ours() {
         assert!(!talks_to_local_server("desk"));
+    }
+
+    #[test]
+    fn focus_asks_only_the_apps_attached_to_the_panes_session() {
+        let apps = vec![
+            ("client:a".to_string(), vec!["session:1".to_string(), "session:2".to_string()]),
+            ("client:b".to_string(), vec!["session:3".to_string()]),
+        ];
+        assert_eq!(apps_showing(&apps, "session:2"), ["client:a"]);
+        assert!(apps_showing(&apps, "session:9").is_empty());
+        assert_eq!(select_args("session:1", "window:w"), ["session_id=session:1", "window_id=window:w"]);
+        assert_eq!(select_args("session:1", ""), ["session_id=session:1"]);
+    }
+
+    #[test]
+    fn the_focus_note_says_whether_the_app_switched() {
+        let note = |apps, failed: &[String]| switch_note("api", "work:2", "work", apps, failed);
+        assert_eq!(note(1, &[]).0, "focused api in work:2");
+        assert!(note(1, &[]).1);
+        assert!(note(0, &[]).0.contains("no app is showing session work"));
+        let no = note(1, &["SessionNotFound".to_string()]);
+        assert!(no.0.contains("the app did not switch: SessionNotFound") && !no.1, "{}", no.0);
+        let some = note(2, &["timeout".to_string()]);
+        assert!(some.0.starts_with("focused api in work:2 · 1 of 2 apps did not switch"), "{}", some.0);
+    }
+
+    #[test]
+    fn the_focus_note_says_how_long_it_lasts_not_when_it_ends() {
+        // A lifetime, which the worker adds to the clock once the app
+        // requests are done - a deadline taken before them could already
+        // have passed by the time a slow failure reached the screen.
+        let lasts = |apps, failed: &[String]| switch_note("api", "work:2", "work", apps, failed).2;
+        assert_eq!(lasts(1, &[]), 4.0);
+        assert_eq!(lasts(1, &["timeout".to_string()]), 6.0);
     }
 }
