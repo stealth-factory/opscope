@@ -258,9 +258,12 @@ with one `rex do` script and woken by `rex events`.
 ### Why it is ordered this way
 
 On a server with a dozen sessions, an agent finishes or gets stuck where
-nobody is looking. **Every section is sorted by state** in this order — what
-is busy, then what needs a human, then what is at rest — and the one holding
-its state longest first among equals:
+nobody is looking. **Rows are sorted by state** in this order — what is busy,
+then what needs a human, then what is at rest — and the one holding its state
+longest first among equals. That order holds within each session group; the
+groups themselves are ordered by their first-ranked row, so an idle agent in
+a session that also has a working one lists above a blocked agent in another
+session. `g` (below) puts every agent of a state under one heading instead.
 
 | Sorts as | Meaning |
 |---|---|
@@ -272,8 +275,10 @@ its state longest first among equals:
 | `idle` | at rest, waiting for its next instruction |
 | `unknown` | an agent is there and has **not reported** a state — not the same as idle |
 
-The headline counts the panes waiting on you, so `Enter` on the top row is
-the whole workflow.
+The headline counts the panes waiting on you. The top row may be a working
+agent rather than one of them, so move to a waiting pane first — `↑` `↓`, or
+`g` to bring every blocked agent under one heading — then `Enter` takes you
+there.
 
 **AGENTS** is every pane holding a coding agent. **PROCESSES** is every other
 pane running something, plus any pane holding a status report — a `terraform`
@@ -394,15 +399,15 @@ and one keypress to get to any of it.
 ```
 ╺━ MUX ACTIVITY · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  in Herdr · HERDR_ENV=1 is set
- 5 agents · 3 workspaces   1 done   1 working   3 idle
+ 5 agents · 3 workspaces   1 working   1 done   3 idle
  ▸ 1 agent waiting for you
 
  ── AGENTS ── 5
  AGENT    STATE    FOR    CPU   MEM   WORKSPACE
- ✓ grok   DONE     ≥16s     6%  231M  some-cli
-   you/some-cli    Investigate the failing test
 ▸◐ claude working  ≥16s    14%  763M  infra
    work            ◐ Refactor the schedule module
+ ✓ grok   DONE     ≥16s     6%  231M  some-cli
+   you/some-cli    Investigate the failing test
  · claude idle     ≥16s     1%  491M  site
    work/site       Plan the repository structure
 
@@ -422,7 +427,8 @@ and one keypress to get to any of it.
 
 On a server with a dozen workspaces, agents finish or get stuck where nobody is
 looking. **AGENTS is sorted by state**, not by name: what is busy, then what
-needs a human, then what is at rest:
+needs a human, then what is at rest. The order holds within each workspace
+group, and the groups are ordered by their first-ranked agent:
 
 | State | Meaning |
 |---|---|
@@ -432,9 +438,9 @@ needs a human, then what is at rest:
 | `idle` | ready for input |
 | `unknown` | an agent is present but Herdr cannot classify it — **not** the same as idle |
 
-A headline counts how many are waiting on you, and the blocked agents sit
-right under the working ones, so one key puts you in front of the one that is
-stuck.
+A headline counts how many are waiting on you. Within a workspace a blocked
+agent sits right under the working ones; `g` brings every blocked agent under
+one heading, and `↵` on it puts you in front of the one that is stuck.
 
 **PROCESSES** covers every other pane actually running something — dev servers,
 monitors, builds — with the command, CPU and memory. **IDLE** lists panes at a
@@ -581,7 +587,8 @@ get to any of it.
 
 On a machine hosting several workspaces, agents finish or get stuck where
 nobody is looking. **AGENTS is sorted by state**, not by name: what is busy,
-then what needs a human, then what is at rest:
+then what needs a human, then what is at rest. The order holds within each
+workspace group, and the groups are ordered by their first-ranked agent:
 
 | State | Meaning |
 |---|---|
@@ -595,9 +602,9 @@ Those four are the states the protocol itself declares, so they are Luvus's
 words rather than this widget's. `blocked` sits above `done` because blocked
 is waiting on you *now* while done is waiting to be noticed.
 
-A headline counts how many are waiting on you, and the blocked agents sit
-right under the working ones, so one key puts you in front of
-it.
+A headline counts how many are waiting on you. Within a workspace a blocked
+agent sits right under the working ones; `g` brings every blocked agent under
+one heading, and `↵` on it puts you in front of it.
 
 ### The claim behind each state
 

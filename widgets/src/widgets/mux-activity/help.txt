@@ -11,8 +11,9 @@ chooses regardless. Only the detected multiplexer's CLI is run.
     mux-activity [--mux rex|herdr|luvus] [-n SECONDS]
 
 Every board has the same shape: a state bar and counts pinned at the top,
-AGENTS in state order - working, then blocked, error, done, attention, then
-idle and unknown - then what else is running, then the panes at a prompt.
+AGENTS grouped by session or workspace and, within each group, in state
+order - working, then blocked, error, done, attention, then idle and
+unknown - then what else is running, then the panes at a prompt.
 A program that reports no state is drawn as unknown, never as idle, and a
 duration prefixed with ≥ is a lower bound the widget timed itself, because
 the state was already in place when it started.
@@ -32,8 +33,8 @@ Press / to filter every board to the agents and panes that fuzzy-match what
 you type: the letters in order, any case, a match at the start of a word
 preferred. A row is matched on what it shows - agent or command, session or
 workspace, directory, branch, title and the message it reported. Rows keep
-their own state order, so a blocked agent never drops below an idle one
-that matched better. Enter keeps the filter and returns to the list,
+their usual order, so a filter never moves a blocked agent below an idle
+one that matched better. Enter keeps the filter and returns to the list,
 esc clears it; with a filter kept, / edits it and esc clears it. The section
 headings count the subset (3 of 14) and the line under the counts names the
 filter, and a query that matches nothing says so instead of drawing an
