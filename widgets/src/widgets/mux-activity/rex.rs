@@ -1725,13 +1725,17 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
     let act = |what: &'static str, pane: Pane, board: Option<Board>| {
         let (acted, wake, server) = (Arc::clone(&acted), Arc::clone(&wake), server.clone());
         std::thread::spawn(move || {
-            let answer = if what == "zoom" {
-                zoom(&server, &pane, tc::now())
+            let (text, ok, lasts) = if what == "zoom" {
+                zoom(&server, &pane)
             } else {
-                focus(&server, &pane, board.as_ref(), tc::now())
+                focus(&server, &pane, board.as_ref())
             };
+            // The note's time starts once the answer is in, not when the
+            // key was pressed: focus runs one command per app, each allowed
+            // the whole run timeout, and a deadline taken before them would
+            // clear a slow failure on the pass it arrived.
             if let Ok(mut slot) = acted.lock() {
-                *slot = Some(answer);
+                *slot = Some((text, ok, tc::now() + lasts));
             }
             refresh_wake::request(&wake);
         });
@@ -2773,12 +2777,15 @@ fn note_row(note: &Option<(String, bool, f64)>, p: &Palette, w: usize) -> String
 /// each app attached to the pane's session is asked to go there with its own
 /// `session.select`. When no app is attached, or one would not switch, the
 /// note says so rather than claiming something moved on a screen.
-fn focus(server: &str, pane: &Pane, board: Option<&Board>, at: f64) -> (String, bool, f64) {
+///
+/// Returns the note, whether it is good news, and how many seconds to show
+/// it for, counted from when this returns.
+fn focus(server: &str, pane: &Pane, board: Option<&Board>) -> (String, bool, f64) {
     if pane.detached {
         return (
             "detached · rex cannot focus a block that is in no window".into(),
             false,
-            at + 4.0,
+            4.0,
         );
     }
     let what = if pane.label.is_empty() {
@@ -2801,12 +2808,12 @@ fn focus(server: &str, pane: &Pane, board: Option<&Board>, at: f64) -> (String, 
                     rex(server, &argv).err().map(|why| absence_words(&why))
                 })
                 .collect();
-            switch_note(&what, &pane.place(), &pane.session_label, apps.len(), &failed, at)
+            switch_note(&what, &pane.place(), &pane.session_label, apps.len(), &failed)
         }
-        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, at + 3.0),
-        Err(Absence::NoServer) => ("no Rex server is running".into(), false, at + 3.0),
-        Err(Absence::Unreachable) => ("the server did not answer".into(), false, at + 3.0),
-        Err(Absence::Other(why)) => (format!("! could not focus: {}", why), false, at + 4.0),
+        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, 3.0),
+        Err(Absence::NoServer) => ("no Rex server is running".into(), false, 3.0),
+        Err(Absence::Unreachable) => ("the server did not answer".into(), false, 3.0),
+        Err(Absence::Other(why)) => (format!("! could not focus: {}", why), false, 4.0),
     }
 }
 
@@ -2845,7 +2852,6 @@ fn switch_note(
     session_label: &str,
     apps: usize,
     failed: &[String],
-    at: f64,
 ) -> (String, bool, f64) {
     if apps == 0 {
         return (
@@ -2854,15 +2860,15 @@ fn switch_note(
                 session_label
             ),
             true,
-            at + 4.0,
+            4.0,
         );
     }
     match failed.first() {
-        None => (format!("focused {} in {}", what, place), true, at + 4.0),
+        None => (format!("focused {} in {}", what, place), true, 4.0),
         Some(why) if failed.len() == apps => (
             format!("! focused on the server, but the app did not switch: {}", why),
             false,
-            at + 6.0,
+            6.0,
         ),
         Some(why) => (
             format!(
@@ -2874,18 +2880,18 @@ fn switch_note(
                 why
             ),
             false,
-            at + 6.0,
+            6.0,
         ),
     }
 }
 
 /// Zoom a pane to fill its window, or undo it. Rex zooms by focusing too.
-fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
+fn zoom(server: &str, pane: &Pane) -> (String, bool, f64) {
     if pane.detached {
         return (
             "detached · a block in no window has nothing to fill".into(),
             false,
-            at + 4.0,
+            4.0,
         );
     }
     let flag = if pane.zoomed { "--off" } else { "--on" };
@@ -2900,12 +2906,12 @@ fn zoom(server: &str, pane: &Pane, at: f64) -> (String, bool, f64) {
                 format!("zoomed {}", pane.place())
             },
             true,
-            at + 3.0,
+            3.0,
         ),
-        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, at + 3.0),
-        Err(Absence::NoServer) => ("no Rex server is running".into(), false, at + 3.0),
-        Err(Absence::Unreachable) => ("the server did not answer".into(), false, at + 3.0),
-        Err(Absence::Other(why)) => (format!("! could not zoom: {}", why), false, at + 4.0),
+        Err(Absence::Gone) => ("that pane closed · refreshing".into(), false, 3.0),
+        Err(Absence::NoServer) => ("no Rex server is running".into(), false, 3.0),
+        Err(Absence::Unreachable) => ("the server did not answer".into(), false, 3.0),
+        Err(Absence::Other(why)) => (format!("! could not zoom: {}", why), false, 4.0),
     }
 }
 
@@ -3394,7 +3400,7 @@ mod tests {
 
     #[test]
     fn the_focus_note_says_whether_the_app_switched() {
-        let note = |apps, failed: &[String]| switch_note("api", "work:2", "work", apps, failed, 0.0);
+        let note = |apps, failed: &[String]| switch_note("api", "work:2", "work", apps, failed);
         assert_eq!(note(1, &[]).0, "focused api in work:2");
         assert!(note(1, &[]).1);
         assert!(note(0, &[]).0.contains("no app is showing session work"));
@@ -3402,5 +3408,15 @@ mod tests {
         assert!(no.0.contains("the app did not switch: SessionNotFound") && !no.1, "{}", no.0);
         let some = note(2, &["timeout".to_string()]);
         assert!(some.0.starts_with("focused api in work:2 · 1 of 2 apps did not switch"), "{}", some.0);
+    }
+
+    #[test]
+    fn the_focus_note_says_how_long_it_lasts_not_when_it_ends() {
+        // A lifetime, which the worker adds to the clock once the app
+        // requests are done - a deadline taken before them could already
+        // have passed by the time a slow failure reached the screen.
+        let lasts = |apps, failed: &[String]| switch_note("api", "work:2", "work", apps, failed).2;
+        assert_eq!(lasts(1, &[]), 4.0);
+        assert_eq!(lasts(1, &["timeout".to_string()]), 6.0);
     }
 }
