@@ -1207,6 +1207,13 @@ fn discover_account_pages(
         let data = match graphql(&query, tok, rate, gql_url) {
             Ok(d) => d,
             Err(said) => {
+                // The response that failed may be the one that spent the
+                // budget. An Ok note would publish the pages already in
+                // hand as the whole discovery. Any other failure stays a
+                // note, so one account does not drop the rest.
+                if rate.stopped(tc::now()).is_some() {
+                    return Err(said);
+                }
                 return Ok((found, Some(format!("{}: {}", acc, said))));
             }
         };
@@ -1479,11 +1486,22 @@ impl Share {
             _ => vec![REST.to_string(), GRAPHQL.to_string()],
         };
         let why = limit_why(stop);
+        // A later, shorter stop must not replace a gate that already runs
+        // longer: the store keeps the newer write, and the deadline is
+        // only in the value. Reading first narrows that; two panes that
+        // both read before either writes can still shorten it.
+        tc::readings::follow(&mut self.cache);
+        let mut noted = until as f64;
         for bucket in buckets {
             let gate = self.key("gha.limit", &[&bucket]);
-            tc::readings::shut(&mut self.cache, &gate, until as f64, &why);
+            let mut until = until as f64;
+            if let Some((held, _)) = tc::readings::gate(&mut self.cache, &gate) {
+                until = until.max(held);
+            }
+            noted = noted.max(until);
+            tc::readings::shut(&mut self.cache, &gate, until, &why);
         }
-        self.note_pause(until as f64, why);
+        self.note_pause(noted, why);
     }
 
     /// The reading this pane already holds under `key`, refusals aside.
@@ -4385,6 +4403,46 @@ mod tests {
             assert!(v.get("runs").is_none(), "an unfinished reading was published: {v}");
             assert!(tc::readings::refusal(&v).is_none(), "a gate stop refused the reading: {v}");
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failed_page_stays_a_note_unless_the_budget_has_stopped() {
+        let url = "http://127.0.0.1:1";
+        let mut open = Budget::default();
+        let noted = discover_account_pages("tok", "acme", 0.0, &mut open, url, &mut |_| Ok(()))
+            .expect("a plain failure is a note");
+        let note = noted.1.unwrap_or_default();
+        assert!(note.contains("acme"), "{note}");
+
+        let mut stopped = Budget::default();
+        let reset = tc::now() as i64 + 300;
+        let spent = vec![
+            ("x-ratelimit-remaining".to_string(), "0".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), reset.to_string()),
+            ("x-ratelimit-resource".to_string(), "graphql".to_string()),
+        ];
+        stopped.take_at(403, &spent, tc::now());
+        let got = discover_account_pages("tok", "acme", 0.0, &mut stopped, url, &mut |_| Ok(()));
+        assert!(got.is_err(), "a stopped budget published the pages in hand: {got:?}");
+    }
+
+    #[test]
+    fn a_shorter_stop_does_not_cut_a_longer_gate() {
+        let path = store_file("gate-longer");
+        let mut a = pane(&path, 1, 60.0);
+        let mut b = pane(&path, 2, 60.0);
+        let long = tc::now() as i64 + 3000;
+        let short = tc::now() as i64 + 60;
+        a.shut(&parse::RateLimit::Spent { until: long, resource: Some(REST.to_string()) }, REST);
+        b.shut(&parse::RateLimit::Secondary { until: short }, REST);
+        tc::readings::follow(&mut a.cache);
+        let gate = a.key("gha.limit", &[REST]);
+        let (until, _) = tc::readings::gate(&mut a.cache, &gate).expect("core gate");
+        assert_eq!(until, long as f64, "the shorter stop replaced the longer gate");
+        let (paused, _) = b.paused.clone().expect("b paused");
+        assert_eq!(paused, long as f64, "the pane said it would ask again at the shorter stop");
         let _ = std::fs::remove_file(&path);
     }
 
