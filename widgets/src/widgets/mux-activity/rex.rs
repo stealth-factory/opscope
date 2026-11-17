@@ -530,7 +530,8 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
     }
 }
 
-/// Worst first, then the one waiting longest, then where it is.
+/// State order first (working, then what needs a human, then what is at
+/// rest), then the one waiting longest, then where it is.
 fn order(panes: &mut [Pane]) {
     panes.sort_by(|a, b| {
         a.rank()
@@ -1035,10 +1036,10 @@ fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
 /// A section's panes regrouped by session, without losing who needs you.
 ///
 /// Each session's panes stay together, in the order they already had -
-/// worst first. The sessions are ordered by their most urgent pane, then by
-/// Rex's own session order, so a blocked agent still puts its session at
-/// the top of the section rather than waiting behind a quiet one that
-/// happens to sort first by name.
+/// in state order. The sessions are ordered by their first-ranked pane, then
+/// by Rex's own session order, so a working or blocked agent still puts its
+/// session at the top of the section rather than waiting behind a quiet one
+/// that happens to sort first by name.
 fn by_session(panes: Vec<&Pane>) -> Vec<&Pane> {
     let mut groups: Vec<(usize, usize, Vec<&Pane>)> = Vec::new();
     for pane in panes {
@@ -2280,7 +2281,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Grouped by session inside each section, when there is more than
         // one: the flat index the keys walk is this order, so the cursor and
         // the sub-headings cannot disagree.
-        // By state, the order above is the grouping: worst first already.
+        // By state, the order above is the grouping: state order already.
         let agents = if by_state { agents } else { by_session(agents) };
         // Background agents no session claimed (OPS-292) get a section of
         // their own after AGENTS: they hold no pane and Enter cannot focus

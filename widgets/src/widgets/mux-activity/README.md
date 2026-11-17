@@ -68,8 +68,9 @@ palette. A row is matched on what it shows: agent or command, session or
 workspace, directory, branch, title and the message it reported.
 
 The match only includes or excludes. Each section keeps its own order —
-urgency first, then grouped by session — so a blocked agent that matches
-still sits above a working one that matches better.
+working first, then what needs a human, then what is at rest, within each
+session or workspace group — so a closer match never moves a row above one
+that ranks higher.
 
 `↵` keeps the filter and returns to the list; `esc` clears it. With a filter
 kept, the footer offers `[/] edit filter` and `[esc] clear`. The headings
@@ -624,8 +625,8 @@ wide enough for it.
 
 ### What a blocked agent is waiting for
 
-`blocked` is the row the widget sorts to the top and the one it used to say
-least about. The row carries the state, how long it has held it, and how it
+`blocked` is the first state that needs a human, ranked just below
+`working`, and the one the widget used to say least about. The row carries the state, how long it has held it, and how it
 was decided — but never *what the agent is asking*, which is the question that
 sends you out of the widget.
 

@@ -1181,9 +1181,9 @@ impl Columns {
 }
 
 /// Agents regrouped by workspace, without losing who needs you: each
-/// workspace's agents together in the order they already had, worst first,
-/// and the workspaces in the order their most urgent agent came - which,
-/// for a list already sorted worst first, is the order each first appears.
+/// workspace's agents together in the order they already had, state order,
+/// and the workspaces in the order their first-ranked agent came - which,
+/// for a list already in state order, is the order each first appears.
 fn by_workspace(agents: Vec<Agent>) -> Vec<Agent> {
     let mut groups: Vec<Vec<Agent>> = Vec::new();
     for agent in agents {
@@ -1721,7 +1721,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // vectors are empty, but the Result beside them is what the
         // header and the empty-section lines read, so a timeout cannot
         // draw as zero.
-        // By state, the poll's workspace order is undone into worst first;
+        // By state, the poll's workspace order is undone into state order;
         // the cursor keeps its row because `reselect` follows the row.
         let agent_rows: Vec<Agent> = in_group_order(agents.clone().unwrap_or_default(), by_state);
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();

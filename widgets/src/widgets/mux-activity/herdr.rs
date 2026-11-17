@@ -679,7 +679,7 @@ fn foreground(pane_id: &str) -> Front {
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     let mut labels = HashMap::new();
-    // Herdr's own order, for workspaces whose most urgent agents tie.
+    // Herdr's own order, for workspaces whose first-ranked agents tie.
     let mut order: Vec<String> = Vec::new();
     if let Some(res) = herdr(&["workspace", "list"]) {
         for w in res["workspaces"].as_array().into_iter().flatten() {
@@ -994,9 +994,10 @@ fn file_jobs(
 /// Agents regrouped by workspace, without losing who needs you.
 ///
 /// Each workspace's agents stay together in the order they already had -
-/// worst first. Workspaces are ordered by their most urgent agent, then by
-/// Herdr's own workspace order, so a blocked agent still puts its workspace
-/// at the top rather than waiting behind a quiet one that is listed first.
+/// in state order. Workspaces are ordered by their first-ranked agent, then
+/// by Herdr's own workspace order, so a working or blocked agent still puts
+/// its workspace at the top rather than waiting behind a quiet one that is
+/// listed first.
 /// Rex's `by_session`, for Herdr's workspaces.
 fn by_workspace(agents: Vec<Agent>, order: &[String]) -> Vec<Agent> {
     let mut groups: Vec<(usize, usize, Vec<Agent>)> = Vec::new();
@@ -1668,7 +1669,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // bar. `agents` is the seated ones shown, then the floating ones
         // shown, which is the order the keys walk.
         // By state, the poll's order before it regrouped by workspace is
-        // the grouping: worst first. Stable, so this is that order exactly.
+        // the grouping: state order. Stable, so this is that order exactly.
         let mut all_agents = all_agents;
         if by_state {
             all_agents.sort_by(|a, b| {
@@ -2819,7 +2820,7 @@ mod tests {
         assert_eq!(panes, ["p4", "p2", "p1", "p3", "p5"]);
 
         // Workspaces Herdr did not list come after the listed ones of the
-        // same urgency, in the order they arrived.
+        // same rank, in the order they arrived.
         let sorted = vec![
             agent("p1", "x2", "idle"),
             agent("p2", "w1", "idle"),
