@@ -357,6 +357,62 @@ fn parse_iso(iso: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
+/// GitHub's rate-limit headers off one answer, each only if it was there
+/// and read as a number. A missing reset is `None`, never "now".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RateHeaders {
+    pub remaining: Option<i64>,
+    pub limit: Option<i64>,
+    /// When the budget refills, in epoch seconds.
+    pub reset: Option<i64>,
+    /// Seconds to wait, sent with a secondary limit.
+    pub retry_after: Option<i64>,
+}
+
+/// GitHub's advice for a secondary limit that names no wait, and for a spent
+/// budget whose reset did not arrive: wait at least a minute.
+pub const RATE_MIN_WAIT: i64 = 60;
+
+/// Read the rate-limit headers out of a header block, one `name: value` per
+/// line, names in any case. Every other line is skipped.
+pub fn parse_rate_headers(head: &str) -> RateHeaders {
+    let mut out = RateHeaders::default();
+    for line in head.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "x-ratelimit-remaining" => out.remaining = value.parse().ok(),
+            "x-ratelimit-limit" => out.limit = value.parse().ok(),
+            "x-ratelimit-reset" => out.reset = value.parse().ok(),
+            "retry-after" => out.retry_after = value.parse().ok().filter(|s: &i64| *s >= 0),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Until when nothing more may be asked, from one answer's status and
+/// headers, `now` in epoch seconds; `None` when asking is fine.
+///
+/// A `retry-after` on a 403 or 429 is a secondary limit and wins, being the
+/// wait GitHub asked for. A `remaining` of zero is the budget spent on any
+/// status: a 200 that used the last request still answered, and the next
+/// one will be refused. A 403 with neither is an ordinary refusal - a
+/// missing scope - not a limit; a bare 429 waits the advised minute.
+pub fn parse_rate_spent(status: u16, h: &RateHeaders, now: i64) -> Option<i64> {
+    if status == 403 || status == 429 {
+        if let Some(wait) = h.retry_after {
+            return Some(now.saturating_add(wait));
+        }
+    }
+    if h.remaining == Some(0) {
+        return Some(h.reset.unwrap_or(now + RATE_MIN_WAIT));
+    }
+    (status == 429).then_some(now + RATE_MIN_WAIT)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -593,5 +649,53 @@ mod tests {
         assert_eq!(parse_median(&[6.0]), Some(6.0));
         assert_eq!(parse_median(&[1.0, 3.0]), Some(2.0));
         assert_eq!(parse_median(&[3.0, 1.0, 2.0]), Some(2.0));
+    }
+
+    const HEAD: &str = "HTTP/2 200\r\n\
+        content-type: application/json\r\n\
+        X-RateLimit-Limit: 5000\r\n\
+        X-RateLimit-Remaining: 4840\r\n\
+        X-RateLimit-Reset: 1790000000\r\n\
+        X-RateLimit-Resource: graphql\r\n";
+
+    #[test]
+    fn rate_headers_are_read_whatever_their_case() {
+        let got = parse_rate_headers(HEAD);
+        assert_eq!(got.remaining, Some(4840));
+        assert_eq!(got.limit, Some(5000));
+        assert_eq!(got.reset, Some(1_790_000_000));
+        assert_eq!(got.retry_after, None);
+        assert_eq!(parse_rate_spent(200, &got, 100), None);
+    }
+
+    #[test]
+    fn a_missing_or_garbled_rate_header_is_absent_not_zero() {
+        let got = parse_rate_headers("x-ratelimit-remaining: lots\nretry-after: soon\n");
+        assert_eq!(got, RateHeaders::default());
+        // Absent is not spent: nothing said the budget ran out.
+        assert_eq!(parse_rate_spent(200, &got, 100), None);
+        assert_eq!(parse_rate_spent(403, &got, 100), None);
+    }
+
+    #[test]
+    fn a_spent_budget_waits_for_githubs_own_reset() {
+        let h = parse_rate_headers("x-ratelimit-remaining: 0\nx-ratelimit-reset: 1790000000\n");
+        // The answer that spent the last request still came back 200.
+        assert_eq!(parse_rate_spent(200, &h, 1_789_999_000), Some(1_790_000_000));
+        assert_eq!(parse_rate_spent(403, &h, 1_789_999_000), Some(1_790_000_000));
+        let no_reset = parse_rate_headers("x-ratelimit-remaining: 0\n");
+        assert_eq!(parse_rate_spent(200, &no_reset, 1000), Some(1000 + RATE_MIN_WAIT));
+    }
+
+    #[test]
+    fn a_secondary_limit_waits_for_retry_after_from_now() {
+        let h = parse_rate_headers("retry-after: 30\nx-ratelimit-remaining: 4000\n");
+        assert_eq!(parse_rate_spent(403, &h, 1000), Some(1030));
+        assert_eq!(parse_rate_spent(429, &h, 1000), Some(1030));
+        // On a success it is not a limit.
+        assert_eq!(parse_rate_spent(200, &h, 1000), None);
+        let huge = parse_rate_headers(&format!("retry-after: {}\n", i64::MAX));
+        assert_eq!(parse_rate_spent(429, &huge, 1000), Some(i64::MAX));
+        assert_eq!(parse_rate_spent(429, &RateHeaders::default(), 1000), Some(1000 + RATE_MIN_WAIT));
     }
 }

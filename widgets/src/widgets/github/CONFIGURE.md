@@ -10,7 +10,7 @@ GitHub GraphQL/REST APIs reached with `curl`.
 
 The owned section is `github`.
 
-Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `window_days`, `refresh`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `window_days`, `refresh`, `share_readings`
 
 For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
 to the web host (for example `acme.ghe.com`). Requests go to
@@ -23,6 +23,12 @@ API.
 `window_days` is the sample for HELD (closed in the window), R24 and T2D
 (merged in the window). It does not change the 24-hour first-review bar or
 the 2-day opened-to-merged bar. `[w]` cycles the same sample.
+
+`share_readings` (on by default) lets every `github` pane on this machine
+share who the token belongs to, the contribution calendar and the board's
+totals, so panes with the same accounts and window make one board pass
+between them. They are stored in `~/.local/state/opscope/github.sqlite`,
+mode 0600: account names and counts, never the token or a PR title.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

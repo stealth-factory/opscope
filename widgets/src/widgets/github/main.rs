@@ -2117,11 +2117,23 @@ fn account_detail(
     (rows, cursor)
 }
 
-/// What the token is allowed to see, read off the response headers.
+/// What the token is allowed to see, and how much more it may ask, read
+/// off the response headers.
 #[derive(Default, Clone)]
 struct Scopes {
     seen: bool,
     have: Vec<String>,
+    /// The budget's remaining and limit, off the last answer that said.
+    rate: Option<(i64, i64)>,
+    /// GitHub said the budget is spent: until when, in epoch seconds. Any
+    /// thread may set it; the poller takes it and shuts every pane.
+    spent: Option<f64>,
+}
+
+/// Until when GitHub said to stop asking, when an answer said so since the
+/// last call. Taken, so one spent budget shuts the gate once.
+fn take_spent(scopes: &Arc<Mutex<Scopes>>) -> Option<f64> {
+    scopes.lock().ok().and_then(|mut g| g.spent.take())
 }
 
 fn graphql(
@@ -2131,7 +2143,7 @@ fn graphql(
     gql_url: &str,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
-    let (text, headers) = tc::post_json(
+    let (status, text, headers) = tc::post_answer(
         gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -2141,6 +2153,21 @@ fn graphql(
         &body,
         30,
     )?;
+    // Read on a refusal too: a 403 or 429 is where GitHub says how long to
+    // wait, and every pane of this widget waits it out (OPS-288).
+    let head: String = headers.iter().map(|(n, v)| format!("{n}: {v}\n")).collect();
+    let limits = parse::parse_rate_headers(&head);
+    if let Ok(mut g) = scopes.lock() {
+        if let (Some(left), Some(limit)) = (limits.remaining, limits.limit) {
+            g.rate = Some((left, limit));
+        }
+        if let Some(until) = parse::parse_rate_spent(status, &limits, tc::now() as i64) {
+            g.spent = Some(until as f64);
+        }
+    }
+    if !(200..300).contains(&status) {
+        return Err(tc::refused(status, &text));
+    }
     for (name, value) in &headers {
         // Absent on fine-grained tokens, which is itself information: a
         // header that never arrives means the check cannot be made.
@@ -2363,6 +2390,16 @@ struct State {
     /// screen drops the figures it holds even if it drew no frame between
     /// that pass ending and the next one starting.
     void_24h: u64,
+    /// GitHub's rate limit is spent, by this pane's request or another's:
+    /// nothing is asked until then.
+    gated: Option<f64>,
+    /// Where the shared readings on screen came from, why this pane is not
+    /// sharing when it meant to, and the store's one-pass notice, for the
+    /// freshness line. Copied out by the poller, which alone touches the
+    /// store.
+    found: Vec<tc::readings::Provenance>,
+    sharing_off: String,
+    store_notice: String,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -2570,41 +2607,249 @@ fn orgs_query(after: Option<&str>) -> String {
     )
 }
 
+/// This widget's store of shared readings, one file for every github pane
+/// on this machine and no other widget's (OPS-288).
+const STORE: &str = "github";
+/// The rate limit every request this widget makes is counted against.
+const GATE: &str = "graphql";
+/// What a pane says while the gate is shut.
+const RATE_SPENT: &str = "GitHub's rate limit is spent";
+/// One request's thirty-second timeout and a margin: the lease a pane holds
+/// on a reading for each request of its fetch.
+const LEASE_FOR: f64 = 45.0;
+/// Who a token belongs to does not change while it is the same token.
+const WHO_HOLD: f64 = 6.0 * 3600.0;
+
+/// What the poller keeps between passes, besides the shared readings.
+#[derive(Default)]
+struct Poll {
+    viewer: String,
+    day_cache: HashMap<String, HashMap<String, (i64, i64)>>,
+    /// key -> when the shared reading last landed on screen was taken, so
+    /// a reading lands once rather than every follow tick.
+    landed: HashMap<String, f64>,
+    /// The calendar and board readings on screen, for the freshness line.
+    shown: Vec<String>,
+    /// Accounts the board on screen could not read, and why.
+    board_failed: Vec<String>,
+    /// Accounts the last full pass could not read the day counts of.
+    day_failed: Vec<String>,
+}
+
+/// Until when GitHub said to stop asking, without taking it; `None` once
+/// that has passed.
+fn spent_until(scopes: &Arc<Mutex<Scopes>>) -> Option<f64> {
+    scopes.lock().ok().and_then(|g| g.spent).filter(|until| *until > tc::now())
+}
+
+/// Shut every pane's gate when an answer said the budget is spent.
+fn shut_if_spent(cache: &mut tc::readings::Cache, scopes: &Arc<Mutex<Scopes>>) {
+    if let Some(until) = take_spent(scopes) {
+        tc::readings::shut(cache, GATE, until, RATE_SPENT);
+    }
+}
+
+/// The reading under `key` when it is new to this pane's screen: its value
+/// and when it was taken, whichever pane fetched it. A refusal is not a
+/// reading; what is on screen stays.
+fn fresh_reading(
+    cache: &tc::readings::Cache,
+    landed: &mut HashMap<String, f64>,
+    key: &str,
+) -> Option<(serde_json::Value, f64)> {
+    let (at, value, _) = cache.live.get(key)?;
+    let value = value.as_ref()?;
+    if tc::readings::refusal(value).is_some() || landed.get(key) == Some(at) {
+        return None;
+    }
+    landed.insert(key.to_string(), *at);
+    Some((value.clone(), *at))
+}
+
+/// One account's aggregates on its row, or why they are missing.
+///
+/// `entry` is one account of the shared board: the search aliases GitHub
+/// answered, or `{"failed": why}`. A failed account keeps its row - the
+/// table should not empty - but loses its rolling-day pair and is named,
+/// on every pane, rather than landing as zeros.
+fn land_account(
+    by_acc: &mut HashMap<String, Account>,
+    acc: &str,
+    entry: &serde_json::Value,
+    viewer: &str,
+    days_now: i64,
+) -> Option<String> {
+    if !entry.is_object() || entry.get("failed").is_some() {
+        if let Some(row) = by_acc.get_mut(acc) {
+            forget_24h(row);
+        }
+        let why = entry["failed"].as_str().unwrap_or("not in the shared reading");
+        return Some(format!("{} ({})", acc, why));
+    }
+    let d = entry;
+    let (merged, dropped) = (count_at(d, "o0_merged"), count_at(d, "o0_dropped"));
+    let prev = by_acc.get(acc).cloned().unwrap_or_default();
+    let keep_timing =
+        prev.window == days_now && prev.merged == merged && prev.timing_window == Some(days_now);
+    by_acc.insert(
+        acc.to_string(),
+        Account {
+            key: acc.to_string(),
+            account: if acc == "@me" { viewer.to_string() } else { acc.to_string() },
+            is_me: acc == "@me",
+            window: days_now,
+            open: count_at(d, "o0_open"),
+            draft: count_at(d, "o0_draft"),
+            review: count_at(d, "o0_review"),
+            issues: count_at(d, "o0_issues"),
+            merged,
+            dropped,
+            held: parse::parse_held(merged, dropped),
+            timing: if keep_timing { prev.timing } else { None },
+            timing_window: if keep_timing { prev.timing_window } else { None },
+            timing_retry: keep_timing && prev.timing_retry,
+            hist: prev.hist,
+            opened_hist: prev.opened_hist,
+            hist_window: prev.hist_window,
+            hist_failed: prev.hist_failed,
+            // Read straight off the payload rather than through
+            // `count_at`, which lands a missing alias on zero - and a
+            // zero here is a claim the skeleton exists to avoid
+            // making.
+            opened_24h: figure_at(d, "o0_o24"),
+            merged_24h: figure_at(d, "o0_m24"),
+        },
+    );
+    None
+}
+
+/// A whole board on the rows at once: one reading, one 24-hour cut, for
+/// every account. Returns the accounts it could not read.
+fn land_board(
+    board: &serde_json::Value,
+    accounts: &[String],
+    by_acc: &mut HashMap<String, Account>,
+    viewer: &str,
+    days_now: i64,
+) -> Vec<String> {
+    // Every row loses last reading's pair first, so an account this board
+    // could not read cannot keep a figure from another cut.
+    for row in by_acc.values_mut() {
+        forget_24h(row);
+    }
+    accounts
+        .iter()
+        .filter_map(|acc| land_account(by_acc, acc, &board["accounts"][acc], viewer, days_now))
+        .collect()
+}
+
+/// The account list's part of the board's key: the same accounts in any
+/// order are the same board.
+fn accounts_tag(accounts: &[String]) -> String {
+    let mut sorted: Vec<&str> = accounts.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    tc::readings::fingerprint(&sorted)
+}
+
+/// Who the token belongs to, on this host. The token is in the key only as
+/// a fingerprint, and no reading carrying it is ever shared.
+fn who_key(cache: &mut tc::readings::Cache, host: &str, tok: &str) -> String {
+    tc::readings::key(cache, "gh.who", 1, &[host], &[tok])
+}
+
+/// The token's contribution calendar, the same whatever the window.
+fn calendar_key(cache: &mut tc::readings::Cache, host: &str, tok: &str) -> String {
+    tc::readings::key(cache, "gh.calendar", 1, &[host], &[tok])
+}
+
+/// Every account's aggregates for one window ending `day`, as one reading.
+fn board_key(
+    cache: &mut tc::readings::Cache,
+    host: &str,
+    tok: &str,
+    accounts: &[String],
+    days: i64,
+    day: NaiveDate,
+) -> String {
+    let (tag, window, day) = (accounts_tag(accounts), days.to_string(), day.format("%Y-%m-%d").to_string());
+    tc::readings::key(cache, "gh.board", 1, &[host, tag.as_str(), window.as_str(), day.as_str()], &[tok])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
-    viewer: &mut String,
-    day_cache: &mut HashMap<String, HashMap<String, (i64, i64)>>,
+    poll: &mut Poll,
+    cache: &mut tc::readings::Cache,
+    full: bool,
+    refresh: f64,
     state: &Arc<Mutex<State>>,
     scopes: &Arc<Mutex<Scopes>>,
     host: Option<&str>,
-) -> Result<(), String> {
+    activity: &tc::Refresh,
+) -> Result<bool, String> {
+    use tc::readings::{Policy, Take};
     let gql_url = tc::github_graphql_url(host);
-    if viewer.is_empty() {
-        let who = graphql("{ viewer { login } }", tok, scopes, &gql_url)?;
-        // An errors envelope has no data.viewer, and `unwrap_or("")` turned
-        // that into an empty login the pass then carried on with - every
-        // query after it silently scoped to nobody. Unreadable rendered as
-        // empty is the one failure this collection exists to avoid, so the
-        // pass stops and says why, which is what github.py does.
-        *viewer = match who["data"]["viewer"]["login"].as_str() {
-            Some(login) if !login.is_empty() => login.to_string(),
-            _ => {
-                let why = who["errors"][0]["message"]
-                    .as_str()
-                    .unwrap_or("no viewer login in the response");
-                // By characters, not bytes: a message with any multibyte
-                // character crossing byte fifty would panic the slice, and
-                // this one comes from a server.
-                return Err(format!(
-                    "who am I: {}",
-                    why.chars().take(50).collect::<String>()
-                ));
-            }
+    let host_name = host.unwrap_or("github.com");
+    // `r` asks again for every reading older than its floor, on the one
+    // pass it woke; every other pass serves what is held.
+    let bust = full
+        && match state.lock() {
+            Ok(mut g) => std::mem::take(&mut g.bust),
+            Err(_) => return Err("state lock poisoned".into()),
         };
+    cache.asked_at = if bust { tc::now() } else { 0.0 };
+    // A request made since the last pass - the detail screen's own - may
+    // have spent the budget. Every pane stops until GitHub's reset.
+    shut_if_spent(cache, scopes);
+    let gated = tc::readings::gate(cache, GATE).map(|(until, _)| until);
+    if let Ok(mut g) = state.lock() {
+        g.gated = gated;
     }
+    let open = gated.is_none();
+
+    // Who the token belongs to, asked once between every pane.
+    let who_key = who_key(cache, host_name, tok);
+    let who_policy = Policy { askable: false, ..Policy::new(WHO_HOLD, LEASE_FOR) };
+    if let Take::Fetch(ticket) = tc::readings::take(cache, &who_key, who_policy) {
+        if open {
+            let _work = activity.start();
+            // An errors envelope has no data.viewer, and `unwrap_or("")`
+            // turned that into an empty login the pass then carried on with
+            // - every query after it silently scoped to nobody. So the
+            // reading is refused instead, and the pass stops and says why.
+            match graphql("{ viewer { login } }", tok, scopes, &gql_url) {
+                Ok(who) => match who["data"]["viewer"]["login"].as_str() {
+                    Some(login) if !login.is_empty() => {
+                        let _ = ticket.publish(serde_json::json!({ "login": login }));
+                    }
+                    _ => ticket.refuse("no viewer login in the response", None),
+                },
+                Err(why) => ticket.refuse(&why, spent_until(scopes)),
+            }
+        }
+    }
+    match cache.live.get(&who_key).and_then(|e| e.1.as_ref()) {
+        Some(v) => match tc::readings::refusal(v) {
+            // By characters, not bytes: a message with any multibyte
+            // character crossing byte fifty would panic the slice, and this
+            // one comes from a server.
+            Some((why, _)) => {
+                shut_if_spent(cache, scopes);
+                return Err(format!("who am I: {}", why.chars().take(50).collect::<String>()));
+            }
+            None => poll.viewer = v["login"].as_str().unwrap_or("").to_string(),
+        },
+        // Another pane is asking, or the gate is shut: nothing to scope by.
+        None => return Ok(false),
+    }
+    let viewer = poll.viewer.clone();
+
     let mut accounts = state.lock().map(|g| g.accounts.clone()).unwrap_or_default();
     if accounts.is_empty() {
+        if !open {
+            return Ok(false);
+        }
         // Every org you belong to, plus your own account - and *every* is
         // what docs/github.md promises for an empty `accounts`. One page of
         // twenty kept that promise only for people who belong to fewer than
@@ -2612,9 +2857,16 @@ fn one_pass(
         // never asked about, and every headline on the board was a total
         // over an account list that nothing on screen said was short. So
         // the cursor is followed to the end.
+        let _work = activity.start();
         let mut cursor: Option<String> = None;
         loop {
-            let d = graphql(&orgs_query(cursor.as_deref()), tok, scopes, &gql_url)?;
+            let d = match graphql(&orgs_query(cursor.as_deref()), tok, scopes, &gql_url) {
+                Ok(d) => d,
+                Err(why) => {
+                    shut_if_spent(cache, scopes);
+                    return Err(why);
+                }
+            };
             let conn = &d["data"]["viewer"]["organizations"];
             accounts.extend(
                 conn["nodes"]
@@ -2645,27 +2897,39 @@ fn one_pass(
     }
 
     // The calendar is best-effort: it is decoration beside the counts, and a
-    // fine-grained token that cannot read it should not blank the board.
-    if let Ok(cal) = graphql(&contribution_query(CONTRIB_WEEKS), tok, scopes, &gql_url) {
-        let found = cal["data"]["viewer"]["contributionsCollection"]["contributionCalendar"].clone();
-        if !found.is_null() {
-            if let Ok(mut g) = state.lock() {
-                g.calendar = Some(found);
+    // fine-grained token that cannot read it should not blank the board. It
+    // does not depend on the window, so panes on different windows share it.
+    let cal_key = calendar_key(cache, host_name, tok);
+    if let Take::Fetch(ticket) = tc::readings::take(cache, &cal_key, Policy::new(refresh, LEASE_FOR)) {
+        if open {
+            let _work = activity.start();
+            match graphql(&contribution_query(CONTRIB_WEEKS), tok, scopes, &gql_url) {
+                Ok(cal) => {
+                    let found = cal["data"]["viewer"]["contributionsCollection"]["contributionCalendar"].clone();
+                    if found.is_null() {
+                        ticket.refuse("no contribution calendar in the answer", None);
+                    } else {
+                        let _ = ticket.publish(found);
+                    }
+                }
+                Err(why) => ticket.refuse(&why, spent_until(scopes)),
             }
         }
     }
-
-    let (days_now, bust) = match state.lock() {
-        Ok(mut g) => {
-            let out = (g.days, g.bust);
-            g.bust = false;
-            out
+    if let Some((cal, at)) = fresh_reading(cache, &mut poll.landed, &cal_key) {
+        if let Ok(mut g) = state.lock() {
+            g.calendar = Some(cal);
+            g.fetched = g.fetched.max(at);
         }
+    }
+
+    let days_now = match state.lock() {
+        Ok(g) => g.days,
         Err(_) => return Err("state lock poisoned".into()),
     };
-    // Start the pass from what is already on screen, keyed by account, so
-    // rows are replaced in place as each lands instead of the table
-    // emptying and refilling every pass.
+    // Start from what is already on screen, keyed by account, so rows are
+    // replaced in place as each lands instead of the table emptying and
+    // refilling every pass.
     let mut by_acc: HashMap<String, Account> = state
         .lock()
         .map(|g| g.stats.iter().map(|a| (a.key.clone(), a.clone())).collect())
@@ -2678,98 +2942,149 @@ fn one_pass(
     let keep_from = (base - Days::days(WINDOWS[WINDOWS.len() - 1] - 1))
         .format("%Y-%m-%d")
         .to_string();
-    let mut failed: Vec<String> = Vec::new();
-    let mut rate: Option<(i64, i64)> = None;
+    let rate = |scopes: &Arc<Mutex<Scopes>>| scopes.lock().ok().and_then(|g| g.rate);
 
-    // Aggregates first, for every account, before any per-day work. One
-    // request each, so the headline is live in seconds; the day charts below
-    // can cost fifty requests on a cold 90d window and would otherwise hold
-    // the whole board grey for minutes.
-    // One `now` for the whole pass: each account is queried sequentially,
-    // and a fresh `Utc::now()` per request would stagger the 24h cut so
-    // the board sum covered several slightly different windows.
-    let rolling_now = Utc::now();
-    // Last pass's figures are a different cutoff. Forget them before any
-    // account lands, or the first publish mixes this window with the last.
-    for row in by_acc.values_mut() {
-        forget_24h(row);
-    }
-    if let Ok(mut g) = state.lock() {
-        g.counting_24h = true;
-    }
-    publish(state, &accounts, &by_acc, rate);
-    for acc in &accounts {
-        let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes, &gql_url) {
-            Ok(d) => d,
-            Err(e) => {
-                // Fifty characters, which is what the branch below used to
-                // take before `graphql` started refusing an errors payload
-                // itself and made that branch unreachable.
-                failed.push(format!("{} ({})", acc, e.chars().take(50).collect::<String>()));
-                if let Some(row) = by_acc.get_mut(acc) {
-                    forget_24h(row);
-                    publish(state, &accounts, &by_acc, rate);
-                }
-                continue;
+    // The board: every account's aggregates as one reading, so every pane
+    // with the same accounts and window shows the same 24-hour cut, asked
+    // once between them. Today's date is in the key because the window
+    // ends today: a board taken before midnight is a different window.
+    let board_key = board_key(cache, host_name, tok, &accounts, days_now, base);
+    let mut asked_here = false;
+    if let Take::Fetch(mut ticket) = tc::readings::take(cache, &board_key, Policy::new(refresh, LEASE_FOR)) {
+        if open {
+            let _work = activity.start();
+            // One `now` for the whole board: each account is asked in turn,
+            // and a fresh `Utc::now()` per request would stagger the 24h cut
+            // so the sum covered several slightly different windows.
+            let rolling_now = Utc::now();
+            // Last reading's figures are a different cutoff. Forget them
+            // before any account lands, or the first publish mixes the two.
+            for row in by_acc.values_mut() {
+                forget_24h(row);
             }
-        };
-        let d = &data["data"];
-        if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
-            rate = Some((d["rateLimit"]["remaining"].as_i64().unwrap_or(0), limit));
-        }
-        let (merged, dropped) = (count_at(d, "o0_merged"), count_at(d, "o0_dropped"));
-        let prev = by_acc.get(acc).cloned().unwrap_or_default();
-        let keep_timing = prev.window == days_now
-            && prev.merged == merged
-            && prev.timing_window == Some(days_now);
-        by_acc.insert(
-            acc.clone(),
-            Account {
-                key: acc.clone(),
-                account: if acc == "@me" { viewer.clone() } else { acc.clone() },
-                is_me: acc == "@me",
-                window: days_now,
-                open: count_at(d, "o0_open"),
-                draft: count_at(d, "o0_draft"),
-                review: count_at(d, "o0_review"),
-                issues: count_at(d, "o0_issues"),
-                merged,
-                dropped,
-                held: parse::parse_held(merged, dropped),
-                timing: if keep_timing { prev.timing } else { None },
-                timing_window: if keep_timing { prev.timing_window } else { None },
-                timing_retry: keep_timing && prev.timing_retry,
-                hist: prev.hist,
-                opened_hist: prev.opened_hist,
-                hist_window: prev.hist_window,
-                hist_failed: prev.hist_failed,
-                // Read straight off the payload rather than through
-                // `count_at`, which lands a missing alias on zero - and a
-                // zero here is a claim the skeleton exists to avoid
-                // making.
-                opened_24h: figure_at(d, "o0_o24"),
-                merged_24h: figure_at(d, "o0_m24"),
-            },
-        );
-        publish(state, &accounts, &by_acc, rate);
-    }
-    let hole = pass_left_a_hole(&accounts, &by_acc);
-    if let Ok(mut g) = state.lock() {
-        g.counting_24h = false;
-        if hole {
-            g.void_24h = g.void_24h.wrapping_add(1);
+            if let Ok(mut g) = state.lock() {
+                g.counting_24h = true;
+            }
+            publish(state, &accounts, &by_acc, rate(scopes), None);
+            poll.board_failed.clear();
+            let mut board = serde_json::Map::new();
+            let mut taken_over = false;
+            for acc in &accounts {
+                // Another pane took the reading over: its board is the one
+                // every pane shows.
+                if !ticket.renew() {
+                    taken_over = true;
+                    break;
+                }
+                if spent_until(scopes).is_some() {
+                    break;
+                }
+                let entry = match graphql(&build_query(acc, days_now, &viewer, rolling_now), tok, scopes, &gql_url) {
+                    Ok(d) => d["data"].clone(),
+                    Err(e) => serde_json::json!({ "failed": e.chars().take(50).collect::<String>() }),
+                };
+                let failed = land_account(&mut by_acc, acc, &entry, &viewer, days_now);
+                let answered = failed.is_none().then(tc::now);
+                poll.board_failed.extend(failed);
+                board.insert(acc.clone(), entry);
+                publish(state, &accounts, &by_acc, rate(scopes), answered);
+            }
+            let hole = pass_left_a_hole(&accounts, &by_acc);
+            if let Ok(mut g) = state.lock() {
+                g.counting_24h = false;
+                if hole {
+                    g.void_24h = g.void_24h.wrapping_add(1);
+                }
+            }
+            if let Some(until) = spent_until(scopes) {
+                // Short by the accounts never asked: not a board to share.
+                ticket.refuse(RATE_SPENT, Some(until));
+            } else if !taken_over {
+                let _ = ticket.publish(serde_json::json!({ "accounts": board }));
+            } else {
+                drop(ticket);
+            }
+            asked_here = true;
         }
     }
+    // This pane's own board is on screen already, row by row.
+    if asked_here {
+        if let Some((at, _, _)) = cache.live.get(&board_key) {
+            poll.landed.insert(board_key.clone(), *at);
+        }
+    }
+    if let Some((board, at)) = fresh_reading(cache, &mut poll.landed, &board_key) {
+        poll.board_failed = land_board(&board, &accounts, &mut by_acc, &viewer, days_now);
+        let hole = pass_left_a_hole(&accounts, &by_acc);
+        if let Ok(mut g) = state.lock() {
+            if hole {
+                g.void_24h = g.void_24h.wrapping_add(1);
+            }
+        }
+        publish(state, &accounts, &by_acc, rate(scopes), Some(at));
+    }
+    poll.shown = [&cal_key, &board_key]
+        .into_iter()
+        .filter(|k| poll.landed.contains_key(*k))
+        .cloned()
+        .collect();
 
+    // The rest is this pane's own and runs on its refresh: the day counts
+    // and the merged-PR timing are not shared yet (OPS-289).
+    let local = full && open && spent_until(scopes).is_none();
+    if local {
+        local_pass(tok, poll, &accounts, &mut by_acc, days_now, &dates, &keep_from, bust, state, scopes, &gql_url);
+    }
+    shut_if_spent(cache, scopes);
+
+    if let Ok(mut g) = state.lock() {
+        // A config file others can read is no longer said here: core raises
+        // it as a notice from load_config, so it is not glued onto a fetch
+        // that worked.
+        let failed: Vec<&String> = poll.board_failed.iter().chain(&poll.day_failed).collect();
+        g.err = if !failed.is_empty() {
+            format!(
+                "could not read: {}",
+                failed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            scopes.lock().map(|s| scope_warning(&s)).unwrap_or_default()
+        };
+        if let Some(r) = rate(scopes) {
+            g.rate = Some(r);
+        }
+    }
+    Ok(local)
+}
+
+/// The day counts and the merged-PR timing, which each pane still asks for
+/// itself, on its own refresh.
+#[allow(clippy::too_many_arguments)]
+fn local_pass(
+    tok: &str,
+    poll: &mut Poll,
+    accounts: &[String],
+    by_acc: &mut HashMap<String, Account>,
+    days_now: i64,
+    dates: &[String],
+    keep_from: &str,
+    bust: bool,
+    state: &Arc<Mutex<State>>,
+    scopes: &Arc<Mutex<Scopes>>,
+    gql_url: &str,
+) {
+    let viewer = poll.viewer.clone();
+    let rate = |scopes: &Arc<Mutex<Scopes>>| scopes.lock().ok().and_then(|g| g.rate);
+    let mut failed: Vec<String> = Vec::new();
     // Then the per-day counts. A past day cannot change - a PR merged on the
     // 3rd stays merged on the 3rd - so only days never seen before, plus the
     // trailing few, cost a request. Widening the window therefore buys only
     // the days it adds; narrowing is free.
-    for acc in &accounts {
-        if !by_acc.contains_key(acc) {
+    for acc in accounts {
+        if !by_acc.contains_key(acc) || spent_until(scopes).is_some() {
             continue;
         }
-        let cache = day_cache.entry(acc.clone()).or_default();
+        let cache = poll.day_cache.entry(acc.clone()).or_default();
         if bust {
             cache.clear();
         }
@@ -2781,7 +3096,7 @@ fn one_pass(
             .collect();
         let mut chunk_err = None;
         for chunk in want.chunks(DAY_CHUNK) {
-            let dd = match graphql(&build_day_query(&scope_of(acc, viewer), chunk), tok, scopes, &gql_url) {
+            let dd = match graphql(&build_day_query(&scope_of(acc, &viewer), chunk), tok, scopes, gql_url) {
                 Ok(d) => d["data"].clone(),
                 Err(e) => {
                     chunk_err.get_or_insert(e);
@@ -2798,24 +3113,29 @@ fn one_pass(
                 );
             }
         }
-        cache.retain(|day, _| *day >= keep_from); // older than any window
+        cache.retain(|day, _| day.as_str() >= keep_from); // older than any window
+        let mut answered = None;
         if let Some(row) = by_acc.get_mut(acc) {
-            if let Some(why) = settle_day_counts(row, days_now, &dates, cache, chunk_err) {
-                let why: String = why.chars().take(50).collect();
-                failed.push(format!("{} day counts ({})", acc, why));
+            match settle_day_counts(row, days_now, dates, cache, chunk_err) {
+                Some(why) => {
+                    let why: String = why.chars().take(50).collect();
+                    failed.push(format!("{} day counts ({})", acc, why));
+                }
+                None => answered = (!want.is_empty()).then(tc::now),
             }
         }
-        publish(state, &accounts, &by_acc, rate);
+        publish(state, accounts, by_acc, rate(scopes), answered);
     }
+    poll.day_failed = failed;
 
     // Timing for R24 / T2D. The headline aliases stay at eight; this pass
     // pages the merged-in-window nodes the aggregates cannot time. While
     // it is short the new cells stay ···, never a sample dressed as a total.
-    for acc in &accounts {
+    for acc in accounts {
         let Some(row) = by_acc.get(acc) else {
             continue;
         };
-        if row.window != days_now {
+        if row.window != days_now || spent_until(scopes).is_some() {
             continue;
         }
         let have = !bust
@@ -2826,7 +3146,7 @@ fn one_pass(
             continue;
         }
         let expected = row.merged;
-        match fetch_land_timing(acc, viewer, days_now, expected, tok, scopes, &gql_url) {
+        match fetch_land_timing(acc, &viewer, days_now, expected, tok, scopes, gql_url) {
             Ok(got) => {
                 if let Ok(mut g) = state.lock() {
                     g.timing_overlay
@@ -2837,30 +3157,22 @@ fn one_pass(
                     row.timing_window = Some(days_now);
                     row.timing_retry = got.retry;
                 }
-                publish(state, &accounts, &by_acc, rate);
+                publish(state, accounts, by_acc, rate(scopes), Some(tc::now()));
             }
             Err(_) => continue,
         }
     }
-
-    if let Ok(mut g) = state.lock() {
-        // A config file others can read is no longer said here: core raises
-        // it as a notice from load_config, so it is not glued onto a fetch
-        // that worked.
-        g.err = if !failed.is_empty() {
-            format!("could not read: {}", failed.join(", "))
-        } else {
-            scopes.lock().map(|s| scope_warning(&s)).unwrap_or_default()
-        };
-    }
-    Ok(())
 }
 
+/// Put the rows on screen. `answered` is when GitHub answered for anything
+/// they now carry, whichever pane asked: "updated" is the newest of those,
+/// not when this pane drew it.
 fn publish(
     state: &Arc<Mutex<State>>,
     accounts: &[String],
     by_acc: &HashMap<String, Account>,
     rate: Option<(i64, i64)>,
+    answered: Option<f64>,
 ) {
     if let Ok(mut g) = state.lock() {
         g.stats = accounts
@@ -2888,8 +3200,30 @@ fn publish(
         if rate.is_some() {
             g.rate = rate;
         }
-        g.fetched = tc::now();
+        if let Some(at) = answered {
+            g.fetched = g.fetched.max(at);
+        }
     }
+}
+
+/// The freshness line, wrapped to `width`: `not sharing readings: <why>`
+/// when this pane is polling alone, else where the readings on screen came
+/// from, and the store's notice under it. Built from what the poller copied
+/// out, so the render thread never touches the store.
+fn sharing_lines(
+    off: &str,
+    found: &[tc::readings::Provenance],
+    notice: &str,
+    now: f64,
+    width: usize,
+) -> Vec<String> {
+    let mut alone = tc::readings::Cache::default();
+    alone.sharing_off = off.to_string();
+    let mut rows = tc::readings::sharing_rows(&alone, found, now, width);
+    if off.is_empty() && !notice.is_empty() {
+        rows.extend(tc::wrap_words(notice, width.max(1)));
+    }
+    rows
 }
 
 fn main() {
@@ -2900,6 +3234,7 @@ fn main() {
     }
     let cfg = tc::load_config("github");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
+    let share_on = cfg.get("share_readings").and_then(|v| v.as_bool()).unwrap_or(true);
     let configured: Vec<String> = tc::cfg_strings(&cfg, "accounts", &[]);
     let start_window = (tc::cfg_f64(&cfg, "window_days", 14.0) as i64).max(1);
 
@@ -2946,9 +3281,16 @@ fn main() {
     let poller_activity = activity.clone();
     let _ = API_HOST.set(enterprise_host(&cfg));
     std::thread::spawn(move || {
-        let mut viewer = String::new();
-        let mut day_cache: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
+        let mut poll = Poll::default();
+        let mut cache = tc::readings::Cache::default();
+        let mut last_full = f64::NEG_INFINITY;
+        let mut asked = false;
         loop {
+            let now = tc::now();
+            // A full pass every `refresh`, or when a key asked for one; in
+            // between, a look every few seconds for what another pane
+            // published, which costs no request.
+            let full = asked || now - last_full >= refresh;
             if tok.is_empty() {
                 if let Ok(mut g) = poller.lock() {
                     g.err = tc::missing_config(&format!(
@@ -2957,33 +3299,72 @@ fn main() {
                     ));
                 }
             } else {
-                let work = poller_activity.start();
-                if let Err(said) = one_pass(
+                if full {
+                    tc::readings::share(&mut cache, STORE, tc::readings::Caps::default(), share_on, now);
+                } else {
+                    tc::readings::follow(&mut cache);
+                }
+                let work = full.then(|| poller_activity.start());
+                let mut ran = false;
+                match one_pass(
                     &tok,
-                    &mut viewer,
-                    &mut day_cache,
+                    &mut poll,
+                    &mut cache,
+                    full,
+                    refresh,
                     &poller,
                     &poller_scopes,
                     api_host(),
+                    &poller_activity,
                 ) {
-                    if let Ok(mut g) = poller.lock() {
-                        g.err = said;
+                    Ok(local) => ran = local,
+                    Err(said) => {
+                        if let Ok(mut g) = poller.lock() {
+                            g.err = said;
+                        }
                     }
                 }
                 drop(work);
+                let now = tc::now();
+                // From the end of the pass, as before sharing: a pass longer
+                // than `refresh` waits a whole `refresh` before the next,
+                // rather than running back to back. A pass that could not
+                // get as far as this pane's own counts - waiting for another
+                // pane's answer, or for the rate limit - is tried again on
+                // the next tick.
+                if ran {
+                    last_full = now;
+                }
+                let found: Vec<tc::readings::Provenance> = poll
+                    .shown
+                    .iter()
+                    .filter_map(|k| tc::readings::provenance(&cache, k, now))
+                    .collect();
+                let notice = cache.store.as_ref().map(|s| s.notice.clone()).unwrap_or_default();
+                // Drawn from now until the next full pass, whose `share`
+                // clears it.
+                if !notice.is_empty() {
+                    cache.notice_drawn.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Ok(mut g) = poller.lock() {
+                    g.found = found;
+                    g.sharing_off = if cache.store.is_none() { cache.sharing_off.clone() } else { String::new() };
+                    g.store_notice = notice;
+                }
             }
             let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
+            let mut woke = match lock.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+            if !*woke {
+                woke = match cond.wait_timeout(woke, Duration::from_secs_f64(tc::readings::FOLLOW_EVERY)) {
                     Ok((g, _)) => g,
                     Err(_) => return,
                 };
             }
-            *asked = false;
+            asked = *woke;
+            *woke = false;
         }
     });
 
@@ -3180,6 +3561,13 @@ fn main() {
                 ),
                 Err(_) => return,
             };
+        let (sharing, gated) = match state.lock() {
+            Ok(g) => (
+                sharing_lines(&g.sharing_off, &g.found, &g.store_notice, tc::now(), w.saturating_sub(2)),
+                g.gated.filter(|until| *until > tc::now()),
+            ),
+            Err(_) => return,
+        };
         // A pass that failed to read the figures, whether or not a frame
         // was drawn while it ended, takes the held ones with it.
         if void != seen_void {
@@ -3238,6 +3626,15 @@ fn main() {
             head.push((colour.as_str(), txt.clone()));
         }
         rows.push(tc::seg(&head, w - 1));
+        for line in &sharing {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", line))], w - 1));
+        }
+        if let Some(until) = gated {
+            let said = format!("{} · next ask in {}", RATE_SPENT, tc::age(until - tc::now()));
+            for line in tc::wrap_words(&said, w.saturating_sub(2).max(1)) {
+                rows.push(tc::seg(&[(p.warn.as_str(), format!(" {}", line))], w - 1));
+            }
+        }
         if !err.is_empty() {
             rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
@@ -3707,7 +4104,7 @@ fn main() {
                 // does not ask again.
                 let key = a.key.clone();
                 let held = oldest.lock().ok().and_then(|g| g.get(&key).cloned());
-                if held.is_none() {
+                if held.is_none() && gated.is_none() {
                     let start = asking
                         .lock()
                         .map(|mut g| g.insert(key.clone()))
@@ -3747,7 +4144,7 @@ fn main() {
                     .lock()
                     .map(|g| g.get(&key).is_none_or(|at| tc::now() >= *at))
                     .unwrap_or(true);
-                if land.is_none() && a.window == want && ready {
+                if land.is_none() && a.window == want && ready && gated.is_none() {
                     let start = timing_asking
                         .lock()
                         .map(|mut g| g.insert(key.clone()))
@@ -4169,6 +4566,133 @@ mod tests {
 
     use super::*;
 
+    /// Two github panes on one store, as `share_readings` opens them.
+    fn two_panes(name: &str) -> (tc::readings::Cache, tc::readings::Cache) {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-github-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("github.sqlite").to_string_lossy().to_string();
+        let pane = |me: u32| {
+            let mut store = tc::readings::Store::open(&path).unwrap();
+            store.me = me;
+            tc::readings::Cache { store: Some(store), ..Default::default() }
+        };
+        (pane(41), pane(42))
+    }
+
+    const FAKE_TOKEN: &str = "ghp_not-a-real-token-for-tests";
+
+    fn aliases(open: i64) -> serde_json::Value {
+        let n = |v: i64| serde_json::json!({ "issueCount": v });
+        serde_json::json!({
+            "o0_open": n(open), "o0_draft": n(0), "o0_review": n(1),
+            "o0_merged": n(4), "o0_dropped": n(1), "o0_issues": n(2),
+            "o0_o24": n(3), "o0_m24": n(1),
+        })
+    }
+
+    #[test]
+    fn two_panes_on_one_window_share_one_board_and_its_failures() {
+        let (mut a, mut b) = two_panes("board");
+        let accounts = vec!["acme".to_string(), "globex".to_string()];
+        let day = today();
+        let key_a = board_key(&mut a, "github.com", FAKE_TOKEN, &accounts, 14, day);
+        let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
+        let board = serde_json::json!({ "accounts": {
+            "acme": aliases(5),
+            "globex": { "failed": "HTTP 502" },
+        }});
+        match tc::readings::take(&mut a, &key_a, policy) {
+            tc::readings::Take::Fetch(ticket) => assert_eq!(ticket.publish(board), None),
+            _ => panic!("the first pane should fetch"),
+        }
+        // The same accounts in another order are the same board, and the
+        // second pane is served it rather than asking.
+        let reordered = vec!["globex".to_string(), "acme".to_string()];
+        let key_b = board_key(&mut b, "github.com", FAKE_TOKEN, &reordered, 14, day);
+        assert_eq!(key_a, key_b);
+        tc::readings::follow(&mut b);
+        assert!(matches!(
+            tc::readings::take(&mut b, &key_b, policy),
+            tc::readings::Take::Serve(Some(_))
+        ));
+        let mut landed = HashMap::new();
+        let (got, at) = fresh_reading(&b, &mut landed, &key_b).expect("a new reading");
+        assert!(at > 0.0);
+        // Once: the next follow tick does not land it again.
+        assert!(fresh_reading(&b, &mut landed, &key_b).is_none());
+        let mut by_acc = HashMap::new();
+        let failed = land_board(&got, &accounts, &mut by_acc, "me", 14);
+        assert_eq!(failed, vec!["globex (HTTP 502)".to_string()]);
+        assert_eq!(by_acc["acme"].open, 5);
+        // Failed on this pane too, and not a row of zeros.
+        assert!(!by_acc.contains_key("globex"));
+        assert!(pass_left_a_hole(&accounts, &by_acc));
+        // Who fetched it is said, and the token went nowhere.
+        let seen = tc::readings::provenance(&b, &key_b, tc::now()).unwrap();
+        assert_eq!(seen.by, Some(41));
+        assert!(!key_a.contains(FAKE_TOKEN));
+    }
+
+    #[test]
+    fn panes_on_different_windows_still_share_who_and_the_calendar() {
+        let (mut a, mut b) = two_panes("calendar");
+        let accounts = vec!["acme".to_string()];
+        let day = today();
+        assert_ne!(
+            board_key(&mut a, "github.com", FAKE_TOKEN, &accounts, 14, day),
+            board_key(&mut b, "github.com", FAKE_TOKEN, &accounts, 30, day)
+        );
+        assert_eq!(who_key(&mut a, "github.com", FAKE_TOKEN), who_key(&mut b, "github.com", FAKE_TOKEN));
+        let cal = calendar_key(&mut a, "github.com", FAKE_TOKEN);
+        assert_eq!(cal, calendar_key(&mut b, "github.com", FAKE_TOKEN));
+        // Another host or another token is another calendar.
+        assert_ne!(cal, calendar_key(&mut b, "acme.ghe.com", FAKE_TOKEN));
+        assert_ne!(cal, calendar_key(&mut b, "github.com", "ghp_another-fake-token-for-tests"));
+        let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
+        match tc::readings::take(&mut a, &cal, policy) {
+            tc::readings::Take::Fetch(t) => {
+                let _ = t.publish(serde_json::json!({ "totalContributions": 7, "weeks": [] }));
+            }
+            _ => panic!("the first pane should fetch"),
+        }
+        tc::readings::follow(&mut b);
+        let served = match tc::readings::take(&mut b, &cal, policy) {
+            tc::readings::Take::Serve(Some(v)) => v,
+            _ => panic!("the second pane should be served the calendar"),
+        };
+        assert_eq!(served["totalContributions"], 7);
+    }
+
+    #[test]
+    fn a_refused_reading_does_not_land_and_an_absent_account_is_not_zero() {
+        let mut c = tc::readings::Cache::default();
+        let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
+        if let tc::readings::Take::Fetch(t) = tc::readings::take(&mut c, "k", policy) {
+            t.refuse("HTTP 502", None);
+        }
+        assert!(fresh_reading(&c, &mut HashMap::new(), "k").is_none());
+        let mut by_acc = HashMap::new();
+        let board = serde_json::json!({ "accounts": {} });
+        let failed = land_board(&board, &["acme".to_string()], &mut by_acc, "me", 14);
+        assert_eq!(failed, vec!["acme (not in the shared reading)".to_string()]);
+        assert!(by_acc.is_empty());
+    }
+
+    #[test]
+    fn a_pane_alone_says_why_on_the_freshness_line() {
+        let rows = sharing_lines("share_readings is off", &[], "", tc::now(), 80);
+        assert_eq!(rows, vec!["not sharing readings: share_readings is off".to_string()]);
+        assert!(sharing_lines("", &[], "", tc::now(), 80).is_empty());
+        let rows = sharing_lines("", &[], "store started again", tc::now(), 80);
+        assert_eq!(rows, vec!["store started again".to_string()]);
+    }
+
     #[test]
     fn a_token_that_will_undercount_says_so() {
         // A classic token missing `repo` still searches - it just silently
@@ -4176,16 +4700,19 @@ mod tests {
         let short = Scopes {
             seen: true,
             have: vec!["read:org".into()],
+            ..Default::default()
         };
         assert!(scope_warning(&short).contains("private repos are not counted"));
         let no_org = Scopes {
             seen: true,
             have: vec!["repo".into()],
+            ..Default::default()
         };
         assert!(scope_warning(&no_org).contains("orgs cannot be discovered"));
         let full = Scopes {
             seen: true,
             have: vec!["repo".into(), "read:org".into(), "gist".into()],
+            ..Default::default()
         };
         assert_eq!(scope_warning(&full), "");
         // A fine-grained token sends no scope header at all, so there is
@@ -5365,7 +5892,7 @@ mod tests {
             g.timing_overlay
                 .insert("acme".to_string(), (14, true, unfinished.clone()));
         }
-        publish(&state, &["acme".to_string()], &by_acc, None);
+        publish(&state, &["acme".to_string()], &by_acc, None, None);
         let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
         assert_eq!(row.timing, Some(unfinished));
         assert_eq!(row.timing_window, Some(14));
@@ -5380,7 +5907,7 @@ mod tests {
             g.timing_overlay.insert("acme".to_string(), (14, false, done));
         }
         by_acc.get_mut("acme").unwrap().merged = 0;
-        publish(&state, &["acme".to_string()], &by_acc, None);
+        publish(&state, &["acme".to_string()], &by_acc, None, None);
         let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
         assert!(!row.timing_retry);
     }

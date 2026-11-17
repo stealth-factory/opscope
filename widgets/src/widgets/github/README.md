@@ -323,6 +323,38 @@ private. `w` has no need to.
 Accounts are read one at a time rather than together: rows appear as they
 arrive, and one bad account cannot blank the whole board.
 
+## Several panes
+
+Panes of `github` on one machine share what they read, so a second pane
+does not double the requests. Three readings are shared:
+
+- **who the token belongs to**, asked once between every pane on the token;
+- **the contribution calendar**, which does not depend on the window, so
+  panes on different windows share it;
+- **the board's totals** - every account's open, draft, review, merged,
+  dropped, issue and rolling-24h counts - as **one** reading per set of
+  accounts and window. One reading, so every account is counted against the
+  same 24-hour cut, and two panes on the same accounts and window make one
+  board pass per refresh between them. An account that could not be read
+  travels inside it and shows as failed on every pane, never as zero.
+
+The day counts behind the flow chart and the R24 / T2D timing are still
+asked by each pane.
+
+The line under the status line says where the readings on screen came from
+when it is not simply this pane, just now: `fetched 2m ago by pane 48213`,
+`cached 3m ago · pane 48213 asking now`, or `not sharing readings: <why>`
+when this pane is polling alone. `updated … ago` is when GitHub answered for
+the newest figure on screen, whichever pane asked.
+
+When GitHub says the rate limit is spent, every `github` pane stops asking
+until its reset and says when it will ask again.
+
+The readings are kept in `~/.local/state/opscope/github.sqlite`, readable
+only by you: account and org names and counts, never a token (it is in the
+key only as a fingerprint) or a PR title. A reading nobody has written for
+a day is deleted. `share_readings: false` keeps everything in the pane.
+
 ## Clickable titles
 
 PR titles in the account detail view link to their GitHub pages. The main
@@ -465,7 +497,8 @@ settings screen restarts the widget to pick it up.
   "enterprise_hostname_env": "",
   "accounts": [],
   "window_days": 14,
-  "refresh": 120
+  "refresh": 120,
+  "share_readings": true
 }
 ```
 

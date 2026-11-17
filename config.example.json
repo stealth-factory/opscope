@@ -174,7 +174,9 @@
     "_window_days_comment": "Days included in delivery charts and summaries.",
     "window_days": 14.0,
     "_refresh_comment": "Seconds between GitHub API refreshes.",
-    "refresh": 120.0
+    "refresh": 120.0,
+    "_share_readings_comment": "Share readings with every other github pane on this machine, so one pane asks GitHub and the rest read its answer. On by default.\n\nShared: who the token belongs to, the contribution calendar, and the board's totals for each set of accounts and window - org and account names and counts, never a token or a PR title. Day counts and merged-PR timing are still asked by each pane. When GitHub says the rate limit is spent, every github pane stops asking until it resets.\n\nThe readings are kept in one small file, github.sqlite in ~/.local/state/opscope, readable only by you, and forgotten a day after nobody has written them. Turn it off to have this pane ask on its own; the line under the status line says which it is doing.",
+    "share_readings": true
   },
   "github_actions": {
     "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed.\n\nEmpty accounts discovers the viewer login and every org they belong to.\n\nEmpty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
