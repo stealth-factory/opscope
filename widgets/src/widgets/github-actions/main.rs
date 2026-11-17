@@ -215,6 +215,9 @@ struct Budget {
     /// have separate buckets; the last response wins, and a full poll ends
     /// on REST, which is what this widget spends. `resource` says which.
     last: Option<parse::RateHeaders>,
+    /// When `last` was observed. A shared reading taken earlier than this
+    /// must not paint its budget over the answer just received.
+    last_at: Option<f64>,
     /// The limit with the latest end that any answer this pass reported,
     /// with GitHub's own reset or retry-after in it. `None` while no answer
     /// said to stop.
@@ -234,6 +237,7 @@ impl Budget {
         let got = parse::parse_rate_headers(&head);
         if matches!((got.remaining, got.limit), (Some(_), Some(max)) if max > 0) {
             self.last = Some(got.clone());
+            self.last_at = Some(now as f64);
         }
         let limit = parse::classify_rate(status, &got, now);
         if let Some(until) = limit.until() {
@@ -259,6 +263,7 @@ impl Budget {
     fn absorb(&mut self, other: &Budget) {
         if other.last.is_some() {
             self.last = other.last.clone();
+            self.last_at = other.last_at;
         }
         if let Some(until) = other.stop.as_ref().and_then(|s| s.until()) {
             if self.stop.as_ref().and_then(|s| s.until()).is_none_or(|was| until >= was) {
@@ -270,6 +275,18 @@ impl Budget {
     /// The stop in force at `now`, if an answer said to stop.
     fn stopped(&self, now: f64) -> Option<&parse::RateLimit> {
         self.stop.as_ref().filter(|s| s.until().is_some_and(|u| u as f64 > now))
+    }
+}
+
+/// The budget the status line shows.
+///
+/// A shared reading supplies one when this pass fetched nothing, and when
+/// that reading is newer than this pass's own last answer. An older cached
+/// budget stays behind an answer that just said the limit is spent.
+fn shown_budget(own: &Budget, seen: Option<(f64, parse::RateHeaders)>) -> Option<parse::RateHeaders> {
+    match seen {
+        Some((at, h)) if own.last_at.is_none_or(|t| at > t) => Some(h),
+        _ => own.last.clone(),
     }
 }
 
@@ -1246,7 +1263,10 @@ fn discover_repos(
                     notes.push(said);
                 }
             }
-            Err(said) => notes.push(format!("{}: {}", acc, said)),
+            // `ask` failed, so discovery stopped. A note would make this
+            // `Ok`, and a spent budget would publish the repos found so
+            // far as the whole reading.
+            Err(said) => return Err(said),
         }
     }
     // Same-name rows have to be adjacent before dedup_by can collapse them.
@@ -1784,7 +1804,8 @@ fn one_pass(
         got.sharing = sh.rows(now);
         if sharing {
             got.paused = sh.paused.clone();
-            if let Some((_, h)) = sh.seen_core.clone().or_else(|| sh.seen_any.clone()) {
+            let seen = sh.seen_core.clone().or_else(|| sh.seen_any.clone());
+            if let Some(h) = shown_budget(&got.rate, seen) {
                 got.rate.last = Some(h);
             }
         }
@@ -4365,6 +4386,54 @@ mod tests {
             assert!(tc::readings::refusal(&v).is_none(), "a gate stop refused the reading: {v}");
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_stop_during_discovery_is_not_a_repo_list() {
+        let accounts = vec!["acme".to_string(), "other".to_string()];
+        let got = discover_repos(
+            "tok",
+            &accounts,
+            7,
+            10,
+            "me",
+            &mut Budget::default(),
+            "https://example.invalid",
+            &mut |_| Err("GitHub's graphql rate limit is spent".into()),
+        );
+        assert!(got.is_err(), "a stopped discovery must not come back as a repo list: {got:?}");
+    }
+
+    #[test]
+    fn an_older_shared_budget_does_not_hide_a_spent_response() {
+        let mut own = Budget::default();
+        let spent = vec![
+            ("x-ratelimit-remaining".to_string(), "0".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), "2000".to_string()),
+            ("x-ratelimit-resource".to_string(), "core".to_string()),
+        ];
+        own.take_at(200, &spent, 1_000);
+        let older = parse::RateHeaders {
+            remaining: Some(4321),
+            limit: Some(5000),
+            reset: None,
+            resource: Some("core".into()),
+            retry_after: None,
+        };
+        let shown = shown_budget(&own, Some((900.0, older.clone()))).expect("budget");
+        assert_eq!(shown.remaining, Some(0), "an older cached budget covered the spent response");
+        // The same second is the response's own time, not a newer reading.
+        let shown = shown_budget(&own, Some((1_000.0, older.clone()))).expect("budget");
+        assert_eq!(shown.remaining, Some(0));
+        let mut newer = older.clone();
+        newer.remaining = Some(100);
+        let shown = shown_budget(&own, Some((1_100.0, newer))).expect("budget");
+        assert_eq!(shown.remaining, Some(100));
+        let mut pass = Budget::default();
+        pass.absorb(&own);
+        let shown = shown_budget(&pass, Some((900.0, older))).expect("budget");
+        assert_eq!(shown.remaining, Some(0), "folding the response dropped its time");
     }
 
     #[test]
