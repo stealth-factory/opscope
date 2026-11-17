@@ -1787,6 +1787,8 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // held for the account signed in before would be drawn under the new
     // account's plan - a monthly figure labelled as a weekly pool.
     let me = account_key();
+    let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
+    secret_fields(caches, &auth, &["accessToken", "refreshToken"]);
     let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
     // Said as the request failed, not as "did not answer" whatever the

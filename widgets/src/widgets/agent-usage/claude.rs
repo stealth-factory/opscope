@@ -61,6 +61,9 @@ pub struct Data {
     pub label: String,
     /// Expanded config directory this reading came from.
     pub dir: String,
+    /// Where this account's shared readings came from, for its freshness
+    /// line.
+    pub freshness: Vec<tc::readings::Provenance>,
     ok: bool,
     why: String,
     stats: serde_json::Value,
@@ -1037,8 +1040,20 @@ fn claude_rates_in(newest_first: &[&str]) -> (Vec<f64>, usize) {
 pub fn read(caches: &mut Caches, cfg: &Config) -> Vec<Data> {
     dirs_of(cfg)
         .into_iter()
-        .map(|dir| read_one(caches, &dir))
+        .map(|dir| {
+            caches.touched.clear();
+            let mut d = read_one(caches, &dir);
+            d.freshness = freshness(caches);
+            d
+        })
         .collect()
+}
+
+/// Register the tokens signed in under `dir`, so no shared reading carries
+/// one - read again each pass, since Claude Code rotates them.
+fn claude_secrets(caches: &mut Caches, dir: &str) {
+    let creds = read_json(&creds_path(dir)).unwrap_or_default();
+    secret_fields(caches, &creds["claudeAiOauth"], &["accessToken", "refreshToken"]);
 }
 
 fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
@@ -1055,6 +1070,7 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // there, so a reading another pane stored before a sign-in as someone
     // else is never served after it.
     let account = claude_account_at(&dir.path);
+    claude_secrets(caches, &dir.path);
     let live = cached(caches, &format!("claude:{}:{account}", dir.path), CLAUDE_LIVE_TTL, || {
         let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
@@ -2652,6 +2668,37 @@ pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reading carrying the token signed in under the directory it was
+    /// read from is never written to the store the other panes read
+    /// (OPS-290): the token is registered before the fetch, as copilot's
+    /// and the others' are.
+    #[test]
+    fn a_reading_carrying_a_claude_token_is_never_shared() {
+        let dir = std::env::temp_dir().join(format!("opscope-claude-secret-{}-{}", std::process::id(), now().to_bits()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = "fixture-access-token-0123456789";
+        std::fs::write(
+            dir.join(".credentials.json"),
+            serde_json::json!({"claudeAiOauth": {"accessToken": token, "refreshToken": "fixture-refresh-token-0123"}}).to_string(),
+        )
+        .unwrap();
+        let path = dir.join("agent-usage.sqlite").to_string_lossy().to_string();
+        let mut caches = Caches::default();
+        caches.readings.store = Some(tc::readings::Store::open(&path).unwrap());
+        let home = dir.to_string_lossy().to_string();
+        claude_secrets(&mut caches, &home);
+        let leaked = serde_json::json!({"u": {"echo": format!("Bearer {token}")}});
+        assert!(cached(&mut caches, "claude:probe", 120.0, || Some(leaked.clone())).is_some());
+        assert!(caches.readings.store.is_some(), "{}", caches.readings.sharing_off);
+        let mut other = tc::readings::Store::open(&path).unwrap();
+        assert_eq!(other.load("claude:probe").unwrap(), None, "the token reached the shared store");
+        assert!(!std::fs::read(&path).unwrap().windows(token.len()).any(|w| w == token.as_bytes()));
+        // A reading without it is shared as before.
+        assert!(cached(&mut caches, "claude:clean", 120.0, || Some(serde_json::json!({"u": 1}))).is_some());
+        assert!(other.load("claude:clean").unwrap().is_some(), "a clean reading was not shared");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn output_model_bars_publish_gradient_plots_with_their_labels_intact() {

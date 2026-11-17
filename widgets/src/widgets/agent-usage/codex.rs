@@ -171,6 +171,15 @@ fn codex_account() -> String {
     account_tag(&format!("{}\n{credential}", field("account_id")))
 }
 
+/// Register the tokens in `~/.codex/auth.json`, so no shared reading
+/// carries one.
+fn codex_secrets(caches: &mut Caches) {
+    const TOKENS: &[&str] = &["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"];
+    let auth = read_json(&under_home(".codex/auth.json")).unwrap_or_default();
+    secret_fields(caches, &auth, TOKENS);
+    secret_fields(caches, &auth["tokens"], TOKENS);
+}
+
 /// Account-wide quota, live from the same endpoint the Codex CLI uses.
 ///
 /// The rollouts carry a rate_limits snapshot, but only from whenever Codex
@@ -578,6 +587,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // Keyed on the account, so a reading another pane stored before a
     // sign-in as someone else is never served after it.
     let key = format!("codex:{}", codex_account());
+    codex_secrets(caches);
     let live = match cached(caches, &key, LIVE_TTL, || match codex_live() {
         Some(got) if got.get("usage_miss").is_some() => {
             carried_bank = got["bank"].as_str().map(str::to_string);

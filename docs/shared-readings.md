@@ -50,7 +50,10 @@ pass: renewed before each request, a dead pane costs one request's wait. It is
 capped at `lease::MAX_LEASE` (300 s).
 
 agent-usage still uses the older `cached` call, which waits for another pane
-when it has nothing to show. New widgets use `take`.
+when it has nothing to show. New widgets use `take`. `provenance` reads a
+`cached` reading the same way: a pane that serves what it has while another
+asks notes who is asking, and a refusal held as `{"why": ...}` is said with
+the time its backoff ends (OPS-290).
 
 ## What the pane says
 

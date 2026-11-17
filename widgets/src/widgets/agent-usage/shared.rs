@@ -47,6 +47,9 @@ pub struct Caches {
     /// The readings shared with the other panes, and how long each is held;
     /// see `tc::readings`.
     pub readings: tc::readings::Cache,
+    /// The keys `cached` was asked for since [`freshness`] last took them,
+    /// so each section can say where its own readings came from.
+    pub touched: Vec<String>,
     /// snapshot path -> the time of the Claude reading last written there,
     /// so a held reading is not written again on every pass.
     pub snapshot_at: HashMap<String, f64>,
@@ -755,6 +758,7 @@ pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<s
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    caches.touched.push(key.to_string());
     tc::readings::cached(&mut caches.readings, key, ttl, fetch)
 }
 
@@ -764,6 +768,7 @@ pub fn cached_file<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Opt
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    caches.touched.push(key.to_string());
     tc::readings::cached_file(&mut caches.readings, key, ttl, fetch)
 }
 
@@ -779,8 +784,33 @@ pub fn secret(caches: &mut Caches, token: &str) {
     tc::readings::secret(&mut caches.readings, token)
 }
 
-pub fn sharing_status(caches: &Caches) -> String {
-    tc::readings::sharing_status(&caches.readings)
+/// Register every non-empty string field `fields` of `obj` names as a
+/// token, so no shared reading carries one.
+pub fn secret_fields(caches: &mut Caches, obj: &serde_json::Value, fields: &[&str]) {
+    for f in fields {
+        if let Some(t) = obj.get(*f).and_then(|v| v.as_str()) {
+            secret(caches, t);
+        }
+    }
+}
+
+/// Where the readings a section asked for since the last call came from,
+/// for the freshness line it draws; see [`tc::readings::provenance`].
+pub fn freshness(caches: &mut Caches) -> Vec<tc::readings::Provenance> {
+    let at = now();
+    let mut keys = std::mem::take(&mut caches.touched);
+    keys.sort();
+    keys.dedup();
+    keys.iter()
+        .filter_map(|k| tc::readings::provenance(&caches.readings, k, at))
+        .collect()
+}
+
+/// The pane's line about sharing, unwrapped: why this pane is not sharing,
+/// or the store's notice, or nothing. Who fetched each section's readings
+/// is said by that section; see [`freshness`].
+pub fn sharing_line(caches: &Caches) -> Vec<String> {
+    tc::readings::sharing_rows(&caches.readings, &[], now(), usize::MAX / 4)
 }
 
 pub fn kept(caches: &mut Caches, key: &str, why: &str) -> Option<(serde_json::Value, Kept)> {

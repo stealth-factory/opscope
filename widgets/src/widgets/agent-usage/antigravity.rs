@@ -912,6 +912,9 @@ fn may_start_agy(shown: bool, start: bool, have_quota: bool) -> bool {
 /// `agy` is skipped when it does not.
 pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     use std::os::unix::fs::MetadataExt;
+    // Every token in the file this reads, so no shared reading carries one.
+    let file = read_json(&token_path()).unwrap_or_default();
+    secret_fields(caches, &file["token"], &["access_token", "refresh_token", "id_token"]);
     // The refusal is cached with the failure, so it is shown for as long as
     // the failure lasts rather than only on the frame the call was made.
     let live = cached(caches, "antigravity", PLAN_TTL, || {

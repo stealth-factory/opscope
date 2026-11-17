@@ -42,8 +42,12 @@ pub struct State {
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
-    /// Whether the readings are shared with the other panes, and how.
-    pub sharing: String,
+    /// Why this pane is not sharing its readings, or the store's notice:
+    /// unwrapped lines, drawn under the status line. Empty when sharing.
+    pub sharing: Vec<String>,
+    /// vendor -> where the readings its section shows came from. Claude
+    /// keeps its own on each account's `Data`.
+    pub freshness: HashMap<String, Vec<tc::readings::Provenance>>,
 }
 
 /// Whether Notion may be asked, on the same terms: it sends the reader's
@@ -93,24 +97,80 @@ pub fn read_all(
     // Each reader notes the tokens it holds as it reads; a token from a
     // pass before, since rotated, has nothing left to guard.
     caches.readings.secrets.clear();
+    caches.touched.clear();
+    let mut freshness = HashMap::new();
+    // Each vendor read, then where the readings it asked for came from.
+    let mut section = |caches: &mut Caches, vendor: &str| {
+        freshness.insert(vendor.to_string(), crate::shared::freshness(caches));
+    };
+    let claude = crate::claude::read(caches, cfg);
+    let codex = crate::codex::read(caches, cfg);
+    section(caches, "codex");
+    let cursor = crate::cursor::read(caches, cfg);
+    section(caches, "cursor");
+    let grok = crate::grok::read(caches, cfg);
+    section(caches, "grok");
+    let copilot = crate::copilot::read(caches, cfg);
+    section(caches, "copilot");
+    let antigravity = crate::antigravity::read(caches, cfg, antigravity_shown);
+    section(caches, "antigravity");
+    let notion = crate::notion::read(caches, cfg, notion_shown);
+    section(caches, "notion");
+    let perplexity = crate::perplexity::read(caches, cfg, perplexity_shown);
+    section(caches, "perplexity");
+    let devin = crate::devin::read(caches, cfg, devin_shown);
+    section(caches, "devin");
+    let droid = crate::droid::read(caches, cfg, droid_shown);
+    section(caches, "droid");
     let mut state = State {
-        claude: crate::claude::read(caches, cfg),
-        codex: crate::codex::read(caches, cfg),
-        cursor: crate::cursor::read(caches, cfg),
-        grok: crate::grok::read(caches, cfg),
-        copilot: crate::copilot::read(caches, cfg),
-        antigravity: crate::antigravity::read(caches, cfg, antigravity_shown),
-        notion: crate::notion::read(caches, cfg, notion_shown),
-        perplexity: crate::perplexity::read(caches, cfg, perplexity_shown),
-        devin: crate::devin::read(caches, cfg, devin_shown),
-        droid: crate::droid::read(caches, cfg, droid_shown),
+        claude,
+        codex,
+        cursor,
+        grok,
+        copilot,
+        antigravity,
+        notion,
+        perplexity,
+        devin,
+        droid,
         installed,
         fetched: 0.0,
         err: String::new(),
-        sharing: String::new(),
+        sharing: Vec::new(),
+        freshness,
     };
     link_spacexsi(&mut state);
     state
+}
+
+/// Where the readings on tab `name` came from: its vendor's, both of the
+/// unified plan's, or every shown vendor's on the overview - so a tab never
+/// claims to be fresher than its stalest part.
+fn freshness_of(name: &str, s: &State, tabs: &[String]) -> Vec<tc::readings::Provenance> {
+    let of = |vendor: &str| s.freshness.get(vendor).cloned().unwrap_or_default();
+    match name {
+        SUMMARY_TAB => {
+            let mut all: Vec<_> = Vec::new();
+            for n in ORDER {
+                if !tabs.iter().any(|t| t == n || t.starts_with(&format!("{n}:"))) {
+                    continue;
+                }
+                if *n == "claude" {
+                    all.extend(s.claude.iter().flat_map(|d| d.freshness.iter().cloned()));
+                } else {
+                    all.extend(of(n));
+                }
+            }
+            all
+        }
+        name if agent_family(name) == "claude" => {
+            claude_of(s, name).map(|d| d.freshness.clone()).unwrap_or_default()
+        }
+        "spacexsi" => [of("cursor"), of("grok")].concat(),
+        "spacexsi:cursor" => of("cursor"),
+        "spacexsi:grok" => of("grok"),
+        other => of(other),
+    }
 }
 
 /// Whether two weekly windows are the same window, to the millisecond.
@@ -897,6 +957,26 @@ fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec
 }
 
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let first = plots.len();
+    let mut body = tab_rows(name, s, w, h, cfg, p, tabs, plots);
+    // Where this tab's readings came from, above them: nothing when every
+    // one is this pane's own and fresh (OPS-290).
+    let found = freshness_of(name, s, tabs);
+    let said: Vec<String> = tc::readings::provenance_rows(&found, now(), w.saturating_sub(2).max(8))
+        .into_iter()
+        .map(|line| tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w - 1))
+        .collect();
+    if !said.is_empty() {
+        let n = said.len();
+        body.splice(0..0, said);
+        for plot in plots.iter_mut().skip(first) {
+            plot.y += n;
+        }
+    }
+    body
+}
+
+fn tab_rows(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let listed = |vendor: &str| tabs.iter().any(|t| t == vendor);
     match name {
         SUMMARY_TAB => {
@@ -2364,6 +2444,39 @@ mod tests {
                 "weekly_resets_at": "2126-01-05T00:00:00Z"
             }
         })
+    }
+
+    /// Each tab says where its own readings came from, above them, in
+    /// core's words - and nothing when they are this pane's and fresh
+    /// (OPS-290).
+    #[test]
+    fn each_tab_says_where_its_readings_came_from() {
+        use tc::readings::Provenance;
+        let at = now();
+        let mine = Provenance { taken_at: at - 10.0, by: None, stale: false, asking: None, refused: None, unshared: None };
+        let first_row = |found: Vec<Provenance>| {
+            let s = State { freshness: HashMap::from([("codex".to_string(), found)]), ..Default::default() };
+            let tabs = vec![SUMMARY_TAB.to_string(), "codex".to_string()];
+            let mut plots = Vec::new();
+            let bare = tab_rows("codex", &s, 100, 60, &Config::default(), &palette(), &tabs, &mut Vec::new());
+            let body = tab_body_with_plots("codex", &s, 100, 60, &Config::default(), &palette(), &tabs, &mut plots);
+            let added = body.len() - bare.len();
+            let plus = plain(&tab_body_with_plots(SUMMARY_TAB, &s, 100, 60, &Config::default(), &palette(), &tabs, &mut Vec::new()));
+            (plain(&body[..added]).join("|").trim().to_string(), plus.first().cloned().unwrap_or_default())
+        };
+        assert_eq!(first_row(vec![mine.clone()]).0, "", "this pane's own fresh reading said something");
+        let (tab, plus) = first_row(vec![Provenance { taken_at: at - 125.0, by: Some(48213), ..mine.clone() }]);
+        assert_eq!(tab, "fetched 2m ago by pane 48213");
+        assert_eq!(plus.trim(), tab, "[+] does not say where codex's reading came from");
+        let asking = Provenance { taken_at: at - 425.0, stale: true, asking: Some(48213), ..mine.clone() };
+        assert_eq!(first_row(vec![asking]).0, "cached 7m ago · pane 48213 asking now");
+        let refused = Provenance {
+            taken_at: at - 425.0,
+            stale: true,
+            refused: Some(("too many requests".into(), at + 185.0)),
+            ..mine.clone()
+        };
+        assert_eq!(first_row(vec![refused]).0, "cached 7m ago · too many requests, next ask in 3m");
     }
 
     /// Both screens drawn through the functions the running widget calls -
