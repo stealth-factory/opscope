@@ -761,12 +761,26 @@ impl Store {
             .conn
             .execute(
                 "UPDATE readings
-                 SET good_value = coalesce(good_value, value), value = ?3, taken_at = ?2, fetched_by = ?4
+                 SET good_at = CASE
+                       WHEN good_value IS NULL THEN max(
+                         coalesce(good_at, taken_at),
+                         coalesce((SELECT at FROM checks WHERE key = readings.key), coalesce(good_at, taken_at))
+                       )
+                       ELSE good_at
+                     END,
+                     good_value = coalesce(good_value, value),
+                     value = ?3, taken_at = ?2, fetched_by = ?4
                  WHERE key = ?1 AND (
-                     (taken_at = ?2 AND fetched_by = ?4)
-                     OR EXISTS (
+                     (
+                       taken_at = ?2 AND fetched_by = ?4
+                       AND NOT EXISTS (
                          SELECT 1 FROM checks c
-                         WHERE c.key = readings.key AND c.at = ?2 AND c.by = ?4
+                         WHERE c.key = readings.key AND c.at > readings.taken_at
+                       )
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM checks c
+                       WHERE c.key = readings.key AND c.at = ?2 AND c.by = ?4
                      )
                  )",
                 params![key, taken_at, text, self.me],
@@ -898,12 +912,33 @@ impl Store {
         let Some(since) = claimed_at else {
             return Ok(false);
         };
+        // A quiet confirmation lives in `checks`, not on the row. That is
+        // a publication too: a fetch this pane started before it does not
+        // write over it.
         self.conn
-            .query_row("SELECT taken_at, fetched_by FROM readings WHERE key = ?1", [key], |r| {
-                Ok((r.get::<_, f64>(0)?, r.get::<_, u32>(1)?))
-            })
+            .query_row(
+                "SELECT r.taken_at, r.fetched_by, c.at, c.by
+                 FROM readings r LEFT JOIN checks c ON c.key = r.key WHERE r.key = ?1",
+                [key],
+                |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, u32>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                        r.get::<_, Option<u32>>(3)?,
+                    ))
+                },
+            )
             .optional()
-            .map(|row| row.is_some_and(|(at, by)| superseded_at(by, at, self.me, since, now)))
+            .map(|row| {
+                row.is_some_and(|(taken_at, fetched_by, checked, checked_by)| {
+                    let (at, by) = match checked {
+                        Some(c) if c >= taken_at => (c, checked_by.unwrap_or(fetched_by)),
+                        _ => (taken_at, fetched_by),
+                    };
+                    superseded_at(by, at, self.me, since, now)
+                })
+            })
             .map_err(sql)
     }
 }
@@ -1641,6 +1676,41 @@ mod tests {
         assert!(s.annotate("k", NOW + 60.0, &serde_json::json!({"why": "later"}), &[]).unwrap());
         s.seen.clear();
         assert_eq!(s.load("k").unwrap().unwrap().value, Some(serde_json::json!({"why": "later"})));
+    }
+
+    #[test]
+    fn an_older_annotation_does_not_replace_a_later_check() {
+        let path = temp("annotate-later");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        b.me = a.me + 1;
+        let v = serde_json::json!({"u": 1});
+        a.publish("k", &reading(NOW, v.clone()), &[], NOW).unwrap();
+        b.publish("k", &reading(NOW + 60.0, v.clone()), &[], NOW + 60.0).unwrap();
+        assert!(!a.annotate("k", NOW, &serde_json::json!({"why": "stale"}), &[]).unwrap());
+        b.seen.clear();
+        assert_eq!(b.load("k").unwrap().unwrap().value, Some(v));
+        assert!(b.annotate("k", NOW + 60.0, &serde_json::json!({"why": "later"}), &[]).unwrap());
+        b.seen.clear();
+        let back = b.load("k").unwrap().unwrap();
+        assert_eq!(back.value, Some(serde_json::json!({"why": "later"})));
+        assert_eq!(back.good.unwrap().0, NOW + 60.0, "the check's time was dropped when the good value was materialised");
+    }
+
+    #[test]
+    fn a_later_check_is_a_successor() {
+        let path = temp("check-successor");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        b.me = a.me + 1;
+        let kept = serde_json::json!({"n": 1});
+        a.publish("k", &reading(NOW, kept.clone()), &[], NOW).unwrap();
+        b.publish("k", &reading(NOW + 50.0, kept.clone()), &[], NOW + 50.0).unwrap();
+        let late = reading(NOW + 80.0, serde_json::json!({"n": 9}));
+        let got = a.publish_many(&[("k", late)], &[], NOW + 80.0, Some(NOW + 10.0)).unwrap();
+        assert_eq!(got, vec![Publish::TakenOver]);
+        b.seen.clear();
+        assert_eq!(b.load("k").unwrap().unwrap().value, Some(kept));
     }
 
     #[test]

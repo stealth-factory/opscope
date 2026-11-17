@@ -1372,9 +1372,9 @@ const GRAPHQL: &str = "graphql";
 
 /// The reading GitHub's remaining budget is kept in, per bucket. It is not
 /// fetched for itself: a pane publishes the figure its own answers carried.
+/// One row is a few hundred bytes and changes with every request, recorded
+/// from the headers just received rather than claimed and fetched.
 const BUDGET: &str = "gha.budget";
-/// One budget row is a few hundred bytes and changes with every request.
-/// It is recorded from the headers just received, not claimed and fetched.
 
 /// Why every pane has stopped asking, as the pane says it.
 fn limit_why(stop: &parse::RateLimit) -> String {

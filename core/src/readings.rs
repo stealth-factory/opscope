@@ -643,7 +643,13 @@ pub fn record(cache: &mut Cache, key: &str, value: serde_json::Value, at: f64, h
             cache.unshared.remove(key);
         }
         Ok(store::Publish::Older) | Ok(store::Publish::TakenOver) => {}
-        Ok(other) => note_unshared(cache, key, other),
+        // Too large, or it carried a token: the store refuses it, and the
+        // pane keeps it, the same as a pane with no store.
+        Ok(other @ (store::Publish::TooLarge | store::Publish::HeldSecret)) => {
+            cache.live.insert(key.to_string(), (at, Some(value.clone()), held));
+            cache.good.insert(key.to_string(), (at, value));
+            note_unshared(cache, key, other);
+        }
         Err(why) if store::busy(&why) => {
             cache.live.insert(key.to_string(), (at, Some(value), held));
         }
@@ -1983,6 +1989,25 @@ mod tests {
         // And 70 s after it, it does.
         let claimed = claim_many(&mut b, &[(key, Policy::new(60.0, 30.0))], later + 70.0);
         assert!(matches!(claimed[0], Claimed::Fetch), "a stale reading was not claimed");
+    }
+
+    #[test]
+    fn a_record_the_store_refuses_stays_on_the_pane() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-record-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.sqlite").to_string_lossy().to_string();
+        let store = Store::open_with(&path, store::Caps { max_value: 8, ..store::Caps::default() }).unwrap();
+        let mut cache = Cache { store: Some(store), ..Cache::default() };
+        let v = serde_json::json!({"remaining": 1, "limit": 5000});
+        record(&mut cache, "budget", v.clone(), 1_000.0, 60.0);
+        assert_eq!(cache.live.get("budget").and_then(|e| e.1.clone()), Some(v.clone()));
+        assert_eq!(cache.good.get("budget").map(|g| g.1.clone()), Some(v));
+        assert_eq!(cache.unshared.get("budget").copied(), Some("too large to share"));
+        assert!(cache.shared.get("budget").is_none(), "a refused observation was marked shared");
     }
 
     #[test]
