@@ -22,8 +22,10 @@ API.
 
 `share_readings` (on by default) shares readings with every other
 github-actions pane on this machine through an owner-only file under
-`~/.local/state/opscope`. It stores run titles for up to 2 hours and never
-the token. Turn it off only when a pane must poll on its own.
+`~/.local/state/opscope`. A run title is deleted after its reading has
+not been refreshed for two hours, and only when a pane next publishes —
+closing every pane does not delete it. The token is never stored. Turn
+it off only when a pane must poll on its own.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

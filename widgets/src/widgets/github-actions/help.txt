@@ -31,8 +31,9 @@ Several panes on one machine share what GitHub said, so they make one
 request per repo per refresh between them; the line under the status line
 says which pane fetched it. Who the token belongs to, the repos found and
 each repo's runs, run titles included, are kept in
-~/.local/state/opscope/github-actions.sqlite (owner-only) and deleted
-after 2 hours unrefreshed. A spent rate limit stops every pane until
+~/.local/state/opscope/github-actions.sqlite (owner-only). A reading
+nobody has refreshed for 2 hours is deleted the next time a pane
+publishes. A spent rate limit stops every pane until
 GitHub's reset. `share_readings: false` turns it off for one pane.
 
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles

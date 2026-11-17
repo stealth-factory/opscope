@@ -1333,7 +1333,7 @@ const STORE: &str = "github-actions";
 const LEASE_FOR: f64 = 60.0;
 
 /// The store's limits. Run titles are stored, so a reading nobody has
-/// published for two hours is deleted.
+/// published for two hours is deleted on a later publish.
 fn store_caps() -> tc::readings::Caps {
     tc::readings::Caps { forget_after: 2.0 * 3600.0, ..Default::default() }
 }
@@ -1498,6 +1498,9 @@ enum Took {
     Refused(String),
     Limited(parse::RateLimit),
     TakenOver,
+    /// Another pane shut the gate between pages. The lease is released
+    /// and the reading is not refused.
+    Blocked,
 }
 
 /// What the pass reports to the pane while it runs.
@@ -1537,13 +1540,41 @@ impl<'a> Steps<'a> {
     }
 }
 
+/// What this pane can still show while the limit is shut: a reading
+/// already in memory, or one another pane stored, and nothing when
+/// neither exists. The lease is not claimed.
+fn show_while_paused(sh: &mut Share, key: &str) -> Read {
+    tc::readings::recall(&mut sh.cache, key, sh.ttl);
+    let now = tc::now();
+    let read = match sh.kept(key) {
+        Some((v, at)) => {
+            sh.saw(&v, at);
+            Read::Got(v, at)
+        }
+        None => Read::Paused,
+    };
+    sh.mark(key, now);
+    read
+}
+
+/// Put the budget the answer carried onto the reading, then publish it.
+fn publish_with_budget(ticket: tc::readings::Ticket<'_>, mut v: serde_json::Value, budget: &Budget) {
+    if let (Some(h), Some(o)) = (budget.last.as_ref(), v.as_object_mut()) {
+        o.insert("budget".into(), budget_json(h));
+    }
+    ticket.publish(v);
+}
+
 /// Ask for one reading through the shared store.
 ///
 /// A spent limit, here or in any other pane, stops the asking before it
-/// starts. A reading another pane fetched is served; one another pane is
-/// fetching is waited for while this pane shows what it has. Otherwise this
-/// pane fetches, renewing its lease before each request, and publishes the
-/// whole reading or nothing.
+/// starts, and a reading already shared is still shown. A reading another
+/// pane fetched is served; one another pane is fetching is waited for
+/// while this pane shows what it has. Otherwise this pane fetches,
+/// renewing its lease and rechecking the limit before each request after
+/// the first, and publishes the whole reading or nothing. A reading whose
+/// last response spent the budget is published; the next request is what
+/// waits.
 fn shared_reading(
     sh: &mut Share,
     key: &str,
@@ -1553,17 +1584,13 @@ fn shared_reading(
     fetch: impl FnOnce(&mut Budget, &mut Ask) -> Result<serde_json::Value, String>,
 ) -> Read {
     let gate = sh.key("gha.limit", &[resource]);
+    // Another pane may have shut the gate since this pass began. `load`
+    // skips a key already read at the version `follow` noted, so look again
+    // before trusting the one from `begin`.
+    tc::readings::follow(&mut sh.cache);
     if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
         sh.note_pause(until, why);
-        let now = tc::now();
-        sh.mark(key, now);
-        return match sh.kept(key) {
-            Some((v, at)) => {
-                sh.saw(&v, at);
-                Read::Got(v, at)
-            }
-            None => Read::Paused,
-        };
+        return show_while_paused(sh, key);
     }
     let policy = tc::readings::Policy::new(sh.ttl, LEASE_FOR);
     let took = match tc::readings::take(&mut sh.cache, key, policy) {
@@ -1574,6 +1601,7 @@ fn shared_reading(
             let mut budget = Budget::default();
             let mut first = true;
             let mut taken_over = false;
+            let mut blocked = false;
             let got = {
                 let mut ask = |b: &Budget| -> Result<(), String> {
                     if std::mem::take(&mut first) {
@@ -1582,6 +1610,10 @@ fn shared_reading(
                     }
                     if let Some(stop) = b.stopped(tc::now()) {
                         return Err(limit_why(stop));
+                    }
+                    if let Some((_, why)) = ticket.closed(&gate) {
+                        blocked = true;
+                        return Err(why);
                     }
                     if taken_over || !ticket.renew() {
                         taken_over = true;
@@ -1592,20 +1624,34 @@ fn shared_reading(
                 fetch(&mut budget, &mut ask)
             };
             rate.absorb(&budget);
-            if let Some(stop) = budget.stopped(tc::now()).cloned() {
-                ticket.refuse(&limit_why(&stop), stop.until().map(|u| u as f64));
-                Took::Limited(stop)
-            } else if taken_over {
+            if taken_over {
                 // Not this pane's to publish: the pane that took over will.
                 drop(ticket);
                 Took::TakenOver
+            } else if let Some(stop) = budget.stopped(tc::now()).cloned() {
+                // The response that spent the last request can still be a
+                // complete reading. Publish that. An error, or a later page
+                // that never went out, is a refusal.
+                match got {
+                    Ok(v) => {
+                        publish_with_budget(ticket, v, &budget);
+                        Took::Limited(stop)
+                    }
+                    Err(_) => {
+                        ticket.refuse(&limit_why(&stop), stop.until().map(|u| u as f64));
+                        Took::Limited(stop)
+                    }
+                }
+            } else if blocked {
+                // Another pane already shut the gate. Releasing the lease
+                // is enough: refusing the reading would hold every pane
+                // past the reset.
+                drop(ticket);
+                Took::Blocked
             } else {
                 match got {
-                    Ok(mut v) => {
-                        if let (Some(h), Some(o)) = (budget.last.as_ref(), v.as_object_mut()) {
-                            o.insert("budget".into(), budget_json(h));
-                        }
-                        ticket.publish(v);
+                    Ok(v) => {
+                        publish_with_budget(ticket, v, &budget);
                         Took::Published
                     }
                     Err(why) => {
@@ -1641,6 +1687,12 @@ fn shared_reading(
             Some((v, at)) => Read::Got(v, at),
             None => Read::Waiting(0),
         },
+        Took::Blocked => {
+            if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+                sh.note_pause(until, why);
+            }
+            return show_while_paused(sh, key);
+        }
     };
     if let Read::Got(v, at) = &read {
         sh.saw(v, *at);
@@ -1721,13 +1773,13 @@ fn one_pass(
     activity: &tc::Refresh,
 ) -> Result<State, String> {
     let sharing = share.as_ref().is_some_and(|s| s.on);
-    if let Some(sh) = share.as_deref_mut() {
+    if let Some(sh) = &mut share {
         sh.begin(tc::now());
     }
     let mut steps = Steps::new(live, activity, !sharing);
     let mut got = pass_body(tok, accounts, explicit, pushed_days, cap, hours, host, &mut share, &mut steps)?;
     drop(steps);
-    if let Some(sh) = share.as_deref_mut() {
+    if let Some(sh) = &mut share {
         let now = tc::now();
         got.sharing = sh.rows(now);
         if sharing {
@@ -4225,6 +4277,94 @@ mod tests {
         assert!(sh.cache.store.is_none());
         tc::readings::share(&mut sh.cache, STORE, store_caps(), false, tc::now());
         assert_eq!(sh.rows(tc::now()), vec!["not sharing readings: share_readings is off".to_string()]);
+    }
+
+    #[test]
+    fn a_gate_closed_between_two_reads_in_one_pass_stops_the_second() {
+        let path = store_file("mid-pass");
+        let mut a = pane(&path, 1, 60.0);
+        let mut b = pane(&path, 2, 60.0);
+        let asked = std::cell::Cell::new(0usize);
+        let mut first = true;
+        let until = tc::now() as i64 + 300;
+        let got = runs_pass(&mut b, &mut |repo, _| {
+            asked.set(asked.get() + 1);
+            if std::mem::take(&mut first) {
+                a.shut(&parse::RateLimit::Spent { until, resource: Some(REST.to_string()) }, REST);
+            }
+            Ok(one_run(repo))
+        });
+        assert_eq!(asked.get(), 1, "the read after the gate closed did not ask");
+        assert!(matches!(got[0], Read::Got(..)), "{:?}", got[0]);
+        assert!(got[1..].iter().all(|r| matches!(r, Read::Paused)), "{got:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_reading_that_spends_the_last_request_is_published_and_a_new_pane_still_reads_it() {
+        let path = store_file("last");
+        let mut a = pane(&path, 1, 60.0);
+        let reset = tc::now() as i64 + 300;
+        let spent = vec![
+            ("x-ratelimit-remaining".to_string(), "0".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), reset.to_string()),
+            ("x-ratelimit-resource".to_string(), "core".to_string()),
+        ];
+        let asked = std::cell::Cell::new(0usize);
+        let got = runs_pass(&mut a, &mut |repo, budget| {
+            asked.set(asked.get() + 1);
+            budget.take_at(200, &spent, tc::now() as i64);
+            Ok(one_run(repo))
+        });
+        assert_eq!(asked.get(), 1, "the spent budget stops the rest of the pass");
+        match &got[0] {
+            Read::Got(v, _) => assert_eq!(v["runs"][0]["display_title"], "fix the build"),
+            other => panic!("the successful reading was dropped: {other:?}"),
+        }
+        assert!(got[1..].iter().all(|r| matches!(r, Read::Paused)), "{got:?}");
+        // A pane that opens while the gate is shut has nothing in memory.
+        // It still shows the reading the first pane published.
+        let mut b = pane(&path, 2, 60.0);
+        let got = runs_pass(&mut b, &mut |_, _| panic!("asked while the gate is shut"));
+        match &got[0] {
+            Read::Got(v, _) => assert_eq!(v["runs"][0]["repo"], REPOS[0]),
+            other => panic!("the stored reading was hidden by the gate: {other:?}"),
+        }
+        assert!(got[1..].iter().all(|r| matches!(r, Read::Paused)), "{got:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_gate_closed_between_pages_stops_the_next_request() {
+        let path = store_file("pages");
+        let mut a = pane(&path, 1, 60.0);
+        let mut b = pane(&path, 2, 60.0);
+        let live = Arc::new(Mutex::new(State::default()));
+        let activity = tc::Refresh::default();
+        let mut steps = Steps::new(&live, &activity, false);
+        let mut rate = Budget::default();
+        let key = b.key("gha.runs", &["acme/app", "48"]);
+        let pages = std::cell::Cell::new(0usize);
+        let until = tc::now() as i64 + 300;
+        let got = shared_reading(&mut b, &key, REST, &mut rate, &mut steps, |budget, ask| {
+            ask(budget)?;
+            pages.set(pages.get() + 1);
+            a.shut(&parse::RateLimit::Spent { until, resource: Some(REST.to_string()) }, REST);
+            ask(budget)?;
+            pages.set(pages.get() + 1);
+            Ok(one_run("acme/app"))
+        });
+        assert_eq!(pages.get(), 1, "the page after the gate closed was asked");
+        assert!(matches!(got, Read::Paused), "{got:?}");
+        let mut look = tc::readings::Store::open_with(&path, store_caps()).expect("store opens");
+        let row = look.load(&key).expect("store reads");
+        if let Some(s) = row {
+            let v = s.value.clone().unwrap_or(serde_json::Value::Null);
+            assert!(v.get("runs").is_none(), "an unfinished reading was published: {v}");
+            assert!(tc::readings::refusal(&v).is_none(), "a gate stop refused the reading: {v}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

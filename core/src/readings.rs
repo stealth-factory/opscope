@@ -299,6 +299,16 @@ fn wait_for_holder(
     }
 }
 
+/// Read `key` into this pane from the store, without claiming its lease.
+///
+/// A spent rate limit stops the asking. It must not stop a pane that has
+/// just opened from showing a reading another pane already published:
+/// [`take`] claims the lease on its way to the row, and a closed gate
+/// never gets that far. [`share`] and [`follow`] do not load it either.
+pub fn recall(cache: &mut Cache, key: &str, ttl: f64) {
+    pull(cache, key, crate::now(), ttl);
+}
+
 /// Take what another pane has published under `key` since this pane last
 /// looked. Costs nothing when nobody has written.
 fn pull(cache: &mut Cache, key: &str, at: f64, ttl: f64) {
@@ -744,6 +754,18 @@ impl Ticket<'_> {
                 true
             }
         }
+    }
+
+    /// Whether `bucket` is shut, after looking at the store again.
+    ///
+    /// [`Self::renew`] does not look at gates. A fetch of several pages
+    /// checks this before each request after the first: a gate another
+    /// pane closed mid-fetch stays unseen until the store's version is
+    /// read again, because a key already read at the version [`follow`]
+    /// noted is not read again.
+    pub fn closed(&mut self, bucket: &str) -> Option<(f64, String)> {
+        follow(self.cache);
+        gate(self.cache, bucket)
     }
 
     /// Hold `value` for this pane's `ttl` and share it, stamped now - when

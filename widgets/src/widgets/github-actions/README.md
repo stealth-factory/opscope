@@ -191,8 +191,10 @@ again. A pane keeps drawing the runs it already had in the meantime.
 
 The readings live in `~/.local/state/opscope/github-actions.sqlite`,
 readable only by you: the latest of each and nothing older, **run titles
-included**. A reading nobody has refreshed for 2 hours is deleted. The
-token is never stored; keys carry only a fingerprint of it.
+included**. A reading nobody has refreshed for 2 hours is deleted the
+next time a pane publishes. Closing every pane does not delete it, so
+one may stay on disk until a pane writes again. The token is never
+stored; keys carry only a fingerprint of it.
 `share_readings: false` keeps everything in the pane, which then polls
 exactly as it did before sharing existed.
 
