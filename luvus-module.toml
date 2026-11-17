@@ -144,7 +144,7 @@ title = "months"
 placement = "split"
 command = ["./luvus/bin/opscope", "months"]
 
-# Every pane of the multiplexer it runs in, ordered by who needs you.
+# Every pane of the multiplexer it runs in, working first, then what needs you.
 [[panes]]
 id = "mux-activity"
 title = "mux-activity"

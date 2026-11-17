@@ -588,11 +588,11 @@ pub fn parse_leases(text: &str) -> Result<Vec<Lease>, String> {
     Ok(found)
 }
 
-/// Worst first: the states that want a human are the reason to look.
+/// What is busy first, then what wants a human, then what is at rest.
 ///
 /// `blocked` above `done` and not the other way round: blocked is waiting
 /// on you right now, while done is waiting to be noticed.
-pub const RANK: &[&str] = &["blocked", "done", "working", "idle", "unknown"];
+pub const RANK: &[&str] = &["working", "blocked", "done", "idle", "unknown"];
 
 pub fn rank_of(state: &str) -> usize {
     RANK.iter().position(|s| *s == state).unwrap_or(9)
@@ -1264,12 +1264,12 @@ mod tests {
     }
 
     #[test]
-    fn the_ordering_puts_the_ones_wanting_a_human_first() {
+    fn the_ordering_puts_working_first_then_the_ones_wanting_a_human() {
         let mut states = vec!["idle", "working", "done", "blocked", "sideways"];
         states.sort_by_key(|s| rank_of(s));
         assert_eq!(
             states,
-            vec!["blocked", "done", "working", "idle", "sideways"]
+            vec!["working", "blocked", "done", "idle", "sideways"]
         );
     }
 

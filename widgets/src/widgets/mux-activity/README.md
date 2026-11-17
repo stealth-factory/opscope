@@ -2,8 +2,8 @@
 
 [← all widgets](../../../../docs/README.md)
 
-Every pane of the multiplexer it runs in — ordered by who needs you, with one
-key to get there. Under [Rex](https://www.superlogical.com/rex/docs/), that is
+Every pane of the multiplexer it runs in — what is working first, then who
+needs you, with one key to get there. Under [Rex](https://www.superlogical.com/rex/docs/), that is
 everything running on the server, across every session.
 
 It replaced `rex-panes`, `herdr-panes` and `luvus-panes`, and those names are
@@ -47,9 +47,9 @@ whichever multiplexer the pane is in.
 ## Grouping by state with `g`
 
 Agents are grouped by session (Rex) or workspace (Herdr, Luvus), the group
-holding the most urgent agent first. `g` regroups the agent sections — AGENTS
-and BACKGROUND AGENTS — by state instead: a sub-heading per state, worst
-first (`blocked · 2`, `done · 3`, `working · 4`, …), each row naming its own
+holding the first-ranked agent first. `g` regroups the agent sections —
+AGENTS and BACKGROUND AGENTS — by state instead: a sub-heading per state, in
+the board's state order (`working · 4`, `blocked · 2`, `done · 3`, …), each row naming its own
 session or workspace since no heading above it does. `g` again goes back. The
 footer names the grouping the next press gives: `[g]roup by state`, then
 `[g]roup by session` (or `workspace`).
@@ -68,8 +68,9 @@ palette. A row is matched on what it shows: agent or command, session or
 workspace, directory, branch, title and the message it reported.
 
 The match only includes or excludes. Each section keeps its own order —
-urgency first, then grouped by session — so a blocked agent that matches
-still sits above a working one that matches better.
+working first, then what needs a human, then what is at rest, within each
+session or workspace group — so a closer match never moves a row above one
+that ranks higher.
 
 `↵` keeps the filter and returns to the list; `esc` clears it. With a filter
 kept, the footer offers `[/] edit filter` and `[esc] clear`. The headings
@@ -258,21 +259,27 @@ with one `rex do` script and woken by `rex events`.
 ### Why it is ordered this way
 
 On a server with a dozen sessions, an agent finishes or gets stuck where
-nobody is looking. **Every section is sorted by who needs a human**, worst
-first, and the one waiting longest first among equals:
+nobody is looking. **Rows are sorted by state** in this order — what is busy,
+then what needs a human, then what is at rest — and the one holding its state
+longest first among equals. That order holds within each session group; the
+groups themselves are ordered by their first-ranked row, so an idle agent in
+a session that also has a working one lists above a blocked agent in another
+session. `g` (below) puts every agent of a state under one heading instead.
 
 | Sorts as | Meaning |
 |---|---|
+| `working` | busy |
 | `blocked` | waiting on a permission, a question or a sign-in, right now |
 | `error` | failed and stopped |
 | `done` | finished work you have not looked at yet |
 | `attention` | not a reported state but a signal: rang the bell or sent a notification since you last looked |
-| `working` | busy |
 | `idle` | at rest, waiting for its next instruction |
 | `unknown` | an agent is there and has **not reported** a state — not the same as idle |
 
-The headline counts the panes waiting on you, so `Enter` on the top row is
-the whole workflow.
+The headline counts the panes waiting on you. The top row may be a working
+agent rather than one of them, so move to a waiting pane first — `↑` `↓`, or
+`g` to bring every blocked agent under one heading — then `Enter` takes you
+there.
 
 **AGENTS** is every pane holding a coding agent. **PROCESSES** is every other
 pane running something, plus any pane holding a status report — a `terraform`
@@ -281,9 +288,9 @@ at a shell prompt, by directory, because the panel is also how you get around.
 
 **Inside each section, panes are grouped by session** under a `╶ work · 3`
 sub-heading, and the row's own column says only the window. The sessions are
-ordered by their most urgent pane, so a blocked agent still brings its session
-to the top of the section; within a session the order is the same worst-first
-one. On a server with one session there is nothing to group, so there are no
+ordered by their first-ranked pane, so a working or blocked agent brings its
+session to the top of the section; within a session the order is the same
+state order. On a server with one session there is nothing to group, so there are no
 sub-headings and the count line names the session instead.
 
 A pane Rex could not be asked about is neither running nor resting: it sorts
@@ -395,15 +402,15 @@ and one keypress to get to any of it.
 ```
 ╺━ MUX ACTIVITY · HERDR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  in Herdr · HERDR_ENV=1 is set
- 5 agents · 3 workspaces   1 done   1 working   3 idle
+ 5 agents · 3 workspaces   1 working   1 done   3 idle
  ▸ 1 agent waiting for you
 
  ── AGENTS ── 5
  AGENT    STATE    FOR    CPU   MEM   WORKSPACE
- ✓ grok   DONE     ≥16s     6%  231M  some-cli
-   you/some-cli    Investigate the failing test
 ▸◐ claude working  ≥16s    14%  763M  infra
    work            ◐ Refactor the schedule module
+ ✓ grok   DONE     ≥16s     6%  231M  some-cli
+   you/some-cli    Investigate the failing test
  · claude idle     ≥16s     1%  491M  site
    work/site       Plan the repository structure
 
@@ -422,19 +429,21 @@ and one keypress to get to any of it.
 ### Why it is ordered this way
 
 On a server with a dozen workspaces, agents finish or get stuck where nobody is
-looking. **AGENTS is sorted by who needs a human**, not by name:
+looking. **AGENTS is sorted by state**, not by name: what is busy, then what
+needs a human, then what is at rest. The order holds within each workspace
+group, and the groups are ordered by their first-ranked agent:
 
 | State | Meaning |
 |---|---|
+| `working` | busy |
 | `blocked` | waiting on an approval or a question, right now |
 | `done` | finished background work you have not looked at yet |
-| `working` | busy |
 | `idle` | ready for input |
 | `unknown` | an agent is present but Herdr cannot classify it — **not** the same as idle |
 
-A headline counts how many are waiting on you, so pressing `Enter` on the top
-row is the whole workflow: the blocked agent surfaces, one key puts you in front
-of it.
+A headline counts how many are waiting on you. Within a workspace a blocked
+agent sits right under the working ones; `g` brings every blocked agent under
+one heading, and `↵` on it puts you in front of the one that is stuck.
 
 **PROCESSES** covers every other pane actually running something — dev servers,
 monitors, builds — with the command, CPU and memory. **IDLE** lists panes at a
@@ -580,13 +589,15 @@ get to any of it.
 ### Why it is ordered this way
 
 On a machine hosting several workspaces, agents finish or get stuck where
-nobody is looking. **AGENTS is sorted by who needs a human**, not by name:
+nobody is looking. **AGENTS is sorted by state**, not by name: what is busy,
+then what needs a human, then what is at rest. The order holds within each
+workspace group, and the groups are ordered by their first-ranked agent:
 
 | State | Meaning |
 |---|---|
+| `working` | busy |
 | `blocked` | waiting on an approval or a question, right now |
 | `done` | finished work you have not looked at yet |
-| `working` | busy |
 | `idle` | ready for input |
 | `unknown` | an agent is present and Luvus classified it as none of those — **not** the same as idle |
 
@@ -594,9 +605,9 @@ Those four are the states the protocol itself declares, so they are Luvus's
 words rather than this widget's. `blocked` sits above `done` because blocked
 is waiting on you *now* while done is waiting to be noticed.
 
-A headline counts how many are waiting on you, so pressing `↵` on the top row
-is the whole workflow: the blocked agent surfaces, one key puts you in front of
-it.
+A headline counts how many are waiting on you. Within a workspace a blocked
+agent sits right under the working ones; `g` brings every blocked agent under
+one heading, and `↵` on it puts you in front of it.
 
 ### The claim behind each state
 
@@ -616,8 +627,8 @@ wide enough for it.
 
 ### What a blocked agent is waiting for
 
-`blocked` is the row the widget sorts to the top and the one it used to say
-least about. The row carries the state, how long it has held it, and how it
+`blocked` is the first state that needs a human, ranked just below
+`working`, and the one the widget used to say least about. The row carries the state, how long it has held it, and how it
 was decided — but never *what the agent is asking*, which is the question that
 sends you out of the widget.
 

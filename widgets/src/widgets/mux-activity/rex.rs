@@ -70,15 +70,16 @@ const DEFAULT_AGENTS: &[&str] = &[
     "jules",
 ];
 
-/// Worst first: the states that want a human are the reason to look.
+/// The order states are listed in: what is busy first, then what needs a
+/// human - blocked, failed, finished and unread - then what is at rest.
 /// `attention` is not a protocol state - it is a program that rang the bell
 /// or sent a notification and has not been looked at since.
 const RANK: &[&str] = &[
+    "working",
     "blocked",
     "error",
     "done",
     "attention",
-    "working",
     "idle",
     "unknown",
 ];
@@ -538,7 +539,8 @@ fn build(g: &parse::Gather, catalogue: &[String], seen: &mut Seen, local: bool, 
     }
 }
 
-/// Worst first, then the one waiting longest, then where it is.
+/// State order first (working, then what needs a human, then what is at
+/// rest), then the one waiting longest, then where it is.
 fn order(panes: &mut [Pane]) {
     panes.sort_by(|a, b| {
         a.rank()
@@ -1043,10 +1045,10 @@ fn detail_phrases(pane: &Pane, at: f64) -> Vec<String> {
 /// A section's panes regrouped by session, without losing who needs you.
 ///
 /// Each session's panes stay together, in the order they already had -
-/// worst first. The sessions are ordered by their most urgent pane, then by
-/// Rex's own session order, so a blocked agent still puts its session at
-/// the top of the section rather than waiting behind a quiet one that
-/// happens to sort first by name.
+/// in state order. The sessions are ordered by their first-ranked pane, then
+/// by Rex's own session order, so a working or blocked agent still puts its
+/// session at the top of the section rather than waiting behind a quiet one
+/// that happens to sort first by name.
 fn by_session(panes: Vec<&Pane>) -> Vec<&Pane> {
     let mut groups: Vec<(usize, usize, Vec<&Pane>)> = Vec::new();
     for pane in panes {
@@ -2292,7 +2294,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // Grouped by session inside each section, when there is more than
         // one: the flat index the keys walk is this order, so the cursor and
         // the sub-headings cannot disagree.
-        // By state, the order above is the grouping: worst first already.
+        // By state, the order above is the grouping: state order already.
         let agents = if by_state { agents } else { by_session(agents) };
         // Background agents no session claimed (OPS-292) get a section of
         // their own after AGENTS: they hold no pane and Enter cannot focus
@@ -2376,7 +2378,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 ),
                 (p.dim.as_str(), format!("{} pane{}", total, plural(total))),
             ];
-            for name in ["blocked", "error", "done", "working", "idle", "unknown"] {
+            for name in ["working", "blocked", "error", "done", "idle", "unknown"] {
                 if let Some(n) = counts.get(name) {
                     summary.push((colour_of(name, &p), format!("  {} {}", n, name)));
                 }
@@ -3376,7 +3378,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blocked_background_agent_sorts_with_the_agents_that_need_you() {
+    fn a_blocked_background_agent_sorts_after_working_and_before_resting_agents() {
         let table = Err("no ps".to_string());
         let job = job_pane(a_job("blocked"), "background agents · via jobs", &table, 2.0e9);
         assert_eq!(job.section(), Section::Agents);
@@ -3384,11 +3386,15 @@ mod tests {
         assert!(job.wants_a_human());
         let mut working = pane_in("work", 1, "w1", Some("working"));
         working.agent = Some(("claude".into(), Source::Report));
-        let mut panes = vec![working, job];
+        let mut idle = pane_in("rest", 2, "w2", Some("idle"));
+        idle.agent = Some(("claude".into(), Source::Report));
+        let mut panes = vec![idle, job, working];
         order(&mut panes);
-        assert!(panes[0].job.is_some(), "the blocked job comes first");
+        let states: Vec<String> = panes.iter().map(|p| p.state()).collect();
+        assert_eq!(states, ["working", "blocked", "idle"], "working, then what needs you, then at rest");
+        assert!(panes[1].job.is_some());
         let grouped = by_session(panes.iter().collect());
-        assert_eq!(grouped[0].session_label, "background agents · via jobs");
+        assert_eq!(grouped[1].session_label, "background agents · via jobs");
     }
 
     #[test]

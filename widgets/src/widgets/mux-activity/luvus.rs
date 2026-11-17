@@ -1181,9 +1181,9 @@ impl Columns {
 }
 
 /// Agents regrouped by workspace, without losing who needs you: each
-/// workspace's agents together in the order they already had, worst first,
-/// and the workspaces in the order their most urgent agent came - which,
-/// for a list already sorted worst first, is the order each first appears.
+/// workspace's agents together in the order they already had, state order,
+/// and the workspaces in the order their first-ranked agent came - which,
+/// for a list already in state order, is the order each first appears.
 fn by_workspace(agents: Vec<Agent>) -> Vec<Agent> {
     let mut groups: Vec<Vec<Agent>> = Vec::new();
     for agent in agents {
@@ -1721,7 +1721,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // vectors are empty, but the Result beside them is what the
         // header and the empty-section lines read, so a timeout cannot
         // draw as zero.
-        // By state, the poll's workspace order is undone into worst first;
+        // By state, the poll's workspace order is undone into state order;
         // the cursor keeps its row because `reselect` follows the row.
         let agent_rows: Vec<Agent> = in_group_order(agents.clone().unwrap_or_default(), by_state);
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();
@@ -1889,7 +1889,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             p.dim.as_str(),
             pane_summary(panes.len(), hidden_opscope, resting.len(), show_idle),
         ));
-        for state_name in ["blocked", "done", "working", "idle"] {
+        for state_name in ["working", "blocked", "done", "idle"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((
                     colour_of(state_name, &p),
@@ -3481,7 +3481,7 @@ mod tests {
             since,
             ..Agent::default()
         };
-        // As polled: grouped by workspace, worst first inside each.
+        // As polled: grouped by workspace, in state order inside each.
         let polled = vec![
             agent("1", "api", "blocked", 5.0),
             agent("2", "api", "working", 50.0),
@@ -3492,9 +3492,9 @@ mod tests {
         assert_eq!(group_of(blocked, true).1, "blocked");
         assert_ne!(group_of(blocked, true).0, blocked.workspace, "a state is never a workspace");
         assert_eq!(group_of(blocked, false), ("api".to_string(), "api".to_string()));
-        // By state the order is worst first, longest held first within a state.
+        // By state: working first, then blocked; longest held first within one.
         let order: Vec<String> = in_group_order(polled.clone(), true).into_iter().map(|a| a.pane).collect();
-        assert_eq!(order, ["3", "1", "2", "4"]);
+        assert_eq!(order, ["2", "4", "3", "1"]);
         // By workspace, the poll's order is left alone.
         let order: Vec<String> = in_group_order(polled.clone(), false).into_iter().map(|a| a.pane).collect();
         assert_eq!(order, ["1", "2", "3", "4"]);

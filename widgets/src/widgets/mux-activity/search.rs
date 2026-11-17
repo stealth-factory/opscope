@@ -18,8 +18,8 @@
 //! words fuzzy-match it.
 //!
 //! The match only includes or excludes a row. Each board keeps its own
-//! order - urgency first, then grouped by session - so a blocked agent
-//! never drops below an idle one that happened to match better.
+//! order - state order within each session or workspace group - so a
+//! closer match never moves a row above one that ranks higher.
 
 use opscope_core as tc;
 
