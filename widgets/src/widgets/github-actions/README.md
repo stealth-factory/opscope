@@ -164,6 +164,40 @@ support OSC 8. `c` remains the keyboard route for copying the URL.
 `j` and `k` move the selection the same way `↓` and `↑` do, as they do on
 `deployments`.
 
+## Several panes
+
+Several `github-actions` panes on one machine ask GitHub once between them,
+not once each. Three readings are shared: who the token belongs to, the
+repos discovery found, and each repo's runs in the window. Runs are kept
+per repo, so two panes watching overlapping repos share the overlap, and
+two panes that go stale together split the repos between them. The state
+and text filters and the selection stay with each pane.
+
+Without it each pane asks for every repo itself. Three accounts and 48
+repos come to at least 2,880 REST requests an hour from one pane, against
+GitHub's 5,000; a second pane went over.
+
+The line under the status line says where the readings came from —
+`fetched 40s ago by pane 48213`, or `cached 2m ago · pane 48213 asking now`
+— and says nothing when every reading is this pane's own and fresh. A
+board still filling in from another pane says how many repos are not in
+yet. "updated … ago" is when the newest figure on the board came back from
+GitHub, whichever pane asked. `r` asks again for readings older than 30
+seconds, or than the refresh when that is shorter.
+
+When GitHub says its rate limit is spent, or asks clients to slow down,
+every pane stops asking until GitHub's reset and says when it will ask
+again. A pane keeps drawing the runs it already had in the meantime.
+
+The readings live in `~/.local/state/opscope/github-actions.sqlite`,
+readable only by you: the latest of each and nothing older, **run titles
+included**. A reading nobody has refreshed for 2 hours is deleted the
+next time a pane publishes. Closing every pane does not delete it, so
+one may stay on disk until a pane writes again. The token is never
+stored; keys carry only a fingerprint of it.
+`share_readings: false` keeps everything in the pane, which then polls
+exactly as it did before sharing existed.
+
 ## Credentials
 
 Its own `github_actions.token` in `config.json`, or the variable
@@ -208,6 +242,7 @@ settings screen restarts the widget to pick it up.
 | `refresh` | `60` | seconds between polls, minimum 30. |
 | `max_repos` | `16` | cap on discovered repos *per owner*. Named on screen when it cuts. |
 | `pushed_days` | `14` | how recently a repo must have been pushed to be considered. |
+| `share_readings` | `true` | share what GitHub said with every other `github-actions` pane on this machine, so they make one request per repo per refresh between them. Off makes this pane ask on its own. |
 
 Discovery walks each account's recently-pushed repos. A run's jobs are read
 only for the run you open. The header figure is the REST allowance those
