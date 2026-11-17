@@ -614,6 +614,43 @@ pub fn peek(cache: &mut Cache, key: &str) -> Option<serde_json::Value> {
     cache.live.get(key).and_then(|e| e.1.clone())
 }
 
+/// Share `value` taken at `at`, without claiming a lease.
+///
+/// For a figure the widget already observed — GitHub's remaining budget —
+/// which must be published even while the stored row is still inside its
+/// hold. A stored reading newer than `at`, or one another pane is writing
+/// now, is left as it is.
+pub fn record(cache: &mut Cache, key: &str, value: serde_json::Value, at: f64, held: f64) {
+    let Some(store) = cache.store.as_mut() else {
+        cache.live.insert(key.to_string(), (at, Some(value.clone()), held));
+        cache.good.insert(key.to_string(), (at, value));
+        return;
+    };
+    let me = store.me;
+    let shared = store::Shared {
+        taken_at: at,
+        held,
+        value: Some(value.clone()),
+        fails: cache.fails.get(key).copied().unwrap_or(0),
+        good: Some((at, value.clone())),
+        fetched_by: me,
+    };
+    match store.publish_since(key, &shared, &cache.secrets, crate::now(), None) {
+        Ok(store::Publish::Written) => {
+            cache.live.insert(key.to_string(), (at, Some(value.clone()), held));
+            cache.good.insert(key.to_string(), (at, value));
+            cache.shared.insert(key.to_string(), (at, me));
+            cache.unshared.remove(key);
+        }
+        Ok(store::Publish::Older) | Ok(store::Publish::TakenOver) => {}
+        Ok(other) => note_unshared(cache, key, other),
+        Err(why) if store::busy(&why) => {
+            cache.live.insert(key.to_string(), (at, Some(value), held));
+        }
+        Err(why) => stop_sharing(cache, &why),
+    }
+}
+
 /// A short, stable fingerprint of `parts`: SHA-256 over a fixed prefix and
 /// the parts, the first 16 bytes in hex. The same on every build and every
 /// toolchain, which `std`'s hasher does not promise.
@@ -967,14 +1004,27 @@ impl Answer {
 /// Publish what a pass fetched, in one transaction and one commit: the
 /// other half of [`claim_many`]. Returns, per answer, why it stayed with
 /// this pane when it did.
-pub fn answer_many(cache: &mut Cache, done: &[(&str, Answer, Policy)], now: f64) -> Vec<Option<&'static str>> {
-    let at = now;
+///
+/// Each answer carries the time its own fetch finished, not the time the
+/// batch is published: a repository fetched at the start of a long pass
+/// is not as fresh as one fetched at the end. `claimed_at` is when this
+/// pane claimed the leases. An answer whose claim was superseded is not
+/// written. An empty batch writes nothing.
+pub fn answer_many(
+    cache: &mut Cache,
+    done: &[(&str, Answer, Policy, f64)],
+    now: f64,
+    claimed_at: f64,
+) -> Vec<Option<&'static str>> {
+    if done.is_empty() {
+        return Vec::new();
+    }
     let mut shared = Vec::with_capacity(done.len());
-    for (key, answer, p) in done {
+    for (key, answer, p, at) in done {
         let (value, held) = match answer {
             Answer::Value(v) => {
                 cache.fails.remove(*key);
-                cache.good.insert((*key).to_string(), (at, v.clone()));
+                cache.good.insert((*key).to_string(), (*at, v.clone()));
                 (Some(v.clone()), p.ttl)
             }
             Answer::Refused { why, until } => {
@@ -984,17 +1034,17 @@ pub fn answer_many(cache: &mut Cache, done: &[(&str, Answer, Policy)], now: f64)
                     *n
                 };
                 let held = match until {
-                    Some(u) if *u > at => u - at,
+                    Some(u) if *u > *at => *u - *at,
                     _ => backoff(n).min(p.ttl.max(BACKOFF_FROM)),
                 };
-                (Some(refusal_value(why, at + held)), held)
+                (Some(refusal_value(why, *at + held)), held)
             }
         };
-        cache.live.insert((*key).to_string(), (at, value.clone(), held));
+        cache.live.insert((*key).to_string(), (*at, value.clone(), held));
         shared.push((
             (*key).to_string(),
             store::Shared {
-                taken_at: at,
+                taken_at: *at,
                 held,
                 value,
                 fails: cache.fails.get(*key).copied().unwrap_or(0),
@@ -1012,11 +1062,11 @@ pub fn answer_many(cache: &mut Cache, done: &[(&str, Answer, Policy)], now: f64)
         s.fetched_by = me;
     }
     let items: Vec<(&str, store::Shared)> = shared.iter().map(|(k, s)| (k.as_str(), s.clone())).collect();
-    match store.publish_many(&items, &cache.secrets, at) {
+    match store.publish_many(&items, &cache.secrets, now, Some(claimed_at)) {
         Ok(results) => {
             for (i, done) in results.into_iter().enumerate() {
                 let key = &items[i].0;
-                cache.shared.insert((*key).to_string(), (at, me));
+                cache.shared.insert((*key).to_string(), (items[i].1.taken_at, me));
                 out[i] = done.unshared();
                 match done.unshared() {
                     Some(why) => {
@@ -1045,6 +1095,25 @@ pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
         return true;
     };
     match store.renew(key, crate::now(), lease_for) {
+        Ok(mine) => mine,
+        Err(why) if store::busy(&why) => true,
+        Err(why) => {
+            stop_sharing(cache, &why);
+            true
+        }
+    }
+}
+
+/// Extend every lease this pane still holds, and say whether `key` is one
+/// of them. A pass that claimed many readings renews them together before
+/// each request, so an answer already fetched stays owned until it is
+/// published. `false` when another pane took `key` over. A busy store
+/// counts as still holding it.
+pub fn renew_all(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
+    let Some(store) = cache.store.as_mut() else {
+        return true;
+    };
+    match store.renew_all(crate::now(), lease_for, key) {
         Ok(mine) => mine,
         Err(why) if store::busy(&why) => true,
         Err(why) => {
@@ -1867,11 +1936,11 @@ mod tests {
         let now = crate::now();
         let claimed = claim_many(&mut a, &asks(&keys), now);
         assert!(claimed.iter().all(|c| matches!(c, Claimed::Fetch)), "a fresh store had something to serve");
-        let done: Vec<(&str, Answer, Policy)> = keys
+        let done: Vec<(&str, Answer, Policy, f64)> = keys
             .iter()
-            .map(|k| (k.as_str(), Answer::Value(serde_json::json!({"k": k})), Policy::new(60.0, 30.0)))
+            .map(|k| (k.as_str(), Answer::Value(serde_json::json!({"k": k})), Policy::new(60.0, 30.0), now))
             .collect();
-        let unshared = answer_many(&mut a, &done, now);
+        let unshared = answer_many(&mut a, &done, now, now);
         assert!(unshared.iter().all(Option::is_none));
         assert_eq!(a.store.as_ref().unwrap().writes, 2, "a claim and an answer commit once each, whatever the pass holds");
         // Every pane reads them all, and none of them asks.
@@ -1893,7 +1962,7 @@ mod tests {
         let key = "k";
         let now = crate::now();
         let _ = claim_many(&mut a, &[(key, Policy::new(60.0, 30.0))], now);
-        answer_many(&mut a, &[(key, Answer::Value(serde_json::json!({"n": 1})), Policy::new(60.0, 30.0))], now);
+        answer_many(&mut a, &[(key, Answer::Value(serde_json::json!({"n": 1})), Policy::new(60.0, 30.0), now)], now, now);
         let text = |c: &Cache| -> String {
             c.store
                 .as_ref()
@@ -1904,7 +1973,7 @@ mod tests {
         // The same answer 40 s later: a check, not the reading.
         let later = now + 40.0;
         let _ = claim_many(&mut a, &[(key, Policy::new(60.0, 30.0))], later);
-        answer_many(&mut a, &[(key, Answer::Value(serde_json::json!({"n": 1})), Policy::new(60.0, 30.0))], later);
+        answer_many(&mut a, &[(key, Answer::Value(serde_json::json!({"n": 1})), Policy::new(60.0, 30.0), later)], later, later);
         assert_eq!(text(&a), before, "the reading was rewritten with the same text");
         follow(&mut b);
         assert_eq!(peek(&mut b, key), Some(serde_json::json!({"n": 1})));
@@ -1917,17 +1986,33 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_answer_writes_nothing() {
+        let (mut a, _) = two_panes("empty-answer");
+        let writes = a.store.as_ref().unwrap().writes;
+        let out = answer_many(&mut a, &[], crate::now(), crate::now());
+        assert!(out.is_empty());
+        assert_eq!(a.store.as_ref().unwrap().writes, writes, "an empty batch opened a transaction");
+    }
+
+    #[test]
     fn a_refusal_in_a_batch_holds_every_reading_it_came_with() {
         let (mut a, mut b) = two_panes("batch-refuse");
         let keys: Vec<String> = (0..3).map(|i| format!("k{i}")).collect();
         let now = crate::now();
         let _ = claim_many(&mut a, &asks(&keys), now);
         let until = now + 600.0;
-        let done: Vec<(&str, Answer, Policy)> = keys
+        let done: Vec<(&str, Answer, Policy, f64)> = keys
             .iter()
-            .map(|k| (k.as_str(), Answer::Refused { why: "too many requests".into(), until: Some(until) }, Policy::new(60.0, 30.0)))
+            .map(|k| {
+                (
+                    k.as_str(),
+                    Answer::Refused { why: "too many requests".into(), until: Some(until) },
+                    Policy::new(60.0, 30.0),
+                    now,
+                )
+            })
             .collect();
-        answer_many(&mut a, &done, now);
+        answer_many(&mut a, &done, now, now);
         follow(&mut b);
         let served = claim_many(&mut b, &asks(&keys), now2());
         for got in served {
