@@ -10,7 +10,7 @@ GitHub search and pull-request APIs using this widget's own credential.
 
 The owned section is `github_prs`. A legacy `pr` section is used only when `github_prs` is absent.
 
-Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `sources`, `limit`, `refresh`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `sources`, `limit`, `refresh`, `share_readings`
 
 For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
 to the web host (for example `acme.ghe.com`). Requests go to
@@ -21,6 +21,12 @@ tool exported never moves the widget. Otherwise it uses the public github.com
 API.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
+
+`share_readings` (default on) shares the pull-request list and the counts
+with every other `github-prs` pane on this machine through one file in
+`~/.local/state/opscope`, readable only by the user. It stores pull-request
+titles for up to 2 hours. Turn it off for a pane that should keep everything
+to itself.
 
 ## Safe configuration process
 
