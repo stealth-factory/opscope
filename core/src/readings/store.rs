@@ -763,8 +763,12 @@ impl Store {
         // the new one is written over it.
         // A quiet republish leaves `taken_at` where it was and records the
         // new time in `checks`. Match either, and the pane that checked.
-        let n = self
-            .conn
+        // The replacement and the check deletion are one transaction: a
+        // check written between them would belong to a later confirmation
+        // and must not be deleted with the one this annotation matched.
+        let me = self.me;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
+        let n = tx
             .execute(
                 "UPDATE readings
                  SET good_at = CASE
@@ -789,12 +793,14 @@ impl Store {
                        WHERE c.key = readings.key AND c.at = ?2 AND c.by = ?4
                      )
                  )",
-                params![key, taken_at, text, self.me],
+                params![key, taken_at, text, me],
             )
             .map_err(sql)?;
         if n > 0 {
-            // The value changed, so the check described the previous text.
-            self.conn.execute("DELETE FROM checks WHERE key = ?1", [key]).map_err(sql)?;
+            tx.execute("DELETE FROM checks WHERE key = ?1", [key]).map_err(sql)?;
+        }
+        tx.commit().map_err(sql)?;
+        if n > 0 {
             self.writes += 1;
         }
         Ok(n > 0)
