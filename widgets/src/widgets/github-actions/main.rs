@@ -226,10 +226,10 @@ struct Budget {
 
 impl Budget {
     fn take(&mut self, status: u16, headers: &[(String, String)]) {
-        self.take_at(status, headers, tc::now() as i64);
+        self.take_at(status, headers, tc::now());
     }
 
-    fn take_at(&mut self, status: u16, headers: &[(String, String)], now: i64) {
+    fn take_at(&mut self, status: u16, headers: &[(String, String)], now: f64) {
         let head: String = headers
             .iter()
             .map(|(name, value)| format!("{}: {}\n", name, value))
@@ -237,9 +237,9 @@ impl Budget {
         let got = parse::parse_rate_headers(&head);
         if matches!((got.remaining, got.limit), (Some(_), Some(max)) if max > 0) {
             self.last = Some(got.clone());
-            self.last_at = Some(now as f64);
+            self.last_at = Some(now);
         }
-        let limit = parse::classify_rate(status, &got, now);
+        let limit = parse::classify_rate(status, &got, now as i64);
         if let Some(until) = limit.until() {
             let later = self
                 .stop
@@ -3820,7 +3820,7 @@ mod tests {
         ];
         let read = |headers: &[(String, String)]| {
             let mut budget = Budget::default();
-            budget.take_at(200, headers, 0);
+            budget.take_at(200, headers, 0.0);
             budget.remaining_of()
         };
         assert_eq!(read(&headers), Some((4840, 5000)));
@@ -3870,14 +3870,14 @@ mod tests {
             ("x-ratelimit-reset".to_string(), "5000".to_string()),
             ("x-ratelimit-resource".to_string(), "core".to_string()),
         ];
-        budget.take_at(403, &spent, 1000);
+        budget.take_at(403, &spent, 1000.0);
         assert_eq!(budget.remaining_of(), Some((0, 5000)));
         assert_eq!(budget.last.as_ref().and_then(|h| h.reset), Some(5000));
         assert_eq!(budget.stop.as_ref().and_then(|s| s.until()), Some(5000));
         // A later answer with an earlier end does not shorten the stop, and
         // a healthy one does not clear it within the pass.
-        budget.take_at(429, &[("retry-after".to_string(), "60".to_string())], 1000);
-        budget.take_at(200, &[], 1000);
+        budget.take_at(429, &[("retry-after".to_string(), "60".to_string())], 1000.0);
+        budget.take_at(200, &[], 1000.0);
         assert_eq!(budget.stop.as_ref().and_then(|s| s.until()), Some(5000));
 
         let mut live = State { window_hours: 24, rate: budget, ..Default::default() };
@@ -4184,7 +4184,7 @@ mod tests {
         let asked = std::cell::Cell::new(0usize);
         let got = runs_pass(&mut a, &mut |_, budget| {
             asked.set(asked.get() + 1);
-            budget.take_at(403, &spent, tc::now() as i64);
+            budget.take_at(403, &spent, tc::now());
             Err("403 API rate limit exceeded".into())
         });
         assert_eq!(asked.get(), 1, "the pane that was told stops asking at once");
@@ -4335,7 +4335,7 @@ mod tests {
         let asked = std::cell::Cell::new(0usize);
         let got = runs_pass(&mut a, &mut |repo, budget| {
             asked.set(asked.get() + 1);
-            budget.take_at(200, &spent, tc::now() as i64);
+            budget.take_at(200, &spent, tc::now());
             Ok(one_run(repo))
         });
         assert_eq!(asked.get(), 1, "the spent budget stops the rest of the pass");
@@ -4413,7 +4413,7 @@ mod tests {
             ("x-ratelimit-reset".to_string(), "2000".to_string()),
             ("x-ratelimit-resource".to_string(), "core".to_string()),
         ];
-        own.take_at(200, &spent, 1_000);
+        own.take_at(200, &spent, 1_000.0);
         let older = parse::RateHeaders {
             remaining: Some(4321),
             limit: Some(5000),
@@ -4423,6 +4423,11 @@ mod tests {
         };
         let shown = shown_budget(&own, Some((900.0, older.clone()))).expect("budget");
         assert_eq!(shown.remaining, Some(0), "an older cached budget covered the spent response");
+        // Same second, earlier fraction: truncating the response to 1000
+        // would make 1000.25 look newer and bring 4321 back.
+        own.take_at(200, &spent, 1000.75);
+        let shown = shown_budget(&own, Some((1000.25, older.clone()))).expect("budget");
+        assert_eq!(shown.remaining, Some(0), "a same-second cached budget covered the spent response");
         // The same second is the response's own time, not a newer reading.
         let shown = shown_budget(&own, Some((1_000.0, older.clone()))).expect("budget");
         assert_eq!(shown.remaining, Some(0));
