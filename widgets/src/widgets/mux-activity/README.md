@@ -209,6 +209,13 @@ reports it under whichever pane started the daemon. When that report carries
 a session id one of the jobs has gone by, the job is not drawn again: its
 subagents join that agent's row instead.
 
+Under Luvus, the jobs are read whether or not `luvus agent list` answered.
+When it fails, AGENTS says why in place of the pane agents, and the
+background agents are drawn as they always are. With no list, no row is
+known to draw a job already, so a job running in a pane gets a row of its
+own in that pane's workspace rather than none. `e` and `Enter` answer on
+those rows as on any other.
+
 Only this machine's config dirs are read: the default (`CLAUDE_CONFIG_DIR`
 or `~/.claude`) and any a running Claude agent was found using. The format
 is undocumented and internal to Claude Code; see
