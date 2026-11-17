@@ -300,6 +300,7 @@ impl Store {
                  fetched_by INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS leases(
                  key TEXT PRIMARY KEY, holder INTEGER NOT NULL, expires_at REAL NOT NULL);
+             CREATE TABLE IF NOT EXISTS checks(key TEXT PRIMARY KEY, at REAL NOT NULL);
              COMMIT;",
         )
         .map_err(|e| {
@@ -377,12 +378,7 @@ impl Store {
     pub fn claim_for(&mut self, key: &str, known: Option<f64>, now: f64, lease_for: f64) -> Result<Got, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
-        let stored: Option<(f64, f64)> = tx
-            .query_row("SELECT taken_at, held FROM readings WHERE key = ?1", [key], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .optional()
-            .map_err(sql)?;
+        let stored = stamp(&tx, key).map_err(sql)?;
         let held: Option<Lease> = tx
             .query_row("SELECT holder, expires_at FROM leases WHERE key = ?1", [key], |r| {
                 Ok(Lease { holder: r.get(0)?, expires_at: r.get(1)? })
@@ -450,18 +446,177 @@ impl Store {
         !identity(&self.path).is_ok_and(|f| f == self.file)
     }
 
-    /// Give a lease back without publishing, so the next pane need not
-    /// wait for it to run out.
-    pub fn release(&mut self, key: &str) -> Result<(), String> {
-        let n = self
-            .conn
-            .execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
-            .map_err(sql)?;
-        if n > 0 {
-            self.writes += 1;
+    /// Claim several readings in one transaction: a pass that fetches many
+    /// pays for one commit, not one each (OPS-298).
+    pub fn claim_many(
+        &mut self,
+        asks: &[(&str, Option<f64>)],
+        now: f64,
+        lease_for: f64,
+    ) -> Result<Vec<Got>, String> {
+        let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
+        let mut out = Vec::with_capacity(asks.len());
+        for (key, known) in asks {
+            let stored = stamp(&tx, key).map_err(sql)?;
+            let held: Option<Lease> = tx
+                .query_row("SELECT holder, expires_at FROM leases WHERE key = ?1", [key], |r| {
+                    Ok(Lease { holder: r.get(0)?, expires_at: r.get(1)? })
+                })
+                .optional()
+                .map_err(sql)?;
+            out.push(match lease::claim(stored, *known, held, self.me, now) {
+                Claim::Mine => {
+                    tx.execute(
+                        "INSERT INTO leases(key, holder, expires_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO UPDATE SET holder = ?2, expires_at = ?3",
+                        params![key, self.me, now + lease_for],
+                    )
+                    .map_err(sql)?;
+                    Got::Mine
+                }
+                Claim::Held(by) => Got::Held(by),
+                Claim::Fresh => match row(&tx, key).map_err(sql)? {
+                    Some(s) => Got::Fresh(s),
+                    None => Got::Held(0),
+                },
+            });
         }
-        Ok(())
+        tx.commit().map_err(sql)?;
+        self.writes += 1;
+        Ok(out)
     }
+
+    /// Put the readings a pass fetched in the store in one transaction, and
+    /// let their leases go. One per item, in order, saying what came of it.
+    pub fn publish_many(
+        &mut self,
+        items: &[(&str, Shared)],
+        secrets: &[String],
+        now: f64,
+    ) -> Result<Vec<Publish>, String> {
+        self.in_immediate(|store| {
+            let mut out = Vec::with_capacity(items.len());
+            for (key, shared) in items {
+                out.push(store.write_one(key, shared, secrets, now)?);
+            }
+            store
+                .conn
+                .execute("DELETE FROM leases WHERE holder = ?1", [store.me])
+                .map_err(sql)?;
+            store
+                .conn
+                .execute("DELETE FROM leases WHERE expires_at < ?1", [now - 2.0 * lease::MAX_LEASE])
+                .map_err(sql)?;
+            store
+                .conn
+                .execute("DELETE FROM checks WHERE at < ?1", [now - store.caps.forget_after])
+                .map_err(sql)?;
+            Ok(out)
+        })
+        .map(|out| {
+            let _ = self.keep_small();
+            out
+        })
+    }
+
+    /// Run `f` inside one `BEGIN IMMEDIATE`, rolling back if it fails.
+    fn in_immediate<T>(&mut self, f: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql)?;
+        let out = match f(self) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        };
+        match self.conn.execute_batch("COMMIT") {
+            Ok(()) => {
+                self.writes += 1;
+                Ok(out)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(sql(e))
+            }
+        }
+    }
+
+    /// Write one reading inside a transaction the caller has begun; the
+    /// body of [`publish`](Self::publish) and of
+    /// [`publish_many`](Self::publish_many).
+    fn write_one(&self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<Publish, String> {
+        let caps = self.caps;
+        let me = self.me;
+        let value = s.value.as_ref().map(|v| v.to_string());
+        let good = s
+            .good
+            .as_ref()
+            .filter(|(_, g)| s.value.as_ref() != Some(g))
+            .map(|(_, v)| v.to_string());
+        let good_at = s.good.as_ref().map(|(at, _)| *at);
+        if let Some(why) = unshareable(&[value.as_deref(), good.as_deref()], secrets, caps.max_value) {
+            let _ = self.conn.execute(
+                "DELETE FROM leases WHERE key = ?1 AND holder = ?2",
+                params![key, me],
+            );
+            return Ok(why);
+        }
+        let stored: Option<(f64, Option<String>, Option<String>, u32, f64)> = self.conn
+            .query_row(
+                "SELECT taken_at, value, good_value, fetched_by, held FROM readings WHERE key = ?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(sql)?;
+        let held_same = stored.as_ref().is_none_or(|r| r.4 == s.held);
+        let other: Option<u32> = self.conn
+            .query_row(
+                "SELECT holder FROM leases WHERE key = ?1 AND holder != ?2 AND expires_at > ?3",
+                params![key, self.me, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        if other.is_some() {
+            return Ok(Publish::TakenOver);
+        }
+        let wrote = lease::supersedes(stored.as_ref().map(|r| r.0), s.taken_at, now);
+        if wrote {
+            let same = stored.as_ref().is_some_and(|r| r.1 == value && r.2 == good);
+            if same && held_same {
+                // The same answer again: a time, not the reading. Moving the
+                // row's own time rewrites its record, and for a large reading
+                // that was the whole cost of a quiet pass (OPS-298).
+                note_check(&self.conn, key, s.taken_at).map_err(sql)?;
+            } else if same {
+                self.conn.execute(
+                    "UPDATE readings SET taken_at = ?2, held = ?3, fails = ?4, good_at = ?5,
+                     fetched_by = ?6 WHERE key = ?1",
+                    params![key, s.taken_at, s.held, s.fails, good_at, self.me],
+                )
+                .map_err(sql)?;
+            } else {
+                self.conn.execute(
+                    "INSERT INTO readings(key, taken_at, held, value, fails, good_value, good_at, fetched_by)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(key) DO UPDATE SET taken_at = ?2, held = ?3, value = ?4, fails = ?5,
+                     good_value = ?6, good_at = ?7, fetched_by = ?8",
+                    params![key, s.taken_at, s.held, value, s.fails, good, good_at, self.me],
+                )
+                .map_err(sql)?;
+            }
+        }
+        self.conn.execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
+            .map_err(sql)?;
+        self.conn.execute(
+            "DELETE FROM readings WHERE taken_at < ?1 AND taken_at + held <= ?2",
+            params![now - caps.forget_after, now],
+        )
+        .map_err(sql)?;
+        Ok(if wrote { Publish::Written } else { Publish::Older })
+        }
 
     /// Put a reading this pane fetched in the store and let its lease go.
     ///
@@ -483,78 +638,52 @@ impl Store {
         now: f64,
         claimed_at: Option<f64>,
     ) -> Result<Publish, String> {
-        let value = s.value.as_ref().map(|v| v.to_string());
-        let good = s.good.as_ref().map(|(_, v)| v.to_string());
-        if let Some(why) = unshareable(&[value.as_deref(), good.as_deref()], secrets, self.caps.max_value) {
-            self.release(key)?;
-            return Ok(why);
-        }
-        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
-        let stored: Option<(f64, Option<String>, Option<String>, u32)> = tx
-            .query_row(
-                "SELECT taken_at, value, good_value, fetched_by FROM readings WHERE key = ?1",
-                [key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()
-            .map_err(sql)?;
-        // A fetch that outlived its lease does not write over the pane
-        // that took it over, which is fetching the same reading now.
-        let other: Option<u32> = tx
-            .query_row(
-                "SELECT holder FROM leases WHERE key = ?1 AND holder != ?2 AND expires_at > ?3",
-                params![key, self.me, now],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(sql)?;
-        // A row dated ahead of the clock is no successor's: `supersedes`
-        // replaces it below.
-        let overtaken = claimed_at.is_some_and(|since| {
-            stored.as_ref().is_some_and(|r| r.3 != self.me && r.0 >= since && r.0 <= now + lease::SKEW)
-        });
-        if other.is_some() || overtaken {
-            tx.commit().map_err(sql)?;
-            return Ok(Publish::TakenOver);
-        }
-        let wrote = lease::supersedes(stored.as_ref().map(|r| r.0), s.taken_at, now);
-        if wrote {
-            let same = stored.as_ref().is_some_and(|r| r.1 == value && r.2 == good);
-            if same {
-                // The same answer again: move its times, leave the text.
-                tx.execute(
-                    "UPDATE readings SET taken_at = ?2, held = ?3, fails = ?4, good_at = ?5,
-                     fetched_by = ?6 WHERE key = ?1",
-                    params![key, s.taken_at, s.held, s.fails, s.good.as_ref().map(|g| g.0), self.me],
+        let out = self.in_immediate(|store| {
+            // A fetch that outlived its lease does not write over the pane
+            // that took it over, which is fetching the same reading now.
+            let other: Option<u32> = store
+                .conn
+                .query_row(
+                    "SELECT holder FROM leases WHERE key = ?1 AND holder != ?2 AND expires_at > ?3",
+                    params![key, store.me, now],
+                    |r| r.get(0),
                 )
+                .optional()
                 .map_err(sql)?;
-            } else {
-                tx.execute(
-                    "INSERT INTO readings(key, taken_at, held, value, fails, good_value, good_at, fetched_by)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                     ON CONFLICT(key) DO UPDATE SET taken_at = ?2, held = ?3, value = ?4, fails = ?5,
-                     good_value = ?6, good_at = ?7, fetched_by = ?8",
-                    params![key, s.taken_at, s.held, value, s.fails, good, s.good.as_ref().map(|g| g.0), self.me],
-                )
-                .map_err(sql)?;
+            // A row dated ahead of the clock is no successor's: `supersedes`
+            // replaces it below.
+            let overtaken = claimed_at.is_some_and(|since| {
+                store
+                    .conn
+                    .query_row("SELECT taken_at, fetched_by FROM readings WHERE key = ?1", [key], |r| {
+                        Ok((r.get::<_, f64>(0)?, r.get::<_, u32>(1)?))
+                    })
+                    .optional()
+                    .map(|row| {
+                        row.is_some_and(|(at, by)| by != store.me && at >= since && at <= now + lease::SKEW)
+                    })
+                    .unwrap_or(false)
+            });
+            if other.is_some() || overtaken {
+                return Ok(Publish::TakenOver);
             }
-        }
-        tx.execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
-            .map_err(sql)?;
-        // Housekeeping rides on a write that was happening anyway. A row
-        // still holding every pane off - a gate or a refusal waiting for a
-        // reset further off than `forget_after` - stays until it lifts.
-        tx.execute(
-            "DELETE FROM readings WHERE taken_at < ?1 AND taken_at + held <= ?2",
-            params![now - self.caps.forget_after, now],
-        )
-        .map_err(sql)?;
-        tx.execute("DELETE FROM leases WHERE expires_at < ?1", [now - 2.0 * lease::MAX_LEASE])
-            .map_err(sql)?;
-        tx.commit().map_err(sql)?;
-        self.writes += 1;
+            store.write_one(key, s, secrets, now)
+        })?;
         self.keep_small()?;
-        Ok(if wrote { Publish::Written } else { Publish::Older })
+        Ok(out)
+    }
+
+    /// Give a lease back without publishing, so the next pane need not
+    /// wait for it to run out.
+    pub fn release(&mut self, key: &str) -> Result<(), String> {
+        let n = self
+            .conn
+            .execute("DELETE FROM leases WHERE key = ?1 AND holder = ?2", params![key, self.me])
+            .map_err(sql)?;
+        if n > 0 {
+            self.writes += 1;
+        }
+        Ok(())
     }
 
     /// Replace the value of a reading this pane just published with the
@@ -574,10 +703,14 @@ impl Store {
         if unshareable(&[Some(&text)], secrets, self.caps.max_value).is_some() {
             return Ok(false);
         }
+        // A row whose good value is a time alone - it was the `value` when
+        // it was published - keeps the old value as its good reading before
+        // the new one is written over it.
         let n = self
             .conn
             .execute(
-                "UPDATE readings SET value = ?3 WHERE key = ?1 AND taken_at = ?2 AND fetched_by = ?4",
+                "UPDATE readings SET good_value = coalesce(good_value, value), value = ?3
+                 WHERE key = ?1 AND taken_at = ?2 AND fetched_by = ?4",
                 params![key, taken_at, text, self.me],
             )
             .map_err(sql)?;
@@ -610,12 +743,27 @@ impl Store {
         )
         .map_err(sql)?;
         tx.execute("DELETE FROM leases", []).map_err(sql)?;
+        tx.execute("DELETE FROM checks", []).map_err(sql)?;
         tx.commit().map_err(sql)?;
         self.conn.execute_batch("VACUUM").map_err(sql)?;
         self.writes += 1;
         self.seen.clear();
         self.notice = "shared store emptied: it had grown past its limit".into();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stored_text_for_tests(&self, key: &str) -> String {
+        self.conn
+            .query_row("SELECT coalesce(value, '') || '|' || coalesce(good_value, '') FROM readings WHERE key = ?1", [key], |r| r.get(0))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lease_count_for_tests(&self, key: &str) -> i64 {
+        self.conn
+            .query_row("SELECT count(*) FROM leases WHERE key = ?1", [key], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -656,23 +804,51 @@ fn identity(path: &str) -> Result<(u64, u64), String> {
         .map_err(|e| format!("cannot read the store's file: {e}"))
 }
 
+/// When `key` was last fetched - the reading's own time, or the check stamp
+/// laid down since - and how long it is held.
+fn stamp(conn: &Connection, key: &str) -> rusqlite::Result<Option<(f64, f64)>> {
+    conn.query_row(
+        "SELECT coalesce(c.at, r.taken_at), r.held FROM readings r
+         LEFT JOIN checks c ON c.key = r.key WHERE r.key = ?1",
+        [key],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+/// Note that `key` was fetched at `at`, without rewriting the reading.
+fn note_check(conn: &rusqlite::Connection, key: &str, at: f64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO checks(key, at) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET at = ?2",
+        params![key, at],
+    )?;
+    Ok(())
+}
+
 fn row(conn: &Connection, key: &str) -> rusqlite::Result<Option<Shared>> {
     conn.query_row(
-        "SELECT taken_at, held, value, fails, good_value, good_at, fetched_by FROM readings WHERE key = ?1",
+        "SELECT r.taken_at, r.held, r.value, r.fails, r.good_value, r.good_at, r.fetched_by, c.at
+         FROM readings r LEFT JOIN checks c ON c.key = r.key WHERE r.key = ?1",
         [key],
         |r| {
             let value: Option<String> = r.get(2)?;
             let good: Option<String> = r.get(4)?;
             let good_at: Option<f64> = r.get(5)?;
+            let value: Option<serde_json::Value> = value.and_then(|v| serde_json::from_str(&v).ok());
+            let taken_at: f64 = r.get(0)?;
+            let checked: Option<f64> = r.get(7)?;
             Ok(Shared {
-                taken_at: r.get(0)?,
+                taken_at: checked.map_or(taken_at, |c| c.max(taken_at)),
                 held: r.get(1)?,
-                value: value.and_then(|v| serde_json::from_str(&v).ok()),
-                fails: r.get(3)?,
+                // A time without a good value of its own: it was the value
+                // itself when it was published (see `publish_since`).
                 good: match (good_at, good.and_then(|v| serde_json::from_str(&v).ok())) {
+                    (Some(at), None) => value.as_ref().map(|v| (at, v.clone())),
                     (Some(at), Some(v)) => Some((at, v)),
                     _ => None,
                 },
+                value,
+                fails: r.get(3)?,
                 fetched_by: r.get(6)?,
             })
         },
@@ -681,7 +857,25 @@ fn row(conn: &Connection, key: &str) -> rusqlite::Result<Option<Shared>> {
 }
 
 #[cfg(test)]
+pub(crate) mod tests_support {
+    /// A fresh store path in a directory of its own.
+    pub fn temp(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-readings-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("w.sqlite").to_string_lossy().to_string()
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::tests_support::temp as temp_store;
     use super::*;
 
     fn temp(name: &str) -> String {
@@ -1169,5 +1363,175 @@ mod tests {
         assert!(fetches <= 30 * 721, "{fetches} fetches");
         let size = panes[0].size();
         assert!(size < 1024 * 1024, "{size} bytes");
+    }
+
+    #[test]
+    fn a_good_reading_that_is_the_value_is_stored_once_and_read_back_whole() {
+        let path = temp_store("good-is-value");
+        let mut s = Store::open(&path).unwrap();
+        let reading = serde_json::json!({"u": 1});
+        let mut r = Shared {
+            taken_at: NOW,
+            held: 300.0,
+            value: Some(reading.clone()),
+            fails: 0,
+            good: Some((NOW, reading.clone())),
+            fetched_by: 0,
+        };
+        assert_eq!(s.publish("k", &r, &[], NOW).unwrap(), Publish::Written);
+        let good_text: Option<String> = s
+            .conn
+            .query_row("SELECT good_value FROM readings WHERE key = 'k'", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(good_text, None, "the value was written twice");
+        let back = s.load("k").unwrap().unwrap();
+        assert_eq!(back.value, Some(reading.clone()));
+        assert_eq!(back.good, Some((NOW, reading)), "the good reading was lost");
+        // A value that differs from the good one is still stored twice.
+        r.value = Some(serde_json::json!({"u": 2}));
+        s.publish("j", &r, &[], NOW).unwrap();
+        let both: Option<String> = s
+            .conn
+            .query_row("SELECT good_value FROM readings WHERE key = 'j'", [], |x| x.get(0))
+            .unwrap();
+        assert!(both.is_some());
+    }
+
+    #[test]
+    fn the_same_answer_again_keeps_the_stored_text_identical() {
+        // What OPS-298 is for: an unchanged reading must not be written
+        // again. Two publishes of the same answer leave the row's text as
+        // it was, with only its times moved.
+        let path = temp_store("same-again");
+        let mut s = Store::open(&path).unwrap();
+        let reading = serde_json::json!({"u": 1});
+        let r = |at: f64| Shared {
+            taken_at: at,
+            held: 300.0,
+            value: Some(reading.clone()),
+            fails: 0,
+            good: Some((at, reading.clone())),
+            fetched_by: 0,
+        };
+        s.publish("k", &r(NOW), &[], NOW).unwrap();
+        let text = |s: &Store| -> (Option<String>, Option<String>, f64) {
+            s.conn
+                .query_row("SELECT value, good_value, taken_at FROM readings WHERE key = 'k'", [], |x| {
+                    Ok((x.get(0)?, x.get(1)?, x.get(2)?))
+                })
+                .unwrap()
+        };
+        let first = text(&s);
+        s.publish("k", &r(NOW + 60.0), &[], NOW + 60.0).unwrap();
+        let second = text(&s);
+        assert_eq!((second.0.clone(), second.1.clone()), (first.0, first.1));
+        // The time moves without the reading being rewritten: it is kept
+        // beside it, in the check stamp.
+        let at = s.load("k").unwrap().unwrap().taken_at;
+        assert_eq!(at, NOW + 60.0, "the reading's time did not move");
+        s.seen.clear();
+        assert_eq!(s.load("k").unwrap().unwrap().taken_at, NOW + 60.0);
+    }
+
+    #[test]
+    fn an_annotation_keeps_the_value_it_replaces_as_the_good_reading() {
+        let path = temp_store("annotate-good");
+        let mut s = Store::open(&path).unwrap();
+        let good = serde_json::json!({"u": 1});
+        s.publish(
+            "k",
+            &Shared { taken_at: NOW, held: 300.0, value: Some(good.clone()), fails: 0, good: Some((NOW, good.clone())), fetched_by: 0 },
+            &[],
+            NOW,
+        )
+        .unwrap();
+        s.annotate("k", NOW, &serde_json::json!({"opscope_refusal": {"why": "busy", "until": NOW + 60.0}}), &[])
+            .unwrap();
+        let back = s.load("k").unwrap().unwrap();
+        assert_eq!(back.good, Some((NOW, good)), "the refusal became the kept reading");
+    }
+}
+
+#[cfg(test)]
+mod write_bench {
+    use super::tests_support::temp;
+    use super::*;
+    use crate::readings::{answer_many, claim_many, Answer, Cache, Claimed, Policy};
+
+    const NOW: f64 = 1_000_000.0;
+
+    /// Force the store's dirty pages out, since the store runs with no
+    /// fsync and `/proc/self/io` only counts what reached the disk.
+    fn flush(path: &str) {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+            let _ = f.sync_all();
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(format!("{path}-journal")) {
+            let _ = f.sync_all();
+        }
+    }
+
+    fn written() -> u64 {
+        std::fs::read_to_string("/proc/self/io")
+            .ok()
+            .and_then(|t| {
+                t.lines()
+                    .find(|l| l.starts_with("write_bytes:"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(|n| n.parse().ok()))
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    fn value(i: usize, at: f64) -> serde_json::Value {
+        if i == 0 {
+            let runs: Vec<serde_json::Value> = (0..400)
+                .map(|n| serde_json::json!({"id": n, "note": "x".repeat(400), "at": at}))
+                .collect();
+            serde_json::json!({"runs": runs})
+        } else {
+            serde_json::json!({"i": i, "at": at})
+        }
+    }
+
+    /// Not a check: a measurement. 21 readings, one of them large, then one
+    /// quiet pass and one in which every answer changed - what a minute of
+    /// github-actions costs, now that a pass claims and publishes in one
+    /// commit each. `cargo test -p opscope-core --lib write_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn measure_a_pass() {
+        let path = temp("bench");
+        let mut cache = Cache::default();
+        cache.store = Some(Store::open(&path).unwrap());
+        let keys: Vec<String> = (0..21).map(|i| format!("k{i}")).collect();
+        let asks: Vec<(&str, Policy)> = keys.iter().map(|k| (k.as_str(), Policy::new(60.0, 30.0))).collect();
+        let mut pass = |cache: &mut Cache, at: f64, changing: bool| {
+            let claimed = claim_many(cache, &asks, at);
+            let mut done = Vec::new();
+            for (i, (key, got)) in keys.iter().zip(claimed).enumerate() {
+                if matches!(got, Claimed::Fetch) {
+                    let v = if changing { value(i, at) } else { value(i, NOW) };
+                    done.push((key.as_str(), Answer::Value(v), Policy::new(60.0, 30.0)));
+                }
+            }
+            answer_many(cache, &done, at);
+        };
+        pass(&mut cache, NOW, false);
+        let size = cache.store.as_ref().unwrap().size();
+        flush(&path);
+        let start = written();
+        pass(&mut cache, NOW + 100.0, false);
+        flush(&path);
+        let quiet = written() - start;
+        let start = written();
+        pass(&mut cache, NOW + 200.0, true);
+        flush(&path);
+        let changed = written() - start;
+        println!(
+            "store {size} B; quiet pass {quiet} B; changed pass {changed} B; per hour at 60 s: {} KiB quiet, {} KiB changed",
+            quiet * 60 / 1024,
+            changed * 60 / 1024
+        );
     }
 }

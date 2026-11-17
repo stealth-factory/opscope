@@ -1370,6 +1370,13 @@ fn store_caps() -> tc::readings::Caps {
 const REST: &str = "core";
 const GRAPHQL: &str = "graphql";
 
+/// The reading GitHub's remaining budget is kept in, per bucket. It is not
+/// fetched for itself: a pane publishes the figure its own answers carried.
+const BUDGET: &str = "gha.budget";
+/// One budget row is a few hundred bytes and changes with every request, so
+/// its lease only has to outlast the claim that publishes it.
+const BUDGET_LEASE: f64 = 20.0;
+
 /// Why every pane has stopped asking, as the pane says it.
 fn limit_why(stop: &parse::RateLimit) -> String {
     match stop {
@@ -1441,6 +1448,73 @@ impl Share {
         self.seen_core = None;
         self.seen_any = None;
         tc::readings::share(&mut self.cache, STORE, store_caps(), self.on, now);
+        // What GitHub last said about the budget, from whichever pane asked:
+        // the figure is the token's, not this pane's, and a pane that fetches
+        // nothing this pass must still show it.
+        if self.on {
+            for resource in [REST, GRAPHQL] {
+                let key = self.key(BUDGET, &[resource]);
+                let at = tc::readings::provenance(&self.cache, &key, now).map_or(now, |p| p.taken_at);
+                if let Some(v) = tc::readings::peek(&mut self.cache, &key) {
+                    self.saw(&v, at);
+                }
+            }
+        }
+    }
+
+    /// The budget a reading of its own carries, or the copy an older build
+    /// of this pane left inside every reading it published.
+    fn budget_of_reading(&self, value: &serde_json::Value) -> Option<parse::RateHeaders> {
+        let b = value.get("remaining")?;
+        let h = parse::RateHeaders {
+            remaining: b.as_i64(),
+            limit: value["limit"].as_i64(),
+            reset: value["reset"].as_i64(),
+            resource: value["resource"].as_str().map(String::from),
+            retry_after: None,
+        };
+        (h.remaining.is_some() && h.limit.is_some()).then_some(h)
+    }
+
+    /// Publish what this pass was told about the budget, once, in a reading
+    /// of its own: one small row a pass instead of a copy in every repo's
+    /// reading (OPS-298). A reading still fresh is left to whoever fetched
+    /// it, and one another pane is writing is left to them.
+    fn publish_budget(&mut self, budget: &Budget) {
+        let Some(h) = budget.last.as_ref() else {
+            return;
+        };
+        let resource = h.resource.clone().unwrap_or_else(|| REST.to_string());
+        let key = self.key(BUDGET, &[&resource]);
+        let value = budget_json(h);
+        match tc::readings::take(&mut self.cache, &key, tc::readings::Policy::new(self.ttl, BUDGET_LEASE)) {
+            tc::readings::Take::Fetch(t) => {
+                t.publish(value);
+            }
+            tc::readings::Take::Serve(_) | tc::readings::Take::Waiting { .. } => {}
+        }
+    }
+
+    /// What a reading serves this pane, as the board reads it.
+    fn reading(&mut self, value: &Option<serde_json::Value>, key: &str, now: f64) -> Read {
+        match value {
+            None => Read::Waiting(0),
+            Some(v) => match tc::readings::refusal(v) {
+                Some((why, _)) => Read::Refused(why),
+                None => {
+                    let at = tc::readings::provenance(&self.cache, key, now).map_or(now, |p| p.taken_at);
+                    self.saw(v, at);
+                    Read::Got(v.clone(), at)
+                }
+            },
+        }
+    }
+
+    /// Note which pane is fetching a reading this one is waiting for.
+    fn asking(&mut self, key: &str, by: u32) {
+        if by != 0 {
+            self.cache.asking.insert(key.to_string(), by);
+        }
     }
 
     fn note_pause(&mut self, until: f64, why: String) {
@@ -1450,7 +1524,7 @@ impl Share {
     }
 
     fn saw(&mut self, value: &serde_json::Value, at: f64) {
-        let Some(h) = budget_from(value) else {
+        let Some(h) = budget_from(value).or_else(|| self.budget_of_reading(value)) else {
             return;
         };
         let newer = |slot: &Option<(f64, parse::RateHeaders)>| slot.as_ref().is_none_or(|(t, _)| at >= *t);
@@ -1596,13 +1670,6 @@ fn show_while_paused(sh: &mut Share, key: &str) -> Read {
 }
 
 /// Put the budget the answer carried onto the reading, then publish it.
-fn publish_with_budget(ticket: tc::readings::Ticket<'_>, mut v: serde_json::Value, budget: &Budget) {
-    if let (Some(h), Some(o)) = (budget.last.as_ref(), v.as_object_mut()) {
-        o.insert("budget".into(), budget_json(h));
-    }
-    ticket.publish(v);
-}
-
 /// Ask for one reading through the shared store.
 ///
 /// A spent limit, here or in any other pane, stops the asking before it
@@ -1672,7 +1739,7 @@ fn shared_reading(
                 // that never went out, is a refusal.
                 match got {
                     Ok(v) => {
-                        publish_with_budget(ticket, v, &budget);
+                        ticket.publish(v);
                         Took::Limited(stop)
                     }
                     Err(_) => {
@@ -1688,8 +1755,12 @@ fn shared_reading(
                 Took::Blocked
             } else {
                 match got {
+                    // Nothing about the pass's own figures goes in here: a
+                    // value that changes on every fetch is a value the store
+                    // rewrites in full every refresh (OPS-298). GitHub's
+                    // budget is a small reading of its own.
                     Ok(v) => {
-                        publish_with_budget(ticket, v, &budget);
+                        ticket.publish(v);
                         Took::Published
                     }
                     Err(why) => {
@@ -1826,6 +1897,7 @@ fn one_pass(
             if let Some(h) = shown_budget(&got.rate, seen) {
                 got.rate.last = Some(h);
             }
+            sh.publish_budget(&got.rate);
         }
     }
     Ok(got)
@@ -2021,15 +2093,114 @@ fn pass_body(
     let mut stamps: Vec<f64> = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     let (mut pending, mut pending_by) = (0usize, 0u32);
-    for (done, repo) in repos.iter().enumerate() {
-        steps.note(|p| {
-            p.count("runs", done, Some(repos.len()));
-        });
-        let fetch = |rate: &mut Budget, ask: &mut Ask| {
-            fetch_runs_for(repo, tok, hours, rate, &rest_base, ask)
-                .map(|(got, note)| serde_json::json!({ "runs": got, "note": note }))
-        };
-        match read(share, |sh| sh.key("gha.runs", &[repo, &hours_key]), REST, &mut rate, steps, fetch) {
+    // What each repo's runs reading came to, in repo order.
+    let mut reads: Vec<Read> = Vec::with_capacity(repos.len());
+    if let Some(sh) = share.as_deref_mut().filter(|sh| sh.on) {
+        // One claim and one answer for the whole pass: eighteen readings
+        // published one transaction each cost more than the data (OPS-298).
+        let now = tc::now();
+        let gate = sh.key("gha.limit", &[REST]);
+        if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+            sh.note_pause(until, why);
+            reads.extend(repos.iter().map(|_| Read::Paused));
+        } else {
+            let keys: Vec<String> = repos
+                .iter()
+                .map(|repo| sh.key("gha.runs", &[repo, &hours_key]))
+                .collect();
+            let asks: Vec<(&str, tc::readings::Policy)> = keys
+                .iter()
+                .map(|k| (k.as_str(), tc::readings::Policy::new(sh.ttl, LEASE_FOR)))
+                .collect();
+            let claimed = tc::readings::claim_many(&mut sh.cache, &asks, now);
+            // Repos this pane has to fetch, by position.
+            let mut mine: Vec<usize> = Vec::new();
+            for (i, got) in claimed.into_iter().enumerate() {
+                match got {
+                    tc::readings::Claimed::Serve(value) => {
+                        sh.mark(&keys[i], now);
+                        reads.push(sh.reading(&value, &keys[i], now));
+                    }
+                    tc::readings::Claimed::Waiting { by, .. } => {
+                        sh.asking(&keys[i], by);
+                        reads.push(Read::Waiting(by));
+                    }
+                    tc::readings::Claimed::Fetch => {
+                        mine.push(i);
+                        reads.push(Read::Paused);
+                    }
+                }
+            }
+            let mut answers: Vec<(&str, tc::readings::Answer, tc::readings::Policy)> = Vec::new();
+            let mut fetched: Vec<(usize, Read)> = Vec::new();
+            for i in mine {
+                steps.note(|p| p.count("runs", i, Some(repos.len())));
+                steps.busy();
+                let key = keys[i].as_str();
+                let repo = &repos[i];
+                let mut budget = Budget::default();
+                let mut first = true;
+                let got = {
+                    let mut ask = |_b: &Budget| -> Result<(), String> {
+                        // The claim has just granted the lease.
+                        if std::mem::take(&mut first) {
+                            return Ok(());
+                        }
+                        if tc::readings::renew(&mut sh.cache, key, LEASE_FOR) {
+                            Ok(())
+                        } else {
+                            Err("another pane took over".into())
+                        }
+                    };
+                    fetch_runs_for(repo, tok, hours, &mut budget, &rest_base, &mut ask)
+                };
+                rate.absorb(&budget);
+                let read = match got {
+                    Ok((got, note)) => {
+                        let v = serde_json::json!({ "runs": got, "note": note });
+                        sh.saw(&v, tc::now());
+                        answers.push((key, tc::readings::Answer::Value(v.clone()), tc::readings::Policy::new(sh.ttl, LEASE_FOR)));
+                        Read::Got(v, tc::now())
+                    }
+                    Err(why) if why == "another pane took over" => {
+                        tc::readings::release(&mut sh.cache, key);
+                        Read::Waiting(0)
+                    }
+                    Err(why) => {
+                        let until = budget.stopped(tc::now()).and_then(|s| s.until()).map(|u| u as f64);
+                        if let Some(stop) = budget.stopped(tc::now()).cloned() {
+                            sh.shut(&stop, REST);
+                        }
+                        answers.push((
+                            key,
+                            tc::readings::Answer::Refused { why: why.clone(), until },
+                            tc::readings::Policy::new(sh.ttl, LEASE_FOR),
+                        ));
+                        Read::Refused(why)
+                    }
+                };
+                sh.mark(key, tc::now());
+                fetched.push((i, read));
+            }
+            tc::readings::answer_many(&mut sh.cache, &answers, tc::now());
+            for (i, read) in fetched {
+                reads[i] = read;
+            }
+        }
+    } else {
+        for (i, repo) in repos.iter().enumerate() {
+            steps.note(|p| p.count("runs", i, Some(repos.len())));
+            steps.busy();
+            let got = fetch_runs_for(repo, tok, hours, &mut rate, &rest_base, &mut |_| Ok(()))
+                .map(|(got, note)| serde_json::json!({ "runs": got, "note": note }));
+            reads.push(match got {
+                Ok(v) => Read::Got(v, tc::now()),
+                Err(why) => Read::Refused(why),
+            });
+        }
+    }
+    for (repo, read) in repos.iter().zip(reads) {
+        match read {
             Read::Got(v, at) => {
                 runs.extend(v["runs"].as_array().cloned().unwrap_or_default());
                 stamps.push(at);

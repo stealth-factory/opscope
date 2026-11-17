@@ -32,6 +32,8 @@ adopting it.
 | `follow(cache)` | Note whether another pane wrote. Call every `FOLLOW_EVERY` (5 s) on the poller thread. No network and no row reads, and it shows nothing by itself: run `take` after each follow tick, so a reading another pane fetched shows up within seconds rather than a full `refresh` later. |
 | `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:%sfingerprint`, with `:` and `%` in a plain part escaped so two sets of parts never make one key; the `%s` mark keeps a plain part from passing for a fingerprint. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written, in the raw form or as JSON escapes it. Only tokens of eight bytes or more are looked for: a shorter one would match ordinary text, so it is not a secret this check can keep. Bump `shape` when what is stored under `unit` changes. |
 | `take(cache, key, Policy)` | `Serve(value)`, `Fetch(ticket)` or `Waiting { by, have }`. Never blocks. |
+| `claim_many(cache, asks, now)` / `answer_many(cache, done, now)` | The same for a pass of many readings, in one commit each. `Claimed::{Serve, Fetch, Waiting}`, `Answer::{Value, Refused}`. |
+| `renew(cache, key, lease_for)` / `release(cache, key)` | Between the two, for a fetch that is several requests. |
 | `ticket.renew()` | Before each request of a long fetch. `false` means another pane took over: stop. |
 | `ticket.publish(value)` | Hold it for this pane's `ttl` and share it. Returns why it stayed with this pane, if it did (too large, it carried a token, or its lease ran out and another pane took over - that pane's answer is the one shared). |
 | `ticket.refuse(why, until)` | The service said no. Every pane waits until `until` if the service named a time, else the doubling backoff. |
@@ -67,6 +69,28 @@ pass; the next `share` clears it.
 
 The "updated" time a widget shows must be the reading's own `taken_at`, not
 when this pane drew it.
+
+## What it costs on disk
+
+A reading is written when it changes, and a pass costs a few pages whatever
+it holds (OPS-298):
+
+- **A reading whose text is unchanged is not rewritten.** Its fetch time is
+  kept in the `checks` table beside it, so a large reading costs a few bytes
+  a minute rather than a copy of itself. `load` reports the later of the
+  reading's own time and its check.
+- **A widget's readings are claimed in one transaction and answered in
+  another.** `claim_many` and `answer_many` (or `take` and `Ticket` for one
+  reading at a time) are two commits a pass; one commit per reading was the
+  whole cost of a quiet pass. A pass that fetches nothing writes nothing.
+- **A good reading that is the value itself is stored once.** `publish`
+  keeps the "last good" copy as a time, and `row` reads the value back for
+  it; `annotate` puts the old value back before it writes a reason over it.
+
+Measured on github-actions, 18 repos, a 60 s refresh: 69 MiB an hour before,
+with every reading rewritten every pass; about 2 MiB an hour quiet and
+proportional to what changed after. A measurement test lives at
+`core/src/readings/store.rs` (`write_bench`, run with `--ignored`).
 
 ## Rules that keep old and new builds together
 
