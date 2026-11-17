@@ -99,7 +99,9 @@ pub fn classify_rate(status: u16, h: &RateHeaders, now: i64) -> RateLimit {
     let refused = status == 403 || status == 429;
     if refused {
         if let Some(wait) = h.retry_after {
-            return RateLimit::Secondary { until: now + wait };
+            // The header is any non-negative integer. A plain add wraps a
+            // wait near `i64::MAX` into a deadline already in the past.
+            return RateLimit::Secondary { until: now.saturating_add(wait) };
         }
     }
     if h.remaining == Some(0) {
@@ -191,5 +193,14 @@ mod tests {
     fn retry_after_on_a_200_is_not_a_limit() {
         let h = parse_rate_headers("retry-after: 30\n");
         assert_eq!(classify_rate(200, &h, 1000), RateLimit::Ok);
+    }
+
+    #[test]
+    fn a_huge_retry_after_saturates_the_deadline_instead_of_wrapping() {
+        let h = parse_rate_headers("retry-after: 9223372036854775807\n");
+        assert_eq!(h.retry_after, Some(i64::MAX));
+        let now = 1_700_000_000;
+        assert_eq!(classify_rate(429, &h, now), RateLimit::Secondary { until: i64::MAX });
+        assert_eq!(classify_rate(403, &h, now), RateLimit::Secondary { until: i64::MAX });
     }
 }
