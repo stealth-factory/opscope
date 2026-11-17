@@ -380,9 +380,12 @@ pub(crate) mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for _ in 0..25 {
-                        // More than the half-second a pane waits. A fair
-                        // schedule is not guaranteed, and each write syncs.
-                        with_lock_waiting(&path, 300, || {
+                        // Far more than the half-second a pane waits. A fair
+                        // schedule is not guaranteed and each write syncs, so
+                        // on a slow CI runner one thread can wait seconds for
+                        // its turn; this tests that no update is lost, not how
+                        // soon a lock frees, and 300 tries flaked in CI.
+                        with_lock_waiting(&path, 6000, || {
                             let n: u64 = std::fs::read_to_string(&path)
                                 .unwrap()
                                 .trim()
