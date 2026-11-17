@@ -437,11 +437,12 @@ impl Store {
     pub fn renew_all(&mut self, now: f64, lease_for: f64, key: &str) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
-        tx.execute(
-            "UPDATE leases SET expires_at = ?3 WHERE holder = ?1 AND expires_at > ?2",
-            params![self.me, now, now + lease_for],
-        )
-        .map_err(sql)?;
+        let n = tx
+            .execute(
+                "UPDATE leases SET expires_at = ?3 WHERE holder = ?1 AND expires_at > ?2",
+                params![self.me, now, now + lease_for],
+            )
+            .map_err(sql)?;
         let mine: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM leases WHERE key = ?1 AND holder = ?2 AND expires_at > ?3",
@@ -451,7 +452,9 @@ impl Store {
             .optional()
             .map_err(sql)?;
         tx.commit().map_err(sql)?;
-        self.writes += 1;
+        if n > 0 {
+            self.writes += 1;
+        }
         Ok(mine.is_some())
     }
 
@@ -642,6 +645,9 @@ impl Store {
                 // that was the whole cost of a quiet pass (OPS-298).
                 note_check(&self.conn, key, s.taken_at, me).map_err(sql)?;
             } else if same {
+                // The row's own time moves past the check, which would still
+                // match `annotate` and pull the reading back.
+                self.conn.execute("DELETE FROM checks WHERE key = ?1", [key]).map_err(sql)?;
                 self.conn.execute(
                     "UPDATE readings SET taken_at = ?2, held = ?3, fails = ?4, good_at = ?5,
                      fetched_by = ?6 WHERE key = ?1",
@@ -1695,6 +1701,27 @@ mod tests {
         let back = b.load("k").unwrap().unwrap();
         assert_eq!(back.value, Some(serde_json::json!({"why": "later"})));
         assert_eq!(back.good.unwrap().0, NOW + 60.0, "the check's time was dropped when the good value was materialised");
+    }
+
+    #[test]
+    fn moving_the_row_time_drops_the_old_check() {
+        let path = temp("held-moves");
+        let mut s = Store::open(&path).unwrap();
+        let v = serde_json::json!({"u": 1});
+        let mut first = reading(NOW, v.clone());
+        first.held = 30.0;
+        s.publish("k", &first, &[], NOW).unwrap();
+        let mut checked = reading(NOW + 60.0, v.clone());
+        checked.held = 30.0;
+        s.publish("k", &checked, &[], NOW + 60.0).unwrap();
+        let mut moved = reading(NOW + 120.0, v.clone());
+        moved.held = 90.0;
+        s.publish("k", &moved, &[], NOW + 120.0).unwrap();
+        assert!(!s.annotate("k", NOW + 60.0, &serde_json::json!({"why": "stale"}), &[]).unwrap());
+        s.seen.clear();
+        let back = s.load("k").unwrap().unwrap();
+        assert_eq!(back.taken_at, NOW + 120.0);
+        assert_eq!(back.value, Some(v));
     }
 
     #[test]
