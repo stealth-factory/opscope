@@ -27,6 +27,14 @@ host but github.com or api.github.com is treated as Enterprise Server
 `enterprise_hostname_env` and set the host there; none is read unless named.
 The token must come from that host.
 
+Several panes on one machine share what GitHub said, so they make one
+request per repo per refresh between them; the line under the status line
+says which pane fetched it. Who the token belongs to, the repos found and
+each repo's runs, run titles included, are kept in
+~/.local/state/opscope/github-actions.sqlite (owner-only) and deleted
+after 2 hours unrefreshed. A spent rate limit stops every pane until
+GitHub's reset. `share_readings: false` turns it off for one pane.
+
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
 repo, workflow, branch, event, conclusion and title, w cycles the window

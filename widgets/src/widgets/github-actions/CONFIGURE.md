@@ -10,7 +10,7 @@ GitHub Actions APIs for the configured/discovered accounts and repositories.
 
 The owned section is `github_actions`. A legacy `gha` section is used only when `github_actions` is absent.
 
-Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `repos`, `window_hours`, `refresh`, `max_repos`, `pushed_days`
+Declared fields: `token`, `token_env`, `enterprise_hostname`, `enterprise_hostname_env`, `accounts`, `repos`, `window_hours`, `refresh`, `max_repos`, `pushed_days`, `share_readings`
 
 For GitHub Enterprise Cloud with data residency, set `enterprise_hostname`
 to the web host (for example `acme.ghe.com`). Requests go to
@@ -19,6 +19,11 @@ to the web host (for example `acme.ghe.com`). Requests go to
 the host there. No variable is read unless one is named, so a host some other
 tool exported never moves the widget. Otherwise it uses the public github.com
 API.
+
+`share_readings` (on by default) shares readings with every other
+github-actions pane on this machine through an owner-only file under
+`~/.local/state/opscope`. It stores run titles for up to 2 hours and never
+the token. Turn it off only when a pane must poll on its own.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
