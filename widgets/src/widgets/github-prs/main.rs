@@ -329,7 +329,7 @@ fn graphql(
             ("User-Agent", "opscope"),
         ],
         &body,
-        45,
+        GRAPHQL_FOR,
     )
     .map_err(|said| plain_refusal(&said))?;
     note_rate(status, &headers);
@@ -2087,10 +2087,15 @@ const STORE: &str = "github-prs";
 /// The gate every pane with the same GitHub identity checks before asking
 /// GraphQL anything. Its key also carries the API host and token fingerprint.
 const GATE: &str = "ghprs.graphql";
-/// One request's lease: curl's 45-second limit and a margin. Renewed
-/// before every request of a pass, so a pane that dies mid-pass holds the
-/// list up for one request, not for the minutes a large board takes.
-const LEASE_FOR: f64 = 60.0;
+/// How long one GraphQL request may run.
+const GRAPHQL_FOR: u64 = 45;
+/// Seconds kept past a request that uses its whole time.
+const LEASE_MARGIN: f64 = 15.0;
+/// Twice one request. A renewal is written only once half of this has
+/// gone, and the half that remains is one request plus [`LEASE_MARGIN`].
+/// A pane that dies holds the list for this long, not for the minutes a
+/// large board takes.
+const LEASE_FOR: f64 = 2.0 * (GRAPHQL_FOR as f64 + LEASE_MARGIN);
 /// Who the token belongs to and which orgs it is in. Rarely changes, so
 /// asked hourly rather than every refresh, and not by `r`.
 const WHO_TTL: f64 = 3600.0;
@@ -4690,6 +4695,19 @@ mod tests {
     }
 
     #[test]
+    fn half_a_lease_covers_the_next_github_request() {
+        let request = GRAPHQL_FOR as f64 + LEASE_MARGIN;
+        assert!(
+            LEASE_FOR / 2.0 >= request,
+            "a skipped renewal leaves less than one request"
+        );
+        assert!(
+            LEASE_FOR <= tc::readings::lease::MAX_LEASE,
+            "the store would shorten this lease"
+        );
+    }
+
+    #[test]
     fn the_list_key_is_the_searches_and_not_the_page_size_or_the_token() {
         let mut c = Cache::default();
         let srcs = vec![("orgs".to_string(), "is:open is:pr @mine".to_string())];
@@ -4975,12 +4993,45 @@ mod tests {
     #[test]
     fn the_counts_line_is_left_out_when_the_stats_are_hidden() {
         let now = tc::now();
-        let p = |at: f64, by: u32| readings::Provenance {
-            taken_at: at, by: Some(by), stale: false, asking: None, refused: None, unshared: None,
+        let p = |at: f64, by: u32, stale: bool| readings::Provenance {
+            taken_at: at, by: Some(by), stale, asking: None, refused: None, unshared: None,
         };
-        let s = Sharing { found: vec![(Part::List, p(now - 30.0, 41)), (Part::Counts, p(now - 10.0, 42))], ..Sharing::default() };
-        assert!(sharing_lines(&s, true, now, 200).join(" ").contains("10s ago by pane 42"));
-        assert!(sharing_lines(&s, false, now, 200).join(" ").contains("30s ago by pane 41"));
+        // Both still inside their hold. The line dates the newest reading,
+        // and a counts figure that has not gone stale does not make it old.
+        let fresh = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 600.0, 42, false)),
+            ],
+            ..Sharing::default()
+        };
+        assert!(sharing_lines(&fresh, true, now, 200).join(" ").contains("30s ago by pane 41"));
+        assert!(sharing_lines(&fresh, false, now, 200).join(" ").contains("30s ago by pane 41"));
+        // A newer counts reading is the one the line dates while stats are
+        // shown, and it drops out with them.
+        let newer = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 10.0, 42, false)),
+            ],
+            ..Sharing::default()
+        };
+        assert!(sharing_lines(&newer, true, now, 200).join(" ").contains("10s ago by pane 42"));
+        assert!(sharing_lines(&newer, false, now, 200).join(" ").contains("30s ago by pane 41"));
+        // A stale counts reading is the line while stats are shown, and
+        // disappears with them.
+        let stale = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 600.0, 42, true)),
+            ],
+            ..Sharing::default()
+        };
+        let shown = sharing_lines(&stale, true, now, 200).join(" ");
+        assert!(shown.contains("cached 10m ago"), "{shown}");
+        let hidden = sharing_lines(&stale, false, now, 200).join(" ");
+        assert!(hidden.contains("30s ago by pane 41"), "{hidden}");
+        assert!(!hidden.contains("10m"), "{hidden}");
         let first = Sharing { waiting: Some(41), ..Sharing::default() };
         assert_eq!(sharing_lines(&first, true, now, 200), ["no list yet · pane 41 asking now"]);
         let off = Sharing { off: "share_readings is off".into(), ..Sharing::default() };

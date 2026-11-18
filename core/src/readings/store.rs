@@ -429,19 +429,59 @@ impl Store {
     /// Hold a lease this pane has for another `lease_for` seconds, before the
     /// next request of a long fetch. `false` when it is no longer this
     /// pane's: it ran out and another pane took it.
+    ///
+    /// The write happens once less than half of `lease_for` remains. The
+    /// caller sizes the lease at twice one request, so that half still
+    /// covers the request about to start. A lease with more than half
+    /// left is only read.
     pub fn renew(&mut self, key: &str, now: f64, lease_for: f64) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        // Half, not sooner: renewing before every request of a long fetch
+        // rewrote the leases table dozens of times a minute for leases
+        // that had most of their time left. The caller sizes `lease_for`
+        // at twice one request, so the half left still covers it.
+        //
+        // Read first. An `UPDATE` that changes nothing still starts a
+        // write transaction, and another pane's `BEGIN IMMEDIATE` then
+        // blocks this check or makes it come back busy.
+        let due = now + lease_for / 2.0;
+        let row: Option<(u32, f64)> = self
+            .conn
+            .query_row("SELECT holder, expires_at FROM leases WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(sql)?;
+        let write = row.is_some_and(|(holder, expires_at)| holder == self.me && expires_at < due);
+        if !write {
+            return self.holds(key, now);
+        }
         let n = self
             .conn
             .execute(
-                "UPDATE leases SET expires_at = ?3 WHERE key = ?1 AND holder = ?2",
-                params![key, self.me, now + lease_for],
+                "UPDATE leases SET expires_at = ?4 WHERE key = ?1 AND holder = ?2 AND expires_at < ?3",
+                params![key, self.me, due, now + lease_for],
             )
             .map_err(sql)?;
         if n > 0 {
             self.writes += 1;
+            return Ok(true);
         }
-        Ok(n > 0)
+        self.holds(key, now)
+    }
+
+    /// Whether this pane still holds `key`'s lease at `now`. A read only.
+    fn holds(&self, key: &str, now: f64) -> Result<bool, String> {
+        let mine: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM leases WHERE key = ?1 AND holder = ?2 AND expires_at > ?3",
+                params![key, self.me, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        Ok(mine.is_some())
     }
 
     /// Extend every lease this pane still holds, and say whether `key` is
@@ -450,6 +490,23 @@ impl Store {
     /// run out while the early answers sit unpublished (OPS-298).
     pub fn renew_all(&mut self, now: f64, lease_for: f64, key: &str) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        // Nothing to write while every lease this pane holds has more than
+        // half its length left: a read, not a transaction. Half is one
+        // request, because the caller sizes `lease_for` at twice that.
+        // This ran before every GitHub request and was most of what a
+        // busy pane wrote.
+        let due: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM leases WHERE holder = ?1 AND expires_at > ?2 AND expires_at < ?3 LIMIT 1",
+                params![self.me, now, now + lease_for / 2.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        if due.is_none() {
+            return self.holds(key, now);
+        }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let n = tx
             .execute(
@@ -1316,8 +1373,8 @@ mod tests {
         assert!(a.renew("k", NOW + 19.0, 20.0).unwrap());
         b.begin_pass().unwrap();
         assert_eq!(b.claim_for("k", None, NOW + 30.0, 20.0).unwrap(), Got::Held(1));
-        // A pane that died stops renewing, and the lease runs out after one
-        // request's length, not after the whole pass would have.
+        // A pane that died stops renewing, and the lease runs out after
+        // `lease_for`, not after the whole pass would have.
         assert_eq!(b.claim_for("k", None, NOW + 40.0, 20.0).unwrap(), Got::Mine);
         assert!(!a.renew("k", NOW + 41.0, 20.0).unwrap(), "renewed a lease another pane took");
         // No claim asks for longer than MAX_LEASE.
@@ -1841,6 +1898,50 @@ mod tests {
             .unwrap();
         let back = s.load("k").unwrap().unwrap();
         assert_eq!(back.good, Some((NOW, good)), "the refusal became the kept reading");
+    }
+
+    #[test]
+    fn a_lease_with_most_of_its_time_left_is_not_rewritten() {
+        let path = temp_store("renew-half");
+        let mut s = Store::open(&path).unwrap();
+        assert_eq!(s.claim_for("k", None, NOW, 60.0).unwrap(), Got::Mine);
+        let writes = s.writes;
+        // Ten requests in the first half of the lease: reads only.
+        for i in 0..10 {
+            assert!(s.renew_all(NOW + i as f64, 60.0, "k").unwrap());
+            assert!(s.renew("k", NOW + i as f64, 60.0).unwrap());
+        }
+        assert_eq!(s.writes, writes, "a lease with most of its time left was rewritten");
+        // The skip is a read. With no busy wait, an UPDATE would come
+        // back busy while the other connection holds the writer lock.
+        s.conn.busy_timeout(Duration::ZERO).unwrap();
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(s.renew("k", NOW + 1.0, 60.0).unwrap(), "a skipped renewal took the writer lock");
+        other.execute_batch("ROLLBACK").unwrap();
+        s.conn.busy_timeout(super::BUSY).unwrap();
+        // The last instant a renewal is skipped: half the lease remains,
+        // which is the one request the caller has to fit there.
+        assert!(s.renew("k", NOW + 30.0, 60.0).unwrap());
+        assert!(s.renew_all(NOW + 30.0, 60.0, "k").unwrap());
+        assert_eq!(s.writes, writes, "the halfway mark was rewritten");
+        let left: f64 = s
+            .conn
+            .query_row("SELECT expires_at FROM leases WHERE key = 'k'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left - (NOW + 30.0), 30.0);
+        // Past half its length it is extended, once.
+        assert!(s.renew_all(NOW + 31.0, 60.0, "k").unwrap());
+        assert_eq!(s.writes, writes + 1);
+        let until: f64 = s
+            .conn
+            .query_row("SELECT expires_at FROM leases WHERE key = 'k'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(until, NOW + 31.0 + 60.0);
+        // A lease another pane took is still reported as lost.
+        s.conn.execute("UPDATE leases SET holder = 999 WHERE key = 'k'", []).unwrap();
+        assert!(!s.renew_all(NOW + 32.0, 60.0, "k").unwrap());
+        assert!(!s.renew("k", NOW + 32.0, 60.0).unwrap());
     }
 }
 

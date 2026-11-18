@@ -711,9 +711,10 @@ pub fn key(cache: &mut Cache, unit: &str, shape: u32, plain: &[&str], secrets: &
 pub struct Policy {
     /// This pane's own hold for a good reading.
     pub ttl: f64,
-    /// One request of the fetch: its timeout and a margin. The lease is
-    /// renewed for this long before each request, so a pane that dies
-    /// mid-fetch holds the reading for one request, not a whole pass.
+    /// Twice one request of the fetch. A renewal is written only once half
+    /// of this has gone, and the half that remains is the request: its
+    /// timeout and a margin. A pane that dies mid-fetch holds the reading
+    /// for this long, not for a whole pass.
     pub lease_for: f64,
     /// Whether `r` asks for it again; false for a reading keyed on a file.
     pub askable: bool,
@@ -798,8 +799,10 @@ pub struct Ticket<'a> {
 }
 
 impl Ticket<'_> {
-    /// Hold the lease for one more request. `false` when it ran out and
-    /// another pane took it: stop, and show what that pane publishes.
+    /// Keep the lease through the next request. It is extended once half
+    /// of it has gone; until then this only checks it is still ours.
+    /// `false` when it ran out and another pane took it: stop, and show
+    /// what that pane publishes.
     pub fn renew(&mut self) -> bool {
         if self.claimed.is_none() {
             return true;
@@ -1102,8 +1105,9 @@ pub fn answer_many(
     out
 }
 
-/// Hold `key`'s lease for another `lease_for` seconds, before the next
-/// request of a long fetch. `false` when another pane took it over.
+/// Keep `key`'s lease through the next request. It is extended by
+/// `lease_for` once half of that has gone, and only read until then.
+/// `false` when another pane took it over.
 pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
     let Some(store) = cache.store.as_mut() else {
         return true;
@@ -1118,11 +1122,12 @@ pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
     }
 }
 
-/// Extend every lease this pane still holds, and say whether `key` is one
-/// of them. A pass that claimed many readings renews them together before
-/// each request, so an answer already fetched stays owned until it is
-/// published. `false` when another pane took `key` over. A busy store
-/// counts as still holding it.
+/// Keep every lease this pane still holds, and say whether `key` is one
+/// of them. They are extended once half of `lease_for` has gone; until
+/// then this only reads. A pass that claimed many readings does this
+/// before each request, so an answer already fetched stays owned until
+/// it is published. `false` when another pane took `key` over. A busy
+/// store counts as still holding it.
 pub fn renew_all(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
     let Some(store) = cache.store.as_mut() else {
         return true;
