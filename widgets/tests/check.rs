@@ -4322,29 +4322,21 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
 
 /// A picker table or discovery hook is wired to its schema by field name.
 ///
-/// Comment lines are dropped before the list is cut at `]` or split on `(`.
-/// A `// retired: []` would otherwise end the list, and a name that starts
-/// on the line after `(` would otherwise be missed.
+/// Full-line comments go before the member is found, so `// discover: &[]`
+/// cannot hide the real list. A `//` later on a live line goes before the
+/// tuples are split, so it cannot add a field. Whitespace, including a
+/// line break, may sit between the name and `&[`.
 fn picker_fields(source: &str, member: &str) -> Vec<String> {
-    let Some((_, rest)) = source.split_once(&format!("{member}: &[")) else {
+    let code = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(without_trailing_comment)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some(rest) = slice_after_member(&code, member) else {
         return Vec::new();
     };
-    let mut body = String::new();
-    for line in rest.lines() {
-        if line.trim_start().starts_with("//") {
-            continue;
-        }
-        match line.split_once(']') {
-            Some((before, _)) => {
-                body.push_str(before);
-                break;
-            }
-            None => {
-                body.push_str(line);
-                body.push('\n');
-            }
-        }
-    }
+    let body = rest.split_once(']').map(|(before, _)| before).unwrap_or(rest);
     body.split('(')
         .skip(1)
         .filter_map(|entry| {
@@ -4355,6 +4347,59 @@ fn picker_fields(source: &str, member: &str) -> Vec<String> {
                 .map(|(key, _)| key.to_string())
         })
         .collect()
+}
+
+/// Drop a `//` comment that follows code, leaving a comment inside quotes.
+fn without_trailing_comment(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && quoted {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if ch == '"' {
+            quoted = !quoted;
+            out.push(ch);
+            continue;
+        }
+        if ch == '/' && !quoted && chars.peek() == Some(&'/') {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The text after `member: &[`, with any whitespace around the colon.
+fn slice_after_member<'a>(code: &'a str, member: &str) -> Option<&'a str> {
+    let mut rest = code;
+    let mut offset = 0;
+    while let Some(at) = rest.find(member) {
+        let abs = offset + at;
+        let before = code[..abs]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        if before {
+            let after = &code[abs + member.len()..];
+            let after_space = after.trim_start();
+            if let Some(after_colon) = after_space.strip_prefix(':') {
+                let value = after_colon.trim_start();
+                if let Some(list) = value.strip_prefix("&[") {
+                    return Some(list);
+                }
+            }
+        }
+        let next = at + member.len();
+        offset += next;
+        rest = &rest[next..];
+    }
+    None
 }
 
 /// Why a discovery field is not a string array, when it is not.
@@ -4448,6 +4493,21 @@ fn picker_fields_ignore_a_commented_entry() {
         picker_fields(wrapped, "discover"),
         vec!["split".to_string(), "properties".to_string()]
     );
+    let trailing = r#"
+        discover: &[
+            ("properties", discover_properties), // ("retired", old_hook)
+        ],
+    "#;
+    assert_eq!(picker_fields(trailing, "discover"), vec!["properties"]);
+    let broken = r#"
+        // Example: discover: &[],
+        discover:
+            &[
+                ("properties", discover_properties),
+            ],
+    "#;
+    assert_eq!(picker_fields(broken, "discover"), vec!["properties"]);
+    assert!(picker_fields("discover: &[],", "discover").is_empty());
 }
 
 #[test]
