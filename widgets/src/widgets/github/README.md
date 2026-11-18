@@ -353,7 +353,8 @@ until its reset and says when it will ask again.
 The readings are kept in `~/.local/state/opscope/github.sqlite`, readable
 only by you: account and org names and counts, never a token (it is in the
 key only as a fingerprint) or a PR title. A reading nobody has written for
-a day is deleted. `share_readings: false` keeps everything in the pane.
+a day is deleted the next time a pane writes to the store.
+`share_readings: false` keeps everything in the pane.
 
 ## Clickable titles
 

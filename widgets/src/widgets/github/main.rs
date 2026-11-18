@@ -2949,6 +2949,9 @@ fn one_pass(
     // once between them. Today's date is in the key because the window
     // ends today: a board taken before midnight is a different window.
     let board_key = board_key(cache, host_name, tok, &accounts, days_now, base);
+    // A cached board is new again when the selected window comes back to it;
+    // only the current calendar and board keep their once-only landing mark.
+    poll.landed.retain(|key, _| key == &cal_key || key == &board_key);
     let mut asked_here = false;
     if let Take::Fetch(mut ticket) = tc::readings::take(cache, &board_key, Policy::new(refresh, LEASE_FOR)) {
         if open {
@@ -3030,8 +3033,11 @@ fn one_pass(
         .collect();
 
     // The rest is this pane's own and runs on its refresh: the day counts
-    // and the merged-PR timing are not shared yet (OPS-289).
-    let local = full && open && spent_until(scopes).is_none();
+    // and the merged-PR timing are not shared yet (OPS-289). A pane still
+    // waiting for its first board has no account to enrich, so that is not a
+    // completed local pass and the full refresh stays pending.
+    let rows_ready = accounts.iter().any(|acc| by_acc.contains_key(acc));
+    let local = full && open && rows_ready && spent_until(scopes).is_none();
     if local {
         local_pass(tok, poll, &accounts, &mut by_acc, days_now, &dates, &keep_from, bust, state, scopes, &gql_url);
     }
@@ -3096,6 +3102,10 @@ fn local_pass(
             .collect();
         let mut chunk_err = None;
         for chunk in want.chunks(DAY_CHUNK) {
+            if spent_until(scopes).is_some() {
+                chunk_err.get_or_insert_with(|| RATE_SPENT.to_string());
+                break;
+            }
             let dd = match graphql(&build_day_query(&scope_of(acc, &viewer), chunk), tok, scopes, gql_url) {
                 Ok(d) => d["data"].clone(),
                 Err(e) => {
@@ -4667,6 +4677,158 @@ mod tests {
             _ => panic!("the second pane should be served the calendar"),
         };
         assert_eq!(served["totalContributions"], 7);
+    }
+
+    #[test]
+    fn returning_to_a_cached_window_lands_its_board_again() {
+        let mut cache = tc::readings::Cache::default();
+        let accounts = vec!["example".to_string()];
+        let day = today();
+        let who = who_key(&mut cache, "github.com", FAKE_TOKEN);
+        let cal = calendar_key(&mut cache, "github.com", FAKE_TOKEN);
+        let short = board_key(&mut cache, "github.com", FAKE_TOKEN, &accounts, 7, day);
+        let long = board_key(&mut cache, "github.com", FAKE_TOKEN, &accounts, 90, day);
+        let put = |cache: &mut tc::readings::Cache, key: &str, value: serde_json::Value| {
+            match tc::readings::take(cache, key, tc::readings::Policy::new(120.0, LEASE_FOR)) {
+                tc::readings::Take::Fetch(ticket) => {
+                    let _ = ticket.publish(value);
+                }
+                _ => panic!("the test should start without this reading"),
+            }
+        };
+        put(&mut cache, &who, serde_json::json!({ "login": "viewer" }));
+        put(&mut cache, &cal, serde_json::json!({ "totalContributions": 0, "weeks": [] }));
+        put(&mut cache, &short, serde_json::json!({ "accounts": { "example": aliases(7) } }));
+        put(&mut cache, &long, serde_json::json!({ "accounts": { "example": aliases(90) } }));
+
+        let state = Arc::new(Mutex::new(State { accounts, days: 7, ..Default::default() }));
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        let activity = tc::Refresh::default();
+        let mut poll = Poll::default();
+        let pass = |poll: &mut Poll, cache: &mut tc::readings::Cache| {
+            one_pass(FAKE_TOKEN, poll, cache, false, 120.0, &state, &scopes, None, &activity)
+        };
+        assert!(!pass(&mut poll, &mut cache).unwrap());
+        assert_eq!(state.lock().unwrap().stats[0].open, 7);
+        state.lock().unwrap().days = 90;
+        assert!(!pass(&mut poll, &mut cache).unwrap());
+        assert_eq!(state.lock().unwrap().stats[0].open, 90);
+        state.lock().unwrap().days = 7;
+        assert!(!pass(&mut poll, &mut cache).unwrap());
+        assert_eq!(state.lock().unwrap().stats[0].open, 7);
+    }
+
+    #[test]
+    fn waiting_for_the_first_board_keeps_the_local_pass_pending() {
+        let (mut a, mut b) = two_panes("local-pending");
+        let accounts = vec!["example".to_string()];
+        let day = today();
+        let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
+        let who = who_key(&mut a, "github.com", FAKE_TOKEN);
+        let cal = calendar_key(&mut a, "github.com", FAKE_TOKEN);
+        for (key, value) in [
+            (who, serde_json::json!({ "login": "viewer" })),
+            (cal, serde_json::json!({ "totalContributions": 0, "weeks": [] })),
+        ] {
+            match tc::readings::take(&mut a, &key, policy) {
+                tc::readings::Take::Fetch(ticket) => {
+                    let _ = ticket.publish(value);
+                }
+                _ => panic!("the first pane should fetch"),
+            }
+        }
+        let board = board_key(&mut a, "github.com", FAKE_TOKEN, &accounts, 14, day);
+        let _held = match tc::readings::take(&mut a, &board, policy) {
+            tc::readings::Take::Fetch(ticket) => ticket,
+            _ => panic!("the first pane should hold the board lease"),
+        };
+        tc::readings::follow(&mut b);
+
+        let state = Arc::new(Mutex::new(State { accounts, days: 14, ..Default::default() }));
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        let activity = tc::Refresh::default();
+        let ran = one_pass(
+            FAKE_TOKEN,
+            &mut Poll::default(),
+            &mut b,
+            true,
+            120.0,
+            &state,
+            &scopes,
+            None,
+            &activity,
+        )
+        .unwrap();
+        assert!(!ran, "waiting for another pane's board is not a local pass");
+    }
+
+    #[test]
+    fn day_count_chunks_stop_when_the_first_answer_spends_the_rate_limit() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            while !server_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        server_calls.fetch_add(1, Ordering::Relaxed);
+                        let mut request = [0; 8192];
+                        let _ = stream.read(&mut request);
+                        let body = r#"{"error":"rate limited"}"#;
+                        let reset = tc::now() as i64 + 3600;
+                        let response = format!(
+                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), reset, body
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(e) => panic!("test server: {e}"),
+                }
+            }
+        });
+
+        let days = (DAY_CHUNK * 2 + 1) as i64;
+        let base = today();
+        let dates: Vec<String> = (0..days)
+            .rev()
+            .map(|k| (base - Days::days(k)).format("%Y-%m-%d").to_string())
+            .collect();
+        let keep_from = (base - Days::days(90)).format("%Y-%m-%d").to_string();
+        let accounts = vec!["example".to_string()];
+        let mut by_acc = HashMap::from([(
+            "example".to_string(),
+            Account { key: "example".into(), account: "example".into(), window: days, ..Default::default() },
+        )]);
+        let state = Arc::new(Mutex::new(State::default()));
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        let mut poll = Poll { viewer: "viewer".into(), ..Default::default() };
+        local_pass(
+            FAKE_TOKEN,
+            &mut poll,
+            &accounts,
+            &mut by_acc,
+            days,
+            &dates,
+            &keep_from,
+            false,
+            &state,
+            &scopes,
+            &url,
+        );
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "a spent budget stops the remaining chunks");
+        assert_eq!(poll.day_failed.len(), 1);
     }
 
     #[test]

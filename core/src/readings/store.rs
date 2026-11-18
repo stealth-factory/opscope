@@ -274,7 +274,11 @@ impl Store {
         // journal SQLite makes beside it takes the same mode.
         match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| OpenError::other(format!("cannot restrict it: {e}")))?;
+            }
             Err(e) => return Err(OpenError::other(format!("cannot create it: {e}"))),
         }
         let conn = Connection::open(path).map_err(db)?;
@@ -1122,6 +1126,13 @@ mod tests {
     fn the_file_is_its_owners_alone() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("mode");
+        Store::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // An existing file is brought back to the same mode, not trusted to
+        // have kept the permissions it was created with.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         Store::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
