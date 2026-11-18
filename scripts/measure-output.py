@@ -41,6 +41,7 @@ All KB/s rates use 1 KB = 1024 bytes.
 
 import argparse
 import base64
+import ctypes
 import errno
 import fcntl
 import json
@@ -730,35 +731,76 @@ def set_winsize(fd: int, rows: int, cols: int, xpixel: int, ypixel: int) -> None
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def peek_child_exit(pid: int) -> Tuple[Optional[int], bool]:
-    """Check if `pid` exited without reaping when `waitid(WNOWAIT)` is available.
+def _libc_waitid_nowait(pid: int) -> Tuple[Optional[int], bool]:
+    """Call libc `waitid(WNOWAIT)` when `os.waitid` is missing.
 
-    Returns `(exit_code_or_none, was_reaped)`. Keeping the leader unreaped until
-    `terminate_process_group` finishes guarantees the kernel cannot recycle its
-    PID/PGID while group helpers are being signalled.
+    macOS builds before Python 3.13 do not expose `os.waitid`. `waitpid` is not
+    a substitute: it reaps the leader and frees the PGID before group cleanup.
+    Returns `(exit_code_or_none, was_reaped)` and never reaps on success.
     """
-    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+    if sys.platform == "darwin":
+        p_pid, wexited, wnohang, wnowait = 1, 4, 1, 0x20
+        off_code, off_pid, off_status = 8, 12, 20
+    elif sys.platform == "linux":
+        p_pid = getattr(os, "P_PID", 1)
+        wexited = getattr(os, "WEXITED", 4)
+        wnohang = getattr(os, "WNOHANG", 1)
+        wnowait = getattr(os, "WNOWAIT", 0x01000000)
+        if struct.calcsize("P") == 8:
+            off_code, off_pid, off_status = 8, 16, 24
+        else:
+            off_code, off_pid, off_status = 8, 12, 20
+    else:
+        return (None, False)
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        waitid = libc.waitid
+    except (OSError, AttributeError):
+        return (None, False)
+
+    info = ctypes.create_string_buffer(128)
+    waitid.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    waitid.restype = ctypes.c_int
+    rc = waitid(p_pid, pid, ctypes.cast(info, ctypes.c_void_p), wexited | wnohang | wnowait)
+    if rc != 0:
+        if ctypes.get_errno() == errno.ECHILD:
+            return (-1, True)
+        return (None, False)
+
+    raw = bytes(info)
+    si_pid = struct.unpack_from("i", raw, off_pid)[0]
+    if si_pid == 0:
+        return (None, False)
+    si_code = struct.unpack_from("i", raw, off_code)[0]
+    si_status = struct.unpack_from("i", raw, off_status)[0]
+    if si_code == getattr(os, "CLD_EXITED", 1):
+        return (int(si_status), False)
+    return (-int(si_status), False)
+
+
+def peek_child_exit(pid: int) -> Tuple[Optional[int], bool]:
+    """Return `(exit_code_or_none, was_reaped)` without reaping a live leader.
+
+    The leader stays unreaped until `terminate_process_group` has signalled the
+    group, so its PGID cannot be recycled into `killpg`. This never calls
+    `waitpid`, including when `os.waitid` is absent.
+    """
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT") and hasattr(os, "P_PID"):
         try:
             info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return (-1, True)
         except OSError:
-            # waitid(WNOWAIT) unsupported here; fall through to waitpid below.
-            pass
+            # os.waitid rejected the call; try libc before giving up. Do not reap.
+            return _libc_waitid_nowait(pid)
         else:
             if info is None:
                 return (None, False)
             if info.si_code == os.CLD_EXITED:
                 return (int(info.si_status), False)
             return (-int(info.si_status), False)
-
-    try:
-        waited_pid, status = os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
-        return (-1, True)
-    if waited_pid == pid:
-        return (os.waitstatus_to_exitcode(status), True)
-    return (None, False)
+    return _libc_waitid_nowait(pid)
 
 
 def terminate_process_group(
@@ -1481,6 +1523,115 @@ def run_self_tests() -> int:
                     os.close(target.pidfd)
     finally:
         os.kill = real_kill  # type: ignore[method-assign]
+
+    # 7. Observing a leader's exit must not reap it, or group cleanup is skipped.
+    def assert_peek_leaves_leader_unreaped() -> None:
+        child = os.fork()
+        if child == 0:
+            os._exit(42)
+        try:
+            deadline = time.monotonic() + 1.0
+            code: Optional[int] = None
+            reaped = False
+            while time.monotonic() < deadline:
+                code, reaped = peek_child_exit(child)
+                if code is not None or reaped:
+                    break
+                time.sleep(0.01)
+            assert reaped is False, "peek_child_exit reaped the leader"
+            assert code == 42, code
+            waited, status = os.waitpid(child, os.WNOHANG)
+            assert waited == child, "leader was reaped before group cleanup"
+            assert os.waitstatus_to_exitcode(status) == 42
+            child = 0
+        finally:
+            if child:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(child, 0)
+                except ChildProcessError:
+                    pass
+
+    assert_peek_leaves_leader_unreaped()
+    saved_waitid = getattr(os, "waitid", None)
+    if saved_waitid is not None:
+        del os.waitid
+    try:
+        assert_peek_leaves_leader_unreaped()
+    finally:
+        if saved_waitid is not None:
+            os.waitid = saved_waitid  # type: ignore[attr-defined]
+
+    def assert_helper_dies_with_leader(hide_waitid: bool) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+            pid_path = tf.name + ".pid"
+            tf.write(
+                "#!/usr/bin/env python3\n"
+                "import os, signal, time\n"
+                f"pid_path = {pid_path!r}\n"
+                "child = os.fork()\n"
+                "if child == 0:\n"
+                "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+                "    with open(pid_path, 'w') as fh:\n"
+                "        fh.write(str(os.getpid()))\n"
+                "    time.sleep(30)\n"
+                "    os._exit(0)\n"
+                "for _ in range(100):\n"
+                "    if os.path.isfile(pid_path) and os.path.getsize(pid_path) > 0:\n"
+                "        os._exit(0)\n"
+                "    time.sleep(0.01)\n"
+                "os._exit(0)\n"
+            )
+            script_path = Path(tf.name)
+        removed = False
+        held = getattr(os, "waitid", None)
+        if hide_waitid and held is not None:
+            del os.waitid
+            removed = True
+        helper = 0
+        try:
+            script_path.chmod(0o755)
+            run_mode(
+                script_path,
+                "group-test",
+                [],
+                mode="text",
+                seconds=0.4,
+                warmup=0.0,
+                cols=57,
+                rows=40,
+                cell_w=10,
+                cell_h=20,
+                steady=False,
+            )
+            assert Path(pid_path).is_file(), "helper never recorded its pid"
+            helper = int(Path(pid_path).read_text(encoding="ascii"))
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(helper, 0)
+                except ProcessLookupError:
+                    helper = 0
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError(f"helper {helper} survived leader exit (hide_waitid={hide_waitid})")
+        finally:
+            if removed and held is not None:
+                os.waitid = held  # type: ignore[attr-defined]
+            if helper:
+                try:
+                    os.kill(helper, signal.SIGKILL)
+                except OSError:
+                    pass
+            script_path.unlink(missing_ok=True)
+            Path(pid_path).unlink(missing_ok=True)
+
+    assert_helper_dies_with_leader(False)
+    assert_helper_dies_with_leader(True)
 
     print("self-test: ok")
     return 0
