@@ -1549,10 +1549,12 @@ def run_self_tests() -> int:
                 try:
                     os.kill(child, signal.SIGKILL)
                 except OSError:
+                    # The leader may already have exited after a failed assertion.
                     pass
                 try:
                     os.waitpid(child, 0)
                 except ChildProcessError:
+                    # An earlier waitpid in this test already reaped the leader.
                     pass
 
     assert_peek_leaves_leader_unreaped()
@@ -1626,6 +1628,7 @@ def run_self_tests() -> int:
                 try:
                     os.kill(helper, signal.SIGKILL)
                 except OSError:
+                    # The helper was already reaped, or this test never learned its pid.
                     pass
             script_path.unlink(missing_ok=True)
             Path(pid_path).unlink(missing_ok=True)
