@@ -165,6 +165,10 @@ struct State {
     /// not drawn. Kept apart from the rows because every live job may be
     /// filed in a workspace, or drawn by an agent row, or there may be none.
     jobs_label: String,
+    /// The background agents, filed and ordered as they are drawn, when
+    /// `agent list` failed and `agents` has no list to carry them in.
+    /// Empty whenever `agents` is `Ok`, which carries its own.
+    unlisted_jobs: Vec<Agent>,
 }
 
 impl Default for State {
@@ -186,6 +190,7 @@ impl Default for State {
             event_cursor: None,
             read: false,
             jobs_label: String::new(),
+            unlisted_jobs: Vec::new(),
         }
     }
 }
@@ -321,6 +326,67 @@ fn file_jobs(
     listed.extend(filed);
 }
 
+/// File the background agents into what `agent list` answered, or, when it
+/// failed, into a list of their own beside the failure (OPS-280), so the
+/// board can say both. With no list nothing proves a pane already draws a
+/// job, so every live job gets a row. Sorted and grouped here, because the
+/// keys and the cursor walk the rows in this order.
+fn with_jobs(
+    agents: Result<Vec<Agent>, String>,
+    panes: &[parse::Pane],
+    jobs: Vec<tc::agent_work::Job>,
+    label: &str,
+    table: &Result<tc::agent_work::Table, String>,
+    at: f64,
+    marker: impl Fn(u32) -> Option<String>,
+) -> (Result<Vec<Agent>, String>, Vec<Agent>) {
+    let order = |mut listed: Vec<Agent>| {
+        listed.sort_by(|a, b| {
+            parse::rank_of(&a.state)
+                .cmp(&parse::rank_of(&b.state))
+                .then(b.since.total_cmp(&a.since))
+        });
+        by_workspace(listed)
+    };
+    match agents {
+        Ok(mut listed) => {
+            file_jobs(&mut listed, panes, jobs, label, table, at, marker);
+            (Ok(order(listed)), Vec::new())
+        }
+        Err(why) => {
+            let mut unlisted = Vec::new();
+            file_jobs(&mut unlisted, panes, jobs, label, table, at, marker);
+            (Err(why), order(unlisted))
+        }
+    }
+}
+
+/// Every row AGENTS and BACKGROUND AGENTS draw: what `agent list` answered,
+/// or, when it failed, the background agents read without it.
+fn agents_drawn(agents: &Result<Vec<Agent>, String>, unlisted_jobs: &[Agent]) -> Vec<Agent> {
+    match agents {
+        Ok(listed) => listed.clone(),
+        Err(_) => unlisted_jobs.to_vec(),
+    }
+}
+
+/// The background agent the `e` panel explains, found by its job id among
+/// the rows drawn, whether or not `agent list` answered.
+fn job_in<'a>(rows: &'a [Agent], short: &str) -> Option<(&'a Agent, &'a tc::agent_work::Job)> {
+    rows.iter().find_map(|a| Some((a, a.job.as_ref().filter(|j| j.short == short)?)))
+}
+
+/// The line under the AGENTS heading in place of pane agents: a failed
+/// `agent list` is said even when background agents are filed in the
+/// section, and an empty one only when nothing else is.
+fn agents_note(agents: &Result<Vec<Agent>, String>, seated: usize) -> Option<(String, bool)> {
+    match agents {
+        Err(_) => Some(empty_or_why(agents, "")),
+        Ok(_) if seated == 0 => Some(empty_or_why(agents, "no agents under this session")),
+        Ok(_) => None,
+    }
+}
+
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
@@ -343,6 +409,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                 guard.sessions = Err(why.clone());
                 guard.git = Err(why.clone());
                 guard.worktrees = Err(why);
+                guard.unlisted_jobs.clear();
                 guard.absent = Some(absent);
                 guard.read = true;
             }
@@ -392,7 +459,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
-    let mut jobs_label = String::new();
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
         let mut live = HashSet::new();
@@ -426,29 +492,25 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         // vanished agent: a failed one must not wipe history and then
         // hand the next success a fresh clock.
         keep_live(seen, &live);
-        // Background agents, which no Luvus pane holds. A process table
-        // that was not read still lets their files be read.
-        let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
-        let jobs = seen.logs.read_jobs(Some(&table));
-        let label = background::group_label(&jobs);
-        jobs_label = label.clone();
-        let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
-        file_jobs(&mut listed, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
-        listed.sort_by(|a, b| {
-            parse::rank_of(&a.state)
-                .cmp(&parse::rank_of(&b.state))
-                .then(b.since.total_cmp(&a.since))
-        });
-        // Drawn, walked by the keys and indexed by the cursor in this
-        // order, so the grouping happens here and nowhere else.
-        by_workspace(listed)
+        listed
     });
+    // Background agents, which no Luvus pane holds, read whether or not
+    // `agent list` answered (OPS-280): a failed list must not take a
+    // blocked background agent off the board with it. A process table
+    // that was not read still lets their files be read.
+    let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
+    let jobs = seen.logs.read_jobs(Some(&table));
+    let label = background::group_label(&jobs);
+    let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
+    let (agents, unlisted_jobs) =
+        with_jobs(agents, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
 
     let event_sequence = snapshot.as_ref().ok().map(|snapshot| snapshot.sequence);
     if let Ok(mut guard) = state.lock() {
         guard.snapshot = snapshot;
         guard.agents = agents;
-        guard.jobs_label = jobs_label;
+        guard.unlisted_jobs = unlisted_jobs;
+        guard.jobs_label = label;
         guard.tasks = tasks;
         guard.leases = leases;
         guard.next = next;
@@ -1697,6 +1759,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             git,
             worktrees,
             jobs_label,
+            unlisted_jobs,
         ) = match state.lock() {
             Ok(g) => (
                 g.snapshot.clone(),
@@ -1712,6 +1775,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 g.git.clone(),
                 g.worktrees.clone(),
                 g.jobs_label.clone(),
+                g.unlisted_jobs.clone(),
             ),
             Err(_) => return,
         };
@@ -1723,7 +1787,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // draw as zero.
         // By state, the poll's workspace order is undone into state order;
         // the cursor keeps its row because `reselect` follows the row.
-        let agent_rows: Vec<Agent> = in_group_order(agents.clone().unwrap_or_default(), by_state);
+        // A failed `agent list` still leaves the background agents, read
+        // without it, to draw beside the failure (OPS-280).
+        let agent_rows: Vec<Agent> = in_group_order(agents_drawn(&agents, &unlisted_jobs), by_state);
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();
         let lease_rows: Vec<Lease> = leases.clone().unwrap_or_default();
         // Worst first here too: a session left in a directory nobody has
@@ -2101,10 +2167,9 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 
         if let Some(job) = detail.as_ref().and_then(|d| d.job.as_ref()) {
             // A background agent, explained from its own files. Read from
-            // this frame's agents, so the panel follows the job as it runs.
-            let found = agents.as_ref().ok().and_then(|agents| {
-                agents.iter().find_map(|a| Some((a, a.job.as_ref().filter(|j| &j.short == job)?)))
-            });
+            // this frame's rows, so the panel follows the job as it runs,
+            // and still opens when `agent list` failed.
+            let found = job_in(&agent_rows, job);
             match found {
                 Some((agent, job)) => {
                     let colour = |kind: &str| match kind {
@@ -2506,6 +2571,16 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // then BACKGROUND AGENTS for those no workspace claimed.
             for background_pass in [false, true] {
                 let list = if background_pass { &floating_shown } else { &agents_shown };
+                // In place of the pane agents, above any background agent
+                // filed in a workspace, so a failed list is said either way.
+                if !background_pass {
+                    if let Some((said, bad)) = agents_note(&agents, seated.len()) {
+                        body.push(tc::seg(
+                            &[(if bad { p.unknown.as_str() } else { p.dim.as_str() }, said)],
+                            w.saturating_sub(1),
+                        ));
+                    }
+                }
                 if background_pass {
                     // The heading is drawn for the finished jobs it counts
                     // even when every live one is filed in a workspace.
@@ -2710,20 +2785,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 if background_pass {
                     continue;
                 }
-                if seated.is_empty() {
-                    let (said, bad) = empty_or_why(&agents, "no agents under this session");
-                    body.push(tc::seg(
-                        &[(
-                            if bad {
-                                p.unknown.as_str()
-                            } else {
-                                p.dim.as_str()
-                            },
-                            said,
-                        )],
-                        w.saturating_sub(1),
-                    ));
-                } else if agents_shown.is_empty() {
+                if !seated.is_empty() && agents_shown.is_empty() {
                     body.push(nothing(seated.len()));
                 }
             }
@@ -3335,6 +3397,44 @@ mod tests {
         assert_eq!(log_session_hint(&agent, &[a, b]), Some(("two", false)));
         agent.session_id = "bound".into();
         assert_eq!(log_session_hint(&agent, &[]), Some(("bound", false)));
+    }
+
+    #[test]
+    fn a_failed_agent_list_still_draws_the_background_agents() {
+        // A working background agent on disk, in a directory no pane has open.
+        let root = std::env::temp_dir().join(format!("opscope-luvus-jobs-{}-{}", std::process::id(), tc::now()));
+        let dir = root.join("jobs").join("bg-one");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.json"), r#"{"state":"working","cwd":"/srv/other"}"#).unwrap();
+        let jobs = tc::agent_work::read_jobs(std::slice::from_ref(&root), None);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(jobs.shown.len(), 1);
+        let label = background::group_label(&jobs);
+        let panes = [parse::Pane { workspace: "web".into(), pane_id: "1".into(), cwd: "/srv/web".into(), ..Default::default() }];
+        let table = Err("not read".to_string());
+        let failed: Result<Vec<Agent>, String> = Err("agent list timed out".into());
+        let (agents, unlisted) = with_jobs(failed, &panes, jobs.shown, &label, &table, 2.0e9, |_| None);
+        // The failure is kept, and the background agent is drawn beside it.
+        assert_eq!(agents.as_ref().err().map(String::as_str), Some("agent list timed out"));
+        let rows = agents_drawn(&agents, &unlisted);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!((row.state.as_str(), row.workspace.as_str(), row.pane.as_str()), ("working", NO_PANE, ""));
+        assert!(floating(row), "drawn under BACKGROUND AGENTS");
+        // AGENTS says the failure in place of the pane agents.
+        let (said, bad) = agents_note(&agents, 0).unwrap();
+        assert!(bad && said.contains("agent list timed out"), "{said}");
+        // Filed in a workspace it still sits under the failure, not instead of it.
+        assert!(agents_note(&agents, 1).is_some());
+        // `e` opens its panel from those rows, and Enter reads it as a job
+        // with no pane: both key off the job the row carries.
+        assert!(job_in(&rows, "bg-one").is_some_and(|(a, _)| a.name == row.name));
+        assert!(matches!(Row::Agent(row.clone()), Row::Agent(a) if a.job.is_some()));
+        // With a list, the job is filed into it and nothing is kept apart.
+        let (listed, apart) = with_jobs(Ok(Vec::new()), &panes, Vec::new(), &label, &table, 2.0e9, |_| None);
+        assert!(listed.is_ok_and(|l| l.is_empty()) && apart.is_empty());
+        assert_eq!(agents_note(&Ok(Vec::new()), 0).map(|(s, _)| s), Some("   no agents under this session".into()));
+        assert_eq!(agents_note(&Ok(Vec::new()), 2), None);
     }
 
     #[test]
