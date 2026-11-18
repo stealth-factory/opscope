@@ -1687,8 +1687,13 @@ fn fetch_list(
             }
             Err(said) => return Err(said),
         };
+        // The response was observed now, before enrichment makes any more
+        // requests. Publishing the list later must not make this budget look
+        // newer than a count another pane fetched in the meantime.
+        let observed = tc::now();
         if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
             if let Ok(mut g) = rate.lock() {
+                g.at = observed;
                 g.remaining = Some(left);
                 // Only when GitHub sent one. A ceiling remembered from an
                 // earlier pass is still true; a zero invented here is not.
@@ -1792,7 +1797,7 @@ fn list_reading(
         "counted": counted,
         "served": served,
         "deepened": deepened,
-        "rate": { "remaining": rate.remaining, "limit": rate.limit },
+        "rate": { "remaining": rate.remaining, "limit": rate.limit, "at": rate.at },
     })
 }
 
@@ -2079,8 +2084,9 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 /// This widget's own store file, shared with no other widget.
 const STORE: &str = "github-prs";
-/// The gate every pane checks before asking GitHub's GraphQL API anything.
-const GATE: &str = "graphql";
+/// The gate every pane with the same GitHub identity checks before asking
+/// GraphQL anything. Its key also carries the API host and token fingerprint.
+const GATE: &str = "ghprs.graphql";
 /// One request's lease: curl's 45-second limit and a margin. Renewed
 /// before every request of a pass, so a pane that dies mid-pass holds the
 /// list up for one request, not for the minutes a large board takes.
@@ -2108,6 +2114,13 @@ const MAX_VALUE: usize = 4 * 1024 * 1024;
 fn list_key(cache: &mut Cache, host: &str, pairs: &[(String, String)], tok: &str) -> String {
     let searched = readings::fingerprint(&[&serde_json::json!(pairs).to_string()]);
     readings::key(cache, "ghprs.list", 1, &[host, &searched], &[tok])
+}
+
+/// A spent GraphQL budget belongs to one host and credential, not to every
+/// account a machine happens to have a pane for. As with the list key, the
+/// token participates only as a fingerprint and is registered as a secret.
+fn gate_key(cache: &mut Cache, host: &str, tok: &str) -> String {
+    readings::key(cache, GATE, 1, &[host], &[tok])
 }
 
 /// The store's limits: pull-request titles are forgotten after two hours.
@@ -2147,17 +2160,21 @@ fn refuse(t: readings::Ticket<'_>, said: &str, refresh: f64) {
 }
 
 /// Take a reading's budget figures when they are newer than the ones held.
-fn apply_rate(rate: &Arc<Mutex<Rate>>, v: &serde_json::Value, at: f64) {
+fn apply_rate(rate: &Arc<Mutex<Rate>>, v: &serde_json::Value, published_at: f64) {
     let Some(left) = v["remaining"].as_i64() else {
         return;
     };
+    // A list can finish enrichment long after the response whose budget it
+    // carries. Older shared readings have no `at`, so publication time is
+    // their best available observation time.
+    let observed = v["at"].as_f64().unwrap_or(published_at);
     if let Ok(mut g) = rate.lock() {
-        if at >= g.at {
+        if observed >= g.at {
             g.remaining = Some(left);
             if let Some(limit) = v["limit"].as_i64() {
                 g.limit = Some(limit);
             }
-            g.at = at;
+            g.at = observed;
         }
     }
 }
@@ -2167,6 +2184,8 @@ fn apply_rate(rate: &Arc<Mutex<Rate>>, v: &serde_json::Value, at: f64) {
 struct Poller {
     tok: String,
     host: String,
+    /// This host and credential's rate gate, already fingerprinted by `key`.
+    gate: String,
     sources: Vec<(String, String)>,
     extra: Vec<String>,
     limit: usize,
@@ -2200,21 +2219,19 @@ impl Poller {
                 c.asked_at = now;
             }
         }
-        if asked {
-            self.detail_tried = None;
-        }
-        if !self.detail() {
-            self.show_sharing(&[], now);
-            return;
-        }
+        // Import and apply this identity's gate before a detail request too:
+        // a pane with no local stop yet must not ask after another pane's
+        // budget was spent.
         self.sync_gate();
-        let gated = readings::gate(&mut self.cache, GATE);
+        let gated = readings::gate(&mut self.cache, &self.gate);
         if let Some((until, why)) = &gated {
-            // Another pane was told; this pane's own requests stop too,
-            // the detail screen's included.
             stop_asking(*until, why);
         }
         let gated = gated.is_some();
+        if !self.detail(asked) {
+            self.show_sharing(&[], now);
+            return;
+        }
         let pol = Policy::new(self.refresh, LEASE_FOR);
 
         // Who the token belongs to, which is what `@mine` means. The
@@ -2408,13 +2425,24 @@ impl Poller {
         found
     }
 
-    /// The detail screen's fetch, when one is waiting. `false` when it
-    /// failed, which leaves the reason on the pane for this pass.
-    fn detail(&mut self) -> bool {
+    /// The detail screen's fetch, when one is waiting. `r` fetches the open
+    /// PR again without removing the copy already on screen. `false` after a
+    /// failure and throughout its retry hold, so a cached list cannot erase
+    /// the detail's reason on the next follow tick.
+    fn detail(&mut self, asked: bool) -> bool {
+        self.detail_with(asked, fetch_detail)
+    }
+
+    fn detail_with(
+        &mut self,
+        asked: bool,
+        fetch: impl FnOnce(&str, &(String, String, i64), &Arc<Mutex<State>>) -> Result<(), String>,
+    ) -> bool {
+        let retried = self.detail_tried.as_ref().map(|(want, _)| want.clone());
         let want = self.state.lock().ok().and_then(|g| {
             let have = g.detail.as_ref().map(|d| number(d, "number"));
             match &g.want {
-                Some(w) if Some(w.2) != have => Some(w.clone()),
+                Some(w) if asked || Some(w.2) != have || retried.as_ref() == Some(w) => Some(w.clone()),
                 _ => None,
             }
         });
@@ -2424,11 +2452,11 @@ impl Poller {
         let now = tc::now();
         if let Some((tried, at)) = &self.detail_tried {
             if *tried == want && now - at < self.refresh {
-                return true;
+                return false;
             }
         }
         let _busy = self.activity.start();
-        match fetch_detail(&self.tok, &want, &self.state) {
+        match fetch(&self.tok, &want, &self.state) {
             Ok(()) => {
                 self.detail_tried = None;
                 true
@@ -2448,7 +2476,7 @@ impl Poller {
     fn sync_gate(&mut self) {
         if let Some((until, why)) = rate_stop() {
             if until > self.shut_until {
-                readings::shut(&mut self.cache, GATE, until, &why);
+                readings::shut(&mut self.cache, &self.gate, until, &why);
                 self.shut_until = until;
             }
         }
@@ -2459,7 +2487,7 @@ impl Poller {
         let mut found = found.to_vec();
         // A spent limit holds every reading, so it is said once on the
         // line whatever else is on it.
-        if let Some(gate) = readings::provenance(&self.cache, &format!("gate/{GATE}"), now)
+        if let Some(gate) = readings::provenance(&self.cache, &format!("gate/{}", self.gate), now)
             .filter(|p| p.refused.is_some())
         {
             match found.first_mut() {
@@ -2551,9 +2579,13 @@ fn main() {
     };
 
     let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let host = api_host().unwrap_or("github.com").to_string();
+    let mut cache = Cache::default();
+    let gate = gate_key(&mut cache, &host, &tok);
     let mut poller = Poller {
         tok: tok.clone(),
-        host: api_host().unwrap_or("github.com").to_string(),
+        host,
+        gate,
         sources: sources.clone(),
         extra: extra.clone(),
         limit,
@@ -2562,7 +2594,7 @@ fn main() {
         state: Arc::clone(&state),
         rate: Arc::clone(&rate),
         activity: activity.clone(),
-        cache: Cache::default(),
+        cache,
         side: Cache::default(),
         shut_until: 0.0,
         detail_tried: None,
@@ -4611,6 +4643,30 @@ mod tests {
 
     const TOKEN: &str = "ghp_not_a_real_token_0000000000";
 
+    fn detail_poller(state: Arc<Mutex<State>>) -> Poller {
+        let tok = TOKEN.to_string();
+        let host = "example.test".to_string();
+        let mut cache = Cache::default();
+        let gate = gate_key(&mut cache, &host, &tok);
+        Poller {
+            tok,
+            host,
+            gate,
+            sources: Vec::new(),
+            extra: Vec::new(),
+            limit: 1,
+            refresh: 60.0,
+            share_on: false,
+            state,
+            rate: Arc::new(Mutex::new(Rate::default())),
+            activity: tc::Refresh::default(),
+            cache,
+            side: Cache::default(),
+            shut_until: 0.0,
+            detail_tried: None,
+        }
+    }
+
     #[test]
     fn the_list_key_is_the_searches_and_not_the_page_size_or_the_token() {
         let mut c = Cache::default();
@@ -4624,6 +4680,50 @@ mod tests {
         assert_ne!(k, list_key(&mut c, "github.com", &one, "ghp_another_token_1111111111"));
         assert!(!k.contains(TOKEN) && !k.contains("acme"), "the key carries what it hashes: {k}");
         assert!(c.secrets.iter().any(|t| t == TOKEN), "the token was not kept out of readings");
+    }
+
+    #[test]
+    fn a_manual_refresh_fetches_the_open_detail_without_blanking_it_first() {
+        let state = Arc::new(Mutex::new(State {
+            want: Some(("acme".into(), "web".into(), 7)),
+            detail: Some(a_pr(7, "before")),
+            ..State::default()
+        }));
+        let mut poller = detail_poller(Arc::clone(&state));
+        assert!(poller.detail_with(true, |_, want, state| {
+            assert_eq!(want.2, 7);
+            assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "before");
+            state.lock().unwrap().detail = Some(a_pr(7, "after"));
+            Ok(())
+        }));
+        assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "after");
+        assert!(poller.detail_tried.is_none());
+        // Only the explicit refresh asks again; an ordinary cached detail
+        // remains a cache hit.
+        assert!(poller.detail_with(false, |_, _, _| panic!("a cached detail was fetched again")));
+    }
+
+    #[test]
+    fn a_failed_detail_refresh_keeps_its_reason_throughout_the_retry_hold() {
+        let state = Arc::new(Mutex::new(State {
+            want: Some(("acme".into(), "web".into(), 7)),
+            detail: Some(a_pr(7, "kept")),
+            ..State::default()
+        }));
+        let mut poller = detail_poller(Arc::clone(&state));
+        assert!(!poller.detail_with(true, |_, _, _| Err("detail still unavailable".into())));
+        assert_eq!(state.lock().unwrap().err, "detail still unavailable");
+        assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "kept");
+
+        // The follow tick must keep the failure, not report success and let
+        // the cached list's settle clear it.
+        assert!(!poller.detail_with(false, |_, _, _| panic!("the retry hold was ignored")));
+        assert_eq!(state.lock().unwrap().err, "detail still unavailable");
+
+        // Once the hold expires the same open PR really is retried.
+        poller.detail_tried.as_mut().unwrap().1 -= poller.refresh + 1.0;
+        assert!(poller.detail_with(false, |_, _, _| Ok(())));
+        assert!(poller.detail_tried.is_none());
     }
 
     #[test]
@@ -4758,17 +4858,26 @@ mod tests {
     }
 
     #[test]
-    fn a_spent_limit_stops_every_pane_until_the_reset() {
+    fn a_spent_limit_stops_only_panes_with_the_same_host_and_credential() {
         let (mut a, mut b) = two_panes("gate", caps());
         let until = tc::now() + 600.0;
-        readings::shut(&mut a, GATE, until, "GitHub rate limit spent");
+        let mine = gate_key(&mut a, "github.com", TOKEN);
+        assert_eq!(mine, gate_key(&mut b, "github.com", TOKEN));
+        let other_host = gate_key(&mut b, "other.example", TOKEN);
+        let other_token = gate_key(&mut b, "github.com", "ghp_another_token_1111111111");
+        assert!(!mine.contains(TOKEN), "the raw credential reached the gate key");
+
+        readings::shut(&mut a, &mine, until, "GitHub rate limit spent");
         readings::follow(&mut b);
-        let (at, why) = readings::gate(&mut b, GATE).expect("the other pane would still ask");
+        let (at, why) = readings::gate(&mut b, &mine).expect("the same identity would still ask");
         // Stored as when it was shut and how long it holds, so the reset
         // comes back to within float rounding.
         assert!((at - until).abs() < 0.01, "{at} against {until}");
         assert_eq!(why, "GitHub rate limit spent");
-        // A pane under the gate takes no ticket, so it sends nothing.
+        assert!(readings::gate(&mut b, &other_host).is_none(), "another host inherited the gate");
+        assert!(readings::gate(&mut b, &other_token).is_none(), "another credential inherited the gate");
+
+        // A pane under its own gate takes no ticket, so it sends nothing.
         let k = readings::key(&mut b, "ghprs.merged", 1, &["github.com"], &[TOKEN]);
         assert!(fetching(readings::take(&mut b, &k, Policy::new(60.0, LEASE_FOR)), true).is_none());
     }
@@ -4791,6 +4900,34 @@ mod tests {
         apply_rate(&rate, &serde_json::json!({ "remaining": 9, "limit": 5000 }), 5.0);
         let r = *rate.lock().unwrap();
         assert_eq!((r.remaining, r.limit), (Some(4000), Some(5000)), "an older reading wound the budget back");
+    }
+
+    #[test]
+    fn a_late_list_cannot_backdate_a_newer_budget_reading() {
+        let rate = Arc::new(Mutex::new(Rate {
+            at: 80.0,
+            remaining: Some(3985),
+            limit: Some(5000),
+        }));
+        let mut list = list_reading(
+            Vec::new(),
+            &[],
+            None,
+            None,
+            Rate { at: 40.0, remaining: Some(3990), limit: Some(5000) },
+        );
+        // Exercise the stored representation, not just the in-memory struct.
+        list = serde_json::from_str(&list.to_string()).unwrap();
+        apply_rate(&rate, &list["rate"], 100.0);
+        let r = *rate.lock().unwrap();
+        assert_eq!((r.at, r.remaining), (80.0, Some(3985)));
+
+        // Observation time, not publication time, orders a genuinely newer
+        // list response too.
+        list["rate"]["at"] = serde_json::json!(90.0);
+        apply_rate(&rate, &list["rate"], 100.0);
+        let r = *rate.lock().unwrap();
+        assert_eq!((r.at, r.remaining), (90.0, Some(3990)));
     }
 
     #[test]

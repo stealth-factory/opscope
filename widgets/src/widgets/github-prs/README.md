@@ -403,8 +403,8 @@ back from GitHub, whichever pane asked.
 A pass that fails - after the three retries GitHub's slow spells get inside
 it - is held for one refresh by every pane, so N panes make one retry rather
 than N. GitHub answers a spent GraphQL budget with HTTP 200 and an error, and
-the headers say when it resets: every pane stops until then and the line
-says `GitHub rate limit spent, next ask in 40m`.
+the headers say when it resets: every pane using that host and credential
+stops until then and the line says `GitHub rate limit spent, next ask in 40m`.
 
 The source filter, the text filter, the sort and the stats toggle stay with
 each pane. Panes given other search terms on the command line keep lists of
@@ -412,8 +412,9 @@ their own.
 
 **What is stored.** One file, `~/.local/state/opscope/github-prs.sqlite`,
 readable only by you, holding the latest of each reading: pull-request
-titles, authors, branch and repository names, and the counts. Nothing nobody
-has fetched for **2 hours** is kept, and no token is ever written. A list
+titles, authors, branch and repository names, and the counts. Readings expire
+after **2 hours** without a fetch and are removed on the next write; no token
+is ever written. A list
 larger than 4 MB - about 7,000 pull requests - stays with the pane that
 fetched it, and the line says `too large to share`.
 

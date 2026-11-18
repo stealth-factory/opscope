@@ -221,7 +221,7 @@
     "limit": 25,
     "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
     "refresh": 60.0,
-    "_share_readings_comment": "Share the pull-request list and the merge and arrival counts with every other github-prs pane on this machine, so one pane pages through GitHub each refresh and the rest read its answer. On by default.\n\nA large board takes a dozen search rounds and dozens of follow-up requests per pass; without sharing, every pane spends that on its own and the GraphQL budget runs out sooner. A spent budget stops every pane until GitHub's reset.\n\nThe readings are kept in one file in ~/.local/state/opscope, readable only by you. It holds pull-request titles, authors, branches and repository names, and anything nobody has fetched for 2 hours is deleted. Turn it off to have this pane ask on its own and keep everything in the pane.",
+    "_share_readings_comment": "Share the pull-request list and the merge and arrival counts with every other github-prs pane on this machine, so one pane pages through GitHub each refresh and the rest read its answer. On by default.\n\nA large board takes a dozen search rounds and dozens of follow-up requests per pass; without sharing, every pane spends that on its own and the GraphQL budget runs out sooner. A spent budget stops every pane using that host and credential until GitHub's reset.\n\nThe readings are kept in one file in ~/.local/state/opscope, readable only by you. It holds pull-request titles, authors, branches and repository names. Readings expire after 2 hours without a fetch and are deleted on the next write. Turn it off to have this pane ask on its own and keep everything in the pane.",
     "share_readings": true
   },
   "google_analytics": {
