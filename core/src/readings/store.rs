@@ -103,6 +103,23 @@ impl Caps {
     }
 }
 
+/// What a lease renewal did, apart from the store being busy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenewHow {
+    /// This pane's lease now runs for another `lease_for`.
+    Extended,
+    /// Still this pane's, with more than half of it left, so nothing was written.
+    Held,
+    /// It ran out, or another pane holds it.
+    Lost,
+}
+
+impl RenewHow {
+    fn still(self) -> bool {
+        !matches!(self, RenewHow::Lost)
+    }
+}
+
 /// What came of publishing a reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Publish {
@@ -423,8 +440,14 @@ impl Store {
     /// The write happens once less than half of `lease_for` remains. The
     /// caller sizes the lease at twice one request, so that half still
     /// covers the request about to start. A lease with more than half
-    /// left is only read.
+    /// left is only read. [`Self::renew_how`] says whether that read
+    /// extended the lease or only found it still held.
     pub fn renew(&mut self, key: &str, now: f64, lease_for: f64) -> Result<bool, String> {
+        Ok(self.renew_how(key, now, lease_for)?.still())
+    }
+
+    /// [`Self::renew`], and whether the lease was lengthened.
+    pub fn renew_how(&mut self, key: &str, now: f64, lease_for: f64) -> Result<RenewHow, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         // Half, not sooner: renewing before every request of a long fetch
         // rewrote the leases table dozens of times a minute for leases
@@ -444,7 +467,7 @@ impl Store {
             .map_err(sql)?;
         let write = row.is_some_and(|(holder, expires_at)| holder == self.me && expires_at < due);
         if !write {
-            return self.holds(key, now);
+            return Ok(self.how_held(key, now)?);
         }
         let n = self
             .conn
@@ -455,9 +478,13 @@ impl Store {
             .map_err(sql)?;
         if n > 0 {
             self.writes += 1;
-            return Ok(true);
+            return Ok(RenewHow::Extended);
         }
-        self.holds(key, now)
+        Ok(self.how_held(key, now)?)
+    }
+
+    fn how_held(&self, key: &str, now: f64) -> Result<RenewHow, String> {
+        Ok(if self.holds(key, now)? { RenewHow::Held } else { RenewHow::Lost })
     }
 
     /// Whether this pane still holds `key`'s lease at `now`. A read only.
@@ -479,6 +506,11 @@ impl Store {
     /// and is still fetching the later ones: their leases would otherwise
     /// run out while the early answers sit unpublished (OPS-298).
     pub fn renew_all(&mut self, now: f64, lease_for: f64, key: &str) -> Result<bool, String> {
+        Ok(self.renew_all_how(now, lease_for, key)?.still())
+    }
+
+    /// [`Self::renew_all`], and whether any lease was lengthened.
+    pub fn renew_all_how(&mut self, now: f64, lease_for: f64, key: &str) -> Result<RenewHow, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         // Nothing to write while every lease this pane holds has more than
         // half its length left: a read, not a transaction. Half is one
@@ -495,7 +527,7 @@ impl Store {
             .optional()
             .map_err(sql)?;
         if due.is_none() {
-            return self.holds(key, now);
+            return Ok(self.how_held(key, now)?);
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let n = tx
@@ -515,8 +547,9 @@ impl Store {
         tx.commit().map_err(sql)?;
         if n > 0 {
             self.writes += 1;
+            return Ok(if mine.is_some() { RenewHow::Extended } else { RenewHow::Lost });
         }
-        Ok(mine.is_some())
+        Ok(if mine.is_some() { RenewHow::Held } else { RenewHow::Lost })
     }
 
     /// Who holds `key`'s lease now, if anyone does and it has not run out.

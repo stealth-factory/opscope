@@ -802,9 +802,10 @@ pub struct Ticket<'a> {
 /// was not touched, and the next request has to try again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Renewed {
-    /// Still this pane's. The store lengthened the lease, or left it
-    /// because more than half of it remains.
+    /// The store lengthened the lease. It now runs for another `lease_for`.
     Extended,
+    /// Still this pane's, and more than half of it remains. Nothing was written.
+    Held,
     /// SQLite was busy. The lease was not extended.
     Busy,
     /// The lease ran out, or another pane holds it.
@@ -819,10 +820,11 @@ impl Renewed {
     }
 }
 
-fn classify_renew(cache: &mut Cache, result: Result<bool, String>) -> Renewed {
+fn classify_renew(cache: &mut Cache, result: Result<store::RenewHow, String>) -> Renewed {
     match result {
-        Ok(true) => Renewed::Extended,
-        Ok(false) => Renewed::Lost,
+        Ok(store::RenewHow::Extended) => Renewed::Extended,
+        Ok(store::RenewHow::Held) => Renewed::Held,
+        Ok(store::RenewHow::Lost) => Renewed::Lost,
         Err(why) if store::busy(&why) => Renewed::Busy,
         Err(why) => {
             // Sharing has stopped, so there is no other pane to take the
@@ -854,7 +856,7 @@ impl Ticket<'_> {
         let Some(store) = self.cache.store.as_mut() else {
             return Renewed::Extended;
         };
-        let result = store.renew(&self.key, crate::now(), self.policy.lease_for);
+        let result = store.renew_how(&self.key, crate::now(), self.policy.lease_for);
         classify_renew(self.cache, result)
     }
 
@@ -1075,7 +1077,16 @@ pub fn answer_many(
         return Vec::new();
     }
     let mut shared = Vec::with_capacity(done.len());
+    // What this pane held before the answer, so a publish another pane
+    // took over can be put back. The answer is written locally first,
+    // and a newer local timestamp would hide the successor's reading.
+    let mut prior = Vec::with_capacity(done.len());
     for (key, answer, p, at) in done {
+        prior.push((
+            cache.live.get(*key).cloned(),
+            cache.good.get(*key).cloned(),
+            cache.fails.get(*key).copied(),
+        ));
         let (value, held) = match answer {
             Answer::Value(v) => {
                 cache.fails.remove(*key);
@@ -1119,21 +1130,53 @@ pub fn answer_many(
     let items: Vec<(&str, store::Shared)> = shared.iter().map(|(k, s)| (k.as_str(), s.clone())).collect();
     match store.publish_many(&items, &cache.secrets, now, Some(claimed_at)) {
         Ok(results) => {
-            for (i, done) in results.into_iter().enumerate() {
-                let key = &items[i].0;
-                cache.shared.insert((*key).to_string(), (items[i].1.taken_at, me));
-                out[i] = done.unshared();
-                match done.unshared() {
+            for (i, published) in results.into_iter().enumerate() {
+                let key = items[i].0;
+                if published == store::Publish::TakenOver {
+                    // The local copy written above is the answer the store
+                    // refused. Put back what was there and take the
+                    // successor, whose timestamp may be earlier.
+                    match &prior[i].0 {
+                        Some(entry) => {
+                            cache.live.insert(key.to_string(), entry.clone());
+                        }
+                        None => {
+                            cache.live.remove(key);
+                        }
+                    }
+                    match &prior[i].1 {
+                        Some(entry) => {
+                            cache.good.insert(key.to_string(), entry.clone());
+                        }
+                        None => {
+                            cache.good.remove(key);
+                        }
+                    }
+                    match prior[i].2 {
+                        Some(n) => {
+                            cache.fails.insert(key.to_string(), n);
+                        }
+                        None => {
+                            cache.fails.remove(key);
+                        }
+                    }
+                    cache.shared.remove(key);
+                    cache.unshared.remove(key);
+                    // The successor was written after this pane last looked.
+                    follow(cache);
+                    pull(cache, key, now, done[i].2.ttl);
+                    out[i] = Some("not shared: another pane took over");
+                    continue;
+                }
+                cache.shared.insert(key.to_string(), (items[i].1.taken_at, me));
+                out[i] = published.unshared();
+                match published.unshared() {
                     Some(why) => {
-                        cache.unshared.insert((*key).to_string(), why);
+                        cache.unshared.insert(key.to_string(), why);
                     }
                     None => {
-                        cache.unshared.remove(*key);
+                        cache.unshared.remove(key);
                     }
-                }
-                if done == store::Publish::TakenOver {
-                    // Another pane holds it now: its answer is the shared one.
-                    out[i] = Some("not shared: another pane took over");
                 }
             }
         }
@@ -1158,7 +1201,7 @@ pub fn renew_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed {
     let Some(store) = cache.store.as_mut() else {
         return Renewed::Extended;
     };
-    let result = store.renew(key, crate::now(), lease_for);
+    let result = store.renew_how(key, crate::now(), lease_for);
     classify_renew(cache, result)
 }
 
@@ -1178,7 +1221,7 @@ pub fn renew_all_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed
     let Some(store) = cache.store.as_mut() else {
         return Renewed::Extended;
     };
-    let result = store.renew_all(crate::now(), lease_for, key);
+    let result = store.renew_all_how(crate::now(), lease_for, key);
     classify_renew(cache, result)
 }
 
@@ -1791,6 +1834,54 @@ mod tests {
         assert_eq!(renew_all_result(&mut cache, "k", 30.0), Renewed::Busy);
         drop(tx);
         assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Extended);
+    }
+
+    /// A renew that only finds the lease still held did not lengthen it.
+    /// Callers that skip the next check on `Extended` must not do that here.
+    #[test]
+    fn a_renew_that_does_not_write_is_not_an_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-renew-held-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sqlite").to_string_lossy().to_string();
+        let mut cache = Cache { store: Some(Store::open(&path).unwrap()), ..Cache::default() };
+        assert!(matches!(cache.store.as_mut().unwrap().claim("k", None, now()), Ok(Got::Mine)));
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Held);
+        assert_eq!(renew_all_result(&mut cache, "k", 30.0), Renewed::Held);
+    }
+
+    /// The answer that lost the lease must not stay in front of the one
+    /// the store kept, even when this pane's timestamp is later.
+    #[test]
+    fn a_taken_over_answer_is_replaced_by_the_one_that_landed() {
+        let (mut a, mut b) = two_panes("taken-over-answer");
+        let policy = Policy { ttl: 120.0, lease_for: 1.0, askable: true };
+        let claimed = now();
+        let Take::Fetch(ticket) = take(&mut a, "k", policy) else {
+            panic!("the first pane did not fetch");
+        };
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        match take(&mut b, "k", policy) {
+            Take::Fetch(t) => {
+                assert_eq!(t.publish(serde_json::json!({"from": "b"})), None);
+            }
+            _ => panic!("the lease should have run out"),
+        }
+        drop(ticket);
+        let out = answer_many(
+            &mut a,
+            &[("k", Answer::Value(serde_json::json!({"from": "a"})), policy, now())],
+            now(),
+            claimed,
+        );
+        assert_eq!(out, vec![Some("not shared: another pane took over")]);
+        let shown = a.live.get("k").and_then(|e| e.1.clone()).expect("the successor");
+        assert_eq!(shown["from"], "b");
     }
 
     #[test]

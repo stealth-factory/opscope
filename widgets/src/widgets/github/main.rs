@@ -967,6 +967,12 @@ fn fetch_land_timing(
             });
         }
         if !keep() {
+            if spent_until(scopes).is_some() {
+                return Ok(Timed {
+                    timing: parse::parse_land_timing(want, &prs),
+                    retry: true,
+                });
+            }
             return Err(TAKEN_OVER.into());
         }
         let raw = match graphql(
@@ -994,6 +1000,13 @@ fn fetch_land_timing(
         for mut pr in page.prs {
             if !fill_reviews(&mut pr, tok, scopes, gql_url, &mut budget, keep) {
                 if !keep() {
+                    if spent_until(scopes).is_some() {
+                        prs.push(pr);
+                        return Ok(Timed {
+                            timing: parse::parse_land_timing(want, &prs),
+                            retry: true,
+                        });
+                    }
                     return Err(TAKEN_OVER.into());
                 }
                 retry = true;
@@ -2169,14 +2182,11 @@ struct Scopes {
     /// The budget's remaining and limit, off the last answer that said.
     rate: Option<(i64, i64)>,
     /// GitHub said the budget is spent: until when, in epoch seconds. Any
-    /// thread may set it; the poller takes it and shuts every pane.
+    /// thread may set it. It stays until that time, so a detail fetch
+    /// still sees it after the poller has published the shared gate.
     spent: Option<f64>,
-}
-
-/// Until when GitHub said to stop asking, when an answer said so since the
-/// last call. Taken, so one spent budget shuts the gate once.
-fn take_spent(scopes: &Arc<Mutex<Scopes>>) -> Option<f64> {
-    scopes.lock().ok().and_then(|mut g| g.spent.take())
+    /// The deadline already handed to the shared gate.
+    gate_shut: Option<f64>,
 }
 
 fn graphql(
@@ -2194,7 +2204,7 @@ fn graphql(
             ("User-Agent", "opscope"),
         ],
         &body,
-        30,
+        REQUEST_FOR,
     )?;
     // Read on a refusal too: a 403 or 429 is where GitHub says how long to
     // wait, and every pane of this widget waits it out (OPS-288).
@@ -2701,9 +2711,14 @@ const STORE: &str = "github";
 const GATE: &str = "graphql";
 /// What a pane says while the gate is shut.
 const RATE_SPENT: &str = "GitHub's rate limit is spent";
-/// One request's thirty-second timeout and a margin: the lease a pane holds
-/// on a reading for each request of its fetch.
-const LEASE_FOR: f64 = 45.0;
+/// How long one GraphQL request may run.
+const REQUEST_FOR: u64 = 30;
+/// Seconds kept past a request that uses its whole time.
+const LEASE_MARGIN: f64 = 15.0;
+/// Twice one request. A renewal is written only once half of this has
+/// gone, and the half that remains is one request plus [`LEASE_MARGIN`],
+/// so the request finishes inside the lease.
+const LEASE_FOR: f64 = 2.0 * (REQUEST_FOR as f64 + LEASE_MARGIN);
 /// Who a token belongs to does not change while it is the same token.
 const WHO_HOLD: f64 = 6.0 * 3600.0;
 
@@ -2729,10 +2744,41 @@ fn spent_until(scopes: &Arc<Mutex<Scopes>>) -> Option<f64> {
 }
 
 /// Shut this host and token's gate when an answer said the budget is spent.
+///
+/// The deadline stays on `scopes`. The detail screen's timing fetch reads
+/// it directly and does not see the shared gate, so taking it off here
+/// would let that fetch ask again during the wait.
 fn shut_if_spent(cache: &mut tc::readings::Cache, scopes: &Arc<Mutex<Scopes>>, bucket: &str) {
-    if let Some(until) = take_spent(scopes) {
-        tc::readings::shut(cache, bucket, until, RATE_SPENT);
+    let Some(until) = spent_until(scopes) else {
+        return;
+    };
+    let published = scopes.lock().ok().and_then(|g| g.gate_shut);
+    if published == Some(until) {
+        return;
     }
+    tc::readings::shut(cache, bucket, until, RATE_SPENT);
+    if let Ok(mut g) = scopes.lock() {
+        if g.spent == Some(until) {
+            g.gate_shut = Some(until);
+        }
+    }
+}
+
+/// Copy another pane's closed gate onto `scopes`, so a walk that stops on
+/// [`spent_until`] stops on that too. `true` when the gate is shut.
+///
+/// A key already read at the version [`tc::readings::follow`] noted is not
+/// read again, so this looks again before the next request.
+fn absorb_gate(cache: &mut tc::readings::Cache, scopes: &Arc<Mutex<Scopes>>, host: &str, tok: &str) -> bool {
+    let bucket = gate_key(cache, host, tok);
+    tc::readings::follow(cache);
+    let Some((until, _)) = tc::readings::gate(cache, &bucket) else {
+        return false;
+    };
+    if let Ok(mut g) = scopes.lock() {
+        g.spent = Some(g.spent.map_or(until, |have| have.max(until)));
+    }
+    true
 }
 
 /// The reading under `key` when it is new to this pane's screen: its value
@@ -3084,6 +3130,14 @@ fn one_pass(
                     taken_over = true;
                     break;
                 }
+                // The ticket borrows the store, so the shared gate is read
+                // through it rather than through `absorb_gate`.
+                if let Some((until, _)) = ticket.closed(&gql_gate) {
+                    if let Ok(mut g) = scopes.lock() {
+                        g.spent = Some(g.spent.map_or(until, |have| have.max(until)));
+                    }
+                    break;
+                }
                 if spent_until(scopes).is_some() {
                     break;
                 }
@@ -3196,12 +3250,11 @@ fn one_pass(
 /// the last third of [`LEASE_FOR`] still outlasts one request's
 /// thirty-second timeout, so it is left alone.
 ///
-/// The quiet window starts when the renew says the lease is still this
-/// pane's. The store itself writes only once half the lease is gone, so
-/// that answer also covers a check that left a long lease alone, and the
-/// window is a third of the lease, shorter than the half still left. A
-/// busy store did not answer, and is asked again before the next request.
-/// A lost lease stays lost through that window, so the next check stops
+/// The quiet window starts only when the renew lengthened the lease. A
+/// check that found it still held, or a busy store, did not, and is asked
+/// again before the next request: half a lease remaining is one request
+/// plus its margin, and skipping ahead on a check would spend that. A
+/// lost lease stays lost through the window, so the next check stops
 /// instead of treating the failed renew as a recent one.
 struct Renewal {
     extended_at: f64,
@@ -3226,7 +3279,9 @@ impl Renewal {
                 self.lost = false;
                 true
             }
-            tc::readings::Renewed::Busy => true,
+            // Still ours, but not lengthened. The next request has to ask
+            // again; the time since this check is not cover for it.
+            tc::readings::Renewed::Held | tc::readings::Renewed::Busy => true,
             tc::readings::Renewed::Lost => {
                 self.lost = true;
                 false
@@ -3405,7 +3460,7 @@ fn day_counts(
         // follow tick that is asking shows it in the title.
         let _work = (!want.is_empty()).then(|| ask.activity.start());
         for chunk in want.chunks(DAY_CHUNK) {
-            if spent_until(ask.scopes).is_some() {
+            if absorb_gate(cache, ask.scopes, ask.host, ask.tok) || spent_until(ask.scopes).is_some() {
                 chunk_err.get_or_insert_with(|| RATE_SPENT.to_string());
                 break;
             }
@@ -3576,6 +3631,9 @@ fn merged_timing(
         let key = keys[i].clone();
         let _work = (merged[i] > 0).then(|| ask.activity.start());
         let mut keep = || {
+            if absorb_gate(cache, ask.scopes, ask.host, ask.tok) {
+                return false;
+            }
             if !renewal.due() {
                 return true;
             }
@@ -5570,11 +5628,24 @@ mod tests {
     }
 
     #[test]
+    fn publishing_the_gate_keeps_the_deadline_on_the_token() {
+        let mut cache = tc::readings::Cache::default();
+        let until = tc::now() + 3600.0;
+        let scopes = Arc::new(Mutex::new(Scopes { spent: Some(until), ..Scopes::default() }));
+        let bucket = gate_key(&mut cache, "github.com", FAKE_TOKEN);
+        shut_if_spent(&mut cache, &scopes, &bucket);
+        shut_if_spent(&mut cache, &scopes, &bucket);
+        assert_eq!(spent_until(&scopes), Some(until));
+    }
+
+    #[test]
     fn a_busy_renew_does_not_start_the_quiet_window() {
         let mut renewal = Renewal::at(0.0);
         assert!(renewal.due());
         assert!(renewal.note(tc::readings::Renewed::Busy));
         assert!(renewal.due(), "a busy store is tried again before the next request");
+        assert!(renewal.note(tc::readings::Renewed::Held));
+        assert!(renewal.due(), "a check that did not lengthen the lease is not cover");
         assert!(renewal.note(tc::readings::Renewed::Extended));
         assert!(!renewal.due());
     }
