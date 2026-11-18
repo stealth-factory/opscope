@@ -33,9 +33,14 @@
 
 use std::collections::HashMap;
 
+mod catalogue;
 mod jobs;
 mod logs;
 mod parse;
+pub use catalogue::{
+    canonical_command, classify_argv, classify_command_only, classify_foreground, classify_process,
+    has_log_reader, matches_reported_app, CatalogueEntry, CATALOGUE, DEFAULT_AGENTS,
+};
 pub use jobs::{
     parse_claude_session, parse_iso_seconds, parse_job_state, parse_job_timeline, read_jobs,
     ClaudeSession, FanItem, InFlight, Job, JobState, Jobs,
@@ -271,29 +276,114 @@ impl Table {
     }
 
     /// Named agent processes across the machine, without counting a direct
-    /// interpreter launch wrapper again. Native children remain separate processes.
-    /// This discovers processes, not proof of an active session or model turn.
+    /// interpreter or shell launch wrapper again. Native children remain
+    /// separate processes. This discovers processes, not proof of an active
+    /// session or model turn.
     pub fn agents(&self, names: &[&str]) -> Vec<(u32, String)> {
         let mut found = Vec::new();
         for (&pid, proc) in &self.procs {
-            let Some(&name) = names.iter().find(|name| is_named(&proc.comm, &proc.args, name)) else {
+            let Some(kind) = classify_process(&proc.comm, &proc.args, names) else {
                 continue;
             };
             let program = proc.args.split_whitespace().next().unwrap_or("");
             let wrapper = INTERPRETERS.contains(&base_name(&proc.comm))
-                || INTERPRETERS.contains(&base_name(program));
-            if wrapper && self.kids(pid).iter().any(|child| self.get(*child)
-                .is_some_and(|p| is_named(&p.comm, &p.args, name))) {
+                || INTERPRETERS.contains(&base_name(program))
+                || is_shell("", program);
+            if wrapper
+                && self.kids(pid).iter().any(|child| {
+                    self.get(*child)
+                        .is_some_and(|p| is_named(&p.comm, &p.args, &kind))
+                })
+            {
                 continue;
             }
-            found.push((pid, name.to_string()));
+            found.push((pid, kind));
         }
         found.sort_unstable();
         found
     }
 
+    /// Every process across the machine matching the shared default catalogue.
+    pub fn catalogue_agents(&self) -> Vec<(u32, String)> {
+        self.agents(DEFAULT_AGENTS)
+    }
+
     fn kids(&self, pid: u32) -> &[u32] {
         self.children.get(&pid).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Find a catalogue or `configured` agent at or below a pane's `root`
+    /// process (used under Luvus when `agent list` did not name the pane).
+    pub fn catalogue_agent_below<S: AsRef<str>>(
+        &self,
+        root: u32,
+        configured: &[S],
+    ) -> Option<(u32, String)> {
+        let p = self.get(root)?;
+        if let Some(kind) = classify_process(&p.comm, &p.args, configured) {
+            return Some((self.innermost(root, &kind), kind));
+        }
+        let mut best: Option<(u32, String)> = None;
+        let mut queue = vec![root];
+        let mut seen = 0;
+        while let Some(pid) = queue.pop() {
+            seen += 1;
+            if seen > 256 {
+                break;
+            }
+            for &kid in self.kids(pid) {
+                let Some(k) = self.get(kid) else { continue };
+                if let Some(kind) = classify_process(&k.comm, &k.args, configured) {
+                    if best.as_ref().is_none_or(|(b, _)| kid < *b) {
+                        best = Some((kid, kind));
+                    }
+                }
+                queue.push(kid);
+            }
+        }
+        best.map(|(pid, kind)| (self.innermost(pid, &kind), kind))
+    }
+
+    /// Find a catalogue or `configured` agent at `pid`, among its ancestors
+    /// above the foreground job (stopping before `shell_pid`), or below a
+    /// launcher at `pid` (used under Herdr when `agent list` did not name the pane).
+    pub fn catalogue_agent_at<S: AsRef<str>>(
+        &self,
+        pid: u32,
+        shell_pid: Option<u32>,
+        configured: &[S],
+    ) -> Option<(u32, String)> {
+        let mut up = pid;
+        for _ in 0..8 {
+            if Some(up) == shell_pid {
+                break;
+            }
+            if let Some(p) = self.get(up) {
+                if let Some(kind) = classify_process(&p.comm, &p.args, configured) {
+                    return Some((self.innermost(up, &kind), kind));
+                }
+                if p.ppid > 1 && Some(p.ppid) != shell_pid {
+                    up = p.ppid;
+                    continue;
+                }
+            }
+            break;
+        }
+        let mut queue = self.kids(pid).to_vec();
+        let mut seen = 0;
+        while let Some(kid) = queue.pop() {
+            seen += 1;
+            if seen > 64 {
+                break;
+            }
+            if let Some(k) = self.get(kid) {
+                if let Some(kind) = classify_process(&k.comm, &k.args, configured) {
+                    return Some((self.innermost(kid, &kind), kind));
+                }
+            }
+            queue.extend_from_slice(self.kids(kid));
+        }
+        None
     }
 
     /// The agent under a pane's root process: the root itself when it is not
@@ -495,25 +585,11 @@ impl Table {
 }
 
 /// Whether a process is the program `name`: by `comm`, by the program on
-/// its command line, or by the script an interpreter runs. Claude Code's
-/// `comm` is its version (`2.1.317`), but its command line starts `claude`.
+/// its command line, by the script an interpreter runs, or through the
+/// shared agent catalogue's aliases (`antigravity-cli` ↔ `agy`, `kiro` ↔ `kiro-cli`,
+/// `cursor` ↔ `cursor-agent`).
 fn is_named(comm: &str, args: &str, name: &str) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    if name.is_empty() {
-        return false;
-    }
-    let name = product(&name);
-    let matches = |word: &str| {
-        let word = base_name(word).to_ascii_lowercase();
-        let word = word.strip_suffix(".js").unwrap_or(&word);
-        product(word) == name
-    };
-    let mut words = args.split_whitespace();
-    let program = words.next().unwrap_or("");
-    // The script is the name only under an interpreter: `node …/claude.js`
-    // is Claude, but `tail /tmp/claude` and `rg claude` are not.
-    let script = words.next().filter(|_| INTERPRETERS.contains(&base_name(program)));
-    matches(comm) || matches(program) || script.is_some_and(matches)
+    catalogue::process_matches_agent(comm, args, name)
 }
 
 /// A name with the suffix products and their commands differ by taken
@@ -691,6 +767,56 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_configured_generic_agent_is_found_again_by_its_name() {
+        // `forge` and `cn` added to `agents` by hand, with no install path
+        // to clue them, beside a job the same shell left running: discovery
+        // takes them, so looking their pid up again must too.
+        for (cmd, wanted) in [("forge", "forge"), ("cn", "cn"), ("agent", "agent")] {
+            let ps = format!("100 1 bash bash\n110 100 {cmd} {cmd}\n111 100 sleep sleep 600\n");
+            let table = parse_process_table(&ps).unwrap();
+            let configured = [wanted];
+            assert_eq!(
+                table.catalogue_agent_below(100, &configured).map(|(pid, kind)| (pid, kind)),
+                Some((110, wanted.to_string())),
+                "{cmd}"
+            );
+            assert_eq!(table.agent_below(100, wanted), Some(110), "{cmd}");
+        }
+        // Without the opt-in a bare Foundry `forge` is still not Forge Code,
+        // and the canonical id still wants its clue.
+        let table = parse_process_table("100 1 bash bash\n110 100 forge forge build\n111 100 sleep sleep 600\n").unwrap();
+        assert_eq!(table.agent_below(100, "forgecode"), None);
+        assert_eq!(table.catalogue_agent_below(100, crate::agent_work::DEFAULT_AGENTS), None);
+    }
+
+    #[test]
+    fn an_opt_in_names_the_agent_and_not_the_services_its_binary_runs() {
+        let configured = ["agent"];
+        // Bare `agent` is the opted-in agent; `agent worker` is Cursor's
+        // service, with or without an install path to say so.
+        assert_eq!(classify_process("agent", "agent", &configured), Some("agent".into()));
+        assert_eq!(classify_process("agent", "agent worker", &configured), None);
+        // Refining the agent's pid never lands on the worker it started.
+        let table = parse_process_table(
+            "100 1 bash bash\n110 100 agent agent\n120 110 agent /opt/cursor-agent/bin/agent worker\n",
+        )
+        .unwrap();
+        assert_eq!(table.catalogue_agent_below(100, &configured), Some((110, "agent".into())));
+        assert_eq!(table.agent_below(100, "agent"), Some(110));
+    }
+
+    #[test]
+    fn the_distinctive_forgecode_name_counts_wherever_it_appears() {
+        // `comm` says `forge`, `argv[0]` says `forgecode`: no clue needed.
+        assert_eq!(
+            classify_process("forge", "/usr/bin/forgecode", DEFAULT_AGENTS),
+            Some("forgecode".into())
+        );
+        // Foundry's `forge` alone still is not Forge Code.
+        assert_eq!(classify_process("forge", "/usr/bin/forge build", DEFAULT_AGENTS), None);
+    }
+
+    #[test]
     fn a_background_agents_fan_draws_unfinished_subagents_and_replaces_their_log_rows() {
         let fan = |id: &str, kind: &str, done: Option<f64>| FanItem {
             id: id.into(),
@@ -827,7 +953,65 @@ mod tests {
         assert!(is_named("cursor", "/usr/bin/cursor", "cursor-agent"));
         assert!(is_named("2.1.317", "claude", "claude-code"));
         assert!(is_named("gemini", "node /x/bin/gemini.js", "gemini-cli"));
+        assert!(is_named("agy", "agy", "antigravity-cli"));
+        assert!(is_named("agy", "/opt/bin/agy", "antigravity"));
+        assert!(is_named("kiro-cli", "kiro-cli", "kiro"));
         assert!(!is_named("cursor", "cursor .", "claude"));
+    }
+
+    #[test]
+    fn catalogue_discovers_agy_pi_and_gemini_with_their_shells_and_skips_generic_commands() {
+        let ps = "\
+100 1 zsh -zsh
+110 100 agy agy
+111 110 bash /bin/bash -c cargo test
+112 111 cargo cargo test
+120 100 pi /bin/sh /home/u/.local/bin/pi
+121 120 node node /home/u/.pi/agent/install/releases/1.0/node_modules/.bin/pi
+122 121 sh /bin/sh -c npm run build
+123 122 node node /usr/bin/npm run build
+130 100 node node /usr/local/bin/gemini
+131 130 zsh /bin/zsh -c pytest
+132 131 pytest pytest
+140 100 forge /home/u/.foundry/bin/forge test
+141 100 vibe /usr/bin/vibe audio.wav
+142 100 cn /usr/local/bin/cn status
+143 100 agent /usr/bin/agent
+144 100 opencode opencode serve
+";
+        let table = parse_process_table(ps).expect("table");
+        assert_eq!(
+            table.catalogue_agents(),
+            vec![
+                (110, "agy".into()),
+                (121, "pi".into()),
+                (130, "gemini".into()),
+            ]
+        );
+        assert_eq!(table.background_shells(110)[0].label, "cargo test");
+        assert_eq!(table.background_shells(121)[0].label, "npm run build");
+        assert_eq!(table.background_shells(130)[0].label, "pytest");
+
+        // Herdr's `antigravity-cli` report resolves to the `agy` process even
+        // when `cargo test` is in the foreground.
+        assert_eq!(table.named_agent_at(112, "antigravity-cli"), Some(110));
+        assert_eq!(table.agent_at(112, "antigravity-cli"), 110);
+        assert_eq!(table.agent_below(100, "antigravity-cli"), Some(110));
+
+        // Herdr and Luvus catalogue gap-fillers find the agent and ignore
+        // Foundry's `forge` or the pane's shell.
+        assert_eq!(
+            table.catalogue_agent_at(112, Some(100), DEFAULT_AGENTS),
+            Some((110, "agy".into()))
+        );
+        assert_eq!(table.catalogue_agent_at(140, Some(100), DEFAULT_AGENTS), None);
+
+        let single_pane = parse_process_table("200 1 bash -bash\n210 200 agy agy\n300 1 bash -bash\n310 300 forge /home/u/.foundry/bin/forge build\n").unwrap();
+        assert_eq!(
+            single_pane.catalogue_agent_below(200, DEFAULT_AGENTS),
+            Some((210, "agy".into()))
+        );
+        assert_eq!(single_pane.catalogue_agent_below(300, DEFAULT_AGENTS), None);
     }
 
     // The pane gets screenshotted: a credential on a job's command line is

@@ -324,6 +324,11 @@ pub struct Agent {
     /// The heading a background agent's group is drawn under, which counts
     /// the finished jobs it leaves out.
     pub group_label: String,
+    /// The agent process the catalogue found when it promoted a pane Luvus
+    /// did not list. Kept rather than looked up again: below a launcher
+    /// root (`npm exec codex`) a fresh lookup lands on the launcher.
+    /// `None` for every row Luvus listed itself.
+    pub pid: Option<u32>,
 }
 
 /// Every agent in `luvus agent list`.
@@ -368,6 +373,7 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
             job: None,
             by_directory: false,
             group_label: String::new(),
+            pid: None,
         });
     }
     Ok(found)

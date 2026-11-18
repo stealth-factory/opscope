@@ -3,8 +3,6 @@ use opscope_core as tc;
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub const NAMES: &[&str] = &["claude", "codex", "opencode"];
-
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub pid: u32,
@@ -35,20 +33,24 @@ pub fn collect(
     cwds: &HashMap<u32, Result<String, String>>,
 ) -> Vec<Agent> {
     let mut agents = Vec::new();
-    for (pid, kind) in table.agents(NAMES) {
+    for (pid, kind) in table.catalogue_agents() {
         let cwd = cwds
             .get(&pid)
             .cloned()
             .unwrap_or_else(|| Err("agent cwd was not acquired".into()));
-        let logs = cwd
-            .as_ref()
-            .map_err(|e| format!("agent cwd: {e}"))
-            .and_then(|cwd| reader.read(&kind, cwd, None));
         let work = tc::agent_work::Work {
             tasks: table.background_shells(pid),
             ..Default::default()
-        }
-        .with_logs(logs);
+        };
+        let work = if tc::agent_work::has_log_reader(&kind) {
+            let logs = cwd
+                .as_ref()
+                .map_err(|e| format!("agent cwd: {e}"))
+                .and_then(|cwd| reader.read_agent(&kind, Some(pid), cwd, None));
+            work.with_logs(logs)
+        } else {
+            work
+        };
         agents.push(Agent {
             pid,
             kind,
@@ -137,5 +139,53 @@ mod tests {
         assert!(finished(&a, 0).is_empty());
         assert!(a.work.rows(80).iter().any(|(_, r)| r.contains("busy")));
         assert!(!a.work.rows(80).iter().any(|(_, r)| r.contains("old")));
+    }
+
+    #[test]
+    fn lists_agy_pi_and_gemini_with_child_shells_and_excludes_generic_commands() {
+        let table = tc::agent_work::parse_process_table(
+            "\
+10 1 agy agy
+11 10 bash /bin/bash -c cargo test
+12 11 cargo cargo test
+20 1 node node /home/u/.pi/agent/install/releases/1.0/node_modules/.bin/pi
+21 20 sh /bin/sh -c npm test
+22 21 node node /usr/bin/npm test
+30 1 node node /usr/local/bin/gemini
+31 30 zsh /bin/zsh -c pytest
+32 31 pytest pytest
+40 1 forge /home/u/.foundry/bin/forge test
+41 1 vibe /usr/bin/vibe
+42 1 cn /usr/local/bin/cn
+43 1 agent /usr/bin/agent
+",
+        )
+        .unwrap();
+        let cwds = HashMap::from([
+            (10, Ok("/srv/a".into())),
+            (20, Ok("/srv/b".into())),
+            (30, Ok("/srv/c".into())),
+        ]);
+        let mut reader = tc::agent_work::LogReader::default();
+        let agents = collect(&table, &mut reader, &cwds);
+        let summary: Vec<(&str, u32, Vec<&str>)> = agents
+            .iter()
+            .map(|a| {
+                (
+                    a.kind.as_str(),
+                    a.pid,
+                    a.work.tasks.iter().map(|t| t.label.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("agy", 10, vec!["cargo test"]),
+                ("gemini", 30, vec!["pytest"]),
+                ("pi", 20, vec!["npm test"]),
+            ]
+        );
+        assert!(agents.iter().all(|a| a.work.unread.is_none()));
     }
 }

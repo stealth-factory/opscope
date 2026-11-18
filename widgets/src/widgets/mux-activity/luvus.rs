@@ -267,23 +267,37 @@ fn file_jobs(
     // is only where it was started.
     // Each proof keeps the index of the row it belongs to, so a job that
     // row draws can hand it its subagents.
+    // A row promoted from the catalogue is no proof: it knows only that a
+    // Claude process runs there, and its `unknown` would stand in for the
+    // state the job reported. The job keeps its row and the promoted one,
+    // the same process, goes instead.
     let mut drawn: Vec<(Option<u32>, &str, usize)> = listed
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.job.is_none())
+        .filter(|(_, a)| a.job.is_none() && !promoted(a))
         .map(|(i, a)| (None, a.session_id.as_str(), i))
         .collect();
+    // A promoted row is matched by the pid it was promoted for, not a
+    // fresh look below the shell, which finds nothing when two Claudes run
+    // there and would leave the same process counted twice.
+    let stood_in: Vec<(Option<u32>, usize)> =
+        listed.iter().enumerate().filter(|(_, a)| promoted(a) && a.pid.is_some()).map(|(i, a)| (a.pid, i)).collect();
     if let Ok(t) = table {
-        let shown =
-            |pane: &str| listed.iter().position(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
-        drawn.extend(panes.iter().filter_map(|p| {
-            let row = shown(&p.pane_id)?;
-            Some((t.sole_agent_below(p.root_pid?, "claude"), "", row))
-        }));
+        let shown = |pane: &str| {
+            listed.iter().position(|a| a.job.is_none() && !promoted(a) && a.kind == "claude" && a.pane == pane)
+        };
+        for p in panes {
+            let (Some(row), Some(root)) = (shown(&p.pane_id), p.root_pid) else { continue };
+            drawn.push((t.sole_agent_below(root, "claude"), "", row));
+        }
     }
+    let mut replaced = Vec::new();
     let mut fans = Vec::new();
     let mut filed = Vec::new();
     for job in jobs {
+        replaced.extend(
+            stood_in.iter().filter(|&&(pid, _)| background::drawn_by(&job, [(pid, "")])).map(|&(_, row)| row),
+        );
         if let Some(&(_, _, row)) =
             drawn.iter().find(|&&(pid, session, _)| background::drawn_by(&job, [(pid, session)]))
         {
@@ -323,7 +337,17 @@ fn file_jobs(
         let agent = &mut listed[row];
         agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
     }
+    let mut row = 0;
+    listed.retain(|_| {
+        row += 1;
+        !replaced.contains(&(row - 1))
+    });
     listed.extend(filed);
+}
+
+/// A row the catalogue promoted from a pane Luvus did not list as an agent.
+fn promoted(agent: &Agent) -> bool {
+    agent.job.is_none() && agent.state_source == "no status reported"
 }
 
 /// File the background agents into what `agent list` answered, or, when it
@@ -387,7 +411,47 @@ fn agents_note(agents: &Result<Vec<Agent>, String>, seated: usize) -> Option<(St
     }
 }
 
-fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
+/// Promote snapshot panes that Luvus did not list in `agent list` when their
+/// local process tree (or reported command, when `ps` was unavailable) matches
+/// the shared agent catalogue or `configured` (`agents` setting).
+fn fill_catalogue_agents(
+    listed: &mut Vec<Agent>,
+    panes: &[parse::Pane],
+    processes: Option<&Result<tc::agent_work::Table, String>>,
+    configured: &[String],
+) {
+    for pane in panes {
+        if pane.is_opscope || listed.iter().any(|a| a.job.is_none() && a.pane == pane.pane_id) {
+            continue;
+        }
+        let matched = match (processes, pane.root_pid) {
+            (Some(Ok(table)), Some(root)) => table
+                .catalogue_agent_below(root, configured)
+                .map(|(pid, kind)| (kind, "process", Some(pid))),
+            _ => tc::agent_work::classify_command_only(&pane.command, configured)
+                .map(|kind| (kind, "command", None)),
+        };
+        let Some((kind, via, pid)) = matched else {
+            continue;
+        };
+        listed.push(Agent {
+            name: kind.clone(),
+            kind,
+            pane: pane.pane_id.clone(),
+            workspace: pane.workspace.clone(),
+            branch: pane.branch.clone(),
+            cwd: pane.cwd.clone(),
+            state: "unknown".into(),
+            authority: via.into(),
+            state_source: "no status reported".into(),
+            focused: pane.focused,
+            pid,
+            ..Default::default()
+        });
+    }
+}
+
+fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str, configured: &[String]) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
     // the same for every reading.
@@ -459,28 +523,46 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
+    let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
+        fill_catalogue_agents(&mut listed, panes, processes.as_ref(), configured);
         let mut live = HashSet::new();
         for agent in &mut listed {
             let key = duration_key(&agent.pane, &agent.name);
             let (since, exact) = measure_since(seen, &key, &agent.state, at);
             agent.since = since;
             agent.exact = exact;
+            // A promoted row keeps the pid discovery found; any other is
+            // looked for below its pane's root by name.
+            let pid = agent.pid.or_else(|| {
+                let table = processes.as_ref()?.as_ref().ok()?;
+                table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
+            });
             // With no root known the agent cannot be found, but a table
             // that did not come back still says so on its row.
             if let Some(table) = &processes {
-                let pid = roots
-                    .get(&agent.pane)
-                    .and_then(|&root| table.as_ref().ok().and_then(|t| t.agent_below(root, &agent.kind)));
                 agent.work = tc::agent_work::Work::of(table, pid);
             }
             let hint = log_session_hint(agent, sessions.as_ref().ok().map(Vec::as_slice).unwrap_or(&[]));
-            let pid = processes.as_ref().and_then(|table| {
-                let table = table.as_ref().ok()?;
-                table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
-            });
-            let logs = seen.logs.read_agent(&agent.kind, pid, &agent.cwd, hint.map(|(id, _)| id))
+            // A row Luvus listed carries the agent's own directory. A promoted
+            // row has only the pane's, and the agent may have moved since, so
+            // its session log is chosen by the agent process's own directory,
+            // as Herdr's are; one that cannot be read says so instead. A
+            // session id, where there is one, is what decides, not a directory.
+            let logs = if promoted(agent) && hint.is_none() && tc::agent_work::has_log_reader(&agent.kind) {
+                match pid {
+                    Some(pid) => match super::host::agent_cwds(&[pid]).remove(&pid) {
+                        Some(Ok(cwd)) => seen.logs.read_agent(&agent.kind, Some(pid), &cwd, None),
+                        Some(Err(why)) => Err(format!("agent cwd: {why}")),
+                        None => Err("agent cwd: agent cwd was not acquired".to_string()),
+                    },
+                    None => Err("agent process not found, so its directory is unknown".to_string()),
+                }
+            } else {
+                seen.logs.read_agent(&agent.kind, pid, &agent.cwd, hint.map(|(id, _)| id))
+            };
+            let logs = logs
                 .map(|mut logs| {
                     logs.guessed |= hint.is_some_and(|(_, guessed)| guessed);
                     logs
@@ -501,7 +583,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
     let jobs = seen.logs.read_jobs(Some(&table));
     let label = background::group_label(&jobs);
-    let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
     let (agents, unlisted_jobs) =
         with_jobs(agents, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
 
@@ -1410,6 +1491,7 @@ fn checkout_line<'a>(
 /// settings screen.
 pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let session = tc::cfg_str(cfg, "luvus_session", "default");
+    let configured = tc::cfg_strings(cfg, "agents", tc::agent_work::DEFAULT_AGENTS);
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
         if let Some(n) = args.get(at + 1) {
@@ -1437,7 +1519,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A poller that dies takes its explanation with it, and an
             // empty board looks exactly like a session with nothing in it.
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                poll(&poller, &mut seen, &polled_session)
+                poll(&poller, &mut seen, &polled_session, &configured)
             }));
             if let Err(payload) = step {
                 if let Ok(mut guard) = poller.lock() {
@@ -1955,7 +2037,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             p.dim.as_str(),
             pane_summary(panes.len(), hidden_opscope, resting.len(), show_idle),
         ));
-        for state_name in ["working", "blocked", "done", "idle"] {
+        for state_name in ["working", "blocked", "done", "idle", "unknown"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((
                     colour_of(state_name, &p),
@@ -2215,6 +2297,21 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 w.saturating_sub(1),
             ));
             body.push(String::new());
+            if let Some(cat) = agents.as_ref().ok().and_then(|agents| {
+                agents
+                    .iter()
+                    .find(|a| a.pane == d.pane && a.state_source == "no status reported")
+            }) {
+                for text in tc::wrap_words(
+                    &format!(
+                        "   catalogue: {} identified via {}; Luvus did not list this pane in agent list",
+                        cat.name, cat.authority
+                    ),
+                    w.saturating_sub(1),
+                ) {
+                    body.push(tc::seg(&[(p.dim.as_str(), text)], w.saturating_sub(1)));
+                }
+            }
             if let Some(explanation) = agents.as_ref().ok().and_then(|agents|
                 agents.iter().find(|a| a.pane == d.pane)).and_then(|a| a.work.logs.explanation()) {
                 for text in tc::wrap_words(&format!("   log source: {explanation}"), w.saturating_sub(1)) {
@@ -3438,6 +3535,58 @@ mod tests {
     }
 
     #[test]
+    fn a_catalogue_row_gives_way_to_the_job_that_reported_a_state() {
+        // Luvus lists no agent in pane 3, so the catalogue promotes its
+        // Claude (7) as `unknown`; that process is a job that says `blocked`.
+        // A second Claude (12) below the same shell makes a fresh look find
+        // neither, so the match is by the pid promoted. Pane 1's promoted
+        // Claude (6) runs no job and stays.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n6 10 claude claude\n11 1 bash bash\n7 11 claude claude --resume\n12 11 claude claude\n",
+        )
+        .map_err(String::from);
+        let panes: Vec<parse::Pane> = [("1", 10), ("3", 11)]
+            .iter()
+            .map(|&(id, root)| parse::Pane {
+                workspace: "web".into(),
+                pane_id: id.into(),
+                cwd: "/srv/web".into(),
+                root_pid: Some(root),
+                ..Default::default()
+            })
+            .collect();
+        let mut listed: Vec<Agent> = Vec::new();
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &["claude".to_string()]);
+        assert_eq!(listed.iter().filter(|a| promoted(a)).map(|a| a.pid).collect::<Vec<_>>(), [Some(6), Some(7)]);
+        let mut job = tc::agent_work::parse_job_state("resumed", r#"{"state":"blocked","cwd":"/srv/other"}"#).unwrap();
+        job.pid = Some(7);
+        file_jobs(&mut listed, &panes, vec![job], "background agents · via jobs", &table, 2.0e9, |_| None);
+        let rows: Vec<(&str, bool)> = listed.iter().map(|a| (a.pane.as_str(), a.job.is_some())).collect();
+        // Shown once, as the job, with the state it reported and its Explain panel.
+        assert_eq!(rows, vec![("1", false), ("", true)]);
+        assert_eq!(listed[1].state, background::state_word(listed[1].job.as_ref().unwrap()));
+        assert_ne!(listed[1].state, "unknown");
+    }
+
+    #[test]
+    fn a_promoted_agent_below_a_launcher_root_keeps_the_pid_discovery_found() {
+        // The pane's root is `npm exec codex` itself, not a shell: a fresh
+        // `agent_below` stops at the launcher, so the row keeps Codex's pid.
+        let table = tc::agent_work::parse_process_table(
+            "100 1 npm npm exec codex\n110 100 codex codex\n111 110 bash bash -c cargo test\n112 111 cargo cargo test\n",
+        )
+        .map_err(String::from);
+        let panes = [parse::Pane { workspace: "web".into(), pane_id: "1".into(), root_pid: Some(100), ..Default::default() }];
+        let mut listed: Vec<Agent> = Vec::new();
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &["codex".to_string()]);
+        assert_eq!((listed[0].kind.as_str(), listed[0].pid), ("codex", Some(110)));
+        let t = table.as_ref().unwrap();
+        assert_eq!(t.agent_below(100, "codex"), Some(100), "a fresh look lands on the launcher");
+        let work = tc::agent_work::Work::of(&table, listed[0].pid);
+        assert_eq!(work.tasks.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), ["cargo test"]);
+    }
+
+    #[test]
     fn background_agents_are_filed_under_the_workspace_they_belong_to() {
         // Pane 1's root shell (10) runs claude 6, a job resumed there, and
         // Luvus lists its Claude agent. Pane 3's shell (11) has claude 7 left
@@ -3711,7 +3860,7 @@ mod tests {
         let state = Arc::new(Mutex::new(State::default()));
         let mut seen = Seen::default();
 
-        poll(&state, &mut seen, "fixture");
+        poll(&state, &mut seen, "fixture", &[]);
         assert_eq!(
             event_baseline(&state),
             Some((1, 61)),
@@ -3719,7 +3868,7 @@ mod tests {
         );
         assert!(state.lock().unwrap().snapshot.is_ok());
 
-        poll(&state, &mut seen, "fixture");
+        poll(&state, &mut seen, "fixture", &[]);
         let guard = state.lock().unwrap();
         assert!(
             guard.snapshot.is_err(),
@@ -4074,5 +4223,61 @@ mod tests {
         keep_live(&mut seen, &live);
         let (returned, _) = measure_since(&mut seen, &a, "working", 100.0);
         assert_eq!(returned, 0.0);
+    }
+
+    #[test]
+    fn catalogue_fills_luvus_gaps_matches_aliases_and_ignores_generic_commands() {
+        let defaults: Vec<String> = tc::agent_work::DEFAULT_AGENTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let table = tc::agent_work::parse_process_table(
+            "\
+100 1 bash bash
+110 100 agy agy
+111 110 sh /bin/sh -c cargo test
+112 111 cargo cargo test
+200 1 bash bash
+210 200 forge /home/u/.foundry/bin/forge test
+300 1 bash bash
+310 300 vibe /usr/bin/vibe
+400 1 bash bash
+410 400 custom-agent /opt/bin/custom-agent
+",
+        );
+        let pane = |id: &str, root: u32| parse::Pane {
+            pane_id: id.into(),
+            workspace: "work".into(),
+            branch: "main".into(),
+            cwd: "/srv/repo".into(),
+            command: "bash".into(),
+            root_pid: Some(root),
+            ..Default::default()
+        };
+        let panes = [pane("1", 100), pane("2", 200), pane("3", 300), pane("4", 400)];
+        let mut listed = Vec::new();
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &defaults);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].pane, "1");
+        assert_eq!(listed[0].name, "agy");
+        assert_eq!(listed[0].state, "unknown");
+        assert_eq!(listed[0].state_source, "no status reported");
+        assert_eq!(listed[0].authority, "process");
+
+        // A Luvus-reported `antigravity-cli` agent resolves to the `agy` pid and its shells.
+        let t = table.as_ref().unwrap();
+        assert_eq!(t.agent_below(100, "antigravity-cli"), Some(110));
+        assert_eq!(t.background_shells(110)[0].label, "cargo test");
+
+        // A name added through `agents` becomes an agent row under Luvus too,
+        // while an already-listed pane is never duplicated.
+        let mut custom = defaults.clone();
+        custom.push("custom-agent".into());
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &custom);
+        let names: Vec<(&str, &str)> = listed
+            .iter()
+            .map(|a| (a.pane.as_str(), a.name.as_str()))
+            .collect();
+        assert_eq!(names, [("1", "agy"), ("4", "custom-agent")]);
     }
 }

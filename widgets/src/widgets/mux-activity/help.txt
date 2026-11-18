@@ -102,17 +102,18 @@ the first-ranked agent first, each under its label and a rule.
 Enter (or f) jumps to whatever is selected: the agent's pane, or the tab
 holding that process.
 
-A Herdr client, not a general agent monitor: the inventory and the lifecycle
-states come from `herdr agent list`, the workspace labels from
+A Herdr client, backed by the shared agent catalogue: the inventory and the
+lifecycle states come from `herdr agent list`, the workspace labels from
 `herdr workspace list`, and the pid behind each pane from
-`herdr pane process-info`. Any agent kind Herdr recognises appears here with
-no change to mux-activity.
+`herdr pane process-info`. Any agent kind Herdr recognises appears with the
+state Herdr reports; panes running a configured `agents` program that Herdr did
+not report appear in AGENTS as `unknown` (`no status reported`).
 
     blocked   waiting on an approval or a question, right now
     done      finished background work you have not looked at yet
     working   busy
     idle      ready for input
-    unknown   an agent is present but Herdr cannot classify it
+    unknown   an agent is present with no reported state, or Herdr cannot classify it
 
 Each row also carries the workspace, how long the agent has held its current
 state, and the real CPU and memory of its process.
@@ -155,18 +156,20 @@ take no workspace argument and answer for whichever workspace the session is
 focused on. Entries rather than files: git reports a wholly untracked
 directory as one entry.
 
-A Luvus client, not a general agent monitor. Every figure comes from the
-session's own Universal Harness Protocol 1.0 answers: the pane inventory from
-`luvus uhp snapshot`, the agents from `luvus agent list`, the two
-coordination sections from `luvus task list` and `luvus lease list`, claimable
-work from `luvus task next`, resumable sessions from `luvus agent sessions`,
-and the focused checkout from `luvus git status` and `luvus worktree list`.
+A Luvus client, backed by the shared agent catalogue. Every reported figure
+comes from the session's own Universal Harness Protocol 1.0 answers: the pane
+inventory from `luvus uhp snapshot`, the agents from `luvus agent list`, the
+two coordination sections from `luvus task list` and `luvus lease list`,
+claimable work from `luvus task next`, resumable sessions from
+`luvus agent sessions`, and the focused checkout from `luvus git status` and
+`luvus worktree list`. Panes running a configured `agents` program that Luvus
+did not report appear in AGENTS as `unknown` (`no status reported`).
 
     blocked   waiting on an approval or a question, right now
     done      finished work you have not looked at yet
     working   busy
     idle      ready for input
-    unknown   an agent is present and Luvus classified it as none of those
+    unknown   an agent is present with no reported state, or Luvus classified it as none of those
 
 Each agent also carries how long it has held that state, and how the state was
 decided - an integration's report and a reading off screen text are different

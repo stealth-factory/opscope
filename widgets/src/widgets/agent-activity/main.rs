@@ -76,7 +76,7 @@ fn poll(shared: Arc<Mutex<model::Snapshot>>, wake: Arc<Wake>, refresh: tc::Refre
         let reading = refresh.start();
         let sample = tc::agent_work::read_process_table().map(|table| {
             let pids: Vec<_> = table
-                .agents(model::NAMES)
+                .catalogue_agents()
                 .iter()
                 .map(|(pid, _)| *pid)
                 .collect();

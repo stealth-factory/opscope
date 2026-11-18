@@ -1,6 +1,6 @@
 Local coding agents, their subagents, and background shell work.
 
-A standalone board of Claude Code, Codex and OpenCode processes on this machine, with child work from shared local session readers and the process table. No multiplexer or hooks required. Log states are last recorded; newest-session guesses and source failures are visible. Finished rows are bounded to the matched sessions of live parents.
+A standalone board of local coding-agent processes from the shared catalogue, with child shells from the process table and subagents from Claude Code, Codex and OpenCode session logs. No multiplexer or hooks required. Log states are last recorded; newest-session guesses and source failures are visible. Finished rows are bounded to the matched sessions of live parents.
 
     agent-activity [-n SECONDS]
 

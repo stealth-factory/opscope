@@ -475,10 +475,16 @@ general agent monitor:
 - `herdr pane list` + `herdr pane process-info` — what every other pane runs,
   paired with `/proc` for real CPU and RSS
 
-**Any agent kind Herdr recognises appears with no code change** — around twenty
-of them, including claude, codex, copilot, cursor, antigravity, gemini and grok.
-State quality depends on the per-agent integration hook being installed; check
-with `herdr integration status`.
+**Any agent kind Herdr recognises appears with no code change** — including
+`claude`, `codex`, `copilot`, `cursor`, `antigravity-cli`, `gemini`, `grok`,
+`pi`, `omp`, `droid`, `devin`, `kimi`, `opencode`, `qodercli`, `qwen` and
+`kiro`. State quality depends on the per-agent integration hook being
+installed; check with `herdr integration status`. Herdr's reported names are
+matched to local processes through the shared `tc::agent_work` catalogue
+(for example, `antigravity-cli` to `agy`, `cursor` to `cursor-agent`, `kiro` to
+`kiro-cli`). When a pane runs an agent in the shared catalogue (or the `agents`
+setting) that Herdr did not list, it still appears under AGENTS with `unknown`
+state and `no status reported`.
 
 **Idle panes are detected exactly**, not guessed: a busy pane's foreground pid
 differs from its own shell pid. Command names come from `argv`, so a pane shows
@@ -762,10 +768,13 @@ The list commands print JSON on their own since Luvus 0.14, which refuses
 `--json` on `agent list`; an older Luvus that prints a table is asked again
 with `--json`.
 
-**`agent list` is what decides who is an agent.** A plain shell sitting at a
-prompt looks enough like an agent from the outside that taking the wider
-reading would list every idle shell as an idle agent; PANES is what is left
-once the real agents are taken out of it.
+**`agent list` comes first, and the shared catalogue fills gaps.** Every agent
+Luvus reports in `agent list` is shown with Luvus's state and authority; a
+snapshot pane not in `agent list` whose process tree (or command, if `ps` is
+unavailable) matches the shared `tc::agent_work` catalogue or the `agents`
+setting also joins AGENTS with `unknown` state (`state via no status reported`).
+A plain shell sitting at a prompt never matches, so idle shells stay in IDLE;
+PANES is what is left once the agents are taken out of it.
 
 **Durations are marked `≥`** when the state was already in place before the
 widget started. UHP does not timestamp a state change, so a duration is
@@ -837,17 +846,30 @@ so rather than focusing something arbitrary.
 `backend` is `auto`, or `rex`, `herdr` or `luvus` to read that one wherever
 `mux-activity` starts; `--mux` does the same for one run. `refresh` is the maximum
 idle delay between reads under every multiplexer; events wake one sooner.
+`agents` is the list of command names that count as coding agents across Rex,
+Herdr and Luvus — seeded from `tc::agent_work`'s shared catalogue. Agents
+whose command another program shares (`forgecode`, `continue`, `vibe`, `goose`,
+and Cursor's newer `agent` launcher under `cursor-agent`) match only with a
+second clue: an install or script path, or for `goose` the way it was run (bare,
+`session` or `run`, never pressly/goose's `goose up`). Under Rex, which reports
+no arguments, the catalogue needs the path clue for `goose`; a goose that
+reports itself to Rex, as current versions do, shows regardless, with its own
+state. Each is switched off by removing its
+own name. Bare `kiro` is the Kiro IDE and is not matched (the CLI is
+`kiro-cli`); Sourcegraph's Amp is not listed, because `amp` is also a text
+editor — add `amp`, or any other command, to match it unconditionally.
 
 - **Rex:** `rex_server` picks a Rex server — a host label from `rex hosts`,
   or an address; empty is the CLI's own default. A second `mux-activity` with
   `rex_server` set is how to watch another machine, and it is only used when
-  `mux-activity` is in no multiplexer at all. `agents` is the list of command names
-  that count as coding agents — a program reporting under any other app name
-  still shows, with its state, in PROCESSES.
-- **Herdr:** nothing to set. Herdr names its agents itself.
+  `mux-activity` is in no multiplexer at all. Under Rex, a program reporting
+  under an app name outside `agents` still shows, with its state, in PROCESSES.
+- **Herdr:** any agent `herdr agent list` reports always shows; `agents` adds
+  command names for panes Herdr did not recognise.
 - **Luvus:** `luvus_session` is which Luvus server session to read;
   `luvus session list` names them, and `default` is the one `luvus` starts on
-  its own.
+  its own. Any agent `luvus agent list` reports always shows; `agents` adds
+  command names for panes Luvus did not recognise.
 
 A `rex_panes`, `herdr_panes` or `luvus_panes` section from before `mux-activity` is
 still read when there is no `mux-activity` section — `server` as `rex_server`,

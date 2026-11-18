@@ -7,8 +7,9 @@ Local coding-agent processes and the child work below them, without a multiplexe
 ```text
 ╺━ AGENT ACTIVITY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  2 named agent processes · 1 open log rows · 1 observed shell jobs
- Claude Code · Codex · OpenCode — local processes
- Log sessions are newest-cwd guesses; states are last recorded.
+ Shared agent catalogue — local processes and child shells;
+ session logs for Claude Code, Codex and OpenCode (last recorded,
+ not a heartbeat).
 
 ▸ claude · pid 420 · process present
   cwd /srv/project
@@ -17,17 +18,19 @@ Local coding-agent processes and the child work below them, without a multiplexe
    latest finished: 1 of 1 in matched session
    └ Review  done · via log · 2026-11-11T12:00:00Z
 
-  codex · pid 560 · process present
+  agy · pid 560 · process present
   cwd /srv/another-project
-   no matching session log or observed shell jobs
+   no session-log reader for this agent; no observed shell jobs
 
 ↑↓ select  [↵]sources  [r]refresh  [,]settings  [q]quit
 ```
 
 The preview is illustrative. Running the widget shows only measured local
 processes and recorded lifecycle states. A named process is not proof of an
-active turn. The board supports Claude Code, Codex and OpenCode; it does not
-include cloud agents or remote machines.
+active turn. The board discovers every CLI coding agent in `tc::agent_work`'s
+shared catalogue, with child shells for all of them and local session-log
+readers for Claude Code, Codex and OpenCode; it does not include cloud agents
+or remote machines.
 
 ## Sources and limits
 

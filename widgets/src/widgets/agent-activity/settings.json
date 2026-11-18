@@ -1,5 +1,5 @@
 {
-  "_comment": "Local Claude Code, Codex and OpenCode processes and their child work. No multiplexer or hooks required. Session guesses and source failures remain visible.",
+  "_comment": "Local coding-agent processes from the shared catalogue and their child work. No multiplexer or hooks required. Session guesses and source failures remain visible.",
   "_schema": {
     "refresh": { "minimum": 0.5, "maximum": 86400 },
     "finished_per_agent": { "minimum": 0, "maximum": 100 }
