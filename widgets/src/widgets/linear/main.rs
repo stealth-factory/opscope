@@ -73,6 +73,12 @@ struct Quota {
     at: f64,
 }
 
+/// A quota count and the time it was observed, as a reading carries them.
+fn quota_from_value(v: &serde_json::Value) -> Option<(i64, f64)> {
+    let pair = v.as_array()?;
+    Some((pair.first()?.as_i64()?, pair.get(1)?.as_f64()?))
+}
+
 /// Why a request brought back no data.
 ///
 /// `said` is what the screen shows, worded exactly as it always was.
@@ -83,14 +89,15 @@ struct Quota {
 struct Failure {
     said: String,
     limit: Option<parse::RateLimit>,
-    /// The walk stopped because another pane took its lease over: not a
-    /// failure of Linear's, and that pane's answer is the one to show.
-    lost_lease: bool,
+    /// The walk stopped at a coordination boundary: another pane took its
+    /// lease or shut the rate gate. This is not Linear's failure and is not
+    /// published as a refusal of this pane's own.
+    coordinated_stop: bool,
 }
 
 impl From<String> for Failure {
     fn from(said: String) -> Self {
-        Failure { said, limit: None, lost_lease: false }
+        Failure { said, limit: None, coordinated_stop: false }
     }
 }
 
@@ -122,7 +129,7 @@ fn graphql(
         return Err(Failure {
             said: tc::refused(status, &text),
             limit: Some(limit),
-            lost_lease: false,
+            coordinated_stop: false,
         });
     }
     if let Some(left) = limit.remaining {
@@ -134,13 +141,13 @@ fn graphql(
     let data = tc::parse_source_json(&text).map_err(|e| Failure {
         said: e.to_string(),
         limit: Some(limit),
-        lost_lease: false,
+        coordinated_stop: false,
     })?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(Failure {
             said: first["message"].as_str().unwrap_or("").chars().take(80).collect(),
             limit: Some(limit),
-            lost_lease: false,
+            coordinated_stop: false,
         });
     }
     Ok(data["data"].clone())
@@ -150,8 +157,8 @@ fn graphql(
 ///
 /// The bool says the cap was hit, so the screen can mark the count as a
 /// floor rather than reporting a truncated total as a total. `renew` is
-/// asked before every request: `false` means another pane took the
-/// reading over, and the walk stops rather than ask twice.
+/// asked before every request: `false` means another pane took the reading
+/// over or shut the rate gate, and the walk stops rather than ask again.
 fn pages(
     tok: &str,
     query: &str,
@@ -165,9 +172,9 @@ fn pages(
     for _ in 0..PAGE_CAP {
         if !renew() {
             return Err(Failure {
-                said: "another pane took over".into(),
+                said: "another pane stopped the walk".into(),
                 limit: None,
-                lost_lease: true,
+                coordinated_stop: true,
             });
         }
         let mut v = variables.clone();
@@ -650,10 +657,10 @@ struct Board {
     projects_capped: bool,
     /// When the walk finished, in Unix seconds.
     fetched: f64,
-    /// Linear's own count of this hour's requests left, as the walk's last
-    /// answer gave it - so a pane that did not fetch shows the figure the
-    /// one that did was told, rather than one of its own from an hour ago.
-    left: Option<i64>,
+    /// Linear's own count of this hour's requests left and when Linear said
+    /// it. A later answer without the allowance header leaves the previous
+    /// observation's time intact instead of making an old count look new.
+    left: Option<(i64, f64)>,
 }
 
 /// What arrived and what left since the window began.
@@ -671,8 +678,9 @@ struct Flow {
     completed_capped: bool,
     /// When the walk finished, in Unix seconds.
     fetched: f64,
-    /// Requests left this hour, as for `Board::left`.
-    left: Option<i64>,
+    /// Requests left this hour and their observation time, as for
+    /// `Board::left`.
+    left: Option<(i64, f64)>,
 }
 
 impl Board {
@@ -705,7 +713,7 @@ impl Board {
             cycles_capped: v["cycles_capped"].as_bool()?,
             projects_capped: v["projects_capped"].as_bool()?,
             fetched: v["fetched"].as_f64()?,
-            left: v["left"].as_i64(),
+            left: quota_from_value(&v["left"]),
         })
     }
 }
@@ -733,7 +741,7 @@ impl Flow {
             created_capped: v["created_capped"].as_bool()?,
             completed_capped: v["completed_capped"].as_bool()?,
             fetched: v["fetched"].as_f64()?,
-            left: v["left"].as_i64(),
+            left: quota_from_value(&v["left"]),
         })
     }
 }
@@ -766,7 +774,7 @@ fn fetch_board(
         cycles_capped,
         projects_capped,
         fetched: tc::now(),
-        left: quota.lock().ok().and_then(|g| g.requests),
+        left: quota.lock().ok().and_then(|g| g.requests.map(|n| (n, g.at))),
     })
 }
 
@@ -801,7 +809,7 @@ fn fetch_flow(
         created_capped,
         completed_capped,
         fetched: tc::now(),
-        left: quota.lock().ok().and_then(|g| g.requests),
+        left: quota.lock().ok().and_then(|g| g.requests.map(|n| (n, g.at))),
     })
 }
 
@@ -1044,9 +1052,9 @@ fn derive(
         // is on screen came back from Linear, whichever pane asked. A half
         // older than its hold is said by the freshness line under it.
         fetched: board.fetched.max(flow.fetched),
-        left: [(board.left, board.fetched), (flow.left, flow.fetched)]
+        left: [board.left, flow.left]
             .into_iter()
-            .filter_map(|(left, at)| left.map(|n| (n, at)))
+            .flatten()
             .max_by(|a, b| a.1.total_cmp(&b.1)),
         // A config file others can read is a notice now, raised by core
         // from load_config, rather than an error on a pass that worked.
@@ -1059,8 +1067,14 @@ fn derive(
 /// other widget.
 const STORE: &str = "linear";
 /// Linear's hourly allowance covers every query this widget makes, so one
-/// spent limit stops every reading.
-const BUCKET: &str = "linear";
+/// spent limit stops every reading made with that credential. The key is
+/// fingerprinted like the readings: one credential's refusal must not pause
+/// a fetch made with another.
+const BUCKET: &str = "linear.limit";
+
+fn rate_gate(cache: &mut tc::readings::Cache, tok: &str) -> String {
+    tc::readings::key(cache, BUCKET, 1, &[], &[tok])
+}
 /// One request's lease: its thirty-second timeout and a margin. Renewed
 /// before every page, so a pane that dies mid-walk holds the reading up for
 /// one request rather than the whole walk.
@@ -1068,8 +1082,9 @@ const LEASE_FOR: f64 = 45.0;
 
 /// The store's limits.
 ///
-/// Issue titles are stored, so rows nobody has published for two hours are
-/// forgotten. A board at the walk's cap of 3,000 open issues serialises to
+/// Issue titles are stored, so old rows become eligible for cleanup after
+/// two hours without a publication and disappear on a later save, not on a
+/// deadline. A board at the walk's cap of 3,000 open issues serialises to
 /// a little over a megabyte, and a publish writes it twice - the reading and
 /// the last good copy kept beside it - so one value may take four. The file
 /// holds that board and a flow per window anyone has open.
@@ -1105,33 +1120,35 @@ struct Drawn {
 fn bring_up_to_date(
     cache: &mut tc::readings::Cache,
     key: &str,
+    gate_key: &str,
     policy: tc::readings::Policy,
     gated: bool,
     activity: &tc::Refresh,
     fetch: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<serde_json::Value, Failure>,
 ) {
-    // While the gate is shut a reading already in hand is all there is to
-    // show, so the store is not even asked for a lease.
-    if gated && cache.good.contains_key(key) {
+    if gated {
+        // The gate stops fetching, not reading. Recall without claiming a
+        // lease so a follower still takes a newer answer another pane
+        // published before it stopped asking.
+        tc::readings::recall(cache, key, policy.ttl);
         return;
     }
     let mut ticket = match tc::readings::take(cache, key, policy) {
         tc::readings::Take::Fetch(ticket) => ticket,
         _ => return,
     };
-    if gated {
-        // Dropped: the lease goes back, and nothing is asked.
-        return;
-    }
     let work = activity.start();
-    let got = fetch(&mut || ticket.renew());
+    // A multi-page walk checks the gate again before every request, so a
+    // limit another pane met mid-walk stops the next page too.
+    let got = fetch(&mut || ticket.closed(gate_key).is_none() && ticket.renew());
     drop(work);
     match got {
         Ok(value) => {
             ticket.publish(value);
         }
-        // The pane that took over publishes; this one shows what it does.
-        Err(failure) if failure.lost_lease => {}
+        // Coordination is not a refusal of this pane's own. Another pane
+        // publishes the answer or the gate this pane stopped for.
+        Err(failure) if failure.coordinated_stop => {}
         Err(failure) => {
             let limit = failure.limit.filter(|l| l.limited);
             let until = limit.and_then(|l| parse::retry_at(&l, tc::now()));
@@ -1142,10 +1159,33 @@ fn bring_up_to_date(
             };
             ticket.refuse(&why, until);
             if let Some(until) = until {
-                tc::readings::shut(cache, BUCKET, until, &why);
+                tc::readings::shut(cache, gate_key, until, &why);
             }
         }
     }
+}
+
+/// Bring the board and flow up to date in order. The gate returned is the
+/// fresh one the flow used, so the status line does not wait a pass to show a
+/// limit the board just met.
+#[allow(clippy::too_many_arguments)]
+fn update_readings(
+    cache: &mut tc::readings::Cache,
+    board_key: &str,
+    flow_key: &str,
+    gate_key: &str,
+    policy: tc::readings::Policy,
+    activity: &tc::Refresh,
+    board: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<serde_json::Value, Failure>,
+    flow: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<serde_json::Value, Failure>,
+) -> Option<(f64, String)> {
+    let gate = tc::readings::gate(cache, gate_key);
+    bring_up_to_date(cache, board_key, gate_key, policy, gate.is_some(), activity, board);
+    // The board's last answer may have shut the gate. Re-read it before the
+    // flow so the same pass cannot send one more request through it.
+    let gate = tc::readings::gate(cache, gate_key);
+    bring_up_to_date(cache, flow_key, gate_key, policy, gate.is_some(), activity, flow);
+    gate
 }
 
 /// A span until a moment, as the freshness line says it.
@@ -1175,22 +1215,28 @@ fn one_pass(
 ) {
     let since = flow_since(days, Utc::now());
     let (board_key, flow_key) = reading_keys(cache, tok, days, &since);
-    let gate = tc::readings::gate(cache, BUCKET);
+    let gate_key = rate_gate(cache, tok);
     let policy = tc::readings::Policy::new(refresh, LEASE_FOR);
     let first = drawn.board.is_none();
-    bring_up_to_date(cache, &board_key, policy, gate.is_some(), activity, |renew| {
-        fetch_board(tok, quota, renew, |teams| {
-            if first {
-                if let Ok(mut guard) = state.lock() {
-                    guard.teams = wanted_teams(teams, keep, exclude);
+    let gate = update_readings(
+        cache,
+        &board_key,
+        &flow_key,
+        &gate_key,
+        policy,
+        activity,
+        |renew| {
+            fetch_board(tok, quota, renew, |teams| {
+                if first {
+                    if let Ok(mut guard) = state.lock() {
+                        guard.teams = wanted_teams(teams, keep, exclude);
+                    }
                 }
-            }
-        })
-        .map(|b| b.to_value())
-    });
-    bring_up_to_date(cache, &flow_key, policy, gate.is_some(), activity, |renew| {
-        fetch_flow(tok, days, &since, quota, renew).map(|f| f.to_value())
-    });
+            })
+            .map(|b| b.to_value())
+        },
+        |renew| fetch_flow(tok, days, &since, quota, renew).map(|f| f.to_value()),
+    );
 
     // Decoded only when a newer reading arrived: the board is most of a
     // megabyte, and this runs every few seconds.
@@ -1231,8 +1277,8 @@ fn one_pass(
 /// the day it starts. The key goes in only as a fingerprint.
 fn reading_keys(cache: &mut tc::readings::Cache, tok: &str, days: i64, since: &str) -> (String, String) {
     let day: String = since.chars().take(10).collect();
-    let board = tc::readings::key(cache, "linear.board", 1, &[], &[tok]);
-    let flow = tc::readings::key(cache, "linear.flow", 1, &[&days.to_string(), &day], &[tok]);
+    let board = tc::readings::key(cache, "linear.board", 2, &[], &[tok]);
+    let flow = tc::readings::key(cache, "linear.flow", 2, &[&days.to_string(), &day], &[tok]);
     (board, flow)
 }
 
@@ -1277,8 +1323,16 @@ fn report(
             p.refused = Some((why.clone(), *until));
         }
     }
-    let sharing = tc::readings::sharing_rows(cache, &found, now, usize::MAX / 2).join("\n");
-    (err, sharing)
+    let width = usize::MAX / 2;
+    let mut rows = tc::readings::sharing_rows(cache, &found, now, width);
+    if cache.store.is_none() && !cache.sharing_off.is_empty() {
+        // `sharing_rows` explains the disabled or unavailable store instead
+        // of the readings. Keep the refusal alongside that explanation when
+        // an old board is still on screen: a quiet stale board must not look
+        // like a quiet, healthy source.
+        rows.extend(tc::readings::provenance_rows(&found, now, width));
+    }
+    (err, rows.join("\n"))
 }
 
 struct Palette {
@@ -4717,11 +4771,31 @@ mod tests {
     }
 
     #[test]
+    fn quota_counts_keep_their_own_observation_times() {
+        let mut board = a_board();
+        board.fetched = 40.0;
+        board.left = Some((100, 10.0));
+        let mut flow = a_flow();
+        flow.fetched = 20.0;
+        flow.left = Some((90, 30.0));
+
+        // Both halves serialise the count and the time Linear actually
+        // reported it. The board completing last must not make its older
+        // quota observation replace the flow's newer one.
+        let board = Board::from_value(&board.to_value()).unwrap();
+        let flow = Flow::from_value(&flow.to_value()).unwrap();
+        assert_eq!(board.left, Some((100, 10.0)));
+        assert_eq!(flow.left, Some((90, 30.0)));
+        let state = derive(&board, &flow, &[], &[], noon_on_the_tenth());
+        assert_eq!(state.left, Some((90, 30.0)));
+    }
+
+    #[test]
     fn a_failure_reads_as_the_message_it_always_was() {
         let f = Failure {
             said: "HTTP 429: slow down".into(),
             limit: Some(parse::rate_limit(429, &[], "")),
-            lost_lease: false,
+            coordinated_stop: false,
         };
         assert!(f.limit.is_some_and(|l| l.limited));
         let shown: String = f.into();
@@ -4769,12 +4843,12 @@ mod tests {
         let mut asked = 0;
         for pane in [&mut one, &mut two] {
             let (board_key, flow_key) = reading_keys(pane, TOKEN, 14, since);
-            bring_up_to_date(pane, &board_key, policy(), false, &activity, |renew| {
+            bring_up_to_date(pane, &board_key, BUCKET, policy(), false, &activity, |renew| {
                 assert!(renew());
                 asked += 1;
                 Ok(a_board().to_value())
             });
-            bring_up_to_date(pane, &flow_key, policy(), false, &activity, |renew| {
+            bring_up_to_date(pane, &flow_key, BUCKET, policy(), false, &activity, |renew| {
                 assert!(renew());
                 asked += 1;
                 Ok(a_flow().to_value())
@@ -4814,6 +4888,19 @@ mod tests {
     }
 
     #[test]
+    fn each_credential_has_its_own_rate_gate() {
+        let mut cache = tc::readings::Cache::default();
+        let other_token = "lin_api_another_fake_key_1111";
+        let one = rate_gate(&mut cache, TOKEN);
+        let other = rate_gate(&mut cache, other_token);
+        assert_ne!(one, other);
+        assert!(!one.contains(TOKEN) && !other.contains(other_token));
+        tc::readings::shut(&mut cache, &one, tc::now() + 600.0, "too many requests");
+        assert!(tc::readings::gate(&mut cache, &one).is_some());
+        assert!(tc::readings::gate(&mut cache, &other).is_none());
+    }
+
+    #[test]
     fn every_pane_on_a_day_counts_from_the_same_midnight() {
         let morning = chrono::DateTime::parse_from_rfc3339("2026-01-14T00:00:01Z").unwrap();
         let night = chrono::DateTime::parse_from_rfc3339("2026-01-14T23:59:59Z").unwrap();
@@ -4824,22 +4911,129 @@ mod tests {
     }
 
     #[test]
+    fn a_board_rate_limit_stops_the_flow_in_the_same_pass() {
+        let mut cache = tc::readings::Cache::default();
+        let (board_key, flow_key) = reading_keys(&mut cache, TOKEN, 14, "2026-01-01");
+        let activity = tc::Refresh::default();
+        let mut flow_asked = false;
+        let gate = update_readings(
+            &mut cache,
+            &board_key,
+            &flow_key,
+            BUCKET,
+            policy(),
+            &activity,
+            |_| {
+                let headers = vec![("retry-after".to_string(), "600".to_string())];
+                Err(Failure {
+                    said: "HTTP 429".into(),
+                    limit: Some(parse::rate_limit(429, &headers, "")),
+                    coordinated_stop: false,
+                })
+            },
+            |_| {
+                flow_asked = true;
+                Ok(a_flow().to_value())
+            },
+        );
+        assert!(!flow_asked, "the flow went through the gate the board had just shut");
+        let (until, why) = gate.expect("the new gate is returned for this pass's status");
+        assert!(until > tc::now() + 590.0);
+        assert_eq!(why, "too many requests");
+        assert!(!cache.good.contains_key(&flow_key));
+    }
+
+    #[test]
+    fn a_shut_gate_still_loads_a_newer_shared_reading() {
+        let (mut one, mut two) = two_panes("gated-follow");
+        let activity = tc::Refresh::default();
+        let (board_key, _) = reading_keys(&mut one, TOKEN, 14, "2026-01-01");
+        bring_up_to_date(&mut one, &board_key, BUCKET, policy(), false, &activity, |_| {
+            Ok(a_board().to_value())
+        });
+        bring_up_to_date(&mut two, &board_key, BUCKET, policy(), false, &activity, |_| {
+            panic!("the follower did not take the first published board")
+        });
+        assert!(!board_of(&two, &board_key).open_capped);
+
+        let mut newer = a_board();
+        newer.open_capped = true;
+        // Expire the publisher's hold; changing the next policy does not
+        // shorten the hold already recorded beside its live reading.
+        one.live.get_mut(&board_key).unwrap().2 = 0.0;
+        bring_up_to_date(&mut one, &board_key, BUCKET, policy(), false, &activity, |_| {
+            Ok(newer.to_value())
+        });
+        tc::readings::follow(&mut two);
+        bring_up_to_date(&mut two, &board_key, BUCKET, policy(), true, &activity, |_| {
+            panic!("a gated pane fetched instead of taking the newer board")
+        });
+        assert!(board_of(&two, &board_key).open_capped);
+    }
+
+    #[test]
+    fn a_gate_closed_between_pages_stops_the_next_request() {
+        let (mut one, mut two) = two_panes("between-pages");
+        let (board_key, _) = reading_keys(&mut one, TOKEN, 14, "2026-01-01");
+        let activity = tc::Refresh::default();
+        let mut asks = 0;
+        bring_up_to_date(&mut one, &board_key, BUCKET, policy(), false, &activity, |renew| {
+            asks += 1;
+            assert!(renew(), "the first request did not start");
+            tc::readings::shut(&mut two, BUCKET, tc::now() + 600.0, "too many requests");
+            asks += 1;
+            assert!(!renew(), "the next request went through another pane's new gate");
+            Err(Failure { coordinated_stop: true, ..Default::default() })
+        });
+        assert_eq!(asks, 2);
+        assert!(tc::readings::gate(&mut one, BUCKET).is_some());
+        assert!(!one.good.contains_key(&board_key));
+    }
+
+    #[test]
+    fn an_unshared_pane_still_reports_a_failed_refresh_with_old_data() {
+        let mut cache = tc::readings::Cache {
+            sharing_off: "share_readings is off".into(),
+            ..Default::default()
+        };
+        let (board_key, flow_key) = reading_keys(&mut cache, TOKEN, 14, "2026-01-01");
+        let activity = tc::Refresh::default();
+        let expired = tc::readings::Policy::new(0.0, LEASE_FOR);
+        bring_up_to_date(&mut cache, &board_key, BUCKET, expired, false, &activity, |_| {
+            Ok(a_board().to_value())
+        });
+        bring_up_to_date(&mut cache, &flow_key, BUCKET, expired, false, &activity, |_| {
+            Ok(a_flow().to_value())
+        });
+        bring_up_to_date(&mut cache, &board_key, BUCKET, expired, false, &activity, |_| {
+            Err(Failure { said: "HTTP 503: unavailable".into(), ..Default::default() })
+        });
+
+        // Both old readings still make a complete board, but the refusal
+        // belongs beside the not-sharing explanation, not behind it.
+        let (err, said) = report(&cache, &board_key, &flow_key, None, true, tc::now());
+        assert!(err.is_empty(), "an old but complete board is not itself an error: {err}");
+        assert!(said.contains("not sharing readings: share_readings is off"), "{said}");
+        assert!(said.contains("HTTP 503: unavailable, next ask in"), "{said}");
+    }
+
+    #[test]
     fn a_rate_limit_stops_every_pane_and_each_says_when_it_asks_again() {
         let (mut one, mut two) = two_panes("rate-limit");
         let since = "2026-01-01T00:00:00.000Z";
         let activity = tc::Refresh::default();
         let (board_key, flow_key) = reading_keys(&mut one, TOKEN, 14, since);
         // The second pane has a board from earlier, the first has nothing.
-        bring_up_to_date(&mut two, &board_key, policy(), false, &activity, |_| {
+        bring_up_to_date(&mut two, &board_key, BUCKET, policy(), false, &activity, |_| {
             Ok(a_board().to_value())
         });
         // Asked for the flow, Linear says the hour is spent for ten minutes.
-        bring_up_to_date(&mut one, &flow_key, policy(), false, &activity, |_| {
+        bring_up_to_date(&mut one, &flow_key, BUCKET, policy(), false, &activity, |_| {
             let headers = vec![("retry-after".to_string(), "600".to_string())];
             Err(Failure {
                 said: "HTTP 429".into(),
                 limit: Some(parse::rate_limit(429, &headers, "")),
-                lost_lease: false,
+                coordinated_stop: false,
             })
         });
         let now = tc::now();
@@ -4852,7 +5046,7 @@ mod tests {
             // has never had.
             let (board_key, flow_key) = reading_keys(pane, TOKEN, 7, since);
             for key in [&board_key, &flow_key] {
-                bring_up_to_date(pane, key, policy(), true, &activity, |_| {
+                bring_up_to_date(pane, key, BUCKET, policy(), true, &activity, |_| {
                     panic!("asked Linear through a shut gate")
                 });
             }
@@ -4875,7 +5069,7 @@ mod tests {
             asks += 1;
             false
         });
-        assert!(got.is_err_and(|f| f.lost_lease));
+        assert!(got.is_err_and(|f| f.coordinated_stop));
         assert_eq!(asks, 1);
     }
 

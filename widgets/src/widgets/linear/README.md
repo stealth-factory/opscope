@@ -292,18 +292,22 @@ of the two readings on screen came back from Linear, whichever pane asked.
 `r` asks again for anything older than thirty seconds.
 
 When Linear answers **too many requests** and says when to come back -
-`Retry-After`, or the hour's reset - every pane stops asking until then, and
-each says when: `cached 7m ago · too many requests, next ask in 12m`. A pane
-with nothing to draw yet says it as an error instead.
+`Retry-After`, or the hour's reset - every pane using that API key stops
+asking until then, and each says when:
+`cached 7m ago · too many requests, next ask in 12m`. A pane with nothing to
+draw yet says it as an error instead.
 
 The answers are kept in `~/.local/state/opscope/linear.sqlite`, created
 readable only by you. **They include issue identifiers, titles and links,
-and project and lead names**, as Linear returned them; anything nobody has
-fetched for **2 hours** is forgotten, and the API key never goes in - it
-appears in the file only as a fingerprint. A board at the walk's cap of
-3,000 open issues is a little over a megabyte. Set `share_readings` to
-`false` to have a pane ask on its own and keep nothing on disk; the line
-under the status line then says it is not sharing.
+and project and lead names**, as Linear returned them. A row becomes
+eligible for routine cleanup after **2 hours** without a publication and is
+deleted only during a later save. That is not a retention deadline: data can
+stay longer after every pane exits, and refusals also update their rows. The
+API key never goes in - it appears in the file only as a fingerprint. A board
+at the walk's cap of 3,000 open issues is a little over a megabyte. Set
+`share_readings` to `false` to have a pane ask on its own and write nothing
+to disk. That does not delete an existing file; the line under the status
+line says the pane is not sharing.
 
 Nothing Linear counts arrives with a total, so **anything counted here is
 walked**, and a walk that does not reach the end says so rather than quietly

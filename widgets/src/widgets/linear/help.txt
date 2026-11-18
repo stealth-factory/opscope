@@ -15,9 +15,11 @@ together produces a number that means nothing.
 Several linear panes on one machine share what Linear answers: one pane walks
 the workspace each refresh and the rest draw their own teams from its answer.
 A line under the status line says which pane fetched it and how long ago. The
-answers, issue titles included, are kept for up to 2 hours in a file only you
-can read; `linear.share_readings` false keeps this pane to itself. A rate limit
-stops every pane until Linear's reset, and each says when it will ask again.
+answers, issue titles included, are kept in a file only you can read. Cleanup
+rides on a later save after 2 hours without a publication, not on a deadline;
+`linear.share_readings` false keeps this pane to itself but does not delete an
+existing file. A rate limit stops every pane using that key until Linear's
+reset, and each says when it asks again.
 
 Credentials: `linear.token` in config.json, or $LINEAR_API_KEY. A personal API
 key from Settings - Security & access - Personal API keys. The API is called
