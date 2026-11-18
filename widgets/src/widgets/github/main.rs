@@ -956,15 +956,34 @@ fn fetch_land_timing(
     let mut budget = REVIEW_PAGE_BUDGET;
     let mut retry = false;
     loop {
+        // A review page that spent the budget already returned. Stop before
+        // the next merged page, and keep what was read so the cells can
+        // draw while the gate is shut. The pass is incomplete, so it is
+        // asked again once asking is allowed.
+        if spent_until(scopes).is_some() {
+            return Ok(Timed {
+                timing: parse::parse_land_timing(want, &prs),
+                retry: true,
+            });
+        }
         if !keep() {
             return Err(TAKEN_OVER.into());
         }
-        let raw = graphql(
+        let raw = match graphql(
             &build_merged_page_query(&q, &since, cursor.as_deref()),
             tok,
             scopes,
             gql_url,
-        )?;
+        ) {
+            Ok(raw) => raw,
+            Err(_why) if spent_until(scopes).is_some() && !prs.is_empty() => {
+                return Ok(Timed {
+                    timing: parse::parse_land_timing(want, &prs),
+                    retry: true,
+                });
+            }
+            Err(why) => return Err(why),
+        };
         let page = parse::parse_merged_search_page(&raw.to_string())
             .ok_or_else(|| "unreadable merged page".to_string())?;
         // Never downward: a count that shrinks mid-walk would let the set be
@@ -978,6 +997,14 @@ fn fetch_land_timing(
                     return Err(TAKEN_OVER.into());
                 }
                 retry = true;
+                prs.push(pr);
+                if spent_until(scopes).is_some() {
+                    return Ok(Timed {
+                        timing: parse::parse_land_timing(want, &prs),
+                        retry: true,
+                    });
+                }
+                continue;
             }
             prs.push(pr);
             if prs.len() as i64 >= want {
@@ -1030,6 +1057,11 @@ fn fill_reviews(
     loop {
         if *budget == 0 {
             return true;
+        }
+        // The request that spent the budget already returned. The caller
+        // keeps this PR's partial reviews and stops the walk.
+        if spent_until(scopes).is_some() {
+            return false;
         }
         if !keep() {
             return false;
@@ -2206,6 +2238,50 @@ fn graphql(
     Ok(data)
 }
 
+/// The scope header as it is shared with every pane on this token.
+///
+/// `seen: false` is a header that was not on the answer (a fine-grained
+/// token, where the check cannot be made). `seen: true` with an empty
+/// `have` is a header that arrived empty. Those are different readings,
+/// and only the second is a token that lacks `repo`.
+fn scope_observation(scopes: &Scopes) -> serde_json::Value {
+    if scopes.seen {
+        serde_json::json!({ "seen": true, "have": scopes.have })
+    } else {
+        serde_json::json!({ "seen": false })
+    }
+}
+
+/// Who the token belongs to, and what it is allowed to see. The scopes
+/// travel with the identity because a pane that is served every other
+/// reading never makes a request of its own, and the warning belongs
+/// beside the counts it draws.
+fn who_reading(login: &str, scopes: &Scopes) -> serde_json::Value {
+    serde_json::json!({ "login": login, "scopes": scope_observation(scopes) })
+}
+
+/// Take a shared scope observation onto this pane.
+///
+/// An observation this pane already made is kept when the shared reading
+/// says the header was absent: a later answer on the fetching pane can
+/// have carried it, and absence is not a list of no scopes.
+fn apply_scope_observation(scopes: &Arc<Mutex<Scopes>>, reading: &serde_json::Value) {
+    let Some(seen) = reading["scopes"]["seen"].as_bool() else {
+        return;
+    };
+    let have = reading["scopes"]["have"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if let Ok(mut g) = scopes.lock() {
+        if g.seen && !seen {
+            return;
+        }
+        g.seen = seen;
+        g.have = if seen { have } else { Vec::new() };
+    }
+}
+
 /// Flag a token that will undercount rather than fail.
 ///
 /// A classic token without `repo` still searches happily - it just returns
@@ -2843,7 +2919,10 @@ fn one_pass(
             match graphql("{ viewer { login } }", tok, scopes, &gql_url) {
                 Ok(who) => match who["data"]["viewer"]["login"].as_str() {
                     Some(login) if !login.is_empty() => {
-                        let _ = ticket.publish(serde_json::json!({ "login": login }));
+                        let observed = scopes.lock().map(|g| who_reading(login, &g)).unwrap_or_else(|_| {
+                            serde_json::json!({ "login": login, "scopes": { "seen": false } })
+                        });
+                        let _ = ticket.publish(observed);
                     }
                     _ => ticket.refuse("no viewer login in the response", None),
                 },
@@ -2860,7 +2939,10 @@ fn one_pass(
                 shut_if_spent(cache, scopes, &gql_gate);
                 return Err(format!("who am I: {}", why.chars().take(50).collect::<String>()));
             }
-            None => poll.viewer = v["login"].as_str().unwrap_or("").to_string(),
+            None => {
+                apply_scope_observation(scopes, v);
+                poll.viewer = v["login"].as_str().unwrap_or("").to_string();
+            }
         },
         // Another pane is asking, or the gate is shut: nothing to scope by.
         None => return Ok(false),
@@ -2994,11 +3076,11 @@ fn one_pass(
             poll.board_failed.clear();
             let mut board = serde_json::Map::new();
             let mut taken_over = false;
-            let mut renewal = Renewal(tc::now());
+            let mut renewal = Renewal::at(tc::now());
             for acc in &accounts {
                 // Another pane took the reading over: its board is the one
                 // every pane shows.
-                if renewal.due() && !ticket.renew() {
+                if renewal.due() && !renewal.note(ticket.renew_result()) {
                     taken_over = true;
                     break;
                 }
@@ -3062,10 +3144,25 @@ fn one_pass(
     let rows_ready = accounts.iter().any(|acc| by_acc.contains_key(acc));
     let ready = open && rows_ready && spent_until(scopes).is_none();
     if ready {
-        let ask = Ask { tok, host: host_name, refresh, gql_url: &gql_url, scopes, state };
+        let ask = Ask {
+            tok,
+            host: host_name,
+            refresh,
+            gql_url: &gql_url,
+            scopes,
+            state,
+            activity,
+        };
         let days_shown = day_counts(&ask, poll, cache, &accounts, &mut by_acc, days_now, &dates, &keep_from);
         merged_timing(&ask, poll, cache, &accounts, &mut by_acc, days_now);
         poll.shown.extend(days_shown);
+    }
+    // "updated" is the newest reading on screen now, so a window switched
+    // back to an older cached board does not keep the one it left.
+    if let Some(at) = shown_taken(cache, &poll.shown) {
+        if let Ok(mut g) = state.lock() {
+            g.fetched = at;
+        }
     }
     shut_if_spent(cache, scopes, &gql_gate);
 
@@ -3093,20 +3190,45 @@ fn one_pass(
     Ok(full && ready)
 }
 
-/// When a pass last renewed its leases. Renewing is a store write, and one
-/// before every request was most of what a quiet pass wrote; a lease renewed
-/// within the last third of [`LEASE_FOR`] still outlasts one request's
+/// When a pass last extended its leases, and whether the last attempt
+/// found them gone. Renewing is a store write, and one before every
+/// request was most of what a quiet pass wrote; a lease extended within
+/// the last third of [`LEASE_FOR`] still outlasts one request's
 /// thirty-second timeout, so it is left alone.
-struct Renewal(f64);
+///
+/// The quiet window starts only when the renew extended the lease. A busy
+/// store did not, and is asked again before the next request. A lost lease
+/// stays lost through that window, so the next check stops instead of
+/// treating the failed renew as a recent one.
+struct Renewal {
+    extended_at: f64,
+    lost: bool,
+}
 
 impl Renewal {
-    fn due(&mut self) -> bool {
-        let now = tc::now();
-        if now - self.0 < LEASE_FOR / 3.0 {
-            return false;
+    fn at(extended_at: f64) -> Renewal {
+        Renewal { extended_at, lost: false }
+    }
+
+    fn due(&self) -> bool {
+        self.lost || tc::now() - self.extended_at >= LEASE_FOR / 3.0
+    }
+
+    /// Record what the renew did. `false` when the lease is no longer this
+    /// pane's.
+    fn note(&mut self, renewed: tc::readings::Renewed) -> bool {
+        match renewed {
+            tc::readings::Renewed::Extended => {
+                self.extended_at = tc::now();
+                self.lost = false;
+                true
+            }
+            tc::readings::Renewed::Busy => true,
+            tc::readings::Renewed::Lost => {
+                self.lost = true;
+                false
+            }
         }
-        self.0 = now;
-        true
     }
 }
 
@@ -3118,6 +3240,9 @@ struct Ask<'a> {
     gql_url: &'a str,
     scopes: &'a Arc<Mutex<Scopes>>,
     state: &'a Arc<Mutex<State>>,
+    /// Set while this pass is asking GitHub, including a follow tick that
+    /// found a stale day map or timing. The title spinner reads it.
+    activity: &'a tc::Refresh,
 }
 
 /// How long a merged-PR timing is held at most. It is good for as long as
@@ -3243,7 +3368,7 @@ fn day_counts(
 
     let mut done: Vec<(usize, Answer, f64)> = Vec::new();
     let mut unanswered: Vec<usize> = Vec::new();
-    let mut renewal = Renewal(claimed_at);
+    let mut renewal = Renewal::at(claimed_at);
     for (i, acc) in accs.iter().enumerate() {
         if !matches!(got[i], Claimed::Fetch) {
             continue;
@@ -3273,12 +3398,15 @@ fn day_counts(
             .collect();
         let mut chunk_err = None;
         let mut taken_over = false;
+        // Held through the requests and the publish that follows them, so a
+        // follow tick that is asking shows it in the title.
+        let _work = (!want.is_empty()).then(|| ask.activity.start());
         for chunk in want.chunks(DAY_CHUNK) {
             if spent_until(ask.scopes).is_some() {
                 chunk_err.get_or_insert_with(|| RATE_SPENT.to_string());
                 break;
             }
-            if renewal.due() && !tc::readings::renew_all(cache, &keys[i], LEASE_FOR) {
+            if renewal.due() && !renewal.note(tc::readings::renew_all_result(cache, &keys[i], LEASE_FOR)) {
                 taken_over = true;
                 break;
             }
@@ -3433,7 +3561,7 @@ fn merged_timing(
 
     let mut done: Vec<(usize, Answer, f64)> = Vec::new();
     let mut unanswered: Vec<usize> = Vec::new();
-    let mut renewal = Renewal(claimed_at);
+    let mut renewal = Renewal::at(claimed_at);
     for (i, acc) in accs.iter().enumerate() {
         if !matches!(got[i], Claimed::Fetch) {
             continue;
@@ -3443,7 +3571,13 @@ fn merged_timing(
             continue;
         }
         let key = keys[i].clone();
-        let mut keep = || !renewal.due() || tc::readings::renew_all(cache, &key, LEASE_FOR);
+        let _work = (merged[i] > 0).then(|| ask.activity.start());
+        let mut keep = || {
+            if !renewal.due() {
+                return true;
+            }
+            renewal.note(tc::readings::renew_all_result(cache, &key, LEASE_FOR))
+        };
         let fetched = fetch_land_timing(acc, &viewer, days_now, merged[i], ask.tok, ask.scopes, ask.gql_url, &mut keep);
         let at = tc::now();
         match fetched {
@@ -3544,6 +3678,19 @@ fn publish(
             g.fetched = g.fetched.max(at);
         }
     }
+}
+
+/// The newest `taken_at` among the readings on screen. A refusal is not
+/// one of them: it is why a number is missing, not a number.
+fn shown_taken(cache: &tc::readings::Cache, shown: &[String]) -> Option<f64> {
+    shown
+        .iter()
+        .filter_map(|k| {
+            let (at, value, _) = cache.live.get(k)?;
+            let value = value.as_ref()?;
+            tc::readings::refusal(value).is_none().then_some(*at)
+        })
+        .reduce(f64::max)
 }
 
 /// The freshness line, wrapped to `width`: `not sharing readings: <why>`
@@ -5050,6 +5197,15 @@ mod tests {
         put(&mut cache, &cal, serde_json::json!({ "totalContributions": 0, "weeks": [] }));
         put(&mut cache, &short, serde_json::json!({ "accounts": { "example": aliases(7) } }));
         put(&mut cache, &long, serde_json::json!({ "accounts": { "example": aliases(90) } }));
+        // Day maps and timing, already fresh, so the pass has nothing to
+        // ask GitHub for. They are older than both boards, so the board
+        // on screen is what "updated" should name.
+        seed_days(&mut cache, 90, 30.0, 1);
+        seed_timing(&mut cache, 7, 4, 30.0);
+        seed_timing(&mut cache, 90, 4, 30.0);
+        let short_at = cache.live.get(&short).unwrap().0;
+        let long_at = cache.live.get(&long).unwrap().0;
+        assert!(long_at > short_at);
 
         let state = Arc::new(Mutex::new(State { accounts, days: 7, ..Default::default() }));
         let scopes = Arc::new(Mutex::new(Scopes::default()));
@@ -5060,12 +5216,18 @@ mod tests {
         };
         assert!(!pass(&mut poll, &mut cache).unwrap());
         assert_eq!(state.lock().unwrap().stats[0].open, 7);
+        assert!((state.lock().unwrap().fetched - short_at).abs() < 1e-6);
         state.lock().unwrap().days = 90;
         assert!(!pass(&mut poll, &mut cache).unwrap());
         assert_eq!(state.lock().unwrap().stats[0].open, 90);
+        assert!((state.lock().unwrap().fetched - long_at).abs() < 1e-6);
         state.lock().unwrap().days = 7;
         assert!(!pass(&mut poll, &mut cache).unwrap());
         assert_eq!(state.lock().unwrap().stats[0].open, 7);
+        assert!(
+            (state.lock().unwrap().fetched - short_at).abs() < 1e-6,
+            "back on the older board, fetched stayed at {long_at}"
+        );
     }
 
     #[test]
@@ -5123,6 +5285,20 @@ mod tests {
 
     impl FakeGithub {
         fn start(answer: fn() -> String) -> FakeGithub {
+            Self::listen(move || answer())
+        }
+
+        /// `answer` is called with how many requests have already been
+        /// answered, starting at zero.
+        fn start_nth(answer: fn(usize) -> String) -> FakeGithub {
+            let n = std::sync::atomic::AtomicUsize::new(0);
+            Self::listen(move || {
+                let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                answer(i)
+            })
+        }
+
+        fn listen(mut answer: impl FnMut() -> String + Send + 'static) -> FakeGithub {
             use std::io::{Read, Write};
             use std::sync::atomic::{AtomicBool, Ordering};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5241,13 +5417,31 @@ mod tests {
 
         fn days(&mut self, url: &str, window_days: i64) -> Vec<String> {
             let (dates, keep_from) = window(window_days);
-            let ask = Ask { tok: FAKE_TOKEN, host: "github.com", refresh: 120.0, gql_url: url, scopes: &self.scopes, state: &self.state };
+            let activity = tc::Refresh::default();
+            let ask = Ask {
+                tok: FAKE_TOKEN,
+                host: "github.com",
+                refresh: 120.0,
+                gql_url: url,
+                scopes: &self.scopes,
+                state: &self.state,
+                activity: &activity,
+            };
             tc::readings::follow(&mut self.cache);
             day_counts(&ask, &mut self.poll, &mut self.cache, &["example".to_string()], &mut self.by_acc, window_days, &dates, &keep_from)
         }
 
         fn timing(&mut self, url: &str, window_days: i64) {
-            let ask = Ask { tok: FAKE_TOKEN, host: "github.com", refresh: 120.0, gql_url: url, scopes: &self.scopes, state: &self.state };
+            let activity = tc::Refresh::default();
+            let ask = Ask {
+                tok: FAKE_TOKEN,
+                host: "github.com",
+                refresh: 120.0,
+                gql_url: url,
+                scopes: &self.scopes,
+                state: &self.state,
+                activity: &activity,
+            };
             tc::readings::follow(&mut self.cache);
             merged_timing(&ask, &mut self.poll, &mut self.cache, &["example".to_string()], &mut self.by_acc, window_days);
         }
@@ -5270,6 +5464,128 @@ mod tests {
         pane.days(&github.url, days);
         assert_eq!(github.calls(), 1, "a spent budget stops the remaining chunks");
         assert_eq!(pane.poll.day_failed.len(), 1);
+    }
+
+    /// Three merged PRs whose first review page is a bot and says there is
+    /// another page, which is what makes the timing walk ask again.
+    fn three_unreviewed_prs() -> String {
+        let node = |id: &str| {
+            format!(
+                r#"{{"id":"{id}","createdAt":"2026-11-01T00:00:00Z","mergedAt":"2026-11-02T00:00:00Z","reviews":{{"pageInfo":{{"hasNextPage":true,"endCursor":"c-{id}"}},"nodes":[{{"submittedAt":"2026-11-01T01:00:00Z","author":{{"__typename":"Bot","login":"dependabot"}}}}]}}}}"#,
+                id = id,
+            )
+        };
+        let body = format!(
+            r#"{{"data":{{"search":{{"issueCount":3,"pageInfo":{{"hasNextPage":false,"endCursor":""}},"nodes":[{},{},{}]}}}}}}"#,
+            node("pr1"),
+            node("pr2"),
+            node("pr3"),
+        );
+        ok_200(&body)
+    }
+
+    #[test]
+    fn timing_stops_when_a_review_page_spends_the_rate_limit() {
+        fn answer(n: usize) -> String {
+            if n == 0 {
+                return three_unreviewed_prs();
+            }
+            let body = r#"{"error":"rate limited"}"#;
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                tc::now() as i64 + 3600,
+                body
+            )
+        }
+        let github = FakeGithub::start_nth(answer);
+        let mut pane = Pane::new(tc::readings::Cache::default(), 14, 3);
+        pane.timing(&github.url, 14);
+        let asked = github.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2, "the walk stops on the request that spends the budget: {asked:?}");
+        assert!(asked[0].contains("search"), "{}", asked[0]);
+        assert!(asked[1].contains("pr1"), "{}", asked[1]);
+        assert!(pane.by_acc["example"].timing_retry, "the partial timing is asked again once the gate opens");
+    }
+
+    #[test]
+    fn an_absent_scope_header_is_not_an_empty_list() {
+        let absent = who_reading("viewer", &Scopes::default());
+        assert_eq!(absent["scopes"]["seen"], false);
+        assert!(absent["scopes"].get("have").is_none());
+
+        let empty = who_reading("viewer", &Scopes { seen: true, ..Scopes::default() });
+        assert_eq!(empty["scopes"]["seen"], true);
+        assert_eq!(empty["scopes"]["have"].as_array().map(|a| a.len()), Some(0));
+        assert!(scope_warning(&Scopes { seen: true, ..Scopes::default() }).contains("private repos"));
+
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        apply_scope_observation(&scopes, &absent);
+        assert!(!scopes.lock().unwrap().seen);
+        assert!(scope_warning(&scopes.lock().unwrap()).is_empty());
+        apply_scope_observation(&scopes, &empty);
+        assert_eq!(
+            scope_warning(&scopes.lock().unwrap()),
+            "token lacks repo and read:org - private repos are not counted"
+        );
+        // A shared reading that never saw the header does not wipe one that did.
+        apply_scope_observation(&scopes, &absent);
+        assert!(scopes.lock().unwrap().seen);
+    }
+
+    #[test]
+    fn a_follower_warns_from_the_shared_identity() {
+        let mut cache = tc::readings::Cache::default();
+        let accounts = vec!["example".to_string()];
+        let day = today();
+        let who = who_key(&mut cache, "github.com", FAKE_TOKEN);
+        let cal = calendar_key(&mut cache, "github.com", FAKE_TOKEN);
+        let board = board_key(&mut cache, "github.com", FAKE_TOKEN, &accounts, 7, day);
+        let put = |cache: &mut tc::readings::Cache, key: &str, value: serde_json::Value| {
+            match tc::readings::take(cache, key, tc::readings::Policy::new(120.0, LEASE_FOR)) {
+                tc::readings::Take::Fetch(ticket) => {
+                    let _ = ticket.publish(value);
+                }
+                _ => panic!("the test should start without this reading"),
+            }
+        };
+        let observed = Scopes { seen: true, have: vec!["read:org".into()], ..Scopes::default() };
+        put(&mut cache, &who, who_reading("viewer", &observed));
+        put(&mut cache, &cal, serde_json::json!({ "totalContributions": 0, "weeks": [] }));
+        put(&mut cache, &board, serde_json::json!({ "accounts": { "example": aliases(3) } }));
+        seed_days(&mut cache, 7, 30.0, 1);
+        seed_timing(&mut cache, 7, 4, 30.0);
+
+        let state = Arc::new(Mutex::new(State { accounts, days: 7, ..Default::default() }));
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        let activity = tc::Refresh::default();
+        one_pass(FAKE_TOKEN, &mut Poll::default(), &mut cache, false, 120.0, &state, &scopes, None, &activity)
+            .unwrap();
+        assert!(scopes.lock().unwrap().seen);
+        assert_eq!(scopes.lock().unwrap().have, vec!["read:org".to_string()]);
+        assert_eq!(state.lock().unwrap().err, "token lacks repo - private repos are not counted");
+    }
+
+    #[test]
+    fn a_busy_renew_does_not_start_the_quiet_window() {
+        let mut renewal = Renewal::at(0.0);
+        assert!(renewal.due());
+        assert!(renewal.note(tc::readings::Renewed::Busy));
+        assert!(renewal.due(), "a busy store is tried again before the next request");
+        assert!(renewal.note(tc::readings::Renewed::Extended));
+        assert!(!renewal.due());
+    }
+
+    #[test]
+    fn a_lost_lease_stays_lost_inside_the_quiet_window() {
+        let mut renewal = Renewal::at(tc::now() - LEASE_FOR);
+        assert!(renewal.due());
+        assert!(!renewal.note(tc::readings::Renewed::Lost));
+        // The old renew stamped this before hearing that the lease was lost,
+        // and the next check then treated it as recently renewed.
+        renewal.extended_at = tc::now();
+        assert!(renewal.due(), "a lost lease is not a recent renewal");
+        assert!(!renewal.note(tc::readings::Renewed::Lost));
     }
 
     #[test]
@@ -5308,6 +5624,26 @@ mod tests {
         let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
         let value = parse::days_to_json(&map, at);
         tc::readings::answer_many(cache, &[(key.as_str(), tc::readings::Answer::Value(value), policy, at)], tc::now(), at);
+    }
+
+    /// A timing reading for `merged`, taken `age` seconds ago, so a pass
+    /// whose board still shows that count does not ask again.
+    fn seed_timing(cache: &mut tc::readings::Cache, window_days: i64, merged: i64, age: f64) {
+        let key = timing_key(cache, "github.com", FAKE_TOKEN, "example", window_days);
+        let t = parse::LandTiming {
+            complete: true,
+            expected: merged,
+            fetched: merged.max(0) as usize,
+            ..parse::LandTiming::default()
+        };
+        let at = tc::now() - age;
+        let policy = tc::readings::Policy::new(TIMING_HOLD, LEASE_FOR);
+        tc::readings::answer_many(
+            cache,
+            &[(key.as_str(), tc::readings::Answer::Value(timing_reading(merged, false, &t)), policy, at)],
+            tc::now(),
+            at,
+        );
     }
 
     #[test]

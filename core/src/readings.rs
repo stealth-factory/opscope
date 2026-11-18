@@ -789,24 +789,61 @@ pub struct Ticket<'a> {
     done: bool,
 }
 
+/// What a lease renewal did. A busy store is not an extension: the lease
+/// was not touched, and the next request has to try again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renewed {
+    /// This pane's lease now runs for another `lease_for`.
+    Extended,
+    /// SQLite was busy. The lease was not extended.
+    Busy,
+    /// The lease ran out, or another pane holds it.
+    Lost,
+}
+
+impl Renewed {
+    /// Still this pane's to fetch. A busy store is not a takeover, and
+    /// neither is a store this pane has stopped sharing.
+    pub fn held(self) -> bool {
+        !matches!(self, Renewed::Lost)
+    }
+}
+
+fn classify_renew(cache: &mut Cache, result: Result<bool, String>) -> Renewed {
+    match result {
+        Ok(true) => Renewed::Extended,
+        Ok(false) => Renewed::Lost,
+        Err(why) if store::busy(&why) => Renewed::Busy,
+        Err(why) => {
+            // Sharing has stopped, so there is no other pane to take the
+            // lease. Callers that only ask [`Renewed::held`] keep going.
+            stop_sharing(cache, &why);
+            Renewed::Extended
+        }
+    }
+}
+
 impl Ticket<'_> {
     /// Hold the lease for one more request. `false` when it ran out and
     /// another pane took it: stop, and show what that pane publishes.
+    ///
+    /// A busy store also returns `true` — the lease was not lost — which
+    /// is not the same as it having been extended. [`Self::renew_result`]
+    /// says which.
     pub fn renew(&mut self) -> bool {
+        self.renew_result().held()
+    }
+
+    /// [`Self::renew`], and whether the lease was actually extended.
+    pub fn renew_result(&mut self) -> Renewed {
         if self.claimed.is_none() {
-            return true;
+            return Renewed::Extended;
         }
         let Some(store) = self.cache.store.as_mut() else {
-            return true;
+            return Renewed::Extended;
         };
-        match store.renew(&self.key, crate::now(), self.policy.lease_for) {
-            Ok(mine) => mine,
-            Err(why) if store::busy(&why) => true,
-            Err(why) => {
-                stop_sharing(self.cache, &why);
-                true
-            }
-        }
+        let result = store.renew(&self.key, crate::now(), self.policy.lease_for);
+        classify_renew(self.cache, result)
     }
 
     /// Whether `bucket` is shut, after looking at the store again.
@@ -1096,37 +1133,39 @@ pub fn answer_many(
 
 /// Hold `key`'s lease for another `lease_for` seconds, before the next
 /// request of a long fetch. `false` when another pane took it over.
+///
+/// A busy store also returns `true`. [`renew_result`] says whether the
+/// lease was extended.
 pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
+    renew_result(cache, key, lease_for).held()
+}
+
+/// [`renew`], and whether the lease was actually extended.
+pub fn renew_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed {
     let Some(store) = cache.store.as_mut() else {
-        return true;
+        return Renewed::Extended;
     };
-    match store.renew(key, crate::now(), lease_for) {
-        Ok(mine) => mine,
-        Err(why) if store::busy(&why) => true,
-        Err(why) => {
-            stop_sharing(cache, &why);
-            true
-        }
-    }
+    let result = store.renew(key, crate::now(), lease_for);
+    classify_renew(cache, result)
 }
 
 /// Extend every lease this pane still holds, and say whether `key` is one
 /// of them. A pass that claimed many readings renews them together before
 /// each request, so an answer already fetched stays owned until it is
 /// published. `false` when another pane took `key` over. A busy store
-/// counts as still holding it.
+/// counts as still holding it, and [`renew_all_result`] says it was not
+/// extended.
 pub fn renew_all(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
+    renew_all_result(cache, key, lease_for).held()
+}
+
+/// [`renew_all`], and whether the leases were actually extended.
+pub fn renew_all_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed {
     let Some(store) = cache.store.as_mut() else {
-        return true;
+        return Renewed::Extended;
     };
-    match store.renew_all(crate::now(), lease_for, key) {
-        Ok(mine) => mine,
-        Err(why) if store::busy(&why) => true,
-        Err(why) => {
-            stop_sharing(cache, &why);
-            true
-        }
-    }
+    let result = store.renew_all(crate::now(), lease_for, key);
+    classify_renew(cache, result)
 }
 
 /// Give `key`'s lease back without publishing: the pass stopped short.
@@ -1647,6 +1686,33 @@ mod tests {
         assert!(matches!(take(&mut b, "k", P), Take::Fetch(_)));
         let p = provenance(&b, "k", crate::now());
         assert!(p.is_none(), "a reading appeared from nowhere");
+    }
+
+    /// A lock held across `renew` comes back `Busy`, not as a lease that
+    /// was extended. The quiet window a caller keeps after `Extended`
+    /// must not follow this.
+    #[test]
+    fn a_busy_store_renews_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-renew-busy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sqlite").to_string_lossy().to_string();
+        let mut cache = Cache { store: Some(Store::open(&path).unwrap()), ..Cache::default() };
+        cache.store.as_mut().unwrap().me = 41;
+        assert!(matches!(cache.store.as_mut().unwrap().claim("k", None, now()), Ok(Got::Mine)));
+        let mut hold = rusqlite::Connection::open(&path).unwrap();
+        let tx = hold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Busy);
+        assert_eq!(renew_all_result(&mut cache, "k", 30.0), Renewed::Busy);
+        drop(tx);
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Extended);
     }
 
     #[test]
