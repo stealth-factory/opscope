@@ -274,6 +274,46 @@ fourteen teams and a thousand-odd open issues at the default 120s refresh
 spends a fraction of it. A team's screen opens on data already in hand rather
 than showing nothing while it waits.
 
+## Several panes, one walk
+
+Every linear pane on the machine draws from the same two readings: the
+**board** - teams, open issues, running cycles and projects - and the
+**flow**, what was created and completed since the window began. The window
+starts at midnight UTC, so every pane on the same window and day shares one
+flow, and panes on different windows still share the board. Each pane
+filters by its own team list after the fact, so a pane for `WEB` and one for
+`APP` cost one walk between them, not two.
+
+Each refresh one pane wins a short lease on each reading and walks it; the
+rest keep drawing what they have, pick up its answer within seconds, and say
+so on a line under the status line: `fetched 40s ago by pane 48213`, or
+`cached 3m ago · pane 48213 asking now`. `updated … ago` is when the newest
+of the two readings on screen came back from Linear, whichever pane asked.
+`r` asks again for anything older than thirty seconds.
+
+When Linear answers **too many requests**, every pane using that API key
+stops asking - the board, the flow and any open project screen - and each
+says when it will ask again:
+`cached 7m ago · too many requests, next ask in 12m`. A pane with nothing to
+draw yet says it as an error instead. The wait is the time Linear named -
+`Retry-After`, or the hour's reset. When it names neither, the wait is two
+minutes, doubling for each limit met in a row by any pane (4, 8, 16, then 30
+minutes), and starting at two again once a request gets through or an hour
+after the last wait ended. A project screen keeps what it already showed
+under a `Linear: too many requests · next ask in 12m` line.
+
+The answers are kept in `~/.local/state/opscope/linear.sqlite`, readable
+only by you. **They include issue identifiers, titles and links,
+and project and lead names**, as Linear returned them. A row becomes
+eligible for routine cleanup after **2 hours** without a publication and is
+deleted only during a later save. That is not a retention deadline: data can
+stay longer after every pane exits, and refusals also update their rows. The
+API key never goes in - it appears in the file only as a fingerprint. A board
+at the walk's cap of 3,000 open issues is a little over a megabyte. Set
+`share_readings` to `false` to have a pane ask on its own and write nothing
+to disk. That does not delete an existing file; the line under the status
+line says the pane is not sharing.
+
 Nothing Linear counts arrives with a total, so **anything counted here is
 walked**, and a walk that does not reach the end says so rather than quietly
 reporting a smaller number. The header reads `truncated`. A cycle walk that
@@ -363,7 +403,8 @@ readable by others.
   "token_env": "LINEAR_API_KEY",
   "exclude_teams": [],
   "window_days": 14,
-  "refresh": 120
+  "refresh": 120,
+  "share_readings": true
 }
 ```
 

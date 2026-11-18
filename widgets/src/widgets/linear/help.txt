@@ -12,6 +12,16 @@ Triage is counted apart from the backlog throughout. An auto-filed intake
 queue and a groomed backlog are different populations, and adding them
 together produces a number that means nothing.
 
+Several linear panes on one machine share what Linear answers: one pane walks
+the workspace each refresh and the rest draw their own teams from its answer.
+A line under the status line says which pane fetched it and how long ago. The
+answers, issue titles included, are kept in a file only you can read. Cleanup
+rides on a later save after 2 hours without a publication, not on a deadline;
+`linear.share_readings` false keeps this pane to itself but does not delete an
+existing file. A rate limit stops every pane using that key, project screens
+included, until the time Linear named - or, when it named none, for two
+minutes, doubling while limits keep coming - and each says when it asks again.
+
 Credentials: `linear.token` in config.json, or $LINEAR_API_KEY. A personal API
 key from Settings - Security & access - Personal API keys. The API is called
 directly, so no CLI is required.
