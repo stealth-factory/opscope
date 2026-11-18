@@ -58,11 +58,29 @@ struct Running {
     home: PathBuf,
     /// Set while this launcher's process group may still hold an orphan.
     group: Option<i32>,
+    initial_lflag: libc::tcflag_t,
 }
 
 impl Running {
     fn spawn(path: &Path, args: &[&str], force_panic: bool, own_group: bool) -> Self {
+        Self::spawn_configured(path, args, force_panic, own_group, None, false)
+    }
+
+    fn spawn_configured(
+        path: &Path,
+        args: &[&str],
+        force_panic: bool,
+        own_group: bool,
+        backtrace: Option<&str>,
+        null_stdin: bool,
+    ) -> Self {
         let (master, slave) = support::pty(80, 24);
+        let mut initial: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(master, &mut initial) },
+            0,
+            "could not read initial pty settings"
+        );
         let unique = NEXT_HOME.fetch_add(1, Ordering::Relaxed);
         let home =
             std::env::temp_dir().join(format!("opscope-exit-{}-{unique}", std::process::id()));
@@ -91,12 +109,16 @@ impl Running {
             .env_remove("OPSCOPE_CONFIG")
             .env_remove("HERDR_ENV")
             .env_remove("TMUX")
+            .env_remove("RUST_BACKTRACE")
             .env_remove("OPSCOPE_TEST_PANIC")
-            .stdin(io(slave))
+            .stdin(if null_stdin { Stdio::null() } else { io(slave) })
             .stdout(io(slave))
             .stderr(io(slave));
         if force_panic {
             command.env("OPSCOPE_TEST_PANIC", "1");
+        }
+        if let Some(backtrace) = backtrace {
+            command.env("RUST_BACKTRACE", backtrace);
         }
         if own_group {
             // The launcher and widget share this group. Counting the group
@@ -125,6 +147,7 @@ impl Running {
             reaped: false,
             home,
             group,
+            initial_lflag: initial.c_lflag,
         }
     }
 
@@ -154,6 +177,26 @@ impl Running {
             assert!(
                 Instant::now() < until,
                 "missing {:?}: {}",
+                String::from_utf8_lossy(expected),
+                dump(&self.output)
+            );
+            self.pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn await_count(&mut self, expected: &[u8], count: usize) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while self
+            .output
+            .windows(expected.len())
+            .filter(|part| *part == expected)
+            .count()
+            < count
+        {
+            assert!(
+                Instant::now() < until,
+                "missing {count} copies of {:?}: {}",
                 String::from_utf8_lossy(expected),
                 dump(&self.output)
             );
@@ -202,6 +245,30 @@ impl Running {
         status
     }
 
+    fn await_stopped(&mut self) {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            self.pump();
+            let mut status = 0;
+            let waited = unsafe {
+                libc::waitpid(
+                    self.child.id() as i32,
+                    &mut status,
+                    libc::WUNTRACED | libc::WNOHANG,
+                )
+            };
+            if waited == self.child.id() as i32 && libc::WIFSTOPPED(status) {
+                return;
+            }
+            assert!(
+                Instant::now() < until,
+                "widget did not stop: {}",
+                dump(&self.output)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn assert_restored(&self) {
         assert!(
             contains(&self.output, ALT_ENTER),
@@ -216,7 +283,75 @@ impl Running {
     }
 
     fn restore_count(&self) -> usize {
-        self.output.windows(RESTORE.len()).filter(|part| *part == RESTORE).count()
+        self.output
+            .windows(RESTORE.len())
+            .filter(|part| *part == RESTORE)
+            .count()
+    }
+
+    fn assert_termios_restored(&self) {
+        let mut current: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(self.master, &mut current) },
+            0,
+            "could not read final pty settings"
+        );
+        let mask = (libc::ECHO | libc::ICANON) as libc::tcflag_t;
+        assert_eq!(
+            current.c_lflag & mask,
+            self.initial_lflag & mask,
+            "echo/canonical input did not return to its initial state"
+        );
+    }
+
+    fn assert_panic_is_on_the_main_screen(&self) {
+        self.assert_restored();
+        let left = last_at(&self.output, ALT_LEAVE).expect("the alternate screen was left");
+        assert!(
+            contains(
+                &self.output[left + ALT_LEAVE.len()..],
+                b"OPSCOPE_TEST_PANIC requested a first-frame panic"
+            ),
+            "the reason did not survive on the restored main screen: {}",
+            dump(&self.output)
+        );
+    }
+}
+
+/// An isolated launcher beside a widget that ignores every graceful request.
+/// /bin/sh loops with no subprocess, so its process group is exactly the
+/// launcher and widget and cannot leave an unrelated sleeper in this test.
+struct StubbornLauncher {
+    dir: PathBuf,
+}
+
+impl StubbornLauncher {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = NEXT_HOME.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("opscope-stubborn-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("stubborn fixture directory");
+        let launcher = dir.join("opscope");
+        std::fs::copy(env!("CARGO_BIN_EXE_opscope"), &launcher).expect("copy the launcher");
+        let matrix = dir.join("matrix");
+        std::fs::write(
+            &matrix,
+            "#!/bin/sh\ntrap '' INT TERM HUP\n/bin/stty -echo -icanon\nprintf 'READY\\n'\nwhile :; do :; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&matrix, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    fn launcher(&self) -> PathBuf {
+        self.dir.join("opscope")
+    }
+}
+
+impl Drop for StubbornLauncher {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -257,7 +392,12 @@ fn q_leaves_the_original_screen() {
     let status = run.wait(Duration::from_secs(3));
     assert_eq!(status.code(), Some(0));
     run.assert_restored();
-    assert_eq!(run.restore_count(), 1, "a second restore would clear the shell again: {}", dump(&run.output));
+    assert_eq!(
+        run.restore_count(),
+        1,
+        "a second restore would clear the shell again: {}",
+        dump(&run.output)
+    );
 }
 
 #[test]
@@ -276,35 +416,92 @@ fn a_panic_restores_before_printing_its_reason() {
     run.await_bytes(b"[q]uit");
     let status = run.wait(Duration::from_secs(3));
     assert_eq!(status.code(), Some(101));
-    run.assert_restored();
+    run.assert_panic_is_on_the_main_screen();
+}
+
+#[test]
+fn a_panic_backtrace_is_printed_after_restore() {
+    let mut run = Running::spawn_configured(
+        Path::new(env!("CARGO_BIN_EXE_matrix")),
+        &[],
+        true,
+        false,
+        Some("1"),
+        false,
+    );
+    run.await_bytes(b"[q]uit");
+    let status = run.wait(Duration::from_secs(3));
+    assert_eq!(status.code(), Some(101));
+    run.assert_panic_is_on_the_main_screen();
     let left = last_at(&run.output, ALT_LEAVE).expect("the alternate screen was left");
     assert!(
-        contains(
-            &run.output[left + ALT_LEAVE.len()..],
-            b"OPSCOPE_TEST_PANIC requested a first-frame panic"
-        ),
-        "the reason did not survive on the restored main screen: {}",
+        contains(&run.output[left + ALT_LEAVE.len()..], b"stack backtrace:"),
+        "the requested backtrace was not replayed after restore: {}",
         dump(&run.output)
     );
 }
 
 #[test]
-fn sigterm_to_the_launcher_takes_its_widget_too() {
-    let mut run = Running::spawn(
-        Path::new(env!("CARGO_BIN_EXE_opscope")),
-        &["matrix"],
+fn rust_backtrace_zero_does_not_print_a_backtrace() {
+    let mut run = Running::spawn_configured(
+        Path::new(env!("CARGO_BIN_EXE_matrix")),
+        &[],
+        true,
         false,
+        Some("0"),
+        false,
+    );
+    run.await_bytes(b"[q]uit");
+    let status = run.wait(Duration::from_secs(3));
+    assert_eq!(status.code(), Some(101));
+    run.assert_panic_is_on_the_main_screen();
+    assert!(!run
+        .output
+        .windows(b"stack backtrace:".len())
+        .any(|part| part == b"stack backtrace:"));
+}
+
+#[test]
+fn a_panic_without_tty_stdin_still_restores_stdout() {
+    let mut run = Running::spawn_configured(
+        Path::new(env!("CARGO_BIN_EXE_matrix")),
+        &[],
+        true,
+        false,
+        None,
         true,
     );
+    let status = run.wait(Duration::from_secs(3));
+    assert_eq!(status.code(), Some(101));
+    run.assert_panic_is_on_the_main_screen();
+}
+
+fn assert_launcher_reaped(
+    mut run: Running,
+    expected_restores: usize,
+    expected_code: i32,
+    sig: i32,
+) {
     let group = run.group.expect("the launcher has its own process group");
-    run.await_bytes(b"[q]uit");
+    let sent = Instant::now();
     unsafe {
-        libc::kill(run.child.id() as i32, libc::SIGTERM);
+        libc::kill(run.child.id() as i32, sig);
     }
     let status = run.wait(Duration::from_secs(3));
-    assert_eq!(status.code(), Some(128 + libc::SIGTERM));
+    assert_eq!(status.code(), Some(expected_code));
+    if expected_code == 128 + libc::SIGKILL {
+        assert!(
+            sent.elapsed() >= Duration::from_millis(900),
+            "SIGKILL skipped the child's grace period"
+        );
+    }
     run.assert_restored();
-    assert_eq!(run.restore_count(), 2, "the launcher did not restore after its child: {}", dump(&run.output));
+    assert_eq!(
+        run.restore_count(),
+        expected_restores,
+        "the launcher did not restore after its child: {}",
+        dump(&run.output)
+    );
 
     let until = Instant::now() + Duration::from_secs(2);
     let empty = loop {
@@ -322,4 +519,113 @@ fn sigterm_to_the_launcher_takes_its_widget_too() {
         run.group = None;
     }
     assert!(empty, "the widget survived its launcher by two seconds");
+    run.assert_termios_restored();
+}
+
+#[test]
+fn sigterm_to_the_direct_launcher_takes_its_widget_too() {
+    let mut run = Running::spawn(
+        Path::new(env!("CARGO_BIN_EXE_opscope")),
+        &["matrix"],
+        false,
+        true,
+    );
+    run.await_bytes(b"[q]uit");
+    assert_launcher_reaped(run, 2, 128 + libc::SIGTERM, libc::SIGTERM);
+}
+
+#[test]
+fn sighup_to_the_launcher_is_repaired_by_the_parent() {
+    let mut run = Running::spawn(
+        Path::new(env!("CARGO_BIN_EXE_opscope")),
+        &["matrix"],
+        false,
+        true,
+    );
+    run.await_bytes(b"[q]uit");
+    // SIGHUP kills the child without its cleanup handler. The launcher's own
+    // restore is therefore the only one, and 129 is inherited from the child.
+    assert_launcher_reaped(run, 1, 128 + libc::SIGHUP, libc::SIGHUP);
+}
+
+#[test]
+fn sigterm_to_the_menu_launcher_takes_its_widget_too() {
+    let mut run = Running::spawn(Path::new(env!("CARGO_BIN_EXE_opscope")), &[], false, true);
+    run.await_bytes(b"21 widgets");
+    // matrix is the fourteenth row, after thirteen ordinary down keys.
+    // Enter starts it in the same supervised handoff the footer offers.
+    run.send(b"jjjjjjjjjjjjj\r");
+    // The menu's entry is the first 1049h; matrix's startup is the second.
+    // The footer itself cannot be the readiness marker because both screens
+    // deliberately say [q]uit.
+    run.await_count(ALT_ENTER, 2);
+    // One restore hands the menu to the child. The signalled child and the
+    // launcher's own final restore supply the other two.
+    assert_launcher_reaped(run, 3, 128 + libc::SIGTERM, libc::SIGTERM);
+}
+
+#[test]
+fn a_stubborn_widget_is_killed_after_its_grace_period() {
+    let fixture = StubbornLauncher::new();
+    let mut run = Running::spawn(&fixture.launcher(), &["matrix"], false, true);
+    run.await_bytes(b"READY");
+    // The fake widget never entered 1049, so the launcher's own forced
+    // restore is the only one. SIGKILL turns the child's status into 137.
+    assert_launcher_reaped(run, 1, 128 + libc::SIGKILL, libc::SIGTERM);
+}
+
+#[test]
+fn a_menu_child_returning_can_quit_normally() {
+    let mut run = Running::spawn(Path::new(env!("CARGO_BIN_EXE_opscope")), &[], false, true);
+    run.await_bytes(b"21 widgets");
+    run.send(b"jjjjjjjjjjjjj\r");
+    run.await_count(ALT_ENTER, 2);
+    run.send(b"q");
+    // The menu reclaims after the child quit, then quits normally itself.
+    run.await_count(ALT_ENTER, 3);
+    run.send(b"q");
+    let status = run.wait(Duration::from_secs(3));
+    assert_eq!(status.code(), Some(0));
+    run.assert_restored();
+    // Parent handoff, child q and parent q. Each restore is emitted once.
+    assert_eq!(
+        run.restore_count(),
+        3,
+        "a normal handoff duplicated or lost an exit: {}",
+        dump(&run.output)
+    );
+    run.assert_termios_restored();
+    run.group = None;
+}
+
+#[test]
+fn suspend_and_resume_enter_a_fresh_alternate_screen() {
+    let mut run = Running::matrix(false);
+    run.await_bytes(b"[q]uit");
+    unsafe {
+        libc::kill(run.child.id() as i32, libc::SIGTSTP);
+    }
+    run.await_stopped();
+    assert_eq!(
+        run.restore_count(),
+        1,
+        "suspend did not leave 1049: {}",
+        dump(&run.output)
+    );
+    run.assert_termios_restored();
+
+    unsafe {
+        libc::kill(run.child.id() as i32, libc::SIGCONT);
+    }
+    run.await_count(ALT_ENTER, 2);
+    run.send(b"q");
+    let status = run.wait(Duration::from_secs(3));
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        run.restore_count(),
+        2,
+        "resume did not return to a fresh screen: {}",
+        dump(&run.output)
+    );
+    run.assert_termios_restored();
 }

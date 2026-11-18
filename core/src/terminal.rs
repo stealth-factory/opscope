@@ -1205,15 +1205,16 @@ pub(crate) fn cleanup_signal() {
     }
 }
 
-/// Signals whose handlers pop the keyboard mode. Held across the push, the
-/// pop, and the flag update so those handlers cannot observe a half-written
-/// transition on this thread. `pthread_sigmask` does not cover other threads.
-/// Restores the previous mask on drop, including from a handler.
-struct HeldSignals {
+/// Signals whose handlers pop the keyboard mode or restore the screen. Held
+/// across those transitions, including the 1049 flag and output, so another
+/// handled signal cannot observe a half-restored terminal on this thread.
+/// `pthread_sigmask` does not cover other threads. Restores the previous mask
+/// on drop, including from a handler, and uses no allocation or lock.
+pub(crate) struct HeldSignals {
     old: libc::sigset_t,
 }
 
-fn block_handled_signals() -> HeldSignals {
+pub(crate) fn block_handled_signals() -> HeldSignals {
     unsafe {
         let mut block = std::mem::zeroed();
         libc::sigemptyset(&mut block);

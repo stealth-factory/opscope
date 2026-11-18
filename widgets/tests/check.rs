@@ -3556,7 +3556,10 @@ fn the_wheel_is_turned_off_on_every_way_out() {
         ("Keyboard::restore", "pub fn restore(&mut self)"),
     ] {
         let at = src.find(from).unwrap_or_else(|| panic!("{} moved or was renamed", what));
-        let body = &src[at..src.len().min(at + 900)];
+        // Read the whole function, not an arbitrary byte window: a comment
+        // explaining signal safety must not hide the actual SCREEN_RESTORE.
+        let end_marker = if from.starts_with(' ') { "\n    }\n" } else { "\n}\n" };
+        let body = &src[at..at + src[at..].find(end_marker).expect("restore function ends")];
         assert!(
             body.contains("SCREEN_RESTORE"),
             "{} does not send the shared SCREEN_RESTORE. A widget leaving by that path hands \
@@ -3590,6 +3593,9 @@ fn the_wheel_is_asked_for_unconditionally() {
     let body: String = whole
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
+        // The RAII guard atomically coordinates signal delivery around claim;
+        // it does not choose whether mouse reporting should be enabled.
+        .filter(|line| line.trim() != "let _hold = terminal::block_handled_signals();")
         .collect::<Vec<_>>()
         .join("\n");
     assert!(

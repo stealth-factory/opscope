@@ -104,6 +104,54 @@ const ALT_SCREEN_ENTER: &str = "\x1b[?1049h";
 /// cleanup twice (Keyboard, then restore_screen); only the first may clear,
 /// because the second would already be writing on the restored shell screen.
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The one thread allowed to write terminal transitions. A process-directed
+/// signal can land on any worker; masking only setup/main would leave those
+/// workers able to interleave a second restore. They record and return instead.
+static TERMINAL_THREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// A fatal request is sticky; a queued stop or continue can never erase it.
+static DEFERRED_FATAL_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// Stop/continue is state, not a queue: the latest request is the next state.
+static DEFERRED_JOB_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+fn defer_terminal_signal(sig: libc::c_int) -> bool {
+    let owner = TERMINAL_THREAD.load(Ordering::Acquire);
+    if owner == 0 || unsafe { libc::pthread_self() } as usize == owner {
+        return false;
+    }
+    match sig {
+        libc::SIGCONT | libc::SIGTSTP => DEFERRED_JOB_SIGNAL.store(sig, Ordering::Release),
+        _ => {
+            let _ = DEFERRED_FATAL_SIGNAL.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+    true
+}
+
+/// Run a worker's request when the terminal-owning thread next waits or polls.
+/// No worker writes a second restoration or exits while main is between bytes.
+fn service_deferred_terminal_signal() {
+    let owner = TERMINAL_THREAD.load(Ordering::Acquire);
+    if owner == 0 || unsafe { libc::pthread_self() } as usize != owner {
+        return;
+    }
+    let fatal = DEFERRED_FATAL_SIGNAL.load(Ordering::Acquire);
+    if fatal != 0 {
+        handle_signal(fatal);
+    }
+    let sig = DEFERRED_JOB_SIGNAL.swap(0, Ordering::AcqRel);
+    match sig {
+        0 => {}
+        libc::SIGCONT => handle_lost_screen(sig),
+        libc::SIGTSTP => handle_suspend(sig),
+        _ => handle_signal(sig),
+    }
+}
+
+/// Resume terminal output before any cleanup write. A stopped output stream
+/// otherwise makes TCSADRAIN/write a deadlock when the exit itself is urgent.
+fn resume_terminal_output() {
+    unsafe { libc::tcflow(libc::STDOUT_FILENO, libc::TCOON); }
+}
 
 /// Eight levels used by compact bar charts across the widgets.
 pub const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -1322,6 +1370,9 @@ pub(crate) fn screen_lost() {
 static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
+    if sig == libc::SIGCONT && defer_terminal_signal(sig) {
+        return;
+    }
     SCREEN_LOST.store(true, Ordering::Release);
     if sig == libc::SIGWINCH {
         terminal::note_resize();
@@ -2012,6 +2063,7 @@ fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -
 /// copy a line out of a widget is that widget's own copy key. Every key is
 /// unaffected either way - ctrl-y and ctrl-e still scroll.
 pub fn setup() {
+    TERMINAL_THREAD.store(unsafe { libc::pthread_self() } as usize, Ordering::Release);
     // An uncaught panic is recorded before Keyboard::drop restores the
     // screen; Drop then prints it on the restored main screen. Caught frame
     // and poller panics keep using the same recording hook.
@@ -2051,6 +2103,10 @@ pub fn setup() {
 /// turns them off, because a terminal left reporting outlives the process
 /// that asked for it.
 pub fn claim_screen() {
+    resume_terminal_output();
+    // A delivered signal runs only after the enter bytes have landed. Without
+    // this hold, it could clear the shell between publishing ACTIVE and 1049h.
+    let _hold = terminal::block_handled_signals();
     forget_frame();
     graphics::cleanup();
     terminal::claim_terminal();
@@ -2112,6 +2168,11 @@ fn forget_termios() {
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
 fn restore_terminal_signal() {
+    resume_terminal_output();
+    // Do not let a second handled signal interrupt this transition either.
+    // Like the keyboard cleanup guard below, this uses pthread_sigmask and no
+    // allocation or lock, and restores the previous mask when it returns.
+    let _hold = terminal::block_handled_signals();
     // Suspend and a signalled exit both come through here. Disarm shared
     // memory without unlinking: `shm_unlink` is not async-signal-safe, and
     // calling it here can stop the handler from restoring the terminal.
@@ -2128,7 +2189,7 @@ fn restore_terminal_signal() {
             }
         }
     }
-    if ALT_SCREEN_ACTIVE.swap(false, Ordering::AcqRel) {
+    if ALT_SCREEN_ACTIVE.load(Ordering::Acquire) {
         unsafe {
             libc::write(
                 libc::STDOUT_FILENO,
@@ -2136,17 +2197,26 @@ fn restore_terminal_signal() {
                 SCREEN_RESTORE.len(),
             );
         }
+        // Only a completed restore counts as inactive. The signal hold above
+        // means no second handler can skip the write in between.
+        ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
     }
 }
 
 extern "C" fn handle_signal(sig: libc::c_int) {
+    if defer_terminal_signal(sig) {
+        return;
+    }
     // Exit only, not suspend: a pane stopped with Ctrl-Z is still there.
     clear_program_status_signal();
     restore_terminal_signal();
     unsafe { libc::_exit(128 + sig); }
 }
 
-extern "C" fn handle_suspend(_: libc::c_int) {
+extern "C" fn handle_suspend(sig: libc::c_int) {
+    if defer_terminal_signal(sig) {
+        return;
+    }
     restore_terminal_signal();
     // SIGSTOP needs no disposition changes and SIGCONT restores cbreak above.
     unsafe { libc::kill(libc::getpid(), libc::SIGSTOP); }
@@ -2154,15 +2224,23 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    resume_terminal_output();
+    // Publish inactive only after the restore has been written and flushed.
+    // Otherwise a fatal signal in that window would skip its own last write.
+    let _hold = terminal::block_handled_signals();
     clear_program_status();
     forget_frame();
     graphics::cleanup();
     terminal::release_terminal();
     terminal::cleanup_signal();
-    if ALT_SCREEN_ACTIVE.swap(false, Ordering::AcqRel) {
+    let restore = ALT_SCREEN_ACTIVE.load(Ordering::Acquire);
+    if restore {
         out(SCREEN_RESTORE);
     }
     flush();
+    if restore {
+        ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 /// Fit hint groups onto as few lines as possible without splitting one.
@@ -4329,14 +4407,11 @@ pub fn take_panic_reason() -> Option<String> {
 /// top of the frame in the wrong colours and survives the redraw. Recorded
 /// instead, and drawn where it can be read.
 ///
-/// `RUST_BACKTRACE` puts the default behaviour back, because somebody who
-/// asked for a backtrace wants the one Rust writes, not a one-line summary
-/// of it.
+/// `RUST_BACKTRACE` adds Rust's captured backtrace to the same record. On an
+/// uncaught panic, Keyboard::drop prints both after leaving 1049, so asking
+/// for a backtrace cannot put the whole explanation back on the hidden screen.
 fn arm_panic_hook() {
     HOOK.call_once(|| {
-        if std::env::var_os("RUST_BACKTRACE").is_some() {
-            return;
-        }
         std::panic::set_hook(Box::new(|info| {
             let where_ = info
                 .location()
@@ -4350,9 +4425,14 @@ fn arm_panic_hook() {
                 .map(|s| (*s).to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panicked".into());
+            let backtrace = if std::env::var("RUST_BACKTRACE").is_ok_and(|value| value != "0") {
+                format!("\nstack backtrace:\n{}", std::backtrace::Backtrace::force_capture())
+            } else {
+                String::new()
+            };
             // A hook runs on the panicking thread, so this lands in that
             // thread's own slot.
-            let said = format!("{what} ({where_})");
+            let said = format!("{what} ({where_}){backtrace}");
             let _ = LAST_PANIC.try_with(|held| *held.borrow_mut() = Some(said));
         }));
     });
@@ -4814,19 +4894,31 @@ impl Keyboard {
     /// Unlike the signal handler this may allocate and take the lock, since
     /// unwinding has already released whatever `draw` was holding.
     pub fn restore(&mut self) {
-        if let Some(saved) = self.saved.take() {
-            clear_program_status();
-            graphics::cleanup();
-            terminal::release_terminal();
-            // Panic, a normal exit, and handing the terminal to a child all
-            // come through here. The signal paths pop in `cleanup_signal`.
-            terminal::pop_keyboard();
-            forget_termios();
-            unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
-            if ALT_SCREEN_ACTIVE.swap(false, Ordering::AcqRel) {
-                out(SCREEN_RESTORE);
-            }
-            flush();
+        resume_terminal_output();
+        let _hold = terminal::block_handled_signals();
+        // A redirected stdin has no saved termios, but setup may still own
+        // stdout's alternate screen. Screen cleanup must not be gated on the
+        // termios Option: that stranded 1049 precisely on the panic path.
+        let saved = self.saved.take();
+        clear_program_status();
+        graphics::cleanup();
+        terminal::release_terminal();
+        // Panic, a normal exit, and handing the terminal to a child all
+        // come through here. The signal paths pop in `cleanup_signal`.
+        terminal::pop_keyboard();
+        forget_termios();
+        if let Some(saved) = saved {
+            // TCSADRAIN could wait forever on stopped output beneath the
+            // signal hold. The restore bytes are flushed explicitly below.
+            unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &saved) };
+        }
+        let restore = ALT_SCREEN_ACTIVE.load(Ordering::Acquire);
+        if restore {
+            out(SCREEN_RESTORE);
+        }
+        flush();
+        if restore {
+            ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
         }
     }
 
@@ -4962,6 +5054,7 @@ impl Keyboard {
     /// Wait between frames, waking immediately when terminal input arrives.
     /// Does not consume input; poll() still owns decoding and protocol replies.
     pub fn wait(&self, timeout: Duration) {
+        service_deferred_terminal_signal();
         // Keys `poll` held back are already here: the next frame is theirs.
         if !self.held.is_empty() {
             return;
@@ -5089,6 +5182,7 @@ impl Keyboard {
     }
 
     fn poll_keys(&mut self) -> Vec<String> {
+        service_deferred_terminal_signal();
         if self.saved.is_none() {
             return Vec::new();
         }
