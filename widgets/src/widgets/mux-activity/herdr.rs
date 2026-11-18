@@ -684,6 +684,22 @@ fn front_is_opscope(front: &Front) -> bool {
     matches!(front, Front::Running(_, argv, name, _) if process_filter::matches(name, &argv.join(" ")))
 }
 
+/// The agent pids whose directory the promoted rows of one poll need: those
+/// whose session log has a reader, which is chosen by the agent's own
+/// directory. Sorted and unique, for one `host::agent_cwds` call; empty when
+/// no row needs one, which makes that call nothing.
+fn cwd_wanted<'a>(promoted: impl Iterator<Item = &'a Option<(Option<u32>, String)>>) -> Vec<u32> {
+    let mut pids: Vec<u32> = promoted
+        .filter_map(|p| match p {
+            Some((Some(pid), kind)) if tc::agent_work::has_log_reader(kind) => Some(*pid),
+            _ => None,
+        })
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
 fn shell_pid_of(info: &serde_json::Value) -> Option<u32> {
     info["process_info"]["shell_pid"]
         .as_u64()
@@ -876,6 +892,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
         .ok()
         .and_then(|text| result_of(text).ok())
     {
+        // Every pane is looked at before any row is built, so the promoted
+        // agents whose session logs need their own directory are asked for
+        // it in one call - one `lsof` on macOS, with its five-second timeout,
+        // rather than one per agent while the refresh waits.
+        let mut looked = Vec::new();
         for pane in listing["panes"].as_array().into_iter().flatten() {
             let pane_id = text_at(pane, "pane_id");
             if pane.get("agent").is_some_and(|a| !a.is_null())
@@ -891,9 +912,13 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
             // A pane whose agent is a background job already on the board
             // is not promoted: the job's row carries the state it reported,
             // and the pane stays a process row that enter can focus.
-            if let Some((agent_pid, kind)) = detect_catalogue_agent(&front, shell_pid, &table, configured)
-                .filter(|(agent_pid, _)| promotable(*agent_pid, &jobs.shown))
-            {
+            let promoted = detect_catalogue_agent(&front, shell_pid, &table, configured)
+                .filter(|(agent_pid, _)| promotable(*agent_pid, &jobs.shown));
+            looked.push((pane, pane_id, front, cpu, rss, promoted));
+        }
+        let cwds = super::host::agent_cwds(&cwd_wanted(looked.iter().map(|l| &l.5)));
+        for (pane, pane_id, front, cpu, rss, promoted) in looked {
+            if let Some((agent_pid, kind)) = promoted {
                 let was = seen.since.get(&pane_id);
                 if was.is_none_or(|(had, _, _)| had != "unknown") {
                     seen.since.insert(
@@ -915,7 +940,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
                         &mut seen.logs,
                         &kind,
                         pid,
-                        &super::host::agent_cwds(&[pid]),
+                        &cwds,
                     ),
                     None if tc::agent_work::has_log_reader(&kind) => {
                         Err("agent process not found, so its directory is unknown".to_string())
@@ -2761,6 +2786,37 @@ fn idle_filter(show_idle: bool, resting: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_poll_asks_once_for_every_promoted_agent_whose_log_needs_its_directory() {
+        let promoted = [
+            Some((Some(30), "codex".to_string())),
+            Some((Some(10), "claude".to_string())),
+            // No log reader: nothing to choose a directory for.
+            Some((Some(20), "agy".to_string())),
+            // No pid found: the row says so; there is nothing to ask about.
+            Some((None, "opencode".to_string())),
+            // The same agent seen from two panes is asked about once.
+            Some((Some(10), "claude".to_string())),
+            None,
+        ];
+        assert_eq!(cwd_wanted(promoted.iter()), vec![10, 30]);
+        let none_need: [Option<(Option<u32>, String)>; 2] = [None, Some((Some(20), "agy".into()))];
+        assert!(cwd_wanted(none_need.iter()).is_empty());
+    }
+
+    #[test]
+    fn a_promoted_agent_left_out_of_the_lookup_still_says_why() {
+        // The per-row text is `agent_log_work`'s, unchanged: a pid missing
+        // from the one map, or one whose directory could not be read.
+        let mut reader = tc::agent_work::LogReader::default();
+        let mut cwds = HashMap::new();
+        cwds.insert(7, Err("permission denied".to_string()));
+        let missing = super::super::rex::agent_log_work(&mut reader, "codex", 8, &cwds).unwrap_err();
+        assert_eq!(missing, "agent cwd was not acquired");
+        let unread = super::super::rex::agent_log_work(&mut reader, "codex", 7, &cwds).unwrap_err();
+        assert_eq!(unread, "agent cwd: permission denied");
+    }
 
     fn agent(pane: &str, workspace: &str, state: &str) -> Agent {
         Agent {
