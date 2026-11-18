@@ -1875,6 +1875,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let events_key = format!("cursor-events:{me}");
     let mut events_why = String::new();
     d.events = cached(caches, &events_key, EVENTS_TTL, || {
+        // No token is this machine's fact, not the dashboard's refusal: it
+        // has no backoff to wait out, so it is not remembered as one.
+        if tok.is_none() {
+            return Some(local_fact("no token - Cursor has not signed in here"));
+        }
         match cursor_events(tok, 30) {
             Ok(events) => Some(events),
             Err(why) => {
