@@ -23,6 +23,11 @@ host but github.com or api.github.com is treated as Enterprise Server
 The token must come from that host. On Server, stacks are inferred from
 branches.
 
+Several panes share one pass: the list and the counts are fetched by one pane
+and read by the rest, through a file only you can read that keeps pull-request
+titles for up to 2 hours. A line under the status line says which pane fetched
+them. `share_readings: false` keeps a pane to itself.
+
 Keys: up/down select, enter opens a PR, esc goes back, / filters, s cycles the
 sort, o reverses it, comma opens settings, r refreshes, q quits.
 

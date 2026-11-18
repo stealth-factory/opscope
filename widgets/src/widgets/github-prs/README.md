@@ -212,10 +212,12 @@ it to code you have a stake in.
 `f` cycles which source is shown — `all`, then each by name. It is instant: the
 pooling already knows which sources found each PR.
 
-**Every source is paged to exhaustion**, and rows are published as each round
-lands, so the board fills while it works rather than staying empty until the
-last source is done, and the count in the header is the count on screen
-throughout. GitHub's search backend goes through slow spells, and a round it
+**Every source is paged to exhaustion**. On a board with nothing on it yet,
+rows are published as each round lands, so the board fills while it works
+rather than staying empty until the last source is done, and the count in the
+header is the count on screen throughout. A board already showing a finished
+list keeps it until the new pass finishes, as every other pane does while this
+one fetches. GitHub's search backend goes through slow spells, and a round it
 refuses is asked again for less; a round it will not serve at all stops the
 paging, and the header then says `of at least` rather than a total, so a short
 board is never mistaken for a quiet one.
@@ -382,6 +384,43 @@ one is shared with `github` when they use the same token.
 Detail is fetched only on demand — 33 PRs are not worth pre-fetching for the
 one you open — so the view paints a loading shimmer and fills in.
 
+## Several panes
+
+Several `github-prs` panes on one machine make one pass between them. Each
+reading - who the token belongs to, the merge counts, the arrival counts and
+the pooled list - is fetched by whichever pane finds it stale first, under a
+lease it renews before every request; the other panes keep drawing what they
+have and take the answer when it lands. On a large board that is a dozen
+search rounds and dozens of enrichment requests a refresh spent once, not once
+per pane.
+
+A line under the status line says where the numbers came from when it is not
+this pane, fresh: `fetched 40s ago by pane 48213`, or, while another pane
+pages, the previous list with `cached 2m ago · pane 48213 asking now`.
+`updated … ago` on the status line is when the newest reading on screen came
+back from GitHub, whichever pane asked.
+
+A pass that fails - after the three retries GitHub's slow spells get inside
+it - is held for one refresh by every pane, so N panes make one retry rather
+than N. GitHub answers a spent GraphQL budget with HTTP 200 and an error, and
+the headers say when it resets: every pane using that host and credential
+stops until then and the line says `GitHub rate limit spent, next ask in 40m`.
+
+The source filter, the text filter, the sort and the stats toggle stay with
+each pane. Panes given other search terms on the command line keep lists of
+their own.
+
+**What is stored.** One file, `~/.local/state/opscope/github-prs.sqlite`,
+readable only by you, holding the latest of each reading: pull-request
+titles, authors, branch and repository names, and the counts. Readings expire
+after **2 hours** without a fetch and are removed on the next write; no token
+is ever written. A list
+larger than 4 MB - about 7,000 pull requests - stays with the pane that
+fetched it, and the line says `too large to share`.
+
+`share_readings: false` turns this off for one pane, which then asks on its
+own and writes nothing.
+
 ## Credentials
 
 **Its own `github_prs.token`** in `config.json`, or the variable
@@ -425,7 +464,8 @@ settings screen restarts the widget to pick it up.
     "assigned": "is:open is:pr assignee:@me"
   },
   "limit": 25,
-  "refresh": 60
+  "refresh": 60,
+  "share_readings": true
 }
 ```
 
