@@ -148,6 +148,7 @@ pub fn read_all(
 /// claims to be fresher than its stalest part.
 fn freshness_of(name: &str, s: &State, tabs: &[String]) -> Vec<tc::readings::Provenance> {
     let of = |vendor: &str| s.freshness.get(vendor).cloned().unwrap_or_default();
+    let listed = |vendor: &str| tabs.iter().any(|t| t == vendor);
     match name {
         SUMMARY_TAB => {
             let mut all: Vec<_> = Vec::new();
@@ -166,9 +167,11 @@ fn freshness_of(name: &str, s: &State, tabs: &[String]) -> Vec<tc::readings::Pro
         name if agent_family(name) == "claude" => {
             claude_of(s, name).map(|d| d.freshness.clone()).unwrap_or_default()
         }
-        "spacexsi" => [of("cursor"), of("grok")].concat(),
-        "spacexsi:cursor" => of("cursor"),
-        "spacexsi:grok" => of("grok"),
+        "spacexsi" if s.cursor.spacexsi == Spacexsi::Shared && listed("cursor") && listed("grok") => {
+            [of("cursor"), of("grok")].concat()
+        }
+        "spacexsi" | "spacexsi:cursor" if s.cursor.spacexsi.unified() && listed("cursor") => of("cursor"),
+        "spacexsi" | "spacexsi:grok" => of("grok"),
         other => of(other),
     }
 }
@@ -2444,6 +2447,47 @@ mod tests {
                 "weekly_resets_at": "2126-01-05T00:00:00Z"
             }
         })
+    }
+
+    #[test]
+    fn spacexsi_freshness_comes_only_from_the_vendors_its_body_displays() {
+        use tc::readings::Provenance;
+        use Spacexsi::*;
+        let at = now();
+        let cursor = Provenance {
+            taken_at: at - 30.0,
+            by: None,
+            stale: false,
+            asking: None,
+            refused: None,
+            unshared: None,
+        };
+        let grok = Provenance {
+            taken_at: at - 600.0,
+            refused: Some(("grok request failed".into(), at + 300.0)),
+            stale: true,
+            ..cursor.clone()
+        };
+        let mut s = State {
+            freshness: HashMap::from([
+                ("cursor".to_string(), vec![cursor.clone()]),
+                ("grok".to_string(), vec![grok.clone()]),
+            ]),
+            ..State::default()
+        };
+        let mut check = |cursor_place, grok_place, name, listed: &[&str], want: &[Provenance]| {
+            s.cursor.spacexsi = cursor_place;
+            s.grok.spacexsi = grok_place;
+            let tabs: Vec<String> = listed.iter().map(|t| t.to_string()).collect();
+            assert_eq!(freshness_of(name, &s, &tabs), want, "{name}, listed {listed:?}");
+        };
+        check(Shared, Shared, "spacexsi", &["cursor", "grok"], &[cursor.clone(), grok.clone()]);
+        check(Shared, Shared, "spacexsi", &["cursor"], std::slice::from_ref(&cursor));
+        check(Shared, Shared, "spacexsi", &["grok"], std::slice::from_ref(&grok));
+        check(Alone, No, "spacexsi", &["cursor", "grok"], std::slice::from_ref(&cursor));
+        check(No, Alone, "spacexsi", &["cursor", "grok"], std::slice::from_ref(&grok));
+        check(Separate, Separate, "spacexsi:cursor", &["cursor", "grok"], std::slice::from_ref(&cursor));
+        check(Separate, Separate, "spacexsi:grok", &["cursor", "grok"], std::slice::from_ref(&grok));
     }
 
     /// Each tab says where its own readings came from, above them, in

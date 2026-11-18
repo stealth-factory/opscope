@@ -1070,8 +1070,9 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // there, so a reading another pane stored before a sign-in as someone
     // else is never served after it.
     let account = claude_account_at(&dir.path);
+    let quota_key = format!("claude:{}:{account}", dir.path);
     claude_secrets(caches, &dir.path);
-    let live = cached(caches, &format!("claude:{}:{account}", dir.path), CLAUDE_LIVE_TTL, || {
+    let live = cached(caches, &quota_key, CLAUDE_LIVE_TTL, || {
         let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
         };
@@ -1107,6 +1108,13 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         }
         None => {
             if let Some((u, at)) = claude_stale_for(&dir.path) {
+                // The refusal's provenance must date this fallback, not the
+                // request that just failed. In a new process the disk
+                // snapshot is the only good reading the core cache has.
+                caches.readings.good.insert(
+                    quota_key,
+                    (at, serde_json::json!({ "u": u.clone(), "at": at })),
+                );
                 claude.quota = Some(u);
                 claude.quota_live = false;
                 claude.quota_at = at;
@@ -2698,6 +2706,63 @@ mod tests {
         assert!(cached(&mut caches, "claude:clean", 120.0, || Some(serde_json::json!({"u": 1}))).is_some());
         assert!(other.load("claude:clean").unwrap().is_some(), "a clean reading was not shared");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_quota_request_dates_the_disk_snapshot_it_displays() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+            }
+        }
+
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "opscope-claude-freshness-{}-{}",
+            std::process::id(),
+            now().to_bits()
+        ));
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        let state = root.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let _restore = RestoreEnv(std::env::var_os("XDG_STATE_HOME"));
+        std::env::set_var("XDG_STATE_HOME", &state);
+
+        let home = home.to_string_lossy().to_string();
+        let taken = now() - 2.0 * 3600.0;
+        let quota = serde_json::json!({"limits": [{"group": "session", "percent": 20}]});
+        write_snapshot(&snapshot_path_for(&home), &quota, None, taken);
+        let account = claude_account_at(&home);
+        let key = format!("claude:{home}:{account}");
+        let mut caches = Caches::default();
+        // The failed request has just been cached. There is no in-memory
+        // good reading, as after a restart; only the old snapshot is on disk.
+        caches.readings.live.insert(
+            key,
+            (now(), Some(serde_json::json!({"why": "fixture request failed"})), CLAUDE_LIVE_TTL),
+        );
+        let cfg = Config {
+            claude_dirs: vec![ClaudeDir { path: home, label: String::new() }],
+            ..Config::default()
+        };
+        let got = read(&mut caches, &cfg);
+        assert_eq!(got[0].quota_at, taken);
+        let provenance = got[0]
+            .freshness
+            .iter()
+            .find(|p| p.refused.is_some())
+            .expect("the quota refusal's provenance");
+        assert!((provenance.taken_at - taken).abs() < 0.001, "{provenance:?}");
+        assert!(got[0].freshness.iter().any(|p| p.refused.is_none()), "the profile lost its own provenance");
+        let rows = tc::readings::provenance_rows(&got[0].freshness, now(), 120).join(" ");
+        assert!(rows.starts_with("cached 2h00m ago"), "{rows}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
