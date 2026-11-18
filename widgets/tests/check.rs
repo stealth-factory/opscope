@@ -4322,84 +4322,180 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
 
 /// A picker table or discovery hook is wired to its schema by field name.
 ///
-/// Full-line comments go before the member is found, so `// discover: &[]`
-/// cannot hide the real list. A `//` later on a live line goes before the
-/// tuples are split, so it cannot add a field. Whitespace, including a
-/// line break, may sit between the name and `&[`.
-fn picker_fields(source: &str, member: &str) -> Vec<String> {
-    let code = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .map(without_trailing_comment)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let Some(rest) = slice_after_member(&code, member) else {
-        return Vec::new();
+/// The source is lexed, so comments, strings and nested brackets are tokens
+/// rather than characters. A name that is not a literal `&[ ... ]` is an
+/// error: skipping it would leave its fields unchecked.
+fn picker_fields(source: &str, member: &str) -> Result<Vec<String>, String> {
+    let tokens = match TokenStream::from_str(source) {
+        Ok(tokens) => tokens.into_iter().collect::<Vec<_>>(),
+        Err(error) => return Err(format!("{member} could not be read ({error})")),
     };
-    let body = rest.split_once(']').map(|(before, _)| before).unwrap_or(rest);
-    body.split('(')
-        .skip(1)
-        .filter_map(|entry| {
-            entry
-                .trim_start()
-                .strip_prefix('"')
-                .and_then(|rest| rest.split_once('"'))
-                .map(|(key, _)| key.to_string())
-        })
-        .collect()
+    let mut fields = Vec::new();
+    let mut named = false;
+    walk_picker_fields(&tokens, true, member, &mut fields, &mut named);
+    if named {
+        return Err(format!(
+            "{member} is not a literal slice, so its fields are not checked"
+        ));
+    }
+    Ok(fields)
 }
 
-/// Drop a `//` comment that follows code, leaving a comment inside quotes.
-fn without_trailing_comment(line: &str) -> String {
-    let mut out = String::new();
-    let mut chars = line.chars().peekable();
-    let mut quoted = false;
-    while let Some(ch) = chars.next() {
-        if ch == '\\' && quoted {
-            out.push(ch);
-            if let Some(next) = chars.next() {
-                out.push(next);
+fn walk_picker_fields(
+    tokens: &[TokenTree],
+    fields_here: bool,
+    member: &str,
+    fields: &mut Vec<String>,
+    named: &mut bool,
+) {
+    if fields_here {
+        note_picker_fields(tokens, member, fields, named);
+    }
+    for token in tokens {
+        let TokenTree::Group(group) = token else {
+            continue;
+        };
+        let nested: Vec<TokenTree> = group.stream().into_iter().collect();
+        walk_picker_fields(
+            &nested,
+            group.delimiter() == Delimiter::Brace,
+            member,
+            fields,
+            named,
+        );
+    }
+}
+
+fn note_picker_fields(
+    tokens: &[TokenTree],
+    member: &str,
+    fields: &mut Vec<String>,
+    named: &mut bool,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        if ident != member || !is_punct(tokens.get(index + 1), ':') {
+            continue;
+        }
+        match slice_fields(&tokens[index + 2..]) {
+            Some(keys) => fields.extend(keys),
+            None => *named = true,
+        }
+    }
+}
+
+/// The field names of a literal `&[("name", value), ...]`, if this is one.
+fn slice_fields(tokens: &[TokenTree]) -> Option<Vec<String>> {
+    let mut index = 0;
+    if !is_punct(tokens.get(index), '&') {
+        return None;
+    }
+    index += 1;
+    if is_punct(tokens.get(index), '\'') {
+        index += 2;
+    }
+    let TokenTree::Group(group) = tokens.get(index)? else {
+        return None;
+    };
+    if group.delimiter() != Delimiter::Bracket {
+        return None;
+    }
+    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+    let mut keys = Vec::new();
+    let mut entry = Vec::new();
+    for token in inner {
+        if is_punct(Some(&token), ',') && entry.is_empty() {
+            continue;
+        }
+        if is_punct(Some(&token), ',') {
+            if let Some(key) = entry_key(&entry) {
+                keys.push(key);
             }
+            entry.clear();
             continue;
         }
-        if ch == '"' {
-            quoted = !quoted;
-            out.push(ch);
-            continue;
-        }
-        if ch == '/' && !quoted && chars.peek() == Some(&'/') {
+        entry.push(token);
+    }
+    if let Some(key) = entry_key(&entry) {
+        keys.push(key);
+    }
+    Some(keys)
+}
+
+/// The first string of a top-level `("name", callback)` entry.
+fn entry_key(entry: &[TokenTree]) -> Option<String> {
+    let token = entry.first()?;
+    let TokenTree::Group(group) = token else {
+        return literal_string(token);
+    };
+    if group.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+    for token in group.stream() {
+        if is_punct(Some(&token), ',') {
             break;
         }
-        out.push(ch);
-    }
-    out
-}
-
-/// The text after `member: &[`, with any whitespace around the colon.
-fn slice_after_member<'a>(code: &'a str, member: &str) -> Option<&'a str> {
-    let mut rest = code;
-    let mut offset = 0;
-    while let Some(at) = rest.find(member) {
-        let abs = offset + at;
-        let before = code[..abs]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
-        if before {
-            let after = &code[abs + member.len()..];
-            let after_space = after.trim_start();
-            if let Some(after_colon) = after_space.strip_prefix(':') {
-                let value = after_colon.trim_start();
-                if let Some(list) = value.strip_prefix("&[") {
-                    return Some(list);
-                }
-            }
+        if let Some(key) = literal_string(&token) {
+            return Some(key);
         }
-        let next = at + member.len();
-        offset += next;
-        rest = &rest[next..];
     }
     None
+}
+
+fn literal_string(token: &TokenTree) -> Option<String> {
+    let TokenTree::Literal(literal) = token else {
+        return None;
+    };
+    rust_string(&literal.to_string())
+}
+
+fn rust_string(text: &str) -> Option<String> {
+    if let Some(raw) = text.strip_prefix('r') {
+        let hashes = raw.bytes().take_while(|byte| *byte == b'#').count();
+        let rest = raw[hashes..].strip_prefix('"')?;
+        let suffix = format!("\"{}", "#".repeat(hashes));
+        return rest.strip_suffix(&suffix).map(str::to_string);
+    }
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    Some(unescape_rust_string(body))
+}
+
+fn unescape_rust_string(body: &str) -> String {
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                out.push(char::from(
+                    u8::from_str_radix(&hex, 16).unwrap_or(b'?'),
+                ));
+            }
+            Some('u') => {
+                let rest: String = chars.by_ref().take_while(|ch| *ch != '}').collect();
+                let hex = rest.trim_start_matches('{');
+                if let Some(code) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                    out.push(code);
+                }
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
 }
 
 /// Why a discovery field is not a string array, when it is not.
@@ -4427,15 +4523,14 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
     let mut wrong = Vec::new();
     for name in widgets().keys() {
         let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
-        let mut fields = picker_fields(&source, "catalogues")
-            .into_iter()
-            .map(|key| (key, "catalogue"))
-            .chain(
-                picker_fields(&source, "discover")
-                    .into_iter()
-                    .map(|key| (key, "discovery")),
-            )
-            .peekable();
+        let mut fields = Vec::new();
+        for (member, picker) in [("catalogues", "catalogue"), ("discover", "discovery")] {
+            match picker_fields(&source, member) {
+                Ok(keys) => fields.extend(keys.into_iter().map(|key| (key, picker))),
+                Err(why) => wrong.push(format!("{name}: {why}")),
+            }
+        }
+        let mut fields = fields.into_iter().peekable();
         if fields.peek().is_none() {
             continue;
         }
@@ -4477,8 +4572,8 @@ fn picker_fields_ignore_a_commented_entry() {
             ("properties", discover_properties),
         ],
     "#;
-    assert_eq!(picker_fields(source, "catalogues"), vec!["models"]);
-    assert_eq!(picker_fields(source, "discover"), vec!["properties"]);
+    assert_eq!(picker_fields(source, "catalogues").unwrap(), vec!["models"]);
+    assert_eq!(picker_fields(source, "discover").unwrap(), vec!["properties"]);
     let wrapped = r#"
         discover: &[
             // Retired choices: []
@@ -4490,7 +4585,7 @@ fn picker_fields_ignore_a_commented_entry() {
         ],
     "#;
     assert_eq!(
-        picker_fields(wrapped, "discover"),
+        picker_fields(wrapped, "discover").unwrap(),
         vec!["split".to_string(), "properties".to_string()]
     );
     let trailing = r#"
@@ -4498,7 +4593,7 @@ fn picker_fields_ignore_a_commented_entry() {
             ("properties", discover_properties), // ("retired", old_hook)
         ],
     "#;
-    assert_eq!(picker_fields(trailing, "discover"), vec!["properties"]);
+    assert_eq!(picker_fields(trailing, "discover").unwrap(), vec!["properties"]);
     let broken = r#"
         // Example: discover: &[],
         discover:
@@ -4506,8 +4601,26 @@ fn picker_fields_ignore_a_commented_entry() {
                 ("properties", discover_properties),
             ],
     "#;
-    assert_eq!(picker_fields(broken, "discover"), vec!["properties"]);
-    assert!(picker_fields("discover: &[],", "discover").is_empty());
+    assert_eq!(picker_fields(broken, "discover").unwrap(), vec!["properties"]);
+    assert!(picker_fields("discover: &[],", "discover").unwrap().is_empty());
+    assert_eq!(
+        picker_fields(r#"discover: & [("missing", hook)]"#, "discover").unwrap(),
+        vec!["missing".to_string()]
+    );
+    let nested = r#"
+        /* disabled: discover: &[] */
+        discover: &[
+            ("properties", { let _ = [0]; let _ = '"'; hook }),
+            ("missing", ("retired", 0)),
+        ] // ]
+    "#;
+    assert_eq!(
+        picker_fields(nested, "discover").unwrap(),
+        vec!["properties".to_string(), "missing".to_string()]
+    );
+    let hidden = r#"const EXAMPLE: &str = "discover: &[]"; discover: &[("properties", hook)]"#;
+    assert_eq!(picker_fields(hidden, "discover").unwrap(), vec!["properties"]);
+    assert!(picker_fields("discover: DISCOVERY", "discover").is_err());
 }
 
 #[test]
