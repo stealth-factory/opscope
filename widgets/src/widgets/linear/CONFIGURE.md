@@ -10,7 +10,7 @@ The Linear GraphQL API reached with `curl` and a personal API key.
 
 The owned section is `linear`.
 
-Declared fields: `token`, `token_env`, `exclude_teams`, `window_days`, `refresh`
+Declared fields: `token`, `token_env`, `exclude_teams`, `window_days`, `refresh`, `share_readings`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

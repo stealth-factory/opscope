@@ -5007,6 +5007,17 @@ mod tests {
         };
         assert!(sharing_lines(&fresh, true, now, 200).join(" ").contains("30s ago by pane 41"));
         assert!(sharing_lines(&fresh, false, now, 200).join(" ").contains("30s ago by pane 41"));
+        // A newer counts reading is the one the line dates while stats are
+        // shown, and it drops out with them.
+        let newer = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 10.0, 42, false)),
+            ],
+            ..Sharing::default()
+        };
+        assert!(sharing_lines(&newer, true, now, 200).join(" ").contains("10s ago by pane 42"));
+        assert!(sharing_lines(&newer, false, now, 200).join(" ").contains("30s ago by pane 41"));
         // A stale counts reading is the line while stats are shown, and
         // disappears with them.
         let stale = Sharing {

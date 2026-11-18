@@ -19,8 +19,9 @@
 //! Linear refuses a request over its limit with HTTP 429, a `RATELIMITED`
 //! code in the GraphQL errors, and a `Retry-After` header; every answer,
 //! refused or not, carries `X-RateLimit-Requests-Remaining` and
-//! `X-RateLimit-Requests-Reset`. Nothing backs off on these yet - they are
-//! read so that a refusal can say which kind it was.
+//! `X-RateLimit-Requests-Reset`. A refusal stops every linear pane on the
+//! machine using that key: until the time it named, or for the doubling
+//! backoff's step when it named none (OPS-286).
 
 /// How long a refused request says to wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,8 +35,6 @@ pub enum RetryAfter {
 /// The rate-limit facts one answer carried. Every field is `None` or false
 /// when the answer did not say, which is not the same as zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-// Read by the backoff OPS-286 adds; nothing on screen uses it yet.
-#[allow(dead_code)]
 pub struct RateLimit {
     /// The HTTP status of the answer.
     pub status: u16,
@@ -103,6 +102,25 @@ pub fn rate_limit(status: u16, headers: &[(String, String)], body: &str) -> Rate
         remaining: header("x-ratelimit-requests-remaining").and_then(parse_requests_remaining),
         reset_ms: header("x-ratelimit-requests-reset").and_then(parse_requests_reset),
     }
+}
+
+/// When a rate-limited answer says to ask again, in Unix seconds.
+///
+/// `Retry-After` first, because it is the answer to this refusal; the
+/// window's reset when that is missing or already past. `None` for an
+/// answer that was not a rate limit, or one that named no time still ahead
+/// of `now` - which the caller waits out on the doubling backoff rather
+/// than guessed at here.
+pub fn retry_at(limit: &RateLimit, now: f64) -> Option<f64> {
+    if !limit.limited {
+        return None;
+    }
+    let after = limit.retry_after.map(|r| match r {
+        RetryAfter::Seconds(s) => now + s as f64,
+        RetryAfter::At(t) => t as f64,
+    });
+    let reset = limit.reset_ms.map(|ms| ms as f64 / 1000.0);
+    after.filter(|t| *t > now).or(reset.filter(|t| *t > now))
 }
 
 #[cfg(test)]
@@ -175,5 +193,31 @@ mod tests {
             r#"{"errors":[{"message":"x","extensions":{"code":"RATELIMITED"}}]}"#,
         );
         assert!(coded.limited);
+    }
+
+    #[test]
+    fn a_rate_limit_says_when_to_ask_again() {
+        let now = 1_767_225_000.0;
+        let limited = RateLimit {
+            status: 429,
+            limited: true,
+            retry_after: Some(RetryAfter::Seconds(42)),
+            remaining: Some(0),
+            reset_ms: Some(1_767_225_600_000),
+        };
+        assert_eq!(retry_at(&limited, now), Some(now + 42.0));
+        // No Retry-After: the window's reset.
+        let reset_only = RateLimit { retry_after: None, ..limited };
+        assert_eq!(retry_at(&reset_only, now), Some(1_767_225_600.0));
+        // A date form, and a Retry-After already past falls to the reset.
+        let dated = RateLimit { retry_after: Some(RetryAfter::At(1_767_225_100)), ..limited };
+        assert_eq!(retry_at(&dated, now), Some(1_767_225_100.0));
+        let past = RateLimit { retry_after: Some(RetryAfter::Seconds(0)), ..limited };
+        assert_eq!(retry_at(&past, now), Some(1_767_225_600.0));
+        // Nothing ahead of now, or not a rate limit at all: no time.
+        let nothing = RateLimit { retry_after: None, reset_ms: Some(1_000), ..limited };
+        assert_eq!(retry_at(&nothing, now), None);
+        let other = RateLimit { limited: false, status: 401, ..limited };
+        assert_eq!(retry_at(&other, now), None);
     }
 }

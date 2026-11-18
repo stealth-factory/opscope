@@ -301,7 +301,9 @@
     "_window_days_comment": "Days included in issue and cycle trend charts.",
     "window_days": 14.0,
     "_refresh_comment": "Seconds between Linear API refreshes.",
-    "refresh": 120.0
+    "refresh": 120.0,
+    "_share_readings_comment": "Share what Linear answers with every other linear pane on this machine, so one pane walks the workspace each refresh and the rest read its answer, each drawing its own teams. On by default.\n\nA rate limit Linear names a reset for stops every pane using that API key until then, and each pane says when it will ask again.\n\nThe answers are kept in one file in ~/.local/state/opscope, readable only by you. They include issue identifiers, titles and links, and project names. A row becomes eligible for cleanup after 2 hours without a publication and is deleted only during a later save; this is not a retention deadline, and refusals also update their rows. Closing every pane leaves the file on disk. The API key is never written there. Turn it off to have this pane ask on its own and write nothing to disk; an existing file is not deleted.",
+    "share_readings": true
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss on Linux or nettop on macOS.",
