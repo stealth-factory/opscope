@@ -32,6 +32,17 @@ host but github.com or api.github.com is treated as Enterprise Server
 `enterprise_hostname_env` and set the host there; none is read unless named.
 The token must come from that host.
 
+Panes share: every github pane on this machine with the same token shares
+who it belongs to and the contribution calendar, and panes on the same
+accounts and window share the board's totals, so one pane asks GitHub and the
+rest read its answer. Day counts and merged-PR timing are shared per
+account: a pane asks only for days no pane has read, and for timing once
+each time the merged count moves; r rebuilds the day counts in every pane. The line under the status line says which pane fetched
+what is on screen, or why this one is not sharing. When GitHub says the rate
+limit is spent, panes on that host and token stop asking and say when they
+will ask again.
+share_readings turns it off for one pane.
+
 Keys: up/down select an account, i shows a legend above the table for
 those of the HELD, R24 and T2D columns the pane is wide enough to draw,
 and hides it again, r refreshes now, w cycles the window (7/14/30/60/90

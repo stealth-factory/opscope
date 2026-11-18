@@ -798,26 +798,66 @@ pub struct Ticket<'a> {
     done: bool,
 }
 
+/// What a lease renewal did. A busy store is not an extension: the lease
+/// was not touched, and the next request has to try again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renewed {
+    /// The store lengthened the lease. It now runs for another `lease_for`.
+    Extended,
+    /// Still this pane's, and more than half of it remains. Nothing was written.
+    Held,
+    /// SQLite was busy. The lease was not extended.
+    Busy,
+    /// The lease ran out, or another pane holds it.
+    Lost,
+}
+
+impl Renewed {
+    /// Still this pane's to fetch. A busy store is not a takeover, and
+    /// neither is a store this pane has stopped sharing.
+    pub fn held(self) -> bool {
+        !matches!(self, Renewed::Lost)
+    }
+}
+
+fn classify_renew(cache: &mut Cache, result: Result<store::RenewHow, String>) -> Renewed {
+    match result {
+        Ok(store::RenewHow::Extended) => Renewed::Extended,
+        Ok(store::RenewHow::Held) => Renewed::Held,
+        Ok(store::RenewHow::Lost) => Renewed::Lost,
+        Err(why) if store::busy(&why) => Renewed::Busy,
+        Err(why) => {
+            // Sharing has stopped, so there is no other pane to take the
+            // lease. Callers that only ask [`Renewed::held`] keep going.
+            stop_sharing(cache, &why);
+            Renewed::Extended
+        }
+    }
+}
+
 impl Ticket<'_> {
-    /// Keep the lease through the next request. It is extended once half
-    /// of it has gone; until then this only checks it is still ours.
+    /// Keep the lease through the next request. The store extends it once
+    /// half of it has gone, and until then only checks it is still ours.
     /// `false` when it ran out and another pane took it: stop, and show
     /// what that pane publishes.
+    ///
+    /// A busy store also returns `true` — the lease was not lost — which
+    /// is not the same as it having been extended. [`Self::renew_result`]
+    /// says which.
     pub fn renew(&mut self) -> bool {
+        self.renew_result().held()
+    }
+
+    /// [`Self::renew`], and whether the lease was actually extended.
+    pub fn renew_result(&mut self) -> Renewed {
         if self.claimed.is_none() {
-            return true;
+            return Renewed::Extended;
         }
         let Some(store) = self.cache.store.as_mut() else {
-            return true;
+            return Renewed::Extended;
         };
-        match store.renew(&self.key, crate::now(), self.policy.lease_for) {
-            Ok(mine) => mine,
-            Err(why) if store::busy(&why) => true,
-            Err(why) => {
-                stop_sharing(self.cache, &why);
-                true
-            }
-        }
+        let result = store.renew_how(&self.key, crate::now(), self.policy.lease_for);
+        classify_renew(self.cache, result)
     }
 
     /// Whether `bucket` is shut, after looking at the store again.
@@ -1037,7 +1077,16 @@ pub fn answer_many(
         return Vec::new();
     }
     let mut shared = Vec::with_capacity(done.len());
+    // What this pane held before the answer, so a publish another pane
+    // took over can be put back. The answer is written locally first,
+    // and a newer local timestamp would hide the successor's reading.
+    let mut prior = Vec::with_capacity(done.len());
     for (key, answer, p, at) in done {
+        prior.push((
+            cache.live.get(*key).cloned(),
+            cache.good.get(*key).cloned(),
+            cache.fails.get(*key).copied(),
+        ));
         let (value, held) = match answer {
             Answer::Value(v) => {
                 cache.fails.remove(*key);
@@ -1081,21 +1130,53 @@ pub fn answer_many(
     let items: Vec<(&str, store::Shared)> = shared.iter().map(|(k, s)| (k.as_str(), s.clone())).collect();
     match store.publish_many(&items, &cache.secrets, now, Some(claimed_at)) {
         Ok(results) => {
-            for (i, done) in results.into_iter().enumerate() {
-                let key = &items[i].0;
-                cache.shared.insert((*key).to_string(), (items[i].1.taken_at, me));
-                out[i] = done.unshared();
-                match done.unshared() {
+            for (i, published) in results.into_iter().enumerate() {
+                let key = items[i].0;
+                if published == store::Publish::TakenOver {
+                    // The local copy written above is the answer the store
+                    // refused. Put back what was there and take the
+                    // successor, whose timestamp may be earlier.
+                    match &prior[i].0 {
+                        Some(entry) => {
+                            cache.live.insert(key.to_string(), entry.clone());
+                        }
+                        None => {
+                            cache.live.remove(key);
+                        }
+                    }
+                    match &prior[i].1 {
+                        Some(entry) => {
+                            cache.good.insert(key.to_string(), entry.clone());
+                        }
+                        None => {
+                            cache.good.remove(key);
+                        }
+                    }
+                    match prior[i].2 {
+                        Some(n) => {
+                            cache.fails.insert(key.to_string(), n);
+                        }
+                        None => {
+                            cache.fails.remove(key);
+                        }
+                    }
+                    cache.shared.remove(key);
+                    cache.unshared.remove(key);
+                    // The successor was written after this pane last looked.
+                    follow(cache);
+                    pull(cache, key, now, done[i].2.ttl);
+                    out[i] = Some("not shared: another pane took over");
+                    continue;
+                }
+                cache.shared.insert(key.to_string(), (items[i].1.taken_at, me));
+                out[i] = published.unshared();
+                match published.unshared() {
                     Some(why) => {
-                        cache.unshared.insert((*key).to_string(), why);
+                        cache.unshared.insert(key.to_string(), why);
                     }
                     None => {
-                        cache.unshared.remove(*key);
+                        cache.unshared.remove(key);
                     }
-                }
-                if done == store::Publish::TakenOver {
-                    // Another pane holds it now: its answer is the shared one.
-                    out[i] = Some("not shared: another pane took over");
                 }
             }
         }
@@ -1105,21 +1186,23 @@ pub fn answer_many(
     out
 }
 
-/// Keep `key`'s lease through the next request. It is extended by
-/// `lease_for` once half of that has gone, and only read until then.
+/// Keep `key`'s lease through the next request. The store extends it by
+/// `lease_for` once half of that has gone, and only reads until then.
 /// `false` when another pane took it over.
+///
+/// A busy store also returns `true`. [`renew_result`] says whether the
+/// lease is still ours or the store was busy.
 pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
+    renew_result(cache, key, lease_for).held()
+}
+
+/// [`renew`], and whether the lease was actually extended.
+pub fn renew_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed {
     let Some(store) = cache.store.as_mut() else {
-        return true;
+        return Renewed::Extended;
     };
-    match store.renew(key, crate::now(), lease_for) {
-        Ok(mine) => mine,
-        Err(why) if store::busy(&why) => true,
-        Err(why) => {
-            stop_sharing(cache, &why);
-            true
-        }
-    }
+    let result = store.renew_how(key, crate::now(), lease_for);
+    classify_renew(cache, result)
 }
 
 /// Keep every lease this pane still holds, and say whether `key` is one
@@ -1127,19 +1210,19 @@ pub fn renew(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
 /// then this only reads. A pass that claimed many readings does this
 /// before each request, so an answer already fetched stays owned until
 /// it is published. `false` when another pane took `key` over. A busy
-/// store counts as still holding it.
+/// store counts as still holding it, and [`renew_all_result`] says it
+/// was not extended.
 pub fn renew_all(cache: &mut Cache, key: &str, lease_for: f64) -> bool {
+    renew_all_result(cache, key, lease_for).held()
+}
+
+/// [`renew_all`], and whether the leases were actually extended.
+pub fn renew_all_result(cache: &mut Cache, key: &str, lease_for: f64) -> Renewed {
     let Some(store) = cache.store.as_mut() else {
-        return true;
+        return Renewed::Extended;
     };
-    match store.renew_all(crate::now(), lease_for, key) {
-        Ok(mine) => mine,
-        Err(why) if store::busy(&why) => true,
-        Err(why) => {
-            stop_sharing(cache, &why);
-            true
-        }
-    }
+    let result = store.renew_all_how(crate::now(), lease_for, key);
+    classify_renew(cache, result)
 }
 
 /// Give `key`'s lease back without publishing: the pass stopped short.
@@ -1773,6 +1856,87 @@ mod tests {
         assert!(matches!(take(&mut b, "k", P), Take::Fetch(_)));
         let p = provenance(&b, "k", crate::now());
         assert!(p.is_none(), "a reading appeared from nowhere");
+    }
+
+    /// A lock held across `renew` comes back `Busy`, not as a lease that
+    /// was extended. The quiet window a caller keeps after `Extended`
+    /// must not follow this.
+    #[test]
+    fn a_busy_store_renews_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-renew-busy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sqlite").to_string_lossy().to_string();
+        let mut cache = Cache { store: Some(Store::open(&path).unwrap()), ..Cache::default() };
+        cache.store.as_mut().unwrap().me = 41;
+        assert!(matches!(cache.store.as_mut().unwrap().claim("k", None, now()), Ok(Got::Mine)));
+        // The store only writes a renew once less than half the lease
+        // remains. A fresh lease would be a read, and a read does not
+        // meet the lock.
+        let prep = rusqlite::Connection::open(&path).unwrap();
+        prep.execute("UPDATE leases SET expires_at = ?1 WHERE key = 'k'", [now() + 1.0]).unwrap();
+        drop(prep);
+        let mut hold = rusqlite::Connection::open(&path).unwrap();
+        let tx = hold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Busy);
+        assert_eq!(renew_all_result(&mut cache, "k", 30.0), Renewed::Busy);
+        drop(tx);
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Extended);
+    }
+
+    /// A renew that only finds the lease still held did not lengthen it.
+    /// Callers that skip the next check on `Extended` must not do that here.
+    #[test]
+    fn a_renew_that_does_not_write_is_not_an_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-renew-held-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sqlite").to_string_lossy().to_string();
+        let mut cache = Cache { store: Some(Store::open(&path).unwrap()), ..Cache::default() };
+        assert!(matches!(cache.store.as_mut().unwrap().claim("k", None, now()), Ok(Got::Mine)));
+        assert_eq!(renew_result(&mut cache, "k", 30.0), Renewed::Held);
+        assert_eq!(renew_all_result(&mut cache, "k", 30.0), Renewed::Held);
+    }
+
+    /// The answer that lost the lease must not stay in front of the one
+    /// the store kept, even when this pane's timestamp is later.
+    #[test]
+    fn a_taken_over_answer_is_replaced_by_the_one_that_landed() {
+        let (mut a, mut b) = two_panes("taken-over-answer");
+        let policy = Policy { ttl: 120.0, lease_for: 1.0, askable: true };
+        let claimed = now();
+        let Take::Fetch(ticket) = take(&mut a, "k", policy) else {
+            panic!("the first pane did not fetch");
+        };
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        match take(&mut b, "k", policy) {
+            Take::Fetch(t) => {
+                assert_eq!(t.publish(serde_json::json!({"from": "b"})), None);
+            }
+            _ => panic!("the lease should have run out"),
+        }
+        drop(ticket);
+        let out = answer_many(
+            &mut a,
+            &[("k", Answer::Value(serde_json::json!({"from": "a"})), policy, now())],
+            now(),
+            claimed,
+        );
+        assert_eq!(out, vec![Some("not shared: another pane took over")]);
+        let shown = a.live.get("k").and_then(|e| e.1.clone()).expect("the successor");
+        assert_eq!(shown["from"], "b");
     }
 
     #[test]
