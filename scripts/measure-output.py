@@ -32,7 +32,9 @@ Also provides two opt-in Linux helpers for live session diagnostics:
   * `--proc-io PID` samples `/proc/PID/io` `wchar` (warning if PID is the
     `opscope` launcher or has child widgets sharing its tty).
   * `--watchdog-pid BRIDGE_PID --kill-pid WIDGET_PID` monitors a live Herdr
-    client bridge and kills test widget PIDs if output exceeds a threshold.
+    client bridge and, only through a pidfd opened when the watchdog is armed,
+    kills test widget PIDs if output exceeds a threshold. It refuses to arm
+    when pidfd signalling is unavailable.
 
 All KB/s rates use 1 KB = 1024 bytes.
 """
@@ -1027,24 +1029,6 @@ def read_proc_comm(pid: int) -> str:
         return "?"
 
 
-def read_proc_starttime(pid: int) -> Optional[int]:
-    """Read field 22 (`starttime`) from `/proc/<pid>/stat` to detect PID reuse."""
-    try:
-        stat_text = (proc_dir_for(pid) / "stat").read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
-        return None
-    rparen = stat_text.rfind(")")
-    if rparen == -1:
-        return None
-    fields = stat_text[rparen + 2 :].split()
-    if len(fields) < 20:
-        return None
-    try:
-        return int(fields[19])
-    except ValueError:
-        return None
-
-
 def read_proc_descendants(pid: int) -> List[int]:
     found: List[int] = []
     seen = {pid}
@@ -1125,44 +1109,49 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
     return 0
 
 
+def pidfd_signalling_available() -> bool:
+    return hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+
+
 @dataclass
 class PinnedTarget:
     pid: int
-    pidfd: Optional[int]
-    starttime: Optional[int]
+    pidfd: int
 
 
 def pin_watchdog_targets(kill_pids: Sequence[int]) -> List[PinnedTarget]:
+    """Open a pidfd for every target. Never fall back to signalling by PID.
+
+    A PID checked at arm time can be recycled before `os.kill`. pidfd_send_signal
+    stays bound to the process that was open when the watchdog was armed.
+    """
+    if not pidfd_signalling_available():
+        raise OSError(
+            errno.ENOTSUP,
+            "pidfd is required to signal watchdog targets; refusing to signal by PID",
+        )
     pinned: List[PinnedTarget] = []
-    use_pidfd = hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
     try:
         for kpid in kill_pids:
-            st = read_proc_starttime(kpid)
-            pfd: Optional[int] = None
-            if use_pidfd:
-                pfd = os.pidfd_open(kpid, 0)
-            elif st is None:
-                raise ProcessLookupError(errno.ESRCH, "No such process", kpid)
-            pinned.append(PinnedTarget(pid=kpid, pidfd=pfd, starttime=st))
+            pinned.append(PinnedTarget(pid=kpid, pidfd=os.pidfd_open(kpid, 0)))
     except Exception:
         for t in pinned:
-            if t.pidfd is not None:
-                try:
-                    os.close(t.pidfd)
-                except OSError:
-                    # Ignore close errors while unwinding target setup.
-                    pass
+            try:
+                os.close(t.pidfd)
+            except OSError:
+                # Ignore close errors while unwinding target setup.
+                pass
         raise
     return pinned
 
 
 def send_pinned_signal(target: PinnedTarget, sig: signal.Signals) -> None:
-    if target.pidfd is not None:
-        signal.pidfd_send_signal(target.pidfd, sig)
-        return
-    if target.starttime is not None and read_proc_starttime(target.pid) != target.starttime:
-        raise ProcessLookupError(errno.ESRCH, "PID recycled", target.pid)
-    os.kill(target.pid, sig)
+    if not pidfd_signalling_available():
+        raise OSError(
+            errno.ENOTSUP,
+            "pidfd is required to signal watchdog targets; refusing to signal by PID",
+        )
+    signal.pidfd_send_signal(target.pidfd, sig)
 
 
 def run_herdr_watchdog(
@@ -1267,12 +1256,11 @@ def run_herdr_watchdog(
         return 0
     finally:
         for target in targets:
-            if target.pidfd is not None:
-                try:
-                    os.close(target.pidfd)
-                except OSError:
-                    # Ignore close errors during watchdog handle cleanup.
-                    pass
+            try:
+                os.close(target.pidfd)
+            except OSError:
+                # Ignore close errors during watchdog handle cleanup.
+                pass
 
 
 def format_table(results: Sequence[ModeResult]) -> str:
@@ -1440,6 +1428,59 @@ def run_self_tests() -> int:
         assert res.verdict == "FAIL", res
     finally:
         flood_script.unlink(missing_ok=True)
+
+    # 6. Watchdog signalling fails closed without a pidfd. Never os.kill by PID.
+    killed: List[int] = []
+    real_kill = os.kill
+
+    def refuse_pid_signal(pid: int, sig: int) -> None:
+        killed.append(pid)
+        raise AssertionError(f"signalled PID {pid} with {sig}")
+
+    os.kill = refuse_pid_signal  # type: ignore[method-assign]
+    try:
+        try:
+            send_pinned_signal(PinnedTarget(pid=os.getpid(), pidfd=-1), signal.SIGTERM)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("send_pinned_signal must fail closed without a live pidfd")
+        assert killed == [], killed
+
+        saved_open = getattr(os, "pidfd_open", None)
+        saved_send = getattr(signal, "pidfd_send_signal", None)
+        if saved_open is not None:
+            del os.pidfd_open
+        if saved_send is not None:
+            del signal.pidfd_send_signal
+        try:
+            try:
+                pin_watchdog_targets([os.getpid()])
+            except OSError as err:
+                assert err.errno == errno.ENOTSUP, err
+            else:
+                raise AssertionError("watchdog armed without pidfd")
+            try:
+                send_pinned_signal(PinnedTarget(pid=os.getpid(), pidfd=1), signal.SIGTERM)
+            except OSError as err:
+                assert err.errno == errno.ENOTSUP, err
+            else:
+                raise AssertionError("send_pinned_signal armed without pidfd")
+        finally:
+            if saved_open is not None:
+                os.pidfd_open = saved_open  # type: ignore[attr-defined]
+            if saved_send is not None:
+                signal.pidfd_send_signal = saved_send  # type: ignore[attr-defined]
+
+        if pidfd_signalling_available():
+            pinned = pin_watchdog_targets([os.getpid()])
+            try:
+                assert pinned[0].pidfd >= 0
+            finally:
+                for target in pinned:
+                    os.close(target.pidfd)
+    finally:
+        os.kill = real_kill  # type: ignore[method-assign]
 
     print("self-test: ok")
     return 0

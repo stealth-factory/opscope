@@ -93,7 +93,7 @@ When asked to measure live inside Herdr:
      ```sh
      sh -c 'printf "WIDGET_PID=%s\n" "$$"; kill -STOP "$$"; exec ./target/debug/latency'
      ```
-   - In your monitoring shell, identify `HERDR_CLIENT_PID` (`ps -eo pid,comm,args`), start the watchdog (which pins the target via `pidfd` on Linux and kills it if bridge output stays `>= 300 KB/s` for `2 s` sustained), and then resume the widget:
+   - In your monitoring shell, identify `HERDR_CLIENT_PID` (`ps -eo pid,comm,args`), start the watchdog, and then resume the widget. The watchdog opens a pidfd for each `--kill-pid` when it arms and signals only that fd if bridge output stays `>= 300 KB/s` for `2 s` sustained. If pidfd signalling is unavailable it exits without signalling, rather than calling `kill` on a PID that may have been reused:
      ```sh
      HERDR_CLIENT_PID="..."   # set from ps -eo pid,comm,args
      WIDGET_PID="..."         # printed in the Herdr pane above
