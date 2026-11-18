@@ -2149,6 +2149,16 @@ fn fetching(take: Take<'_>, gated: bool) -> Option<readings::Ticket<'_>> {
     }
 }
 
+/// Whether this list pass may make its next request. Renewing the lease
+/// alone does not read the shared gate again, which a long pass must do.
+/// `Err` carries the gate's deadline and reason for the process-local stop.
+fn list_request_open(ticket: &mut readings::Ticket<'_>, gate: &str) -> Result<bool, (f64, String)> {
+    match ticket.closed(gate) {
+        Some(stop) => Err(stop),
+        None => Ok(ticket.renew()),
+    }
+}
+
 /// A pass that failed: every pane waits out one refresh - or GitHub's
 /// reset, when the budget is what ran out - rather than each asking again.
 fn refuse(t: readings::Ticket<'_>, said: &str, refresh: f64) {
@@ -2379,7 +2389,19 @@ impl Poller {
         self.show_sharing(&self.found(&keys, &created_key), tc::now());
         if let Some(mut t) = fetching(readings::take(&mut self.cache, &list_key, pol), gated) {
             let _busy = self.activity.start();
-            let got = fetch_list(&self.tok, &pairs, self.limit, &self.state, &self.rate, &mut || t.renew());
+            let gate = self.gate.clone();
+            let got = fetch_list(&self.tok, &pairs, self.limit, &self.state, &self.rate, &mut || {
+                match list_request_open(&mut t, &gate) {
+                    Ok(open) => open,
+                    Err((until, why)) => {
+                        // Stop this pass now. Its ticket is dropped without a
+                        // refusal: another pane closed the shared gate, and
+                        // every later request will read this local stop too.
+                        stop_asking(until, &why);
+                        false
+                    }
+                }
+            });
             match got {
                 Ok(v) => {
                     t.publish(v);
@@ -4880,6 +4902,26 @@ mod tests {
         // A pane under its own gate takes no ticket, so it sends nothing.
         let k = readings::key(&mut b, "ghprs.merged", 1, &["github.com"], &[TOKEN]);
         assert!(fetching(readings::take(&mut b, &k, Policy::new(60.0, LEASE_FOR)), true).is_none());
+    }
+
+    #[test]
+    fn a_gate_closed_between_list_requests_blocks_the_next_request() {
+        let (mut a, mut b) = two_panes("mid-list-gate", caps());
+        let pairs = searches(&[("orgs".into(), "is:open is:pr".into())], "", &[], &[]);
+        let key = list_key(&mut a, "github.com", &pairs, TOKEN);
+        assert_eq!(key, list_key(&mut b, "github.com", &pairs, TOKEN));
+        let gate = gate_key(&mut a, "github.com", TOKEN);
+        assert_eq!(gate, gate_key(&mut b, "github.com", TOKEN));
+        let Take::Fetch(mut ticket) = readings::take(&mut b, &key, Policy::new(60.0, LEASE_FOR)) else {
+            panic!("the list pane did not claim its pass")
+        };
+        assert!(list_request_open(&mut ticket, &gate).expect("an open gate refused the first request"));
+
+        let until = tc::now() + 600.0;
+        readings::shut(&mut a, &gate, until, "GitHub rate limit spent");
+        let (held, why) = list_request_open(&mut ticket, &gate).expect_err("the next request missed the new gate");
+        assert!((held - until).abs() < 0.01, "{held} against {until}");
+        assert_eq!(why, "GitHub rate limit spent");
     }
 
     #[test]
