@@ -36,6 +36,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 /// Cycled at runtime with n, the same way the latency monitor's i key does.

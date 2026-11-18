@@ -52,7 +52,9 @@ native package catalogue, and `opscope doctor` report. Widgets provide the
 command, range, platform, and optional reason in their owned
 `dependencies.json`; they never choose or invoke a package manager. Core also
 owns the shared per-widget settings screen and its order-preserving, private
-atomic writer.
+atomic writer. Widgets can supply a `Discover` function for an array field
+through `SettingsSpec::discover`. The settings screen runs it in the
+background and displays the returned values and labels as a checklist.
 
 `core/src/google.rs` is the Google sign-in every Google widget shares: a
 service-account key signs an RS256 JWT locally (`rsa` and `sha2`, both pure

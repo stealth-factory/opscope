@@ -39,6 +39,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     // Nothing here is keyed by something the code owns: three fields, all
     // scalars, and `week_start`'s two answers are named in the schema.
     catalogues: &[],
+    discover: &[],
 };
 
 /// Weeks of context kept either side of the week today is in.

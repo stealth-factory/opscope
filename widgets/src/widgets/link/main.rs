@@ -45,6 +45,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 const IDLE_AFTER: f64 = 300.0;

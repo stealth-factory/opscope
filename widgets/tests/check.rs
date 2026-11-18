@@ -4320,34 +4320,27 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
     );
 }
 
-/// A catalogue is wired to a field by name, and nothing else ties them.
-///
-/// `catalogues: &[("rates", LIST_RATES)]` says "offer this table on the field
-/// called rates". Write `"rate"` and it compiles, every test passes, and the
-/// settings screen quietly goes on showing a JSON box - the exact failure
-/// this file exists for, since the only symptom is a feature that is simply
-/// not there.
+/// A picker table or discovery hook is wired to its schema by field name.
+fn picker_fields<'a>(source: &'a str, member: &str) -> impl Iterator<Item = &'a str> {
+    source
+        .split_once(&format!("{member}: &["))
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .into_iter()
+        .flat_map(|(list, _)| list.split('(').skip(1))
+        .filter_map(|entry| entry.trim_start().strip_prefix('"')?.split_once('"').map(|(key, _)| key))
+}
+
 #[test]
 fn every_catalogue_names_a_field_its_widget_actually_declares() {
     let dir = root().join("widgets/src/widgets");
     let mut wrong = Vec::new();
     for name in widgets().keys() {
         let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
-        let Some(rest) = source.split("catalogues: &[").nth(1) else {
-            continue;
-        };
-        let Some(list) = rest.split("],").next() else {
-            continue;
-        };
-        // Each entry opens ("field-name", TABLE.
-        let declared: Vec<String> = list
-            .match_indices("(\"")
-            .filter_map(|(at, _)| {
-                let after = &list[at + 2..];
-                after.find('"').map(|end| after[..end].to_string())
-            })
-            .collect();
-        if declared.is_empty() {
+        let mut fields = picker_fields(&source, "catalogues")
+            .map(|key| (key, "catalogue"))
+            .chain(picker_fields(&source, "discover").map(|key| (key, "discovery")))
+            .peekable();
+        if fields.peek().is_none() {
             continue;
         }
         let settings =
@@ -4355,21 +4348,24 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
         let parsed: serde_json::Value = match serde_json::from_str(&settings) {
             Ok(v) => v,
             Err(_) => {
-                wrong.push(format!("{name}: declares a catalogue and has no settings.json"));
+                wrong.push(format!("{name}: declares a picker and has no valid settings.json"));
                 continue;
             }
         };
-        for field in declared {
-            if !parsed.as_object().is_some_and(|o| o.contains_key(&field)) {
-                wrong.push(format!(
-                    "{name}: catalogue names {field:?}, which is not a key in its settings.json"
-                ));
+        for (field, picker) in fields {
+            match parsed.get(field) {
+                None => wrong.push(format!(
+                    "{name}: {picker} names {field:?}, which is not a key in its settings.json"
+                )),
+                Some(value) if picker == "discovery" && !value.is_array() => wrong.push(format!(
+                    "{name}: discovery names {field:?}, which is not an array in its settings.json"
+                )),
+                Some(_) => {}
             }
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
-
 
 /// The `token_env` default on screen is the one the code falls back to.
 ///

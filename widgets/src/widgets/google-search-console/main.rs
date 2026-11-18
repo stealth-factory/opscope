@@ -44,6 +44,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 /// The shortest `refresh`. The hourly data moves a few times an hour at
