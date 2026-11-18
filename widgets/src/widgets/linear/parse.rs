@@ -19,8 +19,9 @@
 //! Linear refuses a request over its limit with HTTP 429, a `RATELIMITED`
 //! code in the GraphQL errors, and a `Retry-After` header; every answer,
 //! refused or not, carries `X-RateLimit-Requests-Remaining` and
-//! `X-RateLimit-Requests-Reset`. A refusal that names when to ask again
-//! stops every linear pane on the machine until then (OPS-286).
+//! `X-RateLimit-Requests-Reset`. A refusal stops every linear pane on the
+//! machine using that key: until the time it named, or for the doubling
+//! backoff's step when it named none (OPS-286).
 
 /// How long a refused request says to wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,8 +109,8 @@ pub fn rate_limit(status: u16, headers: &[(String, String)], body: &str) -> Rate
 /// `Retry-After` first, because it is the answer to this refusal; the
 /// window's reset when that is missing or already past. `None` for an
 /// answer that was not a rate limit, or one that named no time still ahead
-/// of `now` - which is left to the ordinary doubling backoff rather than
-/// guessed at.
+/// of `now` - which the caller waits out on the doubling backoff rather
+/// than guessed at here.
 pub fn retry_at(limit: &RateLimit, now: f64) -> Option<f64> {
     if !limit.limited {
         return None;

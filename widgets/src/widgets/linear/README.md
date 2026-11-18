@@ -291,11 +291,16 @@ so on a line under the status line: `fetched 40s ago by pane 48213`, or
 of the two readings on screen came back from Linear, whichever pane asked.
 `r` asks again for anything older than thirty seconds.
 
-When Linear answers **too many requests** and says when to come back -
-`Retry-After`, or the hour's reset - every pane using that API key stops
-asking until then, and each says when:
+When Linear answers **too many requests**, every pane using that API key
+stops asking - the board, the flow and any open project screen - and each
+says when it will ask again:
 `cached 7m ago · too many requests, next ask in 12m`. A pane with nothing to
-draw yet says it as an error instead.
+draw yet says it as an error instead. The wait is the time Linear named -
+`Retry-After`, or the hour's reset. When it names neither, the wait is two
+minutes, doubling for each limit met in a row by any pane (4, 8, 16, then 30
+minutes), and starting at two again once a request gets through or an hour
+after the last wait ended. A project screen keeps what it already showed
+under a `Linear: too many requests · next ask in 12m` line.
 
 The answers are kept in `~/.local/state/opscope/linear.sqlite`, created
 readable only by you. **They include issue identifiers, titles and links,

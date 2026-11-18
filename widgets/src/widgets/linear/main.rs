@@ -433,12 +433,9 @@ struct Proj {
 /// The error is kept in the same place the answer would be. A fetch that
 /// fails silently leaves a screen saying "loading" for ever, which is this
 /// widget's oldest lesson written a different way.
-fn fetch_project(id: &str, tok: &str, quota: &Arc<Mutex<Quota>>) -> serde_json::Value {
+fn fetch_project(id: &str, tok: &str, quota: &Arc<Mutex<Quota>>) -> Result<serde_json::Value, Failure> {
     let vars = serde_json::json!({ "id": id });
-    match graphql(PROJECT_QUERY, tok, vars, quota) {
-        Ok(v) => v["project"].clone(),
-        Err(failure) => serde_json::json!({ "_error": failure.said }),
-    }
+    graphql(PROJECT_QUERY, tok, vars, quota).map(|v| v["project"].clone())
 }
 
 /// How much of a project row each optional column gets.
@@ -1075,6 +1072,133 @@ const BUCKET: &str = "linear.limit";
 fn rate_gate(cache: &mut tc::readings::Cache, tok: &str) -> String {
     tc::readings::key(cache, BUCKET, 1, &[], &[tok])
 }
+
+/// Linear's allowance is counted by the hour, so no limit is waited out
+/// for longer than that.
+const LIMIT_WINDOW: f64 = 3600.0;
+
+/// The row the gate is stored under. Its refusal count travels with it to
+/// every pane, so the limits in a row are counted across panes.
+fn gate_row(gate_key: &str) -> String {
+    format!("gate/{gate_key}")
+}
+
+/// Limits met in a row on this gate, by any pane. A run ends when a request
+/// gets through, or when the last gate lifted more than an hour ago - a
+/// window Linear has since reset.
+fn limit_strikes(cache: &tc::readings::Cache, gate_key: &str, now: f64) -> u32 {
+    let row = gate_row(gate_key);
+    let lifted = cache
+        .live
+        .get(&row)
+        .and_then(|(_, v, _)| tc::readings::refusal(v.as_ref()?))
+        .map(|(_, until)| until);
+    match lifted {
+        Some(until) if now - until <= LIMIT_WINDOW => cache.fails.get(&row).copied().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// When to ask again after a limit: the time Linear named, or, when it
+/// named none, the doubling backoff's step for this run of limits - two
+/// minutes, then four, eight, sixteen, thirty - never past the hour.
+fn limit_until(limit: &parse::RateLimit, strikes: u32, now: f64) -> f64 {
+    parse::retry_at(limit, now)
+        .unwrap_or_else(|| now + tc::readings::backoff(strikes).min(LIMIT_WINDOW))
+}
+
+/// Shut the gate for every pane holding this credential, counting one more
+/// limit in the run.
+fn shut_for_limit(cache: &mut tc::readings::Cache, gate_key: &str, strikes: u32, until: f64, why: &str) {
+    cache.fails.insert(gate_row(gate_key), strikes);
+    tc::readings::shut(cache, gate_key, until, why);
+}
+
+/// A request got through, so the next limit starts from the first step.
+/// Kept to this pane: rewriting the shared gate here could lift one another
+/// pane shut a moment ago. Another pane's count is forgotten an hour after
+/// its last gate lifted.
+fn limit_run_over(cache: &mut tc::readings::Cache, gate_key: &str) {
+    cache.fails.remove(&gate_row(gate_key));
+}
+
+/// The gate as this process last saw it, shared between the poller and the
+/// project screen's fetches, which keep separate caches. The store carries a
+/// gate between them too; this is what does when nothing is shared.
+type LocalGate = Arc<Mutex<Option<(f64, String)>>>;
+
+/// The later of two gates still shut at `now`.
+fn later_gate(a: Option<(f64, String)>, b: Option<(f64, String)>, now: f64) -> Option<(f64, String)> {
+    [a, b]
+        .into_iter()
+        .flatten()
+        .filter(|(until, _)| *until > now)
+        .max_by(|x, y| x.0.total_cmp(&y.0))
+}
+
+/// What came of asking for one project.
+#[derive(Debug, PartialEq)]
+enum ProjectAsk {
+    /// Linear's record, or why there was none, kept where the record goes.
+    Answer(serde_json::Value),
+    /// The rate gate is shut, until when and why. Nothing was sent, or
+    /// Linear has just shut it.
+    Gated(f64, String),
+}
+
+/// Ask for one project, unless the rate gate is shut for this credential.
+///
+/// A limit this request meets shuts the gate like a limit the board meets,
+/// and the screen keeps what it had.
+fn ask_project(
+    cache: &mut tc::readings::Cache,
+    gate_key: &str,
+    local: &Mutex<Option<(f64, String)>>,
+    fetch: impl FnOnce() -> Result<serde_json::Value, Failure>,
+) -> ProjectAsk {
+    let now = tc::now();
+    tc::readings::follow(cache);
+    let mine = local.lock().ok().and_then(|g| g.clone());
+    if let Some((until, why)) = later_gate(tc::readings::gate(cache, gate_key), mine, now) {
+        // Kept for the screen, which asks again only once it lifts.
+        if let Ok(mut g) = local.lock() {
+            *g = Some((until, why.clone()));
+        }
+        return ProjectAsk::Gated(until, why);
+    }
+    let strikes = limit_strikes(cache, gate_key, now) + 1;
+    match fetch() {
+        Ok(v) => {
+            limit_run_over(cache, gate_key);
+            ProjectAsk::Answer(v)
+        }
+        Err(failure) => match failure.limit.filter(|l| l.limited) {
+            Some(limit) => {
+                let why = "too many requests".to_string();
+                let until = limit_until(&limit, strikes, tc::now());
+                shut_for_limit(cache, gate_key, strikes, until, &why);
+                if let Ok(mut g) = local.lock() {
+                    *g = later_gate(g.take(), Some((until, why.clone())), tc::now());
+                }
+                ProjectAsk::Gated(until, why)
+            }
+            None => ProjectAsk::Answer(serde_json::json!({ "_error": failure.said })),
+        },
+    }
+}
+
+/// Shut the poller's gate for a limit the project screen met in this
+/// process and the poller has not seen - which, with nothing shared, is the
+/// only way it would.
+fn take_local_gate(cache: &mut tc::readings::Cache, gate_key: &str, local: &Mutex<Option<(f64, String)>>) {
+    let now = tc::now();
+    let Some((until, why)) = local.lock().ok().and_then(|g| g.clone()).filter(|(u, _)| *u > now) else {
+        return;
+    };
+    if tc::readings::gate(cache, gate_key).is_none_or(|(u, _)| u < until) {
+        tc::readings::shut(cache, gate_key, until, &why);
+    }
+}
 /// One request's lease: its thirty-second timeout and a margin. Renewed
 /// before every page, so a pane that dies mid-walk holds the reading up for
 /// one request rather than the whole walk.
@@ -1133,6 +1257,9 @@ fn bring_up_to_date(
         tc::readings::recall(cache, key, policy.ttl);
         return;
     }
+    // Counted before the ticket borrows the cache; the ticket is what
+    // answers a limit, and the gate is shut once it has.
+    let strikes = limit_strikes(cache, gate_key, tc::now()) + 1;
     let mut ticket = match tc::readings::take(cache, key, policy) {
         tc::readings::Take::Fetch(ticket) => ticket,
         _ => return,
@@ -1145,23 +1272,23 @@ fn bring_up_to_date(
     match got {
         Ok(value) => {
             ticket.publish(value);
+            limit_run_over(cache, gate_key);
         }
         // Coordination is not a refusal of this pane's own. Another pane
         // publishes the answer or the gate this pane stopped for.
         Err(failure) if failure.coordinated_stop => {}
-        Err(failure) => {
-            let limit = failure.limit.filter(|l| l.limited);
-            let until = limit.and_then(|l| parse::retry_at(&l, tc::now()));
-            let why = if limit.is_some() {
-                "too many requests".to_string()
-            } else {
-                failure.said
-            };
-            ticket.refuse(&why, until);
-            if let Some(until) = until {
-                tc::readings::shut(cache, gate_key, until, &why);
+        Err(failure) => match failure.limit.filter(|l| l.limited) {
+            // A limit stops every reading made with this credential, named
+            // reset or not: one that names no time still means the hour is
+            // spent, and every other pane asking would only spend it again.
+            Some(limit) => {
+                let why = "too many requests";
+                let until = limit_until(&limit, strikes, tc::now());
+                ticket.refuse(why, Some(until));
+                shut_for_limit(cache, gate_key, strikes, until, why);
             }
-        }
+            None => ticket.refuse(&failure.said, None),
+        },
     }
 }
 
@@ -1212,11 +1339,13 @@ fn one_pass(
     state: &Arc<Mutex<State>>,
     quota: &Arc<Mutex<Quota>>,
     activity: &tc::Refresh,
+    local: &LocalGate,
 ) {
     let since = flow_since(days, Utc::now());
     let (board_key, flow_key) = reading_keys(cache, tok, days, &since);
     let gate_key = rate_gate(cache, tok);
     let policy = tc::readings::Policy::new(refresh, LEASE_FOR);
+    take_local_gate(cache, &gate_key, local);
     let first = drawn.board.is_none();
     let gate = update_readings(
         cache,
@@ -1237,6 +1366,9 @@ fn one_pass(
         },
         |renew| fetch_flow(tok, days, &since, quota, renew).map(|f| f.to_value()),
     );
+    if let Ok(mut g) = local.lock() {
+        *g = later_gate(g.take(), gate.clone(), tc::now());
+    }
 
     // Decoded only when a newer reading arrived: the board is most of a
     // megabyte, and this runs every few seconds.
@@ -1952,6 +2084,7 @@ fn project_detail_with_plots(
     q: &Proj,
     team: &str,
     held: Option<&serde_json::Value>,
+    gate: Option<&(f64, String)>,
     states: &HashMap<String, usize>,
     oldest: Option<&(f64, String)>,
     w: usize,
@@ -1965,7 +2098,16 @@ fn project_detail_with_plots(
         format!("{} · {}", q.name, team)
     };
     let mut rows = vec![tc::title_busy(&title, w, &p.accent, busy)];
+    // In the board's words: what is below is what the screen already had,
+    // and nothing newer is coming until the gate lifts.
+    if let Some((until, why)) = gate {
+        let said = format!("Linear: {why} · next ask in {}", until_text(*until, tc::now()));
+        for line in wrap(&said, w.saturating_sub(3)) {
+            rows.push(tc::seg(&[(p.warn.as_str(), format!("  {line}"))], w - 1));
+        }
+    }
     let label_w = 18usize;
+    let meter_y = rows.len();
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
         rows.push(tc::seg(
             &[
@@ -1979,7 +2121,7 @@ fn project_detail_with_plots(
 
     // Linear's own progress, the same figure the team's list shows. Derived
     // here it would disagree with the line the reader just came from.
-    plots.push(tc::Plot::meter(30, 1, w.saturating_sub(label_w + 22).clamp(6, 24), q.progress, None, &p.dim, &p.grid, &p.txt));
+    plots.push(tc::Plot::meter(30, meter_y, w.saturating_sub(label_w + 22).clamp(6, 24), q.progress, None, &p.dim, &p.grid, &p.txt));
     field(
         "progress",
         format!("{:.0}%", 100.0 * q.progress),
@@ -2164,6 +2306,8 @@ fn project_detail_with_plots(
     }
 
     match held {
+        // Nothing yet, and nothing asked: the gate's row above says why.
+        None if gate.is_some() => return rows,
         None => {
             rows.push(String::new());
             rows.push(tc::seg(&[(p.dim.as_str(), "  asking Linear for the rest...".into())], w - 1));
@@ -2442,6 +2586,8 @@ fn main() {
     let poller_quota = Arc::clone(&quota);
     let poller_activity = activity.clone();
     let poller_asked = Arc::clone(&asked_again);
+    let local_gate: LocalGate = Arc::new(Mutex::new(None));
+    let poller_gate = Arc::clone(&local_gate);
     // Every pane polls the shared readings, not Linear: a pass every few
     // seconds costs a look at the store's version counter, and Linear is
     // asked only when a reading has outlived `refresh` and this pane wins
@@ -2483,6 +2629,7 @@ fn main() {
                     &poller,
                     &poller_quota,
                     &poller_activity,
+                    &poller_gate,
                 );
             }
             let (lock, cond) = &*poller_wake;
@@ -2538,6 +2685,10 @@ fn main() {
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let ui_tok = ui_token.clone();
     let ui_quota = Arc::clone(&quota);
+    // The project screen's fetches keep a cache of their own, opened on the
+    // same store, so they see and shut the same rate gate the board does.
+    let project_cache: Arc<Mutex<tc::readings::Cache>> =
+        Arc::new(Mutex::new(tc::readings::Cache::default()));
     // How long the open screen's own list was when it was last drawn, and
     // what the cursor was on - read by the keys, which run before the frame
     // that answers them is built. A team's screen lists its projects and a
@@ -3561,11 +3712,13 @@ fn main() {
                 let states = s.proj_state.get(&q.id).unwrap_or(&empty);
                 let oldest = s.proj_oldest.get(&q.id).cloned();
                 let record = held.lock().ok().and_then(|g| g.get(&q.id).map(|(v, _)| v.clone()));
+                let gate = later_gate(local_gate.lock().ok().and_then(|g| g.clone()), None, tc::now());
                 (
                     project_detail_with_plots(
                         q,
                         &q.teams.join(" · "),
                         record.as_ref(),
+                        gate.as_ref(),
                         states,
                         oldest.as_ref(),
                         w,
@@ -3635,18 +3788,32 @@ fn main() {
                     .and_then(|g| g.get(&q.id).map(|(_, at)| tc::now() - at > refresh))
                     .unwrap_or(true);
                 let mine = asking.lock().map(|g| !g.contains(&q.id)).unwrap_or(false);
-                if due && mine && !ui_tok.is_empty() {
+                // A shut gate is not asked through. The screen says when it
+                // will be, and keeps what it has until then.
+                let open = local_gate
+                    .lock()
+                    .map(|g| g.as_ref().is_none_or(|(until, _)| *until <= tc::now()))
+                    .unwrap_or(true);
+                if due && mine && open && !ui_tok.is_empty() {
                     if let Ok(mut g) = asking.lock() {
                         g.insert(q.id.clone());
                     }
                     let (id, tok, quota) = (q.id.clone(), ui_tok.clone(), Arc::clone(&ui_quota));
                     let (held, asking) = (Arc::clone(&held), Arc::clone(&asking));
+                    let (cache, local) = (Arc::clone(&project_cache), Arc::clone(&local_gate));
                     let project_activity = activity.clone();
                     std::thread::spawn(move || {
                         let _work = project_activity.start();
-                        let got = fetch_project(&id, &tok, &quota);
-                        if let Ok(mut g) = held.lock() {
-                            g.insert(id.clone(), (got, tc::now()));
+                        let got = {
+                            let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
+                            tc::readings::share(&mut cache, STORE, caps(), share_on, tc::now());
+                            let gate_key = rate_gate(&mut cache, &tok);
+                            ask_project(&mut cache, &gate_key, &local, || fetch_project(&id, &tok, &quota))
+                        };
+                        if let ProjectAsk::Answer(got) = got {
+                            if let Ok(mut g) = held.lock() {
+                                g.insert(id.clone(), (got, tc::now()));
+                            }
                         }
                         if let Ok(mut g) = asking.lock() {
                             g.remove(&id);
@@ -4165,6 +4332,7 @@ mod tests {
         let rows = project_detail_with_plots(
             &q,
             "ABC",
+            None,
             None,
             &states,
             None,
@@ -5061,6 +5229,167 @@ mod tests {
         assert!(said.contains("too many requests, next ask in"), "{said}");
     }
 
+    /// A refusal over the limit, saying nothing about when to ask again.
+    fn unnamed_limit() -> Failure {
+        Failure {
+            said: "HTTP 429".into(),
+            limit: Some(parse::rate_limit(429, &[], "")),
+            coordinated_stop: false,
+        }
+    }
+
+    fn named_limit(seconds: u64) -> Failure {
+        let headers = vec![("retry-after".to_string(), seconds.to_string())];
+        Failure {
+            said: "HTTP 429".into(),
+            limit: Some(parse::rate_limit(429, &headers, "")),
+            coordinated_stop: false,
+        }
+    }
+
+    #[test]
+    fn a_limit_that_names_no_time_waits_the_backoff_step_and_never_past_the_hour() {
+        let now = 1_767_225_000.0;
+        let unnamed = parse::rate_limit(429, &[], "");
+        assert_eq!(limit_until(&unnamed, 1, now), now + 120.0);
+        assert_eq!(limit_until(&unnamed, 2, now), now + 240.0);
+        assert_eq!(limit_until(&unnamed, 3, now), now + 480.0);
+        for strikes in 4..40 {
+            assert!(limit_until(&unnamed, strikes, now) <= now + LIMIT_WINDOW);
+        }
+        // A time Linear named wins over the step, however far the run got.
+        let headers = vec![("retry-after".to_string(), "42".to_string())];
+        assert_eq!(limit_until(&parse::rate_limit(429, &headers, ""), 5, now), now + 42.0);
+    }
+
+    #[test]
+    fn a_limit_that_names_no_time_stops_every_pane_and_doubles_across_them() {
+        let (mut one, mut two) = two_panes("unnamed-limit");
+        let activity = tc::Refresh::default();
+        let (board_key, flow_key) = reading_keys(&mut one, TOKEN, 14, "2026-01-01");
+        bring_up_to_date(&mut one, &board_key, BUCKET, policy(), false, &activity, |_| Err(unnamed_limit()));
+        let now = tc::now();
+        for pane in [&mut one, &mut two] {
+            let (until, why) = tc::readings::gate(pane, BUCKET).expect("the gate is shut for every pane");
+            assert!(until > now + 115.0 && until <= now + 121.0, "{}", until - now);
+            assert_eq!(why, "too many requests");
+        }
+        // The gate lifts; the next limit, met by the other pane, is the
+        // second in the run and waits twice as long.
+        tc::readings::shut(&mut one, BUCKET, tc::now() - 1.0, "too many requests");
+        tc::readings::follow(&mut two);
+        assert!(tc::readings::gate(&mut two, BUCKET).is_none());
+        bring_up_to_date(&mut two, &flow_key, BUCKET, policy(), false, &activity, |_| Err(unnamed_limit()));
+        let now = tc::now();
+        tc::readings::follow(&mut one);
+        let (until, _) = tc::readings::gate(&mut one, BUCKET).expect("the second limit shut it again");
+        assert!(until > now + 235.0 && until <= now + 241.0, "{}", until - now);
+
+        // A request that gets through ends the run.
+        tc::readings::shut(&mut two, BUCKET, tc::now() - 1.0, "too many requests");
+        // Another window's flow: both readings above hold their refusals.
+        let (_, other) = reading_keys(&mut two, TOKEN, 7, "2026-01-01");
+        let expired = tc::readings::Policy::new(0.0, LEASE_FOR);
+        let mut asked = 0;
+        bring_up_to_date(&mut two, &other, BUCKET, expired, false, &activity, |_| {
+            asked += 1;
+            Ok(a_flow().to_value())
+        });
+        assert_eq!(limit_strikes(&two, BUCKET, tc::now()), 0);
+        bring_up_to_date(&mut two, &other, BUCKET, expired, false, &activity, |_| {
+            asked += 1;
+            Err(unnamed_limit())
+        });
+        assert_eq!(asked, 2);
+        let (until, _) = tc::readings::gate(&mut two, BUCKET).unwrap();
+        assert!(until <= tc::now() + 121.0, "{}", until - tc::now());
+    }
+
+    #[test]
+    fn the_project_screen_does_not_ask_through_a_gate_another_pane_shut() {
+        let (mut one, mut two) = two_panes("project-gated");
+        let local = Mutex::new(None);
+        tc::readings::shut(&mut two, BUCKET, tc::now() + 600.0, "too many requests");
+        let got = ask_project(&mut one, BUCKET, &local, || panic!("asked Linear through a shut gate"));
+        let ProjectAsk::Gated(until, why) = got else { panic!("{got:?}") };
+        assert!(until > tc::now() + 590.0);
+        assert_eq!(why, "too many requests");
+        // The screen is told, so it stops asking until the gate lifts.
+        assert_eq!(local.lock().unwrap().as_ref().map(|g| g.0), Some(until));
+    }
+
+    #[test]
+    fn the_project_screen_honours_a_gate_met_in_this_process_with_nothing_shared() {
+        let mut cache = tc::readings::Cache::default();
+        let local = Mutex::new(Some((tc::now() + 300.0, "too many requests".to_string())));
+        let got = ask_project(&mut cache, BUCKET, &local, || panic!("asked Linear through a shut gate"));
+        assert!(matches!(got, ProjectAsk::Gated(..)), "{got:?}");
+        // And a limit the project screen met reaches the poller's own cache.
+        let mut poller = tc::readings::Cache::default();
+        take_local_gate(&mut poller, BUCKET, &local);
+        assert!(tc::readings::gate(&mut poller, BUCKET).is_some());
+    }
+
+    #[test]
+    fn a_limit_on_the_project_fetch_shuts_the_gate_for_every_pane() {
+        let (mut one, mut two) = two_panes("project-limit");
+        let local = Mutex::new(None);
+        let got = ask_project(&mut one, BUCKET, &local, || Err(named_limit(600)));
+        let ProjectAsk::Gated(until, _) = got else { panic!("{got:?}") };
+        assert!(until > tc::now() + 590.0);
+        let (shared, _) = tc::readings::gate(&mut two, BUCKET).expect("the other pane sees the gate");
+        assert!((shared - until).abs() < 0.01, "{shared} {until}");
+        // One with no time named still shuts it.
+        let (mut three, mut four) = two_panes("project-unnamed");
+        let got = ask_project(&mut three, BUCKET, &Mutex::new(None), || Err(unnamed_limit()));
+        assert!(matches!(got, ProjectAsk::Gated(..)), "{got:?}");
+        assert!(tc::readings::gate(&mut four, BUCKET).is_some());
+    }
+
+    #[test]
+    fn an_open_gate_lets_the_project_screen_ask() {
+        let mut cache = tc::readings::Cache::default();
+        let local = Mutex::new(None);
+        let got = ask_project(&mut cache, BUCKET, &local, || Ok(serde_json::json!({ "name": "x" })));
+        assert_eq!(got, ProjectAsk::Answer(serde_json::json!({ "name": "x" })));
+        let got = ask_project(&mut cache, BUCKET, &local, || {
+            Err(Failure { said: "HTTP 502".into(), ..Default::default() })
+        });
+        assert_eq!(got, ProjectAsk::Answer(serde_json::json!({ "_error": "HTTP 502" })));
+        assert!(tc::readings::gate(&mut cache, BUCKET).is_none(), "a plain failure shut the gate");
+    }
+
+    #[test]
+    fn a_gated_project_screen_keeps_what_it_has_and_says_when_it_asks_again() {
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        let gate = (tc::now() + 545.0, "too many requests".to_string());
+        let record = serde_json::json!({ "startedAt": "2026-01-02T00:00:00Z" });
+        let draw = |held: Option<&serde_json::Value>| {
+            let mut plots = Vec::new();
+            let rows = project_detail_with_plots(
+                &q,
+                "ABC",
+                held,
+                Some(&gate),
+                &HashMap::new(),
+                None,
+                100,
+                &palette(),
+                &mut plots,
+                None,
+            );
+            // The meter still sits on the progress row below the notice.
+            assert!(plain(&[rows[plots[0].y].clone()]).contains("progress"));
+            plain(&rows)
+        };
+        let had = draw(Some(&record));
+        assert!(had.contains("Linear: too many requests · next ask in 9m"), "{had}");
+        assert!(had.contains("2026-01-02"), "{had}");
+        let nothing = draw(None);
+        assert!(nothing.contains("next ask in 9m"), "{nothing}");
+        assert!(!nothing.contains("asking Linear"), "{nothing}");
+    }
+
     #[test]
     fn a_walk_another_pane_took_over_stops_without_asking_again() {
         let quota = Arc::new(Mutex::new(Quota::default()));
@@ -5148,5 +5477,5 @@ fn project_detail(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    project_detail_with_plots(q, team, held, states, oldest, w, p, &mut Vec::new(), None)
+    project_detail_with_plots(q, team, held, None, states, oldest, w, p, &mut Vec::new(), None)
 }
