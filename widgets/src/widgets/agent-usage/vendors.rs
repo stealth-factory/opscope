@@ -965,7 +965,7 @@ pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Conf
     // Where this tab's readings came from, above them: nothing when every
     // one is this pane's own and fresh (OPS-290).
     let found = freshness_of(name, s, tabs);
-    let said: Vec<String> = tc::readings::provenance_rows(&found, now(), w.saturating_sub(2).max(8))
+    let said: Vec<String> = tc::readings::provenance_rows(&found, now(), w.saturating_sub(2).max(1))
         .into_iter()
         .map(|line| tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w - 1))
         .collect();
@@ -2447,6 +2447,34 @@ mod tests {
                 "weekly_resets_at": "2126-01-05T00:00:00Z"
             }
         })
+    }
+
+    #[test]
+    fn provenance_wraps_before_the_leading_space_is_added() {
+        use tc::readings::Provenance;
+        let at = now();
+        let found = Provenance {
+            taken_at: at - 600.0,
+            by: None,
+            stale: true,
+            asking: None,
+            refused: Some(("requests".into(), at + 185.0)),
+            unshared: None,
+        };
+        let expected = tc::readings::provenance_rows(std::slice::from_ref(&found), at, 6)
+            .into_iter()
+            .map(|line| format!(" {line}"))
+            .collect::<Vec<_>>();
+        let s = State {
+            freshness: HashMap::from([("codex".to_string(), vec![found])]),
+            ..State::default()
+        };
+        let tabs = vec!["codex".to_string()];
+        let body = tab_body_with_plots("codex", &s, 8, 40, &Config::default(), &palette(), &tabs, &mut Vec::new());
+        assert_eq!(plain(&body[..expected.len()]), expected);
+        for row in plain(&body[..expected.len()]) {
+            assert!(row.chars().count() <= 7, "{row:?}");
+        }
     }
 
     #[test]

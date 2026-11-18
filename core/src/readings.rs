@@ -1213,10 +1213,11 @@ pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
     let refusal_held = value
         .as_ref()
         .and_then(|v| refusal(v).or_else(|| reason_only(v, taken_at + held)));
-    // A refusal, in force or lifted while the next ask is out, says how old
-    // the reading still on screen is, not when it was refused.
-    let taken_at = match (&refusal_held, cache.good.get(key)) {
-        (Some(_), Some((at, _))) => *at,
+    // A refusal, or an empty answer a reader covers with its last good
+    // value, says how old the reading still on screen is - not when this
+    // request failed. `is_reading` covers both the explicit refusal shapes.
+    let taken_at = match (is_reading(value), cache.good.get(key)) {
+        (false, Some((at, _))) => *at,
         _ => *taken_at,
     };
     let refused = refusal_held.filter(|(_, until)| *until > now);
@@ -1799,6 +1800,20 @@ mod tests {
         let p = provenance(&c, "k", now).unwrap();
         assert_eq!(p.taken_at, now - 3600.0);
         assert_eq!(p.refused, None);
+    }
+
+    #[test]
+    fn an_empty_refresh_dates_the_good_reading_still_on_screen() {
+        let mut c = Cache::default();
+        assert!(cached(&mut c, "plan", 3600.0, || Some(serde_json::json!({"plan": "fixture"}))).is_some());
+        c.good.get_mut("plan").unwrap().0 = crate::now() - 7200.0;
+        c.live.get_mut("plan").unwrap().0 = crate::now() - 3700.0;
+        assert!(cached(&mut c, "plan", 3600.0, || None).is_none());
+        let at = crate::now();
+        let p = provenance(&c, "plan", at).unwrap();
+        assert_eq!(p.taken_at, c.good["plan"].0);
+        assert!(p.stale);
+        assert_eq!(provenance_rows(&[p], at, 80), ["cached 2h00m ago"]);
     }
 
     #[test]

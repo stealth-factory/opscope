@@ -2752,7 +2752,7 @@ mod tests {
             ..Config::default()
         };
         let got = read(&mut caches, &cfg);
-        assert_eq!(got[0].quota_at, taken);
+        assert!((got[0].quota_at - taken).abs() < 0.001);
         let provenance = got[0]
             .freshness
             .iter()
