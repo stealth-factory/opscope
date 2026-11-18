@@ -550,16 +550,18 @@ wide resize, a pane short enough to scroll, wheel versus selection behaviour,
 every documented key, and the shared settings screen where present. Restart
 the process after editing—the running binary still holds the old code.
 
-Measure terminal output in `text`, `kitty`, and `herdr` modes against the data
-budget with [`measure-data-usage`](../.claude/skills/measure-data-usage/SKILL.md):
+Measure terminal output across `text`, `kitty`, and `herdr` modes against the
+data budget with [`measure-data-usage`](../.claude/skills/measure-data-usage/SKILL.md):
 
 ```sh
 python3 -I scripts/measure-output.py ./target/debug/example-widget --seconds 60
 ```
 
 A steady screen stays within a few KB/s and uploads no Kitty images unless its
-plotted data changed (`--steady` checks zero steady-state uploads). Python 3 is
-a tool for this manual smoke test only, never a build or `cargo test`
+plotted data changed. Add `--steady` for meter, bar, or table views that must
+upload zero images at rest; omit `--steady` for live-updating pixel charts
+whose data changes during the window, since any upload fails `--steady`. Python
+3 is a tool for this manual smoke test only, never a build or `cargo test`
 dependency ([step 7](#7-generate-configuration-and-run-the-gates)).
 
 ### 9. Hand it off

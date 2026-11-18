@@ -26,7 +26,7 @@ each mode against the repo's per-widget data budget.
 Run with isolated Python (`python3 -I`):
 
     python3 -I scripts/measure-output.py ./target/debug/latency --seconds 60
-    python3 -I scripts/measure-output.py clocks --seconds 60 --steady
+    python3 -I scripts/measure-output.py ./target/debug/clocks --seconds 60 --steady
 
 Also provides two opt-in Linux helpers for live session diagnostics:
   * `--proc-io PID` samples `/proc/PID/io` `wchar` (warning if PID is the
@@ -42,6 +42,7 @@ import base64
 import errno
 import fcntl
 import json
+import math
 import os
 import pty
 import select
@@ -64,6 +65,13 @@ SHM_PROBE_ID = 2_147_483_645
 ANIMATION_PROBE_MASK = 0xF000_0000
 ANIMATION_PROBE_PREFIX = 0x2000_0000
 
+# Cell raster bounds enforced by `sane_cell` in `core/src/terminal.rs`.
+MIN_CELL_W = 4
+MAX_CELL_W = 48
+MIN_CELL_H = 8
+MAX_CELL_H = 96
+MAX_WINSIZE_USHORT = 65_535
+
 # Budget thresholds (1 KB = 1024 B) for a single widget in a 57x40 (10x20 px)
 # pane after warm-up. Typical tabs hold 2-6 panes (~12 across tabs).
 BUDGET_TOTAL_KB_S = 15.0
@@ -77,6 +85,8 @@ ALL_DEFAULT_MODES = ("text", "kitty", "herdr")
 VALID_MODES = ("text", "kitty", "herdr", "kitty-herdr", "all")
 
 MAX_SEQ_BYTES = 1_048_576
+MAX_UPLOAD_PAYLOAD_BYTES = 16 * 1024 * 1024
+MAX_READS_PER_TICK = 4
 
 
 def is_probe_image_id(image_id: Optional[int]) -> bool:
@@ -85,6 +95,24 @@ def is_probe_image_id(image_id: Optional[int]) -> bool:
     if image_id in (GRAPHICS_QUERY_ID, SHM_PROBE_ID):
         return True
     return (image_id & ANIMATION_PROBE_MASK) == ANIMATION_PROBE_PREFIX
+
+
+def is_sane_cell(cell_w: int, cell_h: int) -> bool:
+    """Match `sane_cell` in `core/src/terminal.rs` so core never substitutes 8x16."""
+    if not (MIN_CELL_W <= cell_w <= MAX_CELL_W and MIN_CELL_H <= cell_h <= MAX_CELL_H):
+        return False
+    return cell_h * 4 >= cell_w * 5 and cell_h <= cell_w * 3
+
+
+def sanitize_display_text(text: str) -> str:
+    """Escape control characters in untrusted process names before printing."""
+    out: List[str] = []
+    for ch in text:
+        if ch.isprintable():
+            out.append(ch)
+        else:
+            out.append(f"\\x{ord(ch):02x}")
+    return "".join(out)
 
 
 def parse_kitty_kv(header: bytes) -> Dict[str, str]:
@@ -98,29 +126,53 @@ def parse_kitty_kv(header: bytes) -> Dict[str, str]:
     return kv
 
 
-def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> int:
-    """Return the decoded RGBA byte count (`w * h * 4`) of an upload."""
+def positive_dimensions(kv: Dict[str, str]) -> Optional[Tuple[int, int]]:
     s_str = kv.get("s")
     v_str = kv.get("v")
-    if s_str is not None and v_str is not None:
-        try:
-            w = int(s_str)
-            h = int(v_str)
-            if w > 0 and h > 0:
-                return w * h * 4
-        except ValueError:
-            # Malformed s=/v= dimensions; fall back to decoding the payload.
-            w = 0
+    if s_str is None or v_str is None:
+        return None
+    try:
+        w = int(s_str)
+        h = int(v_str)
+    except ValueError:
+        return None
+    if w > 0 and h > 0:
+        return (w, h)
+    return None
+
+
+def parse_png_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    w, h = struct.unpack(">II", data[16:24])
+    if w > 0 and h > 0:
+        return (w, h)
+    return None
+
+
+def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> int:
+    """Return the decoded RGBA byte count (`w * h * 4`) of an upload."""
+    dims = positive_dimensions(kv)
+    if dims is not None:
+        return dims[0] * dims[1] * 4
+
     raw_b64 = b"".join(payload_chunks)
     if not raw_b64:
         return 0
     try:
         decoded = base64.b64decode(raw_b64)
         if kv.get("o") == "z":
-            decoded = zlib.decompress(decoded)
+            decomp = zlib.decompressobj()
+            decoded = decomp.decompress(decoded, MAX_UPLOAD_PAYLOAD_BYTES + 1)
+            if len(decoded) > MAX_UPLOAD_PAYLOAD_BYTES or decomp.unconsumed_tail:
+                return MAX_UPLOAD_PAYLOAD_BYTES + 1
     except (ValueError, zlib.error):
         return 0
+
     fmt = kv.get("f", "32")
+    if fmt == "100":
+        png_dims = parse_png_dimensions(decoded)
+        return (png_dims[0] * png_dims[1] * 4) if png_dims is not None else 0
     if fmt == "24":
         return (len(decoded) // 3) * 4
     return len(decoded)
@@ -158,14 +210,30 @@ class TerminalStream:
         self.measuring = False
         self.metrics = Metrics()
         self.replies: bytearray = bytearray()
+        self.sample_invalid: Optional[str] = None
 
         self._buf = bytearray()
+        self._warmup_prefix = 0
         self._cursor_col = 1
         # Active multi-chunk Kitty command (`m=1` ... `m=0`):
         self._chunk_kv: Optional[Dict[str, str]] = None
+        self._chunk_needs_payload = False
         self._chunk_payloads: List[bytes] = []
-        self._chunk_wire_bytes: int = 0
-        self._chunk_started_measuring: bool = False
+        self._chunk_payload_bytes = 0
+        self._chunk_started_measuring = False
+
+    def start_measuring(self) -> None:
+        if not self.measuring:
+            self.measuring = True
+            # Bytes already buffered before the boundary belong to warm-up.
+            self._warmup_prefix = len(self._buf)
+
+    def _measured_len(self, consumed_len: int) -> int:
+        if self._warmup_prefix > 0:
+            warm = min(self._warmup_prefix, consumed_len)
+            self._warmup_prefix -= warm
+            return (consumed_len - warm) if self.measuring else 0
+        return consumed_len if self.measuring else 0
 
     def take_replies(self) -> bytes:
         if not self.replies:
@@ -220,7 +288,7 @@ class TerminalStream:
                 pos = end
 
             elif nxt == ord("P"):  # DCS: ESC P ... ESC \
-                end = self._find_st(buf, pos + 2)
+                end = self._find_dcs_st(buf, pos + 2)
                 if end is None:
                     if n - pos > MAX_SEQ_BYTES:
                         self._account_text_len(n - pos)
@@ -246,12 +314,10 @@ class TerminalStream:
                     self._handle_csi(seq[2:])
                     pos = j + 1
                 else:
-                    # Malformed CSI; consume ESC [ and continue.
                     self._account_text_len(2)
                     pos += 2
 
             else:
-                # Two-byte ESC sequence (e.g. ESC \, ESC 7, ESC 8).
                 self._account_text_len(2)
                 pos += 2
 
@@ -271,6 +337,24 @@ class TerminalStream:
             i = esc + 1
 
     @staticmethod
+    def _find_dcs_st(buf: bytearray, start: int) -> Optional[int]:
+        """Locate the outer ST of a DCS string, skipping doubled ESC inside `tmux;`."""
+        n = len(buf)
+        if buf[start : start + 5] == b"tmux;":
+            i = start + 5
+            while True:
+                esc = buf.find(0x1B, i)
+                if esc == -1 or esc + 1 >= n:
+                    return None
+                if buf[esc + 1] == 0x1B:
+                    i = esc + 2
+                    continue
+                if buf[esc + 1] == ord("\\"):
+                    return esc + 2
+                i = esc + 1
+        return TerminalStream._find_st(buf, start)
+
+    @staticmethod
     def _find_osc_end(buf: bytearray, start: int) -> Optional[int]:
         bel = buf.find(0x07, start)
         st = TerminalStream._find_st(buf, start)
@@ -281,12 +365,10 @@ class TerminalStream:
     def _account_plain(self, span: memoryview | bytearray | bytes) -> None:
         if 0x0D in span:
             self._cursor_col = 1
-        if self.measuring:
-            self.metrics.text_bytes += len(span)
+        self.metrics.text_bytes += self._measured_len(len(span))
 
     def _account_text_len(self, length: int) -> None:
-        if self.measuring:
-            self.metrics.text_bytes += length
+        self.metrics.text_bytes += self._measured_len(length)
 
     def _handle_csi(self, body: bytes) -> None:
         if body == b"?2026$p":
@@ -327,9 +409,23 @@ class TerminalStream:
         else:
             self._account_text_len(len(seq))
 
+    def _append_chunk_payload(self, payload: bytes) -> None:
+        if not payload or not self._chunk_needs_payload:
+            return
+        if self._chunk_payload_bytes + len(payload) > MAX_UPLOAD_PAYLOAD_BYTES:
+            self.sample_invalid = (
+                f"Kitty upload payload exceeded {MAX_UPLOAD_PAYLOAD_BYTES // (1024 * 1024)} MiB cap"
+            )
+            self._chunk_needs_payload = False
+            self._chunk_payloads.clear()
+            return
+        self._chunk_payloads.append(payload)
+        self._chunk_payload_bytes += len(payload)
+
     def _handle_kitty(self, body: bytes, *, wire_len: int) -> None:
-        if self.measuring:
-            self.metrics.image_bytes += wire_len
+        began_in_window = self.measuring and self._warmup_prefix == 0
+        measured_wire = self._measured_len(wire_len)
+        self.metrics.image_bytes += measured_wire
 
         if b";" in body:
             header, payload = body.split(b";", 1)
@@ -340,35 +436,41 @@ class TerminalStream:
 
         if self._chunk_kv is None:
             cmd_kv = dict(kv)
-            started_measuring = self.measuring
-            payloads = [payload] if payload else []
+            started_measuring = began_in_window
+            needs_payload = positive_dimensions(cmd_kv) is None and cmd_kv.get("a", "t") in (
+                "T",
+                "t",
+                "f",
+            )
             if more:
                 self._chunk_kv = cmd_kv
-                self._chunk_payloads = payloads
-                self._chunk_wire_bytes = wire_len
+                self._chunk_needs_payload = needs_payload
+                self._chunk_payloads = []
+                self._chunk_payload_bytes = 0
                 self._chunk_started_measuring = started_measuring
+                self._append_chunk_payload(payload)
                 return
+            payloads = [payload] if (needs_payload and payload) else []
         else:
-            # Continuation chunk: merge any extra keys without overwriting
-            # first-chunk keys (`a`, `s`, `v`, `i`, `p`, `q`).
             for k, v in kv.items():
                 if k != "m" and k not in self._chunk_kv:
                     self._chunk_kv[k] = v
-            if payload:
-                self._chunk_payloads.append(payload)
-            self._chunk_wire_bytes += wire_len
+            if self._chunk_needs_payload and positive_dimensions(self._chunk_kv) is not None:
+                self._chunk_needs_payload = False
+                self._chunk_payloads.clear()
+                self._chunk_payload_bytes = 0
+            self._append_chunk_payload(payload)
             if more:
                 return
             cmd_kv = self._chunk_kv
-            payloads = self._chunk_payloads
-            started_measuring = self._chunk_started_measuring or self.measuring
+            payloads = list(self._chunk_payloads)
+            started_measuring = self._chunk_started_measuring
             self._chunk_kv = None
+            self._chunk_needs_payload = False
             self._chunk_payloads = []
-            self._chunk_wire_bytes = 0
+            self._chunk_payload_bytes = 0
             self._chunk_started_measuring = False
 
-        # Reply according to the Kitty graphics protocol (`q=0` default replies
-        # OK or error; `q=1` replies errors only; `q=2` is silent).
         if self.kitty_capable:
             q_mode = cmd_kv.get("q", "0")
             id_str = cmd_kv.get("i")
@@ -403,14 +505,19 @@ class TerminalStream:
         if action in ("T", "t"):
             self.metrics.a_t += 1
             self.metrics.uploads += 1
-            self.metrics.raw_rgba_bytes += decoded_upload_rgba_bytes(cmd_kv, payloads)
+            rgba = decoded_upload_rgba_bytes(cmd_kv, payloads)
+            if rgba > MAX_UPLOAD_PAYLOAD_BYTES and positive_dimensions(cmd_kv) is None:
+                self.sample_invalid = "decompressed Kitty upload exceeded safety cap"
+            else:
+                self.metrics.raw_rgba_bytes += rgba
         elif action == "f":
-            # `r=2,c=1` in `frame_edit` clones the root frame before `a=c`
-            # compose; pixel-uploading `a=f` edits carry no `c=` copy source.
-            if "c" not in cmd_kv:
-                self.metrics.a_f += 1
-                self.metrics.uploads += 1
-                self.metrics.raw_rgba_bytes += decoded_upload_rgba_bytes(cmd_kv, payloads)
+            self.metrics.a_f += 1
+            self.metrics.uploads += 1
+            rgba = decoded_upload_rgba_bytes(cmd_kv, payloads)
+            if rgba > MAX_UPLOAD_PAYLOAD_BYTES and positive_dimensions(cmd_kv) is None:
+                self.sample_invalid = "decompressed Kitty frame edit exceeded safety cap"
+            else:
+                self.metrics.raw_rgba_bytes += rgba
         elif action == "p":
             self.metrics.a_p += 1
         elif action == "d":
@@ -426,6 +533,7 @@ class ModeResult:
     verdict: str
     reasons: List[str] = field(default_factory=list)
     exited_early: Optional[int] = None
+    sample_invalid: Optional[str] = None
 
     @property
     def total_kb_s(self) -> float:
@@ -474,9 +582,12 @@ def evaluate_budget(
     metrics: Metrics,
     steady: bool = False,
     exited_early: Optional[int] = None,
+    sample_invalid: Optional[str] = None,
 ) -> Tuple[str, List[str]]:
     if exited_early is not None:
         return "FAIL", [f"exited early after {elapsed_s:.1f}s (status {exited_early})"]
+    if sample_invalid is not None:
+        return "FAIL", [sample_invalid]
     if elapsed_s <= 0:
         return "FAIL", ["zero measurement window"]
 
@@ -594,54 +705,139 @@ def build_mode_env(mode: str) -> Dict[str, str]:
     return env
 
 
+def validate_pty_geometry(cols: int, rows: int, cell_w: int, cell_h: int) -> Optional[str]:
+    if cols <= 0 or rows <= 0:
+        return "--cols and --rows must be > 0"
+    if cols > MAX_WINSIZE_USHORT or rows > MAX_WINSIZE_USHORT:
+        return f"--cols and --rows must be <= {MAX_WINSIZE_USHORT}"
+    if not is_sane_cell(cell_w, cell_h):
+        return (
+            f"cell size {cell_w}x{cell_h} is outside opscope-core's supported raster range "
+            f"({MIN_CELL_W}..={MAX_CELL_W} x {MIN_CELL_H}..={MAX_CELL_H} px, height/width in 5:4..=3:1)"
+        )
+    if cols * cell_w > MAX_WINSIZE_USHORT or rows * cell_h > MAX_WINSIZE_USHORT:
+        return (
+            f"pixel window size {cols * cell_w}x{rows * cell_h} exceeds TIOCSWINSZ limit "
+            f"({MAX_WINSIZE_USHORT})"
+        )
+    return None
+
+
 def set_winsize(fd: int, rows: int, cols: int, xpixel: int, ypixel: int) -> None:
     packed = struct.pack("HHHH", rows, cols, xpixel, ypixel)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def terminate_process_group(pid: int, master_fd: Optional[int]) -> Optional[int]:
-    if master_fd is not None:
+def peek_child_exit(pid: int) -> Tuple[Optional[int], bool]:
+    """Check if `pid` exited without reaping when `waitid(WNOWAIT)` is available.
+
+    Returns `(exit_code_or_none, was_reaped)`. Keeping the leader unreaped until
+    `terminate_process_group` finishes guarantees the kernel cannot recycle its
+    PID/PGID while group helpers are being signalled.
+    """
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        try:
+            info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return (-1, True)
+        except OSError:
+            info = None
+        else:
+            if info is None:
+                return (None, False)
+            if info.si_code == os.CLD_EXITED:
+                return (int(info.si_status), False)
+            return (-int(info.si_status), False)
+
+    try:
+        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return (-1, True)
+    if waited_pid == pid:
+        return (os.waitstatus_to_exitcode(status), True)
+    return (None, False)
+
+
+def terminate_process_group(
+    pid: int,
+    master_fd: Optional[int],
+    *,
+    leader_reaped: bool,
+) -> Optional[int]:
+    exit_code: Optional[int] = None
+
+    if master_fd is not None and not leader_reaped:
         try:
             os.write(master_fd, b"q")
         except OSError:
             # Slave side may already be closed; proceed to process-group signals.
-            master_fd = None
+            pass
 
-    deadline = time.monotonic() + 0.4
-    while time.monotonic() < deadline:
-        try:
-            waited_pid, status = os.waitpid(pid, os.WNOHANG)
-            if waited_pid == pid:
-                return os.waitstatus_to_exitcode(status)
-        except ChildProcessError:
-            return None
-        time.sleep(0.02)
-
-    for sig, wait_s in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.5)):
-        try:
-            os.killpg(pid, sig)
-        except ProcessLookupError:
-            break
-        except PermissionError:
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            code, reaped = peek_child_exit(pid)
+            if code is not None:
+                exit_code = code
+                leader_reaped = reaped
                 break
-        sig_deadline = time.monotonic() + wait_s
-        while time.monotonic() < sig_deadline:
-            try:
-                waited_pid, status = os.waitpid(pid, os.WNOHANG)
-                if waited_pid == pid:
-                    return os.waitstatus_to_exitcode(status)
-            except ChildProcessError:
-                return None
             time.sleep(0.02)
 
+    # While `pid` has not been reaped, its PGID (`pid`) cannot be recycled by
+    # the kernel; always sweep the group so same-group helpers (`ping`, `curl`)
+    # cannot survive even when the leader exited cleanly on `q`.
+    if not leader_reaped:
+        for sig, wait_s in ((signal.SIGTERM, 0.25), (signal.SIGKILL, 0.15)):
+            try:
+                os.killpg(pid, sig)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+            sig_deadline = time.monotonic() + wait_s
+            while time.monotonic() < sig_deadline:
+                code, reaped = peek_child_exit(pid)
+                if code is not None:
+                    exit_code = code
+                    leader_reaped = reaped
+                    if sig == signal.SIGTERM:
+                        # Give helpers a brief moment to honour SIGTERM before SIGKILL.
+                        time.sleep(0.05)
+                    break
+                time.sleep(0.02)
+
+        try:
+            _, status = os.waitpid(pid, 0)
+            if exit_code is None:
+                exit_code = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            pass
+
+    return exit_code
+
+
+def flush_tx_buf(master_fd: int, tx_buf: bytearray) -> None:
+    if not tx_buf:
+        return
     try:
-        _, status = os.waitpid(pid, 0)
-        return os.waitstatus_to_exitcode(status)
-    except ChildProcessError:
-        return None
+        _, wready, _ = select.select([], [master_fd], [], 0)
+    except InterruptedError:
+        return
+    while tx_buf and wready:
+        try:
+            sent = os.write(master_fd, tx_buf)
+            del tx_buf[:sent]
+        except OSError as err:
+            if err.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EIO):
+                break
+            raise
+        if tx_buf:
+            try:
+                _, wready, _ = select.select([], [master_fd], [], 0)
+            except InterruptedError:
+                break
 
 
 def run_mode(
@@ -658,6 +854,10 @@ def run_mode(
     cell_h: int,
     steady: bool,
 ) -> ModeResult:
+    geom_err = validate_pty_geometry(cols, rows, cell_w, cell_h)
+    if geom_err is not None:
+        raise ValueError(geom_err)
+
     kitty_capable = mode in ("kitty", "herdr", "kitty-herdr")
     stream = TerminalStream(kitty_capable=kitty_capable, cell_w=cell_w, cell_h=cell_h)
     env = build_mode_env(mode)
@@ -677,8 +877,8 @@ def run_mode(
             if slave_fd > 2:
                 os.close(slave_fd)
             argv = [str(binary), *widget_args]
-            os.execve(str(binary), argv, env)
-        except Exception as exc:
+            os.execve(str(binary), argv, env)  # noqa: S606
+        except BaseException as exc:
             os.write(2, f"exec failed: {exc}\n".encode("utf-8", "replace"))
             os._exit(127)
 
@@ -688,6 +888,7 @@ def run_mode(
 
     tx_buf = bytearray()
     exited_early: Optional[int] = None
+    leader_reaped = False
     started_at = time.monotonic()
     measure_start = started_at + max(0.0, warmup)
     measure_end = measure_start + seconds
@@ -696,23 +897,19 @@ def run_mode(
 
     try:
         while True:
+            code, reaped = peek_child_exit(pid)
+            if code is not None:
+                exited_early = code
+                leader_reaped = reaped
+                measured_ended_at = time.monotonic()
+                break
+
             now = time.monotonic()
             if not stream.measuring and now >= measure_start:
-                stream.measuring = True
+                stream.start_measuring()
                 measured_started_at = now
             if now >= measure_end:
                 measured_ended_at = now
-                break
-
-            try:
-                waited_pid, status = os.waitpid(pid, os.WNOHANG)
-                if waited_pid == pid:
-                    exited_early = os.waitstatus_to_exitcode(status)
-                    measured_ended_at = time.monotonic()
-                    break
-            except ChildProcessError:
-                exited_early = -1
-                measured_ended_at = time.monotonic()
                 break
 
             next_boundary = measure_start if not stream.measuring else measure_end
@@ -724,7 +921,15 @@ def run_mode(
                 continue
 
             if rready:
-                while True:
+                reads = 0
+                while reads < MAX_READS_PER_TICK:
+                    now_read = time.monotonic()
+                    if not stream.measuring and now_read >= measure_start:
+                        stream.start_measuring()
+                        measured_started_at = now_read
+                    if now_read >= measure_end:
+                        measured_ended_at = now_read
+                        break
                     try:
                         chunk = os.read(master_fd, 65536)
                     except OSError as err:
@@ -736,35 +941,32 @@ def run_mode(
                             raise
                     if not chunk:
                         break
-                    now_read = time.monotonic()
-                    if not stream.measuring and now_read >= measure_start:
-                        stream.measuring = True
-                        measured_started_at = now_read
+                    reads += 1
                     stream.feed(chunk)
                     reply = stream.take_replies()
                     if reply:
                         tx_buf.extend(reply)
 
-            if tx_buf:
-                if not wready:
-                    _, wready, _ = select.select([], [master_fd], [], 0)
-                while tx_buf and wready:
-                    try:
-                        sent = os.write(master_fd, tx_buf)
-                        del tx_buf[:sent]
-                    except OSError as err:
-                        if err.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EIO):
-                            break
-                        raise
-                    if tx_buf:
-                        _, wready, _ = select.select([], [master_fd], [], 0)
+            if tx_buf and (wready or rready):
+                flush_tx_buf(master_fd, tx_buf)
+
+            if measured_ended_at is not None:
+                code, reaped = peek_child_exit(pid)
+                if code is not None:
+                    exited_early = code
+                    leader_reaped = reaped
+                break
     finally:
-        terminate_process_group(pid, master_fd if exited_early is None else None)
+        terminate_process_group(
+            pid,
+            master_fd if exited_early is None else None,
+            leader_reaped=leader_reaped,
+        )
         try:
             os.close(master_fd)
-        except OSError as close_err:
-            # Ignore EBADF/EIO when tearing down the master PTY descriptor.
-            _ = close_err
+        except OSError:
+            # Ignore EBADF/EIO when closing the master PTY descriptor during cleanup.
+            pass
 
     if measured_started_at is None:
         elapsed = max(0.001, (measured_ended_at or time.monotonic()) - started_at)
@@ -778,6 +980,7 @@ def run_mode(
         metrics=stream.metrics,
         steady=steady,
         exited_early=exited_early,
+        sample_invalid=stream.sample_invalid,
     )
     return ModeResult(
         mode=mode,
@@ -787,26 +990,53 @@ def run_mode(
         verdict=verdict,
         reasons=reasons,
         exited_early=exited_early,
+        sample_invalid=stream.sample_invalid,
     )
+
+
+def proc_dir_for(pid: int) -> Path:
+    if pid <= 0:
+        raise ValueError(f"PID must be positive, got {pid}")
+    return Path("/proc") / str(int(pid))
 
 
 def read_proc_wchar(pid: int) -> Optional[int]:
     try:
-        with open(f"/proc/{pid}/io", "r", encoding="ascii") as f:
-            for line in f:
-                if line.startswith("wchar:"):
-                    return int(line.split()[1])
-    except OSError:
+        io_text = (proc_dir_for(pid) / "io").read_text(encoding="ascii")
+    except (OSError, ValueError):
         return None
+    for line in io_text.splitlines():
+        if line.startswith("wchar:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
     return None
 
 
 def read_proc_comm(pid: int) -> str:
     try:
-        with open(f"/proc/{pid}/comm", "r", encoding="utf-8", errors="replace") as f:
-            return f.read().strip()
-    except OSError:
+        return (proc_dir_for(pid) / "comm").read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError):
         return "?"
+
+
+def read_proc_starttime(pid: int) -> Optional[int]:
+    """Read field 22 (`starttime`) from `/proc/<pid>/stat` to detect PID reuse."""
+    try:
+        stat_text = (proc_dir_for(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    rparen = stat_text.rfind(")")
+    if rparen == -1:
+        return None
+    fields = stat_text[rparen + 2 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
 
 
 def read_proc_descendants(pid: int) -> List[int]:
@@ -815,10 +1045,9 @@ def read_proc_descendants(pid: int) -> List[int]:
     queue = [pid]
     while queue:
         cur = queue.pop(0)
-        task_dir = Path(f"/proc/{cur}/task")
         try:
-            tasks = list(task_dir.iterdir())
-        except OSError:
+            tasks = list((proc_dir_for(cur) / "task").iterdir())
+        except (OSError, ValueError):
             continue
         for tdir in tasks:
             try:
@@ -830,7 +1059,7 @@ def read_proc_descendants(pid: int) -> List[int]:
                     cpid = int(tok)
                 except ValueError:
                     continue
-                if cpid not in seen:
+                if cpid > 0 and cpid not in seen:
                     seen.add(cpid)
                     found.append(cpid)
                     queue.append(cpid)
@@ -843,18 +1072,24 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
         return 2
     start_val = read_proc_wchar(pid)
     if start_val is None:
-        sys.stderr.write(f"error: cannot read /proc/{pid}/io (process missing or insufficient permissions)\n")
+        sys.stderr.write(
+            f"error: cannot read /proc/{pid}/io (process missing or insufficient permissions)\n"
+        )
         return 2
 
-    comm = read_proc_comm(pid)
+    raw_comm = read_proc_comm(pid)
+    shown_comm = sanitize_display_text(raw_comm)
     children = read_proc_descendants(pid)
-    if comm == "opscope" or children:
-        child_desc = ", ".join(f"{c} ({read_proc_comm(c)})" for c in children) or "none yet"
+    if raw_comm == "opscope" or children:
+        child_desc = (
+            ", ".join(f"{c} ({sanitize_display_text(read_proc_comm(c))})" for c in children)
+            or "none yet"
+        )
         sys.stderr.write(
-            f"warning: PID {pid} ({comm}) is a parent/launcher process (children: {child_desc}).\n"
+            f"warning: PID {pid} ({shown_comm}) is a parent/launcher process (children: {child_desc}).\n"
             "         The opscope launcher runs widgets as child processes sharing its tty,\n"
-            "         so /proc/<launcher>/io wchar misses the widget's own writes!\n"
-            "         Measure the widget child PID directly (shown separately below).\n"
+            "         so /proc/<launcher>/io wchar misses live widget writes until children are reaped!\n"
+            "         Measure the live widget child PID directly (shown separately below).\n"
         )
 
     tracked = [pid, *children]
@@ -864,7 +1099,7 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
         val = read_proc_wchar(p)
         if val is not None:
             initial[p] = val
-            names[p] = read_proc_comm(p)
+            names[p] = sanitize_display_text(read_proc_comm(p))
 
     t0 = time.monotonic()
     time.sleep(max(0.1, seconds))
@@ -878,10 +1113,50 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
             continue
         rate = max(0, v1 - v0) / KB / dt
         note = "includes all write() syscalls (tty + files/sockets)"
-        if p == pid and children:
-            note = "parent only; excludes child tty writes"
+        if p == pid and (raw_comm == "opscope" or children):
+            note = "parent (+ any reaped children); live child writes are separate"
         print(f"{p:>8}  {names[p]:<20}  {rate:>12.2f}  {note}")
     return 0
+
+
+@dataclass
+class PinnedTarget:
+    pid: int
+    pidfd: Optional[int]
+    starttime: Optional[int]
+
+
+def pin_watchdog_targets(kill_pids: Sequence[int]) -> List[PinnedTarget]:
+    pinned: List[PinnedTarget] = []
+    use_pidfd = hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+    try:
+        for kpid in kill_pids:
+            st = read_proc_starttime(kpid)
+            pfd: Optional[int] = None
+            if use_pidfd:
+                pfd = os.pidfd_open(kpid, 0)
+            elif st is None:
+                raise ProcessLookupError(errno.ESRCH, "No such process", kpid)
+            pinned.append(PinnedTarget(pid=kpid, pidfd=pfd, starttime=st))
+    except Exception:
+        for t in pinned:
+            if t.pidfd is not None:
+                try:
+                    os.close(t.pidfd)
+                except OSError:
+                    # Ignore close errors while unwinding target setup.
+                    pass
+        raise
+    return pinned
+
+
+def send_pinned_signal(target: PinnedTarget, sig: signal.Signals) -> None:
+    if target.pidfd is not None:
+        signal.pidfd_send_signal(target.pidfd, sig)
+        return
+    if target.starttime is not None and read_proc_starttime(target.pid) != target.starttime:
+        raise ProcessLookupError(errno.ESRCH, "PID recycled", target.pid)
+    os.kill(target.pid, sig)
 
 
 def run_herdr_watchdog(
@@ -900,68 +1175,98 @@ def run_herdr_watchdog(
         sys.stderr.write(f"error: cannot read /proc/{bridge_pid}/io\n")
         return 2
 
-    comm = read_proc_comm(bridge_pid)
-    print(
-        f"watching PID {bridge_pid} ({comm}) for {seconds:.0f}s — "
-        f"will kill {list(kill_pids)} if wchar >= {threshold_kb_s:.0f} KB/s "
-        f"for {sustained} consecutive second(s)",
-        flush=True,
-    )
-    start = prev
-    t_start = time.monotonic()
-    t_prev = t_start
-    peak_kb_s = 0.0
-    over_streak = 0
+    try:
+        targets = pin_watchdog_targets(kill_pids)
+    except OSError as err:
+        sys.stderr.write(f"error: cannot arm watchdog on --kill-pid target: {err}\n")
+        return 2
 
-    while True:
-        now = time.monotonic()
-        if now - t_start >= seconds:
-            break
-        time.sleep(min(1.0, max(0.05, (t_start + seconds) - now)))
-        t_now = time.monotonic()
-        cur = read_proc_wchar(bridge_pid)
-        if cur is None:
-            print(f"bridge PID {bridge_pid} exited", flush=True)
-            break
-        dt = max(0.001, t_now - t_prev)
-        kb_s = max(0, cur - prev) / KB / dt
-        peak_kb_s = max(peak_kb_s, kb_s)
-        prev = cur
-        t_prev = t_now
+    try:
+        comm = sanitize_display_text(read_proc_comm(bridge_pid))
+        print(
+            f"watching PID {bridge_pid} ({comm}) for {seconds:g}s — "
+            f"will kill {[t.pid for t in targets]} if wchar >= {threshold_kb_s:.0f} KB/s "
+            f"for {sustained}s sustained",
+            flush=True,
+        )
+        start = prev
+        t_start = time.monotonic()
+        t_prev = t_start
+        peak_kb_s = 0.0
+        over_seconds = 0.0
 
-        if kb_s >= threshold_kb_s:
-            over_streak += 1
-        else:
-            over_streak = 0
+        while True:
+            now = time.monotonic()
+            if now - t_start >= seconds:
+                break
+            time.sleep(min(1.0, max(0.05, (t_start + seconds) - now)))
+            t_now = time.monotonic()
+            cur = read_proc_wchar(bridge_pid)
+            if cur is None:
+                elapsed_err = t_now - t_start
+                sys.stderr.write(
+                    f"error: /proc/{bridge_pid}/io became unreadable after {elapsed_err:.1f}s "
+                    f"(bridge exited or access lost before {seconds:g}s window completed)\n"
+                )
+                return 2
+            dt = max(0.001, t_now - t_prev)
+            kb_s = max(0, cur - prev) / KB / dt
+            peak_kb_s = max(peak_kb_s, kb_s)
+            prev = cur
+            t_prev = t_now
 
-        if over_streak >= sustained:
-            killed: List[int] = []
-            for kpid in kill_pids:
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.kill(kpid, sig)
-                        if kpid not in killed:
-                            killed.append(kpid)
-                    except ProcessLookupError:
-                        # Process already exited before this signal arrived.
-                        break
-                    time.sleep(0.05)
-            print(
-                f"STOPPED: bridge PID {bridge_pid} wrote {kb_s:.1f} KB/s "
-                f"(>= {threshold_kb_s:.0f} KB/s for {over_streak}s, peak {peak_kb_s:.1f} KB/s); "
-                f"killed {killed}",
-                flush=True,
+            if kb_s >= threshold_kb_s:
+                over_seconds += dt
+            else:
+                over_seconds = 0.0
+
+            if over_seconds + 1e-6 >= float(sustained):
+                killed: List[int] = []
+                denied: List[int] = []
+                for target in targets:
+                    for sig in (signal.SIGTERM, signal.SIGKILL):
+                        try:
+                            send_pinned_signal(target, sig)
+                            if target.pid not in killed:
+                                killed.append(target.pid)
+                        except ProcessLookupError:
+                            # Target process already exited before this signal arrived.
+                            break
+                        except PermissionError:
+                            if target.pid not in denied:
+                                denied.append(target.pid)
+                            break
+                        time.sleep(0.05)
+                denied_note = f"; permission denied for {denied}" if denied else ""
+                print(
+                    f"STOPPED: bridge PID {bridge_pid} wrote {kb_s:.1f} KB/s "
+                    f"(>= {threshold_kb_s:.0f} KB/s for {over_seconds:.1f}s, peak {peak_kb_s:.1f} KB/s); "
+                    f"killed {killed}{denied_note}",
+                    flush=True,
+                )
+                return 2
+
+        total_dt = max(0.001, time.monotonic() - t_start)
+        end_val = read_proc_wchar(bridge_pid)
+        if end_val is None:
+            sys.stderr.write(
+                f"error: /proc/{bridge_pid}/io became unreadable at end of {total_dt:.1f}s window\n"
             )
             return 2
-
-    total_dt = max(0.001, time.monotonic() - t_start)
-    end_val = read_proc_wchar(bridge_pid)
-    mean_kb_s = (max(0, (end_val or prev) - start) / KB / total_dt)
-    print(
-        f"OK: bridge PID {bridge_pid} mean {mean_kb_s:.2f} KB/s, peak {peak_kb_s:.2f} KB/s over {total_dt:.1f}s",
-        flush=True,
-    )
-    return 0
+        mean_kb_s = max(0, end_val - start) / KB / total_dt
+        print(
+            f"OK: bridge PID {bridge_pid} mean {mean_kb_s:.2f} KB/s, peak {peak_kb_s:.2f} KB/s over {total_dt:.1f}s",
+            flush=True,
+        )
+        return 0
+    finally:
+        for target in targets:
+            if target.pidfd is not None:
+                try:
+                    os.close(target.pidfd)
+                except OSError:
+                    # Ignore close errors during watchdog handle cleanup.
+                    pass
 
 
 def format_table(results: Sequence[ModeResult]) -> str:
@@ -982,9 +1287,11 @@ def format_table(results: Sequence[ModeResult]) -> str:
 
 
 def run_self_tests() -> int:
-    # 1. Startup negotiation + torn chunked upload + probes excluded.
+    import tempfile
+
+    # 1. Startup negotiation + torn reads + probes excluded.
     s = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
-    s.measuring = True
+    s.start_measuring()
     startup = (
         b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c"
         b"\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"
@@ -996,7 +1303,6 @@ def run_self_tests() -> int:
         b"\x1bP+q536d756c78;536574756c63\x1b\\"
         b"\x1b_Ga=q,f=32,t=s,s=1,v=1,i=2147483645,q=0,S=4;c2ht\x1b\\"
     )
-    # Feed byte-by-byte to prove torn reads never break parsing or replies.
     for b in startup:
         s.feed(bytes([b]))
     replies = s.take_replies()
@@ -1011,12 +1317,15 @@ def run_self_tests() -> int:
     assert s.metrics.uploads == 0, f"probes counted as uploads: {s.metrics}"
     assert s.metrics.raw_rgba_bytes == 0, f"probes counted as RGBA: {s.metrics}"
 
-    # 2. Multi-chunk a=T + multi-chunk a=f + a=p + a=d accounting.
+    # 2. Multi-chunk a=T + a=f (including c=1) + a=p + a=d + tmux passthrough + PNG f=100.
     s2 = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
-    s2.measuring = True
-    raw_px = bytes([10, 20, 30, 255]) * (20 * 10)  # 20x10 RGBA = 800 bytes
+    s2.start_measuring()
+    raw_px = bytes([10, 20, 30, 255]) * (20 * 10)
     b64 = base64.b64encode(zlib.compress(raw_px))
     half = len(b64) // 2
+    png_ihdr = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" + struct.pack(">II", 16, 8) + b"\x08\x06\x00\x00\x00"
+    png_b64 = base64.b64encode(png_ihdr)
+    tmux_wrapped = b"\x1bPtmux;\x1b\x1b_Ga=p,i=1610612768,p=3,c=2,r=1,C=1,q=1\x1b\x1b\\\x1b\\"
     upload = (
         b"\x1b[2;1H"
         + b"\x1b_Ga=T,f=32,t=d,o=z,s=20,v=10,i=1610612768,p=3,c=2,r=1,C=1,q=0,m=1;"
@@ -1026,12 +1335,16 @@ def run_self_tests() -> int:
         + b64[half:]
         + b"\x1b\\"
         + b"\x1b_Ga=d,d=i,i=1610612768,p=2,q=2\x1b\\"
-        + b"\x1b_Ga=p,i=1610612768,p=3,c=2,r=1,C=1,q=1\x1b\\"
+        + tmux_wrapped
+        + b"\x1b_Ga=f,f=32,t=d,s=1,v=1,i=1610612768,r=2,c=1,X=1,q=1;AAAAAA==\x1b\\"
         + b"\x1b_Ga=f,f=32,t=d,o=z,s=5,v=4,x=0,y=0,i=1610612768,r=1,X=1,q=1,m=1;"
         + b64[:10]
         + b"\x1b\\"
         + b"\x1b_Ga=f,m=0;"
         + b64[10:20]
+        + b"\x1b\\"
+        + b"\x1b_Ga=T,f=100,t=d,i=1610612769,p=1,q=2;"
+        + png_b64
         + b"\x1b\\"
     )
     for i in range(0, len(upload), 7):
@@ -1040,14 +1353,29 @@ def run_self_tests() -> int:
     assert rep2 == b"\x1b_Gi=1610612768,p=3;OK\x1b\\", rep2
     assert s2.metrics.text_bytes == len(b"\x1b[2;1H")
     assert s2.metrics.image_bytes == len(upload) - len(b"\x1b[2;1H")
-    assert s2.metrics.a_t == 1
-    assert s2.metrics.a_f == 1
+    assert s2.metrics.a_t == 2
+    assert s2.metrics.a_f == 2
     assert s2.metrics.a_p == 1
     assert s2.metrics.a_d == 1
-    assert s2.metrics.uploads == 2
-    assert s2.metrics.raw_rgba_bytes == (20 * 10 * 4) + (5 * 4 * 4)
+    assert s2.metrics.uploads == 4
+    assert s2.metrics.raw_rgba_bytes == (20 * 10 * 4) + 4 + (5 * 4 * 4) + (16 * 8 * 4)
 
-    # 3. Budget checks: pre-#469 flood fails, current latency passes, matrix exempt.
+    # 3. Warm-up straddling sequence charges only post-warm-up bytes.
+    s3 = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    warm_part = b"\x1b_Ga=T,f=32,t=d,s=10,v=10,i=1610612768,p=1,q=1;AAAA"
+    post_part = b"BBBB\x1b\\"
+    s3.feed(warm_part)
+    s3.start_measuring()
+    s3.feed(post_part)
+    assert s3.metrics.image_bytes == len(post_part), s3.metrics
+    assert s3.metrics.uploads == 0, "upload started during warm-up should not count"
+
+    # 4. Budget & geometry checks.
+    assert validate_pty_geometry(57, 40, 10, 20) is None
+    assert validate_pty_geometry(57, 40, 10, 10) is not None
+    assert validate_pty_geometry(2000, 40, 40, 80) is not None
+    assert sanitize_display_text("bad\x1b[31mname") == "bad\\x1b[31mname"
+
     flood = Metrics(
         text_bytes=int(4 * KB * 60),
         image_bytes=int(20 * KB * 60),
@@ -1072,9 +1400,40 @@ def run_self_tests() -> int:
     )
     assert verdict_ok == "PASS", (verdict_ok, reasons_ok)
 
-    matrix_m = Metrics(text_bytes=int(240 * KB * 10))
-    verdict_mx, _ = evaluate_budget(mode="text", widget_name="matrix", elapsed_s=10.0, metrics=matrix_m)
-    assert verdict_mx == "EXEMPT"
+    # 5. Non-stop PTY flood terminates promptly at `--seconds` deadline.
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+        tf.write(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "chunk = b'\\x1b_Ga=p,i=1,p=1,q=2\\x1b\\\\' * 400\n"
+            "while True:\n"
+            "    try:\n"
+            "        os.write(1, chunk)\n"
+            "    except OSError:\n"
+            "        break\n"
+        )
+        flood_script = Path(tf.name)
+    try:
+        flood_script.chmod(0o755)
+        t_flood = time.monotonic()
+        res = run_mode(
+            flood_script,
+            "flood-test",
+            [],
+            mode="kitty",
+            seconds=0.25,
+            warmup=0.0,
+            cols=57,
+            rows=40,
+            cell_w=10,
+            cell_h=20,
+            steady=False,
+        )
+        dt_flood = time.monotonic() - t_flood
+        assert dt_flood < 2.0, f"flood starved deadline ({dt_flood:.2f}s)"
+        assert res.verdict == "FAIL", res
+    finally:
+        flood_script.unlink(missing_ok=True)
 
     print("self-test: ok")
     return 0
@@ -1098,6 +1457,23 @@ def parse_modes(raw_modes: Optional[Sequence[str]]) -> List[str]:
             elif part not in expanded:
                 expanded.append(part)
     return expanded or list(ALL_DEFAULT_MODES)
+
+
+def parse_positive_pids(spec: str) -> List[int]:
+    pids: List[int] = []
+    for raw in spec.split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        try:
+            pid = int(tok)
+        except ValueError as err:
+            raise ValueError(f"invalid PID '{tok}' in --kill-pid") from err
+        if pid <= 0:
+            raise ValueError(f"--kill-pid entries must be positive PIDs, got {pid}")
+        if pid not in pids:
+            pids.append(pid)
+    return pids
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1153,7 +1529,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--no-fail",
         action="store_true",
-        help="Exit 0 even when a mode exceeds the data budget",
+        help="Exit 0 when a completed run exceeds the data budget (early exits still fail)",
     )
     parser.add_argument("--proc-io", type=int, metavar="PID", help="Sample /proc/PID/io wchar on Linux")
     parser.add_argument(
@@ -1166,7 +1542,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--kill-pid",
         type=str,
         default="",
-        help="Comma-separated test widget PID(s) to kill if --watchdog-pid trips",
+        help="Comma-separated positive test widget PID(s) to kill if --watchdog-pid trips",
     )
     parser.add_argument(
         "--threshold-kb",
@@ -1178,20 +1554,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--sustained",
         type=int,
         default=2,
-        help="Consecutive seconds over --threshold-kb before watchdog kills test widgets (default: 2)",
+        help="Sustained seconds over --threshold-kb before watchdog kills test widgets (default: 2)",
     )
     parser.add_argument("--self-test", action="store_true", help="Run parser and budget unit tests")
 
     args = parser.parse_args(raw_argv)
 
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        parser.error("--seconds must be a finite number > 0")
+    if not math.isfinite(args.warmup) or args.warmup < 0:
+        parser.error("--warmup must be a finite number >= 0")
+    if not math.isfinite(args.threshold_kb) or args.threshold_kb <= 0:
+        parser.error("--threshold-kb must be a finite number > 0")
+    if args.sustained <= 0:
+        parser.error("--sustained must be >= 1")
+
     if args.self_test:
         return run_self_tests()
 
     if args.proc_io is not None:
+        if args.proc_io <= 0:
+            parser.error("--proc-io requires a positive PID")
         return run_proc_io_sampler(args.proc_io, args.seconds)
 
     if args.watchdog_pid is not None:
-        kill_pids = [int(x) for x in args.kill_pid.split(",") if x.strip()]
+        if args.watchdog_pid <= 0:
+            parser.error("--watchdog-pid requires a positive PID")
+        try:
+            kill_pids = parse_positive_pids(args.kill_pid)
+        except ValueError as err:
+            parser.error(str(err))
         if not kill_pids:
             parser.error("--watchdog-pid requires --kill-pid WIDGET_PID[,PID2...]")
         return run_herdr_watchdog(
@@ -1204,10 +1596,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if not args.widget:
         parser.error("widget is required (or pass --self-test / --proc-io / --watchdog-pid)")
-    if args.seconds <= 0:
-        parser.error("--seconds must be > 0")
-    if args.cols <= 0 or args.rows <= 0 or args.cell_width <= 0 or args.cell_height <= 0:
-        parser.error("pane and cell dimensions must be > 0")
+
+    geom_err = validate_pty_geometry(args.cols, args.rows, args.cell_width, args.cell_height)
+    if geom_err is not None:
+        parser.error(geom_err)
 
     try:
         modes = parse_modes(args.modes)
@@ -1263,6 +1655,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(format_table(results))
 
+    broken = any(r.exited_early is not None or r.sample_invalid is not None for r in results)
+    if broken:
+        return 1
     failed = any(r.verdict == "FAIL" for r in results)
     return 1 if (failed and not args.no_fail) else 0
 
