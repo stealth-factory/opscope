@@ -122,7 +122,7 @@ fn graphql(
             ("User-Agent", "opscope"),
         ],
         &body,
-        30,
+        GRAPHQL_FOR,
     )?;
     let limit = parse::rate_limit(status, &headers, &text);
     if !(200..300).contains(&status) {
@@ -1212,10 +1212,11 @@ fn local_open(local: &Mutex<Option<(f64, String)>>) -> bool {
     }
 }
 
-/// One request's lease: its thirty-second timeout and a margin. Renewed
-/// before every page, so a pane that dies mid-walk holds the reading up for
-/// one request rather than the whole walk.
-const LEASE_FOR: f64 = 45.0;
+/// How long one GraphQL request may run.
+const GRAPHQL_FOR: u64 = 30;
+/// Core renews only after half the lease is gone, so each half must cover
+/// one request and its 15-second margin.
+const LEASE_FOR: f64 = 2.0 * (GRAPHQL_FOR as f64 + 15.0);
 
 /// The store's limits.
 ///
