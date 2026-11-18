@@ -9,7 +9,8 @@ adopting it.
 ## The model
 
 - **One store file per widget**, `store::path("<widget>")` under
-  `tc::state_dir()`, created `0600`. Widgets never share a file, so a widget
+  `tc::state_dir()`, mode `0600`. An existing file is restricted to that
+  mode when it is opened. Widgets never share a file, so a widget
   can change what it stores without coordinating with another.
 - **Leadership per reading, not per pane.** A stale reading is claimed with a
   short lease. The pane that wins fetches; the others keep drawing what they
@@ -20,7 +21,8 @@ adopting it.
 - **The newest reading wins**, by when its answer arrived, not by who wrote
   last.
 - **A refusal is shared.** Every pane waits out a backoff, or a rate limit's
-  reset, that one pane was told.
+  reset, that one pane was told. A later gate does not shorten one still in
+  force; the later deadline stays, and a longer one replaces it.
 - **Followers read nothing until something changed.** `PRAGMA data_version`
   says whether another pane wrote; only then are rows read.
 

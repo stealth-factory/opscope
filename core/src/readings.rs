@@ -1172,12 +1172,56 @@ fn publish_pending_gate(cache: &mut Cache, key: &str, at: f64) {
 
 /// Stop every pane of this widget asking `bucket` until `until`: the
 /// service said its limit is spent and when it resets. A store busy at
-/// that moment gets the gate on this pane's next [`gate`].
+/// that moment gets the gate on this pane's next [`gate`]. A deadline
+/// still in force is not shortened by a later, shorter one: the store
+/// keeps the later of the two, and this pane takes that back.
 pub fn shut(cache: &mut Cache, bucket: &str, until: f64, why: &str) {
     let key = format!("gate/{bucket}");
     let at = crate::now();
+    // This pane's own gate, before the store's. With nothing shared it is
+    // the only copy, and a shorter limit must not open it early.
+    let (until, why) = match cache
+        .live
+        .get(&key)
+        .and_then(|(_, v, _)| v.as_ref())
+        .and_then(refusal)
+    {
+        Some((old_why, old)) if old > at && old > until => (old, old_why),
+        _ => (until, why.to_string()),
+    };
     let held = (until - at).max(0.0);
-    settle(cache, &key, at, Some(refusal_value(why, until)), held, None);
+    settle(cache, &key, at, Some(refusal_value(&why, until)), held, None);
+    adopt_stored_gate(cache, &key);
+}
+
+/// Take back a deadline the store kept when this pane's own was shorter.
+///
+/// [`settle`] writes this pane's value first. The store, in the same
+/// commit, may have left a longer one another pane had already recorded,
+/// and [`Store::load`] would not read it again this pass.
+fn adopt_stored_gate(cache: &mut Cache, key: &str) {
+    let Some(store) = cache.store.as_mut() else {
+        return;
+    };
+    let Ok(Some(row)) = store.load_committed(key) else {
+        return;
+    };
+    let Some((_, until)) = row.value.as_ref().and_then(refusal) else {
+        return;
+    };
+    if until <= crate::now() {
+        return;
+    }
+    let local = cache
+        .live
+        .get(key)
+        .and_then(|(_, v, _)| v.as_ref())
+        .and_then(refusal)
+        .map(|(_, u)| u);
+    if local.is_some_and(|u| until <= u) {
+        return;
+    }
+    cache.live.insert(key.to_string(), (row.taken_at, row.value, row.held));
 }
 
 /// Where the reading on screen came from, and how fresh it is.
@@ -1740,6 +1784,40 @@ mod tests {
         let (until, why) = gate(&mut b, "core").expect("the other pane did not see the limit");
         assert_eq!(why, "rate limit spent");
         assert!(until > crate::now() + 290.0);
+    }
+
+    #[test]
+    fn a_shorter_gate_does_not_replace_one_still_in_force() {
+        let (mut a, mut b) = two_panes("gate-longer");
+        let now = crate::now();
+        shut(&mut a, "core", now + 600.0, "rate limit spent");
+        shut(&mut b, "core", now + 60.0, "too many requests");
+        let (until, why) = gate(&mut b, "core").expect("the writer lost the gate");
+        assert!(until > now + 590.0, "the short write replaced it: {}", until - now);
+        assert_eq!(why, "rate limit spent");
+        follow(&mut a);
+        let (until, _) = gate(&mut a, "core").expect("the first pane lost the longer gate");
+        assert!(until > now + 590.0, "a follower took the short gate: {}", until - now);
+
+        // A longer deadline still extends it, and one that has passed does not stick.
+        shut(&mut a, "core", now + 1200.0, "still limited");
+        follow(&mut b);
+        let (until, why) = gate(&mut b, "core").unwrap();
+        assert!(until > now + 1190.0, "a longer deadline did not extend: {}", until - now);
+        assert_eq!(why, "still limited");
+
+        // A deadline that has already passed does not stick.
+        let (mut c, mut d) = two_panes("gate-expired");
+        shut(&mut c, "core", crate::now() - 5.0, "old");
+        assert!(gate(&mut c, "core").is_none(), "an expired gate read as shut");
+        shut(&mut d, "core", crate::now() + 45.0, "fresh");
+        let (until, why) = gate(&mut d, "core").unwrap();
+        assert!(until < crate::now() + 50.0, "an expired gate stayed: {}", until - crate::now());
+        assert_eq!(why, "fresh");
+        follow(&mut c);
+        let (until, why) = gate(&mut c, "core").unwrap();
+        assert_eq!(why, "fresh");
+        assert!(until < crate::now() + 50.0);
     }
 
     #[test]

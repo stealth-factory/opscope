@@ -1455,6 +1455,21 @@ fn one_pass(
         guard.err = err;
         guard.sharing = sharing;
     }
+    // A flow key names the window and the day it starts. The board on
+    // screen is `Drawn`, so a key this pass is not using is only weight.
+    forget_other_flows(cache, &flow_key);
+}
+
+/// Drop flow readings other than the one this pass is drawing.
+fn forget_other_flows(cache: &mut tc::readings::Cache, flow_key: &str) {
+    let drop_key = |k: &String| k.starts_with("linear.flow/") && k != flow_key;
+    cache.good.retain(|k, _| !drop_key(k));
+    cache.live.retain(|k, _| !drop_key(k));
+    cache.fails.retain(|k, _| !drop_key(k));
+    cache.shared.retain(|k, _| !drop_key(k));
+    cache.asking.retain(|k, _| !drop_key(k));
+    cache.unshared.retain(|k, _| !drop_key(k));
+    cache.annotate_pending.retain(|k| !drop_key(k));
 }
 
 /// The keys of the two shared readings: the board, the same for every pane
@@ -5111,6 +5126,25 @@ mod tests {
         // Another key is another workspace.
         let (other, _) = reading_keys(&mut cache, "lin_api_another_fake_key_1111", 7, "2026-01-04");
         assert_ne!(board_7, other);
+    }
+
+    #[test]
+    fn an_old_flow_leaves_memory_when_the_window_moves() {
+        let mut cache = tc::readings::Cache::default();
+        let (board, flow_14) = reading_keys(&mut cache, TOKEN, 14, "2026-01-01T00:00:00.000Z");
+        let (_, flow_7) = reading_keys(&mut cache, TOKEN, 7, "2026-01-08T00:00:00.000Z");
+        let row = (1.0, serde_json::json!({ "issues": [] }));
+        cache.good.insert(board.clone(), row.clone());
+        cache.good.insert(flow_14.clone(), row.clone());
+        cache.good.insert(flow_7.clone(), row.clone());
+        cache.live.insert(flow_14.clone(), (1.0, Some(row.1.clone()), 120.0));
+        cache.live.insert(flow_7.clone(), (1.0, Some(row.1.clone()), 120.0));
+        forget_other_flows(&mut cache, &flow_7);
+        assert!(cache.good.contains_key(&board), "the board went with the old flow");
+        assert!(cache.good.contains_key(&flow_7));
+        assert!(cache.live.contains_key(&flow_7));
+        assert!(!cache.good.contains_key(&flow_14), "yesterday's flow stayed in memory");
+        assert!(!cache.live.contains_key(&flow_14));
     }
 
     #[test]

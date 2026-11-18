@@ -274,7 +274,14 @@ impl Store {
         // journal SQLite makes beside it takes the same mode.
         match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // A file left from an older build, or copied in, keeps whatever
+            // mode it was given. Issue titles land in it, so it is restricted
+            // before SQLite writes.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| OpenError::other(format!("cannot restrict it: {e}")))?;
+            }
             Err(e) => return Err(OpenError::other(format!("cannot create it: {e}"))),
         }
         let conn = Connection::open(path).map_err(db)?;
@@ -368,6 +375,13 @@ impl Store {
         // until somebody wrote something else.
         self.seen.insert(key.to_string(), self.version);
         Ok(found)
+    }
+
+    /// The row as just committed. [`load`](Self::load) skips a key this pass
+    /// already read, which would hide a gate this write just lengthened.
+    pub fn load_committed(&mut self, key: &str) -> Result<Option<Shared>, String> {
+        self.seen.remove(key);
+        self.load(key)
     }
 
     /// Ask to be the pane that fetches `key`. `known` is when the reading
@@ -589,6 +603,22 @@ impl Store {
             }
         }
     }
+}
+
+/// The `until` of a gate refusal, when `text` is one.
+fn refusal_until(text: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get("opscope_refusal")?.get("until")?.as_f64()
+}
+
+impl Store {
+    fn stored_fails(&self, key: &str) -> Result<Option<u32>, String> {
+        self.conn
+            .query_row("SELECT fails FROM readings WHERE key = ?1", [key], |r| r.get::<_, i64>(0))
+            .optional()
+            .map(|n| n.map(|n| n.max(0) as u32))
+            .map_err(sql)
+    }
 
     /// Write one reading inside a transaction the caller has begun; the
     /// body of [`publish`](Self::publish) and of
@@ -596,13 +626,15 @@ impl Store {
     fn write_one(&self, key: &str, s: &Shared, secrets: &[String], now: f64) -> Result<Publish, String> {
         let caps = self.caps;
         let me = self.me;
-        let value = s.value.as_ref().map(|v| v.to_string());
-        let good = s
+        let mut value = s.value.as_ref().map(|v| v.to_string());
+        let mut good = s
             .good
             .as_ref()
             .filter(|(_, g)| s.value.as_ref() != Some(g))
             .map(|(_, v)| v.to_string());
-        let good_at = s.good.as_ref().map(|(at, _)| *at);
+        let mut good_at = s.good.as_ref().map(|(at, _)| *at);
+        let mut row_held = s.held;
+        let mut row_fails = s.fails;
         if let Some(why) = unshareable(&[value.as_deref(), good.as_deref()], secrets, caps.max_value) {
             let _ = self.conn.execute(
                 "DELETE FROM leases WHERE key = ?1 AND holder = ?2",
@@ -620,11 +652,34 @@ impl Store {
             )
             .optional()
             .map_err(sql)?;
+        // A gate still in force is not shortened by a later write. Two panes
+        // can be in flight together and be told different resets; the later
+        // timestamp would otherwise replace a ten-minute wait with a one-minute
+        // one, and every other pane would ask again inside the longer reset.
+        // The longer deadline is rewritten at this write's time so a follower
+        // adopts it. A deadline that has passed, and a longer new one, are
+        // written as they stand.
+        if key.starts_with("gate/") {
+            if let Some(stored_text) = stored.as_ref().and_then(|r| r.1.clone()) {
+                if let Some(stored_until) = refusal_until(&stored_text) {
+                    let new_until = value.as_deref().and_then(refusal_until);
+                    if stored_until > now && new_until.is_some_and(|u| u < stored_until) {
+                        value = Some(stored_text);
+                        row_held = (stored_until - s.taken_at).max(0.0);
+                        if let Some(n) = self.stored_fails(key)? {
+                            row_fails = row_fails.max(n);
+                        }
+                        good = None;
+                        good_at = None;
+                    }
+                }
+            }
+        }
         // The check is the later fetch of this same text. An answer older
         // than that check is older than the reading, whatever the row's
         // own time still says.
         let effective = stored.as_ref().map(|r| r.5.map_or(r.0, |c| c.max(r.0)));
-        let held_same = stored.as_ref().is_none_or(|r| r.4 == s.held);
+        let held_same = stored.as_ref().is_none_or(|r| r.4 == row_held);
         let other: Option<u32> = self.conn
             .query_row(
                 "SELECT holder FROM leases WHERE key = ?1 AND holder != ?2 AND expires_at > ?3",
@@ -651,7 +706,7 @@ impl Store {
                 self.conn.execute(
                     "UPDATE readings SET taken_at = ?2, held = ?3, fails = ?4, good_at = ?5,
                      fetched_by = ?6 WHERE key = ?1",
-                    params![key, s.taken_at, s.held, s.fails, good_at, self.me],
+                    params![key, s.taken_at, row_held, row_fails, good_at, self.me],
                 )
                 .map_err(sql)?;
             } else {
@@ -662,7 +717,7 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(key) DO UPDATE SET taken_at = ?2, held = ?3, value = ?4, fails = ?5,
                      good_value = ?6, good_at = ?7, fetched_by = ?8",
-                    params![key, s.taken_at, s.held, value, s.fails, good, good_at, self.me],
+                    params![key, s.taken_at, row_held, value, row_fails, good, good_at, self.me],
                 )
                 .map_err(sql)?;
             }
@@ -1122,6 +1177,17 @@ mod tests {
     fn the_file_is_its_owners_alone() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("mode");
+        Store::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn an_existing_file_is_restricted_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp("mode-existing");
+        Store::open(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         Store::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

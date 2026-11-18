@@ -302,8 +302,8 @@ minutes), and starting at two again once a request gets through or an hour
 after the last wait ended. A project screen keeps what it already showed
 under a `Linear: too many requests · next ask in 12m` line.
 
-The answers are kept in `~/.local/state/opscope/linear.sqlite`, created
-readable only by you. **They include issue identifiers, titles and links,
+The answers are kept in `~/.local/state/opscope/linear.sqlite`, readable
+only by you. **They include issue identifiers, titles and links,
 and project and lead names**, as Linear returned them. A row becomes
 eligible for routine cleanup after **2 hours** without a publication and is
 deleted only during a later save. That is not a retention deadline: data can
