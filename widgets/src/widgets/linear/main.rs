@@ -5437,6 +5437,14 @@ mod tests {
     #[test]
     fn a_limit_that_names_no_time_stops_every_pane_and_doubles_across_them() {
         let (mut one, mut two) = two_panes("unnamed-limit");
+        // Age the stored deadline while keeping its refusal count. A new
+        // call to shut must preserve the deadline while it is still live.
+        let row = gate_row(BUCKET);
+        let expire_gate = |pane: &mut tc::readings::Cache| {
+            let mut refusal = pane.live[&row].1.clone().expect("the gate has a refusal");
+            refusal["opscope_refusal"]["until"] = serde_json::json!(tc::now() - 1.0);
+            tc::readings::set_live(pane, &row, refusal);
+        };
         let activity = tc::Refresh::default();
         let (board_key, flow_key) = reading_keys(&mut one, TOKEN, 14, "2026-01-01");
         bring_up_to_date(&mut one, &board_key, BUCKET, policy(), false, &activity, &no_local_gate(), |_| Err(unnamed_limit()));
@@ -5448,7 +5456,7 @@ mod tests {
         }
         // The gate lifts; the next limit, met by the other pane, is the
         // second in the run and waits twice as long.
-        tc::readings::shut(&mut one, BUCKET, tc::now() - 1.0, "too many requests");
+        expire_gate(&mut one);
         tc::readings::follow(&mut two);
         assert!(tc::readings::gate(&mut two, BUCKET).is_none());
         bring_up_to_date(&mut two, &flow_key, BUCKET, policy(), false, &activity, &no_local_gate(), |_| Err(unnamed_limit()));
@@ -5458,7 +5466,8 @@ mod tests {
         assert!(until > now + 235.0 && until <= now + 241.0, "{}", until - now);
 
         // A request that gets through ends the run.
-        tc::readings::shut(&mut two, BUCKET, tc::now() - 1.0, "too many requests");
+        expire_gate(&mut two);
+        assert!(tc::readings::gate(&mut two, BUCKET).is_none());
         // Another window's flow: both readings above hold their refusals.
         let (_, other) = reading_keys(&mut two, TOKEN, 7, "2026-01-01");
         let expired = tc::readings::Policy::new(0.0, LEASE_FOR);
@@ -5474,7 +5483,8 @@ mod tests {
         });
         assert_eq!(asked, 2);
         let (until, _) = tc::readings::gate(&mut two, BUCKET).unwrap();
-        assert!(until <= tc::now() + 121.0, "{}", until - tc::now());
+        let now = tc::now();
+        assert!(until > now + 115.0 && until <= now + 121.0, "{}", until - now);
     }
 
     #[test]
