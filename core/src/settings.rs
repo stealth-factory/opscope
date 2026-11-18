@@ -4689,6 +4689,14 @@ fn draw_pick(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
             (p.dim.as_str(), if *on_list { " to the box" } else { " to the list" }.into()),
         ]);
     }
+    // r retries a discovery, including an empty or failed one, but only
+    // while the rows have focus — in the box it is a letter. The hint is
+    // what makes that key clickable.
+    if discovery.is_some() && *on_list {
+        hints.insert(hints.len() - 1, vec![
+            (p.dim.as_str(), "[r] list again".into()),
+        ]);
+    }
     let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
     let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
     // Title pinned, the rest windowed - the same shape as the list, and for
@@ -5309,6 +5317,10 @@ mod tests {
         app.discover = &[("properties", stopped)];
         // Tab can focus even an empty list, so a refusal can be retried.
         handle_pick_key(&mut app, "tab");
+        assert!(
+            draw_discovery(&mut app).contains("[r] list again"),
+            "the retry has to be on the footer, or it cannot be clicked"
+        );
         handle_pick_key(&mut app, "r");
         await_discovery(&mut app);
         assert!(draw_discovery(&mut app).contains("discovery stopped: example discovery panic"));
