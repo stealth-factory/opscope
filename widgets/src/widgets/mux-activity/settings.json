@@ -19,7 +19,7 @@
   "luvus_session": "default",
   "_refresh_comment": "Maximum idle delay in seconds; Rex events wake a full read sooner.",
   "refresh": 4.0,
-  "_agents_comment": "Command names that count as coding agents under Rex, Herdr and Luvus. Under Herdr and Luvus, any agent the multiplexer itself reports always shows; this list fills gaps for panes the multiplexer did not recognise. Matched against the pane's foreground program or process tree, and under Rex against the app name a program reports with OSC 7501 (aliases such as claude-code and antigravity-cli resolve through the shared catalogue). Generic names (forge, agent, cn, vibe) match by default only with an install or script path clue; add a name here to match it unconditionally.",
+  "_agents_comment": "Command names that count as coding agents under Rex, Herdr and Luvus. Under Herdr and Luvus, any agent the multiplexer itself reports always shows; this list fills gaps for panes the multiplexer did not recognise. Matched against the pane's foreground program or process tree, and under Rex against the app name a program reports with OSC 7501 (aliases such as claude-code and antigravity-cli resolve through the shared catalogue). forgecode, continue, vibe and goose run under names other programs share (forge, cn, vibe, goose - Foundry, pressly/goose), so they match only with a second clue: an install or script path, or for goose the way it was run (bare, session or run). cursor-agent covers Cursor's newer `agent` launcher the same way. Each is switched off by removing its own name. Amp is not listed: `amp` is also a text editor and nothing tells them apart; add amp, or any other command, to match it unconditionally.",
   "agents": [
     "claude",
     "codex",
@@ -33,7 +33,6 @@
     "droid",
     "devin",
     "grok",
-    "amp",
     "kimi",
     "qwen",
     "qodercli",
@@ -41,11 +40,14 @@
     "cline",
     "crush",
     "aider",
-    "goose",
     "codebuff",
     "auggie",
     "gptme",
     "codewhale",
-    "jules"
+    "jules",
+    "forgecode",
+    "continue",
+    "vibe",
+    "goose"
   ]
 }

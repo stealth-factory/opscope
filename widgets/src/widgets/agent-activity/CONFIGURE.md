@@ -2,8 +2,11 @@
 
 This widget reads local coding-agent processes from `tc::agent_work`'s shared
 catalogue, agent child shells, and the shared session readers for Claude Code,
-Codex and OpenCode. Generic command names in the catalogue (`forge`, `agent`,
-`cn`, `vibe`) require a path or script clue so unrelated tools are excluded. It
+Codex and OpenCode. Command names other programs share (`forge`, `agent`,
+`cn`, `vibe`, `goose`) need a second clue - an install or script path, or for
+`goose` being run bare, as `session` or as `run` - so Foundry's `forge` or
+pressly/goose is never listed. Bare `kiro` (the Kiro IDE) and `amp` (also a text
+editor) are not matched. It
 needs no credentials, hooks or multiplexer. It never contacts an agent vendor
 API and never installs tools.
 

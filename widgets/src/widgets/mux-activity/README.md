@@ -847,9 +847,15 @@ so rather than focusing something arbitrary.
 `mux-activity` starts; `--mux` does the same for one run. `refresh` is the maximum
 idle delay between reads under every multiplexer; events wake one sooner.
 `agents` is the list of command names that count as coding agents across Rex,
-Herdr and Luvus — seeded from `tc::agent_work`'s shared catalogue, with
-generic names (`forge`, `agent`, `cn`, `vibe`) matching by default only when an
-install or script path confirms them.
+Herdr and Luvus — seeded from `tc::agent_work`'s shared catalogue. Agents
+whose command another program shares (`forgecode`, `continue`, `vibe`, `goose`,
+and Cursor's newer `agent` launcher under `cursor-agent`) match only with a
+second clue: an install or script path, or for `goose` the way it was run (bare,
+`session` or `run`, never pressly/goose's `goose up`). Under Rex, which reports
+no arguments, `goose` needs the path clue. Each is switched off by removing its
+own name. Bare `kiro` is the Kiro IDE and is not matched (the CLI is
+`kiro-cli`); Sourcegraph's Amp is not listed, because `amp` is also a text
+editor — add `amp`, or any other command, to match it unconditionally.
 
 - **Rex:** `rex_server` picks a Rex server — a host label from `rex hosts`,
   or an address; empty is the CLI's own default. A second `mux-activity` with

@@ -41,6 +41,12 @@ pub struct CatalogueEntry {
     /// Path or script substrings required when `commands` is generic (Group 2);
     /// empty `&[]` for Group 1 entries.
     pub second_clues: &'static [&'static str],
+    /// A second clue read from the arguments rather than the path, for an
+    /// agent whose install path says nothing (Block's `goose` lands in
+    /// `~/.local/bin`): the process counts when it was run bare, or with the
+    /// first argument one of these. Only where the arguments are known - a
+    /// bare command label from a multiplexer is not evidence of either.
+    pub session_args: &'static [&'static str],
     /// One-line provenance note recording where the command name was confirmed.
     pub note: &'static str,
 }
@@ -48,12 +54,13 @@ pub struct CatalogueEntry {
 impl CatalogueEntry {
     /// Group 1 entries have distinctive command names and need no second clue.
     pub const fn is_group_1(&self) -> bool {
-        self.second_clues.is_empty()
+        self.second_clues.is_empty() && self.session_args.is_empty()
     }
 }
 
-/// Every confirmed CLI coding agent: 26 Group 1 entries (`second_clues` empty)
-/// followed by 4 Group 2 entries that require a path/script clue.
+/// Every confirmed CLI coding agent: 24 Group 1 entries (no second clue)
+/// followed by 5 Group 2 entries whose command name is generic or collides
+/// with an unrelated program, and which need a path or argument clue.
 pub const CATALOGUE: &[CatalogueEntry] = &[
     // ── Group 1: distinctive, confirmed command names ──
     CatalogueEntry {
@@ -63,6 +70,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["claude", "claude-code", "claude-cli"],
         service_subcommands: &["gateway", "mcp serve"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/claude) and https://docs.anthropic.com/en/docs/claude-code/cli-reference",
     },
     CatalogueEntry {
@@ -72,6 +80,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["codex", "codex-cli"],
         service_subcommands: &["app-server", "mcp-server", "remote-control"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/codex) and https://github.com/openai/codex",
     },
     CatalogueEntry {
@@ -81,6 +90,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["gemini", "gemini-cli"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from npm @google/gemini-cli bin 'gemini' at https://github.com/google-gemini/gemini-cli",
     },
     CatalogueEntry {
@@ -90,6 +100,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["opencode"],
         service_subcommands: &["serve", "service", "acp", "web"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.opencode/bin/opencode) and https://opencode.ai/docs/cli",
     },
     CatalogueEntry {
@@ -99,6 +110,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["agy", "antigravity", "antigravity-cli"],
         service_subcommands: &["acp", "mic-serve", "remote-control"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/agy) and Herdr integration 'antigravity-cli' at https://herdr.dev/tui/docs/agents/",
     },
     CatalogueEntry {
@@ -108,6 +120,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["pi"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.pi/agent/bin/pi -> node_modules/.bin/pi) and Herdr integration 'pi'",
     },
     CatalogueEntry {
@@ -117,6 +130,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["omp"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from @oh-my-pi/pi-coding-agent bin 'omp' (https://omp.sh) and Herdr integration 'omp'",
     },
     CatalogueEntry {
@@ -126,6 +140,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["cursor-agent", "cursor"],
         service_subcommands: &["worker"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/cursor-agent), Herdr integration 'cursor', and https://docs.cursor.com/en/cli/overview",
     },
     CatalogueEntry {
@@ -135,6 +150,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["copilot", "copilot-cli"],
         service_subcommands: &["--acp"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/copilot) and https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
     },
     CatalogueEntry {
@@ -144,6 +160,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["droid"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from Factory CLI docs https://docs.factory.ai/cli/getting-started/quickstart and Herdr integration 'droid'",
     },
     CatalogueEntry {
@@ -153,6 +170,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["devin", "devin-cli"],
         service_subcommands: &["acp", "forward"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/devin), Herdr integration 'devin', and https://docs.devin.ai",
     },
     CatalogueEntry {
@@ -162,16 +180,8 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["grok", "grok-cli"],
         service_subcommands: &["leader", "worker"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed on local install (~/.grok/bin/grok) and Herdr integration 'grok'",
-    },
-    CatalogueEntry {
-        display: "Amp",
-        id: "amp",
-        commands: &["amp"],
-        aliases: &["amp", "amp-cli"],
-        service_subcommands: &[],
-        second_clues: &[],
-        note: "confirmed from Sourcegraph Amp (@sourcegraph/amp / @ampcode/cli) manual at https://ampcode.com/manual",
     },
     CatalogueEntry {
         display: "Kimi Code",
@@ -180,6 +190,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["kimi", "kimi-code", "kimi-cli"],
         service_subcommands: &["web", "acp"],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from MoonshotAI/kimi-code docs at https://code.kimi.com and Herdr integration 'kimi'",
     },
     CatalogueEntry {
@@ -189,6 +200,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["qwen", "qwen-code"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from @qwen-code/qwen-code at https://github.com/QwenLM/qwen-code and Herdr integration 'qwen'",
     },
     CatalogueEntry {
@@ -198,16 +210,21 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["qodercli"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from @qoder-ai/qodercli at https://docs.qoder.com/cli/quick-start and Herdr integration 'qodercli'",
     },
     CatalogueEntry {
         display: "Kiro CLI",
         id: "kiro",
-        commands: &["kiro-cli", "kiro"],
+        // Not `kiro`: that is the Kiro IDE's own launcher (`kiro .` opens the
+        // editor), and a pane running it is not an agent. Herdr still reports
+        // the CLI as `kiro`, which `aliases` resolves.
+        commands: &["kiro-cli"],
         aliases: &["kiro", "kiro-cli"],
         service_subcommands: &[],
         second_clues: &[],
-        note: "confirmed from https://kiro.dev/cli/ ('kiro-cli', also 'kiro') and Herdr integration 'kiro'",
+        session_args: &[],
+        note: "confirmed from https://kiro.dev/cli/ ('kiro-cli') and Herdr integration 'kiro'; bare 'kiro' is the Kiro IDE launcher",
     },
     CatalogueEntry {
         display: "Cline CLI",
@@ -216,6 +233,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["cline", "cline-cli"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from npm 'cline' at https://docs.cline.bot/cline-cli/overview",
     },
     CatalogueEntry {
@@ -225,6 +243,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["crush"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from Charmbracelet Crush (@charmland/crush) at https://github.com/charmbracelet/crush",
     },
     CatalogueEntry {
@@ -234,16 +253,8 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["aider", "aider-chat"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from Python aider-chat CLI docs at https://aider.chat/docs/usage.html",
-    },
-    CatalogueEntry {
-        display: "Goose",
-        id: "goose",
-        commands: &["goose"],
-        aliases: &["goose"],
-        service_subcommands: &["mcp", "web"],
-        second_clues: &[],
-        note: "confirmed from Goose CLI docs at https://block.github.io/goose/docs/getting-started/installation",
     },
     CatalogueEntry {
         display: "Codebuff",
@@ -252,6 +263,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["codebuff"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from npm 'codebuff' quickstart at https://www.codebuff.com/docs/help/quick-start",
     },
     CatalogueEntry {
@@ -261,6 +273,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["auggie", "augment"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from npm @augmentcode/auggie docs at https://docs.augmentcode.com/cli/overview",
     },
     CatalogueEntry {
@@ -270,6 +283,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["gptme"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from Python 'gptme' CLI reference at https://gptme.org/docs/cli.html",
     },
     CatalogueEntry {
@@ -279,6 +293,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["codewhale"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from Rust crate 'codewhale' binary at https://crates.io/crates/codewhale",
     },
     CatalogueEntry {
@@ -288,6 +303,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["jules"],
         service_subcommands: &[],
         second_clues: &[],
+        session_args: &[],
         note: "confirmed from npm @google/jules CLI reference at https://jules.google/docs/cli/reference",
     },
     // ── Group 2: generic or colliding command names; require a second clue ──
@@ -298,6 +314,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["forgecode"],
         service_subcommands: &[],
         second_clues: &["/forgecode/", "/@antinomyhq/forge/"],
+        session_args: &[],
         note: "confirmed from npm 'forgecode' (@antinomyhq/forge) at https://forgecode.dev; requires path clue so Foundry's 'forge' never matches",
     },
     CatalogueEntry {
@@ -307,6 +324,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["cursor", "cursor-agent"],
         service_subcommands: &["worker"],
         second_clues: &["/cursor-agent/"],
+        session_args: &[],
         note: "confirmed on local install (~/.local/bin/agent -> ~/.local/share/cursor-agent/versions/.../cursor-agent); requires '/cursor-agent/' path/script clue",
     },
     CatalogueEntry {
@@ -316,6 +334,7 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["continue-cli", "continuedev"],
         service_subcommands: &[],
         second_clues: &["/@continuedev/", "/continuedev/"],
+        session_args: &[],
         note: "confirmed from npm @continuedev/cli bin 'cn' at https://docs.continue.dev/cli/overview; requires '@continuedev' path/script clue",
     },
     CatalogueEntry {
@@ -325,12 +344,39 @@ pub const CATALOGUE: &[CatalogueEntry] = &[
         aliases: &["mistral-vibe"],
         service_subcommands: &[],
         second_clues: &["/mistral-vibe/", "/mistral_vibe/"],
+        session_args: &[],
         note: "confirmed from uv tool 'mistral-vibe' bin 'vibe' at https://github.com/mistralai/mistral-vibe; requires 'mistral-vibe' path/script clue",
     },
+    CatalogueEntry {
+        display: "Goose",
+        id: "goose",
+        commands: &["goose"],
+        // Not `goose`: an OSC report or multiplexer kind of plain `goose`
+        // could as well be pressly/goose, the database migration tool.
+        aliases: &["goose-cli", "block-goose"],
+        service_subcommands: &["mcp", "web"],
+        // Homebrew's formula is `block-goose-cli`; the install script puts a
+        // bare binary in ~/.local/bin, so the arguments carry the clue there:
+        // Block's agent runs bare or as `goose session` / `goose run`, while
+        // pressly/goose always takes a driver or a command (`goose up`,
+        // `goose postgres "…" status`) and exits.
+        second_clues: &["/block-goose"],
+        session_args: &["session", "s", "run"],
+        note: "confirmed from Goose CLI docs at https://block.github.io/goose/docs/getting-started/installation; collides with pressly/goose (database migrations), so requires a path or argument clue",
+    },
+    // Not here: Sourcegraph's Amp (`amp`). It shares its name with the Amp
+    // terminal text editor, which also runs bare and stays open, and no clue
+    // separates them reliably: an npm install runs as `node /usr/local/bin/amp`
+    // - the symlink as typed - so its `@sourcegraph` path never reaches argv.
+    // Herdr reports Amp itself; elsewhere, add `amp` to `agents` to match it.
 ];
 
 /// Default `agents` list for `mux-activity` and `agent-activity`: every
-/// Group 1 catalogue entry's canonical id, in catalogue order.
+/// catalogue entry's canonical id, once, in catalogue order. Group 2 entries
+/// are named here too, so each one is switched on or off by its own name:
+/// they used to be on only while the list still held every Group 1 default,
+/// so removing an unrelated name (`jules`) silently dropped Cursor's `agent`
+/// launcher. Naming a Group 2 entry still never matches without its clue.
 pub const DEFAULT_AGENTS: &[&str] = &[
     "claude",
     "codex",
@@ -344,7 +390,6 @@ pub const DEFAULT_AGENTS: &[&str] = &[
     "droid",
     "devin",
     "grok",
-    "amp",
     "kimi",
     "qwen",
     "qodercli",
@@ -352,12 +397,15 @@ pub const DEFAULT_AGENTS: &[&str] = &[
     "cline",
     "crush",
     "aider",
-    "goose",
     "codebuff",
     "auggie",
     "gptme",
     "codewhale",
     "jules",
+    "forgecode",
+    "continue",
+    "vibe",
+    "goose",
 ];
 
 /// Whether `agent` has a local session-log reader in [`super::LogReader`].
@@ -416,22 +464,12 @@ fn entry_enabled<S: AsRef<str>>(entry: &CatalogueEntry, configured: &[S]) -> boo
     })
 }
 
-fn has_all_defaults<S: AsRef<str>>(configured: &[S]) -> bool {
-    DEFAULT_AGENTS.iter().all(|def| {
-        configured
-            .iter()
-            .any(|c| c.as_ref().trim().eq_ignore_ascii_case(def))
-    })
-}
-
+/// A Group 2 entry is on when `agents` names it, exactly as a Group 1 entry
+/// is; it still needs its clue to match a process. It used to be on only
+/// while `agents` held every Group 1 default, which turned all four off,
+/// Cursor's `agent` launcher included, the moment anyone removed `jules`.
 fn group_2_enabled<S: AsRef<str>>(entry: &CatalogueEntry, configured: &[S]) -> bool {
-    if entry_enabled(entry, configured) {
-        return true;
-    }
-    if DEFAULT_AGENTS.contains(&entry.id) {
-        return false;
-    }
-    has_all_defaults(configured)
+    entry_enabled(entry, configured)
 }
 
 /// Resolve a multiplexer-reported or OSC 7501 agent name (`"claude-code"`,
@@ -568,20 +606,29 @@ fn is_service_invocation(entry: &CatalogueEntry, sub: [&str; 2]) -> bool {
     })
 }
 
-fn has_second_clue(entry: &CatalogueEntry, paths: &[&str]) -> bool {
-    entry.second_clues.iter().any(|clue| {
+/// Whether a Group 2 entry's second clue is present: a path substring, or -
+/// when the arguments are known - the session arguments it is run with.
+/// `sub` is `None` for a bare command label, which proves neither.
+fn has_second_clue(entry: &CatalogueEntry, paths: &[&str], sub: Option<[&str; 2]>) -> bool {
+    let by_path = entry.second_clues.iter().any(|clue| {
         let clue = clue.to_ascii_lowercase();
         paths.iter().any(|p| {
             let norm = p.replace('\\', "/").to_ascii_lowercase();
             norm.contains(&clue)
         })
-    })
+    });
+    let by_args = !entry.session_args.is_empty()
+        && sub.is_some_and(|s| {
+            let first = s[0].to_ascii_lowercase();
+            first.is_empty() || entry.session_args.contains(&first.as_str())
+        });
+    by_path || by_args
 }
 
 fn match_candidates<S: AsRef<str>>(
     names: &[String],
     paths: &[&str],
-    sub: [&str; 2],
+    sub: Option<[&str; 2]>,
     configured: &[S],
 ) -> Option<String> {
     if configured.is_empty() || names.is_empty() {
@@ -593,7 +640,7 @@ fn match_candidates<S: AsRef<str>>(
             continue;
         }
         if names.iter().any(|n| entry.commands.contains(&n.as_str())) {
-            if is_service_invocation(entry, sub) {
+            if is_service_invocation(entry, sub.unwrap_or(["", ""])) {
                 return None;
             }
             return Some(entry.id.to_string());
@@ -608,8 +655,8 @@ fn match_candidates<S: AsRef<str>>(
         let matched = names.iter().find(|n| entry.commands.contains(&n.as_str()));
         let Some(cmd) = matched else { continue };
         let unambiguous_cmd = cmd == entry.id && entry.aliases.contains(&cmd.as_str());
-        if unambiguous_cmd || has_second_clue(entry, paths) {
-            if is_service_invocation(entry, sub) {
+        if unambiguous_cmd || has_second_clue(entry, paths, sub) {
+            if is_service_invocation(entry, sub.unwrap_or(["", ""])) {
                 return None;
             }
             return Some(entry.id.to_string());
@@ -622,9 +669,12 @@ fn match_candidates<S: AsRef<str>>(
         if c_lower.is_empty() {
             continue;
         }
-        if CATALOGUE
-            .iter()
-            .any(|e| e.is_group_1() && entry_named(e, &c_lower))
+        // A default is never an unconditional opt-in: `goose` and `amp` are
+        // in the default list precisely so they match *with* their clue.
+        if DEFAULT_AGENTS.contains(&c_lower.as_str())
+            || CATALOGUE
+                .iter()
+                .any(|e| e.is_group_1() && entry_named(e, &c_lower))
         {
             continue;
         }
@@ -648,7 +698,7 @@ pub fn classify_process<S: AsRef<str>>(
     }
     let (program, script, sub) = dissect_argv(comm, &words);
     let (names, paths) = collect_candidates(comm, program, script);
-    match_candidates(&names, &paths, sub, configured)
+    match_candidates(&names, &paths, Some(sub), configured)
 }
 
 /// Classify a foreground `(name, argv)` slice (as Herdr reports it) against `configured`.
@@ -663,7 +713,7 @@ pub fn classify_argv<S: AsRef<str>>(
     let words: Vec<&str> = argv.iter().map(String::as_str).collect();
     let (program, script, sub) = dissect_argv(name, &words);
     let (names, paths) = collect_candidates(name, program, script);
-    match_candidates(&names, &paths, sub, configured)
+    match_candidates(&names, &paths, Some(sub), configured)
 }
 
 /// Classify a Rex foreground block's fields against `configured`.
@@ -692,7 +742,9 @@ pub fn classify_foreground<S: AsRef<str>>(
             paths.push(p);
         }
     }
-    match_candidates(&names, &paths, ["", ""], configured)
+    // Rex reports `argv[0]`, not the arguments after it, so neither a
+    // service subcommand nor a session argument can be seen here.
+    match_candidates(&names, &paths, None, configured)
 }
 
 /// Classify a bare command label (used only when a multiplexer snapshot carries
@@ -708,7 +760,7 @@ pub fn classify_command_only<S: AsRef<str>>(command: &str, configured: &[S]) -> 
     }
     let names = [cleaned];
     let paths = [command];
-    match_candidates(&names, &paths, ["", ""], configured)
+    match_candidates(&names, &paths, None, configured)
 }
 
 /// Whether `(comm, args)` is the process for an already-identified `agent_name`
@@ -741,7 +793,7 @@ pub(super) fn process_matches_agent(comm: &str, args: &str, agent_name: &str) ->
                 return true;
             }
         } else if names.iter().any(|n| entry.commands.contains(&n.as_str()))
-            && (has_second_clue(entry, &paths)
+            && (has_second_clue(entry, &paths, Some(sub))
                 || names.iter().any(|n| n == entry.id && entry.aliases.contains(&n.as_str())))
         {
             return true;
@@ -761,17 +813,19 @@ mod tests {
 
     #[test]
     fn every_catalogue_entry_has_a_confirmation_note_and_matches_default_agents() {
-        let mut group1_ids = Vec::new();
+        let mut ids: Vec<&str> = Vec::new();
         for entry in CATALOGUE {
             assert!(!entry.display.trim().is_empty());
             assert!(!entry.id.trim().is_empty());
             assert!(!entry.commands.is_empty(), "{} has no commands", entry.id);
             assert!(!entry.note.trim().is_empty(), "{} has no confirmation note", entry.id);
-            if entry.is_group_1() {
-                group1_ids.push(entry.id);
+            if !ids.contains(&entry.id) {
+                ids.push(entry.id);
             }
         }
-        assert_eq!(group1_ids.as_slice(), DEFAULT_AGENTS);
+        // Every entry is named once, Group 2 included, so each is switched
+        // on by its own name.
+        assert_eq!(ids.as_slice(), DEFAULT_AGENTS);
     }
 
     #[test]
@@ -786,7 +840,8 @@ mod tests {
             Some("gemini".into())
         );
         assert_eq!(classify_process("kiro-cli", "kiro-cli", DEFAULT_AGENTS), Some("kiro".into()));
-        assert_eq!(classify_process("kiro", "kiro", DEFAULT_AGENTS), Some("kiro".into()));
+        // Bare `kiro` is the Kiro IDE's launcher, not the CLI agent.
+        assert_eq!(classify_process("kiro", "/usr/bin/kiro .", DEFAULT_AGENTS), None);
         assert_eq!(classify_process("qodercli", "qodercli", DEFAULT_AGENTS), Some("qodercli".into()));
         assert_eq!(classify_process("omp", "omp", DEFAULT_AGENTS), Some("omp".into()));
 
@@ -845,6 +900,58 @@ mod tests {
             "cursor",
         ));
         assert!(!process_matches_agent("agent", "/usr/bin/agent", "cursor"));
+    }
+
+    #[test]
+    fn programs_that_share_an_agents_name_are_not_agents() {
+        // pressly/goose (database migrations), the Amp text editor, and the
+        // Kiro IDE all run under an agent's command name.
+        for (comm, args) in [
+            ("goose", "goose up"),
+            ("goose", "/home/u/go/bin/goose postgres user=app status"),
+            ("goose", "/opt/homebrew/bin/goose -dir migrations sqlite3 ./app.db up"),
+            ("amp", "amp notes.txt"),
+            ("amp", "/usr/bin/amp"),
+            ("kiro", "kiro ."),
+        ] {
+            assert_eq!(classify_process(comm, args, DEFAULT_AGENTS), None, "{args}");
+        }
+        // A label with no arguments proves nothing either way.
+        assert_eq!(classify_command_only("goose", DEFAULT_AGENTS), None);
+        assert_eq!(classify_foreground("goose", "goose", "/home/u/.local/bin/goose", "", "", DEFAULT_AGENTS), None);
+
+        // Block's goose: bare, as a session or a run, or from its Homebrew formula.
+        for args in ["goose", "/home/u/.local/bin/goose session", "goose run -t hello", "goose s"] {
+            assert_eq!(classify_process("goose", args, DEFAULT_AGENTS), Some("goose".into()), "{args}");
+        }
+        assert_eq!(
+            classify_process("goose", "/opt/homebrew/Cellar/block-goose-cli/1.9.0/bin/goose up", DEFAULT_AGENTS),
+            Some("goose".into())
+        );
+        assert_eq!(classify_process("goose", "goose mcp developer", DEFAULT_AGENTS), None);
+        // Sourcegraph's Amp is not matched by default (no reliable clue); a
+        // person who runs it adds `amp` to `agents`, and then it matches.
+        let mut with_amp: Vec<&str> = DEFAULT_AGENTS.to_vec();
+        with_amp.push("amp");
+        assert_eq!(classify_process("node", "node /usr/local/bin/amp", &with_amp), Some("amp".into()));
+    }
+
+    #[test]
+    fn removing_one_default_does_not_switch_off_another_agent() {
+        let without_jules: Vec<&str> = DEFAULT_AGENTS.iter().copied().filter(|a| *a != "jules").collect();
+        let cursor = "/home/u/.local/bin/agent --use-system-ca /home/u/.local/share/cursor-agent/versions/2026.11/index.js";
+        assert_eq!(classify_process("node", cursor, &without_jules), Some("cursor-agent".into()));
+        assert_eq!(
+            classify_process("node", "node /usr/lib/node_modules/@continuedev/cli/dist/cn.js", &without_jules),
+            Some("continue".into())
+        );
+        // Each Group 2 entry is switched off by removing its own name only.
+        let without_continue: Vec<&str> = DEFAULT_AGENTS.iter().copied().filter(|a| *a != "continue").collect();
+        assert_eq!(
+            classify_process("node", "node /usr/lib/node_modules/@continuedev/cli/dist/cn.js", &without_continue),
+            None
+        );
+        assert_eq!(classify_process("node", cursor, &without_continue), Some("cursor-agent".into()));
     }
 
     #[test]
