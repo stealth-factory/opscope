@@ -20,6 +20,10 @@ Kitty image uploads (`a=T`, `a=f`) are zlib-compressed on the local PTY (`o=z`),
 Always measure locally first using `scripts/measure-output.py` under isolated Python (`python3 -I`, stdlib only; Python 3 is a tool for this skill only, never a Cargo build or test dependency):
 
 ```sh
+# 0. Check the harness itself still parses Kitty output and applies the budget.
+#    Python is not a test dependency, so nothing else runs this.
+python3 -I scripts/measure-output.py --self-test
+
 # 1. Build the widget binary you are testing (for example, latency or clocks)
 cargo build --bin latency
 
@@ -44,16 +48,25 @@ python3 -I scripts/measure-output.py ./target/debug/clocks --seconds 60 --steady
 - Exits `0` when every mode passes (or `EXEMPT`), `1` when any mode violates the budget or exits early.
 
 > **Check that the widget is actually polling real data.** A configurable widget with missing credentials or empty targets sits on a static `missing_config()` / `cannot_start()` screen and writes ~0 KB/s without exercising its charts or pollers. Verify the widget has working inputs (or pass `-- <args>`) before trusting a near-zero reading.
+>
+> **It runs with your real config and credentials.** The child keeps your `HOME`, so a network widget reads your `config.json`, calls its real APIs once per mode, and reads and writes the real shared readings store in `~/.local/state/opscope`. That is what makes the reading real; know it before running an API widget repeatedly.
+>
+> **`mux-activity` cannot be measured this way.** The harness scrubs `TMUX` and `HERDR_ENV` and the PTY is not a Rex, Herdr or Luvus pane, so `mux-activity` finds no multiplexer to read and exits at once (`exited early … (status 2)`). Measure it live with `--proc-io` instead.
 
 ## Pass/fail budget (per widget after warm-up; `1 KB = 1024 B`)
 
+Every limit is set for **a dozen panes at once over SSH on mobile data**: 2–6 widgets on a tab and about 12 across tabs. A per-widget figure that looks harmless multiplies: 15 KB/s a pane is ~650 MB an hour. The table's `x12 MB/h` column does that multiplication for you; quote it in the report.
+
+The limits were calibrated on 2026-11-18 against every local widget on `main` (20 s per mode). Text output ran 1.0–6.9 KB/s (`latency` the highest). In `kitty`, `latency` made ~5.6 `a=f` edits/s (40–66 KB/s raw) and `ports` ~0.4 whole `a=T`/s. `tailnet` made **4 whole `a=T`/s** and fails, correctly: an image re-uploaded on almost every frame is the defect this skill exists to catch.
+
 | Mode / case | Wire `total KB/s` | `uploads/s` | `raw-RGBA KB/s` | Notes |
 | --- | --- | --- | --- | --- |
-| `text` | `<= 15 KB/s` (`<= 10` with `--steady`) | `0` | `0` | Any Kitty graphics byte fails |
-| `herdr` (`HERDR_ENV=1`) | `<= 15 KB/s` (`<= 10` with `--steady`) | `0` | `0` | Must draw text (`0` `a=T`, `a=f`, and `a=p`) |
-| `kitty` — steady screen / meter-only (`--steady`) | `<= 10 KB/s` | `0` | `0` | Meters, stacked bars, and loading placeholders are eighth-cell text; `clocks` in `kitty` must match its `text` rate. Periodic `a=p` every 5 s (`WHOLE_EVERY` heal) places cached images without uploading pixels (`uploads = 0`) |
-| `kitty` — live-updating pixel chart (`latency`, `link`, `ports`, `disk`, `procs`) | `<= 15 KB/s` | `<= 20.0/s` total (`a=f` bands), `<= 2.0/s` whole `a=T` | `<= 600 KB/s` | Small changes emit narrow `a=f` changed-band rectangles across charts and row sparklines; full `a=T` re-uploads are capped to 1 per 2 s per slot. Never upload an image on every frame |
-| `matrix` (documented exception) | `<= 500 KB/s` (`EXEMPT`) | `0` | `0` | ~240 KB/s text at 30 fps by design; still `0` image bytes in every mode |
+| `text` | `<= 8 KB/s` (`<= 5` with `--steady`) | `0` | `0` | Any Kitty graphics byte fails |
+| `herdr` (`HERDR_ENV=1`) | `<= 8 KB/s` (`<= 5` with `--steady`) | `0` | `0` | Must draw text (`0` `a=T`, `a=f`, and `a=p`) |
+| `kitty` — steady screen / meter-only (`--steady`) | `<= 5 KB/s` | `0` | `0` | Meters, stacked bars, and loading placeholders are eighth-cell text; `clocks` in `kitty` must match its `text` rate. Periodic `a=p` every 5 s (`WHOLE_EVERY` heal) places cached images without uploading pixels (`uploads = 0`) |
+| `kitty` — live-updating pixel chart (`latency`, `link`, `ports`, `disk`, `procs`) | `<= 8 KB/s` | `<= 8.0/s` total (`a=f` bands), `<= 0.5/s` whole `a=T` | `<= 100 KB/s` | Small changes emit narrow `a=f` changed-band rectangles; a whole `a=T` more often than once per 2 s means an image is being rebuilt instead of edited. Never upload an image on every frame |
+| `kitty-herdr` (opt-in: `HERDR_ENV=1` + `OPSCOPE_GRAPHICS=kitty`) | `<= 8 KB/s` | as `kitty` | **`<= 16 KB/s`** | Herdr relays Kitty images **decoded**, so raw RGBA is what crosses SSH. OPS-199 was this case at up to 4.9 MB/s. `latency` (~32–57 KB/s raw) fails here: opting a chart widget into pixels under Herdr costs about 1.4 GB/h across 12 panes. Also fails any `a=p` re-placement |
+| `matrix` (documented exception) | `<= 500 KB/s` (`EXEMPT`) | `0` | `0` | ~240 KB/s text at 30 fps by design; still `0` image bytes in every mode. Judged by the binary's file name — pass `--name matrix` for a renamed copy |
 
 ## Warm-up times per widget (`--warmup SECONDS`)
 
@@ -122,4 +135,4 @@ When asked to measure live inside Herdr:
 
 ## Reporting format
 
-Always include the command run, pane geometry, warm-up and window durations, one row per mode actually measured (`text`, `kitty`, and `herdr` on a standard run, or the specific `--mode` requested), any standalone `--proc-io` or `--watchdog-pid` observations, and a plain pass/fail summary naming any anomalies (for example whether `clocks` in `kitty` matched `text`, or why a widget needed a longer `--warmup`).
+Always include the command run, pane geometry, warm-up and window durations, one row per mode actually measured (`text`, `kitty`, and `herdr` on a standard run, or the specific `--mode` requested) including its `x12 MB/h` figure, any standalone `--proc-io` or `--watchdog-pid` observations, and a plain pass/fail summary naming any anomalies (for example whether `clocks` in `kitty` matched `text`, or why a widget needed a longer `--warmup`).

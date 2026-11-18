@@ -76,12 +76,27 @@ MAX_CELL_H = 96
 MAX_WINSIZE_USHORT = 65_535
 
 # Budget thresholds (1 KB = 1024 B) for a single widget in a 57x40 (10x20 px)
-# pane after warm-up. Typical tabs hold 2-6 panes (~12 across tabs).
-BUDGET_TOTAL_KB_S = 15.0
-BUDGET_STEADY_TOTAL_KB_S = 10.0
-BUDGET_KITTY_RAW_RGBA_KB_S = 600.0
-BUDGET_KITTY_WHOLE_UPLOADS_S = 2.00
-BUDGET_KITTY_TOTAL_UPLOADS_S = 20.00
+# pane after warm-up. Typical tabs hold 2-6 panes (~12 across tabs), so every
+# limit is set for a dozen panes running at once, over SSH on mobile data:
+# that is where a per-widget number that looks harmless (15 KB/s) becomes
+# 650 MB an hour.
+#
+# Calibrated on 2026-11-18 against every local widget on main, 20 s per mode:
+# text output was 1.0-6.9 KB/s (latency the highest); in Kitty mode latency
+# made ~5.6 a=f edits/s (40-66 KB/s raw), ports ~0.4 whole a=T/s, and
+# tailnet 4 a=T/s - the last a real defect, which these limits fail.
+TYPICAL_PANES = 12
+BUDGET_TOTAL_KB_S = 8.0
+BUDGET_STEADY_TOTAL_KB_S = 5.0
+# Kitty on a local terminal: the wire carries zlib-compressed pixels, so the
+# raw figure bounds how much image churn a widget causes, not the link.
+BUDGET_KITTY_RAW_RGBA_KB_S = 100.0
+BUDGET_KITTY_WHOLE_UPLOADS_S = 0.5
+BUDGET_KITTY_TOTAL_UPLOADS_S = 8.0
+# Kitty pixels under a relay that re-sends them decoded (Herdr with
+# OPSCOPE_GRAPHICS=kitty): the raw RGBA *is* the link. OPS-199 was this case
+# at up to 4.9 MB/s; 16 KB/s a widget keeps a dozen panes near 200 KB/s.
+BUDGET_RELAY_RAW_RGBA_KB_S = 16.0
 BUDGET_MATRIX_TEXT_KB_S = 500.0
 
 ALL_DEFAULT_MODES = ("text", "kitty", "herdr")
@@ -588,6 +603,20 @@ class ModeResult:
     def raw_rgba_kb_s(self) -> float:
         return self.metrics.raw_rgba_bytes / KB / self.elapsed_s if self.elapsed_s > 0 else 0.0
 
+    @property
+    def link_kb_s(self) -> float:
+        """What crosses the link to the person: the wire bytes, except under a
+        relay that re-sends Kitty images decoded, where it is the text plus
+        the raw RGBA."""
+        if self.mode == "kitty-herdr":
+            return self.text_kb_s + self.raw_rgba_kb_s
+        return self.total_kb_s
+
+    @property
+    def fleet_mb_h(self) -> float:
+        """`link_kb_s` for `TYPICAL_PANES` panes like this one, per hour."""
+        return self.link_kb_s * TYPICAL_PANES * 3600 / KB
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "mode": self.mode,
@@ -598,6 +627,8 @@ class ModeResult:
             "image_kb_s": round(self.image_kb_s, 2),
             "uploads_s": round(self.uploads_s, 2),
             "raw_rgba_kb_s": round(self.raw_rgba_kb_s, 2),
+            "link_kb_s": round(self.link_kb_s, 2),
+            f"mb_per_hour_x{TYPICAL_PANES}": round(self.fleet_mb_h, 1),
             "a_T": self.metrics.a_t,
             "a_f": self.metrics.a_f,
             "a_p": self.metrics.a_p,
@@ -675,9 +706,12 @@ def evaluate_budget(
                         f"steady screen uploaded {metrics.uploads} image(s) ({raw_kb_s:.2f} KB/s raw)"
                     )
             else:
-                if raw_kb_s > BUDGET_KITTY_RAW_RGBA_KB_S:
+                relayed = mode == "kitty-herdr"
+                raw_limit = BUDGET_RELAY_RAW_RGBA_KB_S if relayed else BUDGET_KITTY_RAW_RGBA_KB_S
+                if raw_kb_s > raw_limit:
                     reasons.append(
-                        f"raw-RGBA {raw_kb_s:.1f} > {BUDGET_KITTY_RAW_RGBA_KB_S:.0f} KB/s"
+                        f"raw-RGBA {raw_kb_s:.1f} > {raw_limit:.0f} KB/s"
+                        + (" (relayed decoded)" if relayed else "")
                     )
                 if whole_s > BUDGET_KITTY_WHOLE_UPLOADS_S:
                     reasons.append(
@@ -1445,7 +1479,8 @@ def run_herdr_watchdog(
 def format_table(results: Sequence[ModeResult]) -> str:
     header = (
         f"{'mode':<11}  {'total KB/s':>10}  {'text KB/s':>9}  {'image KB/s':>10}  "
-        f"{'uploads/s':>9}  {'raw-RGBA KB/s':>13}  {'a=T/f/p/d':<13}  {'status'}"
+        f"{'uploads/s':>9}  {'raw-RGBA KB/s':>13}  {f'x{TYPICAL_PANES} MB/h':>9}  "
+        f"{'a=T/f/p/d':<13}  {'status'}"
     )
     lines = [header]
     for r in results:
@@ -1454,8 +1489,12 @@ def format_table(results: Sequence[ModeResult]) -> str:
         lines.append(
             f"{r.mode:<11}  {r.total_kb_s:>10.2f}  {r.text_kb_s:>9.2f}  "
             f"{r.image_kb_s:>10.2f}  {r.uploads_s:>9.2f}  {r.raw_rgba_kb_s:>13.2f}  "
-            f"{cmds:<13}  {status}"
+            f"{r.fleet_mb_h:>9.0f}  {cmds:<13}  {status}"
         )
+    lines.append(
+        f"x{TYPICAL_PANES} MB/h: this widget's link bytes (wire bytes; text + raw RGBA under "
+        f"kitty-herdr) for {TYPICAL_PANES} panes at once, per hour."
+    )
     return "\n".join(lines)
 
 
@@ -1559,19 +1598,54 @@ def run_self_tests() -> int:
     verdict, reasons = evaluate_budget(mode="kitty", widget_name="latency", elapsed_s=60.0, metrics=flood)
     assert verdict == "FAIL" and any("raw-RGBA" in r for r in reasons), (verdict, reasons)
 
+    # latency on main, measured 2026-11-18: ~5.6 a=f edits/s, ~66 KB/s raw.
     healthy = Metrics(
-        text_bytes=int(4.0 * KB * 60),
-        image_bytes=int(2.2 * KB * 60),
-        uploads=75,
-        raw_rgba_bytes=int(138 * KB * 60),
-        a_t=12,
-        a_f=63,
+        text_bytes=int(2.1 * KB * 60),
+        image_bytes=int(2.7 * KB * 60),
+        uploads=336,
+        raw_rgba_bytes=int(66 * KB * 60),
+        a_f=336,
         a_p=12,
     )
     verdict_ok, reasons_ok = evaluate_budget(
         mode="kitty", widget_name="latency", elapsed_s=60.0, metrics=healthy
     )
     assert verdict_ok == "PASS", (verdict_ok, reasons_ok)
+    # ...but the same pixels relayed decoded are 66 KB/s a pane: fails.
+    v_relay, r_relay = evaluate_budget(
+        mode="kitty-herdr", widget_name="latency", elapsed_s=60.0,
+        metrics=Metrics(**{**healthy.__dict__, "a_p": 0}),
+    )
+    assert v_relay == "FAIL" and any("relayed" in r for r in r_relay), (v_relay, r_relay)
+
+    # OPS-199's shape: one 570x200 chart re-uploaded whole every second.
+    churn = Metrics(
+        text_bytes=int(2 * KB * 60),
+        image_bytes=int(3 * KB * 60),
+        uploads=60,
+        raw_rgba_bytes=570 * 200 * 4 * 60,
+        a_t=60,
+    )
+    for m in ("kitty", "kitty-herdr"):
+        v_churn, r_churn = evaluate_budget(mode=m, widget_name="latency", elapsed_s=60.0, metrics=churn)
+        assert v_churn == "FAIL" and any("raw-RGBA" in r for r in r_churn), (m, v_churn, r_churn)
+        assert any("whole uploads" in r for r in r_churn), (m, r_churn)
+
+    # Text: the busiest healthy widget (~6.9 KB/s) passes; 9 KB/s does not.
+    for kb_s, want in ((6.9, "PASS"), (9.0, "FAIL")):
+        v_text, _ = evaluate_budget(
+            mode="text", widget_name="latency", elapsed_s=60.0,
+            metrics=Metrics(text_bytes=int(kb_s * KB * 60)),
+        )
+        assert v_text == want, (kb_s, v_text)
+
+    # The 12-pane projection reads the link: raw RGBA under a relay.
+    proj = ModeResult(
+        mode="kitty-herdr", widget_name="x", elapsed_s=1.0,
+        metrics=Metrics(text_bytes=int(1 * KB), raw_rgba_bytes=int(15 * KB)),
+        verdict="PASS",
+    )
+    assert abs(proj.fleet_mb_h - 16 * TYPICAL_PANES * 3600 / KB) < 0.01, proj.fleet_mb_h
 
     # 5. Non-stop PTY flood terminates promptly at `--seconds` deadline.
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
@@ -1919,6 +1993,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Require zero image uploads in Kitty mode (for steady screens / meter-only widgets)",
     )
+    parser.add_argument(
+        "--name",
+        help=(
+            "Widget name the budget is judged as (default: the binary's file name). "
+            "Only `matrix` is judged differently, so pass `--name matrix` for a renamed copy."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON output instead of a table")
     parser.add_argument(
         "--no-fail",
@@ -2001,6 +2082,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (FileNotFoundError, ValueError) as err:
         sys.stderr.write(f"error: {err}\n")
         return 2
+    if args.name:
+        widget_name = args.name
 
     results: List[ModeResult] = []
     for mode in modes:
