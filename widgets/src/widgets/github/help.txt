@@ -37,7 +37,8 @@ who it belongs to and the contribution calendar, and panes on the same
 accounts and window share the board's totals, so one pane asks GitHub and the
 rest read its answer. The line under the status line says which pane fetched
 what is on screen, or why this one is not sharing. When GitHub says the rate
-limit is spent every pane stops asking, and says when it will ask again.
+limit is spent, panes on that host and token stop asking and say when they
+will ask again.
 share_readings turns it off for one pane.
 
 Keys: up/down select an account, i shows a legend above the table for

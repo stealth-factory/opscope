@@ -347,8 +347,8 @@ when it is not simply this pane, just now: `fetched 2m ago by pane 48213`,
 when this pane is polling alone. `updated … ago` is when GitHub answered for
 the newest figure on screen, whichever pane asked.
 
-When GitHub says the rate limit is spent, every `github` pane stops asking
-until its reset and says when it will ask again.
+When GitHub says the rate limit is spent, every `github` pane on that host
+and token stops asking until its reset and says when it will ask again.
 
 The readings are kept in `~/.local/state/opscope/github.sqlite`, readable
 only by you: account and org names and counts, never a token (it is in the

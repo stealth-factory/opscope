@@ -2642,10 +2642,10 @@ fn spent_until(scopes: &Arc<Mutex<Scopes>>) -> Option<f64> {
     scopes.lock().ok().and_then(|g| g.spent).filter(|until| *until > tc::now())
 }
 
-/// Shut every pane's gate when an answer said the budget is spent.
-fn shut_if_spent(cache: &mut tc::readings::Cache, scopes: &Arc<Mutex<Scopes>>) {
+/// Shut this host and token's gate when an answer said the budget is spent.
+fn shut_if_spent(cache: &mut tc::readings::Cache, scopes: &Arc<Mutex<Scopes>>, bucket: &str) {
     if let Some(until) = take_spent(scopes) {
-        tc::readings::shut(cache, GATE, until, RATE_SPENT);
+        tc::readings::shut(cache, bucket, until, RATE_SPENT);
     }
 }
 
@@ -2752,6 +2752,12 @@ fn accounts_tag(accounts: &[String]) -> String {
     tc::readings::fingerprint(&sorted)
 }
 
+/// The GraphQL budget belongs to one host and credential, not to every pane
+/// that happens to open this widget's store.
+fn gate_key(cache: &mut tc::readings::Cache, host: &str, tok: &str) -> String {
+    tc::readings::key(cache, GATE, 1, &[host], &[tok])
+}
+
 /// Who the token belongs to, on this host. The token is in the key only as
 /// a fingerprint, and no reading carrying it is ever shared.
 fn who_key(cache: &mut tc::readings::Cache, host: &str, tok: &str) -> String {
@@ -2791,6 +2797,7 @@ fn one_pass(
     use tc::readings::{Policy, Take};
     let gql_url = tc::github_graphql_url(host);
     let host_name = host.unwrap_or("github.com");
+    let gql_gate = gate_key(cache, host_name, tok);
     // `r` asks again for every reading older than its floor, on the one
     // pass it woke; every other pass serves what is held.
     let bust = full
@@ -2800,9 +2807,9 @@ fn one_pass(
         };
     cache.asked_at = if bust { tc::now() } else { 0.0 };
     // A request made since the last pass - the detail screen's own - may
-    // have spent the budget. Every pane stops until GitHub's reset.
-    shut_if_spent(cache, scopes);
-    let gated = tc::readings::gate(cache, GATE).map(|(until, _)| until);
+    // have spent the budget. Every pane on this host and token waits its reset.
+    shut_if_spent(cache, scopes, &gql_gate);
+    let gated = tc::readings::gate(cache, &gql_gate).map(|(until, _)| until);
     if let Ok(mut g) = state.lock() {
         g.gated = gated;
     }
@@ -2835,7 +2842,7 @@ fn one_pass(
             // character crossing byte fifty would panic the slice, and this
             // one comes from a server.
             Some((why, _)) => {
-                shut_if_spent(cache, scopes);
+                shut_if_spent(cache, scopes, &gql_gate);
                 return Err(format!("who am I: {}", why.chars().take(50).collect::<String>()));
             }
             None => poll.viewer = v["login"].as_str().unwrap_or("").to_string(),
@@ -2863,7 +2870,7 @@ fn one_pass(
             let d = match graphql(&orgs_query(cursor.as_deref()), tok, scopes, &gql_url) {
                 Ok(d) => d,
                 Err(why) => {
-                    shut_if_spent(cache, scopes);
+                    shut_if_spent(cache, scopes, &gql_gate);
                     return Err(why);
                 }
             };
@@ -3041,7 +3048,7 @@ fn one_pass(
     if local {
         local_pass(tok, poll, &accounts, &mut by_acc, days_now, &dates, &keep_from, bust, state, scopes, &gql_url);
     }
-    shut_if_spent(cache, scopes);
+    shut_if_spent(cache, scopes, &gql_gate);
 
     if let Ok(mut g) = state.lock() {
         // A config file others can read is no longer said here: core raises
@@ -4677,6 +4684,25 @@ mod tests {
             _ => panic!("the second pane should be served the calendar"),
         };
         assert_eq!(served["totalContributions"], 7);
+    }
+
+    #[test]
+    fn a_spent_budget_closes_only_its_host_and_tokens_gate() {
+        let (mut a, mut b) = two_panes("gate-scope");
+        let shared = gate_key(&mut a, "github.com", FAKE_TOKEN);
+        let same = gate_key(&mut b, "github.com", FAKE_TOKEN);
+        let other_host = gate_key(&mut b, "enterprise.example", FAKE_TOKEN);
+        let other_token = gate_key(&mut b, "github.com", "ghp_another-fake-token-for-tests");
+        assert_eq!(shared, same);
+        assert_ne!(shared, other_host);
+        assert_ne!(shared, other_token);
+        assert!(!shared.contains(FAKE_TOKEN));
+
+        tc::readings::shut(&mut a, &shared, tc::now() + 60.0, RATE_SPENT);
+        tc::readings::follow(&mut b);
+        assert!(tc::readings::gate(&mut b, &same).is_some());
+        assert!(tc::readings::gate(&mut b, &other_host).is_none());
+        assert!(tc::readings::gate(&mut b, &other_token).is_none());
     }
 
     #[test]
