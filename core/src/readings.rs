@@ -1172,6 +1172,9 @@ fn publish_pending_gate(cache: &mut Cache, key: &str, at: f64) {
     let lifted = refusal(&value).is_none_or(|(_, until)| until <= at);
     if cache.store.is_some() && !written && !lifted {
         settle(cache, key, taken_at, Some(value), held, None);
+        // The retry can preserve a longer deadline another pane stored.
+        // `shut` adopted only the attempt that met the lock.
+        adopt_stored_gate(cache, key);
     }
 }
 
@@ -1860,6 +1863,26 @@ mod tests {
         assert!(gate(&mut a, "core").is_some());
         follow(&mut b);
         assert!(gate(&mut b, "core").is_some(), "a gate that met a busy store never reached the other pane");
+    }
+
+    #[test]
+    fn a_short_gate_blocked_by_the_store_adopts_the_longer_one_when_it_retries() {
+        let (mut a, mut b) = two_panes("gate-pending-longer");
+        let now = crate::now();
+        shut(&mut a, "core", now + 600.0, "rate limit spent");
+        let path = b.store.as_ref().unwrap().path_for_tests();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        shut(&mut b, "core", now + 60.0, "too many requests");
+        let (until, _) = gate(&mut b, "core").expect("the locked pane lost its own gate");
+        assert!(until < now + 70.0, "the lock already showed the longer gate: {}", until - now);
+        other.execute_batch("ROLLBACK").unwrap();
+        let (until, _) = gate(&mut b, "core").expect("the gate vanished when the store recovered");
+        assert!(
+            until > now + 590.0,
+            "the writer kept the short gate after the store kept the long one: {}",
+            until - now
+        );
     }
 
     #[test]
