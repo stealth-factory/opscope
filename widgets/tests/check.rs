@@ -4332,10 +4332,23 @@ fn picker_fields(source: &str, member: &str) -> Result<Vec<String>, String> {
     };
     let mut fields = Vec::new();
     let mut named = false;
-    walk_picker_fields(&tokens, true, member, &mut fields, &mut named);
+    let mut unreadable = false;
+    walk_picker_fields(
+        &tokens,
+        true,
+        member,
+        &mut fields,
+        &mut named,
+        &mut unreadable,
+    );
     if named {
         return Err(format!(
             "{member} is not a literal slice, so its fields are not checked"
+        ));
+    }
+    if unreadable {
+        return Err(format!(
+            "{member} has an entry whose name is not a string literal"
         ));
     }
     Ok(fields)
@@ -4347,9 +4360,10 @@ fn walk_picker_fields(
     member: &str,
     fields: &mut Vec<String>,
     named: &mut bool,
+    unreadable: &mut bool,
 ) {
     if fields_here {
-        note_picker_fields(tokens, member, fields, named);
+        note_picker_fields(tokens, member, fields, named, unreadable);
     }
     for token in tokens {
         let TokenTree::Group(group) = token else {
@@ -4362,6 +4376,7 @@ fn walk_picker_fields(
             member,
             fields,
             named,
+            unreadable,
         );
     }
 }
@@ -4371,36 +4386,51 @@ fn note_picker_fields(
     member: &str,
     fields: &mut Vec<String>,
     named: &mut bool,
+    unreadable: &mut bool,
 ) {
     for (index, token) in tokens.iter().enumerate() {
         let TokenTree::Ident(ident) = token else {
             continue;
         };
-        if ident != member || !is_punct(tokens.get(index + 1), ':') {
+        if !ident_is(ident, member) || !is_punct(tokens.get(index + 1), ':') {
             continue;
         }
         match slice_fields(&tokens[index + 2..]) {
-            Some(keys) => fields.extend(keys),
-            None => *named = true,
+            SliceRead::Keys(keys) => fields.extend(keys),
+            SliceRead::NotSlice => *named = true,
+            SliceRead::Unreadable => *unreadable = true,
         }
     }
 }
 
+/// `r#discover` is the same field as `discover`. This proc-macro2 prints the
+/// raw prefix, so a plain string compare would skip the declaration.
+fn ident_is(ident: &proc_macro2::Ident, name: &str) -> bool {
+    let text = ident.to_string();
+    text == name || text.strip_prefix("r#") == Some(name)
+}
+
+enum SliceRead {
+    Keys(Vec<String>),
+    NotSlice,
+    Unreadable,
+}
+
 /// The field names of a literal `&[("name", value), ...]`, if this is one.
-fn slice_fields(tokens: &[TokenTree]) -> Option<Vec<String>> {
+fn slice_fields(tokens: &[TokenTree]) -> SliceRead {
     let mut index = 0;
     if !is_punct(tokens.get(index), '&') {
-        return None;
+        return SliceRead::NotSlice;
     }
     index += 1;
     if is_punct(tokens.get(index), '\'') {
         index += 2;
     }
-    let TokenTree::Group(group) = tokens.get(index)? else {
-        return None;
+    let Some(TokenTree::Group(group)) = tokens.get(index) else {
+        return SliceRead::NotSlice;
     };
     if group.delimiter() != Delimiter::Bracket {
-        return None;
+        return SliceRead::NotSlice;
     }
     let inner: Vec<TokenTree> = group.stream().into_iter().collect();
     let mut keys = Vec::new();
@@ -4410,18 +4440,22 @@ fn slice_fields(tokens: &[TokenTree]) -> Option<Vec<String>> {
             continue;
         }
         if is_punct(Some(&token), ',') {
-            if let Some(key) = entry_key(&entry) {
-                keys.push(key);
+            match entry_key(&entry) {
+                Some(key) => keys.push(key),
+                None if !entry.is_empty() => return SliceRead::Unreadable,
+                None => {}
             }
             entry.clear();
             continue;
         }
         entry.push(token);
     }
-    if let Some(key) = entry_key(&entry) {
-        keys.push(key);
+    match entry_key(&entry) {
+        Some(key) => keys.push(key),
+        None if !entry.is_empty() => return SliceRead::Unreadable,
+        None => {}
     }
-    Some(keys)
+    SliceRead::Keys(keys)
 }
 
 /// The first string of a top-level `("name", callback)` entry.
@@ -4464,7 +4498,7 @@ fn rust_string(text: &str) -> Option<String> {
 
 fn unescape_rust_string(body: &str) -> String {
     let mut out = String::new();
-    let mut chars = body.chars();
+    let mut chars = body.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '\\' {
             out.push(ch);
@@ -4485,17 +4519,38 @@ fn unescape_rust_string(body: &str) -> String {
                 ));
             }
             Some('u') => {
-                let rest: String = chars.by_ref().take_while(|ch| *ch != '}').collect();
-                let hex = rest.trim_start_matches('{');
-                if let Some(code) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                if chars.next() != Some('{') {
+                    continue;
+                }
+                let hex: String = chars
+                    .by_ref()
+                    .take_while(|ch| *ch != '}')
+                    .filter(|ch| *ch != '_')
+                    .collect();
+                if let Some(code) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
                     out.push(code);
                 }
+            }
+            // A backslash at the end of a line is not a character. Rust
+            // drops the break and the indentation that follows it.
+            Some('\n') => skip_string_indent(&mut chars),
+            Some('\r') => {
+                if chars.clone().next() == Some('\n') {
+                    chars.next();
+                }
+                skip_string_indent(&mut chars);
             }
             Some(other) => out.push(other),
             None => {}
         }
     }
     out
+}
+
+fn skip_string_indent(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.peek().is_some_and(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r') {
+        chars.next();
+    }
 }
 
 /// Why a discovery field is not a string array, when it is not.
@@ -4621,6 +4676,16 @@ fn picker_fields_ignore_a_commented_entry() {
     let hidden = r#"const EXAMPLE: &str = "discover: &[]"; discover: &[("properties", hook)]"#;
     assert_eq!(picker_fields(hidden, "discover").unwrap(), vec!["properties"]);
     assert!(picker_fields("discover: DISCOVERY", "discover").is_err());
+    assert!(picker_fields("discover: &[(FIELD, hook)]", "discover").is_err());
+    assert_eq!(
+        picker_fields("r#discover: &[(\"missing\", hook)]", "discover").unwrap(),
+        vec!["missing".to_string()]
+    );
+    let escaped = "discover: &[(\"\\u{0_070}roperties\", hook), (\"pro\\\n    perties\", hook)]";
+    assert_eq!(
+        picker_fields(escaped, "discover").unwrap(),
+        vec!["properties".to_string(), "properties".to_string()]
+    );
 }
 
 #[test]
