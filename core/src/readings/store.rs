@@ -467,7 +467,7 @@ impl Store {
             .map_err(sql)?;
         let write = row.is_some_and(|(holder, expires_at)| holder == self.me && expires_at < due);
         if !write {
-            return Ok(self.how_held(key, now)?);
+            return self.how_held(key, now);
         }
         let n = self
             .conn
@@ -480,7 +480,7 @@ impl Store {
             self.writes += 1;
             return Ok(RenewHow::Extended);
         }
-        Ok(self.how_held(key, now)?)
+        self.how_held(key, now)
     }
 
     fn how_held(&self, key: &str, now: f64) -> Result<RenewHow, String> {
@@ -527,7 +527,7 @@ impl Store {
             .optional()
             .map_err(sql)?;
         if due.is_none() {
-            return Ok(self.how_held(key, now)?);
+            return self.how_held(key, now);
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let n = tx

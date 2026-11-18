@@ -2947,6 +2947,19 @@ fn one_pass(
     // have spent the budget. Every pane on this host and token waits its reset.
     shut_if_spent(cache, scopes, &gql_gate);
     let gated = tc::readings::gate(cache, &gql_gate).map(|(until, _)| until);
+    // The detail screen's timing fetch shares `scopes` and does not read
+    // the gate itself. A deadline another pane published has to be on
+    // `spent` or that fetch keeps asking. The gate is already in the
+    // store, so it is not published again.
+    if let Some(until) = gated {
+        if let Ok(mut g) = scopes.lock() {
+            let merged = g.spent.map_or(until, |have| have.max(until));
+            g.spent = Some(merged);
+            if merged == until {
+                g.gate_shut = Some(until);
+            }
+        }
+    }
     if let Ok(mut g) = state.lock() {
         g.gated = gated;
     }
@@ -3493,6 +3506,13 @@ fn day_counts(
             settle_one(poll, row, acc, days_now, dates, &map, chunk_err.clone());
         }
         publish(ask.state, accounts, by_acc, rate(ask.scopes), chunk_err.is_none().then_some(at));
+        // A refusal stores no map of its own. The days that did land go
+        // into the good reading, so the next pass asks only for the ones
+        // still missing. The refusal stays the live value: the window is
+        // failed until every date is present.
+        if chunk_err.is_some() && !map.is_empty() {
+            cache.good.insert(keys[i].clone(), (at, parse::days_to_json(&map, cleared)));
+        }
         let answer = match chunk_err {
             None => Answer::Value(parse::days_to_json(&map, cleared)),
             Some(why) => Answer::Refused { why: why.chars().take(50).collect(), until: spent_until(ask.scopes) },
@@ -5527,6 +5547,35 @@ mod tests {
         assert_eq!(pane.poll.day_failed.len(), 1);
     }
 
+    /// Days that landed before the gate closed stay in the good reading.
+    /// The next pass asks for the rest, not for those again.
+    #[test]
+    fn days_read_before_the_gate_closes_are_kept() {
+        fn answer(n: usize) -> String {
+            if n == 0 {
+                return quiet_github();
+            }
+            let body = r#"{"error":"rate limited"}"#;
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                tc::now() as i64 + 3600,
+                body
+            )
+        }
+        let github = FakeGithub::start_nth(answer);
+        let days = (DAY_CHUNK + 1) as i64;
+        let mut pane = Pane::new(tc::readings::Cache::default(), days, 0);
+        pane.days(&github.url, days);
+        assert_eq!(github.calls(), 2, "the second chunk is the one that spends the budget");
+        let key = days_key(&mut pane.cache, "github.com", FAKE_TOKEN, "example");
+        let good = pane.cache.good.get(&key).expect("the days that landed");
+        let (map, _) = parse::days_from_json(&good.1);
+        assert_eq!(map.len(), DAY_CHUNK, "the first chunk is kept: {map:?}");
+        let live = pane.cache.live.get(&key).and_then(|e| e.1.clone()).expect("a live reading");
+        assert!(tc::readings::refusal(&live).is_some(), "the window stays failed");
+    }
+
     /// Three merged PRs whose first review page is a bot and says there is
     /// another page, which is what makes the timing walk ask again.
     fn three_unreviewed_prs() -> String {
@@ -5636,6 +5685,34 @@ mod tests {
         shut_if_spent(&mut cache, &scopes, &bucket);
         shut_if_spent(&mut cache, &scopes, &bucket);
         assert_eq!(spent_until(&scopes), Some(until));
+    }
+
+    /// A gate another pane already published has to reach the detail
+    /// fetch, which reads `Scopes` and not the gate.
+    #[test]
+    fn another_panes_gate_reaches_the_detail_fetch() {
+        let mut cache = tc::readings::Cache::default();
+        let until = tc::now() + 3600.0;
+        let bucket = gate_key(&mut cache, "github.com", FAKE_TOKEN);
+        tc::readings::shut(&mut cache, &bucket, until, RATE_SPENT);
+        let scopes = Arc::new(Mutex::new(Scopes::default()));
+        let state = Arc::new(Mutex::new(State::default()));
+        let activity = tc::Refresh::default();
+        let ran = one_pass(
+            FAKE_TOKEN,
+            &mut Poll::default(),
+            &mut cache,
+            false,
+            120.0,
+            &state,
+            &scopes,
+            None,
+            &activity,
+        )
+        .unwrap();
+        assert!(!ran);
+        assert_eq!(spent_until(&scopes), Some(until));
+        assert_eq!(scopes.lock().unwrap().gate_shut, Some(until));
     }
 
     #[test]
