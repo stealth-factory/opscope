@@ -313,10 +313,10 @@ fn budget_from(v: &serde_json::Value) -> Option<parse::RateHeaders> {
     (h.remaining.is_some() && h.limit.is_some()).then_some(h)
 }
 
-/// Asked before every request after a reading's first: `Err` stops the
-/// fetch. Sharing uses it to renew the lease and to stop the moment GitHub
-/// says its limit is spent; a pane that does not share answers `Ok` always,
-/// which is how it fetched before sharing existed.
+/// Asked before every request: `Err` stops the fetch. Sharing uses it to
+/// renew the lease and to stop the moment GitHub says its limit is spent; a
+/// pane that does not share answers `Ok` always, which is how it fetched
+/// before sharing existed.
 type Ask<'a> = dyn FnMut(&Budget) -> Result<(), String> + 'a;
 
 fn text(value: &serde_json::Value, key: &str) -> String {
@@ -1370,6 +1370,12 @@ fn store_caps() -> tc::readings::Caps {
 const REST: &str = "core";
 const GRAPHQL: &str = "graphql";
 
+/// The reading GitHub's remaining budget is kept in, per bucket. It is not
+/// fetched for itself: a pane publishes the figure its own answers carried.
+/// One row is a few hundred bytes and changes with every request, recorded
+/// from the headers just received rather than claimed and fetched.
+const BUDGET: &str = "gha.budget";
+
 /// Why every pane has stopped asking, as the pane says it.
 fn limit_why(stop: &parse::RateLimit) -> String {
     match stop {
@@ -1441,6 +1447,71 @@ impl Share {
         self.seen_core = None;
         self.seen_any = None;
         tc::readings::share(&mut self.cache, STORE, store_caps(), self.on, now);
+        // What GitHub last said about the budget, from whichever pane asked:
+        // the figure is the token's, not this pane's, and a pane that fetches
+        // nothing this pass must still show it.
+        if self.on {
+            for resource in [REST, GRAPHQL] {
+                let key = self.key(BUDGET, &[resource]);
+                // Peek first. The time belongs to the value peek just
+                // loaded; reading it before that pairs a new budget with
+                // the previous pane's clock.
+                if let Some(v) = tc::readings::peek(&mut self.cache, &key) {
+                    let at = tc::readings::provenance(&self.cache, &key, now).map(|p| p.taken_at).unwrap_or(0.0);
+                    self.saw(&v, at);
+                }
+            }
+        }
+    }
+
+    /// The budget a reading of its own carries, or the copy an older build
+    /// of this pane left inside every reading it published.
+    fn budget_of_reading(&self, value: &serde_json::Value) -> Option<parse::RateHeaders> {
+        let b = value.get("remaining")?;
+        let h = parse::RateHeaders {
+            remaining: b.as_i64(),
+            limit: value["limit"].as_i64(),
+            reset: value["reset"].as_i64(),
+            resource: value["resource"].as_str().map(String::from),
+            retry_after: None,
+        };
+        (h.remaining.is_some() && h.limit.is_some()).then_some(h)
+    }
+
+    /// Publish what this pass was told about the budget, once, in a reading
+    /// of its own: one small row a pass instead of a copy in every repo's
+    /// reading (OPS-298). The time is when GitHub said it. A cached copy is
+    /// not published again, and a stored row still inside its hold does not
+    /// keep a newer observation out.
+    fn publish_budget(&mut self, budget: &Budget) {
+        let (Some(h), Some(at)) = (budget.last.as_ref(), budget.last_at) else {
+            return;
+        };
+        let resource = h.resource.clone().unwrap_or_else(|| REST.to_string());
+        let key = self.key(BUDGET, &[&resource]);
+        tc::readings::record(&mut self.cache, &key, budget_json(h), at, self.ttl);
+    }
+
+    /// What a reading serves this pane, as the board reads it.
+    fn reading(&mut self, value: &Option<serde_json::Value>, key: &str, now: f64) -> Read {
+        match value {
+            None => Read::Waiting(0),
+            Some(v) => match tc::readings::refusal(v) {
+                Some((why, _)) => Read::Refused(why),
+                None => {
+                    let at = tc::readings::provenance(&self.cache, key, now).map_or(now, |p| p.taken_at);
+                    self.saw(v, at);
+                    Read::Got(v.clone(), at)
+                }
+            },
+        }
+    }
+
+    /// Note which pane is fetching a reading this one is waiting for.
+    fn asking(&mut self, key: &str, by: u32) {
+        if by != 0 {
+            self.cache.asking.insert(key.to_string(), by);
+        }
     }
 
     fn note_pause(&mut self, until: f64, why: String) {
@@ -1450,7 +1521,7 @@ impl Share {
     }
 
     fn saw(&mut self, value: &serde_json::Value, at: f64) {
-        let Some(h) = budget_from(value) else {
+        let Some(h) = budget_from(value).or_else(|| self.budget_of_reading(value)) else {
             return;
         };
         let newer = |slot: &Option<(f64, parse::RateHeaders)>| slot.as_ref().is_none_or(|(t, _)| at >= *t);
@@ -1596,13 +1667,6 @@ fn show_while_paused(sh: &mut Share, key: &str) -> Read {
 }
 
 /// Put the budget the answer carried onto the reading, then publish it.
-fn publish_with_budget(ticket: tc::readings::Ticket<'_>, mut v: serde_json::Value, budget: &Budget) {
-    if let (Some(h), Some(o)) = (budget.last.as_ref(), v.as_object_mut()) {
-        o.insert("budget".into(), budget_json(h));
-    }
-    ticket.publish(v);
-}
-
 /// Ask for one reading through the shared store.
 ///
 /// A spent limit, here or in any other pane, stops the asking before it
@@ -1672,7 +1736,7 @@ fn shared_reading(
                 // that never went out, is a refusal.
                 match got {
                     Ok(v) => {
-                        publish_with_budget(ticket, v, &budget);
+                        ticket.publish(v);
                         Took::Limited(stop)
                     }
                     Err(_) => {
@@ -1688,8 +1752,12 @@ fn shared_reading(
                 Took::Blocked
             } else {
                 match got {
+                    // Nothing about the pass's own figures goes in here: a
+                    // value that changes on every fetch is a value the store
+                    // rewrites in full every refresh (OPS-298). GitHub's
+                    // budget is a small reading of its own.
                     Ok(v) => {
-                        publish_with_budget(ticket, v, &budget);
+                        ticket.publish(v);
                         Took::Published
                     }
                     Err(why) => {
@@ -1822,6 +1890,9 @@ fn one_pass(
         got.sharing = sh.rows(now);
         if sharing {
             got.paused = sh.paused.clone();
+            // What this pass was told, before the display fallback can put
+            // a cached budget in its place and republish that.
+            sh.publish_budget(&got.rate);
             let seen = sh.seen_core.clone().or_else(|| sh.seen_any.clone());
             if let Some(h) = shown_budget(&got.rate, seen) {
                 got.rate.last = Some(h);
@@ -1829,6 +1900,186 @@ fn one_pass(
         }
     }
     Ok(got)
+}
+
+/// Every repository's runs, claimed together and answered together.
+///
+/// The single-reading path renews one lease and stops at the rate limit
+/// because each repository is fetched before the next is claimed. A batch
+/// claims them all first, so each request rechecks the limit and the gate,
+/// renews every lease this pane still holds — the ones already answered as
+/// well as the one it is about to use — and a repository another pane is
+/// refreshing keeps the runs already in hand.
+fn shared_runs(
+    sh: &mut Share,
+    repos: &[String],
+    hours: i64,
+    steps: &mut Steps,
+    rate: &mut Budget,
+    mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<(Vec<serde_json::Value>, Option<String>), String>,
+) -> Vec<Read> {
+    let hours_key = hours.to_string();
+    let claimed_at = tc::now();
+    tc::readings::follow(&mut sh.cache);
+    let gate = sh.key("gha.limit", &[REST]);
+    if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+        sh.note_pause(until, why);
+        let mut reads = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let key = sh.key("gha.runs", &[repo, &hours_key]);
+            reads.push(show_while_paused(sh, &key));
+        }
+        return reads;
+    }
+    let keys: Vec<String> = repos
+        .iter()
+        .map(|repo| sh.key("gha.runs", &[repo, &hours_key]))
+        .collect();
+    let policy = tc::readings::Policy::new(sh.ttl, LEASE_FOR);
+    let asks: Vec<(&str, tc::readings::Policy)> = keys.iter().map(|k| (k.as_str(), policy)).collect();
+    let claimed = tc::readings::claim_many(&mut sh.cache, &asks, claimed_at);
+    let mut reads = Vec::with_capacity(repos.len());
+    let mut mine: Vec<usize> = Vec::new();
+    for (i, got) in claimed.into_iter().enumerate() {
+        match got {
+            tc::readings::Claimed::Serve(value) => {
+                sh.mark(&keys[i], claimed_at);
+                reads.push(sh.reading(&value, &keys[i], claimed_at));
+            }
+            tc::readings::Claimed::Waiting { by, have } => {
+                sh.asking(&keys[i], by);
+                let read = match &have {
+                    Some(_) => sh.reading(&have, &keys[i], claimed_at),
+                    None => Read::Waiting(by),
+                };
+                sh.mark(&keys[i], claimed_at);
+                reads.push(read);
+            }
+            tc::readings::Claimed::Fetch => {
+                mine.push(i);
+                reads.push(Read::Paused);
+            }
+        }
+    }
+    let mut answers: Vec<(&str, tc::readings::Answer, tc::readings::Policy, f64)> = Vec::new();
+    let mut fetched: Vec<(usize, Read)> = Vec::new();
+    let mut skip = false;
+    for i in mine {
+        let key = keys[i].as_str();
+        let repo = &repos[i];
+        if !skip {
+            tc::readings::follow(&mut sh.cache);
+            if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+                sh.note_pause(until, why);
+                skip = true;
+            } else if rate.stopped(tc::now()).is_some() {
+                skip = true;
+            }
+        }
+        if skip {
+            tc::readings::release(&mut sh.cache, key);
+            fetched.push((i, show_while_paused(sh, key)));
+            continue;
+        }
+        steps.note(|p| p.count("runs", i, Some(repos.len())));
+        steps.busy();
+        let mut budget = Budget::default();
+        let mut taken_over = false;
+        let mut blocked = false;
+        let got = {
+            let mut ask = |b: &Budget| -> Result<(), String> {
+                if let Some(stop) = b.stopped(tc::now()) {
+                    return Err(limit_why(stop));
+                }
+                tc::readings::follow(&mut sh.cache);
+                if let Some((_, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+                    blocked = true;
+                    return Err(why);
+                }
+                // The claim covered every repository before the first
+                // request. By the time this one is reached the lease may
+                // already be older than `LEASE_FOR`, and the answers
+                // buffered above still need it.
+                if tc::readings::renew_all(&mut sh.cache, key, LEASE_FOR) {
+                    Ok(())
+                } else {
+                    taken_over = true;
+                    Err("another pane took over".into())
+                }
+            };
+            fetch(repo, &mut budget, &mut ask)
+        };
+        let at = tc::now();
+        rate.absorb(&budget);
+        let read = if taken_over {
+            match sh.kept(key) {
+                Some((v, t)) => {
+                    sh.saw(&v, t);
+                    sh.mark(key, at);
+                    Read::Got(v, t)
+                }
+                None => {
+                    sh.mark(key, at);
+                    Read::Waiting(0)
+                }
+            }
+        } else if let Some(stop) = budget.stopped(at).cloned() {
+            sh.shut(&stop, REST);
+            skip = true;
+            match got {
+                Ok((runs, note)) => {
+                    let v = serde_json::json!({ "runs": runs, "note": note });
+                    sh.saw(&v, at);
+                    answers.push((key, tc::readings::Answer::Value(v.clone()), policy, at));
+                    Read::Got(v, at)
+                }
+                Err(_) => {
+                    let why = limit_why(&stop);
+                    let until = stop.until().map(|u| u as f64);
+                    answers.push((
+                        key,
+                        tc::readings::Answer::Refused { why: why.clone(), until },
+                        policy,
+                        at,
+                    ));
+                    match sh.kept(key) {
+                        Some((v, t)) => Read::Got(v, t),
+                        None => Read::Paused,
+                    }
+                }
+            }
+        } else if blocked {
+            tc::readings::release(&mut sh.cache, key);
+            if let Some((until, why)) = tc::readings::gate(&mut sh.cache, &gate) {
+                sh.note_pause(until, why);
+            }
+            skip = true;
+            show_while_paused(sh, key)
+        } else {
+            match got {
+                Ok((runs, note)) => {
+                    let v = serde_json::json!({ "runs": runs, "note": note });
+                    sh.saw(&v, at);
+                    answers.push((key, tc::readings::Answer::Value(v.clone()), policy, at));
+                    Read::Got(v, at)
+                }
+                Err(why) => {
+                    answers.push((key, tc::readings::Answer::Refused { why: why.clone(), until: None }, policy, at));
+                    Read::Refused(why)
+                }
+            }
+        };
+        fetched.push((i, read));
+    }
+    let published = tc::now();
+    tc::readings::answer_many(&mut sh.cache, &answers, published, claimed_at);
+    for (key, _, _, _) in &answers {
+        sh.mark(key, published);
+    }
+    for (i, read) in fetched {
+        reads[i] = read;
+    }
+    reads
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1848,7 +2099,6 @@ fn pass_body(
     let mut err = String::new();
     let mut rate = Budget::default();
     let empty_stats = PickStats::default();
-    let hours_key = hours.to_string();
     steps.note(|p| {
         p.clear();
         p.begin("accounts");
@@ -2021,15 +2271,28 @@ fn pass_body(
     let mut stamps: Vec<f64> = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     let (mut pending, mut pending_by) = (0usize, 0u32);
-    for (done, repo) in repos.iter().enumerate() {
-        steps.note(|p| {
-            p.count("runs", done, Some(repos.len()));
+    // What each repo's runs reading came to, in repo order.
+    let mut reads: Vec<Read> = Vec::with_capacity(repos.len());
+    if let Some(sh) = share.as_deref_mut().filter(|sh| sh.on) {
+        // One claim and one answer for the whole pass: eighteen readings
+        // published one transaction each cost more than the data (OPS-298).
+        reads = shared_runs(sh, &repos, hours, steps, &mut rate, |repo, budget, ask| {
+            fetch_runs_for(repo, tok, hours, budget, &rest_base, ask)
         });
-        let fetch = |rate: &mut Budget, ask: &mut Ask| {
-            fetch_runs_for(repo, tok, hours, rate, &rest_base, ask)
-                .map(|(got, note)| serde_json::json!({ "runs": got, "note": note }))
-        };
-        match read(share, |sh| sh.key("gha.runs", &[repo, &hours_key]), REST, &mut rate, steps, fetch) {
+    } else {
+        for (i, repo) in repos.iter().enumerate() {
+            steps.note(|p| p.count("runs", i, Some(repos.len())));
+            steps.busy();
+            let got = fetch_runs_for(repo, tok, hours, &mut rate, &rest_base, &mut |_| Ok(()))
+                .map(|(got, note)| serde_json::json!({ "runs": got, "note": note }));
+            reads.push(match got {
+                Ok(v) => Read::Got(v, tc::now()),
+                Err(why) => Read::Refused(why),
+            });
+        }
+    }
+    for (repo, read) in repos.iter().zip(reads) {
+        match read {
             Read::Got(v, at) => {
                 runs.extend(v["runs"].as_array().cloned().unwrap_or_default());
                 stamps.push(at);
@@ -4508,5 +4771,150 @@ mod tests {
         let back = budget_from(&v).expect("budget");
         assert_eq!((back.remaining, back.limit, back.resource.as_deref()), (Some(4321), Some(5000), Some("core")));
         assert_eq!(budget_from(&serde_json::json!({})), None);
+    }
+
+    fn batch_runs(
+        sh: &mut Share,
+        mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<(Vec<serde_json::Value>, Option<String>), String>,
+    ) -> Vec<Read> {
+        let live = Arc::new(Mutex::new(State::default()));
+        let activity = tc::Refresh::default();
+        let mut steps = Steps::new(&live, &activity, false);
+        let mut rate = Budget::default();
+        let repos: Vec<String> = REPOS.iter().map(|s| (*s).to_string()).collect();
+        shared_runs(sh, &repos, 48, &mut steps, &mut rate, &mut fetch)
+    }
+
+    fn one_batch(repo: &str) -> (Vec<serde_json::Value>, Option<String>) {
+        (vec![serde_json::json!({ "id": 1, "repo": repo, "display_title": "fix the build" })], None)
+    }
+
+    #[test]
+    fn a_batch_keeps_cached_runs_while_another_pane_refreshes_them() {
+        let path = store_file("batch-have");
+        let mut a = pane(&path, 1, 0.3);
+        let mut b = pane(&path, 2, 0.3);
+        batch_runs(&mut a, |repo, _, ask| {
+            ask(&Budget::default())?;
+            Ok(one_batch(repo))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let mut during = false;
+        batch_runs(&mut a, |repo, _, ask| {
+            ask(&Budget::default())?;
+            if !during {
+                during = true;
+                let got = batch_runs(&mut b, |_, _, _| panic!("the waiting pane fetched"));
+                assert!(
+                    got.iter().all(|r| matches!(r, Read::Got(..))),
+                    "cached runs were dropped while the other pane refreshed: {got:?}"
+                );
+            }
+            Ok(one_batch(repo))
+        });
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_batch_publishes_the_reading_that_spends_the_budget_and_stops() {
+        let path = store_file("batch-stop");
+        let mut a = pane(&path, 1, 60.0);
+        let reset = tc::now() as i64 + 300;
+        let spent = vec![
+            ("x-ratelimit-remaining".to_string(), "0".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), reset.to_string()),
+            ("x-ratelimit-resource".to_string(), "core".to_string()),
+        ];
+        let asked = std::cell::Cell::new(0usize);
+        let got = batch_runs(&mut a, |repo, budget, ask| {
+            ask(budget)?;
+            asked.set(asked.get() + 1);
+            budget.take_at(200, &spent, tc::now());
+            Ok(one_batch(repo))
+        });
+        assert_eq!(asked.get(), 1, "the spent budget did not stop the rest of the batch");
+        assert!(matches!(got[0], Read::Got(..)), "{:?}", got[0]);
+        assert!(got[1..].iter().all(|r| matches!(r, Read::Paused)), "{got:?}");
+        let mut b = pane(&path, 2, 60.0);
+        let got = batch_runs(&mut b, |_, _, _| panic!("asked while the gate is shut"));
+        match &got[0] {
+            Read::Got(v, _) => assert_eq!(v["runs"][0]["repo"], REPOS[0]),
+            other => panic!("the stored reading was hidden by the gate: {other:?}"),
+        }
+        assert!(got[1..].iter().all(|r| matches!(r, Read::Paused)), "{got:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_closed_gate_keeps_the_runs_a_batch_already_has() {
+        let path = store_file("batch-gate");
+        let mut a = pane(&path, 1, 60.0);
+        batch_runs(&mut a, |repo, _, ask| {
+            ask(&Budget::default())?;
+            Ok(one_batch(repo))
+        });
+        let until = tc::now() as i64 + 300;
+        a.shut(&parse::RateLimit::Spent { until, resource: Some(REST.to_string()) }, REST);
+        let mut b = pane(&path, 2, 60.0);
+        let got = batch_runs(&mut b, |_, _, _| panic!("asked while the gate is shut"));
+        assert!(
+            got.iter().all(|r| matches!(r, Read::Got(..))),
+            "a closed gate cleared runs already in hand: {got:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_batch_refresh_reports_the_time_it_fetched() {
+        let path = store_file("batch-when");
+        let mut a = pane(&path, 1, 0.3);
+        batch_runs(&mut a, |repo, _, ask| {
+            ask(&Budget::default())?;
+            Ok(one_batch(repo))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        a.found.clear();
+        batch_runs(&mut a, |repo, _, ask| {
+            ask(&Budget::default())?;
+            Ok(one_batch(repo))
+        });
+        let newest = a.found.iter().map(|p| p.taken_at).fold(0.0_f64, f64::max);
+        assert!(tc::now() - newest < 1.0, "the sharing line kept the previous fetch ({newest})");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_budget_observed_this_pass_replaces_a_held_one() {
+        let path = store_file("budget-fresh");
+        let mut a = pane(&path, 1, 60.0);
+        let key = a.key(BUDGET, &[REST]);
+        let older = parse::RateHeaders {
+            remaining: Some(5000),
+            limit: Some(5000),
+            reset: Some(9_000),
+            resource: Some(REST.to_string()),
+            retry_after: None,
+        };
+        tc::readings::record(&mut a.cache, &key, budget_json(&older), tc::now() - 10.0, 60.0);
+        let mut b = pane(&path, 2, 60.0);
+        b.begin(tc::now());
+        let mut budget = Budget::default();
+        let headers = vec![
+            ("x-ratelimit-remaining".to_string(), "4999".to_string()),
+            ("x-ratelimit-limit".to_string(), "5000".to_string()),
+            ("x-ratelimit-reset".to_string(), "9000".to_string()),
+            ("x-ratelimit-resource".to_string(), "core".to_string()),
+        ];
+        budget.take_at(200, &headers, tc::now());
+        b.publish_budget(&budget);
+        let writes = store_of(&b).writes;
+        b.publish_budget(&Budget::default());
+        assert_eq!(store_of(&b).writes, writes, "a pass with no observation republished the cached budget");
+        let mut look = pane(&path, 3, 60.0);
+        look.begin(tc::now());
+        let seen = look.seen_core.clone().expect("budget");
+        assert_eq!(seen.1.remaining, Some(4999), "a held budget row kept the older remaining count");
+        let _ = std::fs::remove_file(&path);
     }
 }
