@@ -109,7 +109,8 @@ def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -
             if w > 0 and h > 0:
                 return w * h * 4
         except ValueError:
-            pass
+            # Malformed s=/v= dimensions; fall back to decoding the payload.
+            w = 0
     raw_b64 = b"".join(payload_chunks)
     if not raw_b64:
         return 0
@@ -117,7 +118,7 @@ def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -
         decoded = base64.b64decode(raw_b64)
         if kv.get("o") == "z":
             decoded = zlib.decompress(decoded)
-    except Exception:
+    except (ValueError, zlib.error):
         return 0
     fmt = kv.get("f", "32")
     if fmt == "24":
@@ -603,7 +604,8 @@ def terminate_process_group(pid: int, master_fd: Optional[int]) -> Optional[int]
         try:
             os.write(master_fd, b"q")
         except OSError:
-            pass
+            # Slave side may already be closed; proceed to process-group signals.
+            master_fd = None
 
     deadline = time.monotonic() + 0.4
     while time.monotonic() < deadline:
@@ -760,8 +762,9 @@ def run_mode(
         terminate_process_group(pid, master_fd if exited_early is None else None)
         try:
             os.close(master_fd)
-        except OSError:
-            pass
+        except OSError as close_err:
+            # Ignore EBADF/EIO when tearing down the master PTY descriptor.
+            _ = close_err
 
     if measured_started_at is None:
         elapsed = max(0.001, (measured_ended_at or time.monotonic()) - started_at)
@@ -940,7 +943,8 @@ def run_herdr_watchdog(
                         if kpid not in killed:
                             killed.append(kpid)
                     except ProcessLookupError:
-                        pass
+                        # Process already exited before this signal arrived.
+                        break
                     time.sleep(0.05)
             print(
                 f"STOPPED: bridge PID {bridge_pid} wrote {kb_s:.1f} KB/s "
