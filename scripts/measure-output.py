@@ -183,23 +183,11 @@ def parse_png_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
-def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> Optional[int]:
-    """Return the RGBA byte count of an upload.
-
-    `None` means zlib output exceeded the retained-payload cap. A PNG `f=100`
-    estimate is returned even when it is larger than that cap, because the PNG
-    bytes are not expanded. Declared `s`/`v` that are not protocol integers
-    yield 0; the caller marks the sample invalid.
-    """
-    if "s" in kv or "v" in kv:
-        dims = positive_dimensions(kv)
-        if dims is None:
-            return 0
-        return dims[0] * dims[1] * 4
-
+def decode_upload_payload(kv: Dict[str, str], payload_chunks: List[bytes]) -> Optional[bytes]:
+    """Return the upload payload, or None when zlib output exceeds the cap."""
     raw_b64 = b"".join(payload_chunks)
     if not raw_b64:
-        return 0
+        return b""
     try:
         decoded = base64.b64decode(raw_b64)
         if kv.get("o") == "z":
@@ -207,13 +195,46 @@ def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -
             decoded = decomp.decompress(decoded, MAX_UPLOAD_PAYLOAD_BYTES + 1)
             if len(decoded) > MAX_UPLOAD_PAYLOAD_BYTES or decomp.unconsumed_tail:
                 return None
+        return decoded
     except (ValueError, zlib.error):
-        return 0
+        return b""
 
+
+def upload_needs_payload(cmd_kv: Dict[str, str]) -> bool:
+    """PNG carries its pixel size in the file; raw uploads can use `s` and `v`."""
+    if cmd_kv.get("a", "t") not in ("T", "t", "f"):
+        return False
+    if cmd_kv.get("f") == "100":
+        return True
+    return positive_dimensions(cmd_kv) is None
+
+
+def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> Optional[int]:
+    """Return the RGBA byte count of an upload.
+
+    `None` means zlib output exceeded the retained-payload cap. PNG (`f=100`)
+    uses the IHDR size even when `s` and `v` are present or incomplete. A PNG
+    estimate is returned even when it is larger than the payload cap, because
+    the PNG bytes are not expanded. Declared raw `s`/`v` that are not protocol
+    integers yield 0; the caller marks the sample invalid.
+    """
     fmt = kv.get("f", "32")
     if fmt == "100":
+        decoded = decode_upload_payload(kv, payload_chunks)
+        if decoded is None:
+            return None
         png_dims = parse_png_dimensions(decoded)
         return (png_dims[0] * png_dims[1] * 4) if png_dims is not None else 0
+
+    if "s" in kv or "v" in kv:
+        dims = positive_dimensions(kv)
+        if dims is None:
+            return 0
+        return dims[0] * dims[1] * 4
+
+    decoded = decode_upload_payload(kv, payload_chunks)
+    if decoded is None:
+        return None
     if fmt == "24":
         return (len(decoded) // 3) * 4
     return len(decoded)
@@ -464,7 +485,7 @@ class TerminalStream:
         self._chunk_payload_bytes += len(payload)
 
     def _account_rgba(self, cmd_kv: Dict[str, str], payloads: List[bytes], kind: str) -> None:
-        if "s" in cmd_kv or "v" in cmd_kv:
+        if cmd_kv.get("f") != "100" and ("s" in cmd_kv or "v" in cmd_kv):
             if positive_dimensions(cmd_kv) is None:
                 self.sample_invalid = "Kitty s/v dimensions are outside the protocol range"
                 return
@@ -489,11 +510,7 @@ class TerminalStream:
         if self._chunk_kv is None:
             cmd_kv = dict(kv)
             started_measuring = began_in_window
-            needs_payload = positive_dimensions(cmd_kv) is None and cmd_kv.get("a", "t") in (
-                "T",
-                "t",
-                "f",
-            )
+            needs_payload = upload_needs_payload(cmd_kv)
             if more:
                 self._chunk_kv = cmd_kv
                 self._chunk_needs_payload = needs_payload
@@ -507,7 +524,7 @@ class TerminalStream:
             for k, v in kv.items():
                 if k != "m" and k not in self._chunk_kv:
                     self._chunk_kv[k] = v
-            if self._chunk_needs_payload and positive_dimensions(self._chunk_kv) is not None:
+            if self._chunk_needs_payload and not upload_needs_payload(self._chunk_kv):
                 self._chunk_needs_payload = False
                 self._chunk_payloads.clear()
                 self._chunk_payload_bytes = 0
@@ -1194,8 +1211,21 @@ class ProcIoHandle:
             return None
         return wchar_from_io_text(text)
 
-    def alive(self) -> bool:
-        return self._read_file("comm") is not None
+    def presence(self) -> str:
+        """`alive`, `gone`, or `unreadable`.
+
+        A failed `comm` read is not proof of exit. `hidepid` can hide a live
+        process. Only `ENOENT` on this pinned directory fd means the original
+        process is gone.
+        """
+        try:
+            fd = os.open("comm", os.O_RDONLY, dir_fd=self._dirfd)
+        except OSError as err:
+            if err.errno in (errno.ENOENT, errno.ESRCH):
+                return "gone"
+            return "unreadable"
+        os.close(fd)
+        return "alive"
 
     def close(self) -> None:
         try:
@@ -1243,62 +1273,66 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
     if not Path("/proc").is_dir():
         sys.stderr.write("error: --proc-io requires Linux /proc/<pid>/io\n")
         return 2
-    start_val = read_proc_wchar(pid)
-    if start_val is None:
-        sys.stderr.write(
-            f"error: cannot read /proc/{pid}/io (process missing or insufficient permissions)\n"
-        )
-        return 2
-
-    raw_comm = read_proc_comm(pid)
-    shown_comm = sanitize_display_text(raw_comm)
-    children = read_proc_descendants(pid)
-    if raw_comm == "opscope" or children:
-        child_desc = (
-            ", ".join(f"{c} ({sanitize_display_text(read_proc_comm(c))})" for c in children)
-            or "none yet"
-        )
-        sys.stderr.write(
-            f"warning: PID {pid} ({shown_comm}) is a parent/launcher process (children: {child_desc}).\n"
-            "         The opscope launcher runs widgets as child processes sharing its tty,\n"
-            "         so /proc/<launcher>/io wchar misses live widget writes until children are reaped!\n"
-            "         Measure the live widget child PID directly (shown separately below).\n"
-        )
-
-    tracked = [pid, *children]
-    initial: Dict[int, int] = {}
-    names: Dict[int, str] = {}
     handles: Dict[int, ProcIoHandle] = {}
     try:
-        for p in tracked:
+        try:
+            primary = ProcIoHandle(pid)
+        except OSError as err:
+            sys.stderr.write(f"error: cannot pin /proc/{pid}: {err}\n")
+            return 2
+        handles[pid] = primary
+        start_val = primary.read_wchar()
+        if start_val is None:
+            sys.stderr.write(
+                f"error: cannot read /proc/{pid}/io (process missing or insufficient permissions)\n"
+            )
+            return 2
+
+        raw_comm = read_proc_comm(pid)
+        shown_comm = sanitize_display_text(raw_comm)
+        children = read_proc_descendants(pid)
+        if raw_comm == "opscope" or children:
+            child_desc = (
+                ", ".join(f"{c} ({sanitize_display_text(read_proc_comm(c))})" for c in children)
+                or "none yet"
+            )
+            sys.stderr.write(
+                f"warning: PID {pid} ({shown_comm}) is a parent/launcher process (children: {child_desc}).\n"
+                "         The opscope launcher runs widgets as child processes sharing its tty,\n"
+                "         so /proc/<launcher>/io wchar misses live widget writes until children are reaped!\n"
+                "         Measure the live widget child PID directly (shown separately below).\n"
+            )
+
+        initial: Dict[int, Tuple[int, float]] = {pid: (start_val, time.monotonic())}
+        names: Dict[int, str] = {pid: shown_comm}
+        for child in children:
             try:
-                handle = ProcIoHandle(p)
+                handle = ProcIoHandle(child)
             except OSError:
                 continue
             val = handle.read_wchar()
             if val is None:
                 handle.close()
                 continue
-            handles[p] = handle
-            initial[p] = val
-            names[p] = sanitize_display_text(read_proc_comm(p))
+            handles[child] = handle
+            initial[child] = (val, time.monotonic())
+            names[child] = sanitize_display_text(read_proc_comm(child))
 
-        t0 = time.monotonic()
         time.sleep(max(0.1, seconds))
-        dt = max(0.001, time.monotonic() - t0)
 
         print(f"{'pid':>8}  {'comm':<20}  {'wchar KB/s':>12}  {'note'}")
-        for p, v0 in initial.items():
+        for p, (v0, t0) in initial.items():
             handle = handles[p]
+            t1 = time.monotonic()
             v1 = handle.read_wchar()
             if v1 is None:
-                if handle.alive():
-                    label, note = "(unread)", "I/O counter unavailable"
-                else:
+                if handle.presence() == "gone":
                     label, note = "(gone)", "original process is gone"
+                else:
+                    label, note = "(unread)", "I/O counter unavailable"
                 print(f"{p:>8}  {names[p]:<20}  {label:>12}  {note}")
                 continue
-            rate = max(0, v1 - v0) / KB / dt
+            rate = max(0, v1 - v0) / KB / max(0.001, t1 - t0)
             note = "includes all write() syscalls (tty + files/sockets)"
             if p == pid and (raw_comm == "opscope" or children):
                 note = "parent (+ any reaped children); live child writes are separate"
@@ -1792,18 +1826,22 @@ def run_self_tests() -> int:
             pid_path = root / "helper.pid"
             read_fd, write_fd = os.pipe()
             os.set_inheritable(write_fd, True)
+            cancel_r, cancel_w = os.pipe()
+            os.set_inheritable(cancel_r, True)
             script_path.write_text(
-                "import os, signal, sys, time\n"
+                "import os, select, signal, sys, time\n"
                 "write_fd = int(sys.argv[1])\n"
-                "pid_path = sys.argv[2]\n"
+                "cancel_r = int(sys.argv[2])\n"
+                "pid_path = sys.argv[3]\n"
                 "child = os.fork()\n"
                 "if child == 0:\n"
                 "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
                 "    with open(pid_path, 'w') as fh:\n"
                 "        fh.write(str(os.getpid()))\n"
-                "    time.sleep(30)\n"
+                "    select.select([cancel_r], [], [], 30)\n"
                 "    os._exit(0)\n"
                 "os.close(write_fd)\n"
+                "os.close(cancel_r)\n"
                 "for _ in range(100):\n"
                 "    if os.path.isfile(pid_path) and os.path.getsize(pid_path) > 0:\n"
                 "        os._exit(0)\n"
@@ -1820,7 +1858,7 @@ def run_self_tests() -> int:
                 res = run_mode(
                     Path(sys.executable),
                     "group-test",
-                    [str(script_path), str(write_fd), str(pid_path)],
+                    [str(script_path), str(write_fd), str(cancel_r), str(pid_path)],
                     mode="text",
                     seconds=0.4,
                     warmup=0.0,
@@ -1844,17 +1882,10 @@ def run_self_tests() -> int:
                 if write_fd >= 0:
                     os.close(write_fd)
                 os.close(read_fd)
-                if pid_path.is_file():
-                    try:
-                        helper = int(pid_path.read_text(encoding="ascii"))
-                    except ValueError:
-                        helper = 0
-                    if helper > 0:
-                        try:
-                            os.kill(helper, signal.SIGKILL)
-                        except OSError:
-                            # The helper already exited; its zombie needs no signal.
-                            pass
+                # Closing the cancel pipe asks a still-running helper to exit.
+                # Do not signal the recorded PID: it may have been reused.
+                os.close(cancel_w)
+                os.close(cancel_r)
 
     assert_helper_dies_with_leader(False)
     assert_helper_dies_with_leader(True)
@@ -1888,6 +1919,11 @@ def run_self_tests() -> int:
     png_stream.feed(b"\x1b_Ga=T,f=100,i=3,q=2;" + base64.b64encode(png) + b"\x1b\\")
     assert png_stream.sample_invalid is None
     assert png_stream.metrics.raw_rgba_bytes == png_est
+    png_header = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    png_header.start_measuring()
+    png_header.feed(b"\x1b_Ga=T,f=100,s=1,v=1,i=5,q=2;" + base64.b64encode(png) + b"\x1b\\")
+    assert png_header.sample_invalid is None
+    assert png_header.metrics.raw_rgba_bytes == png_est
 
     tx = bytearray()
     capped = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
@@ -1899,7 +1935,7 @@ def run_self_tests() -> int:
         pinned_io = ProcIoHandle(os.getpid())
         try:
             assert pinned_io.read_wchar() is not None
-            assert pinned_io.alive()
+            assert pinned_io.presence() == "alive"
         finally:
             pinned_io.close()
 

@@ -51,7 +51,7 @@ python3 -I scripts/measure-output.py ./target/debug/clocks --seconds 60 --steady
 >
 > **It runs with your real config and credentials.** The child keeps your `HOME`, so a network widget reads your `config.json`, calls its real APIs once per mode, and reads and writes the real shared readings store in `~/.local/state/opscope`. That is what makes the reading real; know it before running an API widget repeatedly.
 >
-> **`mux-activity` cannot be measured this way.** The harness scrubs `TMUX` and `HERDR_ENV` and the PTY is not a Rex, Herdr or Luvus pane, so `mux-activity` finds no multiplexer to read and exits at once (`exited early … (status 2)`). Measure it live with `--proc-io` instead.
+> **`mux-activity` cannot be measured by this harness, and its budget stays unverified.** The harness scrubs `TMUX` and `HERDR_ENV`, and the PTY is not a Rex, Herdr or Luvus pane, so `mux-activity` finds no multiplexer and exits at once (`exited early … (status 2)`). `--proc-io` can show a live process's total `write()` rate, including state-file writes. It does not report text, image, upload, or raw-RGBA rates, so it cannot pass or fail a mode in the table below.
 
 ## Pass/fail budget (per widget after warm-up; `1 KB = 1024 B`)
 
@@ -63,7 +63,7 @@ The limits were calibrated on 2026-11-18 against every local widget on `main` (2
 | --- | --- | --- | --- | --- |
 | `text` | `<= 8 KB/s` (`<= 5` with `--steady`) | `0` | `0` | Any Kitty graphics byte fails |
 | `herdr` (`HERDR_ENV=1`) | `<= 8 KB/s` (`<= 5` with `--steady`) | `0` | `0` | Must draw text (`0` `a=T`, `a=f`, and `a=p`) |
-| `kitty` — steady screen / meter-only (`--steady`) | `<= 5 KB/s` | `0` | `0` | Meters, stacked bars, and loading placeholders are eighth-cell text; `clocks` in `kitty` must match its `text` rate. Periodic `a=p` every 5 s (`WHOLE_EVERY` heal) places cached images without uploading pixels (`uploads = 0`) |
+| `kitty` — steady screen / meter-only (`--steady`) | `<= 5 KB/s` | `0` | `0` | Meters, stacked bars, and loading placeholders are eighth-cell text. Compare `clocks` in `kitty` with its `text` rate by hand in the report; the script judges each mode on its own and does not compare them. Periodic `a=p` every 5 s (`WHOLE_EVERY` heal) places cached images without uploading pixels (`uploads = 0`) |
 | `kitty` — live-updating pixel chart (`latency`, `link`, `ports`, `disk`, `procs`) | `<= 8 KB/s` | `<= 8.0/s` total (`a=f` bands), `<= 0.5/s` whole `a=T` | `<= 100 KB/s` | Small changes emit narrow `a=f` changed-band rectangles; a whole `a=T` more often than once per 2 s means an image is being rebuilt instead of edited. Never upload an image on every frame |
 | `kitty-herdr` (opt-in: `HERDR_ENV=1` + `OPSCOPE_GRAPHICS=kitty`) | `<= 8 KB/s` | as `kitty` | **`<= 16 KB/s`** | Herdr relays Kitty images **decoded**, so raw RGBA is what crosses SSH. OPS-199 was this case at up to 4.9 MB/s. `latency` (~32–57 KB/s raw) fails here: opting a chart widget into pixels under Herdr costs about 1.4 GB/h across 12 panes. Also fails any `a=p` re-placement |
 | `matrix` (documented exception) | `<= 500 KB/s` (`EXEMPT`) | `0` | `0` | ~240 KB/s text at 30 fps by design; still `0` image bytes in every mode. Judged by the binary's file name — pass `--name matrix` for a renamed copy |
