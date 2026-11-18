@@ -666,35 +666,135 @@ fn split_repo(name: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-/// Flatten one REST workflow run into the fields the board reads.
-fn ingest_run(raw: &serde_json::Value, repo: &str, repo_total: i64, fetched: usize) -> serde_json::Value {
-    let repo = if repo.is_empty() {
-        raw["repository"]["full_name"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-    } else {
-        repo.to_string()
-    };
-    serde_json::json!({
-        "id": raw["id"].as_i64().unwrap_or(0),
-        "repo": repo,
-        "workflow": raw["name"].as_str().unwrap_or(""),
-        "branch": raw["head_branch"].as_str().unwrap_or(""),
-        "event": raw["event"].as_str().unwrap_or(""),
-        "status": raw["status"].as_str().unwrap_or(""),
-        "conclusion": raw["conclusion"].as_str().unwrap_or(""),
-        "created_at": raw["created_at"].as_str().unwrap_or(""),
-        "run_started_at": raw["run_started_at"].as_str().unwrap_or(""),
-        "updated_at": raw["updated_at"].as_str().unwrap_or(""),
-        "html_url": raw["html_url"].as_str().unwrap_or(""),
-        "run_number": raw["run_number"].as_i64().unwrap_or(0),
-        "head_sha": raw["head_sha"].as_str().unwrap_or(""),
-        "display_title": raw["display_title"].as_str().unwrap_or(""),
-        "attempt": raw["run_attempt"].as_i64().unwrap_or(1),
-        "repo_total": repo_total,
-        "repo_fetched": fetched as i64,
-    })
+/// The shape of the `gha.runs` reading. Old and new builds keep separate
+/// rows, so neither reads the other's runs.
+const RUNS_SHAPE: u32 = 2;
+
+/// A stamp as the store keeps it: whole seconds since the epoch, or the
+/// text itself when it does not parse, so nothing GitHub said is lost.
+fn stored_time(iso: &str) -> serde_json::Value {
+    match chrono::DateTime::parse_from_rfc3339(iso) {
+        Ok(at) if at.timestamp_subsec_nanos() == 0 => at.timestamp().into(),
+        _ => iso.into(),
+    }
+}
+
+/// The RFC-3339 text the board reads back from [`stored_time`].
+fn shown_time(stored: &serde_json::Value) -> String {
+    match stored
+        .as_i64()
+        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+    {
+        Some(at) => at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        None => stored.as_str().unwrap_or("").to_string(),
+    }
+}
+
+/// One repo's runs as the shared store holds them.
+///
+/// A busy repo's list is rewritten whole whenever one run in it moves, so
+/// the reading keeps only what the board reads, under short names, and
+/// leaves out what is the same for every run or never read:
+///
+/// `i` id · `w` workflow · `b` branch · `e` event · `s` status ·
+/// `c` conclusion · `t0` created · `t1` started · `t2` updated, kept only
+/// for a completed run, where it is the end of the run; a live run's moves
+/// on every step and nothing reads it · `n` run number · `h` head sha ·
+/// `d` title · `a` attempt, past the first · `u` the run's address, only
+/// when it is not the reading's `url` and the id.
+///
+/// The repo is the reading's key, and `total` is GitHub's count for the
+/// window; how many were fetched is the length of `runs`.
+fn runs_reading(raw: &[serde_json::Value], total: i64, note: Option<String>) -> serde_json::Value {
+    let address = |run: &serde_json::Value| text(run, "html_url");
+    let id_of = |run: &serde_json::Value| run["id"].as_i64().unwrap_or(0);
+    let url = raw
+        .iter()
+        .find_map(|run| {
+            address(run)
+                .strip_suffix(&id_of(run).to_string())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let runs: Vec<serde_json::Value> = raw
+        .iter()
+        .map(|run| {
+            let mut out = serde_json::Map::new();
+            out.insert("i".into(), id_of(run).into());
+            let mut put = |k: &str, v: String| {
+                if !v.is_empty() {
+                    out.insert(k.into(), v.into());
+                }
+            };
+            put("w", text(run, "name"));
+            put("b", text(run, "head_branch"));
+            put("e", text(run, "event"));
+            put("s", text(run, "status"));
+            put("c", text(run, "conclusion"));
+            put("h", text(run, "head_sha"));
+            put("d", text(run, "display_title"));
+            let link = address(run);
+            if link != format!("{}{}", url, id_of(run)) {
+                out.insert("u".into(), link.into());
+            }
+            let mut stamp = |k: &str, field: &str| {
+                let iso = text(run, field);
+                if !iso.is_empty() {
+                    out.insert(k.into(), stored_time(&iso));
+                }
+            };
+            stamp("t0", "created_at");
+            stamp("t1", "run_started_at");
+            if text(run, "status") == "completed" {
+                stamp("t2", "updated_at");
+            }
+            if let Some(n) = run["run_number"].as_i64() {
+                out.insert("n".into(), n.into());
+            }
+            let attempt = run["run_attempt"].as_i64().unwrap_or(1);
+            if attempt != 1 {
+                out.insert("a".into(), attempt.into());
+            }
+            serde_json::Value::Object(out)
+        })
+        .collect();
+    serde_json::json!({ "runs": runs, "total": total, "url": url, "note": note })
+}
+
+/// A [`runs_reading`] opened back into the fields the board reads.
+fn board_runs(reading: &serde_json::Value, repo: &str) -> Vec<serde_json::Value> {
+    let stored = reading["runs"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let total = reading["total"].as_i64().unwrap_or(0);
+    let url = reading["url"].as_str().unwrap_or("");
+    stored
+        .iter()
+        .map(|run| {
+            let id = run["i"].as_i64().unwrap_or(0);
+            let html_url = match run["u"].as_str() {
+                Some(u) => u.to_string(),
+                None => format!("{}{}", url, id),
+            };
+            serde_json::json!({
+                "id": id,
+                "repo": repo,
+                "workflow": text(run, "w"),
+                "branch": text(run, "b"),
+                "event": text(run, "e"),
+                "status": text(run, "s"),
+                "conclusion": text(run, "c"),
+                "created_at": shown_time(&run["t0"]),
+                "run_started_at": shown_time(&run["t1"]),
+                "updated_at": shown_time(&run["t2"]),
+                "html_url": html_url,
+                "run_number": run["n"].as_i64().unwrap_or(0),
+                "head_sha": text(run, "h"),
+                "display_title": text(run, "d"),
+                "attempt": run["a"].as_i64().unwrap_or(1),
+                "repo_total": total,
+                "repo_fetched": stored.len() as i64,
+            })
+        })
+        .collect()
 }
 
 /// The first step that failed on a job, if any.
@@ -1056,7 +1156,7 @@ fn fetch_runs_for(
     rate: &mut Budget,
     rest_base: &str,
     ask: &mut Ask,
-) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
+) -> Result<serde_json::Value, String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
     let mut raw: Vec<serde_json::Value> = Vec::new();
@@ -1094,10 +1194,6 @@ fn fetch_runs_for(
         page += 1;
     }
     let fetched = raw.len();
-    let mut out = Vec::new();
-    for run in &raw {
-        out.push(ingest_run(run, repo, total, fetched));
-    }
     let note = if total > fetched as i64 {
         Some(format!(
             "{}: {} of {} runs in the window",
@@ -1108,7 +1204,7 @@ fn fetch_runs_for(
     };
     // Stamped by the caller the moment this returns: when GitHub answered
     // the last page, not when the pass finished or the pane drew it.
-    Ok((out, note))
+    Ok(runs_reading(&raw, total, note))
 }
 
 /// When the newest figure on the board came back from GitHub: what
@@ -1429,15 +1525,16 @@ impl Share {
         }
     }
 
-    /// `unit/1:host:plain…:%s<token fingerprint>`. The token goes in only
-    /// as a fingerprint, and is registered so no reading holding it is
+    /// `unit/<shape>:host:plain…:%s<token fingerprint>`. The token goes in
+    /// only as a fingerprint, and is registered so no reading holding it is
     /// ever written.
     fn key(&mut self, unit: &str, plain: &[&str]) -> String {
         let host = self.host.clone();
         let tok = self.tok.clone();
         let mut parts = vec![host.as_str()];
         parts.extend_from_slice(plain);
-        tc::readings::key(&mut self.cache, unit, 1, &parts, &[tok.as_str()])
+        let shape = if unit == "gha.runs" { RUNS_SHAPE } else { 1 };
+        tc::readings::key(&mut self.cache, unit, shape, &parts, &[tok.as_str()])
     }
 
     /// Open or keep the store and forget what the last pass found.
@@ -1916,7 +2013,7 @@ fn shared_runs(
     hours: i64,
     steps: &mut Steps,
     rate: &mut Budget,
-    mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<(Vec<serde_json::Value>, Option<String>), String>,
+    mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<serde_json::Value, String>,
 ) -> Vec<Read> {
     let hours_key = hours.to_string();
     let claimed_at = tc::now();
@@ -2027,8 +2124,7 @@ fn shared_runs(
             sh.shut(&stop, REST);
             skip = true;
             match got {
-                Ok((runs, note)) => {
-                    let v = serde_json::json!({ "runs": runs, "note": note });
+                Ok(v) => {
                     sh.saw(&v, at);
                     answers.push((key, tc::readings::Answer::Value(v.clone()), policy, at));
                     Read::Got(v, at)
@@ -2057,8 +2153,7 @@ fn shared_runs(
             show_while_paused(sh, key)
         } else {
             match got {
-                Ok((runs, note)) => {
-                    let v = serde_json::json!({ "runs": runs, "note": note });
+                Ok(v) => {
                     sh.saw(&v, at);
                     answers.push((key, tc::readings::Answer::Value(v.clone()), policy, at));
                     Read::Got(v, at)
@@ -2283,8 +2378,7 @@ fn pass_body(
         for (i, repo) in repos.iter().enumerate() {
             steps.note(|p| p.count("runs", i, Some(repos.len())));
             steps.busy();
-            let got = fetch_runs_for(repo, tok, hours, &mut rate, &rest_base, &mut |_| Ok(()))
-                .map(|(got, note)| serde_json::json!({ "runs": got, "note": note }));
+            let got = fetch_runs_for(repo, tok, hours, &mut rate, &rest_base, &mut |_| Ok(()));
             reads.push(match got {
                 Ok(v) => Read::Got(v, tc::now()),
                 Err(why) => Read::Refused(why),
@@ -2294,7 +2388,7 @@ fn pass_body(
     for (repo, read) in repos.iter().zip(reads) {
         match read {
             Read::Got(v, at) => {
-                runs.extend(v["runs"].as_array().cloned().unwrap_or_default());
+                runs.extend(board_runs(&v, repo));
                 stamps.push(at);
                 if let Some(said) = v["note"].as_str() {
                     partial.push(said.to_string());
@@ -3876,7 +3970,11 @@ mod tests {
             "display_title": "fix: the thing",
             "run_attempt": 2
         });
-        let got = ingest_run(&raw, "acme/app", 80, 30);
+        let mut thirty = vec![raw.clone(); 30];
+        for (i, run) in thirty.iter_mut().enumerate().skip(1) {
+            run["id"] = (100 + i as i64).into();
+        }
+        let got = board_runs(&runs_reading(&thirty, 80, None), "acme/app").remove(0);
         assert_eq!(got["repo"], "acme/app");
         assert_eq!(got["workflow"], "CI");
         assert_eq!(got["repo_total"], 80);
@@ -3892,6 +3990,147 @@ mod tests {
             "the run title links the url the copy sheet lists"
         );
         assert!(rows.iter().any(|r| r.contains("fix: the thing")));
+    }
+
+    fn raw_run(id: i64, status: &str, conclusion: &str, updated: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": "CI",
+            "head_branch": "main",
+            "event": "push",
+            "status": status,
+            "conclusion": conclusion,
+            "created_at": "2026-08-27T10:00:00Z",
+            "run_started_at": "2026-08-27T10:00:04Z",
+            "updated_at": updated,
+            "html_url": format!("https://github.com/acme/app/actions/runs/{id}"),
+            "run_number": 12,
+            "head_sha": "abc1234deadbeef",
+            "display_title": "fix: the thing",
+            "run_attempt": 1,
+            "repository": { "full_name": "acme/app", "description": "never read" },
+            "pull_requests": [],
+        })
+    }
+
+    #[test]
+    fn a_stored_run_opens_back_into_every_field_the_board_reads() {
+        let raw = [raw_run(9, "completed", "failure", "2026-08-27T10:02:00Z")];
+        let got = board_runs(&runs_reading(&raw, 1, None), "acme/app");
+        assert_eq!(
+            got,
+            vec![serde_json::json!({
+                "id": 9,
+                "repo": "acme/app",
+                "workflow": "CI",
+                "branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "created_at": "2026-08-27T10:00:00Z",
+                "run_started_at": "2026-08-27T10:00:04Z",
+                "updated_at": "2026-08-27T10:02:00Z",
+                "html_url": "https://github.com/acme/app/actions/runs/9",
+                "run_number": 12,
+                "head_sha": "abc1234deadbeef",
+                "display_title": "fix: the thing",
+                "attempt": 1,
+                "repo_total": 1,
+                "repo_fetched": 1,
+            })]
+        );
+        assert_eq!(
+            run_secs(&got[0], 0.0),
+            Some(116.0),
+            "a finished run keeps its end"
+        );
+    }
+
+    #[test]
+    fn a_live_run_moving_on_does_not_change_the_stored_reading() {
+        let one = runs_reading(
+            &[raw_run(9, "in_progress", "", "2026-08-27T10:01:00Z")],
+            1,
+            None,
+        );
+        let two = runs_reading(
+            &[raw_run(9, "in_progress", "", "2026-08-27T10:01:30Z")],
+            1,
+            None,
+        );
+        assert_eq!(one, two, "a live run's updated_at rewrote the reading");
+        let got = board_runs(&two, "acme/app");
+        assert_eq!(
+            run_secs(&got[0], iso_secs("2026-08-27T10:01:04Z").unwrap()),
+            Some(60.0)
+        );
+    }
+
+    #[test]
+    fn a_stored_run_keeps_what_is_not_the_usual_shape() {
+        let mut odd = raw_run(10, "completed", "success", "2026-08-27T10:02:00.5Z");
+        odd["html_url"] = "https://example.test/elsewhere/10".into();
+        odd["run_attempt"] = 3.into();
+        let mut bare = raw_run(11, "queued", "", "");
+        bare["html_url"] = "".into();
+        let reading = runs_reading(
+            &[
+                raw_run(9, "completed", "success", "2026-08-27T10:02:00Z"),
+                odd,
+                bare,
+            ],
+            3,
+            Some("note".into()),
+        );
+        assert!(
+            reading["runs"][0].get("u").is_none(),
+            "the usual address was stored per run"
+        );
+        let got = board_runs(&reading, "acme/app");
+        assert_eq!(
+            got[0]["html_url"],
+            "https://github.com/acme/app/actions/runs/9"
+        );
+        assert_eq!(got[1]["html_url"], "https://example.test/elsewhere/10");
+        assert_eq!(
+            got[1]["updated_at"], "2026-08-27T10:02:00.5Z",
+            "a stamp with a fraction stays text"
+        );
+        assert_eq!(got[1]["attempt"], 3);
+        assert_eq!(
+            got[2]["html_url"], "",
+            "a run with no address was given one"
+        );
+        assert_eq!(reading["note"], "note");
+    }
+
+    #[test]
+    fn a_stored_run_is_under_half_what_the_first_shape_stored() {
+        let raw: Vec<_> = (1..=100)
+            .map(|i| {
+                raw_run(
+                    1_000_000_000 + i,
+                    "completed",
+                    "success",
+                    "2026-08-27T10:02:00Z",
+                )
+            })
+            .collect();
+        let stored = runs_reading(&raw, 100, None).to_string().len();
+        let before = serde_json::json!({ "runs": board_runs(&runs_reading(&raw, 100, None), "acme/app"), "note": null }).to_string().len();
+        assert!(
+            stored * 2 < before,
+            "stored {stored} bytes against {before}"
+        );
+    }
+
+    #[test]
+    fn runs_readings_have_their_own_shape() {
+        let mut sh = Share::new(false, None, FIXTURE_TOKEN, 60.0);
+        assert!(sh
+            .key("gha.runs", &["acme/app", "48"])
+            .starts_with(&format!("gha.runs/{RUNS_SHAPE}:")));
+        assert!(sh.key("gha.repos", &["x"]).starts_with("gha.repos/1:"));
     }
 
     #[test]
@@ -4775,7 +5014,7 @@ mod tests {
 
     fn batch_runs(
         sh: &mut Share,
-        mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<(Vec<serde_json::Value>, Option<String>), String>,
+        mut fetch: impl FnMut(&str, &mut Budget, &mut Ask) -> Result<serde_json::Value, String>,
     ) -> Vec<Read> {
         let live = Arc::new(Mutex::new(State::default()));
         let activity = tc::Refresh::default();
@@ -4785,8 +5024,8 @@ mod tests {
         shared_runs(sh, &repos, 48, &mut steps, &mut rate, &mut fetch)
     }
 
-    fn one_batch(repo: &str) -> (Vec<serde_json::Value>, Option<String>) {
-        (vec![serde_json::json!({ "id": 1, "repo": repo, "display_title": "fix the build" })], None)
+    fn one_batch(repo: &str) -> serde_json::Value {
+        one_run(repo)
     }
 
     #[test]
