@@ -207,6 +207,13 @@ struct Seen {
 /// A resumable ID is exact only when the server ties it to this pane.
 /// A cwd-only resumable entry does not identify this process or the newest
 /// session. With no binding the log reader chooses its own labelled guess.
+/// Whether a row's session log is chosen by the agent process's own
+/// directory: a row this widget promoted, with no session id to decide it,
+/// for an agent whose log has a reader.
+fn needs_agent_cwd(agent: &Agent, sessions: &[parse::Resumable]) -> bool {
+    promoted(agent) && log_session_hint(agent, sessions).is_none() && tc::agent_work::has_log_reader(&agent.kind)
+}
+
 fn log_session_hint<'a>(agent: &'a Agent, sessions: &'a [parse::Resumable]) -> Option<(&'a str, bool)> {
     if !agent.session_id.is_empty() { return Some((&agent.session_id, false)); }
     if let Some(s) = sessions.iter().find(|s| !s.pane.is_empty() && s.pane == agent.pane
@@ -527,32 +534,49 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str, configured: &
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
         fill_catalogue_agents(&mut listed, panes, processes.as_ref(), configured);
+        let resumable = sessions.as_ref().ok().map(Vec::as_slice).unwrap_or(&[]);
+        // A promoted row keeps the pid discovery found; any other is looked
+        // for below its pane's root by name. Found for every row first, so
+        // the rows that need the agent's own directory ask for it in one call
+        // - one `lsof` on macOS, with its five-second timeout - not one each.
+        let pids: Vec<Option<u32>> = listed
+            .iter()
+            .map(|agent| {
+                agent.pid.or_else(|| {
+                    let table = processes.as_ref()?.as_ref().ok()?;
+                    table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
+                })
+            })
+            .collect();
+        let mut wanted: Vec<u32> = listed
+            .iter()
+            .zip(&pids)
+            .filter(|(agent, _)| needs_agent_cwd(agent, resumable))
+            .filter_map(|(_, pid)| *pid)
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut cwds = super::host::agent_cwds(&wanted);
         let mut live = HashSet::new();
-        for agent in &mut listed {
+        for (agent, pid) in listed.iter_mut().zip(pids) {
             let key = duration_key(&agent.pane, &agent.name);
             let (since, exact) = measure_since(seen, &key, &agent.state, at);
             agent.since = since;
             agent.exact = exact;
-            // A promoted row keeps the pid discovery found; any other is
-            // looked for below its pane's root by name.
-            let pid = agent.pid.or_else(|| {
-                let table = processes.as_ref()?.as_ref().ok()?;
-                table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
-            });
             // With no root known the agent cannot be found, but a table
             // that did not come back still says so on its row.
             if let Some(table) = &processes {
                 agent.work = tc::agent_work::Work::of(table, pid);
             }
-            let hint = log_session_hint(agent, sessions.as_ref().ok().map(Vec::as_slice).unwrap_or(&[]));
+            let hint = log_session_hint(agent, resumable);
             // A row Luvus listed carries the agent's own directory. A promoted
             // row has only the pane's, and the agent may have moved since, so
             // its session log is chosen by the agent process's own directory,
             // as Herdr's are; one that cannot be read says so instead. A
             // session id, where there is one, is what decides, not a directory.
-            let logs = if promoted(agent) && hint.is_none() && tc::agent_work::has_log_reader(&agent.kind) {
+            let logs = if needs_agent_cwd(agent, resumable) {
                 match pid {
-                    Some(pid) => match super::host::agent_cwds(&[pid]).remove(&pid) {
+                    Some(pid) => match cwds.remove(&pid) {
                         Some(Ok(cwd)) => seen.logs.read_agent(&agent.kind, Some(pid), &cwd, None),
                         Some(Err(why)) => Err(format!("agent cwd: {why}")),
                         None => Err("agent cwd: agent cwd was not acquired".to_string()),
@@ -3482,6 +3506,26 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_promoted_log_reader_with_no_session_id_needs_the_agents_directory() {
+        let promoted_codex = Agent {
+            kind: "codex".into(),
+            pane: "p1".into(),
+            state_source: "no status reported".into(),
+            ..Default::default()
+        };
+        assert!(needs_agent_cwd(&promoted_codex, &[]));
+        // An agent with no log reader has no log to choose.
+        let promoted_agy = Agent { kind: "agy".into(), ..promoted_codex.clone() };
+        assert!(!needs_agent_cwd(&promoted_agy, &[]));
+        // A session id decides the log, so no directory is asked for.
+        let bound = Agent { session_id: "s1".into(), ..promoted_codex.clone() };
+        assert!(!needs_agent_cwd(&bound, &[]));
+        // A row Luvus itself listed carries its own directory.
+        let listed = Agent { state_source: String::new(), ..promoted_codex };
+        assert!(!needs_agent_cwd(&listed, &[]));
+    }
 
     #[test]
     fn a_session_id_is_exact_only_when_bound_to_the_pane() {
