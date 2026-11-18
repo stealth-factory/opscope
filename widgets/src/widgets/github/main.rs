@@ -2994,10 +2994,11 @@ fn one_pass(
             poll.board_failed.clear();
             let mut board = serde_json::Map::new();
             let mut taken_over = false;
+            let mut renewal = Renewal(tc::now());
             for acc in &accounts {
                 // Another pane took the reading over: its board is the one
                 // every pane shows.
-                if !ticket.renew() {
+                if renewal.due() && !ticket.renew() {
                     taken_over = true;
                     break;
                 }
@@ -3090,6 +3091,23 @@ fn one_pass(
         }
     }
     Ok(full && ready)
+}
+
+/// When a pass last renewed its leases. Renewing is a store write, and one
+/// before every request was most of what a quiet pass wrote; a lease renewed
+/// within the last third of [`LEASE_FOR`] still outlasts one request's
+/// thirty-second timeout, so it is left alone.
+struct Renewal(f64);
+
+impl Renewal {
+    fn due(&mut self) -> bool {
+        let now = tc::now();
+        if now - self.0 < LEASE_FOR / 3.0 {
+            return false;
+        }
+        self.0 = now;
+        true
+    }
 }
 
 /// What every request of a pass is asked with.
@@ -3225,6 +3243,7 @@ fn day_counts(
 
     let mut done: Vec<(usize, Answer, f64)> = Vec::new();
     let mut unanswered: Vec<usize> = Vec::new();
+    let mut renewal = Renewal(claimed_at);
     for (i, acc) in accs.iter().enumerate() {
         if !matches!(got[i], Claimed::Fetch) {
             continue;
@@ -3259,7 +3278,7 @@ fn day_counts(
                 chunk_err.get_or_insert_with(|| RATE_SPENT.to_string());
                 break;
             }
-            if !tc::readings::renew_all(cache, &keys[i], LEASE_FOR) {
+            if renewal.due() && !tc::readings::renew_all(cache, &keys[i], LEASE_FOR) {
                 taken_over = true;
                 break;
             }
@@ -3414,6 +3433,7 @@ fn merged_timing(
 
     let mut done: Vec<(usize, Answer, f64)> = Vec::new();
     let mut unanswered: Vec<usize> = Vec::new();
+    let mut renewal = Renewal(claimed_at);
     for (i, acc) in accs.iter().enumerate() {
         if !matches!(got[i], Claimed::Fetch) {
             continue;
@@ -3423,7 +3443,7 @@ fn merged_timing(
             continue;
         }
         let key = keys[i].clone();
-        let mut keep = || tc::readings::renew_all(cache, &key, LEASE_FOR);
+        let mut keep = || !renewal.due() || tc::readings::renew_all(cache, &key, LEASE_FOR);
         let fetched = fetch_land_timing(acc, &viewer, days_now, merged[i], ask.tok, ask.scopes, ask.gql_url, &mut keep);
         let at = tc::now();
         match fetched {
