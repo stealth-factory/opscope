@@ -3,6 +3,50 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.16.0] - 2026-11-18
+
+### Bug Fixes
+
+- **mux-activity**: Match a background agent's detail with / under Herdr and Luvus (OPS-281) (#629)
+- **mux-activity**: Switch the Rex app to the pane focus selects (OPS-291) (#642)
+- **github-actions**: Write the shared store only what actually changed (#662)
+- **mux-activity**: Show Claude background agents under Luvus when agent list fails (#655)
+- **core**: Restore terminal on every exit (#665)
+
+### Features
+
+- **mux-activity**: File Claude background agents under the session they belong to (OPS-292) (#647)
+- **mux-activity**: Group agents and panes by state with g (OPS-293) (#649)
+- **core**: Shared readings for fetches made of many requests (#646)
+- **mux-activity**: Order states working first, then what needs a human (OPS-295) (#652)
+- **github-actions**: Read GitHub's rate-limit reset and stamp readings with their own time (OPS-285 prep) (#645)
+- **github-actions**: Share repo discovery and per-repo runs across panes, and stop at the rate limit (#659)
+- **agent-usage**: Per-tab freshness, and every vendor's token guarded (#657)
+- **github-prs**: Share the counts and the pooled pull-request list across panes (#660)
+- **linear**: Share the workspace fetch across panes (#656)
+- **github**: Share identity, calendar, board totals, day counts and landed timing across panes (#658)
+- **core**: Add a discovery hook for settings pickers (#666)
+- Share one coding agent catalogue across mux-activity and agent-activity (#669)
+
+### Miscellaneous
+
+- Initialize shared agent catalogue draft (OPS-300)
+- Add a skill for measuring widget data usage in text and Kitty mode (OPS-201) (#667)
+
+### Performance
+
+- **github-actions**: Store only the run fields the board reads, and renew leases only when due (#664)
+- **mux-activity**: Look up promoted agents' directories in one call (OPS-302) [skip-cr] (#672)
+
+### Refactor
+
+- **core**: Move the shared-readings store out of agent-usage into tc::readings (#639)
+- **linear**: Split the workspace fetch from the per-pane board (OPS-286 prep) (#648)
+
+### Tests
+
+- **core**: Give the statefile lock test room on a slow runner (OPS-297) (#654)
+
 ## [2.15.0] - 2026-11-12
 
 ### CI
