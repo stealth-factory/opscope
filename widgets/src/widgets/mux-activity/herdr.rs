@@ -878,8 +878,23 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
                     Front::Running(_, _, _, fg_cwd) if !fg_cwd.is_empty() => fg_cwd.clone(),
                     _ => text_at(pane, "cwd"),
                 };
-                let work = tc::agent_work::Work::of(&table, agent_pid)
-                    .with_logs(seen.logs.read_agent(&kind, agent_pid, &cwd, None));
+                // A session log is chosen by the agent's own directory, never
+                // the foreground job's: Codex in /srv/api running a command
+                // in /srv/web would otherwise read /srv/web's latest session.
+                // An agent whose directory cannot be read says so instead.
+                let logs = match agent_pid {
+                    Some(pid) if tc::agent_work::has_log_reader(&kind) => super::rex::agent_log_work(
+                        &mut seen.logs,
+                        &kind,
+                        pid,
+                        &super::host::agent_cwds(&[pid]),
+                    ),
+                    None if tc::agent_work::has_log_reader(&kind) => {
+                        Err("agent process not found, so its directory is unknown".to_string())
+                    }
+                    _ => seen.logs.read_agent(&kind, agent_pid, &cwd, None),
+                };
+                let work = tc::agent_work::Work::of(&table, agent_pid).with_logs(logs);
                 agents.push(Agent {
                     name: kind,
                     pane_id,
@@ -1049,7 +1064,13 @@ fn file_jobs(
     // Agents whose process the table found: only one of those being the
     // job's process says a row already draws it. A marker is inherited from
     // the shell that started the job and says nothing about what runs there now.
-    let pids: Vec<Option<u32>> = agents.iter().filter(|a| a.job.is_none()).map(|a| a.pid).collect();
+    // A row promoted from the catalogue is no proof either: it knows only
+    // that the process runs, and its `unknown` would replace the state the
+    // job reported. The job's row is kept and the promoted one goes instead.
+    let pids: Vec<Option<u32>> =
+        agents.iter().filter(|a| a.job.is_none() && !a.from_catalogue).map(|a| a.pid).collect();
+    let job_pids: Vec<u32> = agents.iter().filter_map(|a| a.job.as_ref()?.pid).collect();
+    agents.retain(|a| !(a.job.is_none() && a.from_catalogue && a.pid.is_some_and(|p| job_pids.contains(&p))));
     let owned: Vec<(String, String, String)> = agents
         .iter()
         .filter(|a| a.job.is_none())
@@ -2886,6 +2907,31 @@ mod tests {
         let w1: Vec<usize> = grouped.iter().enumerate().filter(|(_, w)| *w == "w1").map(|(i, _)| i).collect();
         assert_eq!(w1.len(), 2);
         assert_eq!(w1[1], w1[0] + 1);
+    }
+
+    #[test]
+    fn a_catalogue_row_gives_way_to_the_job_that_reported_a_state() {
+        // Herdr did not list the resumed Claude; the catalogue promoted its
+        // pane as `unknown`, and its job file says `blocked`.
+        let mut promoted = agent("w1:p1", "w1", "unknown");
+        promoted.pid = Some(7);
+        promoted.from_catalogue = true;
+        let mut job_row = agent("", background::GROUP, "blocked");
+        let mut job = tc::agent_work::parse_job_state("resumed", r#"{"state":"blocked","cwd":"/srv/api"}"#).unwrap();
+        job.pid = Some(7);
+        job_row.job = Some(job);
+        // A promoted row on another process is left alone.
+        let mut other = agent("w1:p2", "w1", "unknown");
+        other.pid = Some(8);
+        other.from_catalogue = true;
+        let mut agents = vec![promoted, other, job_row];
+        let open = vec![("w1".to_string(), "w1:p1".to_string(), "/srv/api".to_string())];
+        file_jobs(&mut agents, &open, |pid| (pid == 7).then(|| "w1".to_string()));
+        let rows: Vec<(&str, &str, bool)> =
+            agents.iter().map(|a| (a.pane_id.as_str(), a.state.as_str(), a.job.is_some())).collect();
+        // Shown once, with the state it reported, filed beside its workspace.
+        assert_eq!(rows, vec![("w1:p2", "unknown", false), ("", "blocked", true)]);
+        assert_eq!(agents[1].workspace_id, "w1");
     }
 
     #[test]

@@ -767,6 +767,29 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_configured_generic_agent_is_found_again_by_its_name() {
+        // `forge` and `cn` added to `agents` by hand, with no install path
+        // to clue them, beside a job the same shell left running: discovery
+        // takes them, so looking their pid up again must too.
+        for (cmd, wanted) in [("forge", "forge"), ("cn", "cn"), ("agent", "agent")] {
+            let ps = format!("100 1 bash bash\n110 100 {cmd} {cmd}\n111 100 sleep sleep 600\n");
+            let table = parse_process_table(&ps).unwrap();
+            let configured = [wanted];
+            assert_eq!(
+                table.catalogue_agent_below(100, &configured).map(|(pid, kind)| (pid, kind)),
+                Some((110, wanted.to_string())),
+                "{cmd}"
+            );
+            assert_eq!(table.agent_below(100, wanted), Some(110), "{cmd}");
+        }
+        // Without the opt-in a bare Foundry `forge` is still not Forge Code,
+        // and the canonical id still wants its clue.
+        let table = parse_process_table("100 1 bash bash\n110 100 forge forge build\n111 100 sleep sleep 600\n").unwrap();
+        assert_eq!(table.agent_below(100, "forgecode"), None);
+        assert_eq!(table.catalogue_agent_below(100, crate::agent_work::DEFAULT_AGENTS), None);
+    }
+
+    #[test]
     fn a_background_agents_fan_draws_unfinished_subagents_and_replaces_their_log_rows() {
         let fan = |id: &str, kind: &str, done: Option<f64>| FanItem {
             id: id.into(),

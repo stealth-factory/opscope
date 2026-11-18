@@ -625,6 +625,15 @@ fn has_second_clue(entry: &CatalogueEntry, paths: &[&str], sub: Option<[&str; 2]
     by_path || by_args
 }
 
+/// Whether a lowercased `agents` entry matches a process by its name alone.
+/// A default is never an unconditional opt-in: `goose` is in the default
+/// list precisely so it matches *with* its clue, and a Group 1 name needs no
+/// opt-in.
+fn is_explicit_opt_in(lower: &str) -> bool {
+    !DEFAULT_AGENTS.contains(&lower)
+        && !CATALOGUE.iter().any(|e| e.is_group_1() && entry_named(e, lower))
+}
+
 fn match_candidates<S: AsRef<str>>(
     names: &[String],
     paths: &[&str],
@@ -669,13 +678,7 @@ fn match_candidates<S: AsRef<str>>(
         if c_lower.is_empty() {
             continue;
         }
-        // A default is never an unconditional opt-in: `goose` and `amp` are
-        // in the default list precisely so they match *with* their clue.
-        if DEFAULT_AGENTS.contains(&c_lower.as_str())
-            || CATALOGUE
-                .iter()
-                .any(|e| e.is_group_1() && entry_named(e, &c_lower))
-        {
+        if !is_explicit_opt_in(&c_lower) {
             continue;
         }
         if names.iter().any(|n| n == &c_lower) {
@@ -799,8 +802,13 @@ pub(super) fn process_matches_agent(comm: &str, args: &str, agent_name: &str) ->
             return true;
         }
     }
+    // A Group 2 command the user added to `agents` themselves (`forge`,
+    // `cn`, `agent`) is matched by its name alone, exactly as discovery's
+    // explicit opt-in in `match_candidates` takes it; otherwise discovery
+    // finds the agent and this refuses the same process when its pid is
+    // looked for again.
     if matched_catalogue_target {
-        return false;
+        return is_explicit_opt_in(&target) && names.iter().any(|n| *n == target);
     }
 
     let wanted = product(&target);

@@ -267,23 +267,37 @@ fn file_jobs(
     // is only where it was started.
     // Each proof keeps the index of the row it belongs to, so a job that
     // row draws can hand it its subagents.
+    // A row promoted from the catalogue is no proof: it knows only that a
+    // Claude process runs there, and its `unknown` would stand in for the
+    // state the job reported. The job keeps its row and the promoted one,
+    // the same process, goes instead.
     let mut drawn: Vec<(Option<u32>, &str, usize)> = listed
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.job.is_none())
+        .filter(|(_, a)| a.job.is_none() && !promoted(a))
         .map(|(i, a)| (None, a.session_id.as_str(), i))
         .collect();
+    let mut stood_in: Vec<(Option<u32>, usize)> = Vec::new();
     if let Ok(t) = table {
         let shown =
             |pane: &str| listed.iter().position(|a| a.job.is_none() && a.kind == "claude" && a.pane == pane);
-        drawn.extend(panes.iter().filter_map(|p| {
-            let row = shown(&p.pane_id)?;
-            Some((t.sole_agent_below(p.root_pid?, "claude"), "", row))
-        }));
+        for p in panes {
+            let (Some(row), Some(root)) = (shown(&p.pane_id), p.root_pid) else { continue };
+            let pid = t.sole_agent_below(root, "claude");
+            if promoted(&listed[row]) {
+                stood_in.push((pid, row));
+            } else {
+                drawn.push((pid, "", row));
+            }
+        }
     }
+    let mut replaced = Vec::new();
     let mut fans = Vec::new();
     let mut filed = Vec::new();
     for job in jobs {
+        replaced.extend(
+            stood_in.iter().filter(|&&(pid, _)| background::drawn_by(&job, [(pid, "")])).map(|&(_, row)| row),
+        );
         if let Some(&(_, _, row)) =
             drawn.iter().find(|&&(pid, session, _)| background::drawn_by(&job, [(pid, session)]))
         {
@@ -323,7 +337,17 @@ fn file_jobs(
         let agent = &mut listed[row];
         agent.work = std::mem::take(&mut agent.work).with_fan(&fan);
     }
+    let mut row = 0;
+    listed.retain(|_| {
+        row += 1;
+        !replaced.contains(&(row - 1))
+    });
     listed.extend(filed);
+}
+
+/// A row the catalogue promoted from a pane Luvus did not list as an agent.
+fn promoted(agent: &Agent) -> bool {
+    agent.job.is_none() && agent.state_source == "no status reported"
 }
 
 /// File the background agents into what `agent list` answered, or, when it
@@ -3491,6 +3515,38 @@ mod tests {
         assert!(listed.is_ok_and(|l| l.is_empty()) && apart.is_empty());
         assert_eq!(agents_note(&Ok(Vec::new()), 0).map(|(s, _)| s), Some("   no agents under this session".into()));
         assert_eq!(agents_note(&Ok(Vec::new()), 2), None);
+    }
+
+    #[test]
+    fn a_catalogue_row_gives_way_to_the_job_that_reported_a_state() {
+        // Luvus lists no agent in pane 3, so the catalogue promotes its
+        // Claude (7) as `unknown`; that process is a job that says `blocked`.
+        // Pane 1's promoted Claude (6) runs no job and stays.
+        let table = tc::agent_work::parse_process_table(
+            "10 1 bash bash\n6 10 claude claude\n11 1 bash bash\n7 11 claude claude --resume\n",
+        )
+        .map_err(String::from);
+        let panes: Vec<parse::Pane> = [("1", 10), ("3", 11)]
+            .iter()
+            .map(|&(id, root)| parse::Pane {
+                workspace: "web".into(),
+                pane_id: id.into(),
+                cwd: "/srv/web".into(),
+                root_pid: Some(root),
+                ..Default::default()
+            })
+            .collect();
+        let mut listed: Vec<Agent> = Vec::new();
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &["claude".to_string()]);
+        assert_eq!(listed.iter().filter(|a| promoted(a)).count(), 2);
+        let mut job = tc::agent_work::parse_job_state("resumed", r#"{"state":"blocked","cwd":"/srv/other"}"#).unwrap();
+        job.pid = Some(7);
+        file_jobs(&mut listed, &panes, vec![job], "background agents · via jobs", &table, 2.0e9, |_| None);
+        let rows: Vec<(&str, bool)> = listed.iter().map(|a| (a.pane.as_str(), a.job.is_some())).collect();
+        // Shown once, as the job, with the state it reported and its Explain panel.
+        assert_eq!(rows, vec![("1", false), ("", true)]);
+        assert_eq!(listed[1].state, background::state_word(listed[1].job.as_ref().unwrap()));
+        assert_ne!(listed[1].state, "unknown");
     }
 
     #[test]

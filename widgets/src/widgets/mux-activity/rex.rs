@@ -557,7 +557,7 @@ fn live_log_agent(pane: &Pane, table: &tc::agent_work::Table, name: &str) -> Opt
 
 /// Keep acquisition tied to the identified agent pid. Pane::cwd may be
 /// the cwd of a foreground build/test process in another directory.
-fn agent_log_work(reader: &mut tc::agent_work::LogReader, name: &str, agent: u32,
+pub(super) fn agent_log_work(reader: &mut tc::agent_work::LogReader, name: &str, agent: u32,
     cwds: &HashMap<u32, Result<String, String>>) -> Result<tc::agent_work::LogWork, String> {
     let cwd = cwds.get(&agent).ok_or("agent cwd was not acquired")?.as_ref()
         .map_err(|why| format!("agent cwd: {why}"))?;
