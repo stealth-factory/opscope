@@ -139,7 +139,7 @@ fn graphql(
             ("User-Agent", "opscope"),
         ],
         &body,
-        45,
+        GRAPHQL_FOR,
     )?;
     rate.take(status, &headers);
     if !(200..300).contains(&status) {
@@ -196,7 +196,7 @@ fn rest_get(
             ("User-Agent", "opscope"),
             ("X-GitHub-Api-Version", "2022-11-28"),
         ],
-        30,
+        REST_FOR,
     )?;
     rate.take(status, &headers);
     if !(200..300).contains(&status) {
@@ -671,12 +671,20 @@ fn split_repo(name: &str) -> Option<(String, String)> {
 const RUNS_SHAPE: u32 = 2;
 
 /// A stamp as the store keeps it: whole seconds since the epoch, or the
-/// text itself when it does not parse, so nothing GitHub said is lost.
+/// text itself when it has a fraction or does not parse, so nothing
+/// GitHub said is lost. A fraction of zero stays text. The board sorts
+/// these strings, and `2026-08-27T10:00:00Z` sorts after
+/// `2026-08-27T10:00:00.500Z`.
 fn stored_time(iso: &str) -> serde_json::Value {
-    match chrono::DateTime::parse_from_rfc3339(iso) {
-        Ok(at) if at.timestamp_subsec_nanos() == 0 => at.timestamp().into(),
-        _ => iso.into(),
+    let whole_seconds = iso
+        .find(['T', 't'])
+        .is_some_and(|t| !iso[t + 1..].contains('.'));
+    if whole_seconds {
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(iso) {
+            return at.timestamp().into();
+        }
     }
+    iso.into()
 }
 
 /// The RFC-3339 text the board reads back from [`stored_time`].
@@ -1451,9 +1459,18 @@ fn note(live: &Arc<Mutex<State>>, f: impl FnOnce(&mut tc::Progress)) {
 /// shared by no other widget.
 const STORE: &str = "github-actions";
 
-/// One request's timeout and a margin. GraphQL waits up to 45 s and REST
-/// 30 s; the lease is renewed before every request after a reading's first.
-const LEASE_FOR: f64 = 60.0;
+/// How long one GitHub request may run. GraphQL is the longer of the two.
+const GRAPHQL_FOR: u64 = 45;
+const REST_FOR: u64 = 30;
+
+/// Seconds kept past a request that uses its whole time.
+const LEASE_MARGIN: f64 = 15.0;
+
+/// Twice one request. A renewal is written only once half of this has
+/// gone, and the half that remains is one request plus [`LEASE_MARGIN`],
+/// so the request finishes inside the lease. A pane that dies holds the
+/// reading for this long.
+const LEASE_FOR: f64 = 2.0 * (GRAPHQL_FOR as f64 + LEASE_MARGIN);
 
 /// The store's limits. Run titles are stored, so a reading nobody has
 /// published for two hours is deleted on a later publish.
@@ -4016,7 +4033,9 @@ mod tests {
     #[test]
     fn a_stored_run_opens_back_into_every_field_the_board_reads() {
         let raw = [raw_run(9, "completed", "failure", "2026-08-27T10:02:00Z")];
-        let got = board_runs(&runs_reading(&raw, 1, None), "acme/app");
+        let reading = runs_reading(&raw, 1, None);
+        assert!(reading["runs"][0]["t0"].is_i64(), "a whole-second stamp was stored as text");
+        let got = board_runs(&reading, "acme/app");
         assert_eq!(
             got,
             vec![serde_json::json!({
@@ -4102,6 +4121,41 @@ mod tests {
             "a run with no address was given one"
         );
         assert_eq!(reading["note"], "note");
+    }
+
+    #[test]
+    fn a_zero_fraction_stays_text_and_sorts_behind_a_later_fraction() {
+        let older = "2026-08-27T10:00:00.000Z";
+        let newer = "2026-08-27T10:00:00.500Z";
+        let mut early = raw_run(1, "completed", "success", older);
+        early["created_at"] = older.into();
+        let mut later = raw_run(2, "completed", "success", newer);
+        later["created_at"] = newer.into();
+        let reading = runs_reading(&[early, later], 2, None);
+        assert_eq!(reading["runs"][0]["t0"], older, "a zero fraction was stored as seconds");
+        assert_eq!(reading["runs"][0]["t2"], older);
+        assert_eq!(reading["runs"][1]["t0"], newer);
+        let mut got = board_runs(&reading, "acme/app");
+        assert_eq!(got[0]["created_at"], older);
+        assert_eq!(got[1]["created_at"], newer);
+        // Newest first. Rebuilding `.000Z` as `...00Z` puts the older run first.
+        sort_runs_by_time(&mut got);
+        assert_eq!(got[0]["created_at"], newer);
+        assert_eq!(got[1]["created_at"], older);
+    }
+
+    #[test]
+    fn half_a_lease_covers_the_next_github_request() {
+        assert!(GRAPHQL_FOR >= REST_FOR, "the lease is sized from the shorter request");
+        let request = GRAPHQL_FOR as f64 + LEASE_MARGIN;
+        assert!(
+            LEASE_FOR / 2.0 >= request,
+            "a skipped renewal leaves less than one request"
+        );
+        assert!(
+            LEASE_FOR <= tc::readings::lease::MAX_LEASE,
+            "the store would shorten this lease"
+        );
     }
 
     #[test]

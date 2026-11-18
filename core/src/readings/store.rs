@@ -415,11 +415,17 @@ impl Store {
     /// Hold a lease this pane has for another `lease_for` seconds, before the
     /// next request of a long fetch. `false` when it is no longer this
     /// pane's: it ran out and another pane took it.
+    ///
+    /// The write happens once less than half of `lease_for` remains. The
+    /// caller sizes the lease at twice one request, so that half still
+    /// covers the request about to start. A lease with more than half
+    /// left is only read.
     pub fn renew(&mut self, key: &str, now: f64, lease_for: f64) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
-        // Only a lease past half its length is written: renewing before
-        // every request of a long fetch rewrote the leases table dozens of
-        // times a minute for leases that had most of their time left.
+        // Half, not sooner: renewing before every request of a long fetch
+        // rewrote the leases table dozens of times a minute for leases
+        // that had most of their time left. The caller sizes `lease_for`
+        // at twice one request, so the half left still covers it.
         let n = self
             .conn
             .execute(
@@ -455,8 +461,10 @@ impl Store {
     pub fn renew_all(&mut self, now: f64, lease_for: f64, key: &str) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
         // Nothing to write while every lease this pane holds has more than
-        // half its length left: a read, not a transaction. This ran before
-        // every GitHub request and was most of what a busy pane wrote.
+        // half its length left: a read, not a transaction. Half is one
+        // request, because the caller sizes `lease_for` at twice that.
+        // This ran before every GitHub request and was most of what a
+        // busy pane wrote.
         let due: Option<i64> = self
             .conn
             .query_row(
@@ -1283,8 +1291,8 @@ mod tests {
         assert!(a.renew("k", NOW + 19.0, 20.0).unwrap());
         b.begin_pass().unwrap();
         assert_eq!(b.claim_for("k", None, NOW + 30.0, 20.0).unwrap(), Got::Held(1));
-        // A pane that died stops renewing, and the lease runs out after one
-        // request's length, not after the whole pass would have.
+        // A pane that died stops renewing, and the lease runs out after
+        // `lease_for`, not after the whole pass would have.
         assert_eq!(b.claim_for("k", None, NOW + 40.0, 20.0).unwrap(), Got::Mine);
         assert!(!a.renew("k", NOW + 41.0, 20.0).unwrap(), "renewed a lease another pane took");
         // No claim asks for longer than MAX_LEASE.
@@ -1822,6 +1830,16 @@ mod tests {
             assert!(s.renew("k", NOW + i as f64, 60.0).unwrap());
         }
         assert_eq!(s.writes, writes, "a lease with most of its time left was rewritten");
+        // The last instant a renewal is skipped: half the lease remains,
+        // which is the one request the caller has to fit there.
+        assert!(s.renew("k", NOW + 30.0, 60.0).unwrap());
+        assert!(s.renew_all(NOW + 30.0, 60.0, "k").unwrap());
+        assert_eq!(s.writes, writes, "the halfway mark was rewritten");
+        let left: f64 = s
+            .conn
+            .query_row("SELECT expires_at FROM leases WHERE key = 'k'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left - (NOW + 30.0), 30.0);
         // Past half its length it is extended, once.
         assert!(s.renew_all(NOW + 31.0, 60.0, "k").unwrap());
         assert_eq!(s.writes, writes + 1);
