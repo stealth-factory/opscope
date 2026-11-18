@@ -417,17 +417,35 @@ impl Store {
     /// pane's: it ran out and another pane took it.
     pub fn renew(&mut self, key: &str, now: f64, lease_for: f64) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        // Only a lease past half its length is written: renewing before
+        // every request of a long fetch rewrote the leases table dozens of
+        // times a minute for leases that had most of their time left.
         let n = self
             .conn
             .execute(
-                "UPDATE leases SET expires_at = ?3 WHERE key = ?1 AND holder = ?2",
-                params![key, self.me, now + lease_for],
+                "UPDATE leases SET expires_at = ?4 WHERE key = ?1 AND holder = ?2 AND expires_at < ?3",
+                params![key, self.me, now + lease_for / 2.0, now + lease_for],
             )
             .map_err(sql)?;
         if n > 0 {
             self.writes += 1;
+            return Ok(true);
         }
-        Ok(n > 0)
+        self.holds(key, now)
+    }
+
+    /// Whether this pane still holds `key`'s lease at `now`. A read only.
+    fn holds(&self, key: &str, now: f64) -> Result<bool, String> {
+        let mine: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM leases WHERE key = ?1 AND holder = ?2 AND expires_at > ?3",
+                params![key, self.me, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        Ok(mine.is_some())
     }
 
     /// Extend every lease this pane still holds, and say whether `key` is
@@ -436,6 +454,21 @@ impl Store {
     /// run out while the early answers sit unpublished (OPS-298).
     pub fn renew_all(&mut self, now: f64, lease_for: f64, key: &str) -> Result<bool, String> {
         let lease_for = lease_for.clamp(1.0, lease::MAX_LEASE);
+        // Nothing to write while every lease this pane holds has more than
+        // half its length left: a read, not a transaction. This ran before
+        // every GitHub request and was most of what a busy pane wrote.
+        let due: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM leases WHERE holder = ?1 AND expires_at > ?2 AND expires_at < ?3 LIMIT 1",
+                params![self.me, now, now + lease_for / 2.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        if due.is_none() {
+            return self.holds(key, now);
+        }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql)?;
         let n = tx
             .execute(
@@ -1775,6 +1808,32 @@ mod tests {
             .unwrap();
         let back = s.load("k").unwrap().unwrap();
         assert_eq!(back.good, Some((NOW, good)), "the refusal became the kept reading");
+    }
+
+    #[test]
+    fn a_lease_with_most_of_its_time_left_is_not_rewritten() {
+        let path = temp_store("renew-half");
+        let mut s = Store::open(&path).unwrap();
+        assert_eq!(s.claim_for("k", None, NOW, 60.0).unwrap(), Got::Mine);
+        let writes = s.writes;
+        // Ten requests in the first half of the lease: reads only.
+        for i in 0..10 {
+            assert!(s.renew_all(NOW + i as f64, 60.0, "k").unwrap());
+            assert!(s.renew("k", NOW + i as f64, 60.0).unwrap());
+        }
+        assert_eq!(s.writes, writes, "a lease with most of its time left was rewritten");
+        // Past half its length it is extended, once.
+        assert!(s.renew_all(NOW + 31.0, 60.0, "k").unwrap());
+        assert_eq!(s.writes, writes + 1);
+        let until: f64 = s
+            .conn
+            .query_row("SELECT expires_at FROM leases WHERE key = 'k'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(until, NOW + 31.0 + 60.0);
+        // A lease another pane took is still reported as lost.
+        s.conn.execute("UPDATE leases SET holder = 999 WHERE key = 'k'", []).unwrap();
+        assert!(!s.renew_all(NOW + 32.0, 60.0, "k").unwrap());
+        assert!(!s.renew("k", NOW + 32.0, 60.0).unwrap());
     }
 }
 
