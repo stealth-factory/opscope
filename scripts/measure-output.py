@@ -90,6 +90,9 @@ VALID_MODES = ("text", "kitty", "herdr", "kitty-herdr", "all")
 MAX_SEQ_BYTES = 1_048_576
 MAX_UPLOAD_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_READS_PER_TICK = 4
+MAX_PENDING_REPLIES = 256 * 1024
+# Kitty graphics `s`/`v`/`i`/`p` are unsigned 32-bit protocol integers.
+KITTY_U32_MAX = 0xFFFFFFFF
 
 
 def is_probe_image_id(image_id: Optional[int]) -> bool:
@@ -129,19 +132,31 @@ def parse_kitty_kv(header: bytes) -> Dict[str, str]:
     return kv
 
 
-def positive_dimensions(kv: Dict[str, str]) -> Optional[Tuple[int, int]]:
-    s_str = kv.get("s")
-    v_str = kv.get("v")
-    if s_str is None or v_str is None:
+def kitty_u32(text: Optional[str]) -> Optional[int]:
+    """Return a Kitty protocol integer, or None when the field is absent or illegal."""
+    if text is None:
         return None
-    try:
-        w = int(s_str)
-        h = int(v_str)
-    except ValueError:
+    if not text.isascii() or not text.isdigit() or len(text) > 10:
         return None
-    if w > 0 and h > 0:
-        return (w, h)
+    value = int(text)
+    if 0 <= value <= KITTY_U32_MAX:
+        return value
     return None
+
+
+def positive_dimensions(kv: Dict[str, str]) -> Optional[Tuple[int, int]]:
+    """Pixel size from `s` and `v` when both are protocol integers.
+
+    A present but illegal field returns None, same as an omitted pair. Callers
+    that must tell those apart check the keys themselves.
+    """
+    if "s" not in kv or "v" not in kv:
+        return None
+    w = kitty_u32(kv.get("s"))
+    h = kitty_u32(kv.get("v"))
+    if w is None or h is None or w <= 0 or h <= 0:
+        return None
+    return (w, h)
 
 
 def parse_png_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
@@ -153,10 +168,18 @@ def parse_png_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
-def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> int:
-    """Return the decoded RGBA byte count (`w * h * 4`) of an upload."""
-    dims = positive_dimensions(kv)
-    if dims is not None:
+def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -> Optional[int]:
+    """Return the RGBA byte count of an upload.
+
+    `None` means zlib output exceeded the retained-payload cap. A PNG `f=100`
+    estimate is returned even when it is larger than that cap, because the PNG
+    bytes are not expanded. Declared `s`/`v` that are not protocol integers
+    yield 0; the caller marks the sample invalid.
+    """
+    if "s" in kv or "v" in kv:
+        dims = positive_dimensions(kv)
+        if dims is None:
+            return 0
         return dims[0] * dims[1] * 4
 
     raw_b64 = b"".join(payload_chunks)
@@ -168,7 +191,7 @@ def decoded_upload_rgba_bytes(kv: Dict[str, str], payload_chunks: List[bytes]) -
             decomp = zlib.decompressobj()
             decoded = decomp.decompress(decoded, MAX_UPLOAD_PAYLOAD_BYTES + 1)
             if len(decoded) > MAX_UPLOAD_PAYLOAD_BYTES or decomp.unconsumed_tail:
-                return MAX_UPLOAD_PAYLOAD_BYTES + 1
+                return None
     except (ValueError, zlib.error):
         return 0
 
@@ -425,6 +448,17 @@ class TerminalStream:
         self._chunk_payloads.append(payload)
         self._chunk_payload_bytes += len(payload)
 
+    def _account_rgba(self, cmd_kv: Dict[str, str], payloads: List[bytes], kind: str) -> None:
+        if "s" in cmd_kv or "v" in cmd_kv:
+            if positive_dimensions(cmd_kv) is None:
+                self.sample_invalid = "Kitty s/v dimensions are outside the protocol range"
+                return
+        rgba = decoded_upload_rgba_bytes(cmd_kv, payloads)
+        if rgba is None:
+            self.sample_invalid = f"decompressed Kitty {kind} exceeded safety cap"
+            return
+        self.metrics.raw_rgba_bytes += rgba
+
     def _handle_kitty(self, body: bytes, *, wire_len: int) -> None:
         began_in_window = self.measuring and self._warmup_prefix == 0
         measured_wire = self._measured_len(wire_len)
@@ -478,6 +512,10 @@ class TerminalStream:
             q_mode = cmd_kv.get("q", "0")
             id_str = cmd_kv.get("i")
             p_str = cmd_kv.get("p")
+            if kitty_u32(id_str) is None:
+                id_str = None
+            if kitty_u32(p_str) is None:
+                p_str = None
             if (id_str == str(SHM_PROBE_ID) or cmd_kv.get("t") == "s") and id_str:
                 if q_mode != "2":
                     self.replies.extend(
@@ -508,19 +546,11 @@ class TerminalStream:
         if action in ("T", "t"):
             self.metrics.a_t += 1
             self.metrics.uploads += 1
-            rgba = decoded_upload_rgba_bytes(cmd_kv, payloads)
-            if rgba > MAX_UPLOAD_PAYLOAD_BYTES and positive_dimensions(cmd_kv) is None:
-                self.sample_invalid = "decompressed Kitty upload exceeded safety cap"
-            else:
-                self.metrics.raw_rgba_bytes += rgba
+            self._account_rgba(cmd_kv, payloads, "upload")
         elif action == "f":
             self.metrics.a_f += 1
             self.metrics.uploads += 1
-            rgba = decoded_upload_rgba_bytes(cmd_kv, payloads)
-            if rgba > MAX_UPLOAD_PAYLOAD_BYTES and positive_dimensions(cmd_kv) is None:
-                self.sample_invalid = "decompressed Kitty frame edit exceeded safety cap"
-            else:
-                self.metrics.raw_rgba_bytes += rgba
+            self._account_rgba(cmd_kv, payloads, "frame edit")
         elif action == "p":
             self.metrics.a_p += 1
         elif action == "d":
@@ -867,6 +897,20 @@ def terminate_process_group(
     return exit_code
 
 
+def queue_terminal_reply(tx_buf: bytearray, reply: bytes, stream: "TerminalStream") -> None:
+    """Append a terminal reply unless the widget has stopped draining stdin."""
+    if not reply:
+        return
+    if len(tx_buf) + len(reply) > MAX_PENDING_REPLIES:
+        if stream.sample_invalid is None:
+            stream.sample_invalid = (
+                "terminal reply queue exceeded "
+                f"{MAX_PENDING_REPLIES // 1024} KiB; widget stopped reading replies"
+            )
+        return
+    tx_buf.extend(reply)
+
+
 def flush_tx_buf(master_fd: int, tx_buf: bytearray) -> None:
     if not tx_buf:
         return
@@ -993,9 +1037,7 @@ def run_mode(
                         break
                     reads += 1
                     stream.feed(chunk)
-                    reply = stream.take_replies()
-                    if reply:
-                        tx_buf.extend(reply)
+                    queue_terminal_reply(tx_buf, stream.take_replies(), stream)
 
             if tx_buf and (wready or rready):
                 flush_tx_buf(master_fd, tx_buf)
@@ -1050,11 +1092,7 @@ def proc_dir_for(pid: int) -> Path:
     return Path("/proc") / str(int(pid))
 
 
-def read_proc_wchar(pid: int) -> Optional[int]:
-    try:
-        io_text = (proc_dir_for(pid) / "io").read_text(encoding="ascii")
-    except (OSError, ValueError):
-        return None
+def wchar_from_io_text(io_text: str) -> Optional[int]:
     for line in io_text.splitlines():
         if line.startswith("wchar:"):
             try:
@@ -1062,6 +1100,62 @@ def read_proc_wchar(pid: int) -> Optional[int]:
             except (IndexError, ValueError):
                 return None
     return None
+
+
+def read_proc_wchar(pid: int) -> Optional[int]:
+    try:
+        io_text = (proc_dir_for(pid) / "io").read_text(encoding="ascii")
+    except (OSError, ValueError):
+        return None
+    return wchar_from_io_text(io_text)
+
+
+class ProcIoHandle:
+    """`/proc/<pid>` directory fd pinned to the process that was open at arm time.
+
+    Reopening by PID can observe a recycled process. Reads through this fd keep
+    failing after the original process exits instead of following the new one.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self._dirfd = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+
+    def _read_file(self, name: str) -> Optional[str]:
+        try:
+            fd = os.open(name, os.O_RDONLY, dir_fd=self._dirfd)
+        except OSError:
+            return None
+        try:
+            chunks: List[bytes] = []
+            total = 0
+            while total < 65536:
+                block = os.read(fd, 4096)
+                if not block:
+                    break
+                chunks.append(block)
+                total += len(block)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        return b"".join(chunks).decode("ascii", "replace")
+
+    def read_wchar(self) -> Optional[int]:
+        text = self._read_file("io")
+        if text is None:
+            return None
+        return wchar_from_io_text(text)
+
+    def alive(self) -> bool:
+        return self._read_file("comm") is not None
+
+    def close(self) -> None:
+        try:
+            os.close(self._dirfd)
+        except OSError:
+            # The directory fd may already be closed during shutdown.
+            pass
 
 
 def read_proc_comm(pid: int) -> str:
@@ -1127,27 +1221,44 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
     tracked = [pid, *children]
     initial: Dict[int, int] = {}
     names: Dict[int, str] = {}
-    for p in tracked:
-        val = read_proc_wchar(p)
-        if val is not None:
+    handles: Dict[int, ProcIoHandle] = {}
+    try:
+        for p in tracked:
+            try:
+                handle = ProcIoHandle(p)
+            except OSError:
+                continue
+            val = handle.read_wchar()
+            if val is None:
+                handle.close()
+                continue
+            handles[p] = handle
             initial[p] = val
             names[p] = sanitize_display_text(read_proc_comm(p))
 
-    t0 = time.monotonic()
-    time.sleep(max(0.1, seconds))
-    dt = max(0.001, time.monotonic() - t0)
+        t0 = time.monotonic()
+        time.sleep(max(0.1, seconds))
+        dt = max(0.001, time.monotonic() - t0)
 
-    print(f"{'pid':>8}  {'comm':<20}  {'wchar KB/s':>12}  {'note'}")
-    for p, v0 in initial.items():
-        v1 = read_proc_wchar(p)
-        if v1 is None:
-            print(f"{p:>8}  {names[p]:<20}  {'(exited)':>12}  process exited during window")
-            continue
-        rate = max(0, v1 - v0) / KB / dt
-        note = "includes all write() syscalls (tty + files/sockets)"
-        if p == pid and (raw_comm == "opscope" or children):
-            note = "parent (+ any reaped children); live child writes are separate"
-        print(f"{p:>8}  {names[p]:<20}  {rate:>12.2f}  {note}")
+        print(f"{'pid':>8}  {'comm':<20}  {'wchar KB/s':>12}  {'note'}")
+        for p, v0 in initial.items():
+            handle = handles[p]
+            v1 = handle.read_wchar()
+            if v1 is None:
+                if handle.alive():
+                    label, note = "(unread)", "I/O counter unavailable"
+                else:
+                    label, note = "(gone)", "original process is gone"
+                print(f"{p:>8}  {names[p]:<20}  {label:>12}  {note}")
+                continue
+            rate = max(0, v1 - v0) / KB / dt
+            note = "includes all write() syscalls (tty + files/sockets)"
+            if p == pid and (raw_comm == "opscope" or children):
+                note = "parent (+ any reaped children); live child writes are separate"
+            print(f"{p:>8}  {names[p]:<20}  {rate:>12.2f}  {note}")
+    finally:
+        for handle in handles.values():
+            handle.close()
     return 0
 
 
@@ -1207,14 +1318,21 @@ def run_herdr_watchdog(
     if not Path("/proc").is_dir():
         sys.stderr.write("error: --watchdog-pid requires Linux /proc/<pid>/io\n")
         return 2
-    prev = read_proc_wchar(bridge_pid)
+    try:
+        bridge = ProcIoHandle(bridge_pid)
+    except OSError as err:
+        sys.stderr.write(f"error: cannot pin /proc/{bridge_pid}: {err}\n")
+        return 2
+    prev = bridge.read_wchar()
     if prev is None:
+        bridge.close()
         sys.stderr.write(f"error: cannot read /proc/{bridge_pid}/io\n")
         return 2
 
     try:
         targets = pin_watchdog_targets(kill_pids)
     except OSError as err:
+        bridge.close()
         sys.stderr.write(f"error: cannot arm watchdog on --kill-pid target: {err}\n")
         return 2
 
@@ -1238,7 +1356,7 @@ def run_herdr_watchdog(
                 break
             time.sleep(min(1.0, max(0.05, (t_start + seconds) - now)))
             t_now = time.monotonic()
-            cur = read_proc_wchar(bridge_pid)
+            cur = bridge.read_wchar()
             if cur is None:
                 elapsed_err = t_now - t_start
                 sys.stderr.write(
@@ -1284,7 +1402,7 @@ def run_herdr_watchdog(
                 return 2
 
         total_dt = max(0.001, time.monotonic() - t_start)
-        end_val = read_proc_wchar(bridge_pid)
+        end_val = bridge.read_wchar()
         if end_val is None:
             sys.stderr.write(
                 f"error: /proc/{bridge_pid}/io became unreadable at end of {total_dt:.1f}s window\n"
@@ -1303,6 +1421,7 @@ def run_herdr_watchdog(
             except OSError:
                 # Ignore close errors during watchdog handle cleanup.
                 pass
+        bridge.close()
 
 
 def format_table(results: Sequence[ModeResult]) -> str:
@@ -1450,12 +1569,11 @@ def run_self_tests() -> int:
         )
         flood_script = Path(tf.name)
     try:
-        flood_script.chmod(0o755)
         t_flood = time.monotonic()
         res = run_mode(
-            flood_script,
+            Path(sys.executable),
             "flood-test",
-            [],
+            [str(flood_script)],
             mode="kitty",
             seconds=0.25,
             warmup=0.0,
@@ -1466,6 +1584,8 @@ def run_self_tests() -> int:
             steady=False,
         )
         dt_flood = time.monotonic() - t_flood
+        assert res.exited_early is None, res.exited_early
+        assert res.metrics.a_p > 0, res.metrics
         assert dt_flood < 2.0, f"flood starved deadline ({dt_flood:.2f}s)"
         assert res.verdict == "FAIL", res
     finally:
@@ -1595,11 +1715,10 @@ def run_self_tests() -> int:
             removed = True
         helper = 0
         try:
-            script_path.chmod(0o755)
             run_mode(
-                script_path,
+                Path(sys.executable),
                 "group-test",
-                [],
+                [str(script_path)],
                 mode="text",
                 seconds=0.4,
                 warmup=0.0,
@@ -1635,6 +1754,50 @@ def run_self_tests() -> int:
 
     assert_helper_dies_with_leader(False)
     assert_helper_dies_with_leader(True)
+
+    # 8. Illegal Kitty dimensions and a non-ASCII id must not raise.
+    assert positive_dimensions({"s": "9" * 310, "v": "1"}) is None
+    assert positive_dimensions({"s": "10", "v": "20"}) == (10, 20)
+    huge = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    huge.start_measuring()
+    huge.feed(b"\x1b_Ga=T,s=" + b"9" * 40 + b",v=1,i=4,q=2\x1b\\")
+    assert huge.sample_invalid == "Kitty s/v dimensions are outside the protocol range"
+    verdict_huge, _reasons_huge = evaluate_budget(
+        mode="kitty",
+        widget_name="latency",
+        elapsed_s=1.0,
+        metrics=huge.metrics,
+        sample_invalid=huge.sample_invalid,
+    )
+    assert verdict_huge == "FAIL"
+    bad_id = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    bad_id.start_measuring()
+    bad_id.feed("\x1b_Ga=T,i=1\ufffd,q=0\x1b\\".encode("utf-8"))
+    assert bad_id.take_replies() == b""
+
+    png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" + struct.pack(">II", 2560, 1700) + b"\x08\x06\x00\x00\x00"
+    png_est = decoded_upload_rgba_bytes({"f": "100"}, [base64.b64encode(png)])
+    assert png_est == 2560 * 1700 * 4
+    assert png_est is not None and png_est > MAX_UPLOAD_PAYLOAD_BYTES
+    png_stream = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    png_stream.start_measuring()
+    png_stream.feed(b"\x1b_Ga=T,f=100,i=3,q=2;" + base64.b64encode(png) + b"\x1b\\")
+    assert png_stream.sample_invalid is None
+    assert png_stream.metrics.raw_rgba_bytes == png_est
+
+    tx = bytearray()
+    capped = TerminalStream(kitty_capable=True, cell_w=10, cell_h=20)
+    queue_terminal_reply(tx, b"a" * (MAX_PENDING_REPLIES + 1), capped)
+    assert capped.sample_invalid is not None
+    assert tx == bytearray()
+
+    if Path("/proc").is_dir():
+        pinned_io = ProcIoHandle(os.getpid())
+        try:
+            assert pinned_io.read_wchar() is not None
+            assert pinned_io.alive()
+        finally:
+            pinned_io.close()
 
     print("self-test: ok")
     return 0

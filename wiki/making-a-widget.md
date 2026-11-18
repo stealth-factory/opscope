@@ -551,7 +551,7 @@ every documented key, and the shared settings screen where present. Restart
 the process after editing—the running binary still holds the old code.
 
 Measure terminal output across `text`, `kitty`, and `herdr` modes against the
-data budget with [`measure-data-usage`](../.claude/skills/measure-data-usage/SKILL.md):
+data budget with [`measure-data-usage`](../.agents/skills/measure-data-usage/SKILL.md):
 
 ```sh
 python3 -I scripts/measure-output.py ./target/debug/example-widget --seconds 60
