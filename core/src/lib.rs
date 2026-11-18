@@ -98,6 +98,61 @@ pub const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 /// terminal that only understood one of them is left as it was found.
 pub const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
+/// Keep every widget frame off the shell's screen and out of its scrollback.
+const ALT_SCREEN_ENTER: &str = "\x1b[?1049h";
+/// Whether this process still owns an alternate screen. Normal quit asks for
+/// cleanup twice (Keyboard, then restore_screen); only the first may clear,
+/// because the second would already be writing on the restored shell screen.
+static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The one thread allowed to write terminal transitions. A process-directed
+/// signal can land on any worker; masking only setup/main would leave those
+/// workers able to interleave a second restore. They record and return instead.
+static TERMINAL_THREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// A fatal request is sticky; a queued stop or continue can never erase it.
+static DEFERRED_FATAL_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// Stop/continue is state, not a queue: the latest request is the next state.
+static DEFERRED_JOB_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+fn defer_terminal_signal(sig: libc::c_int) -> bool {
+    let owner = TERMINAL_THREAD.load(Ordering::Acquire);
+    if owner == 0 || unsafe { libc::pthread_self() } as usize == owner {
+        return false;
+    }
+    match sig {
+        libc::SIGCONT | libc::SIGTSTP => DEFERRED_JOB_SIGNAL.store(sig, Ordering::Release),
+        _ => {
+            let _ = DEFERRED_FATAL_SIGNAL.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+    true
+}
+
+/// Run a worker's request when the terminal-owning thread next waits or polls.
+/// No worker writes a second restoration or exits while main is between bytes.
+fn service_deferred_terminal_signal() {
+    let owner = TERMINAL_THREAD.load(Ordering::Acquire);
+    if owner == 0 || unsafe { libc::pthread_self() } as usize != owner {
+        return;
+    }
+    let fatal = DEFERRED_FATAL_SIGNAL.load(Ordering::Acquire);
+    if fatal != 0 {
+        handle_signal(fatal);
+    }
+    let sig = DEFERRED_JOB_SIGNAL.swap(0, Ordering::AcqRel);
+    match sig {
+        0 => {}
+        libc::SIGCONT => handle_lost_screen(sig),
+        libc::SIGTSTP => handle_suspend(sig),
+        _ => handle_signal(sig),
+    }
+}
+
+/// Resume terminal output before any cleanup write. A stopped output stream
+/// otherwise makes TCSADRAIN/write a deadlock when the exit itself is urgent.
+fn resume_terminal_output() {
+    unsafe { libc::tcflow(libc::STDOUT_FILENO, libc::TCOON); }
+}
+
 /// Eight levels used by compact bar charts across the widgets.
 pub const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -1315,6 +1370,9 @@ pub(crate) fn screen_lost() {
 static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
+    if sig == libc::SIGCONT && defer_terminal_signal(sig) {
+        return;
+    }
     SCREEN_LOST.store(true, Ordering::Release);
     if sig == libc::SIGWINCH {
         terminal::note_resize();
@@ -2005,6 +2063,11 @@ fn stamped_with(row: &str, w: usize, counter: Option<&(&'static str, String)>) -
 /// copy a line out of a widget is that widget's own copy key. Every key is
 /// unaffected either way - ctrl-y and ctrl-e still scroll.
 pub fn setup() {
+    TERMINAL_THREAD.store(unsafe { libc::pthread_self() } as usize, Ordering::Release);
+    // An uncaught panic is recorded before Keyboard::drop restores the
+    // screen; Drop then prints it on the restored main screen. Caught frame
+    // and poller panics keep using the same recording hook.
+    arm_panic_hook();
     unsafe {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
@@ -2040,31 +2103,42 @@ pub fn setup() {
 /// turns them off, because a terminal left reporting outlives the process
 /// that asked for it.
 pub fn claim_screen() {
+    resume_terminal_output();
+    // A delivered signal runs only after the enter bytes have landed. Without
+    // this hold, it could clear the shell between publishing ACTIVE and 1049h.
+    let _hold = terminal::block_handled_signals();
     forget_frame();
     graphics::cleanup();
     terminal::claim_terminal();
-    out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
+    ALT_SCREEN_ACTIVE.store(true, Ordering::Release);
+    out(&format!("{}{}{}{}{}", ALT_SCREEN_ENTER, MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
 
-/// The bytes `handle_signal` writes. Built as a constant so the handler
-/// never formats, allocates, or takes the stdout lock - any of which can
-/// deadlock if the signal arrives while `draw` is already writing.
-/// Mouse-off leads, because it is the one whose absence outlives the
-/// process. A terminal left reporting spits escape bytes at the shell on
-/// every later click, caused by something that already exited, with
-/// nothing on screen to explain it. The cursor and the clear are only
-/// cosmetic by comparison.
+/// The bytes every exit writes after deleting images and popping the keyboard
+/// protocol. Built as a constant so the signal handler never formats,
+/// allocates, or takes the stdout lock - any of which can deadlock if the
+/// signal arrives while `draw` is already writing.
+///
+/// Mouse-off leads, because leaving it on outlives the process. Synchronized
+/// updates end before the cursor is shown and SGR is reset. Clear and home are
+/// the floor for a terminal that ignores the alternate screen; leaving 1049 is
+/// last, restores the shell's original screen, and keeps frames out of its
+/// scrollback. Ending a synchronized update and disabling reports that were
+/// never enabled are both harmless, and avoid a conditional diverging between
+/// normal, panic and signal exits.
 const SCREEN_RESTORE: &str = concat!(
     "\x1b[?1006l",
     "\x1b[?1000l",
     // Light/dark reports (mode 2031), which outlive the process the same
     // way: the next switch would be typed at the shell.
     "\x1b[?2031l",
+    "\x1b[?2026l",
     "\x1b[?25h",
     "\x1b[0m",
     "\x1b[2J",
-    "\x1b[H"
+    "\x1b[H",
+    "\x1b[?1049l"
 );
 
 /// Saved cbreak settings, written by `Keyboard` and read by the handler.
@@ -2094,6 +2168,11 @@ fn forget_termios() {
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
 fn restore_terminal_signal() {
+    resume_terminal_output();
+    // Do not let a second handled signal interrupt this transition either.
+    // Like the keyboard cleanup guard below, this uses pthread_sigmask and no
+    // allocation or lock, and restores the previous mask when it returns.
+    let _hold = terminal::block_handled_signals();
     // Suspend and a signalled exit both come through here. Disarm shared
     // memory without unlinking: `shm_unlink` is not async-signal-safe, and
     // calling it here can stop the handler from restoring the terminal.
@@ -2110,23 +2189,34 @@ fn restore_terminal_signal() {
             }
         }
     }
-    unsafe {
-        libc::write(
-            libc::STDOUT_FILENO,
-            SCREEN_RESTORE.as_ptr() as *const libc::c_void,
-            SCREEN_RESTORE.len(),
-        );
+    if ALT_SCREEN_ACTIVE.load(Ordering::Acquire) {
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                SCREEN_RESTORE.as_ptr() as *const libc::c_void,
+                SCREEN_RESTORE.len(),
+            );
+        }
+        // Only a completed restore counts as inactive. The signal hold above
+        // means no second handler can skip the write in between.
+        ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
     }
 }
 
 extern "C" fn handle_signal(sig: libc::c_int) {
+    if defer_terminal_signal(sig) {
+        return;
+    }
     // Exit only, not suspend: a pane stopped with Ctrl-Z is still there.
     clear_program_status_signal();
     restore_terminal_signal();
     unsafe { libc::_exit(128 + sig); }
 }
 
-extern "C" fn handle_suspend(_: libc::c_int) {
+extern "C" fn handle_suspend(sig: libc::c_int) {
+    if defer_terminal_signal(sig) {
+        return;
+    }
     restore_terminal_signal();
     // SIGSTOP needs no disposition changes and SIGCONT restores cbreak above.
     unsafe { libc::kill(libc::getpid(), libc::SIGSTOP); }
@@ -2134,13 +2224,23 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    resume_terminal_output();
+    // Publish inactive only after the restore has been written and flushed.
+    // Otherwise a fatal signal in that window would skip its own last write.
+    let _hold = terminal::block_handled_signals();
     clear_program_status();
     forget_frame();
     graphics::cleanup();
     terminal::release_terminal();
     terminal::cleanup_signal();
-    out(&format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME));
+    let restore = ALT_SCREEN_ACTIVE.load(Ordering::Acquire);
+    if restore {
+        out(SCREEN_RESTORE);
+    }
     flush();
+    if restore {
+        ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 /// Fit hint groups onto as few lines as possible without splitting one.
@@ -4307,14 +4407,11 @@ pub fn take_panic_reason() -> Option<String> {
 /// top of the frame in the wrong colours and survives the redraw. Recorded
 /// instead, and drawn where it can be read.
 ///
-/// `RUST_BACKTRACE` puts the default behaviour back, because somebody who
-/// asked for a backtrace wants the one Rust writes, not a one-line summary
-/// of it.
+/// `RUST_BACKTRACE` adds Rust's captured backtrace to the same record. On an
+/// uncaught panic, Keyboard::drop prints both after leaving 1049, so asking
+/// for a backtrace cannot put the whole explanation back on the hidden screen.
 fn arm_panic_hook() {
     HOOK.call_once(|| {
-        if std::env::var_os("RUST_BACKTRACE").is_some() {
-            return;
-        }
         std::panic::set_hook(Box::new(|info| {
             let where_ = info
                 .location()
@@ -4328,9 +4425,14 @@ fn arm_panic_hook() {
                 .map(|s| (*s).to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panicked".into());
+            let backtrace = if std::env::var("RUST_BACKTRACE").is_ok_and(|value| value != "0") {
+                format!("\nstack backtrace:\n{}", std::backtrace::Backtrace::force_capture())
+            } else {
+                String::new()
+            };
             // A hook runs on the panicking thread, so this lands in that
             // thread's own slot.
-            let said = format!("{what} ({where_})");
+            let said = format!("{what} ({where_}){backtrace}");
             let _ = LAST_PANIC.try_with(|held| *held.borrow_mut() = Some(said));
         }));
     });
@@ -4781,33 +4883,42 @@ impl Keyboard {
         }
     }
 
-    /// Give the terminal back what this widget took: its line settings, and
-    /// its mouse.
+    /// Give back the terminal's line settings and original screen.
     ///
-    /// The mouse belongs here rather than only in `restore_screen` because
-    /// this runs on the third exit path. A normal quit calls both; a signal
-    /// goes through `SCREEN_RESTORE`; a panic unwinds and reaches neither,
-    /// but it does drop the `Keyboard`. Tracking left on outlives the
-    /// process: every later click spits escape bytes at the shell prompt,
-    /// caused by something that has already exited, with nothing on screen
-    /// to explain it. Sending it twice on a normal quit costs nothing.
+    /// A normal quit calls this and `restore_screen`; a panic unwinds through
+    /// here without reaching the latter. Both therefore write exactly the
+    /// signal path's `SCREEN_RESTORE`, rather than the weaker mouse-only reset
+    /// that used to leave the last panic-covered frame behind. Handing the
+    /// terminal to a child uses the same leave before `reclaim` enters again.
     ///
     /// Unlike the signal handler this may allocate and take the lock, since
     /// unwinding has already released whatever `draw` was holding.
     pub fn restore(&mut self) {
-        if let Some(saved) = self.saved.take() {
-            graphics::cleanup();
-            // Panic, a normal exit, and handing the terminal to a child all
-            // come through here. The signal paths pop in `cleanup_signal`.
-            terminal::pop_keyboard();
-            forget_termios();
-            unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
-            out(MOUSE_OFF);
-            out(terminal::SCHEME_REPORTS_OFF);
-            if capabilities().synchronized_updates {
-                out(terminal::SYNC_END);
-            }
-            flush();
+        resume_terminal_output();
+        let _hold = terminal::block_handled_signals();
+        // A redirected stdin has no saved termios, but setup may still own
+        // stdout's alternate screen. Screen cleanup must not be gated on the
+        // termios Option: that stranded 1049 precisely on the panic path.
+        let saved = self.saved.take();
+        clear_program_status();
+        graphics::cleanup();
+        terminal::release_terminal();
+        // Panic, a normal exit, and handing the terminal to a child all
+        // come through here. The signal paths pop in `cleanup_signal`.
+        terminal::pop_keyboard();
+        forget_termios();
+        if let Some(saved) = saved {
+            // TCSADRAIN could wait forever on stopped output beneath the
+            // signal hold. The restore bytes are flushed explicitly below.
+            unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &saved) };
+        }
+        let restore = ALT_SCREEN_ACTIVE.load(Ordering::Acquire);
+        if restore {
+            out(SCREEN_RESTORE);
+        }
+        flush();
+        if restore {
+            ALT_SCREEN_ACTIVE.store(false, Ordering::Release);
         }
     }
 
@@ -4844,6 +4955,9 @@ impl Keyboard {
         // same reason the buffered input above is.
         self.hints.clear();
         forget_frame();
+        // Enter the alternate screen before capability queries resume: those
+        // belong to this widget, not to the child's restored main screen.
+        claim_screen();
         terminal::start();
     }
 
@@ -4940,6 +5054,7 @@ impl Keyboard {
     /// Wait between frames, waking immediately when terminal input arrives.
     /// Does not consume input; poll() still owns decoding and protocol replies.
     pub fn wait(&self, timeout: Duration) {
+        service_deferred_terminal_signal();
         // Keys `poll` held back are already here: the next frame is theirs.
         if !self.held.is_empty() {
             return;
@@ -5067,6 +5182,7 @@ impl Keyboard {
     }
 
     fn poll_keys(&mut self) -> Vec<String> {
+        service_deferred_terminal_signal();
         if self.saved.is_none() {
             return Vec::new();
         }
@@ -5076,6 +5192,9 @@ impl Keyboard {
         if SESSION_CHANGED.swap(false, Ordering::AcqRel) {
             graphics::cleanup();
             forget_frame();
+            // Suspend used the same alternate-screen leave as an exit. Resume
+            // claims a fresh screen before restarting capability negotiation.
+            claim_screen();
             terminal::start();
         }
         let mut chunk = [0u8; 64];
@@ -5203,11 +5322,16 @@ fn hung_up(fd: i32) -> bool {
 
 impl Drop for Keyboard {
     fn drop(&mut self) {
+        let panicking = std::thread::panicking();
         self.restore();
-        // The third way out: a panic unwinding past the loop never reaches
-        // `restore_screen`. Here rather than in `restore`, which also runs
-        // when a launcher hands the terminal to a child.
-        clear_program_status();
+        if panicking {
+            // The panic hook records rather than writes while the alternate
+            // screen still owns the terminal. Now that restore has left it,
+            // put the reason on the shell's screen where it survives.
+            if let Some(reason) = take_panic_reason() {
+                eprintln!("{reason}");
+            }
+        }
     }
 }
 
@@ -7932,11 +8056,11 @@ mod tests {
         assert_eq!(clear, super::STATUS_CLEAR);
         // Every exit clears: `q` through `restore_screen`, Ctrl-C and
         // SIGTERM through `handle_signal`, which never reaches a widget, and
-        // a panic through the `Drop` that runs while it unwinds.
+        // a panic through `Keyboard::restore` when Drop unwinds.
         let src = include_str!("lib.rs");
         for (start, call) in [
             ("pub fn restore_screen() {", "clear_program_status();"),
-            ("impl Drop for Keyboard {", "clear_program_status();"),
+            ("pub fn restore(&mut self) {", "clear_program_status();"),
             ("extern \"C\" fn handle_signal(", "clear_program_status_signal();"),
         ] {
             let at = src.find(start).unwrap_or_else(|| panic!("{start} moved"));
@@ -9161,19 +9285,25 @@ mod tests {
         assert_eq!(poll_secs(15.0, 120.0), 15.0);
         // A broken fallback still has to be a duration.
         assert_eq!(poll_secs(-1.0, f64::NAN), 1.0);
-        // And the bytes the handler writes are the same sequences
-        // restore_screen formats - so a drift here is a drift on Ctrl-C.
-        //
-        // Mouse-off is in both and leads both. It is the one whose absence
-        // outlives the process: a terminal left reporting answers every
-        // later click with escape bytes at the shell prompt, caused by
-        // something that already exited. This assertion is what stops the
-        // handler and the normal exit disagreeing about that.
+    }
+
+    #[test]
+    fn every_exit_writes_the_same_complete_restore_sequence() {
+        // This exact &'static str is what the signal handler writes with
+        // write(2), without allocation or a lock; normal and panic restores
+        // send the same constant through the ordinary output path. Mouse-off
+        // leads because reporting outlives the process, and 1049 leave is last
+        // so no later write lands on the shell's restored screen.
         assert_eq!(
-            format!("{}{}{}{}{}{}", MOUSE_OFF, terminal::SCHEME_REPORTS_OFF, SHOW, RST, CLEAR, HOME),
-            SCREEN_RESTORE
+            SCREEN_RESTORE,
+            concat!(
+                "\x1b[?1006l", "\x1b[?1000l", "\x1b[?2031l", "\x1b[?2026l",
+                "\x1b[?25h", "\x1b[0m", "\x1b[2J", "\x1b[H", "\x1b[?1049l"
+            )
         );
         assert!(SCREEN_RESTORE.starts_with(MOUSE_OFF), "mouse-off must lead");
+        assert!(SCREEN_RESTORE.ends_with("\x1b[?1049l"), "leaving the alternate screen must be last");
+        assert_eq!(ALT_SCREEN_ENTER, "\x1b[?1049h");
     }
 
     /// The status names that a request was refused; only the body names

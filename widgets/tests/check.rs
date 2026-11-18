@@ -3556,11 +3556,14 @@ fn the_wheel_is_turned_off_on_every_way_out() {
         ("Keyboard::restore", "pub fn restore(&mut self)"),
     ] {
         let at = src.find(from).unwrap_or_else(|| panic!("{} moved or was renamed", what));
-        let body = &src[at..src.len().min(at + 900)];
+        // Read the whole function, not an arbitrary byte window: a comment
+        // explaining signal safety must not hide the actual SCREEN_RESTORE.
+        let end_marker = if from.starts_with(' ') { "\n    }\n" } else { "\n}\n" };
+        let body = &src[at..at + src[at..].find(end_marker).expect("restore function ends")];
         assert!(
-            body.contains("MOUSE_OFF"),
-            "{} does not send MOUSE_OFF. A widget leaving by that path hands \
-             back a terminal that is still reporting.",
+            body.contains("SCREEN_RESTORE"),
+            "{} does not send the shared SCREEN_RESTORE. A widget leaving by that path hands \
+             back a terminal that is still reporting or otherwise unrestored.",
             what
         );
     }
@@ -3590,6 +3593,9 @@ fn the_wheel_is_asked_for_unconditionally() {
     let body: String = whole
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
+        // The RAII guard atomically coordinates signal delivery around claim;
+        // it does not choose whether mouse reporting should be enabled.
+        .filter(|line| line.trim() != "let _hold = terminal::block_handled_signals();")
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -5213,6 +5219,47 @@ fn no_widget_moves_the_cursor_itself() {
     assert!(
         wrong.is_empty(),
         "widgets that move the cursor themselves - hand the rows to tc::draw instead:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
+fn widgets_all_leave_through_core_restore() {
+    // Alternate-screen bytes belong to the same core constant as the clear,
+    // cursor and mouse reset. A widget constructing its own exit sequence can
+    // omit one without anything on its last frame looking wrong. This focused
+    // check also covers named modes that cursor_moves does not need to know.
+    let mut sources = widgets();
+    sources.insert(
+        "launcher".into(),
+        without_tests(
+            &std::fs::read_to_string(root().join("widgets/src/launcher/main.rs"))
+                .expect("the launcher"),
+        ),
+    );
+    let mut wrong = Vec::new();
+    for (name, src) in sources {
+        for line in without_line_comments(&src).lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("?1049")
+                || trimmed.contains("MOUSE_OFF")
+                || trimmed.contains("ALT_SCREEN")
+            {
+                wrong.push(format!("{name}: owns an exit sequence: {trimmed}"));
+            }
+        }
+        // Newer widgets break a labelled input loop and restore immediately
+        // after it rather than returning from the match arm; others use q to
+        // close only a secondary view. Requiring a particular arm shape would
+        // flag both correct forms. What every binary must have is the shared
+        // exit itself, with no private terminal modes beside it.
+        if !src.contains("restore_screen()") {
+            wrong.push(format!("{name}: never calls restore_screen"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "terminal exits belong to restore_screen, never to individual widgets:\n  {}",
         wrong.join("\n  ")
     );
 }

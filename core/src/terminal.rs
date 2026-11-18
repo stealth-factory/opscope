@@ -1190,17 +1190,10 @@ pub(crate) fn apply_pending_cell_size() {
 
 pub(crate) fn cleanup_signal() {
     // Same hold as the push: the handler can itself be interrupted, and
-    // the flag clear and the pop bytes have to stay one transition.
+    // the flag clear and the pop bytes have to stay one transition. The
+    // shared SCREEN_RESTORE constant owns the synchronization end that
+    // follows this pop; duplicating it here would undo the one-exit-path rule.
     let _hold = block_handled_signals();
-    if SYNC_SUPPORTED.load(Ordering::Acquire) {
-        unsafe {
-            libc::write(
-                libc::STDOUT_FILENO,
-                SYNC_END.as_ptr().cast(),
-                SYNC_END.len(),
-            );
-        }
-    }
     if KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         unsafe {
             libc::write(
@@ -1212,15 +1205,16 @@ pub(crate) fn cleanup_signal() {
     }
 }
 
-/// Signals whose handlers pop the keyboard mode. Held across the push, the
-/// pop, and the flag update so those handlers cannot observe a half-written
-/// transition on this thread. `pthread_sigmask` does not cover other threads.
-/// Restores the previous mask on drop, including from a handler.
-struct HeldSignals {
+/// Signals whose handlers pop the keyboard mode or restore the screen. Held
+/// across those transitions, including the 1049 flag and output, so another
+/// handled signal cannot observe a half-restored terminal on this thread.
+/// `pthread_sigmask` does not cover other threads. Restores the previous mask
+/// on drop, including from a handler, and uses no allocation or lock.
+pub(crate) struct HeldSignals {
     old: libc::sigset_t,
 }
 
-fn block_handled_signals() -> HeldSignals {
+pub(crate) fn block_handled_signals() -> HeldSignals {
     unsafe {
         let mut block = std::mem::zeroed();
         libc::sigemptyset(&mut block);
@@ -2260,4 +2254,3 @@ pub(crate) static SCHEME_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Ask the terminal to report light/dark switches (mode 2031). Harmless
 /// where it is not known; turned off again in `restore_screen`.
 pub(crate) const SCHEME_REPORTS_ON: &str = "\x1b[?2031h";
-pub(crate) const SCHEME_REPORTS_OFF: &str = "\x1b[?2031l";

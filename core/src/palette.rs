@@ -986,7 +986,6 @@ fn switch_to(keyboard: &mut crate::Keyboard, stem: &str, keys: &[String]) {
     // away again, screen clear, mouse reporting on again, without which
     // the wheel does nothing on the way back in.
     keyboard.reclaim();
-    crate::claim_screen();
 }
 
 /// Run the palette over the widget's last frame until it is escaped out

@@ -4966,7 +4966,6 @@ pub(crate) fn relaunch_with(keyboard: &mut crate::Keyboard, env: &[(&str, &str)]
     // termios back and forgot them; reclaim cbreak before redrawing so
     // keys reach the widget instead of echoing until Enter.
     keyboard.reclaim();
-    crate::setup();
 }
 
 #[cfg(test)]

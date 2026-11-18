@@ -59,6 +59,25 @@ among its states - Rex - gets `tc::program_status` reports. Every other
 terminal gets none. `clocks` reports its pomodoro that way (OPS-249).
 Core emits the sequences; widgets do not branch on the terminal.
 
+## Leaving the terminal
+
+A session enters the alternate screen (`CSI ? 1049 h`) before drawing, so its
+frames never enter the shell's scrollback. Every normal quit, uncaught panic,
+fatal signal and child handoff uses core's one `SCREEN_RESTORE` constant:
+images and keyboard protocol are released first, then mouse and other reports
+are disabled, synchronized updates end, the cursor and SGR state are restored,
+and clear plus home precede `CSI ? 1049 l`. Leaving the alternate screen is
+last; the clear also covers a terminal that ignores 1049. A panic's reason is
+printed only after the main screen has been restored.
+
+The signal handler writes that static constant directly, without allocation or
+a lock. `Keyboard::reclaim` re-enters the alternate screen after a child. The
+launcher forwards a targeted SIGINT, SIGTERM or SIGHUP to its widget, allows
+one second for that widget's own cleanup, then uses SIGKILL before restoring
+its interactive screen and passing on the child's status. A closed pty is the
+one exception: `leave_after_hangup` writes nothing to a terminal that no longer
+exists, releases local resources and exits immediately.
+
 ## Choosing a renderer
 
 ```sh

@@ -210,6 +210,12 @@ fn main() {
             );
         }
         tc::draw(&rows, w, h);
+        // A real first frame precedes the forced failure, so terminal-exit
+        // integration tests exercise the same populated-screen panic a bug
+        // would produce rather than quitting before anything was drawn.
+        if std::env::var_os("OPSCOPE_TEST_PANIC").is_some() {
+            panic!("OPSCOPE_TEST_PANIC requested a first-frame panic");
+        }
         pacer.wait();
     }
 }
