@@ -317,11 +317,12 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // recorded. The log used to win outright, and on this machine that
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
-    let account = token_account();
+    let raw = read_auth();
+    let account = raw.as_deref().and_then(parse_token_account);
     let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
-    let key = match usable_token() {
+    let key = match token_entry_in(raw.as_deref()).and_then(|e| token_of(&e, now())) {
         Ok(k) => k,
         Err(why) => {
             // The widget's own refresh has already been tried after the
@@ -733,9 +734,20 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
 /// Keyed by issuer and account, so the entry is found by shape rather than
 /// by a name that is different on every machine.
 fn token_entry() -> Result<serde_json::Value, String> {
-    let raw = std::fs::read_to_string(under_home(AUTH))
-        .map_err(|_| "the Grok CLI has left no token on this disk".to_string())?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
+    token_entry_in(read_auth().as_deref())
+}
+
+/// `auth.json` as it is now. Read once for a pass's account and token, so
+/// a token the CLI refreshes mid-pass is never sent under the key, or past
+/// the guard, of the one before.
+fn read_auth() -> Option<String> {
+    std::fs::read_to_string(under_home(AUTH)).ok()
+}
+
+/// [`token_entry`] over a body already read.
+fn token_entry_in(raw: Option<&str>) -> Result<serde_json::Value, String> {
+    let raw = raw.ok_or_else(|| "the Grok CLI has left no token on this disk".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(raw)
         .map_err(|_| "the token the CLI left is not readable JSON".to_string())?;
     parsed
         .as_object()
@@ -786,12 +798,9 @@ fn token_expiry() -> Option<f64> {
 /// flattened to None, because "not live" for a token that lapsed an hour
 /// ago and "not live" for an endpoint that is down are the same two words
 /// for two different things, and only one of them is fixed by waiting.
-fn usable_token() -> Result<String, String> {
-    token_of(&token_entry()?, now())
-}
-
-/// The same decision, over a value and a clock, so it can be tested without
-/// a token on disk and without waiting for one to lapse.
+///
+/// Over a value and a clock, so it can be tested without a token on disk
+/// and without waiting for one to lapse.
 fn token_of(entry: &serde_json::Value, at: f64) -> Result<String, String> {
     let key = entry["key"]
         .as_str()

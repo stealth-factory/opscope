@@ -757,8 +757,8 @@ pub fn tier_note_said(why: Missing, said: &str) -> String {
 /// not be cached with the call: the call is held for an hour, and a token
 /// that lapses inside that hour would otherwise be reported as an endpoint
 /// that would not answer.
-fn why_no_tier() -> Missing {
-    let Some(file) = read_json(&token_path()) else {
+fn why_no_tier(file: Option<&serde_json::Value>) -> Missing {
+    let Some(file) = file else {
         return Missing::NotSignedIn;
     };
     let tok = &file["token"];
@@ -771,8 +771,8 @@ fn why_no_tier() -> Missing {
     }
 }
 
-fn antigravity_said() -> Result<serde_json::Value, String> {
-    let Some(file) = read_json(&token_path()) else {
+fn antigravity_said(file: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    let Some(file) = file else {
         return Err(String::new());
     };
     let tok = &file["token"];
@@ -804,13 +804,13 @@ fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
 /// back to whatever generic sentence is left - which is how this said
 /// "Google did not answer" about a token that had expired an hour earlier
 /// and was never sent.
-fn remote_token(allowed: bool) -> Result<String, String> {
+fn remote_token(allowed: bool, file: Option<&serde_json::Value>) -> Result<String, String> {
     if !allowed {
         return Err(tc::missing_config(
             "asking Google is off - set agent_usage.antigravity_remote to true",
         ));
     }
-    let Some(file) = read_json(&token_path()) else {
+    let Some(file) = file else {
         return Err(
             "Antigravity has not signed in on this machine - run `agy` once and sign in".into(),
         );
@@ -892,6 +892,16 @@ fn conversation_steps(path: &str) -> Option<f64> {
     Some(count as f64)
 }
 
+/// The token file, read once, with every token in it registered so no
+/// shared reading carries one.
+fn antigravity_creds(caches: &mut Caches) -> Option<serde_json::Value> {
+    let file = read_json(&token_path());
+    if let Some(file) = &file {
+        secret_fields(caches, &file["token"], &["access_token", "refresh_token", "id_token"]);
+    }
+    file
+}
+
 /// Whether this pass may start `agy`.
 ///
 /// It boots a language server, so it waits for three things at once: the
@@ -912,10 +922,14 @@ fn may_start_agy(shown: bool, start: bool, have_quota: bool) -> bool {
 /// `agy` is skipped when it does not.
 pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     use std::os::unix::fs::MetadataExt;
+    // One read of the token file for the guard and every request, so a
+    // token rotated mid-pass is never sent unregistered. Read again only
+    // after this pass started `agy`, which may have refreshed it.
+    let mut file = antigravity_creds(caches);
     // The refusal is cached with the failure, so it is shown for as long as
     // the failure lasts rather than only on the frame the call was made.
     let live = cached(caches, "antigravity", PLAN_TTL, || {
-        match antigravity_said() {
+        match antigravity_said(file.as_ref()) {
             Ok(v) => Some(v),
             Err(why) => Some(serde_json::json!({ "opscope_refusal": why })),
         }
@@ -927,7 +941,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     let live = if said.is_empty() { live } else { None };
     let local = cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota);
     let mut d = Data {
-        tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier() },
+        tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier(file.as_ref()) },
         tier_said: said,
         live,
         local_refused: local
@@ -936,8 +950,9 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         quota: local
             .and_then(|got| got.as_array().cloned())
             .unwrap_or_default(),
-        auth: read_json(&token_path())
-            .map(|file| text(&file, "auth_method"))
+        auth: file
+            .as_ref()
+            .map(|file| text(file, "auth_method"))
             .unwrap_or_default(),
         ..Data::default()
     };
@@ -964,13 +979,20 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         if let Some(path) = &agy {
             const KEY: &str = "antigravity-agy-usage";
             let mut asked = String::new();
-            let got = cached(caches, KEY, AGY_USAGE_TTL, || match agy_usage(path) {
-                Ok(groups) => Some(serde_json::Value::Array(groups)),
-                Err(said) => {
-                    asked = said;
-                    None
+            let mut started = false;
+            let got = cached(caches, KEY, AGY_USAGE_TTL, || {
+                started = true;
+                match agy_usage(path) {
+                    Ok(groups) => Some(serde_json::Value::Array(groups)),
+                    Err(said) => {
+                        asked = said;
+                        None
+                    }
                 }
             });
+            if started {
+                file = antigravity_creds(caches);
+            }
             remember_refusal(caches, KEY, &asked);
             match got {
                 Some(serde_json::Value::Array(groups)) => {
@@ -989,7 +1011,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     // - newer ones lock the server it reads behind the same CSRF token.
     if d.quota.is_empty() {
         let mut why = String::new();
-        match remote_token(cfg.antigravity_remote) {
+        match remote_token(cfg.antigravity_remote, file.as_ref()) {
             // Decided before the cache, so it survives a held failure and
             // is the same sentence on every frame until it changes.
             Err(said) => why = said,
@@ -1070,7 +1092,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     // backoff rather than being held for the hour a reading is; its reason
     // is written into the slot afterwards so it lasts as long as the failure.
     if !d.quota.is_empty() {
-        match remote_token(cfg.antigravity_remote) {
+        match remote_token(cfg.antigravity_remote, file.as_ref()) {
             Err(said) => d.gemini_why = said,
             Ok(access) => {
                 const KEY: &str = "antigravity-models";
@@ -1688,7 +1710,7 @@ mod tests {
     fn the_remote_ask_refuses_before_it_leaves_the_machine() {
         // Turned off, and there is no request to make - the reason names the
         // key rather than blaming the network.
-        let off = remote_token(false).unwrap_err();
+        let off = remote_token(false, None).unwrap_err();
         assert!(off.contains("agent_usage.antigravity_remote"), "{}", off);
         assert!(off.contains(tc::SET_IN_SETTINGS), "{}", off);
         // It may name Google - that is where the request would have gone -

@@ -1479,9 +1479,21 @@ Nothing has to notice that it left.
 - `r` still asks for anything older than thirty seconds. When another pane
   is already asking, this one shows what it has and takes the answer when
   it lands.
-- The status line says `readings shared`, and how many of this pane's
-  readings another pane fetched. It says `not sharing readings:` and why
-  when it cannot share, and the pane then asks on its own as before.
+- Each tab says, above its readings, where they came from when that is
+  not this pane just now: `fetched 2m ago by pane 48213`,
+  `cached 7m ago · pane 48213 asking now`, or
+  `cached 7m ago · too many requests, next ask in 3m`. Nothing is said
+  when every reading on the tab is this pane's own and fresh. The age is
+  that of the reading the line is about: the oldest one that is stale,
+  refused or being fetched by another pane, else the newest one another
+  pane fetched. A plan read hourly does not make a tab whose quota came
+  back a minute ago read an hour old. `[+]` says it across every agent it
+  shows.
+- Something only this machine can say - no token, not signed in here - is
+  shown on its tab and is not a refusal: no service was asked, so there is
+  no "next ask in" for it.
+- Under the status line the pane says `not sharing readings:` and why
+  when it cannot share, and then asks on its own as before.
 
 The readings live in one file, `~/.local/state/opscope/agent-usage.sqlite`,
 readable only by you. It is kept small and quiet on purpose:
@@ -1489,8 +1501,13 @@ readable only by you. It is kept small and quiet on purpose:
 - **Only the latest reading** for each service, replaced and never added to.
   A reading nobody has fetched for a day is deleted.
 - **A hard cap.** SQLite stops the file at 16 MB. A file found larger than
-  8 MB, damaged, or written by another version is deleted and started again,
-  which costs one request per service.
+  8 MB is vacuumed, and if that is not enough it is emptied in place - the
+  other panes have it open, so a new file under the same name is one they
+  would never see. A rate limit still in force is kept. Only a file SQLite
+  calls damaged is deleted and started again. Either costs one request per
+  service, and the pane says so for one pass. A file written by another
+  version of opscope is left alone for the panes on that version; this
+  pane says why and asks on its own.
 - **Written only when a reading is fetched**: a claim and a publish, and
   nothing in between. With every agent on, that is a handful of writes a
   minute for the whole machine, however many panes are open. A pane whose
@@ -1498,7 +1515,11 @@ readable only by you. It is kept small and quiet on purpose:
 - **No forced flushes to disk.** A crash cannot damage the file; a power cut
   could, and then it is started again.
 - **No tokens.** A reading that contains a token this pane holds is not
-  written at all.
+  written at all. Each pass reads an agent's credentials once and uses that
+  one copy for the guard, the account its readings are filed under and
+  every request, so a token rotated mid-pass is never sent unguarded. A
+  token that has since rotated stays guarded for as long as a reading this
+  pane still holds carries it, and is dropped once none does.
 
 `share_readings` turns it off for one pane, which then asks on its own.
 

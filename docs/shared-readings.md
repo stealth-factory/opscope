@@ -50,15 +50,22 @@ pass: renewed before each request, a dead pane costs one request's wait. It is
 capped at `lease::MAX_LEASE` (300 s).
 
 agent-usage still uses the older `cached` call, which waits for another pane
-when it has nothing to show. New widgets use `take`.
+when it has nothing to show. New widgets use `take`. `provenance` reads a
+`cached` reading the same way: a pane that serves what it has while another
+asks notes who is asking, and a refusal held as `{"why": ...}` is said with
+the time its backoff ends (OPS-290).
 
 ## What the pane says
 
 One row, wrapped to the pane, under the status line - never squeezed onto it.
 Draw it with `sharing_rows`, so a pane that cannot share says
 `not sharing readings: <why>` in the same place, not on the `!` screen.
-Built from every reading on screen, so the pane never claims to be fresher
-than its stalest part:
+Built from every reading on screen, and dated by the reading it speaks for:
+the oldest one that is stale, refused or being fetched by another pane, so
+the pane never claims to be fresher than a part that is behind; else, when
+it only says who fetched, the newest such reading. A reading still inside
+its hold - an hourly plan beside a quota read every minute - does not make
+the line read old (OPS-290).
 
 - `fetched 2m ago by pane 48213`
 - `cached 7m ago · pane 48213 asking now`

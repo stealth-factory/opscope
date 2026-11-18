@@ -61,6 +61,9 @@ pub struct Data {
     pub label: String,
     /// Expanded config directory this reading came from.
     pub dir: String,
+    /// Where this account's shared readings came from, for its freshness
+    /// line.
+    pub freshness: Vec<tc::readings::Provenance>,
     ok: bool,
     why: String,
     stats: serde_json::Value,
@@ -501,8 +504,10 @@ fn snapshot_slug(dir: &str) -> String {
 /// used at all: the refresh token sits beside it, but spending it would
 /// race Claude Code's own credential handling for a number that has a local
 /// cache anyway.
-fn claude_token_at(dir: &str) -> Option<(String, String)> {
-    let creds = read_json(&creds_path(dir))?;
+///
+/// Taken from the pass's one read of the credentials, [`creds_at`], so the
+/// token a request carries is the one registered, and the one its key names.
+fn claude_token_in(creds: &serde_json::Value) -> Option<(String, String)> {
     let o = &creds["claudeAiOauth"];
     let tok = text(o, "accessToken");
     if tok.is_empty() || num(o, "expiresAt") / 1000.0 <= now() {
@@ -511,19 +516,21 @@ fn claude_token_at(dir: &str) -> Option<(String, String)> {
     Some((tok, text(o, "subscriptionType")))
 }
 
-/// Which account is signed in under `dir`, as a tag for shared keys: the
+/// What `.credentials.json` under `dir` says, read once per pass: Claude
+/// Code rewrites it as it refreshes, so two reads in one pass can disagree,
+/// and a request must not carry a token the pass never registered.
+fn creds_at(dir: &str) -> serde_json::Value {
+    read_json(&creds_path(dir)).unwrap_or_default()
+}
+
+/// Which account `creds` is signed in as, as a tag for shared keys: the
 /// refresh token hashed, or the access token where there is none.
-fn claude_account_at(dir: &str) -> String {
-    let creds = read_json(&creds_path(dir)).unwrap_or_default();
+fn claude_account_in(creds: &serde_json::Value) -> String {
     let o = &creds["claudeAiOauth"];
     match text(o, "refreshToken") {
         t if !t.is_empty() => account_tag(&t),
         _ => account_tag(&text(o, "accessToken")),
     }
-}
-
-pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
-    claude_try(url, tok).ok()
 }
 
 /// The same request, keeping why it failed.
@@ -1037,11 +1044,27 @@ fn claude_rates_in(newest_first: &[&str]) -> (Vec<f64>, usize) {
 pub fn read(caches: &mut Caches, cfg: &Config) -> Vec<Data> {
     dirs_of(cfg)
         .into_iter()
-        .map(|dir| read_one(caches, &dir))
+        .map(|dir| {
+            caches.touched.clear();
+            let mut d = read_one(caches, &dir, &claude_try);
+            d.freshness = freshness(caches);
+            d
+        })
         .collect()
 }
 
-fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
+/// Register the tokens in `creds`, so no shared reading carries one - read
+/// again each pass, since Claude Code rotates them.
+fn claude_secrets(caches: &mut Caches, creds: &serde_json::Value) {
+    secret_fields(caches, &creds["claudeAiOauth"], &["accessToken", "refreshToken"]);
+}
+
+/// One account's readings. `ask` is the request, `claude_try` but in tests.
+fn read_one(
+    caches: &mut Caches,
+    dir: &ClaudeDir,
+    ask: &dyn Fn(&str, &str) -> Result<serde_json::Value, String>,
+) -> Data {
     let mut claude = Data {
         label: dir.label.clone(),
         dir: dir.path.clone(),
@@ -1054,12 +1077,18 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
     // Max accounts cannot share one held reading, and the account signed in
     // there, so a reading another pane stored before a sign-in as someone
     // else is never served after it.
-    let account = claude_account_at(&dir.path);
-    let live = cached(caches, &format!("claude:{}:{account}", dir.path), CLAUDE_LIVE_TTL, || {
-        let Some((tok, plan)) = claude_token_at(&dir.path) else {
-            return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
+    // One read of the credentials for everything this pass does with them:
+    // the token registered, the account the keys name, and every request.
+    let creds = creds_at(&dir.path);
+    let token = claude_token_in(&creds);
+    let account = claude_account_in(&creds);
+    let quota_key = format!("claude:{}:{account}", dir.path);
+    claude_secrets(caches, &creds);
+    let live = cached(caches, &quota_key, CLAUDE_LIVE_TTL, || {
+        let Some((tok, plan)) = token.clone() else {
+            return Some(local_fact("no token - Claude Code has not signed in here"));
         };
-        match claude_try(USAGE_URL, &tok) {
+        match ask(USAGE_URL, &tok) {
             Ok(u) => Some(serde_json::json!({ "u": u, "at": now(), "plan": plan })),
             Err(why) => Some(serde_json::json!({ "why": why })),
         }
@@ -1091,6 +1120,13 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         }
         None => {
             if let Some((u, at)) = claude_stale_for(&dir.path) {
+                // The refusal's provenance must date this fallback, not the
+                // request that just failed. In a new process the disk
+                // snapshot is the only good reading the core cache has.
+                caches.readings.good.insert(
+                    quota_key,
+                    (at, serde_json::json!({ "u": u.clone(), "at": at })),
+                );
                 claude.quota = Some(u);
                 claude.quota_live = false;
                 claude.quota_at = at;
@@ -1102,8 +1138,8 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         &format!("claude-plan:{}:{account}", dir.path),
         PLAN_TTL,
         || {
-            let (tok, plan) = claude_token_at(&dir.path)?;
-            let mut d = claude_get("https://api.anthropic.com/api/oauth/profile", &tok)?;
+            let (tok, plan) = token.clone()?;
+            let mut d = ask("https://api.anthropic.com/api/oauth/profile", &tok).ok()?;
             d["_plan"] = serde_json::Value::String(plan);
             Some(d)
         },
@@ -1112,16 +1148,14 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         // The profile endpoint is richer, but the credentials file needs no
         // network and is always there, so the section degrades to two true
         // lines instead of vanishing.
-        if let Some(creds) = read_json(&creds_path(&dir.path)) {
-            let o = &creds["claudeAiOauth"];
-            let plan = text(o, "subscriptionType");
-            if !plan.is_empty() {
-                claude.profile = Some(serde_json::json!({
-                    "_plan": plan,
-                    "_local": true,
-                    "organization": { "rate_limit_tier": text(o, "rateLimitTier") },
-                }));
-            }
+        let o = &creds["claudeAiOauth"];
+        let plan = text(o, "subscriptionType");
+        if !plan.is_empty() {
+            claude.profile = Some(serde_json::json!({
+                "_plan": plan,
+                "_local": true,
+                "organization": { "rate_limit_tier": text(o, "rateLimitTier") },
+            }));
         }
     }
     match read_json(&stats_path(&dir.path)) {
@@ -2652,6 +2686,220 @@ pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reading carrying the token signed in under the directory it was
+    /// read from is never written to the store the other panes read
+    /// (OPS-290): the token is registered before the fetch, as copilot's
+    /// and the others' are.
+    #[test]
+    fn a_reading_carrying_a_claude_token_is_never_shared() {
+        let dir = std::env::temp_dir().join(format!("opscope-claude-secret-{}-{}", std::process::id(), now().to_bits()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = "fixture-access-token-0123456789";
+        std::fs::write(
+            dir.join(".credentials.json"),
+            serde_json::json!({"claudeAiOauth": {"accessToken": token, "refreshToken": "fixture-refresh-token-0123"}}).to_string(),
+        )
+        .unwrap();
+        let path = dir.join("agent-usage.sqlite").to_string_lossy().to_string();
+        let mut caches = Caches::default();
+        caches.readings.store = Some(tc::readings::Store::open(&path).unwrap());
+        let home = dir.to_string_lossy().to_string();
+        claude_secrets(&mut caches, &creds_at(&home));
+        let leaked = serde_json::json!({"u": {"echo": format!("Bearer {token}")}});
+        assert!(cached(&mut caches, "claude:probe", 120.0, || Some(leaked.clone())).is_some());
+        assert!(caches.readings.store.is_some(), "{}", caches.readings.sharing_off);
+        let mut other = tc::readings::Store::open(&path).unwrap();
+        assert_eq!(other.load("claude:probe").unwrap(), None, "the token reached the shared store");
+        assert!(!std::fs::read(&path).unwrap().windows(token.len()).any(|w| w == token.as_bytes()));
+        // A reading without it is shared as before.
+        assert!(cached(&mut caches, "claude:clean", 120.0, || Some(serde_json::json!({"u": 1}))).is_some());
+        assert!(other.load("claude:clean").unwrap().is_some(), "a clean reading was not shared");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every test here that points `XDG_STATE_HOME` somewhere holds this,
+    /// and puts the variable back when it is done.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+
+    /// A signed-in Claude config dir under a fresh temp root, a shared store
+    /// beside it, and `XDG_STATE_HOME` pointed inside it so the quota
+    /// snapshot a good reading writes stays there.
+    struct Signed {
+        root: std::path::PathBuf,
+        home: String,
+        store: String,
+        _restore: RestoreEnv,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Signed {
+        fn new(name: &str, access: &str) -> Signed {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let root = std::env::temp_dir().join(format!("opscope-{name}-{}-{}", std::process::id(), now().to_bits()));
+            let home = root.join("profile");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(root.join("state")).unwrap();
+            let restore = RestoreEnv(std::env::var_os("XDG_STATE_HOME"));
+            std::env::set_var("XDG_STATE_HOME", root.join("state"));
+            let signed = Signed {
+                store: root.join("agent-usage.sqlite").to_string_lossy().to_string(),
+                home: home.to_string_lossy().to_string(),
+                root,
+                _restore: restore,
+                _lock: lock,
+            };
+            signed.sign_in(access, "fixture-refresh-token-0123");
+            signed
+        }
+
+        fn sign_in(&self, access: &str, refresh: &str) {
+            let creds = serde_json::json!({"claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": refresh,
+                "expiresAt": (now() + 3600.0) * 1000.0,
+                "subscriptionType": "fixture-plan",
+            }});
+            std::fs::write(format!("{}/.credentials.json", self.home), creds.to_string()).unwrap();
+        }
+
+        fn dir(&self) -> ClaudeDir {
+            ClaudeDir { path: self.home.clone(), label: String::new() }
+        }
+
+        fn caches(&self) -> Caches {
+            let mut caches = Caches::default();
+            caches.readings.store = Some(tc::readings::Store::open(&self.store).unwrap());
+            caches
+        }
+
+        /// Whether `token` reached the store's file, or its log.
+        fn store_holds(&self, token: &str) -> bool {
+            [self.store.clone(), format!("{}-wal", self.store)].iter().any(|p| {
+                std::fs::read(p).is_ok_and(|b| b.windows(token.len()).any(|w| w == token.as_bytes()))
+            })
+        }
+    }
+
+    impl Drop for Signed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A reading that says which token asked for it, as an endpoint that
+    /// echoed its request would.
+    fn echo(tok: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"limits": [], "echo": format!("Bearer {tok}")}))
+    }
+
+    /// Claude Code rewrites its credentials while a pass is reading: every
+    /// request of the pass carries the token the pass registered, under the
+    /// account its key names, so the rotated one is never sent unguarded
+    /// and nothing carrying either reaches the other panes (OPS-290).
+    #[test]
+    fn a_token_rotated_during_a_pass_is_never_sent_unregistered() {
+        let first = "fixture-access-token-first-0123";
+        let second = "fixture-access-token-second-4567";
+        let s = Signed::new("claude-rotate-during", first);
+        let mut caches = s.caches();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |_: &str, tok: &str| {
+            if asked.borrow().is_empty() {
+                s.sign_in(second, "fixture-refresh-token-4567");
+            }
+            asked.borrow_mut().push(tok.to_string());
+            echo(tok)
+        };
+        let d = read_one(&mut caches, &s.dir(), &ask);
+        assert!(caches.readings.store.is_some(), "{}", caches.readings.sharing_off);
+        assert!(d.quota.is_some() && d.profile.is_some());
+        assert_eq!(*asked.borrow(), [first, first], "a request carried a token read after the pass began");
+        assert!(caches.readings.secrets.iter().any(|t| t == first));
+        let account = account_tag("fixture-refresh-token-0123");
+        assert!(caches.readings.live.contains_key(&format!("claude:{}:{account}", s.home)));
+        assert!(!s.store_holds(first), "the registered token reached the store");
+        assert!(!s.store_holds(second), "a token the pass never registered reached the store");
+    }
+
+    /// The access token rotates after a reading that carried it: the next
+    /// refusal is published beside that last good reading, which still
+    /// carries the old token, so its guard outlives the rotation (OPS-290).
+    #[test]
+    fn a_rotated_token_stays_guarded_while_a_reading_carrying_it_is_held() {
+        let first = "fixture-access-token-first-0123";
+        let second = "fixture-access-token-second-4567";
+        let s = Signed::new("claude-rotate-after", first);
+        let mut caches = s.caches();
+        let d = read_one(&mut caches, &s.dir(), &|_, tok| echo(tok));
+        assert!(d.quota_live, "the first pass did not read the quota");
+        assert!(!s.store_holds(first));
+
+        // Rotated, and the quota due again: this time the server refuses.
+        s.sign_in(second, "fixture-refresh-token-0123");
+        let key = format!("claude:{}:{}", s.home, account_tag("fixture-refresh-token-0123"));
+        caches.readings.live.get_mut(&key).unwrap().0 -= 2.0 * CLAUDE_LIVE_TTL;
+        crate::shared::renew_secrets(&mut caches);
+        let d = read_one(&mut caches, &s.dir(), &|_, _| Err("the server answered 503".into()));
+        assert!(!d.quota_live);
+        assert!(caches.readings.secrets.iter().any(|t| t == first), "the old token lost its guard");
+        assert!(!s.store_holds(first), "the old token reached the store beside a refusal");
+    }
+
+    #[test]
+    fn a_failed_quota_request_dates_the_disk_snapshot_it_displays() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "opscope-claude-freshness-{}-{}",
+            std::process::id(),
+            now().to_bits()
+        ));
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        let state = root.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let _restore = RestoreEnv(std::env::var_os("XDG_STATE_HOME"));
+        std::env::set_var("XDG_STATE_HOME", &state);
+
+        let home = home.to_string_lossy().to_string();
+        let taken = now() - 2.0 * 3600.0;
+        let quota = serde_json::json!({"limits": [{"group": "session", "percent": 20}]});
+        write_snapshot(&snapshot_path_for(&home), &quota, None, taken);
+        let account = claude_account_in(&creds_at(&home));
+        let key = format!("claude:{home}:{account}");
+        let mut caches = Caches::default();
+        // The failed request has just been cached. There is no in-memory
+        // good reading, as after a restart; only the old snapshot is on disk.
+        caches.readings.live.insert(
+            key,
+            (now(), Some(serde_json::json!({"why": "fixture request failed"})), CLAUDE_LIVE_TTL),
+        );
+        let cfg = Config {
+            claude_dirs: vec![ClaudeDir { path: home, label: String::new() }],
+            ..Config::default()
+        };
+        let got = read(&mut caches, &cfg);
+        assert!((got[0].quota_at - taken).abs() < 0.001);
+        let provenance = got[0]
+            .freshness
+            .iter()
+            .find(|p| p.refused.is_some())
+            .expect("the quota refusal's provenance");
+        assert!((provenance.taken_at - taken).abs() < 0.001, "{provenance:?}");
+        assert!(got[0].freshness.iter().any(|p| p.refused.is_none()), "the profile lost its own provenance");
+        let rows = tc::readings::provenance_rows(&got[0].freshness, now(), 120).join(" ");
+        assert!(rows.starts_with("cached 2h00m ago"), "{rows}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn output_model_bars_publish_gradient_plots_with_their_labels_intact() {
@@ -4305,7 +4553,7 @@ mod tests {
             if let Some(body) = stats {
                 std::fs::write(root.join("stats-cache.json"), body).unwrap();
             }
-            let data = read_one(&mut caches, &dir);
+            let data = read_one(&mut caches, &dir, &claude_try);
             assert_eq!(data.ok, stats == Some("{}"));
             assert_eq!(data.sampled, 1, "transcript sampling must not depend on stats");
             for days in [1, 30] {

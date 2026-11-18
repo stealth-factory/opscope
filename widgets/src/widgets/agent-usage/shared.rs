@@ -47,6 +47,9 @@ pub struct Caches {
     /// The readings shared with the other panes, and how long each is held;
     /// see `tc::readings`.
     pub readings: tc::readings::Cache,
+    /// The keys `cached` was asked for since [`freshness`] last took them,
+    /// so each section can say where its own readings came from.
+    pub touched: Vec<String>,
     /// snapshot path -> the time of the Claude reading last written there,
     /// so a held reading is not written again on every pass.
     pub snapshot_at: HashMap<String, f64>,
@@ -755,6 +758,7 @@ pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<s
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    caches.touched.push(key.to_string());
     tc::readings::cached(&mut caches.readings, key, ttl, fetch)
 }
 
@@ -764,6 +768,7 @@ pub fn cached_file<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Opt
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    caches.touched.push(key.to_string());
     tc::readings::cached_file(&mut caches.readings, key, ttl, fetch)
 }
 
@@ -779,8 +784,88 @@ pub fn secret(caches: &mut Caches, token: &str) {
     tc::readings::secret(&mut caches.readings, token)
 }
 
-pub fn sharing_status(caches: &Caches) -> String {
-    tc::readings::sharing_status(&caches.readings)
+/// Register every non-empty string field `fields` of `obj` names as a
+/// token, so no shared reading carries one.
+pub fn secret_fields(caches: &mut Caches, obj: &serde_json::Value, fields: &[&str]) {
+    for f in fields {
+        if let Some(t) = obj.get(*f).and_then(|v| v.as_str()) {
+            secret(caches, t);
+        }
+    }
+}
+
+/// Start a pass's token guards: of the tokens the passes before held, keep
+/// only those a reading this pane still holds carries (OPS-290).
+///
+/// A token that rotates is not read again, but a reading taken with it -
+/// one that stayed with this pane because it carried the token - is still
+/// held in `good` and `live`, and every later answer under that key is
+/// published with the last good copy beside it. Dropping the old token's
+/// guard while that copy is held would let the next refusal write it to
+/// the store. Kept no longer than such a reading is, so tokens do not pile
+/// up over a run.
+pub fn renew_secrets(caches: &mut Caches) {
+    let r = &mut caches.readings;
+    if r.secrets.is_empty() {
+        return;
+    }
+    let held: Vec<String> = r
+        .live
+        .values()
+        .filter_map(|(_, v, _)| v.as_ref())
+        .chain(r.good.values().map(|(_, v)| v))
+        .map(|v| v.to_string())
+        .collect();
+    r.secrets.retain(|t| held.iter().any(|v| carries(v, t)));
+}
+
+/// Whether serialised JSON `text` carries `token`, raw or JSON-escaped, on
+/// the store's terms: a token under eight bytes is not looked for.
+fn carries(text: &str, token: &str) -> bool {
+    if token.len() < 8 {
+        return false;
+    }
+    let json = serde_json::to_string(token).unwrap_or_default();
+    let escaped = json.get(1..json.len().saturating_sub(1)).unwrap_or("");
+    text.contains(token) || (!escaped.is_empty() && text.contains(escaped))
+}
+
+/// A fact about this machine - no token, not signed in here - held as a
+/// reading's reason so the tab can say it, but not a refusal: no service
+/// was asked, so there is no backoff to wait out and no "next ask in" to
+/// say. [`freshness`] leaves it out.
+pub fn local_fact(why: &str) -> serde_json::Value {
+    serde_json::json!({ "why": why, "local": true })
+}
+
+fn is_local_fact(caches: &Caches, key: &str) -> bool {
+    caches
+        .readings
+        .live
+        .get(key)
+        .and_then(|(_, v, _)| v.as_ref())
+        .is_some_and(|v| v.get("local").and_then(|l| l.as_bool()) == Some(true))
+}
+
+/// Where the readings a section asked for since the last call came from,
+/// for the freshness line it draws; see [`tc::readings::provenance`]. A
+/// [`local_fact`] is no reading from anywhere, and the tab already says it.
+pub fn freshness(caches: &mut Caches) -> Vec<tc::readings::Provenance> {
+    let at = now();
+    let mut keys = std::mem::take(&mut caches.touched);
+    keys.sort();
+    keys.dedup();
+    keys.iter()
+        .filter(|k| !is_local_fact(caches, k))
+        .filter_map(|k| tc::readings::provenance(&caches.readings, k, at))
+        .collect()
+}
+
+/// The pane's line about sharing, unwrapped: why this pane is not sharing,
+/// or the store's notice, or nothing. Who fetched each section's readings
+/// is said by that section; see [`freshness`].
+pub fn sharing_line(caches: &Caches) -> Vec<String> {
+    tc::readings::sharing_rows(&caches.readings, &[], now(), usize::MAX / 4)
 }
 
 pub fn kept(caches: &mut Caches, key: &str, why: &str) -> Option<(serde_json::Value, Kept)> {
@@ -1179,6 +1264,48 @@ pub mod growing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token from a pass before is guarded for as long as a reading this
+    /// pane holds carries it, raw or JSON-escaped, and no longer: tokens do
+    /// not pile up over a run as they rotate (OPS-290).
+    #[test]
+    fn an_old_token_is_guarded_only_while_a_held_reading_carries_it() {
+        let held = "fixture-token-held-0123";
+        let quoted = "fixture-token-\"quoted\"-4567";
+        let gone = "fixture-token-gone-89ab";
+        let mut caches = Caches::default();
+        for t in [held, quoted, gone, "short"] {
+            secret(&mut caches, t);
+        }
+        caches.readings.good.insert("a".into(), (1.0, serde_json::json!({"echo": held})));
+        caches.readings.live.insert("b".into(), (1.0, Some(serde_json::json!({"echo": quoted})), 60.0));
+        caches.readings.live.insert("c".into(), (1.0, None, 60.0));
+        renew_secrets(&mut caches);
+        assert_eq!(caches.readings.secrets, [held, quoted]);
+        // Both readings replaced by ones that carry nothing: nothing to guard.
+        caches.readings.good.insert("a".into(), (2.0, serde_json::json!({"u": 1})));
+        caches.readings.live.insert("b".into(), (2.0, Some(serde_json::json!({"u": 2})), 60.0));
+        renew_secrets(&mut caches);
+        assert!(caches.readings.secrets.is_empty(), "{:?}", caches.readings.secrets);
+    }
+
+    /// "Not signed in here" is a fact about this machine, held so the tab
+    /// can say it: the freshness line does not repeat it as a refusal with a
+    /// "next ask in". A service's refusal still says when the next ask is.
+    #[test]
+    fn a_local_fact_is_no_refusal_and_has_no_next_ask() {
+        let mut caches = Caches::default();
+        let got = cached(&mut caches, "local", LIVE_TTL, || Some(local_fact("no token - fixture has not signed in here")));
+        assert_eq!(text(got.as_ref().unwrap(), "why"), "no token - fixture has not signed in here");
+        assert!(freshness(&mut caches).is_empty());
+
+        let got = cached(&mut caches, "remote", LIVE_TTL, || Some(serde_json::json!({"why": "the server answered 503"})));
+        assert!(got.is_some());
+        let found = freshness(&mut caches);
+        assert_eq!(found.len(), 1);
+        let said = tc::readings::provenance_rows(&found, now(), 120).join(" ");
+        assert!(said.contains("the server answered 503, next ask in"), "{said}");
+    }
 
     #[test]
     fn a_counted_log_counts_what_a_whole_read_does() {
