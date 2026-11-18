@@ -741,7 +741,8 @@ def peek_child_exit(pid: int) -> Tuple[Optional[int], bool]:
         except ChildProcessError:
             return (-1, True)
         except OSError:
-            info = None
+            # waitid(WNOWAIT) unsupported here; fall through to waitpid below.
+            pass
         else:
             if info is None:
                 return (None, False)
@@ -787,6 +788,8 @@ def terminate_process_group(
     # cannot survive even when the leader exited cleanly on `q`.
     if not leader_reaped:
         for sig, wait_s in ((signal.SIGTERM, 0.25), (signal.SIGKILL, 0.15)):
+            if leader_reaped:
+                break
             try:
                 os.killpg(pid, sig)
             except ProcessLookupError:
@@ -802,18 +805,20 @@ def terminate_process_group(
                 if code is not None:
                     exit_code = code
                     leader_reaped = reaped
-                    if sig == signal.SIGTERM:
+                    if sig == signal.SIGTERM and not leader_reaped:
                         # Give helpers a brief moment to honour SIGTERM before SIGKILL.
                         time.sleep(0.05)
                     break
                 time.sleep(0.02)
 
-        try:
-            _, status = os.waitpid(pid, 0)
-            if exit_code is None:
-                exit_code = os.waitstatus_to_exitcode(status)
-        except ChildProcessError:
-            pass
+        if not leader_reaped:
+            try:
+                _, status = os.waitpid(pid, 0)
+                if exit_code is None:
+                    exit_code = os.waitstatus_to_exitcode(status)
+            except ChildProcessError:
+                # Leader was already reaped before final waitpid.
+                pass
 
     return exit_code
 
@@ -878,8 +883,9 @@ def run_mode(
                 os.close(slave_fd)
             argv = [str(binary), *widget_args]
             os.execve(str(binary), argv, env)  # noqa: S606
-        except BaseException as exc:
+        except OSError as exc:
             os.write(2, f"exec failed: {exc}\n".encode("utf-8", "replace"))
+        finally:
             os._exit(127)
 
     os.close(slave_fd)
