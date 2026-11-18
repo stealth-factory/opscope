@@ -634,6 +634,18 @@ fn is_explicit_opt_in(lower: &str) -> bool {
         && !CATALOGUE.iter().any(|e| e.is_group_1() && entry_named(e, lower))
 }
 
+/// Whether a process is the explicitly opted-in `lower` (see
+/// [`is_explicit_opt_in`]): one of its names is `lower`, and it is not a
+/// service the catalogue entry of that name runs (`agent worker`). An opt-in
+/// names the agent, not every program the agent's binary can become.
+fn opted_in_process<N: AsRef<str>>(lower: &str, names: &[N], sub: [&str; 2]) -> bool {
+    is_explicit_opt_in(lower)
+        && names.iter().any(|n| n.as_ref() == lower)
+        && !CATALOGUE
+            .iter()
+            .any(|e| entry_named(e, lower) && is_service_invocation(e, sub))
+}
+
 fn match_candidates<S: AsRef<str>>(
     names: &[String],
     paths: &[&str],
@@ -661,9 +673,14 @@ fn match_candidates<S: AsRef<str>>(
         if !group_2_enabled(entry, configured) {
             continue;
         }
-        let matched = names.iter().find(|n| entry.commands.contains(&n.as_str()));
-        let Some(cmd) = matched else { continue };
-        let unambiguous_cmd = cmd == entry.id && entry.aliases.contains(&cmd.as_str());
+        if !names.iter().any(|n| entry.commands.contains(&n.as_str())) {
+            continue;
+        }
+        // Every candidate is looked at for the distinctive command: `comm`
+        // may say `forge` while `argv[0]` says `forgecode`.
+        let unambiguous_cmd = names.iter().any(|n| {
+            n == entry.id && entry.commands.contains(&n.as_str()) && entry.aliases.contains(&n.as_str())
+        });
         if unambiguous_cmd || has_second_clue(entry, paths, sub) {
             if is_service_invocation(entry, sub.unwrap_or(["", ""])) {
                 return None;
@@ -681,7 +698,7 @@ fn match_candidates<S: AsRef<str>>(
         if !is_explicit_opt_in(&c_lower) {
             continue;
         }
-        if names.iter().any(|n| n == &c_lower) {
+        if opted_in_process(&c_lower, names, sub.unwrap_or(["", ""])) {
             return Some(c_lower);
         }
     }
@@ -808,7 +825,7 @@ pub(super) fn process_matches_agent(comm: &str, args: &str, agent_name: &str) ->
     // finds the agent and this refuses the same process when its pid is
     // looked for again.
     if matched_catalogue_target {
-        return is_explicit_opt_in(&target) && names.iter().any(|n| *n == target);
+        return opted_in_process(&target, &names, sub);
     }
 
     let wanted = product(&target);

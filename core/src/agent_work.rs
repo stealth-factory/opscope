@@ -790,6 +790,33 @@ mod tests {
     }
 
     #[test]
+    fn an_opt_in_names_the_agent_and_not_the_services_its_binary_runs() {
+        let configured = ["agent"];
+        // Bare `agent` is the opted-in agent; `agent worker` is Cursor's
+        // service, with or without an install path to say so.
+        assert_eq!(classify_process("agent", "agent", &configured), Some("agent".into()));
+        assert_eq!(classify_process("agent", "agent worker", &configured), None);
+        // Refining the agent's pid never lands on the worker it started.
+        let table = parse_process_table(
+            "100 1 bash bash\n110 100 agent agent\n120 110 agent /opt/cursor-agent/bin/agent worker\n",
+        )
+        .unwrap();
+        assert_eq!(table.catalogue_agent_below(100, &configured), Some((110, "agent".into())));
+        assert_eq!(table.agent_below(100, "agent"), Some(110));
+    }
+
+    #[test]
+    fn the_distinctive_forgecode_name_counts_wherever_it_appears() {
+        // `comm` says `forge`, `argv[0]` says `forgecode`: no clue needed.
+        assert_eq!(
+            classify_process("forge", "/usr/bin/forgecode", DEFAULT_AGENTS),
+            Some("forgecode".into())
+        );
+        // Foundry's `forge` alone still is not Forge Code.
+        assert_eq!(classify_process("forge", "/usr/bin/forge build", DEFAULT_AGENTS), None);
+    }
+
+    #[test]
     fn a_background_agents_fan_draws_unfinished_subagents_and_replaces_their_log_rows() {
         let fan = |id: &str, kind: &str, done: Option<f64>| FanItem {
             id: id.into(),

@@ -720,6 +720,12 @@ fn detect_catalogue_agent(
     None
 }
 
+/// Whether a pane the catalogue matched becomes an agent row: not when its
+/// agent is a background job already shown, whose row has the real state.
+fn promotable(agent_pid: Option<u32>, jobs: &[tc::agent_work::Job]) -> bool {
+    agent_pid.is_none_or(|pid| !jobs.iter().any(|job| job.pid == Some(pid)))
+}
+
 /// The foreground process of a pane, the prompt, or the failed probe, paired
 /// with the pane's shell pid when reported.
 fn foreground_with_shell(pane_id: &str) -> (Front, Option<u32>) {
@@ -845,6 +851,25 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
     }
     let table = table.unwrap_or_else(|| Err("process table not read".into()));
 
+    let mut jobs = seen.logs.read_jobs(Some(&table));
+    // Herdr's hook reports a background agent too, credited to whichever
+    // pane started the daemon. That one keeps its row; the job adds its
+    // subagents to it rather than drawing the same agent twice.
+    let sessions: Vec<String> = listed["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(reported_session)
+        .collect();
+    for job in background::take_reported(&mut jobs, &sessions) {
+        let found = listed["agents"].as_array().into_iter().flatten().position(|e| {
+            reported_session(e).is_some_and(|s| job.is_session(&s))
+        });
+        if let Some(agent) = found.and_then(|i| agents.get_mut(i)) {
+            agent.work = std::mem::take(&mut agent.work).with_fan(&job.fan);
+        }
+    }
+
     let mut panels = Vec::new();
     if let Some(listing) = pane_listing
         .as_ref()
@@ -863,8 +888,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
                 Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
                 Front::Prompt | Front::Unknown(_) => (None, None),
             };
-            if let Some((agent_pid, kind)) =
-                detect_catalogue_agent(&front, shell_pid, &table, configured)
+            // A pane whose agent is a background job already on the board
+            // is not promoted: the job's row carries the state it reported,
+            // and the pane stays a process row that enter can focus.
+            if let Some((agent_pid, kind)) = detect_catalogue_agent(&front, shell_pid, &table, configured)
+                .filter(|(agent_pid, _)| promotable(*agent_pid, &jobs.shown))
             {
                 let was = seen.since.get(&pane_id);
                 if was.is_none_or(|(had, _, _)| had != "unknown") {
@@ -953,24 +981,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[Strin
         }
     }
 
-    let mut jobs = seen.logs.read_jobs(Some(&table));
-    // Herdr's hook reports a background agent too, credited to whichever
-    // pane started the daemon. That one keeps its row; the job adds its
-    // subagents to it rather than drawing the same agent twice.
-    let sessions: Vec<String> = listed["agents"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(reported_session)
-        .collect();
-    for job in background::take_reported(&mut jobs, &sessions) {
-        let found = listed["agents"].as_array().into_iter().flatten().position(|e| {
-            reported_session(e).is_some_and(|s| job.is_session(&s))
-        });
-        if let Some(agent) = found.and_then(|i| agents.get_mut(i)) {
-            agent.work = std::mem::take(&mut agent.work).with_fan(&job.fan);
-        }
-    }
     labels.insert(background::GROUP.to_string(), background::group_label(&jobs));
     for job in jobs.shown {
         let (since, exact) = job.held_since.unwrap_or((at, false));
@@ -1064,13 +1074,7 @@ fn file_jobs(
     // Agents whose process the table found: only one of those being the
     // job's process says a row already draws it. A marker is inherited from
     // the shell that started the job and says nothing about what runs there now.
-    // A row promoted from the catalogue is no proof either: it knows only
-    // that the process runs, and its `unknown` would replace the state the
-    // job reported. The job's row is kept and the promoted one goes instead.
-    let pids: Vec<Option<u32>> =
-        agents.iter().filter(|a| a.job.is_none() && !a.from_catalogue).map(|a| a.pid).collect();
-    let job_pids: Vec<u32> = agents.iter().filter_map(|a| a.job.as_ref()?.pid).collect();
-    agents.retain(|a| !(a.job.is_none() && a.from_catalogue && a.pid.is_some_and(|p| job_pids.contains(&p))));
+    let pids: Vec<Option<u32>> = agents.iter().filter(|a| a.job.is_none()).map(|a| a.pid).collect();
     let owned: Vec<(String, String, String)> = agents
         .iter()
         .filter(|a| a.job.is_none())
@@ -2910,28 +2914,17 @@ mod tests {
     }
 
     #[test]
-    fn a_catalogue_row_gives_way_to_the_job_that_reported_a_state() {
-        // Herdr did not list the resumed Claude; the catalogue promoted its
-        // pane as `unknown`, and its job file says `blocked`.
-        let mut promoted = agent("w1:p1", "w1", "unknown");
-        promoted.pid = Some(7);
-        promoted.from_catalogue = true;
-        let mut job_row = agent("", background::GROUP, "blocked");
-        let mut job = tc::agent_work::parse_job_state("resumed", r#"{"state":"blocked","cwd":"/srv/api"}"#).unwrap();
+    fn a_pane_whose_agent_is_a_shown_job_is_not_promoted() {
+        // The resumed Claude (7) is a job that says `blocked`: its pane is
+        // left a process row, so the agent is drawn once, with its state,
+        // and enter can still focus the pane.
+        let mut job = tc::agent_work::parse_job_state("resumed", r#"{"state":"blocked"}"#).unwrap();
         job.pid = Some(7);
-        job_row.job = Some(job);
-        // A promoted row on another process is left alone.
-        let mut other = agent("w1:p2", "w1", "unknown");
-        other.pid = Some(8);
-        other.from_catalogue = true;
-        let mut agents = vec![promoted, other, job_row];
-        let open = vec![("w1".to_string(), "w1:p1".to_string(), "/srv/api".to_string())];
-        file_jobs(&mut agents, &open, |pid| (pid == 7).then(|| "w1".to_string()));
-        let rows: Vec<(&str, &str, bool)> =
-            agents.iter().map(|a| (a.pane_id.as_str(), a.state.as_str(), a.job.is_some())).collect();
-        // Shown once, with the state it reported, filed beside its workspace.
-        assert_eq!(rows, vec![("w1:p2", "unknown", false), ("", "blocked", true)]);
-        assert_eq!(agents[1].workspace_id, "w1");
+        let jobs = [job];
+        assert!(!promotable(Some(7), &jobs));
+        assert!(promotable(Some(8), &jobs));
+        assert!(promotable(None, &jobs));
+        assert!(promotable(Some(7), &[]));
     }
 
     #[test]
