@@ -1874,20 +1874,20 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     }
     let events_key = format!("cursor-events:{me}");
     let mut events_why = String::new();
-    d.events = cached(caches, &events_key, EVENTS_TTL, || {
-        // No token is this machine's fact, not the dashboard's refusal: it
-        // has no backoff to wait out, so it is not remembered as one.
-        if tok.is_none() {
-            return Some(local_fact("no token - Cursor has not signed in here"));
-        }
-        match cursor_events(tok, 30) {
+    // No token is this machine's fact, not the dashboard's refusal, and it
+    // is not held: the account key can outlive an empty access token, and
+    // a held fact would keep the events from being asked for half an hour
+    // after one arrives.
+    d.events = match tok {
+        None => Some(local_fact("no token - Cursor has not signed in here")),
+        Some(_) => cached(caches, &events_key, EVENTS_TTL, || match cursor_events(tok, 30) {
             Ok(events) => Some(events),
             Err(why) => {
                 events_why = why;
                 None
             }
-        }
-    });
+        }),
+    };
     if !events_why.is_empty() {
         remember_refusal(caches, &events_key, &events_why);
         d.events = Some(serde_json::json!({"why": events_why}));
