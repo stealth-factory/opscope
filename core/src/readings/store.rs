@@ -1846,17 +1846,14 @@ mod tests {
             assert!(s.renew("k", NOW + i as f64, 60.0).unwrap());
         }
         assert_eq!(s.writes, writes, "a lease with most of its time left was rewritten");
-        // The skip is a read. An UPDATE that matches nothing still takes
-        // the writer lock, and this would wait out the other connection.
+        // The skip is a read. With no busy wait, an UPDATE would come
+        // back busy while the other connection holds the writer lock.
+        s.conn.busy_timeout(Duration::ZERO).unwrap();
         let other = Connection::open(&path).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let started = std::time::Instant::now();
-        assert!(s.renew("k", NOW + 1.0, 60.0).unwrap());
-        assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "a skipped renewal waited on the writer"
-        );
+        assert!(s.renew("k", NOW + 1.0, 60.0).unwrap(), "a skipped renewal took the writer lock");
         other.execute_batch("ROLLBACK").unwrap();
+        s.conn.busy_timeout(super::BUSY).unwrap();
         // The last instant a renewal is skipped: half the lease remains,
         // which is the one request the caller has to fit there.
         assert!(s.renew("k", NOW + 30.0, 60.0).unwrap());
