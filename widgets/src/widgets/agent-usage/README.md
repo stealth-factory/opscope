@@ -1483,8 +1483,15 @@ Nothing has to notice that it left.
   not this pane just now: `fetched 2m ago by pane 48213`,
   `cached 7m ago · pane 48213 asking now`, or
   `cached 7m ago · too many requests, next ask in 3m`. Nothing is said
-  when every reading on the tab is this pane's own and fresh. `[+]` says
-  it for the oldest reading of every agent it shows.
+  when every reading on the tab is this pane's own and fresh. The age is
+  that of the reading the line is about: the oldest one that is stale,
+  refused or being fetched by another pane, else the newest one another
+  pane fetched. A plan read hourly does not make a tab whose quota came
+  back a minute ago read an hour old. `[+]` says it across every agent it
+  shows.
+- Something only this machine can say - no token, not signed in here - is
+  shown on its tab and is not a refusal: no service was asked, so there is
+  no "next ask in" for it.
 - Under the status line the pane says `not sharing readings:` and why
   when it cannot share, and then asks on its own as before.
 
@@ -1508,7 +1515,11 @@ readable only by you. It is kept small and quiet on purpose:
 - **No forced flushes to disk.** A crash cannot damage the file; a power cut
   could, and then it is started again.
 - **No tokens.** A reading that contains a token this pane holds is not
-  written at all.
+  written at all. Each pass reads an agent's credentials once and uses that
+  one copy for the guard, the account its readings are filed under and
+  every request, so a token rotated mid-pass is never sent unguarded. A
+  token that has since rotated stays guarded for as long as a reading this
+  pane still holds carries it, and is dropped once none does.
 
 `share_readings` turns it off for one pane, which then asks on its own.
 

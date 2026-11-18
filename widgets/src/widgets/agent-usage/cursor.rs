@@ -109,6 +109,8 @@ const EVENTS_TTL: f64 = 1800.0;
 /// What Cursor publishes, and what its tracking database recorded here.
 #[derive(Clone, Default)]
 pub struct Data {
+    /// [`account_key_in`] of the pass's one read of the credentials.
+    pub account: String,
     /// The tracking database was readable; the counts below mean something.
     ok: bool,
     why: String,
@@ -227,9 +229,11 @@ fn commas(n: i64) -> String {
 /// account, so a balance read for one account is never served for another,
 /// and it is never written anywhere itself. A refresh that rotates it only
 /// costs one early re-read.
-pub fn account_key() -> String {
+///
+/// `auth` is the pass's one read of `~/.config/cursor/auth.json`, so the
+/// key names the account whose token the requests carry.
+fn account_key_in(auth: &serde_json::Value) -> String {
     use std::hash::{Hash, Hasher};
-    let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match text(&auth, "refreshToken") {
         t if !t.is_empty() => t.hash(&mut h),
@@ -243,9 +247,8 @@ pub fn has_live(d: &Data) -> bool {
     d.live.is_some()
 }
 
-fn cursor_token() -> Option<String> {
-    let auth = read_json(&under_home(".config/cursor/auth.json"))?;
-    let tok = text(&auth, "accessToken");
+fn token_in(auth: &serde_json::Value) -> Option<String> {
+    let tok = text(auth, "accessToken");
     if tok.is_empty() {
         None
     } else {
@@ -260,14 +263,14 @@ fn cursor_token() -> Option<String> {
 /// else it has. The bearer token rides in a header that post_json feeds to
 /// curl on its standard input, never in an argument - /proc/<pid>/cmdline
 /// is world-readable.
-fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
-    cursor_rpc_said(method, body).ok()
+fn cursor_rpc(tok: Option<&str>, method: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
+    cursor_rpc_said(tok, method, body).ok()
 }
 
 /// `cursor_rpc`, keeping why it failed in `refusal`'s words, so `kept` can
 /// tell a request lost in transit from a token the server refused.
-fn cursor_rpc_said(method: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let tok = cursor_token().ok_or_else(|| "no token - Cursor has not signed in here".to_string())?;
+fn cursor_rpc_said(tok: Option<&str>, method: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let tok = tok.ok_or_else(|| "no token - Cursor has not signed in here".to_string())?;
     let bearer = format!("Bearer {}", tok);
     post_json_said(
         &format!("{}{}", CURSOR_RPC, method),
@@ -289,11 +292,11 @@ fn cursor_rpc_said(method: &str, body: &serde_json::Value) -> Result<serde_json:
 /// is a refusal, returned as its reason so the caller can keep it out of
 /// the cache, and `cached` backs off rather than treating the diagnostic as
 /// a successful reading.
-fn cursor_live() -> Result<serde_json::Value, String> {
-    if cursor_token().is_none() {
-        return Ok(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
+fn cursor_live(tok: Option<&str>) -> Result<serde_json::Value, String> {
+    if tok.is_none() {
+        return Ok(local_fact("no token - Cursor has not signed in here"));
     }
-    cursor_rpc_said("GetCurrentPeriodUsage", &serde_json::json!({})).map(|u| serde_json::json!({"u": u}))
+    cursor_rpc_said(tok, "GetCurrentPeriodUsage", &serde_json::json!({})).map(|u| serde_json::json!({"u": u}))
 }
 
 /// Which Cursor plan the percentages are percentages of.
@@ -301,8 +304,8 @@ fn cursor_live() -> Result<serde_json::Value, String> {
 /// GetPlanInfo is where the plan's name and price live - the usage call
 /// carries neither, and its $400 limit is meaningless without knowing that
 /// is what Ultra includes.
-fn cursor_plan() -> Option<serde_json::Value> {
-    cursor_rpc("GetPlanInfo", &serde_json::json!({}))
+fn cursor_plan(tok: Option<&str>) -> Option<serde_json::Value> {
+    cursor_rpc(tok, "GetPlanInfo", &serde_json::json!({}))
 }
 
 /// The Grok Bot allowance, or why it could not be read.
@@ -310,8 +313,8 @@ fn cursor_plan() -> Option<serde_json::Value> {
 /// Best-effort by contract: every failure here has to leave Cursor's three
 /// monthly bars exactly as they were, because this is an extra lane and not
 /// a precondition for the rest of the tab.
-fn sand_status() -> Result<serde_json::Value, String> {
-    let tok = cursor_token().ok_or("no Cursor token on this disk")?;
+fn sand_status(tok: Option<&str>) -> Result<serde_json::Value, String> {
+    let tok = tok.ok_or("no Cursor token on this disk")?;
     let bearer = format!("Bearer {}", tok);
     post_json_said(
         &format!("{}{}", CURSOR_RPC, SAND_METHOD),
@@ -361,8 +364,8 @@ fn sand_lane(v: &serde_json::Value) -> Option<(f64, Option<f64>, Option<f64>)> {
 /// Best-effort, like the Bot allowance: the cap in the usage block is
 /// enough on its own for the state this machine is actually in, so a
 /// refusal here must leave everything else exactly as it was.
-fn cursor_hard_limit() -> Option<serde_json::Value> {
-    cursor_rpc("GetHardLimit", &serde_json::json!({}))
+fn cursor_hard_limit(tok: Option<&str>) -> Option<serde_json::Value> {
+    cursor_rpc(tok, "GetHardLimit", &serde_json::json!({}))
 }
 
 /// What Cursor's monthly spend limit is set to, and what has gone against
@@ -1277,13 +1280,13 @@ fn seg_owned(parts: &[(String, String)], w: usize) -> String {
 /// unified plan grok.com shows the same heatmap. The handle is the
 /// account's public one, so asking by it reveals nothing the profile page
 /// does not.
-fn cursor_activity() -> Option<serde_json::Value> {
-    let me = cursor_rpc("GetUserProfile", &serde_json::json!({}))?;
+fn cursor_activity(tok: Option<&str>) -> Option<serde_json::Value> {
+    let me = cursor_rpc(tok, "GetUserProfile", &serde_json::json!({}))?;
     let handle = text(&me["profile"], "handle");
     if handle.is_empty() {
         return None;
     }
-    let got = cursor_rpc("GetViewableProfileByHandle", &serde_json::json!({ "handle": handle }))?;
+    let got = cursor_rpc(tok, "GetViewableProfileByHandle", &serde_json::json!({ "handle": handle }))?;
     got.get("activitySummary").cloned()
 }
 
@@ -1368,9 +1371,10 @@ fn activity_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> 
 ///
 /// This is what the plan percentages are made of: which model spent the
 /// money. totalCents is Cursor's own figure, not an estimate.
-fn cursor_spend(days: i64) -> Option<serde_json::Value> {
+fn cursor_spend(tok: Option<&str>, days: i64) -> Option<serde_json::Value> {
     let at = (now() * 1000.0) as i64;
     cursor_rpc(
+        tok,
         "GetAggregatedUsageEvents",
         &serde_json::json!({
             "startDate": (at - days * 86_400_000).to_string(),
@@ -1682,10 +1686,10 @@ fn event_report(
     })
 }
 
-fn cursor_events(days: i64) -> Result<serde_json::Value, String> {
+fn cursor_events(tok: Option<&str>, days: i64) -> Result<serde_json::Value, String> {
     let end_ms = (now() * 1000.0) as i64;
     let start_ms = event_window(days, end_ms).ok_or("invalid usage window")?;
-    let token = cursor_token().ok_or("no token - Cursor has not signed in here")?;
+    let token = tok.ok_or("no token - Cursor has not signed in here")?;
     let cookie = crate::parse::parse_cursor_cookie(&token, end_ms as f64 / 1000.0)
         .ok_or("Cursor token cannot open the dashboard; sign in again")?;
     let events = collect_event_pages(
@@ -1786,15 +1790,22 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // plan's: the plan decides how the usage is drawn, so a usage response
     // held for the account signed in before would be drawn under the new
     // account's plan - a monthly figure labelled as a weekly pool.
-    let me = account_key();
+    //
+    // One read of the credentials for all of it - the key, the guard and
+    // every request - so a token Cursor rotates mid-pass is never sent
+    // unregistered, or under another token's key.
     let auth = read_json(&under_home(".config/cursor/auth.json")).unwrap_or_default();
+    let me = account_key_in(&auth);
+    d.account = me.clone();
+    let tok = token_in(&auth);
+    let tok = tok.as_deref();
     secret_fields(caches, &auth, &["accessToken", "refreshToken"]);
     let live_key = format!("cursor:{me}");
     let mut refuse = String::new();
     // Said as the request failed, not as "did not answer" whatever the
     // cause: a refused token must not read as a failure in transit and
     // bring back a reading `kept` holds for one.
-    d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live() {
+    d.live = match cached(caches, &live_key, LIVE_TTL, || match cursor_live(tok) {
         Err(why) => {
             let short: String = why.chars().take(40).collect();
             refuse = format!("Cursor's usage request failed: {short}");
@@ -1824,7 +1835,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         }
     }
     // A plan cached for one account must never classify another.
-    d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, cursor_plan);
+    d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, || cursor_plan(tok));
     // The plan decides which drawing the live figures get, so a failed
     // plan read keeps the last good one for this account rather than draw
     // a unified account's week as an old plan's three lanes.
@@ -1846,25 +1857,25 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // spend block refreshed every two minutes against an hour-old
     // `noUsageBasedAllowed` would draw the old state for the rest of that
     // hour. One small POST on the same schedule as the reading it qualifies.
-    d.hard = cached(caches, &format!("cursor-hard:{me}"), LIVE_TTL, cursor_hard_limit);
+    d.hard = cached(caches, &format!("cursor-hard:{me}"), LIVE_TTL, || cursor_hard_limit(tok));
     // The unified plan's money lives in two calls an account on its own
     // plan has no use for, so they are asked only once the plan says it is
     // unified. Best-effort like the hard limit: the pool bar stands without
     // either, and the rows they feed say nothing rather than a guess.
     if is_unified(d.plan.as_ref()) {
         d.prepaid = cached(caches, &format!("cursor-prepaid:{me}"), LIVE_TTL, || {
-            cursor_rpc("GetUserPrepaidBilling", &serde_json::json!({}))
+            cursor_rpc(tok, "GetUserPrepaidBilling", &serde_json::json!({}))
         });
         d.month = cached(caches, &format!("cursor-month:{me}"), PLAN_TTL, || {
-            cursor_rpc("GetMonthlyBillingCycle", &serde_json::json!({}))
+            cursor_rpc(tok, "GetMonthlyBillingCycle", &serde_json::json!({}))
         });
         // Daily figures, so the plan's hour is plenty.
-        d.activity = cached(caches, &format!("cursor-activity:{me}"), PLAN_TTL, cursor_activity);
+        d.activity = cached(caches, &format!("cursor-activity:{me}"), PLAN_TTL, || cursor_activity(tok));
     }
     let events_key = format!("cursor-events:{me}");
     let mut events_why = String::new();
     d.events = cached(caches, &events_key, EVENTS_TTL, || {
-        match cursor_events(30) {
+        match cursor_events(tok, 30) {
             Ok(events) => Some(events),
             Err(why) => {
                 events_why = why;
@@ -1877,13 +1888,13 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         d.events = Some(serde_json::json!({"why": events_why}));
     }
     d.spend = cached(caches, &format!("cursor-spend:{me}"), LIVE_TTL, || {
-        cursor_spend(30)
+        cursor_spend(tok, 30)
     });
     // Deliberately last of the four and deliberately unable to affect them:
     // this is an extra allowance, and an account without one is the normal
     // case rather than a fault.
     let mut why = String::new();
-    d.sand = cached(caches, SAND_KEY, SAND_TTL, || match sand_status() {
+    d.sand = cached(caches, SAND_KEY, SAND_TTL, || match sand_status(tok) {
         Ok(v) => Some(v),
         Err(e) => {
             why = e;

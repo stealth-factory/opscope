@@ -95,8 +95,9 @@ pub fn read_all(
     let droid_shown = droid_asked(&installed, cfg);
     let antigravity_shown = antigravity_asked(&installed, cfg);
     // Each reader notes the tokens it holds as it reads; a token from a
-    // pass before, since rotated, has nothing left to guard.
-    caches.readings.secrets.clear();
+    // pass before, since rotated, is guarded only while a reading this pane
+    // holds still carries it.
+    renew_secrets(caches);
     caches.touched.clear();
     let mut freshness = HashMap::new();
     // Each vendor read, then where the readings it asked for came from.
@@ -245,7 +246,7 @@ fn remembered(last: Option<&(String, (Spacexsi, Spacexsi))>, who: &str) -> Optio
 fn link_spacexsi(s: &mut State) {
     let who = format!(
         "{}|{}",
-        crate::cursor::account_key(),
+        s.cursor.account,
         crate::grok::account_id().unwrap_or_default()
     );
     let mut last = LAST_PLACED.lock().unwrap_or_else(|e| e.into_inner());

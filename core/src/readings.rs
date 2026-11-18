@@ -1268,36 +1268,38 @@ pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize)
 
 /// The one wording every widget gives for where its readings came from,
 /// wrapped to `width`, from the readings on screen: nothing when every
-/// one was fetched by this pane and is fresh, else the oldest of them, and
-/// what is happening to it.
+/// one was fetched by this pane and is fresh, else the reading the line is
+/// about, and what is happening to it.
+///
+/// The line dates the reading it speaks for. When anything is stale,
+/// refused or being fetched by another pane, that is the oldest such
+/// reading; a reading still inside its hold does not make the line read
+/// old, however long its hold is. When the line only says who fetched,
+/// it dates the newest reading it is saying that of (OPS-290).
 ///
 /// `fetched 2m ago by pane 48213`, `cached 7m ago · pane 48213 asking now`,
 /// `cached 7m ago · too many requests, next ask in 3m`.
 pub fn provenance_rows(found: &[Provenance], now: f64, width: usize) -> Vec<String> {
-    let Some(oldest) = found.iter().min_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) else {
-        return Vec::new();
-    };
     let asking = found.iter().find_map(|p| p.asking);
     let refused = found
         .iter()
         .filter_map(|p| p.refused.clone())
         .max_by(|a, b| a.1.total_cmp(&b.1));
     let unshared = found.iter().find_map(|p| p.unshared);
-    let other = found.iter().find_map(|p| p.by);
-    let stale = found.iter().any(|p| p.stale);
-    if asking.is_none() && refused.is_none() && unshared.is_none() && other.is_none() && !stale {
-        return Vec::new();
-    }
-    let age = ago(now - oldest.taken_at);
-    let mut text = if refused.is_some() || asking.is_some() || stale {
-        format!("cached {age} ago")
-    } else {
-        // The oldest reading's own fetcher: another pane's newer reading
-        // must not lend it a pane that never fetched it.
-        match oldest.by {
+    let behind = |p: &&Provenance| p.stale || p.asking.is_some() || p.refused.is_some();
+    let said_of = |p: &&Provenance| p.by.is_some() || p.unshared.is_some();
+    let mut text = if let Some(oldest) = found.iter().filter(behind).min_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) {
+        format!("cached {} ago", ago(now - oldest.taken_at))
+    } else if let Some(newest) = found.iter().filter(said_of).max_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) {
+        // The newest reading's own fetcher: another pane's reading must
+        // not lend its pane to one this pane fetched, or the reverse.
+        let age = ago(now - newest.taken_at);
+        match newest.by {
             Some(pid) => format!("fetched {age} ago by pane {pid}"),
             None => format!("fetched {age} ago by this pane"),
         }
+    } else {
+        return Vec::new();
     };
     if let Some(pid) = asking.filter(|p| *p != 0) {
         text.push_str(&format!(" · pane {pid} asking now"));
@@ -1828,11 +1830,42 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_reading_is_dated_by_the_pane_that_fetched_it() {
+    fn the_reading_a_line_names_a_fetcher_of_is_dated_by_that_fetcher() {
         let now = 10_000.0;
         let mine = Provenance { taken_at: now - 300.0, by: None, stale: false, asking: None, refused: None, unshared: None };
         let theirs = Provenance { taken_at: now - 10.0, by: Some(42), ..mine.clone() };
-        assert_eq!(provenance_rows(&[mine, theirs], now, 80), ["fetched 5m ago by this pane"]);
+        assert_eq!(provenance_rows(&[mine.clone(), theirs.clone()], now, 80), ["fetched 10s ago by pane 42"]);
+        // An older reading of another pane's does not lend its pane, or
+        // its age, to this pane's newer one.
+        let older = Provenance { taken_at: now - 600.0, ..theirs };
+        let newer = Provenance { taken_at: now - 20.0, ..mine };
+        assert_eq!(provenance_rows(&[newer, older], now, 80), ["fetched 10m ago by pane 42"]);
+    }
+
+    /// A plan read hourly and a quota read every minute, both from pane 42
+    /// and both inside their holds: the line dates the newest, not the
+    /// plan, so a tab whose numbers are fresh does not read 26 minutes old.
+    #[test]
+    fn a_long_hold_inside_its_time_does_not_make_the_line_read_old() {
+        let now = 10_000.0;
+        let quota = Provenance { taken_at: now - 30.0, by: Some(42), stale: false, asking: None, refused: None, unshared: None };
+        let plan = Provenance { taken_at: now - 26.0 * 60.0, ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), quota.clone()], now, 80), ["fetched 30s ago by pane 42"]);
+        // Once something is behind, the line is about that one: the oldest
+        // reading that is stale, refused or being fetched elsewhere.
+        let stale = Provenance { taken_at: now - 7.0 * 60.0, stale: true, ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), quota.clone(), stale], now, 80), ["cached 7m ago"]);
+        let asked = Provenance { taken_at: now - 3.0 * 60.0, asking: Some(43), ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), asked], now, 80), ["cached 3m ago · pane 43 asking now"]);
+        let refused = Provenance {
+            taken_at: now - 9.0 * 60.0,
+            refused: Some(("too many requests".into(), now + 120.0)),
+            ..quota.clone()
+        };
+        assert_eq!(
+            provenance_rows(&[plan, quota, refused], now, 80),
+            ["cached 9m ago · too many requests, next ask in 2m"]
+        );
     }
 
     #[test]
