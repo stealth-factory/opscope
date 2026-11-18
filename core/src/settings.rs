@@ -1794,8 +1794,19 @@ enum Discovery {
     Failed(String),
 }
 
+/// The hook for a top-level array whose schema says `items: "string"`.
+///
+/// Discovered values are strings. A hook on an integer array would show
+/// `"22"` as ticked beside the number `22`, then refuse the write.
 fn discovery_hook(app: &App, key: &str) -> Option<(&'static str, Discover)> {
     let hook = app.discover.iter().find(|(field, _)| *field == key)?;
+    let string_array = app
+        .constraints
+        .get(key)
+        .and_then(Value::as_object)
+        .and_then(|rule| rule.get("items"))
+        .and_then(Value::as_str)
+        == Some("string");
     app.fields
         .iter()
         .any(|field| {
@@ -1803,6 +1814,7 @@ fn discovery_hook(app: &App, key: &str) -> Option<(&'static str, Discover)> {
                 && field.section == app.section
                 && field.parents.is_empty()
                 && field.default.is_array()
+                && string_array
         })
         .then_some(*hook)
 }
@@ -1860,6 +1872,9 @@ fn poll_discovery(app: &mut App) {
             *sel = 0;
             *scroll = 0;
         }
+        // A new list is a new selection. Follow it once, then leave the
+        // wheel free to move through a choice that wraps past the pane.
+        app.chase = true;
     }
     app.discoveries.insert(key, state);
 }
@@ -2966,6 +2981,11 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         *on_list,
         *cursor,
     );
+    let started_sel = s_;
+    // Set when this key is about the view rather than the selection, or
+    // when focus lands on the list without the index changing. Anything
+    // else that moves the selection follows on the next draw.
+    let mut chase_after: Option<bool> = None;
     let catalogue = app
         .fields
         .get(index)
@@ -3026,6 +3046,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "down" | "pgdn" if typed && !rows && total > 0 => {
             rows = true;
             s_ = 0;
+            chase_after = Some(true);
         }
         // And out again the way you came: up from the first entry is not a
         // selection that will not move, it is a request to go back to typing.
@@ -3047,8 +3068,16 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "home" => s_ = 0,
         "end" => s_ = total.saturating_sub(1),
         // The wheel moves the view and never the selection, as everywhere.
-        "ctrl-y" | "wheel-up" => sc = sc.saturating_sub(1),
-        "ctrl-e" | "wheel-down" => sc = sc.saturating_add(1),
+        // Leave the window where it was put: following on the next frame
+        // would drag it back to the first line of the choice.
+        "ctrl-y" | "wheel-up" => {
+            sc = sc.saturating_sub(1);
+            chase_after = Some(false);
+        }
+        "ctrl-e" | "wheel-down" => {
+            sc = sc.saturating_add(1);
+            chase_after = Some(false);
+        }
         "backspace" => {
             delete_before(&mut q, &mut cur);
             s_ = 0;
@@ -3281,6 +3310,12 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         _ => {}
     }
     let total = zone_choices(app, index, &q, all).len();
+    let sel_now = s_.min(total.saturating_sub(1));
+    app.chase = match chase_after {
+        Some(chase) => chase,
+        None if sel_now != started_sel => true,
+        None => app.chase,
+    };
     if let Mode::Pick {
         query,
         sel,
@@ -3446,6 +3481,9 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                         // came to type into.
                         on_list: false,
                     };
+                    // The first frame follows the selection. After that, only
+                    // a key that moves it does — the wheel keeps its place.
+                    app.chase = true;
                     if discovery_hook(app, &field.key)
                         .is_some_and(|(key, _)| !app.discoveries.contains_key(key))
                     {
@@ -4008,7 +4046,7 @@ fn input_row(
     )
 }
 
-fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+fn draw_pick(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
     let lit = palette_on(true);
     let Mode::Pick {
         index,
@@ -4623,14 +4661,20 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     // the same reason: a pane too short is a pane you scroll.
     let head = body.remove(0);
     let room = h.saturating_sub(1 + foot.len()).max(1);
-    // Follow the selection through the whole screen, using the picker's
-    // own scroll: moving it brings the window along, and the wheel still
-    // moves the view by itself.
+    // Follow only on the frame a key moved the selection. Doing it every
+    // frame anchors a wrapped choice to its first line, so wheel and
+    // ctrl-e cannot reach the rest of a label taller than the pane.
     let want = rows_at
         .iter()
         .find_map(|(row, index)| (*index == *sel).then_some(*row))
         .unwrap_or(first_choice_row);
-    let at = crate::follow(*scroll, want, room).min(body.len().saturating_sub(room));
+    let chasing = std::mem::replace(&mut app.chase, false);
+    let at = if chasing {
+        crate::follow(*scroll, want, room)
+    } else {
+        *scroll
+    }
+    .min(body.len().saturating_sub(room));
     let mut out = vec![head];
     out.extend(body.iter().skip(at).take(room).cloned());
     while out.len() + foot.len() < h {
@@ -4639,7 +4683,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
-    (
+    let frame = (
         out,
         Clickable {
             placed: rows_at.into_iter().map(|(row, i)| (row + 1, i)).collect(),
@@ -4649,7 +4693,13 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
             foot_top,
             foot_indent: 1,
         },
-    )
+    );
+    // Keep the drawn window. The next wheel starts from what is on screen,
+    // including the lines below a wrapped choice's first row.
+    if let Mode::Pick { scroll: stored, .. } = &mut app.mode {
+        *stored = at;
+    }
+    frame
 }
 
 fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
@@ -4754,6 +4804,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         // list and takes a choice on the picker - the keys both screens
         // already answer. The two are separate arms because the picker
         // keeps its cursor inside its own mode rather than in `app`.
+        let mut picked = false;
         if matches!(app.mode, Mode::List) {
             if let Some(at) = crate::rows_clicked(
                 &mut keys,
@@ -4781,7 +4832,11 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
                 // both - and a cursor moved in an unfocused list would draw
                 // nowhere and answer to nothing.
                 *on_list = true;
+                picked = true;
             }
+        }
+        if picked {
+            app.chase = true;
         }
         for key in keys {
             let quit = match app.mode {
@@ -4812,7 +4867,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
-            Mode::Pick { .. } => draw_pick(&app, w, h, &p),
+            Mode::Pick { .. } => draw_pick(&mut app, w, h, &p),
         };
         crate::draw_current(&body, w, h, &[]);
         keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
@@ -5139,7 +5194,7 @@ mod tests {
         }
     }
 
-    fn draw_discovery(app: &App) -> String {
+    fn draw_discovery(app: &mut App) -> String {
         crate::strip_escapes(&draw_pick(app, 100, 30, &palette()).0.join("\n"))
     }
 
@@ -5152,20 +5207,24 @@ mod tests {
             example_choices()
         }
 
-        let mut app = field_app("properties", serde_json::json!([]), None);
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
         app.discover = &[("properties", counted_choices)];
         handle_list_key(&mut app, "enter");
         assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
-        let frame = draw_discovery(&app);
+        let frame = draw_discovery(&mut app);
         assert!(frame.contains("listing…") && frame.contains("Type an entry"), "{frame}");
-        assert!(draw_pick(&app, 100, 30, &palette()).0[0].contains(['⠖', '⠲', '⠴', '⠦']));
+        assert!(draw_pick(&mut app, 100, 30, &palette()).0[0].contains(['⠖', '⠲', '⠴', '⠦']));
         assert!(!app.wrote);
 
         await_discovery(&mut app);
-        let frame = draw_discovery(&app);
+        let frame = draw_discovery(&mut app);
         assert!(frame.contains("2 found") && frame.contains("123 · Example Co"), "{frame}");
         assert!(frame.contains("sc-domain:example.com · Example site"), "{frame}");
-        let (narrow, click) = draw_pick(&app, 24, 30, &palette());
+        let (narrow, click) = draw_pick(&mut app, 24, 30, &palette());
         assert!(narrow.iter().all(|line| crate::display_width(line) <= 24));
         assert!(click.placed.iter().filter(|(_, choice)| *choice == 1).count() > 1);
         assert_eq!(zone_choices(&app, 0, "CO", false), vec![("123".into(), false), ("sc-domain:example.com".into(), false)]);
@@ -5175,12 +5234,12 @@ mod tests {
         handle_pick_key(&mut app, "esc");
         handle_list_key(&mut app, "enter");
         assert_eq!(CALLS.load(Ordering::Relaxed), 1);
-        assert!(draw_discovery(&app).contains("2 found"));
+        assert!(draw_discovery(&mut app).contains("2 found"));
         handle_pick_key(&mut app, "r");
         assert!(matches!(&app.mode, Mode::Pick { query, .. } if query == "r"));
         handle_pick_key(&mut app, "tab");
         handle_pick_key(&mut app, "r");
-        assert!(draw_discovery(&app).contains("listing…"));
+        assert!(draw_discovery(&mut app).contains("listing…"));
         await_discovery(&mut app);
         assert_eq!(CALLS.load(Ordering::Relaxed), 2);
         assert!(!app.wrote);
@@ -5194,19 +5253,95 @@ mod tests {
         fn stopped() -> Result<Vec<Choice>, String> {
             panic!("example discovery panic")
         }
-        let mut app = field_app("properties", serde_json::json!([]), None);
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
         app.discover = &[("properties", empty)];
         handle_list_key(&mut app, "enter");
         await_discovery(&mut app);
-        assert!(draw_discovery(&app).contains("nothing found — type one to add it"));
+        assert!(draw_discovery(&mut app).contains("nothing found — type one to add it"));
         assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
         app.discover = &[("properties", stopped)];
         // Tab can focus even an empty list, so a refusal can be retried.
         handle_pick_key(&mut app, "tab");
         handle_pick_key(&mut app, "r");
         await_discovery(&mut app);
-        assert!(draw_discovery(&app).contains("discovery stopped: example discovery panic"));
+        assert!(draw_discovery(&mut app).contains("discovery stopped: example discovery panic"));
         assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+    }
+
+    #[test]
+    fn discovery_accepts_only_a_string_array() {
+        fn choices() -> Result<Vec<Choice>, String> {
+            Ok(vec![Choice {
+                value: "22".into(),
+                label: "ssh".into(),
+            }])
+        }
+        let mut numbers = field_app(
+            "ports",
+            serde_json::json!([22]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        numbers.discover = &[("ports", choices)];
+        assert!(discovery_hook(&numbers, "ports").is_none());
+        let mut bare = field_app("properties", serde_json::json!([]), None);
+        bare.discover = &[("properties", choices)];
+        assert!(discovery_hook(&bare, "properties").is_none());
+        let mut strings = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        strings.discover = &[("properties", choices)];
+        assert!(discovery_hook(&strings, "properties").is_some());
+    }
+
+    /// A choice taller than the pane stays where the wheel put it.
+    ///
+    /// Following every frame pinned the window to the choice's first line,
+    /// so the rest of a wrapped label could not be read.
+    #[test]
+    fn a_wrapped_discovery_choice_scrolls_to_its_tail() {
+        fn long() -> Result<Vec<Choice>, String> {
+            Ok(vec![Choice {
+                value: "property-id".into(),
+                label: format!("{}TAILMARK", "pad ".repeat(40)),
+            }])
+        }
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", long)];
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        let p = palette();
+        let first = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            first.contains("property-id"),
+            "the choice's first line is on the opening frame:\n{first}"
+        );
+        assert!(
+            !first.contains("TAILMARK"),
+            "the tail is below a 12-row pane:\n{first}"
+        );
+        for _ in 0..80 {
+            handle_pick_key(&mut app, "ctrl-e");
+        }
+        let scrolled = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            scrolled.contains("TAILMARK"),
+            "ctrl-e reaches the wrapped tail:\n{scrolled}"
+        );
+        let stayed = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            stayed.contains("TAILMARK"),
+            "the next frame keeps the wheel's place:\n{stayed}"
+        );
     }
 
     #[test]
@@ -5269,7 +5404,7 @@ mod tests {
         handle_list_key(&mut app, "enter");
         await_discovery(&mut app);
         let p = palette();
-        let frame = draw_pick(&app, 100, 30, &p).0.join("\n");
+        let frame = draw_pick(&mut app, 100, 30, &p).0.join("\n");
         assert!(frame.contains(&format!("{} example refusal", p.bad)), "{frame}");
         for ch in ["m", "o", "r", "e"] {
             handle_pick_key(&mut app, ch);
@@ -5284,7 +5419,7 @@ mod tests {
         fs::write(&app.path, concurrent).unwrap();
         handle_pick_key(&mut app, "enter");
         assert_eq!(fs::read_to_string(&app.path).unwrap(), concurrent);
-        assert!(draw_discovery(&app).contains("refusing to overwrite an updated list"));
+        assert!(draw_discovery(&mut app).contains("refusing to overwrite an updated list"));
     }
 
     /// A list of strings is typed into, one entry at a time.
@@ -5820,7 +5955,7 @@ mod tests {
         assert_eq!(held_rows(&plain, 0), vec![serde_json::json!("1.1.1.1")]);
         // Nor is the edit offered. A hint bound to nothing says the
         // feature is there.
-        let footer = draw_pick(&plain, 60, 24, &palette()).0.join("\n");
+        let footer = draw_pick(&mut plain, 60, 24, &palette()).0.join("\n");
         assert!(
             !footer.contains("edit the entry"),
             "the footer offered an edit that does nothing:\n{footer}"
@@ -6201,7 +6336,7 @@ mod tests {
             cursor: 4,
         };
         assert!(!add_free_entry(&mut app, 0, "http"));
-        let drawn = draw_pick(&app, 60, 24, &palette()).0.join("\n");
+        let drawn = draw_pick(&mut app, 60, 24, &palette()).0.join("\n");
         assert!(
             drawn.contains("whole number"),
             "the refusal has to reach the screen:\n{drawn}"
@@ -6238,11 +6373,11 @@ mod tests {
             on_list: true,
             cursor: 0,
         };
-        let wide = draw_pick(&app, 120, 24, &palette()).0.join("\n");
+        let wide = draw_pick(&mut app, 120, 24, &palette()).0.join("\n");
         assert!(wide.contains(long), "cut on a wide pane:\n{wide}");
         // And narrow enough, it is cut at the edge rather than overflowing
         // it - every row of the frame still measures inside the width.
-        let narrow = draw_pick(&app, 44, 24, &palette()).0.join("\n");
+        let narrow = draw_pick(&mut app, 44, 24, &palette()).0.join("\n");
         assert!(!narrow.contains(long), "nothing to clip at 44:\n{narrow}");
         assert!(
             narrow.contains("/tmp/somewhere/deeper"),

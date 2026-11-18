@@ -4321,13 +4321,34 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
 }
 
 /// A picker table or discovery hook is wired to its schema by field name.
+///
+/// A line whose first text is `//` is not a declaration. Splitting the raw
+/// list on `(` made `// ("retired", old_hook)` look like a live field.
 fn picker_fields<'a>(source: &'a str, member: &str) -> impl Iterator<Item = &'a str> {
     source
         .split_once(&format!("{member}: &["))
         .and_then(|(_, rest)| rest.split_once(']'))
         .into_iter()
-        .flat_map(|(list, _)| list.split('(').skip(1))
+        .flat_map(|(list, _)| list.lines())
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| line.split('(').skip(1))
         .filter_map(|entry| entry.trim_start().strip_prefix('"')?.split_once('"').map(|(key, _)| key))
+}
+
+/// Why a discovery field is not a string array, when it is not.
+fn discovery_field_error(settings: &serde_json::Value, field: &str) -> Option<String> {
+    let value = settings.get(field)?;
+    let items = settings
+        .get("_schema")
+        .and_then(|schema| schema.get(field))
+        .and_then(|rule| rule.get("items"))
+        .and_then(|kind| kind.as_str());
+    if value.is_array() && items == Some("string") {
+        return None;
+    }
+    Some(format!(
+        "discovery names {field:?}, which must be an array of strings (`items`: \"string\")"
+    ))
 }
 
 #[test]
@@ -4357,14 +4378,54 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
                 None => wrong.push(format!(
                     "{name}: {picker} names {field:?}, which is not a key in its settings.json"
                 )),
-                Some(value) if picker == "discovery" && !value.is_array() => wrong.push(format!(
-                    "{name}: discovery names {field:?}, which is not an array in its settings.json"
-                )),
+                Some(_) if picker == "discovery" => {
+                    if let Some(why) = discovery_field_error(&parsed, field) {
+                        wrong.push(format!("{name}: {why}"));
+                    }
+                }
                 Some(_) => {}
             }
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn picker_fields_ignore_a_commented_entry() {
+    let source = r#"
+        catalogues: &[
+            // ("retired", OLD),
+            ("models", MODELS),
+        ],
+        discover: &[
+            // ("retired", old_hook),
+            ("properties", discover_properties),
+        ],
+    "#;
+    assert_eq!(
+        picker_fields(source, "catalogues").collect::<Vec<_>>(),
+        vec!["models"]
+    );
+    assert_eq!(
+        picker_fields(source, "discover").collect::<Vec<_>>(),
+        vec!["properties"]
+    );
+}
+
+#[test]
+fn discovery_fields_must_be_string_arrays() {
+    let integer = serde_json::json!({
+        "ports": [22],
+        "_schema": { "ports": { "items": "integer" } }
+    });
+    assert!(discovery_field_error(&integer, "ports").is_some());
+    let bare = serde_json::json!({ "properties": [] });
+    assert!(discovery_field_error(&bare, "properties").is_some());
+    let strings = serde_json::json!({
+        "properties": [],
+        "_schema": { "properties": { "items": "string" } }
+    });
+    assert!(discovery_field_error(&strings, "properties").is_none());
 }
 
 /// The `token_env` default on screen is the one the code falls back to.
