@@ -101,12 +101,12 @@ Two caveats apply whenever you read `/proc/<PID>/io`:
 When asked to measure live inside Herdr:
 
 1. **Check your detach escape before launching anything.** Confirm how to detach the Herdr client (`herdr --help` or your configured Herdr detach keybinding; default tmux-style prefix detach if configured) so you can drop the client stream immediately if a backlog forms.
-2. **Test one widget at a time, starting it paused so monitoring is armed before its first frame:**
+2. **Test one widget at a time, starting it paused so monitoring is armed before its first frame.** Set `WIDGET` to the binary name (`latency`, `vercel-deployments`, …). Linux `comm` shows only the first 15 bytes of that name.
    - In the visible Herdr pane, launch the widget suspended after printing its PID:
      ```sh
-     sh -c 'printf "WIDGET_PID=%s\n" "$$"; kill -STOP "$$"; exec ./target/debug/latency'
+     sh -c 'printf "WIDGET_PID=%s\n" "$$"; kill -STOP "$$"; exec ./target/debug/"$1"' sh "$WIDGET"
      ```
-   - In your monitoring shell, identify `HERDR_CLIENT_PID` (`ps -eo pid,comm,args`), start the watchdog, and then resume the widget. The watchdog opens a pidfd for each `--kill-pid` when it arms and signals only that fd if bridge output stays `>= 300 KB/s` for `2 s` sustained. If pidfd signalling is unavailable it exits without signalling, rather than calling `kill` on a PID that may have been reused:
+   - In your monitoring shell, identify `HERDR_CLIENT_PID` (`ps -eo pid,comm,args`), start the watchdog, and resume the widget only after it prints `watching PID`. The watchdog opens a pidfd for each `--kill-pid` when it arms and signals only that fd if bridge output stays `>= 300 KB/s` for `2 s` sustained. If pidfd signalling is unavailable it exits without signalling. Leave the widget stopped when arming fails:
      ```sh
      HERDR_CLIENT_PID="..."   # set from ps -eo pid,comm,args
      WIDGET_PID="..."         # printed in the Herdr pane above
@@ -115,17 +115,43 @@ When asked to measure live inside Herdr:
        --kill-pid "$WIDGET_PID" \
        --threshold-kb 300 \
        --sustained 2 \
-       --seconds 60 &
+       --seconds 60 >watchdog.out 2>&1 &
      WATCHDOG_JOB=$!
-     sleep 0.2
+     armed=0
+     for _ in 1 2 3 4 5 6 7 8 9 10; do
+       if grep -q '^watching PID ' watchdog.out 2>/dev/null; then armed=1; break; fi
+       if ! kill -0 "$WATCHDOG_JOB" 2>/dev/null; then break; fi
+       sleep 0.1
+     done
+     if [ "$armed" -ne 1 ]; then
+       echo "watchdog did not arm; leaving $WIDGET stopped" >&2
+       wait "$WATCHDOG_JOB" || true
+       exit 1
+     fi
      kill -CONT "$WIDGET_PID"
      wait "$WATCHDOG_JOB"
      ```
-3. **Always stop the test widget as soon as the watchdog window finishes** (when the window ends cleanly with `OK`, the watchdog exits and is no longer guarding the link):
+3. **Always stop the test widget as soon as the watchdog window finishes** (when the window ends cleanly with `OK`, the watchdog exits and is no longer guarding the link). `comm` is only 15 bytes, so compare that prefix and say so when it does not match. Do not continue while `/proc/$WIDGET_PID/comm` still names this widget:
    ```sh
-   if [ "$(cat "/proc/$WIDGET_PID/comm" 2>/dev/null)" = "latency" ]; then
-     kill "$WIDGET_PID"
-     while kill -0 "$WIDGET_PID" 2>/dev/null; do sleep 0.1; done
+   expect=$(printf '%.15s' "$WIDGET")
+   comm=$(cat "/proc/$WIDGET_PID/comm" 2>/dev/null || true)
+   if [ "$comm" != "$expect" ]; then
+     printf 'error: refusing to kill %s; comm is %q, expected %q\n' \
+       "$WIDGET_PID" "$comm" "$expect" >&2
+     exit 1
+   fi
+   kill "$WIDGET_PID"
+   i=0
+   while [ "$i" -lt 50 ]; do
+     now=$(cat "/proc/$WIDGET_PID/comm" 2>/dev/null || true)
+     if [ "$now" != "$expect" ]; then break; fi
+     i=$((i + 1))
+     sleep 0.1
+   done
+   now=$(cat "/proc/$WIDGET_PID/comm" 2>/dev/null || true)
+   if [ "$now" = "$expect" ]; then
+     echo "error: $WIDGET (pid $WIDGET_PID) still running" >&2
+     exit 1
    fi
    ```
 4. **When the watchdog is not enough — stop the flood by detaching the client:**

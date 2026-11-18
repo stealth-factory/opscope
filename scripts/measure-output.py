@@ -1211,17 +1211,64 @@ class ProcIoHandle:
             return None
         return wchar_from_io_text(text)
 
+    def _pinned_path(self, *parts: str) -> Path:
+        # `/proc/self/fd/N` follows this directory fd, not a recycled PID.
+        return Path(f"/proc/self/fd/{self._dirfd}", *parts)
+
+    def starttime(self) -> Optional[int]:
+        try:
+            stat_text = self._pinned_path("stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        rparen = stat_text.rfind(")")
+        if rparen == -1:
+            return None
+        fields = stat_text[rparen + 2 :].split()
+        if len(fields) < 20:
+            return None
+        try:
+            return int(fields[19])
+        except ValueError:
+            return None
+
+    def read_comm(self) -> Optional[str]:
+        try:
+            return self._pinned_path("comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+
+    def child_pids(self) -> Optional[List[int]]:
+        try:
+            tasks = list(self._pinned_path("task").iterdir())
+        except OSError:
+            return None
+        found: List[int] = []
+        seen = {self.pid}
+        for task in tasks:
+            try:
+                raw = (task / "children").read_text(encoding="ascii")
+            except OSError:
+                continue
+            for tok in raw.split():
+                try:
+                    cpid = int(tok)
+                except ValueError:
+                    continue
+                if cpid > 0 and cpid not in seen:
+                    seen.add(cpid)
+                    found.append(cpid)
+        return found
+
     def presence(self) -> str:
         """`alive`, `gone`, or `unreadable`.
 
-        A failed `comm` read is not proof of exit. `hidepid` can hide a live
-        process. Only `ENOENT` on this pinned directory fd means the original
-        process is gone.
+        `hidepid=2` can return `ENOENT` for `comm` on a live process. Only
+        `ESRCH` on this pinned directory fd means the original process is gone.
         """
         try:
             fd = os.open("comm", os.O_RDONLY, dir_fd=self._dirfd)
         except OSError as err:
-            if err.errno in (errno.ENOENT, errno.ESRCH):
+            if err.errno == errno.ESRCH:
                 return "gone"
             return "unreadable"
         os.close(fd)
@@ -1282,15 +1329,20 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
             return 2
         handles[pid] = primary
         start_val = primary.read_wchar()
+        started_at = time.monotonic()
+        baseline_start = primary.starttime()
         if start_val is None:
             sys.stderr.write(
                 f"error: cannot read /proc/{pid}/io (process missing or insufficient permissions)\n"
             )
             return 2
 
-        raw_comm = read_proc_comm(pid)
-        shown_comm = sanitize_display_text(raw_comm)
-        children = read_proc_descendants(pid)
+        raw_comm = ""
+        children: List[int] = []
+        if baseline_start is not None and primary.starttime() == baseline_start:
+            raw_comm = primary.read_comm() or ""
+            children = primary.child_pids() or []
+        shown_comm = sanitize_display_text(raw_comm) if raw_comm else "?"
         if raw_comm == "opscope" or children:
             child_desc = (
                 ", ".join(f"{c} ({sanitize_display_text(read_proc_comm(c))})" for c in children)
@@ -1303,7 +1355,7 @@ def run_proc_io_sampler(pid: int, seconds: float) -> int:
                 "         Measure the live widget child PID directly (shown separately below).\n"
             )
 
-        initial: Dict[int, Tuple[int, float]] = {pid: (start_val, time.monotonic())}
+        initial: Dict[int, Tuple[int, float]] = {pid: (start_val, started_at)}
         names: Dict[int, str] = {pid: shown_comm}
         for child in children:
             try:
