@@ -33,9 +33,9 @@ adopting it.
 | `key(cache, unit, shape, plain, secrets)` | `unit/shape:plain…:%sfingerprint`, with `:` and `%` in a plain part escaped so two sets of parts never make one key; the `%s` mark keeps a plain part from passing for a fingerprint. Tokens go in only as a SHA-256 fingerprint, and are registered so no reading containing one is ever written, in the raw form or as JSON escapes it. Only tokens of eight bytes or more are looked for: a shorter one would match ordinary text, so it is not a secret this check can keep. Bump `shape` when what is stored under `unit` changes. |
 | `take(cache, key, Policy)` | `Serve(value)`, `Fetch(ticket)` or `Waiting { by, have }`. Never blocks. |
 | `claim_many(cache, asks, now)` / `answer_many(cache, done, now, claimed_at)` | The same for a pass of many readings, in one commit each. `done` is `(key, answer, policy, fetched_at)`: each answer keeps the time its own fetch finished. `claimed_at` is when those leases were taken; an answer superseded after that is not written. An empty `done` writes nothing. `Claimed::{Serve, Fetch, Waiting}`, `Answer::{Value, Refused}`. |
-| `renew(cache, key, lease_for)` / `renew_all(cache, key, lease_for)` / `release(cache, key)` | Between the two, for a fetch that is several requests. `renew_all` extends every lease this pane still holds and reports whether `key` is one of them. |
+| `renew(cache, key, lease_for)` / `renew_all(cache, key, lease_for)` / `release(cache, key)` | Between the two, for a fetch that is several requests. A renewal is written once less than half of `lease_for` remains; until then it only checks the lease is still this pane's. `renew_all` does that for every lease this pane holds and reports whether `key` is one of them. |
 | `record(cache, key, value, at, held)` | Share a figure already in hand, at the time it was observed, without a lease. A newer stored reading is left alone. |
-| `ticket.renew()` | Before each request of a long fetch. `false` means another pane took over: stop. |
+| `ticket.renew()` | Before each request of a long fetch. Extends the lease once half of it has gone. `false` means another pane took over: stop. |
 | `ticket.publish(value)` | Hold it for this pane's `ttl` and share it. Returns why it stayed with this pane, if it did (too large, it carried a token, or its lease ran out and another pane took over - that pane's answer is the one shared). |
 | `ticket.refuse(why, until)` | The service said no. Every pane waits until `until` if the service named a time, else the doubling backoff. |
 | `gate(cache, bucket)` / `shut(cache, bucket, until, why)` | A rate limit that covers every reading of the service. `shut` when the service says the limit is spent; check `gate` before asking anything. A gate `shut` could not write because the store was busy is written by this pane's next `gate`. |
@@ -45,20 +45,28 @@ adopting it.
 A dropped `Ticket` gives the lease back, including while a panic unwinds, so
 another pane does not wait out a lease nobody is using.
 
-`Policy::lease_for` is one request's timeout plus a margin, not a whole
-pass: renewed before each request, a dead pane costs one request's wait. It is
-capped at `lease::MAX_LEASE` (300 s).
+`Policy::lease_for` is twice one request — the timeout and a margin, twice —
+not a whole pass. A renewal is written once half of it has gone, and the half
+left covers the next request. A dead pane costs that long. It is capped at
+`lease::MAX_LEASE` (300 s).
 
 agent-usage still uses the older `cached` call, which waits for another pane
-when it has nothing to show. New widgets use `take`.
+when it has nothing to show. New widgets use `take`. `provenance` reads a
+`cached` reading the same way: a pane that serves what it has while another
+asks notes who is asking, and a refusal held as `{"why": ...}` is said with
+the time its backoff ends (OPS-290).
 
 ## What the pane says
 
 One row, wrapped to the pane, under the status line - never squeezed onto it.
 Draw it with `sharing_rows`, so a pane that cannot share says
 `not sharing readings: <why>` in the same place, not on the `!` screen.
-Built from every reading on screen, so the pane never claims to be fresher
-than its stalest part:
+Built from every reading on screen, and dated by the reading it speaks for:
+the oldest one that is stale, refused or being fetched by another pane, so
+the pane never claims to be fresher than a part that is behind; else, when
+it only says who fetched, the newest such reading. A reading still inside
+its hold - an hourly plan beside a quota read every minute - does not make
+the line read old (OPS-290).
 
 - `fetched 2m ago by pane 48213`
 - `cached 7m ago · pane 48213 asking now`

@@ -3196,10 +3196,13 @@ fn one_pass(
 /// the last third of [`LEASE_FOR`] still outlasts one request's
 /// thirty-second timeout, so it is left alone.
 ///
-/// The quiet window starts only when the renew extended the lease. A busy
-/// store did not, and is asked again before the next request. A lost lease
-/// stays lost through that window, so the next check stops instead of
-/// treating the failed renew as a recent one.
+/// The quiet window starts when the renew says the lease is still this
+/// pane's. The store itself writes only once half the lease is gone, so
+/// that answer also covers a check that left a long lease alone, and the
+/// window is a third of the lease, shorter than the half still left. A
+/// busy store did not answer, and is asked again before the next request.
+/// A lost lease stays lost through that window, so the next check stops
+/// instead of treating the failed renew as a recent one.
 struct Renewal {
     extended_at: f64,
     lost: bool,

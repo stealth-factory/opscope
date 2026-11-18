@@ -26,6 +26,9 @@ use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
 use opscope_core as tc;
+use tc::readings::{self, Cache, Policy, Take};
+
+mod parse;
 
 /// The environment variable a GitHub token is read from when `token_env`
 /// says nothing. Named once so the code and the schema cannot drift: the
@@ -191,6 +194,10 @@ fn for_this_host(query: &str, field: &str) -> String {
 
 #[derive(Clone, Copy, Default)]
 struct Rate {
+    /// When the answer these figures came from arrived, so a shared
+    /// reading older than what this pane already holds does not wind the
+    /// budget back.
+    at: f64,
     /// Remaining and the ceiling it is measured against. A bare remaining
     /// is not a reading: 4737 is reassuring against 5000 and alarming
     /// against 5000000, and the header showed the first number without the
@@ -256,14 +263,65 @@ fn short_explain(said: &str, code: u16) -> Option<String> {
     Some(rest.chars().take(80).collect())
 }
 
+/// A rate limit GitHub reported on any request of this run: until when, in
+/// epoch seconds, and what the pane says about it.
+///
+/// One for the process, because the two count threads and the poller all
+/// ask through `graphql` and any of them can be the one told. The poller
+/// shares it with every other pane through the store's gate; until the
+/// reset, `graphql` refuses here rather than spend a request GitHub will
+/// refuse.
+static RATE_STOP: Mutex<Option<(f64, String)>> = Mutex::new(None);
+
+/// The limit GitHub reported, while it is still in force.
+fn rate_stop() -> Option<(f64, String)> {
+    let stop = RATE_STOP.lock().ok()?.clone();
+    stop.filter(|(until, _)| *until > tc::now())
+}
+
+/// Stop asking until `until`, as GitHub told this pane or another.
+fn stop_asking(until: f64, why: &str) {
+    if let Ok(mut stop) = RATE_STOP.lock() {
+        let later = stop.as_ref().is_none_or(|(was, _)| until >= *was);
+        if later {
+            *stop = Some((until, why.to_string()));
+        }
+    }
+}
+
+/// Note what one answer's headers say about asking again.
+fn note_rate(status: u16, headers: &[(String, String)]) {
+    let got = parse::parse_rate_headers(&parse::header_block(headers));
+    let limit = parse::classify_rate(status, &got, tc::now() as i64);
+    if let (Some(until), Some(why)) = (limit.until(), parse::rate_reason(&limit)) {
+        stop_asking(until as f64, why);
+    }
+}
+
+/// When the pane says the next ask is, as a clock time.
+fn rate_refusal(until: f64, why: &str) -> String {
+    let at = chrono::DateTime::from_timestamp(until as i64, 0)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default();
+    format!("{why}, asking again at {at}")
+}
+
 fn graphql(
     query: &str,
     tok: &str,
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    // A spent budget is spent for every request until the reset, and
+    // asking anyway is how a limit is sustained rather than cleared.
+    if let Some((until, why)) = rate_stop() {
+        return Err(rate_refusal(until, &why));
+    }
     let gql_url = tc::github_graphql_url(api_host());
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
-    let (out, _headers) = tc::post_json(
+    // `post_answer`, not `post_json`: GitHub answers a spent GraphQL
+    // budget with HTTP 200 and an errors array, and only the headers say
+    // it was the budget and when it comes back.
+    let (status, out, headers) = tc::post_answer(
         &gql_url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -271,9 +329,13 @@ fn graphql(
             ("User-Agent", "opscope"),
         ],
         &body,
-        45,
+        GRAPHQL_FOR,
     )
     .map_err(|said| plain_refusal(&said))?;
+    note_rate(status, &headers);
+    if !(200..300).contains(&status) {
+        return Err(plain_refusal(&tc::refused(status, &out)));
+    }
     let data = tc::parse_source_json(&out).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
@@ -338,9 +400,21 @@ const PR_COMPUTED_FIELDS: &str = "
 /// correct, they simply show their checks as unknown, which is what an
 /// unknown check should look like. Inventing "passing" because a lookup
 /// failed is the one outcome that would be worse than a dash.
-fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String, String>, tok: &str) {
+///
+/// `renew` holds this pane's lease on the shared list for one more request
+/// and is asked before each chunk; `false` back means another pane took
+/// the fetch over, and so does this function's.
+fn enrich(
+    pool: &mut HashMap<String, serde_json::Value>,
+    by_id: &HashMap<String, String>,
+    tok: &str,
+    renew: &mut dyn FnMut() -> bool,
+) -> bool {
     let ids: Vec<String> = by_id.keys().cloned().collect();
     for chunk in ids.chunks(50) {
+        if !renew() {
+            return false;
+        }
         let query = format!(
             "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
             for_this_host(PR_HEAVY_FIELDS, STACK_ENTRY_FIELD)
@@ -365,6 +439,7 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
             entry["commits"] = node["commits"].clone();
         }
     }
+    true
 }
 
 /// The same again for the fields the search stopped carrying.
@@ -381,9 +456,13 @@ fn enrich_computed(
     pool: &mut HashMap<String, serde_json::Value>,
     by_id: &HashMap<String, String>,
     tok: &str,
-) {
+    renew: &mut dyn FnMut() -> bool,
+) -> bool {
     let ids: Vec<String> = by_id.keys().cloned().collect();
     for chunk in ids.chunks(50) {
+        if !renew() {
+            return false;
+        }
         let query = format!(
             "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
             PR_COMPUTED_FIELDS
@@ -402,6 +481,7 @@ fn enrich_computed(
             }
         }
     }
+    true
 }
 
 /// One request, one aliased search per source.
@@ -742,6 +822,66 @@ struct State {
     /// deliberately not in `err`: the `!` banner is for a pass that
     /// produced nothing and for a refusal that really is one.
     stopped: bool,
+    /// Where the readings on screen came from, as the poller last saw
+    /// them: drawn as one line under the status line (OPS-287).
+    sharing: Sharing,
+}
+
+/// What the freshness line needs, copied off the poller thread: the store
+/// lives there and the render thread never touches it.
+#[derive(Clone, Default)]
+struct Sharing {
+    /// Why this pane is not sharing, when it is not.
+    off: String,
+    /// Each reading on screen and where it came from. The counts are kept
+    /// apart so a pane with its stats hidden does not date its line by
+    /// figures it is not showing.
+    found: Vec<(Part, readings::Provenance)>,
+    /// The store's notice - started again, emptied - and when it was
+    /// raised: drawn for one refresh, then gone.
+    notice: (String, f64),
+    /// The pane fetching a list this pane has never had, so a pane started
+    /// during another's first pass says why its board is empty.
+    waiting: Option<u32>,
+}
+
+/// Which reading a provenance describes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Part {
+    List,
+    Counts,
+}
+
+/// The freshness line under the status line, wrapped to `width`.
+///
+/// Through `tc::readings::sharing_rows`, so the wording is the one every
+/// widget uses. The store itself stays on the poller thread; a cache that
+/// holds only the reason sharing is off is all `sharing_rows` reads.
+fn sharing_lines(s: &Sharing, stats: bool, now: f64, width: usize) -> Vec<String> {
+    let found: Vec<readings::Provenance> = s
+        .found
+        .iter()
+        .filter(|(part, _)| stats || *part != Part::Counts)
+        .map(|(_, p)| p.clone())
+        .collect();
+    let cache = Cache { sharing_off: s.off.clone(), ..Cache::default() };
+    let mut rows = readings::sharing_rows(&cache, &found, now, width);
+    if let Some(by) = s.waiting.filter(|by| *by != 0 && s.off.is_empty()) {
+        let said = rows.join(" ");
+        if !said.contains("asking now") {
+            let line = if said.is_empty() {
+                format!("no list yet · pane {by} asking now")
+            } else {
+                format!("{said} · no list yet, pane {by} asking now")
+            };
+            rows = tc::wrap_words(&line, width.max(1));
+        }
+    }
+    if s.off.is_empty() && !s.notice.0.is_empty() && now - s.notice.1 < NOTICE_FOR {
+        rows.extend(tc::wrap_words(&s.notice.0, width.max(1)));
+    }
+
+    rows
 }
 
 /// Merge counts over the span the MERGED chart plots, and both rolling
@@ -1014,39 +1154,44 @@ fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
 /// wait on. Reports through `counts_err` rather than `err` for the reason
 /// OPS-84 exists: the board's own resilience to GitHub's
 /// slow spells must not be undone by a second request beside it.
-fn fetch_counts(
-    tok: &str,
-    days: &[String],
-    state: &Arc<Mutex<State>>,
-    rate: &Arc<Mutex<Rate>>,
-) -> Result<(), String> {
-    let (viewer, orgs) = state
-        .lock()
-        .map(|g| (g.viewer.clone(), g.orgs.clone()))
-        .unwrap_or_default();
-    let scope = mine_scope(&viewer, &orgs);
+///
+/// Handed back as the `ghprs.merged` reading every pane shares, with the
+/// budget GitHub reported beside the figures.
+fn fetch_counts(tok: &str, days: &[String], scope: &str) -> Result<serde_json::Value, String> {
     if scope.is_empty() {
         return Err("no account to count over yet".to_string());
     }
     let since = (Utc::now() - chrono::Duration::hours(COUNT_WINDOW_HOURS))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let d = graphql(&count_query(&scope, days, &since), tok, serde_json::json!({}))?;
-    if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
-        if let Ok(mut g) = rate.lock() {
-            g.remaining = Some(left);
-            if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
-                g.limit = Some(limit);
-            }
-        }
-    }
-    let mut counts = read_counts(&d, days)?;
-    counts.at = tc::now();
-    if let Ok(mut g) = state.lock() {
-        g.counts = Some(counts);
-        g.counts_err = String::new();
-    }
-    Ok(())
+    let d = graphql(&count_query(scope, days, &since), tok, serde_json::json!({}))?;
+    let counts = read_counts(&d, days)?;
+    Ok(serde_json::json!({
+        "days": counts.days,
+        "merged_24h": counts.merged_24h,
+        "opened_24h": counts.opened_24h,
+        "rate": d["rateLimit"].clone(),
+    }))
+}
+
+/// A merge-count reading back as the figures the chart draws, stamped
+/// with when its answer arrived - whichever pane asked.
+fn counts_from(v: &serde_json::Value, at: f64) -> Option<Counts> {
+    Some(Counts {
+        days: day_pairs(&v["days"])?,
+        merged_24h: v["merged_24h"].as_i64()?,
+        opened_24h: v["opened_24h"].as_i64()?,
+        at,
+    })
+}
+
+/// `[["2026-11-17", 4], ...]` back as pairs, or `None` when any entry is
+/// not one: a day that does not read is not a day with nothing in it.
+fn day_pairs(v: &serde_json::Value) -> Option<Vec<(String, i64)>> {
+    v.as_array()?
+        .iter()
+        .map(|d| Some((d[0].as_str()?.to_string(), d[1].as_i64()?)))
+        .collect()
 }
 
 /// How many pull requests were opened on each day, whatever became of
@@ -1092,37 +1237,20 @@ fn read_created(d: &serde_json::Value, days: &[String]) -> Result<Created, Strin
 ///
 /// Same cadence and same day list as `fetch_counts`, so the two rows plot
 /// one axis, and reports through `created_err` so each chart can say on
-/// its own caption whether its own figures landed.
-fn fetch_created(
-    tok: &str,
-    days: &[String],
-    state: &Arc<Mutex<State>>,
-    rate: &Arc<Mutex<Rate>>,
-) -> Result<(), String> {
-    let (viewer, orgs) = state
-        .lock()
-        .map(|g| (g.viewer.clone(), g.orgs.clone()))
-        .unwrap_or_default();
-    let scope = mine_scope(&viewer, &orgs);
+/// its own caption whether its own figures landed. Handed back as the
+/// `ghprs.created` reading.
+fn fetch_created(tok: &str, days: &[String], scope: &str) -> Result<serde_json::Value, String> {
     if scope.is_empty() {
         return Err("no account to count over yet".to_string());
     }
-    let d = graphql(&created_query(&scope, days), tok, serde_json::json!({}))?;
-    if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
-        if let Ok(mut g) = rate.lock() {
-            g.remaining = Some(left);
-            if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
-                g.limit = Some(limit);
-            }
-        }
-    }
-    let mut created = read_created(&d, days)?;
-    created.at = tc::now();
-    if let Ok(mut g) = state.lock() {
-        g.created = Some(created);
-        g.created_err = String::new();
-    }
-    Ok(())
+    let d = graphql(&created_query(scope, days), tok, serde_json::json!({}))?;
+    let created = read_created(&d, days)?;
+    Ok(serde_json::json!({ "days": created.days, "rate": d["rateLimit"].clone() }))
+}
+
+/// An arrival-count reading back as the figures the chart draws.
+fn created_from(v: &serde_json::Value, at: f64) -> Option<Created> {
+    Some(Created { days: day_pairs(&v["days"])?, at })
 }
 
 fn fetch_detail(
@@ -1285,14 +1413,21 @@ fn worth_retrying(said: &str) -> bool {
 /// that worked back in rather than starting each round at the default.
 /// Halving twice from there reaches the floor, so a bad minute costs two
 /// extra requests once, not once per round.
+///
+/// `renew` is asked before every request, including each smaller retry,
+/// because each can take the whole of curl's 45 seconds.
 fn fetch_round(
     round: &[String],
     cursors: &[Option<String>],
     limit: usize,
     tok: &str,
+    renew: &mut dyn FnMut() -> bool,
 ) -> Result<(serde_json::Value, usize), String> {
     let mut size = limit.max(1);
     loop {
+        if !renew() {
+            return Err(TAKEN_OVER.to_string());
+        }
         match graphql(&list_query(round, size, cursors), tok, serde_json::json!({})) {
             Ok(d) => return Ok((d, size)),
             Err(said) => match smaller(size).filter(|_| worth_retrying(&said)) {
@@ -1365,56 +1500,67 @@ fn union_total(sources: &[(i64, usize)], pooled: usize) -> (usize, bool) {
 /// need the same answer and need it first: on a board of several hundred
 /// pull requests the list pages for minutes, and a figure that only turns
 /// up at the end of that is a figure nobody sees.
-fn discover_owners(tok: &str, state: &Arc<Mutex<State>>) -> Result<(), String> {
-    let need_viewer = state.lock().map(|g| g.viewer.is_empty()).unwrap_or(true);
-    if need_viewer {
-        // Every org, not the first page of them. `@mine` is built out of
-        // this list as owner qualifiers, so an org missing here is not an
-        // undercount - it is a scope the board never searched, and nothing
-        // downstream can tell that from an org with no open PRs.
-        let mut login = String::new();
-        let mut orgs: Vec<String> = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let who = graphql(
-                "query($after: String) { viewer { login \
-                 organizations(first: 100, after: $after) { \
-                 pageInfo { hasNextPage endCursor } nodes { login } } } }",
-                tok,
-                serde_json::json!({ "after": cursor }),
-            )?;
-            if login.is_empty() {
-                login = text(&who["viewer"], "login");
-            }
-            let conn = &who["viewer"]["organizations"];
-            orgs.extend(
-                conn["nodes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|o| text(o, "login"))
-                    .filter(|o| !o.is_empty()),
-            );
-            let next = conn["pageInfo"]["endCursor"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            // This runs on the poller thread: a cursor that stops advancing
-            // has to end the loop rather than spin it.
-            if !conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
-                || next.is_empty()
-                || Some(&next) == cursor.as_ref()
-            {
-                break;
-            }
-            cursor = Some(next);
+///
+/// Handed back as the reading every pane of this widget shares,
+/// `{"viewer": login, "orgs": [...]}`, rather than written into the
+/// pane: the poller publishes it and every pane applies it the same way.
+fn discover_owners(tok: &str, renew: &mut dyn FnMut() -> bool) -> Result<serde_json::Value, String> {
+    // Every org, not the first page of them. `@mine` is built out of
+    // this list as owner qualifiers, so an org missing here is not an
+    // undercount - it is a scope the board never searched, and nothing
+    // downstream can tell that from an org with no open PRs.
+    let mut login = String::new();
+    let mut orgs: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        if !renew() {
+            return Err(TAKEN_OVER.to_string());
         }
-        if let Ok(mut g) = state.lock() {
-            g.viewer = login;
-            g.orgs = orgs;
+        let who = graphql(
+            "query($after: String) { viewer { login \
+             organizations(first: 100, after: $after) { \
+             pageInfo { hasNextPage endCursor } nodes { login } } } }",
+            tok,
+            serde_json::json!({ "after": cursor }),
+        )?;
+        if login.is_empty() {
+            login = text(&who["viewer"], "login");
         }
+        let conn = &who["viewer"]["organizations"];
+        orgs.extend(
+            conn["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|o| text(o, "login"))
+                .filter(|o| !o.is_empty()),
+        );
+        let next = conn["pageInfo"]["endCursor"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        // This runs on the poller thread: a cursor that stops advancing
+        // has to end the loop rather than spin it.
+        if !conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
+            || next.is_empty()
+            || Some(&next) == cursor.as_ref()
+        {
+            break;
+        }
+        cursor = Some(next);
     }
-    Ok(())
+    Ok(serde_json::json!({ "viewer": login, "orgs": orgs }))
+}
+
+/// The identity reading back as `(viewer, orgs)`.
+fn read_owners(v: &serde_json::Value) -> (String, Vec<String>) {
+    let orgs = v["orgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o.as_str().map(str::to_string))
+        .collect();
+    (text(v, "viewer"), orgs)
 }
 
 /// Put what has landed on screen, without waiting for the rest.
@@ -1423,6 +1569,12 @@ fn discover_owners(tok: &str, state: &Arc<Mutex<State>>) -> Result<(), String> {
 /// the pages arrive rather than staying empty until the last source is
 /// exhausted, and the count in the header is the count on screen at every
 /// moment in between.
+///
+/// Only on a board that has no finished list yet. A pane already showing
+/// one keeps it until this pass finishes, as every other pane does while
+/// this one fetches: on a large board a pass runs for minutes, and the
+/// pane doing the work shrinking to its first page while the panes beside
+/// it show the whole list was two answers to one question (OPS-287).
 fn publish(
     state: &Arc<Mutex<State>>,
     pool: &HashMap<String, serde_json::Value>,
@@ -1432,6 +1584,9 @@ fn publish(
 ) {
     if let Ok(mut g) = state.lock() {
         g.stages.count("pull requests", order.len(), None);
+        if g.fetched > 0.0 {
+            return;
+        }
         let partial: Vec<serde_json::Value> = order
             .iter()
             .filter_map(|url| pool.get(url).cloned())
@@ -1445,20 +1600,21 @@ fn publish(
     }
 }
 
+/// Page every source to the end, pool what they found, and hand the pool
+/// back as the reading every pane of this widget shares.
+///
+/// The pane that fetches still fills its own board as the rounds land;
+/// what it publishes for the others is the finished pass only (OPS-287
+/// leaves partial publishes for later). `renew` is asked before each
+/// request and `false` ends the pass with [`TAKEN_OVER`].
 fn fetch_list(
     tok: &str,
-    sources: &[(String, String)],
-    extra: &[String],
+    pairs: &[(String, String)],
     limit: usize,
     state: &Arc<Mutex<State>>,
     rate: &Arc<Mutex<Rate>>,
-) -> Result<(), String> {
-    discover_owners(tok, state)?;
-    let (viewer, orgs) = state
-        .lock()
-        .map(|g| (g.viewer.clone(), g.orgs.clone()))
-        .unwrap_or_default();
-    let pairs = searches(sources, &viewer, &orgs, extra);
+    renew: &mut dyn FnMut() -> bool,
+) -> Result<serde_json::Value, String> {
     let queries: Vec<String> = pairs.iter().map(|(_, q)| q.clone()).collect();
 
     // Pool the sources, remembering which found each PR. The sources
@@ -1508,7 +1664,7 @@ fn fetch_list(
         let outcome = loop {
             let start = served.unwrap_or(limit);
             let start = if tried == 0 { start } else { start.min(PAGE_FLOOR) };
-            match fetch_round(&round, &round_cursors, start, tok) {
+            match fetch_round(&round, &round_cursors, start, tok, renew) {
                 Ok(got) => break Ok(got),
                 Err(said) if retry_again(tried, &said) => {
                     tried += 1;
@@ -1524,14 +1680,20 @@ fn fetch_list(
                 }
                 d
             }
+            Err(said) if said == TAKEN_OVER => return Err(said),
             Err(said) if !order.is_empty() => {
                 deepened = Some(said);
                 break;
             }
             Err(said) => return Err(said),
         };
+        // The response was observed now, before enrichment makes any more
+        // requests. Publishing the list later must not make this budget look
+        // newer than a count another pane fetched in the meantime.
+        let observed = tc::now();
         if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
             if let Ok(mut g) = rate.lock() {
+                g.at = observed;
                 g.remaining = Some(left);
                 // Only when GitHub sent one. A ceiling remembered from an
                 // earlier pass is still true; a zero invented here is not.
@@ -1594,14 +1756,18 @@ fn fetch_list(
         // reads an absent rollup as a repository with no CI, so the board
         // would count approved PRs as ready and then take it back - and
         // "ready to merge" is the one figure anybody acts on.
-        enrich(&mut pool, &fresh_ids, tok);
+        if !enrich(&mut pool, &fresh_ids, tok, renew) {
+            return Err(TAKEN_OVER.to_string());
+        }
         publish(state, &pool, &order, &counted, !live.is_empty());
         // The computed fields after, and published again. These do not
         // need holding back: until they land the SIZE column is blank and
         // the conflicting count says what it was over, so the board is
         // visibly waiting rather than quietly wrong, and the rows are on
         // screen two and a half seconds sooner for it.
-        enrich_computed(&mut pool, &fresh_ids, tok);
+        if !enrich_computed(&mut pool, &fresh_ids, tok, renew) {
+            return Err(TAKEN_OVER.to_string());
+        }
         publish(state, &pool, &order, &counted, !live.is_empty());
     }
 
@@ -1609,19 +1775,52 @@ fn fetch_list(
         .into_iter()
         .filter_map(|url| pool.remove(&url))
         .collect();
-    if let Ok(mut g) = state.lock() {
-        g.query = pairs
-            .iter()
-            .map(|(n, _)| n.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        // The config file's permissions and the old section name are
-        // notices now, raised once rather than glued onto every pass; the
-        // refilled sources stay here because they explain the board itself.
-        let said = refilled_sources_note().unwrap_or_default();
-        settle(&mut g, nodes, &counted, served, deepened.as_deref(), said);
-    }
-    Ok(())
+    let rate = rate.lock().map(|r| *r).unwrap_or_default();
+    Ok(list_reading(nodes, &counted, served, deepened.as_deref(), rate))
+}
+
+/// The pooled list as every pane shares it: the pull requests, and the
+/// four facts about how the pass went - what each source counted against
+/// what it handed over (which `total` and `capped` fall out of), the page
+/// size it fell back to, and why paging stopped early. Each pane settles
+/// it the same way, so a list another pane fetched reads exactly as this
+/// pane's own would have.
+fn list_reading(
+    prs: Vec<serde_json::Value>,
+    counted: &[(i64, usize)],
+    served: Option<usize>,
+    deepened: Option<&str>,
+    rate: Rate,
+) -> serde_json::Value {
+    serde_json::json!({
+        "prs": prs,
+        "counted": counted,
+        "served": served,
+        "deepened": deepened,
+        "rate": { "remaining": rate.remaining, "limit": rate.limit, "at": rate.at },
+    })
+}
+
+/// Settle a shared list reading onto this pane, as fetched at `at`.
+///
+/// `None` when the value is not a list this build can read, which leaves
+/// the pane as it was rather than drawing an empty board.
+fn apply_list(g: &mut State, v: &serde_json::Value, at: f64, query: String) -> Option<()> {
+    let prs = v["prs"].as_array()?.clone();
+    let counted: Vec<(i64, usize)> = v["counted"]
+        .as_array()?
+        .iter()
+        .map(|c| Some((c[0].as_i64()?, c[1].as_u64()? as usize)))
+        .collect::<Option<_>>()?;
+    let served = v["served"].as_u64().map(|n| n as usize);
+    // The config file's permissions and the old section name are notices
+    // now, raised once rather than glued onto every pass; the refilled
+    // sources stay here because they explain the board itself.
+    let said = refilled_sources_note().unwrap_or_default();
+    settle(g, prs, &counted, served, v["deepened"].as_str(), said);
+    g.fetched = at;
+    g.query = query;
+    Some(())
 }
 
 /// What a finished pass leaves on the pane.
@@ -1881,6 +2080,464 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
     out
 }
 
+// ── readings shared between panes (OPS-287) ─────────────────────────────
+
+/// This widget's own store file, shared with no other widget.
+const STORE: &str = "github-prs";
+/// The gate every pane with the same GitHub identity checks before asking
+/// GraphQL anything. Its key also carries the API host and token fingerprint.
+const GATE: &str = "ghprs.graphql";
+/// How long one GraphQL request may run.
+const GRAPHQL_FOR: u64 = 45;
+/// Seconds kept past a request that uses its whole time.
+const LEASE_MARGIN: f64 = 15.0;
+/// Twice one request. A renewal is written only once half of this has
+/// gone, and the half that remains is one request plus [`LEASE_MARGIN`].
+/// A pane that dies holds the list for this long, not for the minutes a
+/// large board takes.
+const LEASE_FOR: f64 = 2.0 * (GRAPHQL_FOR as f64 + LEASE_MARGIN);
+/// Who the token belongs to and which orgs it is in. Rarely changes, so
+/// asked hourly rather than every refresh, and not by `r`.
+const WHO_TTL: f64 = 3600.0;
+/// How long the store's own notice - started again, emptied - is drawn.
+const NOTICE_FOR: f64 = 60.0;
+/// What a fetch hands back when another pane took its lease over: not a
+/// refusal, so nothing is held; that pane's answer is the one to show.
+const TAKEN_OVER: &str = "another pane took over this fetch";
+/// The largest reading shared. A pull request with everything the board
+/// draws is about 0.6 KB of JSON, so the default 2 MB stopped sharing at
+/// about 3,000; 4 MB carries about 7,000. The store keeps the value and
+/// the last good value side by side, so a board that size is 8 MB of
+/// file, and the file cap is doubled to match.
+const MAX_VALUE: usize = 4 * 1024 * 1024;
+
+/// The key the pooled list is shared under: the host, and a hash of the
+/// searches as they are sent - source names, `@mine` expanded, the
+/// command line's terms appended - with the token only as a fingerprint.
+/// Not `limit`: the page size changes how the list is fetched, not what is
+/// in it.
+fn list_key(cache: &mut Cache, host: &str, pairs: &[(String, String)], tok: &str) -> String {
+    let searched = readings::fingerprint(&[&serde_json::json!(pairs).to_string()]);
+    readings::key(cache, "ghprs.list", 1, &[host, &searched], &[tok])
+}
+
+/// A spent GraphQL budget belongs to one host and credential, not to every
+/// account a machine happens to have a pane for. As with the list key, the
+/// token participates only as a fingerprint and is registered as a secret.
+fn gate_key(cache: &mut Cache, host: &str, tok: &str) -> String {
+    readings::key(cache, GATE, 1, &[host], &[tok])
+}
+
+/// The store's limits: pull-request titles are forgotten after two hours.
+fn caps() -> readings::Caps {
+    readings::Caps { max_pages: 8192, max_value: MAX_VALUE, forget_after: 2.0 * 3600.0 }
+}
+
+/// The reading held under `key`: the last good value and when its answer
+/// arrived, and the reason a refusal every pane is waiting out gave.
+fn held(cache: &Cache, key: &str) -> (Option<(f64, serde_json::Value)>, Option<String>) {
+    let Some((at, value, _)) = cache.live.get(key) else {
+        return (None, None);
+    };
+    match value.as_ref().and_then(readings::refusal) {
+        Some((why, _)) => (cache.good.get(key).cloned(), Some(why)),
+        None => (value.clone().map(|v| (*at, v)), None),
+    }
+}
+
+/// The ticket, when this pane is to fetch: never under a spent rate limit,
+/// whose ticket is dropped here and so gives the lease back.
+fn fetching(take: Take<'_>, gated: bool) -> Option<readings::Ticket<'_>> {
+    match take {
+        Take::Fetch(t) if !gated => Some(t),
+        _ => None,
+    }
+}
+
+/// Whether this list pass may make its next request. Renewing the lease
+/// alone does not read the shared gate again, which a long pass must do.
+/// `Err` carries the gate's deadline and reason for the process-local stop.
+fn list_request_open(ticket: &mut readings::Ticket<'_>, gate: &str) -> Result<bool, (f64, String)> {
+    match ticket.closed(gate) {
+        Some(stop) => Err(stop),
+        None => Ok(ticket.renew()),
+    }
+}
+
+/// A pass that failed: every pane waits out one refresh - or GitHub's
+/// reset, when the budget is what ran out - rather than each asking again.
+fn refuse(t: readings::Ticket<'_>, said: &str, refresh: f64) {
+    let until = match rate_stop() {
+        Some((until, _)) => until,
+        None => tc::now() + refresh,
+    };
+    t.refuse(said, Some(until));
+}
+
+/// Take a reading's budget figures when they are newer than the ones held.
+fn apply_rate(rate: &Arc<Mutex<Rate>>, v: &serde_json::Value, published_at: f64) {
+    let Some(left) = v["remaining"].as_i64() else {
+        return;
+    };
+    // A list can finish enrichment long after the response whose budget it
+    // carries. Older shared readings have no `at`, so publication time is
+    // their best available observation time.
+    let observed = v["at"].as_f64().unwrap_or(published_at);
+    if let Ok(mut g) = rate.lock() {
+        if observed >= g.at {
+            g.remaining = Some(left);
+            if let Some(limit) = v["limit"].as_i64() {
+                g.limit = Some(limit);
+            }
+            g.at = observed;
+        }
+    }
+}
+
+/// Everything the poller thread holds between passes. The store is opened
+/// here and never touched from the render thread.
+struct Poller {
+    tok: String,
+    host: String,
+    /// This host and credential's rate gate, already fingerprinted by `key`.
+    gate: String,
+    sources: Vec<(String, String)>,
+    extra: Vec<String>,
+    limit: usize,
+    refresh: f64,
+    share_on: bool,
+    state: Arc<Mutex<State>>,
+    rate: Arc<Mutex<Rate>>,
+    activity: tc::Refresh,
+    /// The identity, the merge counts, the list and the gate.
+    cache: Cache,
+    /// The arrival counts, in a cache of their own. A ticket borrows its
+    /// cache for as long as it lives, and both count requests are in
+    /// flight at once, so the two tickets cannot come from one cache.
+    side: Cache,
+    /// The latest reset this pane has written to the gate.
+    shut_until: f64,
+    /// The detail last asked for and when, so one that fails is asked
+    /// again on the refresh rather than on every follow tick.
+    detail_tried: Option<((String, String, i64), f64)>,
+}
+
+impl Poller {
+    /// One look at every reading: take what another pane published, and
+    /// fetch only what is stale and nobody else is fetching. Cheap when
+    /// nothing changed, so it runs every `FOLLOW_EVERY`.
+    fn tick(&mut self, asked: bool) {
+        let now = tc::now();
+        for c in [&mut self.cache, &mut self.side] {
+            readings::share(c, STORE, caps(), self.share_on, now);
+            if asked {
+                c.asked_at = now;
+            }
+        }
+        // Import and apply this identity's gate before a detail request too:
+        // a pane with no local stop yet must not ask after another pane's
+        // budget was spent.
+        self.sync_gate();
+        let gated = readings::gate(&mut self.cache, &self.gate);
+        if let Some((until, why)) = &gated {
+            stop_asking(*until, why);
+        }
+        let gated = gated.is_some();
+        if !self.detail(asked) {
+            self.show_sharing(&[], now);
+            return;
+        }
+        let pol = Policy::new(self.refresh, LEASE_FOR);
+
+        // Who the token belongs to, which is what `@mine` means. The
+        // counts and the list are both searched over it.
+        let who_key = readings::key(&mut self.cache, "ghprs.who", 1, &[&self.host], &[&self.tok]);
+        let who_pol = Policy { ttl: WHO_TTL, lease_for: LEASE_FOR, askable: false };
+        if let Some(mut t) = fetching(readings::take(&mut self.cache, &who_key, who_pol), gated) {
+            let _busy = self.activity.start();
+            let got = discover_owners(&self.tok, &mut || t.renew());
+            match got {
+                Ok(v) => {
+                    t.publish(v);
+                }
+                Err(said) if said == TAKEN_OVER => {}
+                Err(said) => refuse(t, &said, self.refresh),
+            }
+        }
+        let (who, who_err) = held(&self.cache, &who_key);
+        let Some((_, who)) = who else {
+            if let Ok(mut g) = self.state.lock() {
+                g.err = who_err.unwrap_or_default();
+            }
+            self.sync_gate();
+            self.show_sharing(&[], tc::now());
+            return;
+        };
+        let (viewer, orgs) = read_owners(&who);
+        if let Ok(mut g) = self.state.lock() {
+            g.viewer = viewer.clone();
+            g.orgs = orgs.clone();
+        }
+        let scope = mine_scope(&viewer, &orgs);
+        let scope_tag = readings::fingerprint(&[&scope]);
+
+        // The two counts, before the list and both in flight at once, for
+        // the reasons on `fetch_counts` and `fetch_created`. Claimed here,
+        // because the store's connection stays on this thread; only the
+        // requests run on theirs, and both are published after the join.
+        let merged_key = readings::key(
+            &mut self.cache,
+            "ghprs.merged",
+            1,
+            &[&self.host, &scope_tag],
+            &[&self.tok],
+        );
+        let created_key = readings::key(
+            &mut self.side,
+            "ghprs.created",
+            1,
+            &[&self.host, &scope_tag],
+            &[&self.tok],
+        );
+        {
+            let merges = fetching(readings::take(&mut self.cache, &merged_key, pol), gated)
+                .and_then(|mut t| t.renew().then_some(t));
+            let arrivals = fetching(readings::take(&mut self.side, &created_key, pol), gated)
+                .and_then(|mut t| t.renew().then_some(t));
+            if merges.is_some() || arrivals.is_some() {
+                let _busy = self.activity.start();
+                let days = chart_days();
+                let got = Arc::new(Mutex::new((None, None)));
+                let merge_thread = merges.as_ref().map(|_| {
+                    let (tok, days, scope, got) = (self.tok.clone(), days.clone(), scope.clone(), Arc::clone(&got));
+                    spawn_count("merge counts", move || {
+                        let v = fetch_counts(&tok, &days, &scope)?;
+                        if let Ok(mut g) = got.lock() {
+                            g.0 = Some(v);
+                        }
+                        Ok(())
+                    })
+                });
+                let arrival_thread = arrivals.as_ref().map(|_| {
+                    let (tok, days, scope, got) = (self.tok.clone(), days.clone(), scope.clone(), Arc::clone(&got));
+                    spawn_count("arrival counts", move || {
+                        let v = fetch_created(&tok, &days, &scope)?;
+                        if let Ok(mut g) = got.lock() {
+                            g.1 = Some(v);
+                        }
+                        Ok(())
+                    })
+                });
+                let merge_said = merge_thread.and_then(count_outcome);
+                let arrival_said = arrival_thread.and_then(count_outcome);
+                let (merged, created) = got.lock().map(|g| g.clone()).unwrap_or_default();
+                let outcomes = [
+                    (merges, merge_said, merged, Count::Merges),
+                    (arrivals, arrival_said, created, Count::Arrivals),
+                ];
+                for (ticket, said, value, which) in outcomes {
+                    let Some(t) = ticket else { continue };
+                    match (said, value) {
+                        (None, Some(v)) => {
+                            t.publish(v);
+                        }
+                        (said, _) => {
+                            let said = said.unwrap_or_else(|| "the count thread handed nothing back".into());
+                            record_count_err(&self.state, which, said.clone());
+                            refuse(t, &said, self.refresh);
+                        }
+                    }
+                }
+            }
+        }
+        let (merged, merged_err) = held(&self.cache, &merged_key);
+        let (created, created_err) = held(&self.side, &created_key);
+        for (at, v) in merged.iter().chain(created.iter()) {
+            apply_rate(&self.rate, &v["rate"], *at);
+        }
+        if let Ok(mut g) = self.state.lock() {
+            if let Some(c) = merged.and_then(|(at, v)| counts_from(&v, at)) {
+                g.counts = Some(c);
+            }
+            if let Some(c) = created.and_then(|(at, v)| created_from(&v, at)) {
+                g.created = Some(c);
+            }
+            g.counts_err = merged_err.unwrap_or_default();
+            g.created_err = created_err.unwrap_or_default();
+        }
+
+        // The pooled list: one reading for every source, because the
+        // sources share each request. Its key is the searches themselves,
+        // so panes given other search terms keep lists of their own; the
+        // page size is left out, since it changes how the list is fetched
+        // and not what is in it.
+        let pairs = searches(&self.sources, &viewer, &orgs, &self.extra);
+        let list_key = list_key(&mut self.cache, &self.host, &pairs, &self.tok);
+        let query = pairs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
+        // A pane with nothing on its board puts up the list another pane -
+        // or an earlier run - left, stale as it is, before deciding whether
+        // to fetch: it then keeps that list on screen through its own pass,
+        // exactly as the panes waiting on it do. The first `take` reads it
+        // out of the store, and its ticket, dropped, gives the lease back.
+        if self.state.lock().is_ok_and(|g| g.fetched == 0.0) {
+            drop(readings::take(&mut self.cache, &list_key, pol));
+            if let (Some((at, v)), _) = held(&self.cache, &list_key) {
+                if let Ok(mut g) = self.state.lock() {
+                    apply_list(&mut g, &v, at, query.clone());
+                }
+            }
+        }
+        // Said before a pass that may run for minutes, not only after it:
+        // this pane's own line should not claim the list is fresh while it
+        // pages for a new one.
+        let keys = [(Part::List, list_key.as_str()), (Part::Counts, merged_key.as_str())];
+        self.show_sharing(&self.found(&keys, &created_key), tc::now());
+        if let Some(mut t) = fetching(readings::take(&mut self.cache, &list_key, pol), gated) {
+            let _busy = self.activity.start();
+            let gate = self.gate.clone();
+            let got = fetch_list(&self.tok, &pairs, self.limit, &self.state, &self.rate, &mut || {
+                match list_request_open(&mut t, &gate) {
+                    Ok(open) => open,
+                    Err((until, why)) => {
+                        // Stop this pass now. Its ticket is dropped without a
+                        // refusal: another pane closed the shared gate, and
+                        // every later request will read this local stop too.
+                        stop_asking(until, &why);
+                        false
+                    }
+                }
+            });
+            match got {
+                Ok(v) => {
+                    t.publish(v);
+                }
+                Err(said) if said == TAKEN_OVER => {}
+                Err(said) => refuse(t, &said, self.refresh),
+            }
+        }
+        let (list, list_err) = held(&self.cache, &list_key);
+        let waiting = match &list {
+            Some(_) => None,
+            None => self.cache.asking.get(&list_key).copied(),
+        };
+        if let Some((at, v)) = &list {
+            apply_rate(&self.rate, &v["rate"], *at);
+        }
+        if let Ok(mut g) = self.state.lock() {
+            if let Some((at, v)) = &list {
+                apply_list(&mut g, v, *at, query);
+            }
+            if let Some(why) = list_err.or(who_err) {
+                g.err = why;
+            }
+        }
+        self.sync_gate();
+        self.show_sharing(&self.found(&keys, &created_key), tc::now());
+        if let Ok(mut g) = self.state.lock() {
+            g.sharing.waiting = waiting;
+        }
+    }
+
+    /// Where each reading on screen came from: `keys` in the main cache,
+    /// and the arrival counts in their own.
+    fn found(&self, keys: &[(Part, &str)], created_key: &str) -> Vec<(Part, readings::Provenance)> {
+        let now = tc::now();
+        let mut found: Vec<_> = keys
+            .iter()
+            .filter_map(|(part, key)| readings::provenance(&self.cache, key, now).map(|p| (*part, p)))
+            .collect();
+        if let Some(p) = readings::provenance(&self.side, created_key, now) {
+            found.push((Part::Counts, p));
+        }
+        found
+    }
+
+    /// The detail screen's fetch, when one is waiting. `r` fetches the open
+    /// PR again without removing the copy already on screen. `false` after a
+    /// failure and throughout its retry hold, so a cached list cannot erase
+    /// the detail's reason on the next follow tick.
+    fn detail(&mut self, asked: bool) -> bool {
+        self.detail_with(asked, fetch_detail)
+    }
+
+    fn detail_with(
+        &mut self,
+        asked: bool,
+        fetch: impl FnOnce(&str, &(String, String, i64), &Arc<Mutex<State>>) -> Result<(), String>,
+    ) -> bool {
+        let retried = self.detail_tried.as_ref().map(|(want, _)| want.clone());
+        let want = self.state.lock().ok().and_then(|g| {
+            let have = g.detail.as_ref().map(|d| number(d, "number"));
+            match &g.want {
+                Some(w) if asked || Some(w.2) != have || retried.as_ref() == Some(w) => Some(w.clone()),
+                _ => None,
+            }
+        });
+        let Some(want) = want else {
+            return true;
+        };
+        let now = tc::now();
+        if let Some((tried, at)) = &self.detail_tried {
+            if *tried == want && now - at < self.refresh {
+                return false;
+            }
+        }
+        let _busy = self.activity.start();
+        match fetch(&self.tok, &want, &self.state) {
+            Ok(()) => {
+                self.detail_tried = None;
+                true
+            }
+            Err(said) => {
+                self.detail_tried = Some((want, now));
+                if let Ok(mut g) = self.state.lock() {
+                    g.err = said;
+                    g.loading = false;
+                }
+                false
+            }
+        }
+    }
+
+    /// Share a limit GitHub reported to this pane with every other pane.
+    fn sync_gate(&mut self) {
+        if let Some((until, why)) = rate_stop() {
+            if until > self.shut_until {
+                readings::shut(&mut self.cache, &self.gate, until, &why);
+                self.shut_until = until;
+            }
+        }
+    }
+
+    /// Hand the render thread what the freshness line needs.
+    fn show_sharing(&mut self, found: &[(Part, readings::Provenance)], now: f64) {
+        let mut found = found.to_vec();
+        // A spent limit holds every reading, so it is said once on the
+        // line whatever else is on it.
+        if let Some(gate) = readings::provenance(&self.cache, &format!("gate/{}", self.gate), now)
+            .filter(|p| p.refused.is_some())
+        {
+            match found.first_mut() {
+                Some((_, p)) => p.refused = gate.refused,
+                None => found.push((Part::List, gate)),
+            }
+        }
+        let off = if self.cache.store.is_none() { self.cache.sharing_off.clone() } else { String::new() };
+        let notice = self.cache.store.as_ref().map(|s| s.notice.clone()).unwrap_or_default();
+        if !notice.is_empty() {
+            // Drawn from here on; the next `share` clears it in the store.
+            self.cache.notice_drawn.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Ok(mut g) = self.state.lock() {
+            g.sharing.found = found;
+            g.sharing.off = off;
+            if !notice.is_empty() {
+                g.sharing.notice = (notice, now);
+            }
+        }
+    }
+}
+
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     tc::register_settings(SETTINGS);
@@ -1948,116 +2605,57 @@ fn main() {
         }
     };
 
-    let poller = Arc::clone(&state);
+    let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let host = api_host().unwrap_or("github.com").to_string();
+    let mut cache = Cache::default();
+    let gate = gate_key(&mut cache, &host, &tok);
+    let mut poller = Poller {
+        tok: tok.clone(),
+        host,
+        gate,
+        sources: sources.clone(),
+        extra: extra.clone(),
+        limit,
+        refresh,
+        share_on: cfg.get("share_readings").and_then(|v| v.as_bool()).unwrap_or(true),
+        state: Arc::clone(&state),
+        rate: Arc::clone(&rate),
+        activity: activity.clone(),
+        cache,
+        side: Cache::default(),
+        shut_until: 0.0,
+        detail_tried: None,
+    };
     let poller_wake = Arc::clone(&wake);
-    let poller_rate = Arc::clone(&rate);
-    let poller_activity = activity.clone();
-    let poll_tok = tok.clone();
+    let poller_asked = Arc::clone(&asked);
     let poll_env = env_name.clone();
-    let poll_sources = sources.clone();
-    let poll_extra = extra.clone();
     std::thread::spawn(move || loop {
-        if poll_tok.is_empty() {
-            if let Ok(mut g) = poller.lock() {
+        if poller.tok.is_empty() {
+            if let Ok(mut g) = poller.state.lock() {
                 g.err = tc::missing_config(&format!(
                     "no token: set github_prs.token or ${}",
                     poll_env
                 ));
             }
         } else {
-            let work = poller_activity.start();
-            let want = poller.lock().ok().and_then(|g| {
-                let have = g.detail.as_ref().map(|d| number(d, "number"));
-                match &g.want {
-                    Some(w) if Some(w.2) != have => Some(w.clone()),
-                    _ => None,
-                }
-            });
-            let mut failed = None;
-            if let Some(want) = want {
-                if let Err(said) = fetch_detail(&poll_tok, &want, &poller) {
-                    failed = Some(said);
-                }
-            }
-            // Before the list, and two requests either way, both in
-            // flight at once. Before, because the list pages for minutes
-            // on a large board and two figures that arrive only at the end
-            // of that are two figures nobody looks at. Two requests,
-            // because sixty-two aliases in one take twice as long and land
-            // on the gateway's ~10s cliff, where thirty on their own take
-            // about three and a half seconds - and because OPS-84 spent a
-            // day making the list survive GitHub's slow spells, which a
-            // count refused beside it must not undo: each reason lands in
-            // its own `counts_err` / `created_err` rather than in `err`,
-            // the last good figures stay on screen, and each caption says
-            // which of them are the older ones.
-            //
-            // At once, because the two are independent and run one after
-            // the other they cost the sum: 3.4s and 3.7s measured here
-            // came to 7.1s of wall time before the list even started
-            // paging. Joined, the slower of the two sets the latency and
-            // the small requests are kept.
-            //
-            // Each on its own thread rather than one here and one beside
-            // it, so a panic in either is a `join` that hands back a
-            // reason instead of a poll loop that has gone. Nothing else
-            // moves: the join is before `fetch_list`, so the counts still
-            // land before the list finishes.
-            //
-            // Skipped when the owner walk itself failed, because then the
-            // scope is not known and `fetch_list` is about to report the
-            // same failure where a reader will look for it.
-            if failed.is_none() && discover_owners(&poll_tok, &poller).is_ok() {
-                let count_days = chart_days();
-                let merges = spawn_count("merge counts", {
-                    let (tok, days) = (poll_tok.clone(), count_days.clone());
-                    let (state, rate) = (Arc::clone(&poller), Arc::clone(&poller_rate));
-                    move || fetch_counts(&tok, &days, &state, &rate)
-                });
-                let arrivals = spawn_count("arrival counts", {
-                    let (tok, days) = (poll_tok.clone(), count_days.clone());
-                    let (state, rate) = (Arc::clone(&poller), Arc::clone(&poller_rate));
-                    move || fetch_created(&tok, &days, &state, &rate)
-                });
-                if let Some(said) = count_outcome(merges) {
-                    record_count_err(&poller, Count::Merges, said);
-                }
-                if let Some(said) = count_outcome(arrivals) {
-                    record_count_err(&poller, Count::Arrivals, said);
-                }
-            }
-            if failed.is_none() {
-                if let Err(said) = fetch_list(
-                    &poll_tok,
-                    &poll_sources,
-                    &poll_extra,
-                    limit,
-                    &poller,
-                    &poller_rate,
-                ) {
-                    failed = Some(said);
-                }
-            }
-            if let Some(said) = failed {
-                if let Ok(mut g) = poller.lock() {
-                    g.err = said;
-                    g.loading = false;
-                }
-            }
-            drop(work);
+            // Every few seconds, not every refresh: a reading another pane
+            // published shows up here within `FOLLOW_EVERY`, and a stale
+            // one is fetched by whichever pane gets to it first. A pass
+            // with nothing stale costs a page of the store's header.
+            poller.tick(poller_asked.swap(false, std::sync::atomic::Ordering::Relaxed));
         }
         let (lock, cond) = &*poller_wake;
-        let mut asked = match lock.lock() {
+        let mut nudged = match lock.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        if !*asked {
-            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+        if !*nudged {
+            nudged = match cond.wait_timeout(nudged, Duration::from_secs_f64(readings::FOLLOW_EVERY)) {
                 Ok((g, _)) => g,
                 Err(_) => return,
             };
         }
-        *asked = false;
+        *nudged = false;
     });
 
     tc::setup();
@@ -2115,6 +2713,7 @@ fn main() {
             stages,
             target,
             owners,
+            sharing,
         ) = match state.lock() {
                 Ok(g) => (
                     g.prs.clone(),
@@ -2139,6 +2738,7 @@ fn main() {
                     // screen is the number searched rather than a config
                     // entry that may name accounts no search reached.
                     g.orgs.len() + usize::from(!g.viewer.is_empty()),
+                    g.sharing.clone(),
                 ),
                 Err(_) => return,
             };
@@ -2297,7 +2897,10 @@ fn main() {
                         );
                     }
                 }
-                "r" | "R" => nudge(&wake),
+                "r" | "R" => {
+                    asked.store(true, std::sync::atomic::Ordering::Relaxed);
+                    nudge(&wake);
+                }
                 "f" | "F" => {
                     // Every PR remembers which sources found it, so
                     // narrowing to one is instant and costs no request.
@@ -2368,11 +2971,27 @@ fn main() {
                 _ => None,
             })
             .unwrap_or(None);
-        let tail = tc::polled(fetched, budget, &p.dim, &p.ok, &p.warn);
+        // The newest reading on screen, whichever pane fetched it: the list
+        // and both counts are fetched apart and stamped when each answer
+        // arrived. Anything older than its hold is the freshness line's to
+        // say, not this one's.
+        let mut updated = fetched;
+        if show_stats {
+            for at in [counts.as_ref().map(|c| c.at), created.as_ref().map(|c| c.at)].into_iter().flatten() {
+                updated = updated.max(at);
+            }
+        }
+        let tail = tc::polled(updated, budget, &p.dim, &p.ok, &p.warn);
         for (colour, txt) in &tail {
             head.push((colour.as_str(), txt.clone()));
         }
         rows.push(tc::seg(&head, w - 1));
+        // Where the readings came from - another pane, a store too busy,
+        // a limit every pane is waiting out - on a line of its own under
+        // the status line, never squeezed onto it.
+        for line in sharing_lines(&sharing, show_stats, tc::now(), w.saturating_sub(2)) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", line))], w - 1));
+        }
 
         // "at least", because a source that filled its page has more behind
         // it and the sources overlap, so the union cannot be added up - only
@@ -4021,6 +4640,396 @@ fn detail_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two panes on one store file, as `share_readings` opens them, told
+    /// apart by the pid each claims leases under.
+    fn two_panes(name: &str, caps: readings::Caps) -> (Cache, Cache) {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-ghprs-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("github-prs.sqlite").to_string_lossy().to_string();
+        let pane = |me: u32| {
+            let mut store = readings::Store::open_with(&path, caps).unwrap();
+            store.me = me;
+            Cache { store: Some(store), ..Cache::default() }
+        };
+        (pane(41), pane(42))
+    }
+
+    fn a_pr(n: i64, title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": n, "title": title, "url": format!("https://example.test/acme/web/pull/{n}"),
+            "repository": { "nameWithOwner": "acme/web" }, "sources": ["orgs"],
+        })
+    }
+
+    const TOKEN: &str = "ghp_not_a_real_token_0000000000";
+
+    fn detail_poller(state: Arc<Mutex<State>>) -> Poller {
+        let tok = TOKEN.to_string();
+        let host = "example.test".to_string();
+        let mut cache = Cache::default();
+        let gate = gate_key(&mut cache, &host, &tok);
+        Poller {
+            tok,
+            host,
+            gate,
+            sources: Vec::new(),
+            extra: Vec::new(),
+            limit: 1,
+            refresh: 60.0,
+            share_on: false,
+            state,
+            rate: Arc::new(Mutex::new(Rate::default())),
+            activity: tc::Refresh::default(),
+            cache,
+            side: Cache::default(),
+            shut_until: 0.0,
+            detail_tried: None,
+        }
+    }
+
+    #[test]
+    fn half_a_lease_covers_the_next_github_request() {
+        let request = GRAPHQL_FOR as f64 + LEASE_MARGIN;
+        assert!(
+            LEASE_FOR / 2.0 >= request,
+            "a skipped renewal leaves less than one request"
+        );
+        assert!(
+            LEASE_FOR <= tc::readings::lease::MAX_LEASE,
+            "the store would shorten this lease"
+        );
+    }
+
+    #[test]
+    fn the_list_key_is_the_searches_and_not_the_page_size_or_the_token() {
+        let mut c = Cache::default();
+        let srcs = vec![("orgs".to_string(), "is:open is:pr @mine".to_string())];
+        let one = searches(&srcs, "me", &["acme".into()], &[]);
+        let narrowed = searches(&srcs, "me", &["acme".into()], &["org:acme".into()]);
+        let k = list_key(&mut c, "github.com", &one, TOKEN);
+        assert_eq!(k, list_key(&mut c, "github.com", &one, TOKEN), "the same searches moved key");
+        assert_ne!(k, list_key(&mut c, "github.com", &narrowed, TOKEN), "other terms shared a list");
+        assert_ne!(k, list_key(&mut c, "acme.ghe.com", &one, TOKEN), "another host shared a list");
+        assert_ne!(k, list_key(&mut c, "github.com", &one, "ghp_another_token_1111111111"));
+        assert!(!k.contains(TOKEN) && !k.contains("acme"), "the key carries what it hashes: {k}");
+        assert!(c.secrets.iter().any(|t| t == TOKEN), "the token was not kept out of readings");
+    }
+
+    #[test]
+    fn a_manual_refresh_fetches_the_open_detail_without_blanking_it_first() {
+        let state = Arc::new(Mutex::new(State {
+            want: Some(("acme".into(), "web".into(), 7)),
+            detail: Some(a_pr(7, "before")),
+            ..State::default()
+        }));
+        let mut poller = detail_poller(Arc::clone(&state));
+        assert!(poller.detail_with(true, |_, want, state| {
+            assert_eq!(want.2, 7);
+            assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "before");
+            state.lock().unwrap().detail = Some(a_pr(7, "after"));
+            Ok(())
+        }));
+        assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "after");
+        assert!(poller.detail_tried.is_none());
+        // Only the explicit refresh asks again; an ordinary cached detail
+        // remains a cache hit.
+        assert!(poller.detail_with(false, |_, _, _| panic!("a cached detail was fetched again")));
+    }
+
+    #[test]
+    fn a_failed_detail_refresh_keeps_its_reason_throughout_the_retry_hold() {
+        let state = Arc::new(Mutex::new(State {
+            want: Some(("acme".into(), "web".into(), 7)),
+            detail: Some(a_pr(7, "kept")),
+            ..State::default()
+        }));
+        let mut poller = detail_poller(Arc::clone(&state));
+        assert!(!poller.detail_with(true, |_, _, _| Err("detail still unavailable".into())));
+        assert_eq!(state.lock().unwrap().err, "detail still unavailable");
+        assert_eq!(text(state.lock().unwrap().detail.as_ref().unwrap(), "title"), "kept");
+
+        // The follow tick must keep the failure, not report success and let
+        // the cached list's settle clear it.
+        assert!(!poller.detail_with(false, |_, _, _| panic!("the retry hold was ignored")));
+        assert_eq!(state.lock().unwrap().err, "detail still unavailable");
+
+        // Once the hold expires the same open PR really is retried.
+        poller.detail_tried.as_mut().unwrap().1 -= poller.refresh + 1.0;
+        assert!(poller.detail_with(false, |_, _, _| Ok(())));
+        assert!(poller.detail_tried.is_none());
+    }
+
+    #[test]
+    fn a_pass_keeps_a_finished_list_on_screen_until_it_finishes() {
+        let pool: HashMap<String, serde_json::Value> =
+            [("u1".to_string(), a_pr(1, "new page"))].into_iter().collect();
+        let order = vec!["u1".to_string()];
+        let state = Arc::new(Mutex::new(State::default()));
+        // A first pass fills the board as the pages land...
+        publish(&state, &pool, &order, &[(5, 1)], true);
+        assert_eq!(state.lock().unwrap().prs.len(), 1);
+        // ...a later one leaves the finished list where it is.
+        {
+            let mut g = state.lock().unwrap();
+            g.prs = (1..=5).map(|n| a_pr(n, "finished")).collect();
+            g.fetched = 100.0;
+        }
+        publish(&state, &pool, &order, &[(5, 1)], true);
+        assert_eq!(state.lock().unwrap().prs.len(), 5);
+    }
+
+    #[test]
+    fn a_shared_list_settles_exactly_as_the_pane_that_fetched_it() {
+        let prs: Vec<_> = (1..=3).map(|n| a_pr(n, "feat: a thing")).collect();
+        let counted = [(40, 3), (2, 2)];
+        let v = list_reading(prs.clone(), &counted, Some(10), Some("GitHub returned 502 - the search was too slow to serve"), Rate::default());
+        // Through the store's JSON and back.
+        let v: serde_json::Value = serde_json::from_str(&v.to_string()).unwrap();
+        let mut here = State::default();
+        settle(&mut here, prs, &counted, Some(10), Some("GitHub returned 502 - the search was too slow to serve"), String::new());
+        let mut there = State::default();
+        apply_list(&mut there, &v, 1234.0, "orgs, authored".into()).expect("the reading did not read back");
+        assert_eq!((there.total, there.capped, there.served, there.stopped), (here.total, here.capped, here.served, here.stopped));
+        assert_eq!((there.total, there.capped, there.served, there.stopped), (40, true, Some(10), true));
+        assert_eq!(there.prs.len(), 3);
+        assert_eq!(there.err, here.err);
+        // Stamped when its answer arrived, not when this pane read it.
+        assert_eq!(there.fetched, 1234.0);
+        assert_eq!(there.query, "orgs, authored");
+        // Something this build cannot read leaves the pane alone.
+        assert!(apply_list(&mut there, &serde_json::json!({"prs": 3}), 9.0, String::new()).is_none());
+        assert_eq!(there.fetched, 1234.0);
+    }
+
+    #[test]
+    fn two_panes_with_the_same_sources_make_one_list_pass() {
+        let (mut a, mut b) = two_panes("one-pass", caps());
+        let p = Policy::new(0.05, LEASE_FOR);
+        let srcs = vec![("orgs".to_string(), "is:open is:pr @mine".to_string())];
+        let pairs = searches(&srcs, "me", &[], &[]);
+        let ka = list_key(&mut a, "github.com", &pairs, TOKEN);
+        let kb = list_key(&mut b, "github.com", &pairs, TOKEN);
+        assert_eq!(ka, kb);
+        let first = list_reading(vec![a_pr(1, "first")], &[(1, 1)], None, None, Rate::default());
+        let Take::Fetch(t) = readings::take(&mut a, &ka, p) else { panic!("nobody fetched") };
+        assert_eq!(t.publish(first), None, "the list was not shared");
+        std::thread::sleep(Duration::from_millis(80));
+
+        // The list is stale. Pane 41 starts the next pass...
+        let Take::Fetch(mut pass) = readings::take(&mut a, &ka, p) else { panic!("41 did not fetch") };
+        assert!(pass.renew());
+        // ...and a pane started now shows the previous list while it does,
+        // and says who is asking. It does not ask too.
+        readings::follow(&mut b);
+        let have = match readings::take(&mut b, &kb, p) {
+            Take::Waiting { by, have } => {
+                assert_eq!(by, 41);
+                have.expect("the previous list was not there to show")
+            }
+            _ => panic!("a second pane asked during the first one's pass"),
+        };
+        let mut g = State::default();
+        apply_list(&mut g, &have, 0.0, String::new()).unwrap();
+        assert_eq!(text(&g.prs[0], "title"), "first");
+        let now = tc::now();
+        let found = vec![(Part::List, readings::provenance(&b, &kb, now).unwrap())];
+        let line = sharing_lines(&Sharing { found, ..Sharing::default() }, true, now, 200).join(" ");
+        assert!(line.contains("pane 41 asking now"), "{line}");
+
+        // The pass lands; the second pane takes it without a request.
+        let second = list_reading(vec![a_pr(1, "first"), a_pr(2, "second")], &[(9, 2)], Some(10), None, Rate::default());
+        assert_eq!(pass.publish(second), None);
+        readings::follow(&mut b);
+        let Take::Serve(Some(v)) = readings::take(&mut b, &kb, Policy::new(60.0, LEASE_FOR)) else {
+            panic!("the second pane did not take the published list")
+        };
+        apply_list(&mut g, &v, 0.0, String::new()).unwrap();
+        assert_eq!((g.prs.len(), g.total, g.capped, g.served), (2, 9, true, Some(10)));
+        let now = tc::now();
+        let found = vec![(Part::List, readings::provenance(&b, &kb, now).unwrap())];
+        let line = sharing_lines(&Sharing { found, ..Sharing::default() }, true, now, 200).join(" ");
+        assert!(line.contains("by pane 41"), "{line}");
+    }
+
+    #[test]
+    fn a_list_too_large_to_share_says_so_on_screen() {
+        let small = readings::Caps { max_value: 512, ..caps() };
+        let (mut a, _b) = two_panes("too-large", small);
+        let pairs = searches(&[("orgs".into(), "is:open is:pr".into())], "", &[], &[]);
+        let k = list_key(&mut a, "github.com", &pairs, TOKEN);
+        let big: Vec<_> = (1..=20).map(|n| a_pr(n, "a title long enough to fill the page")).collect();
+        let Take::Fetch(t) = readings::take(&mut a, &k, Policy::new(60.0, LEASE_FOR)) else { panic!() };
+        assert_eq!(t.publish(list_reading(big, &[(20, 20)], None, None, Rate::default())), Some("too large to share"));
+        let now = tc::now();
+        let found = vec![(Part::List, readings::provenance(&a, &k, now).unwrap())];
+        let line = sharing_lines(&Sharing { found, ..Sharing::default() }, true, now, 200).join(" ");
+        assert!(line.contains("too large to share"), "{line}");
+        // The pane that fetched it still has it.
+        let (list, why) = held(&a, &k);
+        assert!(list.is_some() && why.is_none());
+    }
+
+    #[test]
+    fn a_refused_pass_is_held_for_every_pane_with_the_last_good_list() {
+        let (mut a, mut b) = two_panes("refused", caps());
+        let p = Policy::new(0.05, LEASE_FOR);
+        let pairs = searches(&[("orgs".into(), "is:open is:pr".into())], "", &[], &[]);
+        let k = list_key(&mut a, "github.com", &pairs, TOKEN);
+        let _ = list_key(&mut b, "github.com", &pairs, TOKEN);
+        let Take::Fetch(t) = readings::take(&mut a, &k, p) else { panic!() };
+        t.publish(list_reading(vec![a_pr(1, "kept")], &[(1, 1)], None, None, Rate::default()));
+        std::thread::sleep(Duration::from_millis(80));
+        let Take::Fetch(t) = readings::take(&mut a, &k, p) else { panic!() };
+        refuse(t, "GitHub returned 401: Bad credentials", 60.0);
+        readings::follow(&mut b);
+        // The other pane does not ask again inside the hold...
+        assert!(matches!(readings::take(&mut b, &k, p), Take::Serve(_)), "a second pane asked again");
+        // ...and shows the list it had with the reason beside it.
+        let (list, why) = held(&b, &k);
+        assert_eq!(text(&list.unwrap().1["prs"][0], "title"), "kept");
+        assert_eq!(why.as_deref(), Some("GitHub returned 401: Bad credentials"));
+    }
+
+    #[test]
+    fn a_spent_limit_stops_only_panes_with_the_same_host_and_credential() {
+        let (mut a, mut b) = two_panes("gate", caps());
+        let until = tc::now() + 600.0;
+        let mine = gate_key(&mut a, "github.com", TOKEN);
+        assert_eq!(mine, gate_key(&mut b, "github.com", TOKEN));
+        let other_host = gate_key(&mut b, "other.example", TOKEN);
+        let other_token = gate_key(&mut b, "github.com", "ghp_another_token_1111111111");
+        assert!(!mine.contains(TOKEN), "the raw credential reached the gate key");
+
+        readings::shut(&mut a, &mine, until, "GitHub rate limit spent");
+        readings::follow(&mut b);
+        let (at, why) = readings::gate(&mut b, &mine).expect("the same identity would still ask");
+        // Stored as when it was shut and how long it holds, so the reset
+        // comes back to within float rounding.
+        assert!((at - until).abs() < 0.01, "{at} against {until}");
+        assert_eq!(why, "GitHub rate limit spent");
+        assert!(readings::gate(&mut b, &other_host).is_none(), "another host inherited the gate");
+        assert!(readings::gate(&mut b, &other_token).is_none(), "another credential inherited the gate");
+
+        // A pane under its own gate takes no ticket, so it sends nothing.
+        let k = readings::key(&mut b, "ghprs.merged", 1, &["github.com"], &[TOKEN]);
+        assert!(fetching(readings::take(&mut b, &k, Policy::new(60.0, LEASE_FOR)), true).is_none());
+    }
+
+    #[test]
+    fn a_gate_closed_between_list_requests_blocks_the_next_request() {
+        let (mut a, mut b) = two_panes("mid-list-gate", caps());
+        let pairs = searches(&[("orgs".into(), "is:open is:pr".into())], "", &[], &[]);
+        let key = list_key(&mut a, "github.com", &pairs, TOKEN);
+        assert_eq!(key, list_key(&mut b, "github.com", &pairs, TOKEN));
+        let gate = gate_key(&mut a, "github.com", TOKEN);
+        assert_eq!(gate, gate_key(&mut b, "github.com", TOKEN));
+        let Take::Fetch(mut ticket) = readings::take(&mut b, &key, Policy::new(60.0, LEASE_FOR)) else {
+            panic!("the list pane did not claim its pass")
+        };
+        assert!(list_request_open(&mut ticket, &gate).expect("an open gate refused the first request"));
+
+        let until = tc::now() + 600.0;
+        readings::shut(&mut a, &gate, until, "GitHub rate limit spent");
+        let (held, why) = list_request_open(&mut ticket, &gate).expect_err("the next request missed the new gate");
+        assert!((held - until).abs() < 0.01, "{held} against {until}");
+        assert_eq!(why, "GitHub rate limit spent");
+    }
+
+    #[test]
+    fn counts_read_back_from_a_shared_reading_and_never_invent_a_day() {
+        let v = serde_json::json!({
+            "days": [["2026-11-16", 3], ["2026-11-17", 0]],
+            "merged_24h": 2, "opened_24h": 5, "rate": { "remaining": 4000, "limit": 5000 },
+        });
+        let c = counts_from(&v, 77.0).unwrap();
+        assert_eq!(c.days, vec![("2026-11-16".to_string(), 3), ("2026-11-17".to_string(), 0)]);
+        assert_eq!((c.merged_24h, c.opened_24h, c.at), (2, 5, 77.0));
+        assert_eq!(created_from(&v, 5.0).unwrap().days.len(), 2);
+        let gap = serde_json::json!({ "days": [["2026-11-16", null]], "merged_24h": 1, "opened_24h": 1 });
+        assert!(counts_from(&gap, 0.0).is_none(), "a missing day read as a number");
+        assert!(created_from(&gap, 0.0).is_none());
+        let rate = Arc::new(Mutex::new(Rate::default()));
+        apply_rate(&rate, &v["rate"], 10.0);
+        apply_rate(&rate, &serde_json::json!({ "remaining": 9, "limit": 5000 }), 5.0);
+        let r = *rate.lock().unwrap();
+        assert_eq!((r.remaining, r.limit), (Some(4000), Some(5000)), "an older reading wound the budget back");
+    }
+
+    #[test]
+    fn a_late_list_cannot_backdate_a_newer_budget_reading() {
+        let rate = Arc::new(Mutex::new(Rate {
+            at: 80.0,
+            remaining: Some(3985),
+            limit: Some(5000),
+        }));
+        let mut list = list_reading(
+            Vec::new(),
+            &[],
+            None,
+            None,
+            Rate { at: 40.0, remaining: Some(3990), limit: Some(5000) },
+        );
+        // Exercise the stored representation, not just the in-memory struct.
+        list = serde_json::from_str(&list.to_string()).unwrap();
+        apply_rate(&rate, &list["rate"], 100.0);
+        let r = *rate.lock().unwrap();
+        assert_eq!((r.at, r.remaining), (80.0, Some(3985)));
+
+        // Observation time, not publication time, orders a genuinely newer
+        // list response too.
+        list["rate"]["at"] = serde_json::json!(90.0);
+        apply_rate(&rate, &list["rate"], 100.0);
+        let r = *rate.lock().unwrap();
+        assert_eq!((r.at, r.remaining), (90.0, Some(3990)));
+    }
+
+    #[test]
+    fn the_counts_line_is_left_out_when_the_stats_are_hidden() {
+        let now = tc::now();
+        let p = |at: f64, by: u32, stale: bool| readings::Provenance {
+            taken_at: at, by: Some(by), stale, asking: None, refused: None, unshared: None,
+        };
+        // Both still inside their hold. The line dates the newest reading,
+        // and a counts figure that has not gone stale does not make it old.
+        let fresh = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 600.0, 42, false)),
+            ],
+            ..Sharing::default()
+        };
+        assert!(sharing_lines(&fresh, true, now, 200).join(" ").contains("30s ago by pane 41"));
+        assert!(sharing_lines(&fresh, false, now, 200).join(" ").contains("30s ago by pane 41"));
+        // A stale counts reading is the line while stats are shown, and
+        // disappears with them.
+        let stale = Sharing {
+            found: vec![
+                (Part::List, p(now - 30.0, 41, false)),
+                (Part::Counts, p(now - 600.0, 42, true)),
+            ],
+            ..Sharing::default()
+        };
+        let shown = sharing_lines(&stale, true, now, 200).join(" ");
+        assert!(shown.contains("cached 10m ago"), "{shown}");
+        let hidden = sharing_lines(&stale, false, now, 200).join(" ");
+        assert!(hidden.contains("30s ago by pane 41"), "{hidden}");
+        assert!(!hidden.contains("10m"), "{hidden}");
+        let first = Sharing { waiting: Some(41), ..Sharing::default() };
+        assert_eq!(sharing_lines(&first, true, now, 200), ["no list yet · pane 41 asking now"]);
+        let off = Sharing { off: "share_readings is off".into(), ..Sharing::default() };
+        assert_eq!(sharing_lines(&off, true, now, 200), ["not sharing readings: share_readings is off"]);
+        // Wrapped to the pane, never wider.
+        for row in sharing_lines(&off, true, now, 20) {
+            assert!(row.chars().count() <= 20, "{row:?}");
+        }
+    }
 
     #[test]
     fn a_long_repo_name_is_cut_only_when_the_title_needs_the_room() {
