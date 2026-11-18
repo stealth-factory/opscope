@@ -159,7 +159,7 @@ fn token_in(raw: &str) -> Option<String> {
 /// question a limit pane is really asked.
 fn copilot_live(tok: Option<&str>) -> Option<serde_json::Value> {
     let Some(tok) = tok else {
-        return Some(serde_json::json!({"why": "no token in ~/.copilot/config.json"}));
+        return Some(local_fact("no token in ~/.copilot/config.json"));
     };
     // Which of the two went wrong matters: blaming the config file for a
     // dropped connection sends the reader to edit a file that is fine.

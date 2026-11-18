@@ -152,11 +152,10 @@ impl Data {
     }
 }
 
-/// Which account `~/.codex/auth.json` is signed in as, as a tag for shared
-/// keys: the account id with the refresh token, hashed - or the access
-/// token where there is no refresh token.
-fn codex_account() -> String {
-    let auth = read_json(&under_home(".codex/auth.json")).unwrap_or_default();
+/// Which account `auth` - `~/.codex/auth.json`, read once per pass - is
+/// signed in as, as a tag for shared keys: the account id with the refresh
+/// token, hashed - or the access token where there is no refresh token.
+fn codex_account(auth: &serde_json::Value) -> String {
     let field = |k: &str| match text(&auth["tokens"], k) {
         s if !s.is_empty() => s,
         _ => text(&auth, k),
@@ -171,6 +170,13 @@ fn codex_account() -> String {
     account_tag(&format!("{}\n{credential}", field("account_id")))
 }
 
+/// Register the tokens in `auth`, so no shared reading carries one.
+fn codex_secrets(caches: &mut Caches, auth: &serde_json::Value) {
+    const TOKENS: &[&str] = &["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"];
+    secret_fields(caches, auth, TOKENS);
+    secret_fields(caches, &auth["tokens"], TOKENS);
+}
+
 /// Account-wide quota, live from the same endpoint the Codex CLI uses.
 ///
 /// The rollouts carry a rate_limits snapshot, but only from whenever Codex
@@ -183,16 +189,19 @@ fn codex_account() -> String {
 ///
 /// A missing token is a local fact and rides in the cached value. A silent
 /// endpoint is a refusal: it stays `None` so `cached` backs off.
-fn codex_live() -> Option<serde_json::Value> {
-    let Some(auth) = read_json(&under_home(".codex/auth.json")) else {
-        return Some(serde_json::json!({"why": "no token - Codex has not signed in here"}));
+///
+/// `auth` is the pass's one read of the file, so the token sent is the one
+/// registered and the one the key names.
+fn codex_live(auth: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let Some(auth) = auth else {
+        return Some(local_fact("no token - Codex has not signed in here"));
     };
     let tok = match text(&auth["tokens"], "access_token") {
         s if !s.is_empty() => s,
         _ => text(&auth, "access_token"),
     };
     if tok.is_empty() {
-        return Some(serde_json::json!({"why": "no token - Codex has not signed in here"}));
+        return Some(local_fact("no token - Codex has not signed in here"));
     }
     let account = match text(&auth["tokens"], "account_id") {
         s if !s.is_empty() => s,
@@ -577,8 +586,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut carried_bank: Option<String> = None;
     // Keyed on the account, so a reading another pane stored before a
     // sign-in as someone else is never served after it.
-    let key = format!("codex:{}", codex_account());
-    let live = match cached(caches, &key, LIVE_TTL, || match codex_live() {
+    // One read of the credentials for the key, the guard and the request.
+    let auth = read_json(&under_home(".codex/auth.json"));
+    let key = format!("codex:{}", codex_account(auth.as_ref().unwrap_or(&serde_json::Value::Null)));
+    codex_secrets(caches, auth.as_ref().unwrap_or(&serde_json::Value::Null));
+    let live = match cached(caches, &key, LIVE_TTL, || match codex_live(auth.as_ref()) {
         Some(got) if got.get("usage_miss").is_some() => {
             carried_bank = got["bank"].as_str().map(str::to_string);
             refuse = "ChatGPT's usage endpoint did not answer".into();
