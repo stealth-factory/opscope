@@ -545,7 +545,23 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str, configured: &
                 let table = table.as_ref().ok()?;
                 table.agent_below(*roots.get(&agent.pane)?, &agent.kind)
             });
-            let logs = seen.logs.read_agent(&agent.kind, pid, &agent.cwd, hint.map(|(id, _)| id))
+            // A row Luvus listed carries the agent's own directory. A promoted
+            // row has only the pane's, and the agent may have moved since, so
+            // its session log is chosen by the agent process's own directory,
+            // as Herdr's are; one that cannot be read says so instead.
+            let logs = if promoted(agent) && tc::agent_work::has_log_reader(&agent.kind) {
+                match pid {
+                    Some(pid) => match super::host::agent_cwds(&[pid]).remove(&pid) {
+                        Some(Ok(cwd)) => seen.logs.read_agent(&agent.kind, Some(pid), &cwd, hint.map(|(id, _)| id)),
+                        Some(Err(why)) => Err(format!("agent cwd: {why}")),
+                        None => Err("agent cwd: agent cwd was not acquired".to_string()),
+                    },
+                    None => Err("agent process not found, so its directory is unknown".to_string()),
+                }
+            } else {
+                seen.logs.read_agent(&agent.kind, pid, &agent.cwd, hint.map(|(id, _)| id))
+            };
+            let logs = logs
                 .map(|mut logs| {
                     logs.guessed |= hint.is_some_and(|(_, guessed)| guessed);
                     logs
