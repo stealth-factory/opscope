@@ -4978,8 +4978,8 @@ mod tests {
         let p = |at: f64, by: u32| readings::Provenance {
             taken_at: at, by: Some(by), stale: false, asking: None, refused: None, unshared: None,
         };
-        let s = Sharing { found: vec![(Part::List, p(now - 30.0, 41)), (Part::Counts, p(now - 600.0, 42))], ..Sharing::default() };
-        assert!(sharing_lines(&s, true, now, 200).join(" ").contains("10m ago by pane 42"));
+        let s = Sharing { found: vec![(Part::List, p(now - 30.0, 41)), (Part::Counts, p(now - 10.0, 42))], ..Sharing::default() };
+        assert!(sharing_lines(&s, true, now, 200).join(" ").contains("10s ago by pane 42"));
         assert!(sharing_lines(&s, false, now, 200).join(" ").contains("30s ago by pane 41"));
         let first = Sharing { waiting: Some(41), ..Sharing::default() };
         assert_eq!(sharing_lines(&first, true, now, 200), ["no list yet · pane 41 asking now"]);
