@@ -852,7 +852,9 @@ whose command another program shares (`forgecode`, `continue`, `vibe`, `goose`,
 and Cursor's newer `agent` launcher under `cursor-agent`) match only with a
 second clue: an install or script path, or for `goose` the way it was run (bare,
 `session` or `run`, never pressly/goose's `goose up`). Under Rex, which reports
-no arguments, `goose` needs the path clue. Each is switched off by removing its
+no arguments, the catalogue needs the path clue for `goose`; a goose that
+reports itself to Rex, as current versions do, shows regardless, with its own
+state. Each is switched off by removing its
 own name. Bare `kiro` is the Kiro IDE and is not matched (the CLI is
 `kiro-cli`); Sourcegraph's Amp is not listed, because `amp` is also a text
 editor — add `amp`, or any other command, to match it unconditionally.
