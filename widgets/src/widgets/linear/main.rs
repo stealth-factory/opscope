@@ -1200,6 +1200,16 @@ fn take_local_gate(cache: &mut tc::readings::Cache, gate_key: &str, local: &Mute
     }
 }
 
+/// A refresh asks for the open project's record again without dropping
+/// the one on screen. The timestamp is what says it is due.
+fn mark_held_stale(held: &Mutex<HashMap<String, (serde_json::Value, f64)>>) {
+    if let Ok(mut g) = held.lock() {
+        for (_, at) in g.values_mut() {
+            *at = 0.0;
+        }
+    }
+}
+
 /// The process-local gate is open. A walk checks this before every page:
 /// the project screen keeps its own cache, so a limit it meets mid-walk
 /// reaches this one only through `local` until the pass copies it across.
@@ -2823,9 +2833,10 @@ fn main() {
                     return;
                 }
                 "r" | "R" => {
-                    if let Ok(mut g) = held.lock() {
-                        g.clear();
-                    }
+                    // Due again, not gone. A shut gate will not fetch a
+                    // replacement, and clearing the record would take the
+                    // project's own facts off the screen until it lifts.
+                    mark_held_stale(&held);
                     asked_again.store(true, Ordering::Relaxed);
                     let (lock, cond) = &*wake;
                     if let Ok(mut asked) = lock.lock() {
@@ -5146,6 +5157,18 @@ mod tests {
         assert!(cache.live.contains_key(&flow_7));
         assert!(!cache.good.contains_key(&flow_14), "yesterday's flow stayed in memory");
         assert!(!cache.live.contains_key(&flow_14));
+    }
+
+    #[test]
+    fn a_refresh_keeps_a_project_record_and_marks_it_due() {
+        let held = Mutex::new(HashMap::from([(
+            "p".to_string(),
+            (serde_json::json!({ "name": "hallway" }), tc::now()),
+        )]));
+        mark_held_stale(&held);
+        let g = held.lock().unwrap();
+        assert_eq!(g["p"].0["name"], "hallway");
+        assert!(tc::now() - g["p"].1 > 120.0, "the record was not marked due");
     }
 
     #[test]
