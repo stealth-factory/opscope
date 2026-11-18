@@ -940,6 +940,7 @@ fn fetch_land_timing(
     tok: &str,
     scopes: &Arc<Mutex<Scopes>>,
     gql_url: &str,
+    keep: &mut dyn FnMut() -> bool,
 ) -> Result<Timed, String> {
     if expected <= 0 {
         return Ok(Timed {
@@ -955,6 +956,9 @@ fn fetch_land_timing(
     let mut budget = REVIEW_PAGE_BUDGET;
     let mut retry = false;
     loop {
+        if !keep() {
+            return Err(TAKEN_OVER.into());
+        }
         let raw = graphql(
             &build_merged_page_query(&q, &since, cursor.as_deref()),
             tok,
@@ -969,7 +973,10 @@ fn fetch_land_timing(
             want = want.max(live);
         }
         for mut pr in page.prs {
-            if !fill_reviews(&mut pr, tok, scopes, gql_url, &mut budget) {
+            if !fill_reviews(&mut pr, tok, scopes, gql_url, &mut budget, keep) {
+                if !keep() {
+                    return Err(TAKEN_OVER.into());
+                }
                 retry = true;
             }
             prs.push(pr);
@@ -1006,6 +1013,7 @@ fn fill_reviews(
     scopes: &Arc<Mutex<Scopes>>,
     gql_url: &str,
     budget: &mut usize,
+    keep: &mut dyn FnMut() -> bool,
 ) -> bool {
     if !pr.reviews_incomplete || pr.id.is_empty() {
         return true;
@@ -1022,6 +1030,9 @@ fn fill_reviews(
     loop {
         if *budget == 0 {
             return true;
+        }
+        if !keep() {
+            return false;
         }
         *budget -= 1;
         let Ok(raw) = graphql(
@@ -2368,7 +2379,7 @@ struct State {
     err: String,
     fetched: f64,
     days: i64,
-    /// Set by [r]: drop the day cache and refetch even past days.
+    /// Set by [r]: ask every pane to rebuild the day maps, past days too.
     bust: bool,
     /// Landed-set timing, keyed by account: the window, whether a request
     /// failed while it was read, and the reading. The enricher and an opened
@@ -2624,7 +2635,6 @@ const WHO_HOLD: f64 = 6.0 * 3600.0;
 #[derive(Default)]
 struct Poll {
     viewer: String,
-    day_cache: HashMap<String, HashMap<String, (i64, i64)>>,
     /// key -> when the shared reading last landed on screen was taken, so
     /// a reading lands once rather than every follow tick.
     landed: HashMap<String, f64>,
@@ -2632,8 +2642,8 @@ struct Poll {
     shown: Vec<String>,
     /// Accounts the board on screen could not read, and why.
     board_failed: Vec<String>,
-    /// Accounts the last full pass could not read the day counts of.
-    day_failed: Vec<String>,
+    /// Accounts whose day counts could not be read, and why.
+    day_failed: HashMap<String, String>,
 }
 
 /// Until when GitHub said to stop asking, without taking it; `None` once
@@ -2806,6 +2816,11 @@ fn one_pass(
             Err(_) => return Err("state lock poisoned".into()),
         };
     cache.asked_at = if bust { tc::now() } else { 0.0 };
+    // And the day maps are rebuilt from nothing, by whichever pane next
+    // holds each one's lease.
+    if bust {
+        ask_to_clear(cache, host_name, tok);
+    }
     // A request made since the last pass - the detail screen's own - may
     // have spent the budget. Every pane on this host and token waits its reset.
     shut_if_spent(cache, scopes, &gql_gate);
@@ -3039,14 +3054,17 @@ fn one_pass(
         .cloned()
         .collect();
 
-    // The rest is this pane's own and runs on its refresh: the day counts
-    // and the merged-PR timing are not shared yet (OPS-289). A pane still
-    // waiting for its first board has no account to enrich, so that is not a
-    // completed local pass and the full refresh stays pending.
+    // The day counts and the merged-PR timing are shared too (OPS-289), and
+    // asked for on whichever tick finds them stale, as the board is. A pane
+    // still waiting for its first board has no account to enrich, so that is
+    // not a completed pass and the full refresh stays pending.
     let rows_ready = accounts.iter().any(|acc| by_acc.contains_key(acc));
-    let local = full && open && rows_ready && spent_until(scopes).is_none();
-    if local {
-        local_pass(tok, poll, &accounts, &mut by_acc, days_now, &dates, &keep_from, bust, state, scopes, &gql_url);
+    let ready = open && rows_ready && spent_until(scopes).is_none();
+    if ready {
+        let ask = Ask { tok, host: host_name, refresh, gql_url: &gql_url, scopes, state };
+        let days_shown = day_counts(&ask, poll, cache, &accounts, &mut by_acc, days_now, &dates, &keep_from);
+        merged_timing(&ask, poll, cache, &accounts, &mut by_acc, days_now);
+        poll.shown.extend(days_shown);
     }
     shut_if_spent(cache, scopes, &gql_gate);
 
@@ -3054,7 +3072,11 @@ fn one_pass(
         // A config file others can read is no longer said here: core raises
         // it as a notice from load_config, so it is not glued onto a fetch
         // that worked.
-        let failed: Vec<&String> = poll.board_failed.iter().chain(&poll.day_failed).collect();
+        let failed: Vec<&String> = poll
+            .board_failed
+            .iter()
+            .chain(accounts.iter().filter_map(|acc| poll.day_failed.get(acc)))
+            .collect();
         g.err = if !failed.is_empty() {
             format!(
                 "could not read: {}",
@@ -3067,53 +3089,181 @@ fn one_pass(
             g.rate = Some(r);
         }
     }
-    Ok(local)
+    Ok(full && ready)
 }
 
-/// The day counts and the merged-PR timing, which each pane still asks for
-/// itself, on its own refresh.
+/// What every request of a pass is asked with.
+struct Ask<'a> {
+    tok: &'a str,
+    host: &'a str,
+    refresh: f64,
+    gql_url: &'a str,
+    scopes: &'a Arc<Mutex<Scopes>>,
+    state: &'a Arc<Mutex<State>>,
+}
+
+/// How long a merged-PR timing is held at most. It is good for as long as
+/// the merged count it was read for still stands, which is what decides
+/// when it is asked for again; this is only the ceiling, for a set that
+/// changed under a count that did not.
+const TIMING_HOLD: f64 = 6.0 * 3600.0;
+/// How long an `r` stays asked for. Every pane's day maps are asked for
+/// within a refresh, so an hour outlasts any pane still to honour it.
+const CLEAR_HOLD: f64 = 3600.0;
+/// Why a fetch stopped: another pane took its lease over, and its answer
+/// is the one every pane shows.
+const TAKEN_OVER: &str = "another pane took over";
+
+/// One account's per-day counts, every window's days in one map, shared by
+/// every pane on this host and token whatever window it draws.
+fn days_key(cache: &mut tc::readings::Cache, host: &str, tok: &str, acc: &str) -> String {
+    tc::readings::key(cache, "gh.days", 1, &[host, acc], &[tok])
+}
+
+/// One account's merged-PR timing for one window.
+fn timing_key(cache: &mut tc::readings::Cache, host: &str, tok: &str, acc: &str, days: i64) -> String {
+    let days = days.to_string();
+    tc::readings::key(cache, "gh.timing", 1, &[host, acc, days.as_str()], &[tok])
+}
+
+/// When an `r` last asked for the day maps to be rebuilt, by any pane.
+fn clear_key(cache: &mut tc::readings::Cache, host: &str, tok: &str) -> String {
+    tc::readings::key(cache, "gh.clear", 1, &[host], &[tok])
+}
+
+/// Ask every pane to rebuild the day maps, honoured by whichever pane next
+/// holds each map's lease.
+fn ask_to_clear(cache: &mut tc::readings::Cache, host: &str, tok: &str) {
+    let key = clear_key(cache, host, tok);
+    let now = tc::now();
+    tc::readings::record(cache, &key, serde_json::json!({ "at": now }), now, CLEAR_HOLD);
+}
+
+/// Make the reading under `key` stale in this pane alone, so the next
+/// claim asks the store for it rather than serving it here. A reading
+/// another pane has published since is taken instead of asked for.
+fn stale_here(cache: &mut tc::readings::Cache, key: &str) {
+    if let Some(entry) = cache.live.get_mut(key) {
+        entry.2 = 0.0;
+    }
+}
+
+/// Claim `keys`, then claim again those whose served reading `wanting`
+/// says cannot be drawn as it is - a map short of this window's days, a
+/// timing read over another merged count. Returns the claims and when the
+/// first was made.
+fn claim_wanting(
+    cache: &mut tc::readings::Cache,
+    keys: &[String],
+    policy: tc::readings::Policy,
+    mut wanting: impl FnMut(usize, &serde_json::Value, f64) -> bool,
+) -> (Vec<tc::readings::Claimed>, f64) {
+    use tc::readings::Claimed;
+    let claimed_at = tc::now();
+    let asks: Vec<(&str, tc::readings::Policy)> = keys.iter().map(|k| (k.as_str(), policy)).collect();
+    let mut got = tc::readings::claim_many(cache, &asks, claimed_at);
+    let mut again = Vec::new();
+    for (i, c) in got.iter().enumerate() {
+        if let Claimed::Serve(Some(v)) = c {
+            let taken = cache.live.get(&keys[i]).map_or(0.0, |e| e.0);
+            if tc::readings::refusal(v).is_none() && wanting(i, v, taken) {
+                again.push(i);
+            }
+        }
+    }
+    if !again.is_empty() {
+        for i in &again {
+            stale_here(cache, &keys[*i]);
+        }
+        let asks: Vec<(&str, tc::readings::Policy)> = again.iter().map(|i| (keys[*i].as_str(), policy)).collect();
+        for (i, c) in again.iter().zip(tc::readings::claim_many(cache, &asks, tc::now())) {
+            got[*i] = c;
+        }
+    }
+    (got, claimed_at)
+}
+
+/// Whether a stored day map can draw `dates`, and has honoured every `r`
+/// asked at `clear_at` that is at least the floor older than it.
+fn day_map_wanting(v: &serde_json::Value, dates: &[String], clear_at: f64, taken: f64, now: f64) -> bool {
+    let (map, cleared) = parse::days_from_json(v);
+    !dates.iter().all(|d| map.contains_key(d))
+        || (cleared < clear_at && now - taken >= tc::readings::ASKED_FLOOR)
+}
+
+/// The per-day counts behind the PR-flow chart, one shared map per
+/// account. A past day cannot change - a PR merged on the 3rd stays merged
+/// on the 3rd - so only days the map has never held, plus the trailing
+/// few, cost a request, and the pane that asks merges them into the map
+/// every pane reads. Widening the window buys only the days it adds, once
+/// between every pane; narrowing is free. Returns the keys on screen.
 #[allow(clippy::too_many_arguments)]
-fn local_pass(
-    tok: &str,
+fn day_counts(
+    ask: &Ask,
     poll: &mut Poll,
+    cache: &mut tc::readings::Cache,
     accounts: &[String],
     by_acc: &mut HashMap<String, Account>,
     days_now: i64,
     dates: &[String],
     keep_from: &str,
-    bust: bool,
-    state: &Arc<Mutex<State>>,
-    scopes: &Arc<Mutex<Scopes>>,
-    gql_url: &str,
-) {
+) -> Vec<String> {
+    use tc::readings::{Answer, Claimed, Policy};
     let viewer = poll.viewer.clone();
     let rate = |scopes: &Arc<Mutex<Scopes>>| scopes.lock().ok().and_then(|g| g.rate);
-    let mut failed: Vec<String> = Vec::new();
-    // Then the per-day counts. A past day cannot change - a PR merged on the
-    // 3rd stays merged on the 3rd - so only days never seen before, plus the
-    // trailing few, cost a request. Widening the window therefore buys only
-    // the days it adds; narrowing is free.
-    for acc in accounts {
-        if !by_acc.contains_key(acc) || spent_until(scopes).is_some() {
+    let clear = clear_key(cache, ask.host, ask.tok);
+    let clear_at = tc::readings::peek(cache, &clear)
+        .and_then(|v| v["at"].as_f64())
+        .unwrap_or(0.0);
+    let accs: Vec<String> = accounts.iter().filter(|a| by_acc.contains_key(*a)).cloned().collect();
+    let keys: Vec<String> = accs.iter().map(|a| days_key(cache, ask.host, ask.tok, a)).collect();
+    let policy = Policy::new(ask.refresh, LEASE_FOR);
+    let now = tc::now();
+    let (got, claimed_at) = claim_wanting(cache, &keys, policy, |_, v, taken| {
+        day_map_wanting(v, dates, clear_at, taken, now)
+    });
+
+    let mut done: Vec<(usize, Answer, f64)> = Vec::new();
+    let mut unanswered: Vec<usize> = Vec::new();
+    for (i, acc) in accs.iter().enumerate() {
+        if !matches!(got[i], Claimed::Fetch) {
             continue;
         }
-        let cache = poll.day_cache.entry(acc.clone()).or_default();
-        if bust {
-            cache.clear();
+        if spent_until(ask.scopes).is_some() {
+            unanswered.push(i);
+            continue;
+        }
+        // Start from the map every pane reads, unless an `r` asked since it
+        // was last rebuilt from nothing.
+        let held = cache
+            .live
+            .get(&keys[i])
+            .and_then(|e| e.1.clone())
+            .filter(|v| tc::readings::refusal(v).is_none())
+            .or_else(|| cache.good.get(&keys[i]).map(|g| g.1.clone()));
+        let (mut map, mut cleared) = held.as_ref().map(parse::days_from_json).unwrap_or_default();
+        if held.is_none() || cleared < clear_at {
+            map.clear();
+            cleared = tc::now();
         }
         let fresh: Vec<&String> = dates.iter().rev().take(FRESH_DAYS).collect();
         let want: Vec<String> = dates
             .iter()
-            .filter(|x| !cache.contains_key(*x) || fresh.contains(x))
+            .filter(|x| !map.contains_key(*x) || fresh.contains(x))
             .cloned()
             .collect();
         let mut chunk_err = None;
+        let mut taken_over = false;
         for chunk in want.chunks(DAY_CHUNK) {
-            if spent_until(scopes).is_some() {
+            if spent_until(ask.scopes).is_some() {
                 chunk_err.get_or_insert_with(|| RATE_SPENT.to_string());
                 break;
             }
-            let dd = match graphql(&build_day_query(&scope_of(acc, &viewer), chunk), tok, scopes, gql_url) {
+            if !tc::readings::renew_all(cache, &keys[i], LEASE_FOR) {
+                taken_over = true;
+                break;
+            }
+            let dd = match graphql(&build_day_query(&scope_of(acc, &viewer), chunk), ask.tok, ask.scopes, ask.gql_url) {
                 Ok(d) => d["data"].clone(),
                 Err(e) => {
                     chunk_err.get_or_insert(e);
@@ -3121,63 +3271,216 @@ fn local_pass(
                 }
             };
             for (n, day) in chunk.iter().enumerate() {
-                cache.insert(
+                map.insert(
                     day.clone(),
-                    (
-                        count_at(&dd, &format!("m{}", n)),
-                        count_at(&dd, &format!("c{}", n)),
-                    ),
+                    (count_at(&dd, &format!("m{}", n)), count_at(&dd, &format!("c{}", n))),
                 );
             }
         }
-        cache.retain(|day, _| day.as_str() >= keep_from); // older than any window
-        let mut answered = None;
-        if let Some(row) = by_acc.get_mut(acc) {
-            match settle_day_counts(row, days_now, dates, cache, chunk_err) {
-                Some(why) => {
-                    let why: String = why.chars().take(50).collect();
-                    failed.push(format!("{} day counts ({})", acc, why));
-                }
-                None => answered = (!want.is_empty()).then(tc::now),
-            }
+        if taken_over {
+            continue;
         }
-        publish(state, accounts, by_acc, rate(scopes), answered);
+        map.retain(|day, _| day.as_str() >= keep_from); // older than any window
+        let at = tc::now();
+        // This pane's own rows fill in account by account, as before
+        // sharing; the store hears the whole pass at once.
+        if let Some(row) = by_acc.get_mut(acc) {
+            settle_one(poll, row, acc, days_now, dates, &map, chunk_err.clone());
+        }
+        publish(ask.state, accounts, by_acc, rate(ask.scopes), chunk_err.is_none().then_some(at));
+        let answer = match chunk_err {
+            None => Answer::Value(parse::days_to_json(&map, cleared)),
+            Some(why) => Answer::Refused { why: why.chars().take(50).collect(), until: spent_until(ask.scopes) },
+        };
+        done.push((i, answer, at));
     }
-    poll.day_failed = failed;
+    for i in unanswered {
+        tc::readings::release(cache, &keys[i]);
+    }
+    let items: Vec<(&str, Answer, Policy, f64)> =
+        done.into_iter().map(|(i, a, at)| (keys[i].as_str(), a, policy, at)).collect();
+    tc::readings::answer_many(cache, &items, tc::now(), claimed_at);
 
-    // Timing for R24 / T2D. The headline aliases stay at eight; this pass
-    // pages the merged-in-window nodes the aggregates cannot time. While
-    // it is short the new cells stay ···, never a sample dressed as a total.
-    for acc in accounts {
-        let Some(row) = by_acc.get(acc) else {
+    // Every account's map as it now stands, whichever pane fetched it. A
+    // map another pane is still filling is not a failure: the row keeps
+    // what it has until that pane publishes.
+    let mut newest = None;
+    for (i, acc) in accs.iter().enumerate() {
+        let Some((at, Some(v), _)) = cache.live.get(&keys[i]).cloned() else {
             continue;
         };
-        if row.window != days_now || spent_until(scopes).is_some() {
+        let (map, err) = match tc::readings::refusal(&v) {
+            Some((why, _)) => (HashMap::new(), Some(why)),
+            None => (parse::days_from_json(&v).0, None),
+        };
+        if err.is_none() && !dates.iter().all(|d| map.contains_key(d)) {
             continue;
         }
-        let have = !bust
-            && row.timing_window == Some(days_now)
-            && !row.timing_retry
-            && row.timing.as_ref().is_some_and(|t| t.expected == row.merged);
-        if have {
+        if err.is_none() {
+            newest = Some(newest.map_or(at, |n: f64| n.max(at)));
+        }
+        if let Some(row) = by_acc.get_mut(acc) {
+            settle_one(poll, row, acc, days_now, dates, &map, err);
+        }
+    }
+    publish(ask.state, accounts, by_acc, rate(ask.scopes), newest);
+    keys
+}
+
+/// Land one account's day counts on its row, and keep or clear the reason
+/// they failed.
+fn settle_one(
+    poll: &mut Poll,
+    row: &mut Account,
+    acc: &str,
+    days_now: i64,
+    dates: &[String],
+    map: &HashMap<String, (i64, i64)>,
+    err: Option<String>,
+) {
+    match settle_day_counts(row, days_now, dates, map, err) {
+        Some(why) => {
+            let why: String = why.chars().take(50).collect();
+            poll.day_failed.insert(acc.to_string(), format!("{} day counts ({})", acc, why));
+        }
+        None => {
+            poll.day_failed.remove(acc);
+        }
+    }
+}
+
+/// A shared timing reading: the merged count it was read for, whether a
+/// request failed while it was read, and the timing.
+fn timing_reading(merged: i64, retry: bool, t: &parse::LandTiming) -> serde_json::Value {
+    serde_json::json!({ "merged": merged, "retry": retry, "timing": parse::timing_to_json(t) })
+}
+
+/// The timing in `v` when it was read for `merged`, and whether a request
+/// failed while it was read.
+fn timing_for(v: &serde_json::Value, merged: i64) -> Option<(bool, parse::LandTiming)> {
+    if v["merged"].as_i64() != Some(merged) {
+        return None;
+    }
+    Some((v["retry"].as_bool().unwrap_or(false), parse::timing_from_json(&v["timing"])?))
+}
+
+/// Timing for R24 / T2D, one shared reading per account and window. It
+/// stays good while the merged count it was read for stands, so it is
+/// asked for once per change in that count between every pane - or again
+/// after a refresh when a request failed while it was read. The headline
+/// aliases stay at eight; this pages the merged-in-window nodes the
+/// aggregates cannot time. While it is short the cells stay ···, never a
+/// sample dressed as a total.
+fn merged_timing(
+    ask: &Ask,
+    poll: &mut Poll,
+    cache: &mut tc::readings::Cache,
+    accounts: &[String],
+    by_acc: &mut HashMap<String, Account>,
+    days_now: i64,
+) {
+    use tc::readings::{Answer, Claimed, Policy};
+    let viewer = poll.viewer.clone();
+    let rate = |scopes: &Arc<Mutex<Scopes>>| scopes.lock().ok().and_then(|g| g.rate);
+    let accs: Vec<String> = accounts
+        .iter()
+        .filter(|a| by_acc.get(*a).is_some_and(|r| r.window == days_now))
+        .cloned()
+        .collect();
+    let merged: Vec<i64> = accs.iter().map(|a| by_acc[a].merged).collect();
+    let keys: Vec<String> = accs.iter().map(|a| timing_key(cache, ask.host, ask.tok, a, days_now)).collect();
+    // A reading the detail screen fetched for this count is shared rather
+    // than asked for again.
+    let overlay = ask.state.lock().map(|g| g.timing_overlay.clone()).unwrap_or_default();
+    for (i, acc) in accs.iter().enumerate() {
+        let stored = cache.live.get(&keys[i]).and_then(|e| e.1.as_ref());
+        if stored.is_some_and(|v| timing_for(v, merged[i]).is_some()) {
             continue;
         }
-        let expected = row.merged;
-        match fetch_land_timing(acc, &viewer, days_now, expected, tok, scopes, gql_url) {
+        if let Some((_, _, t)) = overlay
+            .get(acc)
+            .filter(|(w, retry, t)| *w == days_now && !retry && t.expected == merged[i])
+        {
+            let now = tc::now();
+            tc::readings::record(cache, &keys[i], timing_reading(merged[i], false, t), now, TIMING_HOLD);
+        }
+    }
+    let policy = Policy::new(TIMING_HOLD, LEASE_FOR);
+    let now = tc::now();
+    let (got, claimed_at) = claim_wanting(cache, &keys, policy, |i, v, taken| match timing_for(v, merged[i]) {
+        None => true,
+        Some((retry, _)) => retry && now - taken >= ask.refresh,
+    });
+
+    let mut done: Vec<(usize, Answer, f64)> = Vec::new();
+    let mut unanswered: Vec<usize> = Vec::new();
+    for (i, acc) in accs.iter().enumerate() {
+        if !matches!(got[i], Claimed::Fetch) {
+            continue;
+        }
+        if spent_until(ask.scopes).is_some() {
+            unanswered.push(i);
+            continue;
+        }
+        let key = keys[i].clone();
+        let mut keep = || tc::readings::renew_all(cache, &key, LEASE_FOR);
+        let fetched = fetch_land_timing(acc, &viewer, days_now, merged[i], ask.tok, ask.scopes, ask.gql_url, &mut keep);
+        let at = tc::now();
+        match fetched {
             Ok(got) => {
-                if let Ok(mut g) = state.lock() {
-                    g.timing_overlay
-                        .insert(acc.clone(), (days_now, got.retry, got.timing.clone()));
-                }
-                if let Some(row) = by_acc.get_mut(acc) {
-                    row.timing = Some(got.timing);
-                    row.timing_window = Some(days_now);
-                    row.timing_retry = got.retry;
-                }
-                publish(state, accounts, by_acc, rate(scopes), Some(tc::now()));
+                land_timing(ask.state, by_acc, acc, days_now, got.retry, got.timing.clone());
+                publish(ask.state, accounts, by_acc, rate(ask.scopes), Some(at));
+                done.push((i, Answer::Value(timing_reading(merged[i], got.retry, &got.timing)), at));
             }
-            Err(_) => continue,
+            Err(why) if why == TAKEN_OVER => {}
+            Err(why) => {
+                let until = spent_until(ask.scopes);
+                done.push((i, Answer::Refused { why: why.chars().take(50).collect(), until }, at));
+            }
         }
+    }
+    for i in unanswered {
+        tc::readings::release(cache, &keys[i]);
+    }
+    let items: Vec<(&str, Answer, Policy, f64)> =
+        done.into_iter().map(|(i, a, at)| (keys[i].as_str(), a, policy, at)).collect();
+    tc::readings::answer_many(cache, &items, tc::now(), claimed_at);
+
+    // Every account's timing as it now stands, whichever pane read it.
+    let mut landed = false;
+    for (i, acc) in accs.iter().enumerate() {
+        let Some((retry, t)) = cache.live.get(&keys[i]).and_then(|e| e.1.as_ref()).and_then(|v| timing_for(v, merged[i]))
+        else {
+            continue;
+        };
+        let row = &by_acc[acc];
+        if row.timing_window == Some(days_now) && row.timing.as_ref() == Some(&t) && row.timing_retry == retry {
+            continue;
+        }
+        land_timing(ask.state, by_acc, acc, days_now, retry, t);
+        landed = true;
+    }
+    if landed {
+        publish(ask.state, accounts, by_acc, rate(ask.scopes), None);
+    }
+}
+
+/// Put a timing on its row, and where the detail screen reads it.
+fn land_timing(
+    state: &Arc<Mutex<State>>,
+    by_acc: &mut HashMap<String, Account>,
+    acc: &str,
+    days_now: i64,
+    retry: bool,
+    t: parse::LandTiming,
+) {
+    if let Ok(mut g) = state.lock() {
+        g.timing_overlay.insert(acc.to_string(), (days_now, retry, t.clone()));
+    }
+    if let Some(row) = by_acc.get_mut(acc) {
+        row.timing = Some(t);
+        row.timing_window = Some(days_now);
+        row.timing_retry = retry;
     }
 }
 
@@ -4190,6 +4493,7 @@ fn main() {
                                 &tok,
                                 &scopes,
                                 &timing_gql,
+                                &mut || true,
                             ) {
                                 Ok(got) => {
                                     if let Ok(mut g) = poll.lock() {
@@ -4788,73 +5092,299 @@ mod tests {
         assert!(!ran, "waiting for another pane's board is not a local pass");
     }
 
+    /// GitHub on localhost: answers every request with `answer`, and keeps
+    /// each request's body so a test can count what was asked.
+    struct FakeGithub {
+        url: String,
+        asked: Arc<Mutex<Vec<String>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeGithub {
+        fn start(answer: fn() -> String) -> FakeGithub {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (server_asked, server_stop) = (Arc::clone(&asked), Arc::clone(&stop));
+            let server = std::thread::spawn(move || {
+                while !server_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let mut got = Vec::new();
+                            let mut buf = [0; 65536];
+                            // Headers, then as much body as they promise.
+                            let body_at = loop {
+                                let n = stream.read(&mut buf).unwrap_or(0);
+                                if n == 0 {
+                                    break None;
+                                }
+                                got.extend_from_slice(&buf[..n]);
+                                if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    break Some(at + 4);
+                                }
+                            };
+                            let Some(body_at) = body_at else { continue };
+                            let head = String::from_utf8_lossy(&got[..body_at]).to_lowercase();
+                            let length: usize = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            if head.contains("expect: 100-continue") {
+                                stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+                            }
+                            while got.len() < body_at + length {
+                                let n = stream.read(&mut buf).unwrap_or(0);
+                                if n == 0 {
+                                    break;
+                                }
+                                got.extend_from_slice(&buf[..n]);
+                            }
+                            server_asked
+                                .lock()
+                                .unwrap()
+                                .push(String::from_utf8_lossy(&got[body_at..]).to_string());
+                            let _ = stream.write_all(answer().as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(e) => panic!("test server: {e}"),
+                    }
+                }
+            });
+            FakeGithub { url, asked, stop, server: Some(server) }
+        }
+
+        fn calls(&self) -> usize {
+            self.asked.lock().unwrap().len()
+        }
+    }
+
+    impl Drop for FakeGithub {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+        }
+    }
+
+    fn ok_200(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    /// Every count zero, and a merged search that has nothing to page.
+    fn quiet_github() -> String {
+        ok_200(r#"{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}"#)
+    }
+
+    /// The last `days` dates ending today, oldest first, and the oldest any
+    /// window keeps.
+    fn window(days: i64) -> (Vec<String>, String) {
+        let base = today();
+        let dates = (0..days).rev().map(|k| (base - Days::days(k)).format("%Y-%m-%d").to_string()).collect();
+        let keep_from = (base - Days::days(WINDOWS[WINDOWS.len() - 1] - 1)).format("%Y-%m-%d").to_string();
+        (dates, keep_from)
+    }
+
+    /// One pane's poller state for the day and timing passes.
+    struct Pane {
+        cache: tc::readings::Cache,
+        poll: Poll,
+        by_acc: HashMap<String, Account>,
+        state: Arc<Mutex<State>>,
+        scopes: Arc<Mutex<Scopes>>,
+    }
+
+    impl Pane {
+        fn new(cache: tc::readings::Cache, window: i64, merged: i64) -> Pane {
+            let row = Account { key: "example".into(), account: "example".into(), window, merged, ..Default::default() };
+            Pane {
+                cache,
+                poll: Poll { viewer: "viewer".into(), ..Default::default() },
+                by_acc: HashMap::from([("example".to_string(), row)]),
+                state: Arc::new(Mutex::new(State::default())),
+                scopes: Arc::new(Mutex::new(Scopes::default())),
+            }
+        }
+
+        fn days(&mut self, url: &str, window_days: i64) -> Vec<String> {
+            let (dates, keep_from) = window(window_days);
+            let ask = Ask { tok: FAKE_TOKEN, host: "github.com", refresh: 120.0, gql_url: url, scopes: &self.scopes, state: &self.state };
+            tc::readings::follow(&mut self.cache);
+            day_counts(&ask, &mut self.poll, &mut self.cache, &["example".to_string()], &mut self.by_acc, window_days, &dates, &keep_from)
+        }
+
+        fn timing(&mut self, url: &str, window_days: i64) {
+            let ask = Ask { tok: FAKE_TOKEN, host: "github.com", refresh: 120.0, gql_url: url, scopes: &self.scopes, state: &self.state };
+            tc::readings::follow(&mut self.cache);
+            merged_timing(&ask, &mut self.poll, &mut self.cache, &["example".to_string()], &mut self.by_acc, window_days);
+        }
+    }
+
     #[test]
     fn day_count_chunks_stop_when_the_first_answer_spends_the_rate_limit() {
-        use std::io::{Read, Write};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let server_calls = Arc::clone(&calls);
-        let stop = Arc::new(AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        server_calls.fetch_add(1, Ordering::Relaxed);
-                        let mut request = [0; 8192];
-                        let _ = stream.read(&mut request);
-                        let body = r#"{"error":"rate limited"}"#;
-                        let reset = tc::now() as i64 + 3600;
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(), reset, body
-                        );
-                        stream.write_all(response.as_bytes()).unwrap();
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(e) => panic!("test server: {e}"),
-                }
-            }
-        });
-
+        fn spent() -> String {
+            let body = r#"{"error":"rate limited"}"#;
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                tc::now() as i64 + 3600,
+                body
+            )
+        }
+        let github = FakeGithub::start(spent);
         let days = (DAY_CHUNK * 2 + 1) as i64;
-        let base = today();
-        let dates: Vec<String> = (0..days)
-            .rev()
-            .map(|k| (base - Days::days(k)).format("%Y-%m-%d").to_string())
-            .collect();
-        let keep_from = (base - Days::days(90)).format("%Y-%m-%d").to_string();
-        let accounts = vec!["example".to_string()];
-        let mut by_acc = HashMap::from([(
-            "example".to_string(),
-            Account { key: "example".into(), account: "example".into(), window: days, ..Default::default() },
-        )]);
-        let state = Arc::new(Mutex::new(State::default()));
-        let scopes = Arc::new(Mutex::new(Scopes::default()));
-        let mut poll = Poll { viewer: "viewer".into(), ..Default::default() };
-        local_pass(
-            FAKE_TOKEN,
-            &mut poll,
-            &accounts,
-            &mut by_acc,
-            days,
-            &dates,
-            &keep_from,
-            false,
-            &state,
-            &scopes,
-            &url,
-        );
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), 1, "a spent budget stops the remaining chunks");
-        assert_eq!(poll.day_failed.len(), 1);
+        let mut pane = Pane::new(tc::readings::Cache::default(), days, 0);
+        pane.days(&github.url, days);
+        assert_eq!(github.calls(), 1, "a spent budget stops the remaining chunks");
+        assert_eq!(pane.poll.day_failed.len(), 1);
+    }
+
+    #[test]
+    fn a_second_pane_on_a_ninety_day_window_asks_for_no_day_counts() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, b) = two_panes("days-shared");
+        let (mut a, mut b) = (Pane::new(a, 90, 0), Pane::new(b, 90, 0));
+        a.days(&github.url, 90);
+        let first = github.calls();
+        assert_eq!(first, 90usize.div_ceil(DAY_CHUNK), "the first pane reads the window once");
+        assert_eq!(a.by_acc["example"].hist_window, Some(90));
+
+        let keys = b.days(&github.url, 90);
+        assert_eq!(github.calls(), first, "the second pane asked for day counts the first already has");
+        assert_eq!(b.by_acc["example"].hist_window, Some(90));
+        assert_eq!(b.by_acc["example"].hist.len(), 90);
+        assert!(b.poll.day_failed.is_empty());
+        // Said on the freshness line as the other pane's, and the token is
+        // in no key.
+        let seen = tc::readings::provenance(&b.cache, &keys[0], tc::now()).unwrap();
+        assert_eq!(seen.by, Some(41));
+        assert!(!keys[0].contains(FAKE_TOKEN));
+        // A narrower window is in the same map: free.
+        let mut c = Pane::new(b.cache, 14, 0);
+        c.days(&github.url, 14);
+        assert_eq!(github.calls(), first);
+        assert_eq!(c.by_acc["example"].hist_window, Some(14));
+    }
+
+    /// Put a day map in the store as though a pane read it `age` seconds ago.
+    fn seed_days(cache: &mut tc::readings::Cache, window_days: i64, age: f64, count: i64) {
+        let (dates, _) = window(window_days);
+        let key = days_key(cache, "github.com", FAKE_TOKEN, "example");
+        let map: HashMap<String, (i64, i64)> = dates.iter().map(|d| (d.clone(), (count, count))).collect();
+        let at = tc::now() - age;
+        let policy = tc::readings::Policy::new(120.0, LEASE_FOR);
+        let value = parse::days_to_json(&map, at);
+        tc::readings::answer_many(cache, &[(key.as_str(), tc::readings::Answer::Value(value), policy, at)], tc::now(), at);
+    }
+
+    #[test]
+    fn a_stale_map_asks_again_for_only_the_trailing_days() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, b) = two_panes("days-trailing");
+        let mut a = Pane::new(a, 30, 0);
+        seed_days(&mut a.cache, 30, 200.0, 7);
+        let mut b = Pane::new(b, 30, 0);
+        b.days(&github.url, 30);
+        let asked = github.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains("m1:") && !asked[0].contains("m2:"), "{}", asked[0]);
+        // The pane that asked merged the two days into the stored map.
+        let hist = &b.by_acc["example"].hist;
+        assert_eq!(hist.len(), 30);
+        assert_eq!(hist.values().filter(|n| **n == 7).count(), 30 - FRESH_DAYS);
+        a.days(&github.url, 30);
+        assert_eq!(github.calls(), 1);
+        assert_eq!(a.by_acc["example"].hist, *hist);
+    }
+
+    #[test]
+    fn an_r_in_one_pane_is_honoured_by_the_pane_that_holds_the_lease() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, b) = two_panes("days-clear");
+        let mut a = Pane::new(a, 14, 0);
+        // Fresh, but read a minute ago, past the floor.
+        seed_days(&mut a.cache, 14, 60.0, 7);
+        a.days(&github.url, 14);
+        assert_eq!(github.calls(), 0, "a fresh map is served");
+
+        // `r` in the other pane, which does not ask itself this time.
+        let mut b = Pane::new(b, 14, 0);
+        ask_to_clear(&mut b.cache, "github.com", FAKE_TOKEN);
+        a.days(&github.url, 14);
+        assert_eq!(github.calls(), 1, "the map is rebuilt from nothing, in one chunk");
+        assert!(a.by_acc["example"].hist.values().all(|n| *n == 0));
+        // Honoured once: neither pane asks again for it.
+        a.days(&github.url, 14);
+        b.days(&github.url, 14);
+        assert_eq!(github.calls(), 1);
+        assert!(b.by_acc["example"].hist.values().all(|n| *n == 0));
+    }
+
+    #[test]
+    fn an_r_inside_the_floor_waits_rather_than_asking() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, _) = two_panes("days-floor");
+        let mut a = Pane::new(a, 14, 0);
+        seed_days(&mut a.cache, 14, 5.0, 7);
+        ask_to_clear(&mut a.cache, "github.com", FAKE_TOKEN);
+        a.days(&github.url, 14);
+        assert_eq!(github.calls(), 0, "a map five seconds old is under the floor");
+        assert!(a.by_acc["example"].hist.values().all(|n| *n == 7));
+    }
+
+    #[test]
+    fn timing_is_asked_once_per_merged_count_between_panes() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, b) = two_panes("timing-shared");
+        let (mut a, mut b) = (Pane::new(a, 14, 3), Pane::new(b, 14, 3));
+        a.timing(&github.url, 14);
+        assert_eq!(github.calls(), 1);
+        let t = a.by_acc["example"].timing.clone().expect("a timing on the row");
+        assert_eq!(t.expected, 3);
+        b.timing(&github.url, 14);
+        a.timing(&github.url, 14);
+        assert_eq!(github.calls(), 1, "the count has not moved, so nobody asks again");
+        assert_eq!(b.by_acc["example"].timing, Some(t));
+        assert_eq!(b.by_acc["example"].timing_window, Some(14));
+
+        // The merged count moves: one pane asks, the other is served.
+        a.by_acc.get_mut("example").unwrap().merged = 4;
+        b.by_acc.get_mut("example").unwrap().merged = 4;
+        b.timing(&github.url, 14);
+        assert_eq!(github.calls(), 2);
+        a.timing(&github.url, 14);
+        assert_eq!(github.calls(), 2);
+        assert_eq!(a.by_acc["example"].timing.as_ref().map(|t| t.expected), Some(4));
+        // Another window is another reading.
+        a.by_acc.get_mut("example").unwrap().window = 30;
+        a.timing(&github.url, 30);
+        assert_eq!(github.calls(), 3);
+    }
+
+    #[test]
+    fn a_timing_the_detail_screen_read_is_shared_not_asked_again() {
+        let github = FakeGithub::start(quiet_github);
+        let (a, b) = two_panes("timing-overlay");
+        let (mut a, mut b) = (Pane::new(a, 14, 3), Pane::new(b, 14, 3));
+        let read = parse::parse_land_timing(3, &[]);
+        a.state.lock().unwrap().timing_overlay.insert("example".into(), (14, false, read.clone()));
+        a.timing(&github.url, 14);
+        b.timing(&github.url, 14);
+        assert_eq!(github.calls(), 0);
+        assert_eq!(b.by_acc["example"].timing, Some(read));
     }
 
     #[test]

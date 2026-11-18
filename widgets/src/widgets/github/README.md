@@ -316,7 +316,7 @@ Even a cold ninety-day window is a small fraction of an hour's GraphQL
 allowance. The REST figure `github-actions` shows is a different one; this
 allowance is shared with `github-prs` when they use the same token.
 
-`r` re-reads every day from scratch, which is the escape hatch for the cases a
+`r` re-reads every day from scratch, in every pane, which is the escape hatch for the cases a
 past day's immutability does not cover — a repo deleted, transferred or made
 private. `w` has no need to.
 
@@ -326,7 +326,7 @@ arrive, and one bad account cannot blank the whole board.
 ## Several panes
 
 Panes of `github` on one machine share what they read, so a second pane
-does not double the requests. Three readings are shared:
+does not double the requests. Five readings are shared:
 
 - **who the token belongs to**, asked once between every pane on the token;
 - **the contribution calendar**, which does not depend on the window, so
@@ -336,10 +336,19 @@ does not double the requests. Three readings are shared:
   accounts and window. One reading, so every account is counted against the
   same 24-hour cut, and two panes on the same accounts and window make one
   board pass per refresh between them. An account that could not be read
-  travels inside it and shows as failed on every pane, never as zero.
-
-The day counts behind the flow chart and the R24 / T2D timing are still
-asked by each pane.
+  travels inside it and shows as failed on every pane, never as zero;
+- **the day counts** behind the flow chart, as one map of day to counts per
+  account, whatever window a pane draws. The pane that asks reads only the
+  days the map has never held plus the trailing two, and merges them into
+  the map every pane reads, so a second pane opening ninety days asks for
+  nothing the first already has. `r` in any pane asks for the maps to be
+  rebuilt from nothing; whichever pane next holds each map's lease does it,
+  and not for a map read in the last thirty seconds;
+- **the R24 / T2D timing**, per account and window. It is good for as long
+  as the merged count it was read for stands, so it is asked for once per
+  change in that count between every pane, not on a timer (a reading where
+  a request failed is asked for again after a refresh). A timing an
+  account's own screen read is shared the same way.
 
 The line under the status line says where the readings on screen came from
 when it is not simply this pane, just now: `fetched 2m ago by pane 48213`,

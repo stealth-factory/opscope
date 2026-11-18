@@ -413,10 +413,122 @@ pub fn parse_rate_spent(status: u16, h: &RateHeaders, now: i64) -> Option<i64> {
     (status == 429).then_some(now + RATE_MIN_WAIT)
 }
 
+/// One account's per-day counts as they are shared between panes:
+/// `{"days": {"2026-11-03": [merged, created], …}, "cleared": t}`.
+/// `cleared` is when the map was last rebuilt from nothing, which is how a
+/// pane tells whether an `r` asked after that has been honoured.
+pub fn days_to_json(days: &std::collections::HashMap<String, (i64, i64)>, cleared: f64) -> serde_json::Value {
+    let map: serde_json::Map<String, serde_json::Value> = days
+        .iter()
+        .map(|(day, (merged, created))| (day.clone(), serde_json::json!([merged, created])))
+        .collect();
+    serde_json::json!({ "days": map, "cleared": cleared })
+}
+
+/// The day map [`days_to_json`] wrote, and when it was cleared. A day whose
+/// pair is not two integers is left out rather than read as zeros, so it is
+/// asked for again.
+pub fn days_from_json(v: &serde_json::Value) -> (std::collections::HashMap<String, (i64, i64)>, f64) {
+    let days = v["days"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(day, pair)| Some((day.clone(), (pair[0].as_i64()?, pair[1].as_i64()?))))
+        .collect();
+    (days, v["cleared"].as_f64().unwrap_or(0.0))
+}
+
+fn pct_to_json(c: PctCell) -> serde_json::Value {
+    match c {
+        PctCell::Incomplete => serde_json::json!("incomplete"),
+        PctCell::Empty => serde_json::json!("empty"),
+        PctCell::Value(v) => serde_json::json!(v),
+    }
+}
+
+fn pct_from_json(v: &serde_json::Value) -> Option<PctCell> {
+    match v.as_str() {
+        Some("incomplete") => Some(PctCell::Incomplete),
+        Some("empty") => Some(PctCell::Empty),
+        Some(_) => None,
+        None => v.as_f64().map(PctCell::Value),
+    }
+}
+
+/// A landed-set timing as it is shared between panes.
+pub fn timing_to_json(t: &LandTiming) -> serde_json::Value {
+    serde_json::json!({
+        "complete": t.complete,
+        "expected": t.expected,
+        "fetched": t.fetched,
+        "r24": pct_to_json(t.r24),
+        "t2d": pct_to_json(t.t2d),
+        "r24_count": t.r24_count,
+        "t2d_count": t.t2d_count,
+        "no_human": t.no_human,
+        "median_review_hours": t.median_review_hours,
+        "median_merge_days": t.median_merge_days,
+    })
+}
+
+/// The timing [`timing_to_json`] wrote; `None` for anything else, so a
+/// reading of another shape is asked for again rather than drawn wrong.
+pub fn timing_from_json(v: &serde_json::Value) -> Option<LandTiming> {
+    Some(LandTiming {
+        complete: v["complete"].as_bool()?,
+        expected: v["expected"].as_i64()?,
+        fetched: v["fetched"].as_u64()? as usize,
+        r24: pct_from_json(&v["r24"])?,
+        t2d: pct_from_json(&v["t2d"])?,
+        r24_count: v["r24_count"].as_i64()?,
+        t2d_count: v["t2d_count"].as_i64()?,
+        no_human: v["no_human"].as_i64(),
+        median_review_hours: v["median_review_hours"].as_f64(),
+        median_merge_days: v["median_merge_days"].as_f64(),
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_day_map_reads_back_as_written() {
+        let days = std::collections::HashMap::from([
+            ("2026-11-01".to_string(), (3, 5)),
+            ("2026-11-02".to_string(), (0, 0)),
+        ]);
+        let (back, cleared) = days_from_json(&days_to_json(&days, 12.5));
+        assert_eq!(back, days);
+        assert_eq!(cleared, 12.5);
+        // A day that is not two integers is missing, so it is asked again,
+        // rather than a zero nobody counted.
+        let odd = serde_json::json!({ "days": { "2026-11-01": [1], "2026-11-02": [1, 2] } });
+        let (back, cleared) = days_from_json(&odd);
+        assert_eq!(back.len(), 1);
+        assert_eq!(cleared, 0.0);
+    }
+
+    #[test]
+    fn a_shared_timing_reads_back_as_written() {
+        let done = LandTiming {
+            complete: true,
+            expected: 4,
+            fetched: 4,
+            r24: PctCell::Value(75.0),
+            t2d: PctCell::Empty,
+            r24_count: 3,
+            t2d_count: 0,
+            no_human: Some(1),
+            median_review_hours: Some(2.5),
+            median_merge_days: None,
+        };
+        assert_eq!(timing_from_json(&timing_to_json(&done)), Some(done));
+        let short = LandTiming { expected: 9, fetched: 2, ..Default::default() };
+        assert_eq!(timing_from_json(&timing_to_json(&short)), Some(short));
+        assert_eq!(timing_from_json(&serde_json::json!({ "complete": true })), None);
+    }
 
     #[test]
     fn held_is_merged_among_closed() {

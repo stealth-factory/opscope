@@ -25,9 +25,10 @@ API.
 the 2-day opened-to-merged bar. `[w]` cycles the same sample.
 
 `share_readings` (on by default) lets every `github` pane on this machine
-share who the token belongs to, the contribution calendar and the board's
-totals, so panes with the same accounts and window make one board pass
-between them. They are stored in `~/.local/state/opscope/github.sqlite`,
+share who the token belongs to, the contribution calendar, the board's
+totals, each account's day counts and its merged-PR timing, so panes with
+the same accounts and window make one board pass between them and a second
+pane on any window asks for no day it does not add. They are stored in `~/.local/state/opscope/github.sqlite`,
 mode 0600: account names and counts, never the token or a PR title.
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
