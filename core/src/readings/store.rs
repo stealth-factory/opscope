@@ -426,11 +426,27 @@ impl Store {
         // rewrote the leases table dozens of times a minute for leases
         // that had most of their time left. The caller sizes `lease_for`
         // at twice one request, so the half left still covers it.
+        //
+        // Read first. An `UPDATE` that changes nothing still starts a
+        // write transaction, and another pane's `BEGIN IMMEDIATE` then
+        // blocks this check or makes it come back busy.
+        let due = now + lease_for / 2.0;
+        let row: Option<(u32, f64)> = self
+            .conn
+            .query_row("SELECT holder, expires_at FROM leases WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(sql)?;
+        let write = row.is_some_and(|(holder, expires_at)| holder == self.me && expires_at < due);
+        if !write {
+            return self.holds(key, now);
+        }
         let n = self
             .conn
             .execute(
                 "UPDATE leases SET expires_at = ?4 WHERE key = ?1 AND holder = ?2 AND expires_at < ?3",
-                params![key, self.me, now + lease_for / 2.0, now + lease_for],
+                params![key, self.me, due, now + lease_for],
             )
             .map_err(sql)?;
         if n > 0 {
@@ -1830,6 +1846,17 @@ mod tests {
             assert!(s.renew("k", NOW + i as f64, 60.0).unwrap());
         }
         assert_eq!(s.writes, writes, "a lease with most of its time left was rewritten");
+        // The skip is a read. An UPDATE that matches nothing still takes
+        // the writer lock, and this would wait out the other connection.
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        assert!(s.renew("k", NOW + 1.0, 60.0).unwrap());
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "a skipped renewal waited on the writer"
+        );
+        other.execute_batch("ROLLBACK").unwrap();
         // The last instant a renewal is skipped: half the lease remains,
         // which is the one request the caller has to fit there.
         assert!(s.renew("k", NOW + 30.0, 60.0).unwrap());
