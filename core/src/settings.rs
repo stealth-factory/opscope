@@ -976,6 +976,10 @@ struct App {
     selected: usize,
     scroll: usize,
     chase: bool,
+    /// A typed entry started while discovery was still listing. It stays a
+    /// manual entry until it is added or cleared, so a result arriving
+    /// mid-draft cannot turn the same keystrokes into a filter.
+    composing: bool,
     mode: Mode,
     status: Option<String>,
     /// The screens left behind while standing inside a declared object: the
@@ -1068,6 +1072,7 @@ fn load(spec: SettingsSpec) -> App {
         selected: 0,
         scroll: 0,
         chase: true,
+        composing: false,
         mode: Mode::List,
         status: None,
         stack: Vec::new(),
@@ -1319,11 +1324,20 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         return write_field(app, index, Value::String(String::new()));
     }
     let field = app.fields.get(index).ok_or("no such field")?;
+    let key = field.key.clone();
     let steps: Vec<String> = field.steps().iter().map(|s| s.to_string()).collect();
     let schema_path = field.path();
     let schema_section = field.section.clone();
     let shown_default = summary(&field.default, false);
+    let loaded = current_of(&app.live, field, app.legacy_section).cloned();
     let (fresh_raw, fresh_live) = fresh_config(app)?;
+    // The same refusal as a toggle. Resetting from the list is still a
+    // write, and a list another process changed is not this screen's to drop.
+    if discovery_hook(app, &key).is_some()
+        && current_of(&fresh_live, &app.fields[index], app.legacy_section) != loaded.as_ref()
+    {
+        return Err("refusing to overwrite an updated list · reload settings".into());
+    }
     let section = live_section(&fresh_live, &schema_section, app.legacy_section).to_string();
     // section, then every key the field sits under, then the field itself.
     let mut full: Vec<&str> = vec![section.as_str()];
@@ -1794,19 +1808,21 @@ enum Discovery {
     Failed(String),
 }
 
-/// The hook for a top-level array whose schema says `items: "string"`.
+/// The hook for a top-level array of strings with no fixed length.
 ///
-/// Discovered values are strings. A hook on an integer array would show
-/// `"22"` as ticked beside the number `22`, then refuse the write.
+/// Discovered values are strings, added and removed one at a time. An
+/// integer array would show `"22"` beside the number `22` and then refuse
+/// the write. A fixed length cannot be edited that way either: both the
+/// add and the remove miss the length, so the field keeps the editor that
+/// writes the whole array at once.
 fn discovery_hook(app: &App, key: &str) -> Option<(&'static str, Discover)> {
     let hook = app.discover.iter().find(|(field, _)| *field == key)?;
-    let string_array = app
-        .constraints
-        .get(key)
-        .and_then(Value::as_object)
+    let rule = app.constraints.get(key).and_then(Value::as_object);
+    let string_array = rule
         .and_then(|rule| rule.get("items"))
         .and_then(Value::as_str)
         == Some("string");
+    let fixed = rule.is_some_and(|rule| rule.contains_key("length"));
     app.fields
         .iter()
         .any(|field| {
@@ -1815,6 +1831,7 @@ fn discovery_hook(app: &App, key: &str) -> Option<(&'static str, Discover)> {
                 && field.parents.is_empty()
                 && field.default.is_array()
                 && string_array
+                && !fixed
         })
         .then_some(*hook)
 }
@@ -1868,13 +1885,20 @@ fn poll_discovery(app: &mut App) {
         }
     };
     if matches!(&state, Discovery::Ready(choices) if !choices.is_empty()) {
-        if let Mode::Pick { sel, scroll, .. } = &mut app.mode {
-            *sel = 0;
-            *scroll = 0;
+        let drafting = matches!(&app.mode, Mode::Pick { query, .. } if !query.is_empty());
+        if drafting {
+            // They were typing an entry. Keep that meaning until the draft
+            // is added or cleared; the checklist waits.
+            app.composing = true;
+        } else {
+            if let Mode::Pick { sel, scroll, .. } = &mut app.mode {
+                *sel = 0;
+                *scroll = 0;
+            }
+            // A new list is a new selection. Follow it once, then leave the
+            // wheel free to move through a choice that wraps past the pane.
+            app.chase = true;
         }
-        // A new list is a new selection. Follow it once, then leave the
-        // wheel free to move through a choice that wraps past the pane.
-        app.chase = true;
     }
     app.discoveries.insert(key, state);
 }
@@ -1887,6 +1911,9 @@ fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
         return Some(PickKind::Catalogue(table));
     }
     if discovery_hook(app, key).is_some() {
+        if app.composing {
+            return Some(PickKind::Free);
+        }
         return Some(match app.discoveries.get(key) {
             Some(Discovery::Ready(choices)) if !choices.is_empty() => PickKind::Discovered,
             _ => PickKind::Free,
@@ -2982,6 +3009,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         *cursor,
     );
     let started_sel = s_;
+    let started_query = q.clone();
     // Set when this key is about the view rather than the selection, or
     // when focus lands on the list without the index changing. Anything
     // else that moves the selection follows on the next draw.
@@ -3311,9 +3339,14 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
     }
     let total = zone_choices(app, index, &q, all).len();
     let sel_now = s_.min(total.saturating_sub(1));
+    // A filter can replace the choice at the same index. That is still a
+    // move of the cursor, so the window follows it on this frame.
+    if q.is_empty() {
+        app.composing = false;
+    }
     app.chase = match chase_after {
         Some(chase) => chase,
-        None if sel_now != started_sel => true,
+        None if sel_now != started_sel || q != started_query => true,
         None => app.chase,
     };
     if let Mode::Pick {
@@ -3484,6 +3517,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     // The first frame follows the selection. After that, only
                     // a key that moves it does — the wheel keeps its place.
                     app.chase = true;
+                    app.composing = false;
                     if discovery_hook(app, &field.key)
                         .is_some_and(|(key, _)| !app.discoveries.contains_key(key))
                     {
@@ -4660,6 +4694,14 @@ fn draw_pick(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Cl
     // Title pinned, the rest windowed - the same shape as the list, and for
     // the same reason: a pane too short is a pane you scroll.
     let head = body.remove(0);
+    // The title was body row 0. The indexes recorded above count it, and
+    // the window is the body with it removed, so each one moves up a row.
+    // `placed` then adds the pinned title back, the same way the list does.
+    let rows_at: Vec<(usize, usize)> = rows_at
+        .into_iter()
+        .map(|(row, i)| (row.saturating_sub(1), i))
+        .collect();
+    let first_choice_row = first_choice_row.saturating_sub(1);
     let room = h.saturating_sub(1 + foot.len()).max(1);
     // Follow only on the frame a key moved the selection. Doing it every
     // frame anchors a wrapped choice to its first line, so wheel and
@@ -4963,6 +5005,7 @@ mod tests {
             selected: 0,
             scroll: 0,
             chase: false,
+            composing: false,
             mode: Mode::List,
             status: None,
             wrote: false,
@@ -5297,6 +5340,13 @@ mod tests {
         );
         strings.discover = &[("properties", choices)];
         assert!(discovery_hook(&strings, "properties").is_some());
+        let mut fixed = field_app(
+            "properties",
+            serde_json::json!(["old"]),
+            Some(serde_json::json!({"items": "string", "length": 1})),
+        );
+        fixed.discover = &[("properties", choices)];
+        assert!(discovery_hook(&fixed, "properties").is_none());
     }
 
     /// A choice taller than the pane stays where the wheel put it.
@@ -5345,7 +5395,65 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_typed_while_listing_is_still_an_entry_when_results_arrive() {
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", example_choices)];
+        handle_list_key(&mut app, "enter");
+        handle_pick_key(&mut app, "e");
+        handle_pick_key(&mut app, "x");
+        await_discovery(&mut app);
+        assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+        assert!(matches!(&app.mode, Mode::Pick { query, .. } if query == "ex"));
+        assert!(
+            !zone_choices(&app, 0, "ex", false).iter().any(|(value, _)| value == "123"),
+            "the draft became a filter"
+        );
+    }
+
+    #[test]
+    fn filtering_follows_the_choice_that_replaced_the_selection() {
+        fn many() -> Result<Vec<Choice>, String> {
+            let mut choices = Vec::new();
+            for i in 0..20 {
+                choices.push(Choice { value: format!("aaa-{i:02}"), label: String::new() });
+            }
+            for i in 0..20 {
+                choices.push(Choice { value: format!("zzz-{i:02}"), label: String::new() });
+            }
+            Ok(choices)
+        }
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", many)];
+        app.discoveries.insert("properties", Discovery::Ready(many().unwrap()));
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 80,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        app.chase = false;
+        handle_pick_key(&mut app, "z");
+        let frame = crate::strip_escapes(&draw_pick(&mut app, 40, 12, &palette()).0.join("\n"));
+        assert!(
+            frame.contains("zzz-00"),
+            "the new first match has to be in view:\n{frame}"
+        );
+    }
+
+    #[test]
     fn discovery_writes_values_and_a_refusal_still_allows_typing() {
+
         use std::fs;
         const CHILD: &str = "OPSCOPE_TEST_DISCOVERY_WRITES";
         // Give the writer a private config path without changing the
@@ -5420,6 +5528,14 @@ mod tests {
         handle_pick_key(&mut app, "enter");
         assert_eq!(fs::read_to_string(&app.path).unwrap(), concurrent);
         assert!(draw_discovery(&mut app).contains("refusing to overwrite an updated list"));
+        handle_pick_key(&mut app, "esc");
+        handle_list_key(&mut app, "d");
+        assert_eq!(fs::read_to_string(&app.path).unwrap(), concurrent);
+        assert!(
+            app.status.as_deref().unwrap_or("").contains("refusing to overwrite"),
+            "{:?}",
+            app.status
+        );
     }
 
     /// A list of strings is typed into, one entry at a time.

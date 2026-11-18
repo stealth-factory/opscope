@@ -4322,17 +4322,39 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
 
 /// A picker table or discovery hook is wired to its schema by field name.
 ///
-/// A line whose first text is `//` is not a declaration. Splitting the raw
-/// list on `(` made `// ("retired", old_hook)` look like a live field.
-fn picker_fields<'a>(source: &'a str, member: &str) -> impl Iterator<Item = &'a str> {
-    source
-        .split_once(&format!("{member}: &["))
-        .and_then(|(_, rest)| rest.split_once(']'))
-        .into_iter()
-        .flat_map(|(list, _)| list.lines())
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .flat_map(|line| line.split('(').skip(1))
-        .filter_map(|entry| entry.trim_start().strip_prefix('"')?.split_once('"').map(|(key, _)| key))
+/// Comment lines are dropped before the list is cut at `]` or split on `(`.
+/// A `// retired: []` would otherwise end the list, and a name that starts
+/// on the line after `(` would otherwise be missed.
+fn picker_fields(source: &str, member: &str) -> Vec<String> {
+    let Some((_, rest)) = source.split_once(&format!("{member}: &[")) else {
+        return Vec::new();
+    };
+    let mut body = String::new();
+    for line in rest.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        match line.split_once(']') {
+            Some((before, _)) => {
+                body.push_str(before);
+                break;
+            }
+            None => {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+    }
+    body.split('(')
+        .skip(1)
+        .filter_map(|entry| {
+            entry
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split_once('"'))
+                .map(|(key, _)| key.to_string())
+        })
+        .collect()
 }
 
 /// Why a discovery field is not a string array, when it is not.
@@ -4343,7 +4365,10 @@ fn discovery_field_error(settings: &serde_json::Value, field: &str) -> Option<St
         .and_then(|schema| schema.get(field))
         .and_then(|rule| rule.get("items"))
         .and_then(|kind| kind.as_str());
-    if value.is_array() && items == Some("string") {
+    let strings = value
+        .as_array()
+        .is_some_and(|items| items.iter().all(serde_json::Value::is_string));
+    if value.is_array() && items == Some("string") && strings {
         return None;
     }
     Some(format!(
@@ -4358,8 +4383,13 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
     for name in widgets().keys() {
         let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
         let mut fields = picker_fields(&source, "catalogues")
+            .into_iter()
             .map(|key| (key, "catalogue"))
-            .chain(picker_fields(&source, "discover").map(|key| (key, "discovery")))
+            .chain(
+                picker_fields(&source, "discover")
+                    .into_iter()
+                    .map(|key| (key, "discovery")),
+            )
             .peekable();
         if fields.peek().is_none() {
             continue;
@@ -4374,12 +4404,12 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
             }
         };
         for (field, picker) in fields {
-            match parsed.get(field) {
+            match parsed.get(field.as_str()) {
                 None => wrong.push(format!(
                     "{name}: {picker} names {field:?}, which is not a key in its settings.json"
                 )),
                 Some(_) if picker == "discovery" => {
-                    if let Some(why) = discovery_field_error(&parsed, field) {
+                    if let Some(why) = discovery_field_error(&parsed, field.as_str()) {
                         wrong.push(format!("{name}: {why}"));
                     }
                 }
@@ -4402,13 +4432,21 @@ fn picker_fields_ignore_a_commented_entry() {
             ("properties", discover_properties),
         ],
     "#;
+    assert_eq!(picker_fields(source, "catalogues"), vec!["models"]);
+    assert_eq!(picker_fields(source, "discover"), vec!["properties"]);
+    let wrapped = r#"
+        discover: &[
+            // Retired choices: []
+            (
+                "split",
+                discover_split
+            ),
+            ("properties", discover_properties),
+        ],
+    "#;
     assert_eq!(
-        picker_fields(source, "catalogues").collect::<Vec<_>>(),
-        vec!["models"]
-    );
-    assert_eq!(
-        picker_fields(source, "discover").collect::<Vec<_>>(),
-        vec!["properties"]
+        picker_fields(wrapped, "discover"),
+        vec!["split".to_string(), "properties".to_string()]
     );
 }
 
@@ -4426,6 +4464,11 @@ fn discovery_fields_must_be_string_arrays() {
         "_schema": { "properties": { "items": "string" } }
     });
     assert!(discovery_field_error(&strings, "properties").is_none());
+    let mixed = serde_json::json!({
+        "properties": [42],
+        "_schema": { "properties": { "items": "string" } }
+    });
+    assert!(discovery_field_error(&mixed, "properties").is_some());
 }
 
 /// The `token_env` default on screen is the one the code falls back to.
