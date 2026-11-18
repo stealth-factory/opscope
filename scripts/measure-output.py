@@ -761,12 +761,14 @@ def set_winsize(fd: int, rows: int, cols: int, xpixel: int, ypixel: int) -> None
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def _libc_waitid_nowait(pid: int) -> Tuple[Optional[int], bool]:
+def _libc_waitid_nowait(pid: int) -> Tuple[Optional[int], bool, bool]:
     """Call libc `waitid(WNOWAIT)` when `os.waitid` is missing.
 
     macOS builds before Python 3.13 do not expose `os.waitid`. `waitpid` is not
     a substitute: it reaps the leader and frees the PGID before group cleanup.
-    Returns `(exit_code_or_none, was_reaped)` and never reaps on success.
+    Returns `(exit_code_or_none, was_reaped, observation_failed)` and never
+    reaps on success. `observation_failed` means the call could not tell whether
+    the child is still running; that is not the same as "still running".
     """
     if sys.platform == "darwin":
         p_pid, wexited, wnohang, wnowait = 1, 4, 1, 0x20
@@ -781,13 +783,13 @@ def _libc_waitid_nowait(pid: int) -> Tuple[Optional[int], bool]:
         else:
             off_code, off_pid, off_status = 8, 12, 20
     else:
-        return (None, False)
+        return (None, False, True)
 
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         waitid = libc.waitid
     except (OSError, AttributeError):
-        return (None, False)
+        return (None, False, True)
 
     info = ctypes.create_string_buffer(128)
     waitid.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
@@ -795,41 +797,42 @@ def _libc_waitid_nowait(pid: int) -> Tuple[Optional[int], bool]:
     rc = waitid(p_pid, pid, ctypes.cast(info, ctypes.c_void_p), wexited | wnohang | wnowait)
     if rc != 0:
         if ctypes.get_errno() == errno.ECHILD:
-            return (-1, True)
-        return (None, False)
+            return (-1, True, False)
+        return (None, False, True)
 
     raw = bytes(info)
     si_pid = struct.unpack_from("i", raw, off_pid)[0]
     if si_pid == 0:
-        return (None, False)
+        return (None, False, False)
     si_code = struct.unpack_from("i", raw, off_code)[0]
     si_status = struct.unpack_from("i", raw, off_status)[0]
     if si_code == getattr(os, "CLD_EXITED", 1):
-        return (int(si_status), False)
-    return (-int(si_status), False)
+        return (int(si_status), False, False)
+    return (-int(si_status), False, False)
 
 
-def peek_child_exit(pid: int) -> Tuple[Optional[int], bool]:
-    """Return `(exit_code_or_none, was_reaped)` without reaping a live leader.
+def peek_child_exit(pid: int) -> Tuple[Optional[int], bool, bool]:
+    """Return `(exit_code_or_none, was_reaped, observation_failed)`.
 
     The leader stays unreaped until `terminate_process_group` has signalled the
     group, so its PGID cannot be recycled into `killpg`. This never calls
-    `waitpid`, including when `os.waitid` is absent.
+    `waitpid`, including when `os.waitid` is absent. A failed observation is
+    reported separately from a child that is still running.
     """
     if hasattr(os, "waitid") and hasattr(os, "WNOWAIT") and hasattr(os, "P_PID"):
         try:
             info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
-            return (-1, True)
+            return (-1, True, False)
         except OSError:
             # os.waitid rejected the call; try libc before giving up. Do not reap.
             return _libc_waitid_nowait(pid)
         else:
             if info is None:
-                return (None, False)
+                return (None, False, False)
             if info.si_code == os.CLD_EXITED:
-                return (int(info.si_status), False)
-            return (-int(info.si_status), False)
+                return (int(info.si_status), False, False)
+            return (-int(info.si_status), False, False)
     return _libc_waitid_nowait(pid)
 
 
@@ -850,7 +853,10 @@ def terminate_process_group(
 
         deadline = time.monotonic() + 0.4
         while time.monotonic() < deadline:
-            code, reaped = peek_child_exit(pid)
+            code, reaped, failed = peek_child_exit(pid)
+            if failed:
+                time.sleep(0.02)
+                continue
             if code is not None:
                 exit_code = code
                 leader_reaped = reaped
@@ -875,7 +881,10 @@ def terminate_process_group(
                     break
             sig_deadline = time.monotonic() + wait_s
             while time.monotonic() < sig_deadline:
-                code, reaped = peek_child_exit(pid)
+                code, reaped, failed = peek_child_exit(pid)
+                if failed:
+                    time.sleep(0.02)
+                    continue
                 if code is not None:
                     exit_code = code
                     leader_reaped = reaped
@@ -991,8 +1000,10 @@ def run_mode(
 
     try:
         while True:
-            code, reaped = peek_child_exit(pid)
-            if code is not None:
+            code, reaped, failed = peek_child_exit(pid)
+            if failed and stream.sample_invalid is None:
+                stream.sample_invalid = "could not observe whether the widget exited"
+            elif code is not None:
                 exited_early = code
                 leader_reaped = reaped
                 measured_ended_at = time.monotonic()
@@ -1043,8 +1054,10 @@ def run_mode(
                 flush_tx_buf(master_fd, tx_buf)
 
             if measured_ended_at is not None:
-                code, reaped = peek_child_exit(pid)
-                if code is not None:
+                code, reaped, failed = peek_child_exit(pid)
+                if failed and stream.sample_invalid is None:
+                    stream.sample_invalid = "could not observe whether the widget exited"
+                elif code is not None:
                     exited_early = code
                     leader_reaped = reaped
                 break
@@ -1286,7 +1299,12 @@ def pin_watchdog_targets(kill_pids: Sequence[int]) -> List[PinnedTarget]:
     pinned: List[PinnedTarget] = []
     try:
         for kpid in kill_pids:
-            pinned.append(PinnedTarget(pid=kpid, pidfd=os.pidfd_open(kpid, 0)))
+            pidfd = os.pidfd_open(kpid, 0)
+            pinned.append(PinnedTarget(pid=kpid, pidfd=pidfd))
+            # Signal 0 checks that this pidfd can be signalled before the
+            # watchdog promises to stop the target. ENOSYS and EPERM abort
+            # arming; the handles opened so far are closed below.
+            signal.pidfd_send_signal(pidfd, 0)
     except Exception:
         for t in pinned:
             try:
@@ -1635,12 +1653,17 @@ def run_self_tests() -> int:
                 signal.pidfd_send_signal = saved_send  # type: ignore[attr-defined]
 
         if pidfd_signalling_available():
-            pinned = pin_watchdog_targets([os.getpid()])
             try:
-                assert pinned[0].pidfd >= 0
-            finally:
-                for target in pinned:
-                    os.close(target.pidfd)
+                pinned = pin_watchdog_targets([os.getpid()])
+            except OSError as err:
+                if err.errno != errno.ENOSYS:
+                    raise
+            else:
+                try:
+                    assert pinned[0].pidfd >= 0
+                finally:
+                    for target in pinned:
+                        os.close(target.pidfd)
     finally:
         os.kill = real_kill  # type: ignore[method-assign]
 
@@ -1654,7 +1677,8 @@ def run_self_tests() -> int:
             code: Optional[int] = None
             reaped = False
             while time.monotonic() < deadline:
-                code, reaped = peek_child_exit(child)
+                code, reaped, failed = peek_child_exit(child)
+                assert not failed, "could not observe child exit"
                 if code is not None or reaped:
                     break
                 time.sleep(0.01)
@@ -1688,12 +1712,16 @@ def run_self_tests() -> int:
             os.waitid = saved_waitid  # type: ignore[attr-defined]
 
     def assert_helper_dies_with_leader(hide_waitid: bool) -> None:
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
-            pid_path = tf.name + ".pid"
-            tf.write(
-                "#!/usr/bin/env python3\n"
-                "import os, signal, time\n"
-                f"pid_path = {pid_path!r}\n"
+        with tempfile.TemporaryDirectory(prefix="opscope-measure-") as tmp:
+            root = Path(tmp)
+            script_path = root / "leader.py"
+            pid_path = root / "helper.pid"
+            read_fd, write_fd = os.pipe()
+            os.set_inheritable(write_fd, True)
+            script_path.write_text(
+                "import os, signal, sys, time\n"
+                "write_fd = int(sys.argv[1])\n"
+                "pid_path = sys.argv[2]\n"
                 "child = os.fork()\n"
                 "if child == 0:\n"
                 "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
@@ -1701,56 +1729,58 @@ def run_self_tests() -> int:
                 "        fh.write(str(os.getpid()))\n"
                 "    time.sleep(30)\n"
                 "    os._exit(0)\n"
+                "os.close(write_fd)\n"
                 "for _ in range(100):\n"
                 "    if os.path.isfile(pid_path) and os.path.getsize(pid_path) > 0:\n"
                 "        os._exit(0)\n"
                 "    time.sleep(0.01)\n"
-                "os._exit(0)\n"
+                "os._exit(0)\n",
+                encoding="utf-8",
             )
-            script_path = Path(tf.name)
-        removed = False
-        held = getattr(os, "waitid", None)
-        if hide_waitid and held is not None:
-            del os.waitid
-            removed = True
-        helper = 0
-        try:
-            run_mode(
-                Path(sys.executable),
-                "group-test",
-                [str(script_path)],
-                mode="text",
-                seconds=0.4,
-                warmup=0.0,
-                cols=57,
-                rows=40,
-                cell_w=10,
-                cell_h=20,
-                steady=False,
-            )
-            assert Path(pid_path).is_file(), "helper never recorded its pid"
-            helper = int(Path(pid_path).read_text(encoding="ascii"))
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(helper, 0)
-                except ProcessLookupError:
-                    helper = 0
-                    break
-                time.sleep(0.02)
-            else:
-                raise AssertionError(f"helper {helper} survived leader exit (hide_waitid={hide_waitid})")
-        finally:
-            if removed and held is not None:
-                os.waitid = held  # type: ignore[attr-defined]
-            if helper:
-                try:
-                    os.kill(helper, signal.SIGKILL)
-                except OSError:
-                    # The helper was already reaped, or this test never learned its pid.
-                    pass
-            script_path.unlink(missing_ok=True)
-            Path(pid_path).unlink(missing_ok=True)
+            removed = False
+            held = getattr(os, "waitid", None)
+            if hide_waitid and held is not None:
+                del os.waitid
+                removed = True
+            try:
+                res = run_mode(
+                    Path(sys.executable),
+                    "group-test",
+                    [str(script_path), str(write_fd), str(pid_path)],
+                    mode="text",
+                    seconds=0.4,
+                    warmup=0.0,
+                    cols=57,
+                    rows=40,
+                    cell_w=10,
+                    cell_h=20,
+                    steady=False,
+                )
+                assert res.exited_early == 0, res
+                os.close(write_fd)
+                write_fd = -1
+                ready, _, _ = select.select([read_fd], [], [], 1.0)
+                got = os.read(read_fd, 16) if ready else b"pending"
+                assert ready and got == b"", (
+                    f"helper still running after leader exit (hide_waitid={hide_waitid})"
+                )
+            finally:
+                if removed and held is not None:
+                    os.waitid = held  # type: ignore[attr-defined]
+                if write_fd >= 0:
+                    os.close(write_fd)
+                os.close(read_fd)
+                if pid_path.is_file():
+                    try:
+                        helper = int(pid_path.read_text(encoding="ascii"))
+                    except ValueError:
+                        helper = 0
+                    if helper > 0:
+                        try:
+                            os.kill(helper, signal.SIGKILL)
+                        except OSError:
+                            # The helper already exited; its zombie needs no signal.
+                            pass
 
     assert_helper_dies_with_leader(False)
     assert_helper_dies_with_leader(True)
