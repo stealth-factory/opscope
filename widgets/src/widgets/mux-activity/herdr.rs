@@ -252,6 +252,8 @@ fn proc_stats(pid: i32) -> Option<(u64, u64)> {
     Some((stat.utime + stat.stime, tc::procfs::rss_bytes(stat.rss_pages)))
 }
 
+const NO_STATUS_REPORTED: &str = "no status reported";
+
 /// A recognised coding agent, and what its process is costing.
 #[derive(Clone, Default)]
 pub(crate) struct Agent {
@@ -280,12 +282,22 @@ pub(crate) struct Agent {
     /// The agent's own process, when the process table found it: what proves
     /// a background agent is this row rather than a second one.
     pid: Option<u32>,
+    /// Identified from the shared catalogue or `agents` setting when Herdr
+    /// itself did not list the pane in `agent list`.
+    from_catalogue: bool,
 }
 
 impl Agent {
-    /// The lines drawn under a background agent's two rows, `w` wide: its
-    /// own notes, then why it sits in this workspace when that was a guess.
+    /// The lines drawn under an agent's two rows, `w` wide: `"no status
+    /// reported"` when promoted from the catalogue, or a background agent's
+    /// notes and why it sits in this workspace when that was a guess.
     fn note_rows(&self, w: usize) -> Vec<(bool, String)> {
+        if self.from_catalogue {
+            return tc::wrap_words(NO_STATUS_REPORTED, w.saturating_sub(4).max(1))
+                .into_iter()
+                .map(|l| (false, format!("   {l}")))
+                .collect();
+        }
         let Some(job) = &self.job else { return Vec::new() };
         let mut out = background::note_rows(job, w);
         if self.by_directory {
@@ -308,6 +320,9 @@ impl Agent {
             homely(&self.cwd),
             self.title.trim().to_string(),
         ];
+        if self.from_catalogue {
+            out.push(NO_STATUS_REPORTED.to_string());
+        }
         // A background agent's detail, drawn under its row.
         out.extend(self.job.iter().flat_map(background::search_words));
         if self.by_directory {
@@ -669,15 +684,57 @@ fn front_is_opscope(front: &Front) -> bool {
     matches!(front, Front::Running(_, argv, name, _) if process_filter::matches(name, &argv.join(" ")))
 }
 
-/// The foreground process of a pane, the prompt, or the failed probe.
-fn foreground(pane_id: &str) -> Front {
+fn shell_pid_of(info: &serde_json::Value) -> Option<u32> {
+    info["process_info"]["shell_pid"]
+        .as_u64()
+        .and_then(|p| u32::try_from(p).ok())
+}
+
+/// Detect a catalogue or user-configured agent in a pane Herdr did not list
+/// as an agent. Returns `(agent_pid, canonical_kind)`.
+fn detect_catalogue_agent(
+    front: &Front,
+    shell_pid: Option<u32>,
+    table: &Result<tc::agent_work::Table, String>,
+    configured: &[String],
+) -> Option<(Option<u32>, String)> {
+    if front_is_opscope(front) {
+        return None;
+    }
+    let Front::Running(pid, argv, name, _) = front else {
+        return None;
+    };
+    let fg_pid = u32::try_from(*pid).ok();
+    if let Some(kind) = tc::agent_work::classify_argv(name, argv, configured) {
+        let agent_pid = match (table, fg_pid) {
+            (Ok(t), Some(p)) => t.named_agent_at(p, &kind).or(Some(p)),
+            (_, p) => p,
+        };
+        return Some((agent_pid, kind));
+    }
+    if let (Ok(t), Some(p)) = (table, fg_pid) {
+        if let Some((agent_pid, kind)) = t.catalogue_agent_at(p, shell_pid, configured) {
+            return Some((Some(agent_pid), kind));
+        }
+    }
+    None
+}
+
+/// The foreground process of a pane, the prompt, or the failed probe, paired
+/// with the pane's shell pid when reported.
+fn foreground_with_shell(pane_id: &str) -> (Front, Option<u32>) {
     match herdr_result(&["pane", "process-info", "--pane", pane_id]) {
-        Ok(info) => classify(&info),
-        Err(why) => Front::Unknown(why),
+        Ok(info) => (classify(&info), shell_pid_of(&info)),
+        Err(why) => (Front::Unknown(why), None),
     }
 }
 
-fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
+/// The foreground process of a pane, the prompt, or the failed probe.
+fn foreground(pane_id: &str) -> Front {
+    foreground_with_shell(pane_id).0
+}
+
+fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64, configured: &[String]) {
     let mut labels = HashMap::new();
     // Herdr's own order, for workspaces whose first-ranked agents tie.
     let mut order: Vec<String> = Vec::new();
@@ -783,9 +840,104 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             job: None,
             by_directory: false,
             pid: agent_pid,
+            from_catalogue: false,
         });
     }
     let table = table.unwrap_or_else(|| Err("process table not read".into()));
+
+    let mut panels = Vec::new();
+    if let Some(listing) = pane_listing
+        .as_ref()
+        .ok()
+        .and_then(|text| result_of(text).ok())
+    {
+        for pane in listing["panes"].as_array().into_iter().flatten() {
+            let pane_id = text_at(pane, "pane_id");
+            if pane.get("agent").is_some_and(|a| !a.is_null())
+                || agents.iter().any(|a| a.job.is_none() && a.pane_id == pane_id)
+            {
+                continue;
+            }
+            let (front, shell_pid) = foreground_with_shell(&pane_id);
+            let (cpu, rss) = match &front {
+                Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
+                Front::Prompt | Front::Unknown(_) => (None, None),
+            };
+            if let Some((agent_pid, kind)) =
+                detect_catalogue_agent(&front, shell_pid, &table, configured)
+            {
+                let was = seen.since.get(&pane_id);
+                if was.is_none_or(|(had, _, _)| had != "unknown") {
+                    seen.since.insert(
+                        pane_id.clone(),
+                        ("unknown".to_string(), at, !seen.first_poll),
+                    );
+                }
+                let (_, began, exact) = seen.since[&pane_id].clone();
+                let cwd = match &front {
+                    Front::Running(_, _, _, fg_cwd) if !fg_cwd.is_empty() => fg_cwd.clone(),
+                    _ => text_at(pane, "cwd"),
+                };
+                let work = tc::agent_work::Work::of(&table, agent_pid)
+                    .with_logs(seen.logs.read_agent(&kind, agent_pid, &cwd, None));
+                agents.push(Agent {
+                    name: kind,
+                    pane_id,
+                    tab_id: text_at(pane, "tab_id"),
+                    workspace_id: text_at(pane, "workspace_id"),
+                    state: "unknown".into(),
+                    title: text_at(pane, "terminal_title_stripped"),
+                    cwd,
+                    since: at - began,
+                    exact,
+                    cpu,
+                    rss,
+                    work,
+                    job: None,
+                    by_directory: false,
+                    pid: agent_pid,
+                    from_catalogue: true,
+                });
+                continue;
+            }
+            let is_opscope = front_is_opscope(&front);
+            let (doing, command, cwd, why) = match front {
+                Front::Running(_, argv, name, cwd) => (
+                    Doing::Running,
+                    command_label(&argv, &name),
+                    if cwd.is_empty() {
+                        text_at(pane, "cwd")
+                    } else {
+                        cwd
+                    },
+                    String::new(),
+                ),
+                Front::Prompt => (
+                    Doing::Prompt,
+                    String::new(),
+                    text_at(pane, "cwd"),
+                    String::new(),
+                ),
+                // The pane's own directory still comes from `pane list`, so
+                // an unread pane is not a blank row - it is a row that says
+                // where it is and that nobody could see into it.
+                Front::Unknown(why) => (Doing::Unknown, String::new(), text_at(pane, "cwd"), why),
+            };
+            panels.push(Panel {
+                tab_id: text_at(pane, "tab_id"),
+                workspace_id: text_at(pane, "workspace_id"),
+                doing,
+                is_opscope,
+                why,
+                pane_id,
+                command,
+                cwd,
+                cpu,
+                rss,
+            });
+        }
+    }
+
     let mut jobs = seen.logs.read_jobs(Some(&table));
     // Herdr's hook reports a background agent too, credited to whichever
     // pane started the daemon. That one keeps its row; the job adds its
@@ -851,60 +1003,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     // Drawn, walked by the keys and indexed by the cursor in this order, so
     // the grouping happens here and nowhere else.
     let agents = by_workspace(agents, &order);
-
-    let mut panels = Vec::new();
-    if let Some(listing) = pane_listing
-        .as_ref()
-        .ok()
-        .and_then(|text| result_of(text).ok())
-    {
-        for pane in listing["panes"].as_array().into_iter().flatten() {
-            if pane.get("agent").is_some_and(|a| !a.is_null()) {
-                continue;
-            }
-            let pane_id = text_at(pane, "pane_id");
-            let front = foreground(&pane_id);
-            let is_opscope = front_is_opscope(&front);
-            let (cpu, rss) = match &front {
-                Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
-                Front::Prompt | Front::Unknown(_) => (None, None),
-            };
-            let (doing, command, cwd, why) = match front {
-                Front::Running(_, argv, name, cwd) => (
-                    Doing::Running,
-                    command_label(&argv, &name),
-                    if cwd.is_empty() {
-                        text_at(pane, "cwd")
-                    } else {
-                        cwd
-                    },
-                    String::new(),
-                ),
-                Front::Prompt => (
-                    Doing::Prompt,
-                    String::new(),
-                    text_at(pane, "cwd"),
-                    String::new(),
-                ),
-                // The pane's own directory still comes from `pane list`, so
-                // an unread pane is not a blank row - it is a row that says
-                // where it is and that nobody could see into it.
-                Front::Unknown(why) => (Doing::Unknown, String::new(), text_at(pane, "cwd"), why),
-            };
-            panels.push(Panel {
-                tab_id: text_at(pane, "tab_id"),
-                workspace_id: text_at(pane, "workspace_id"),
-                doing,
-                is_opscope,
-                why,
-                pane_id,
-                command,
-                cwd,
-                cpu,
-                rss,
-            });
-        }
-    }
     // Unread first, then busy, and the busiest of those first: the point of
     // the section is what is costing something, and above that, what the
     // widget could not find out at all.
@@ -1323,6 +1421,7 @@ fn homely(path: &str) -> String {
 /// settings screen.
 pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
+    let configured = tc::cfg_strings(cfg, "agents", tc::agent_work::DEFAULT_AGENTS);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
         if let Some(n) = args.get(at + 1) {
             refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
@@ -1349,7 +1448,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a Herdr with nothing running in it.
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                poll(&poller, &mut seen, hz)
+                poll(&poller, &mut seen, hz, &configured)
             }));
             if let Err(payload) = step {
                 if let Ok(mut guard) = poller.lock() {
@@ -1544,6 +1643,11 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                                 note = Some((background::NO_PANE.into(), false, tc::now() + 4.0));
                                 continue;
                             }
+                            Row::Agent(a) if a.from_catalogue => (
+                                herdr_action(&["tab", "focus", &a.tab_id]),
+                                a.name.clone(),
+                                a.pane_id.clone(),
+                            ),
                             Row::Agent(a) => (
                                 focus_agent(&a.tab_id, &a.pane_id),
                                 a.name.clone(),
@@ -1775,7 +1879,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 format!(" · {} workspace{}", places.len(), plural(places.len())),
             ),
         ];
-        for state_name in ["working", "blocked", "done", "idle"] {
+        for state_name in ["working", "blocked", "done", "idle", "unknown"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((
                     colour_of(state_name, &p),
@@ -2011,7 +2115,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
         // rows and its work, so they come out of the work's budget too: an
         // entry taller than the room would be admitted whole and then cut.
         let notes_of = |i: usize| -> Vec<(bool, String)> {
-            if agents[i].job.is_some() { fit_notes(agents[i].note_rows(w), room) } else { Vec::new() }
+            fit_notes(agents[i].note_rows(w), room)
         };
         let lead_fits = |lead: usize, notes: usize, work: &tc::agent_work::Work| {
             let some_work = usize::from(!work.tasks.is_empty() || work.unread.is_some()
@@ -2650,7 +2754,78 @@ mod tests {
             job: None,
             by_directory: false,
             pid: None,
+            from_catalogue: false,
         }
+    }
+
+    #[test]
+    fn catalogue_fills_herdr_gaps_with_unknown_state_and_matches_aliases_without_false_positives() {
+        let defaults: Vec<String> = tc::agent_work::DEFAULT_AGENTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let table = tc::agent_work::parse_process_table(
+            "\
+100 1 zsh -zsh
+110 100 agy agy
+111 110 bash /bin/bash -c cargo test
+112 111 cargo cargo test
+200 1 zsh -zsh
+210 200 forge /home/u/.foundry/bin/forge test
+",
+        );
+
+        // Unreported `agy` pane (even while foreground pid 112 is `cargo test`)
+        // becomes an agent row with unknown state and `"no status reported"`.
+        let running_job = Front::Running(
+            112,
+            vec!["cargo".into(), "test".into()],
+            "cargo".into(),
+            "/srv/repo".into(),
+        );
+        assert_eq!(
+            detect_catalogue_agent(&running_job, Some(100), &table, &defaults),
+            Some((Some(110), "agy".into()))
+        );
+        let mut promoted = agent("w1:p1", "w1", "unknown");
+        promoted.name = "agy".into();
+        promoted.from_catalogue = true;
+        assert!(promoted.note_rows(60).iter().any(|(_, l)| l.trim() == NO_STATUS_REPORTED));
+        assert!(super::super::search::matches("no status", &promoted.search_fields(None)));
+
+        // Herdr's reported `antigravity-cli` row resolves to pid 110 (`agy`) and its shells.
+        let t = table.as_ref().unwrap();
+        assert_eq!(t.named_agent_at(112, "antigravity-cli"), Some(110));
+        assert_eq!(t.background_shells(110)[0].label, "cargo test");
+
+        // Generic commands (`forge`, `vibe`, `cn`, `agent`) on unrelated programs do NOT match.
+        for cmd in ["forge", "vibe", "cn", "agent"] {
+            let front = Front::Running(
+                210,
+                vec![format!("/usr/bin/{cmd}")],
+                cmd.into(),
+                "/srv/repo".into(),
+            );
+            assert_eq!(
+                detect_catalogue_agent(&front, Some(200), &table, &defaults),
+                None,
+                "{cmd}"
+            );
+        }
+
+        // A name added through the `agents` setting becomes an agent row under Herdr.
+        let mut custom = defaults.clone();
+        custom.push("custom-cli".into());
+        let custom_front = Front::Running(
+            310,
+            vec!["/opt/bin/custom-cli".into()],
+            "custom-cli".into(),
+            "/srv/repo".into(),
+        );
+        assert_eq!(
+            detect_catalogue_agent(&custom_front, Some(300), &Err("no ps".into()), &custom),
+            Some((Some(310), "custom-cli".into()))
+        );
     }
 
     #[test]

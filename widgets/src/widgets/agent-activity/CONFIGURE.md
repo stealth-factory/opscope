@@ -1,8 +1,11 @@
 # Configure agent-activity
 
-This widget reads local processes, agent child shells, and the shared
-`tc::agent_work` session readers. It needs no credentials, hooks or multiplexer.
-It never contacts an agent vendor API and never installs tools.
+This widget reads local coding-agent processes from `tc::agent_work`'s shared
+catalogue, agent child shells, and the shared session readers for Claude Code,
+Codex and OpenCode. Generic command names in the catalogue (`forge`, `agent`,
+`cn`, `vibe`) require a path or script clue so unrelated tools are excluded. It
+needs no credentials, hooks or multiplexer. It never contacts an agent vendor
+API and never installs tools.
 
 The owned settings section is `agent_activity`. Press comma in the widget
 for `refresh` (seconds, default 2) and `finished_per_agent` (default 3; zero

@@ -238,9 +238,10 @@ impl LogReader {
         session: Option<&str>,
     ) -> Result<LogWork, String> {
         let session = session.filter(|s| !s.is_empty());
-        match agent {
-            "claude" | "claude-code" => self.claude(cwd, session),
-            "codex" => self.codex(cwd, session),
+        let lower = agent.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "claude" | "claude-code" | "claude-cli" => self.claude(cwd, session),
+            "codex" | "codex-cli" => self.codex(cwd, session),
             "opencode" => self.opencode(cwd, session),
             _ => Ok(LogWork::default()),
         }
@@ -256,7 +257,8 @@ impl LogReader {
         cwd: &str,
         session: Option<&str>,
     ) -> Result<LogWork, String> {
-        let claude = matches!(agent, "claude" | "claude-code");
+        let lower = agent.trim().to_ascii_lowercase();
+        let claude = matches!(lower.as_str(), "claude" | "claude-code" | "claude-cli");
         let session = session.filter(|s| !s.is_empty());
         let (Some(pid), true) = (pid, claude) else {
             return self.read(agent, cwd, session);

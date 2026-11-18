@@ -48,28 +48,6 @@ const API_REVISION_BUILT_AGAINST: u64 = 10;
 /// Seconds before a rex command is given up on.
 const RUN_TIMEOUT: u64 = 8;
 
-const DEFAULT_AGENTS: &[&str] = &[
-    "claude",
-    "codex",
-    "gemini",
-    "copilot",
-    "cursor-agent",
-    "aider",
-    "opencode",
-    "pi",
-    "goose",
-    "amp",
-    "grok",
-    "droid",
-    "kiro",
-    "cline",
-    "crush",
-    "qwen",
-    "kimi",
-    "devin",
-    "jules",
-];
-
 /// The order states are listed in: what is busy first, then what needs a
 /// human - blocked, failed, finished and unread - then what is at rest.
 /// `attention` is not a protocol state - it is a program that rang the bell
@@ -1782,7 +1760,7 @@ fn explain_lines(pane: &Pane, board: &Board, server: &str, why: &str, at: f64) -
 pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
     let server = tc::cfg_str(cfg, "rex_server", "");
-    let catalogue = tc::cfg_strings(cfg, "agents", DEFAULT_AGENTS);
+    let catalogue = tc::cfg_strings(cfg, "agents", tc::agent_work::DEFAULT_AGENTS);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
         if let Some(n) = args.get(at + 1) {
             refresh = tc::poll_secs(n.parse().unwrap_or(4.0), 4.0).max(1.0);
@@ -3169,7 +3147,45 @@ mod tests {
     const GATHER_RECORDS: &str = include_str!("fixtures/rex/gather_records.json");
 
     fn catalogue() -> Vec<String> {
-        DEFAULT_AGENTS.iter().map(|s| s.to_string()).collect()
+        tc::agent_work::DEFAULT_AGENTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_agy_pane_under_rex_is_an_agent_row_with_unknown_state_said() {
+        let input = r#"{
+            "sessions": [{
+                "session_id": "session:work",
+                "label": "work",
+                "active_window_id": "window:1",
+                "view": { "active_window_id": "window:1", "windows": [{ "window_id": "window:1", "label": "main", "focused_block_id": "block:1" }] },
+                "blocks": [{
+                    "block": { "block_id": "block:1", "creator_name": "com.superlogical.terminal", "window_id": "window:1" },
+                    "process": {
+                        "child": { "pid": 100, "cwd": "/srv/repo", "name": "zsh", "argv0": "-zsh" },
+                        "foreground": { "pid": 110, "name": "agy", "argv0": "agy", "invoked_path": "/home/u/.local/bin/agy", "cwd": "/srv/repo" }
+                    },
+                    "title": { "title": "Antigravity" },
+                    "program_status": { "records": {} }
+                }]
+            }],
+            "errors": {},
+            "clients": { "clients": {} },
+            "server": { "host_id": "h1", "instance_id": "i1" },
+            "version": { "rex_version": "1.0", "api_revision": 10 }
+        }"#;
+        let b = board(input);
+        assert_eq!(b.panes.len(), 1);
+        let pane = &b.panes[0];
+        assert_eq!(pane.section(), Section::Agents);
+        assert_eq!(pane.agent, Some(("agy".into(), Source::Process)));
+        assert_eq!(pane.state(), "unknown");
+        let text = drawn(pane, 100);
+        assert!(text.contains("agy"), "{text}");
+        assert!(text.contains("unknown"), "{text}");
+        assert!(text.contains("no status reported"), "{text}");
     }
 
     fn board(text: &str) -> Board {

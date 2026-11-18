@@ -337,4 +337,16 @@ mod tests {
         let rex: serde_json::Value = serde_json::from_str(&dependencies_for(Mux::Rex, all)).unwrap();
         assert!(rex["recommended"].get("ps").is_none());
     }
+
+    #[test]
+    fn settings_agents_default_matches_the_shared_catalogue() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!("settings.json")).unwrap();
+        let listed: Vec<&str> = schema["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(listed.as_slice(), tc::agent_work::DEFAULT_AGENTS);
+    }
 }

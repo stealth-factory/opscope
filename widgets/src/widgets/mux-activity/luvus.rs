@@ -387,7 +387,46 @@ fn agents_note(agents: &Result<Vec<Agent>, String>, seated: usize) -> Option<(St
     }
 }
 
-fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
+/// Promote snapshot panes that Luvus did not list in `agent list` when their
+/// local process tree (or reported command, when `ps` was unavailable) matches
+/// the shared agent catalogue or `configured` (`agents` setting).
+fn fill_catalogue_agents(
+    listed: &mut Vec<Agent>,
+    panes: &[parse::Pane],
+    processes: Option<&Result<tc::agent_work::Table, String>>,
+    configured: &[String],
+) {
+    for pane in panes {
+        if pane.is_opscope || listed.iter().any(|a| a.job.is_none() && a.pane == pane.pane_id) {
+            continue;
+        }
+        let matched = match (processes, pane.root_pid) {
+            (Some(Ok(table)), Some(root)) => table
+                .catalogue_agent_below(root, configured)
+                .map(|(_, kind)| (kind, "process")),
+            _ => tc::agent_work::classify_command_only(&pane.command, configured)
+                .map(|kind| (kind, "command")),
+        };
+        let Some((kind, via)) = matched else {
+            continue;
+        };
+        listed.push(Agent {
+            name: kind.clone(),
+            kind,
+            pane: pane.pane_id.clone(),
+            workspace: pane.workspace.clone(),
+            branch: pane.branch.clone(),
+            cwd: pane.cwd.clone(),
+            state: "unknown".into(),
+            authority: via.into(),
+            state_source: "no status reported".into(),
+            focused: pane.focused,
+            ..Default::default()
+        });
+    }
+}
+
+fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str, configured: &[String]) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
     // the same for every reading.
@@ -459,8 +498,10 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
+    let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
+        fill_catalogue_agents(&mut listed, panes, processes.as_ref(), configured);
         let mut live = HashSet::new();
         for agent in &mut listed {
             let key = duration_key(&agent.pane, &agent.name);
@@ -501,7 +542,6 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     let table = processes.clone().unwrap_or_else(|| tc::agent_work::read_process_table());
     let jobs = seen.logs.read_jobs(Some(&table));
     let label = background::group_label(&jobs);
-    let panes = snapshot.as_ref().map(|s| s.panes.as_slice()).unwrap_or(&[]);
     let (agents, unlisted_jobs) =
         with_jobs(agents, panes, jobs.shown, &label, &table, at, |pid| luvus_marker(pid, session));
 
@@ -1410,6 +1450,7 @@ fn checkout_line<'a>(
 /// settings screen.
 pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn(&mut tc::Keyboard)) {
     let session = tc::cfg_str(cfg, "luvus_session", "default");
+    let configured = tc::cfg_strings(cfg, "agents", tc::agent_work::DEFAULT_AGENTS);
     let mut refresh = tc::poll_secs(tc::cfg_f64(cfg, "refresh", 4.0), 4.0);
     if let Some(at) = args.iter().position(|a| a == "-n" || a == "--refresh") {
         if let Some(n) = args.get(at + 1) {
@@ -1437,7 +1478,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             // A poller that dies takes its explanation with it, and an
             // empty board looks exactly like a session with nothing in it.
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                poll(&poller, &mut seen, &polled_session)
+                poll(&poller, &mut seen, &polled_session, &configured)
             }));
             if let Err(payload) = step {
                 if let Ok(mut guard) = poller.lock() {
@@ -1955,7 +1996,7 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
             p.dim.as_str(),
             pane_summary(panes.len(), hidden_opscope, resting.len(), show_idle),
         ));
-        for state_name in ["working", "blocked", "done", "idle"] {
+        for state_name in ["working", "blocked", "done", "idle", "unknown"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((
                     colour_of(state_name, &p),
@@ -2215,6 +2256,21 @@ pub fn watch(cfg: &serde_json::Value, args: &[String], why: &str, comma: &dyn Fn
                 w.saturating_sub(1),
             ));
             body.push(String::new());
+            if let Some(cat) = agents.as_ref().ok().and_then(|agents| {
+                agents
+                    .iter()
+                    .find(|a| a.pane == d.pane && a.state_source == "no status reported")
+            }) {
+                for text in tc::wrap_words(
+                    &format!(
+                        "   catalogue: {} identified via {}; Luvus did not list this pane in agent list",
+                        cat.name, cat.authority
+                    ),
+                    w.saturating_sub(1),
+                ) {
+                    body.push(tc::seg(&[(p.dim.as_str(), text)], w.saturating_sub(1)));
+                }
+            }
             if let Some(explanation) = agents.as_ref().ok().and_then(|agents|
                 agents.iter().find(|a| a.pane == d.pane)).and_then(|a| a.work.logs.explanation()) {
                 for text in tc::wrap_words(&format!("   log source: {explanation}"), w.saturating_sub(1)) {
@@ -3711,7 +3767,7 @@ mod tests {
         let state = Arc::new(Mutex::new(State::default()));
         let mut seen = Seen::default();
 
-        poll(&state, &mut seen, "fixture");
+        poll(&state, &mut seen, "fixture", &[]);
         assert_eq!(
             event_baseline(&state),
             Some((1, 61)),
@@ -3719,7 +3775,7 @@ mod tests {
         );
         assert!(state.lock().unwrap().snapshot.is_ok());
 
-        poll(&state, &mut seen, "fixture");
+        poll(&state, &mut seen, "fixture", &[]);
         let guard = state.lock().unwrap();
         assert!(
             guard.snapshot.is_err(),
@@ -4074,5 +4130,61 @@ mod tests {
         keep_live(&mut seen, &live);
         let (returned, _) = measure_since(&mut seen, &a, "working", 100.0);
         assert_eq!(returned, 0.0);
+    }
+
+    #[test]
+    fn catalogue_fills_luvus_gaps_matches_aliases_and_ignores_generic_commands() {
+        let defaults: Vec<String> = tc::agent_work::DEFAULT_AGENTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let table = tc::agent_work::parse_process_table(
+            "\
+100 1 bash bash
+110 100 agy agy
+111 110 sh /bin/sh -c cargo test
+112 111 cargo cargo test
+200 1 bash bash
+210 200 forge /home/u/.foundry/bin/forge test
+300 1 bash bash
+310 300 vibe /usr/bin/vibe
+400 1 bash bash
+410 400 custom-agent /opt/bin/custom-agent
+",
+        );
+        let pane = |id: &str, root: u32| parse::Pane {
+            pane_id: id.into(),
+            workspace: "work".into(),
+            branch: "main".into(),
+            cwd: "/srv/repo".into(),
+            command: "bash".into(),
+            root_pid: Some(root),
+            ..Default::default()
+        };
+        let panes = [pane("1", 100), pane("2", 200), pane("3", 300), pane("4", 400)];
+        let mut listed = Vec::new();
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &defaults);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].pane, "1");
+        assert_eq!(listed[0].name, "agy");
+        assert_eq!(listed[0].state, "unknown");
+        assert_eq!(listed[0].state_source, "no status reported");
+        assert_eq!(listed[0].authority, "process");
+
+        // A Luvus-reported `antigravity-cli` agent resolves to the `agy` pid and its shells.
+        let t = table.as_ref().unwrap();
+        assert_eq!(t.agent_below(100, "antigravity-cli"), Some(110));
+        assert_eq!(t.background_shells(110)[0].label, "cargo test");
+
+        // A name added through `agents` becomes an agent row under Luvus too,
+        // while an already-listed pane is never duplicated.
+        let mut custom = defaults.clone();
+        custom.push("custom-agent".into());
+        fill_catalogue_agents(&mut listed, &panes, Some(&table), &custom);
+        let names: Vec<(&str, &str)> = listed
+            .iter()
+            .map(|a| (a.pane.as_str(), a.name.as_str()))
+            .collect();
+        assert_eq!(names, [("1", "agy"), ("4", "custom-agent")]);
     }
 }

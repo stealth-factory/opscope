@@ -24,7 +24,9 @@ fn words(out: &mut Vec<String>, text: &str, width: usize, role: tc::Role, select
 fn work_rows(out: &mut Vec<String>, a: &Agent, width: usize, selected: bool, recent: usize) {
     let mut work = a.work.rows(width);
     if work.is_empty() {
-        let text = if a.work.logs.session_id.is_empty() {
+        let text = if !tc::agent_work::has_log_reader(&a.kind) {
+            "   no observed shell jobs · no session-log reader for this agent"
+        } else if a.work.logs.session_id.is_empty() {
             "   no matching session log or observed shell jobs"
         } else {
             "   no unfinished children or observed shell jobs"
@@ -150,7 +152,7 @@ pub fn board(s: &Snapshot, selected: usize, width: usize, recent: usize) -> Body
         tc::Role::Accent,
         false,
     );
-    words(&mut body.rows, "Claude Code · Codex · OpenCode — local processes; child state is last recorded, not a heartbeat.", width, tc::Role::Muted, false);
+    words(&mut body.rows, "Shared agent catalogue — local processes and child shells; session logs for Claude Code, Codex and OpenCode (last recorded, not a heartbeat).", width, tc::Role::Muted, false);
     words(&mut body.rows, "Log sessions are newest-cwd guesses. No multiplexer OSC reports are available in this standalone view.", width, tc::Role::Muted, false);
     if recent == 0 {
         let finished: usize = s
@@ -174,7 +176,7 @@ pub fn board(s: &Snapshot, selected: usize, width: usize, recent: usize) -> Body
         );
     }
     if s.agents.is_empty() {
-        words(&mut body.rows, "No supported local agent processes found. Start Claude Code, Codex or OpenCode on this machine.", width, tc::Role::Fg, false);
+        words(&mut body.rows, "No supported local coding-agent processes found on this machine.", width, tc::Role::Fg, false);
     }
     for (index, a) in s.agents.iter().enumerate() {
         body.rows.push(String::new());
@@ -259,13 +261,12 @@ pub fn detail(s: &Snapshot, a: &Agent, present: bool, width: usize, recent: usiz
     if let Some(explain) = a.work.logs.explanation() {
         words(&mut body.rows, &explain, width, tc::Role::Orange, false);
     } else if a.work.unread.is_none() && a.work.logs.warnings.is_empty() {
-        words(
-            &mut body.rows,
-            "No matching session log found; process-backed shells can still be shown.",
-            width,
-            tc::Role::Muted,
-            false,
-        );
+        let text = if tc::agent_work::has_log_reader(&a.kind) {
+            "No matching session log found; process-backed shells can still be shown."
+        } else {
+            "No session-log reader for this agent; process-backed shells are shown."
+        };
+        words(&mut body.rows, text, width, tc::Role::Muted, false);
     }
     words(&mut body.rows,"Sources: local session stores (via log), then agent child shells (via process). No OSC report connection. A named process does not prove a model turn is running.",width,tc::Role::Muted,false);
     words(&mut body.rows,&format!("Finished view: up to {recent} latest finished log children from this matched session. Excludes older sessions and exited parent processes; this is not total history."),width,tc::Role::Muted,false);

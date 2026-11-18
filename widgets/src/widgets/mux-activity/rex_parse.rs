@@ -207,47 +207,11 @@ pub fn command_label(fg: &Foreground) -> String {
     "?".into()
 }
 
-/// Every name the foreground program goes by, for matching a catalogue.
-///
-/// `invoked_path` first: it is the one that said `claude` while `name` said
-/// `2.1.317`.
-fn identities(fg: &Foreground) -> Vec<String> {
-    let mut names = Vec::new();
-    for candidate in [
-        base_name(&fg.invoked_path),
-        base_name(fg.argv0.split_whitespace().next().unwrap_or("")),
-        base_name(&fg.path),
-        fg.name.as_str(),
-        base_name(&fg.script),
-    ] {
-        let candidate = candidate.trim_start_matches('-').to_ascii_lowercase();
-        if !candidate.is_empty() && !names.contains(&candidate) {
-            names.push(candidate);
-        }
-    }
-    names
-}
-
-/// Whether a reported app name is one of the catalogue's commands.
-///
-/// Programs report under their product name, which is often the command
-/// with a suffix: Claude Code says `claude-code` and its command is
-/// `claude`. Exactly those two suffixes, so `claude-code` matches `claude`
-/// while a `claudette` would not.
-fn app_matches(app: &str, command: &str) -> bool {
-    let app = app.to_ascii_lowercase();
-    let command = command.to_ascii_lowercase();
-    app == command || app == format!("{}-code", command) || app == format!("{}-cli", command)
-}
-
 /// The catalogue command an agent's name stands for: a reported product
-/// name (`claude-code`) is its command (`claude`), which is what its
-/// process is called. A name the catalogue does not know is kept.
+/// name (`claude-code`, `antigravity-cli`) is its command (`claude`, `agy`),
+/// which is what its process is called. A name the catalogue does not know is kept.
 pub fn agent_command(name: &str, catalogue: &[String]) -> String {
-    catalogue
-        .iter()
-        .find(|c| app_matches(name, c))
-        .map_or_else(|| name.to_string(), |c| c.to_ascii_lowercase())
+    opscope_core::agent_work::canonical_command(name, catalogue)
 }
 
 /// How the widget came to call a pane an agent.
@@ -281,19 +245,20 @@ pub fn classify_agent(
     catalogue: &[String],
 ) -> Option<(String, Source)> {
     for record in records {
-        if catalogue.iter().any(|c| app_matches(&record.app, c)) {
+        if opscope_core::agent_work::matches_reported_app(&record.app, catalogue) {
             return Some((record.app.clone(), Source::Report));
         }
     }
     let fg = fg?;
-    let names = identities(fg);
-    for command in catalogue {
-        let command = command.to_ascii_lowercase();
-        if names.iter().any(|n| *n == command) {
-            return Some((command, Source::Process));
-        }
-    }
-    None
+    opscope_core::agent_work::classify_foreground(
+        &fg.name,
+        &fg.argv0,
+        &fg.path,
+        &fg.invoked_path,
+        &fg.script,
+        catalogue,
+    )
+    .map(|command| (command, Source::Process))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -787,8 +752,67 @@ mod tests {
             classify_agent(&[record], Some(&fg), &catalogue()),
             Some(("claude-code".into(), Source::Report))
         );
-        assert!(!app_matches("claudette", "claude"));
-        assert!(app_matches("Codex-CLI", "codex"));
+        assert!(!opscope_core::agent_work::matches_reported_app("claudette", &catalogue()));
+        assert!(opscope_core::agent_work::matches_reported_app("Codex-CLI", &catalogue()));
+    }
+
+    #[test]
+    fn default_catalogue_detects_agy_and_group_2_only_with_second_clue() {
+        let defaults: Vec<String> = opscope_core::agent_work::DEFAULT_AGENTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let agy = Foreground {
+            pid: 5,
+            name: "agy".into(),
+            argv0: "agy".into(),
+            invoked_path: "/home/u/.local/bin/agy".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_agent(&[], Some(&agy), &defaults),
+            Some(("agy".into(), Source::Process))
+        );
+        assert_eq!(agent_command("antigravity-cli", &defaults), "agy");
+
+        for cmd in ["forge", "vibe", "cn", "agent"] {
+            let unrelated = Foreground {
+                pid: 6,
+                name: cmd.into(),
+                argv0: cmd.into(),
+                invoked_path: format!("/usr/bin/{cmd}"),
+                path: format!("/usr/bin/{cmd}"),
+                ..Default::default()
+            };
+            assert_eq!(classify_agent(&[], Some(&unrelated), &defaults), None, "{cmd}");
+        }
+
+        let cursor_new = Foreground {
+            pid: 7,
+            name: "node".into(),
+            argv0: "agent".into(),
+            invoked_path: "/home/u/.local/bin/agent".into(),
+            path: "/home/u/.local/share/cursor-agent/versions/2026.11/node".into(),
+            script: "/home/u/.local/share/cursor-agent/versions/2026.11/index.js".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_agent(&[], Some(&cursor_new), &defaults),
+            Some(("cursor-agent".into(), Source::Process))
+        );
+
+        let mut with_custom = defaults.clone();
+        with_custom.push("custom-agent".into());
+        let custom = Foreground {
+            pid: 8,
+            name: "custom-agent".into(),
+            argv0: "custom-agent".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_agent(&[], Some(&custom), &with_custom),
+            Some(("custom-agent".into(), Source::Process))
+        );
     }
 
     #[test]
