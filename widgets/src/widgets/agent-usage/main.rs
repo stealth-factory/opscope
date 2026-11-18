@@ -2729,6 +2729,12 @@ fn share_readings(caches: &mut shared::Caches, on: bool, tried: &mut f64, at: f6
         caches.readings.sharing_off = "share_readings is off".into();
         return;
     }
+    // A store's notice is said for one pass, as core's `share` does.
+    if caches.readings.notice_drawn.swap(false, Ordering::Relaxed) {
+        if let Some(store) = caches.readings.store.as_mut() {
+            store.notice.clear();
+        }
+    }
     if caches.readings.store.is_none() && at - *tried >= SHARE_RETRY {
         *tried = at;
         // The path agent-usage has always used, not `store::path`, so a pane
@@ -2885,7 +2891,7 @@ fn main() {
                     if let Ok(mut g) = poller.lock() {
                         *g = found;
                         g.fetched = now();
-                        g.sharing = shared::sharing_status(&caches);
+                        g.sharing = shared::sharing_line(&caches);
                     }
                     // A save that fails costs the next start a slower first
                     // read and nothing else; there is nothing on screen it
@@ -3066,12 +3072,13 @@ fn main() {
 
         let status_at = rows.len();
         rows.push(String::new()); // filled in once the scroll is resolved
-        // Whether this pane's readings come from the other panes, or why
-        // not. Its own row, wrapped rather than squeezed onto the status
-        // line: there it was the first thing to stand down, and these
-        // panes are narrow enough that it never showed at all.
-        if !snapshot.sharing.is_empty() {
-            for line in wrap_text(&snapshot.sharing, w.saturating_sub(2).max(8)) {
+        // Why this pane is not sharing its readings, when it is not. Its
+        // own row, wrapped rather than squeezed onto the status line:
+        // there it was the first thing to stand down, and these panes are
+        // narrow enough that it never showed at all. Who fetched what is
+        // said by each tab, above its own readings.
+        for said in &snapshot.sharing {
+            for line in wrap_text(said, w.saturating_sub(2).max(8)) {
                 rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w - 1));
             }
         }

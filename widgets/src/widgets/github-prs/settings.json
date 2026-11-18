@@ -29,5 +29,7 @@
   "_limit_comment": "How many results to ask GitHub for per page. Not a cap on what is shown: paging continues until every search is exhausted. A smaller page is slower to finish and far likelier to be served when GitHub search is having a slow minute; a round that is refused backs off to 10 on its own.",
   "limit": 25,
   "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
-  "refresh": 60.0
+  "refresh": 60.0,
+  "_share_readings_comment": "Share the pull-request list and the merge and arrival counts with every other github-prs pane on this machine, so one pane pages through GitHub each refresh and the rest read its answer. On by default.\n\nA large board takes a dozen search rounds and dozens of follow-up requests per pass; without sharing, every pane spends that on its own and the GraphQL budget runs out sooner. A spent budget stops every pane using that host and credential until GitHub's reset.\n\nThe readings are kept in one file in ~/.local/state/opscope, readable only by you. It holds pull-request titles, authors, branches and repository names. Readings expire after 2 hours without a fetch and are deleted on the next write. Turn it off to have this pane ask on its own and keep everything in the pane.",
+  "share_readings": true
 }

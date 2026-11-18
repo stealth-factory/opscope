@@ -153,7 +153,9 @@ where
             && *when < cache.asked_at
             && cache.asked_at - when >= ASKED_FLOOR;
         if at - when < *held && !asked {
-            return value.clone();
+            let value = value.clone();
+            cache.asking.remove(key);
+            return value;
         }
     }
     // Stale here. Before asking, ask the other panes: one of them may have
@@ -169,14 +171,18 @@ where
             Ok(store::Got::Mine) => claimed_at = Some(at),
             Ok(store::Got::Fresh(s)) => {
                 adopt_row(cache, key, s, at, ttl);
+                cache.asking.remove(key);
                 if let Some((_, value, _)) = cache.live.get(key) {
                     return value.clone();
                 }
             }
-            // Another pane is asking. Show what there is until it lands.
-            Ok(store::Got::Held(_)) => {
+            // Another pane is asking. Show what there is until it lands,
+            // noting who, for the `pane 48213 asking now` it says.
+            Ok(store::Got::Held(by)) => {
                 if let Some((_, value, _)) = cache.live.get(key) {
-                    return value.clone();
+                    let value = value.clone();
+                    cache.asking.insert(key.to_string(), by);
+                    return value;
                 }
                 // Nothing at all to show - a pane just started. Asking too
                 // is exactly the burst sharing exists to stop: six panes
@@ -194,6 +200,7 @@ where
             Err(why) => stop_sharing(cache, &why),
         }
     }
+    cache.asking.remove(key);
     let value = fetch();
     // The reading's own time is when the answer arrived, not when it was
     // asked for: a fetch slower than the TTL would otherwise land already
@@ -280,6 +287,7 @@ fn wait_for_holder(
         match store.claim(key, None, at) {
             Ok(store::Got::Fresh(s)) => {
                 adopt_row(cache, key, s, at, ttl);
+                cache.asking.remove(key);
                 return cache.live.get(key).map(|e| e.1.clone());
             }
             // Ours now: the holder went without publishing.
@@ -1200,11 +1208,16 @@ pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
         .filter(|s| s.0 == *taken_at)
         .map(|s| s.1)
         .filter(|by| Some(*by) != me && *by != 0);
-    let refusal_held = value.as_ref().and_then(refusal);
-    // A refusal, in force or lifted while the next ask is out, says how old
-    // the reading still on screen is, not when it was refused.
-    let taken_at = match (&refusal_held, cache.good.get(key)) {
-        (Some(_), Some((at, _))) => *at,
+    // `cached`'s refusals carry only their reason, `{"why": ...}`; they
+    // are held until the backoff `cached` set runs out.
+    let refusal_held = value
+        .as_ref()
+        .and_then(|v| refusal(v).or_else(|| reason_only(v, taken_at + held)));
+    // A refusal, or an empty answer a reader covers with its last good
+    // value, says how old the reading still on screen is - not when this
+    // request failed. `is_reading` covers both the explicit refusal shapes.
+    let taken_at = match (is_reading(value), cache.good.get(key)) {
+        (false, Some((at, _))) => *at,
         _ => *taken_at,
     };
     let refused = refusal_held.filter(|(_, until)| *until > now);
@@ -1216,6 +1229,13 @@ pub fn provenance(cache: &Cache, key: &str, now: f64) -> Option<Provenance> {
         refused,
         unshared: cache.unshared.get(key).copied(),
     })
+}
+
+/// A refusal [`cached`] holds - a value with a `why`, as [`is_reading`]
+/// tells them apart - held until `until`.
+fn reason_only(value: &serde_json::Value, until: f64) -> Option<(String, f64)> {
+    let why = value.get("why")?.as_str().filter(|w| !w.is_empty())?;
+    Some((why.to_string(), until))
 }
 
 /// A duration as a pane says it: `40s`, `7m`, `2h05m`, `3d`.
@@ -1248,36 +1268,38 @@ pub fn sharing_rows(cache: &Cache, found: &[Provenance], now: f64, width: usize)
 
 /// The one wording every widget gives for where its readings came from,
 /// wrapped to `width`, from the readings on screen: nothing when every
-/// one was fetched by this pane and is fresh, else the oldest of them, and
-/// what is happening to it.
+/// one was fetched by this pane and is fresh, else the reading the line is
+/// about, and what is happening to it.
+///
+/// The line dates the reading it speaks for. When anything is stale,
+/// refused or being fetched by another pane, that is the oldest such
+/// reading; a reading still inside its hold does not make the line read
+/// old, however long its hold is. When the line only says who fetched,
+/// it dates the newest reading it is saying that of (OPS-290).
 ///
 /// `fetched 2m ago by pane 48213`, `cached 7m ago · pane 48213 asking now`,
 /// `cached 7m ago · too many requests, next ask in 3m`.
 pub fn provenance_rows(found: &[Provenance], now: f64, width: usize) -> Vec<String> {
-    let Some(oldest) = found.iter().min_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) else {
-        return Vec::new();
-    };
     let asking = found.iter().find_map(|p| p.asking);
     let refused = found
         .iter()
         .filter_map(|p| p.refused.clone())
         .max_by(|a, b| a.1.total_cmp(&b.1));
     let unshared = found.iter().find_map(|p| p.unshared);
-    let other = found.iter().find_map(|p| p.by);
-    let stale = found.iter().any(|p| p.stale);
-    if asking.is_none() && refused.is_none() && unshared.is_none() && other.is_none() && !stale {
-        return Vec::new();
-    }
-    let age = ago(now - oldest.taken_at);
-    let mut text = if refused.is_some() || asking.is_some() || stale {
-        format!("cached {age} ago")
-    } else {
-        // The oldest reading's own fetcher: another pane's newer reading
-        // must not lend it a pane that never fetched it.
-        match oldest.by {
+    let behind = |p: &&Provenance| p.stale || p.asking.is_some() || p.refused.is_some();
+    let said_of = |p: &&Provenance| p.by.is_some() || p.unshared.is_some();
+    let mut text = if let Some(oldest) = found.iter().filter(behind).min_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) {
+        format!("cached {} ago", ago(now - oldest.taken_at))
+    } else if let Some(newest) = found.iter().filter(said_of).max_by(|a, b| a.taken_at.total_cmp(&b.taken_at)) {
+        // The newest reading's own fetcher: another pane's reading must
+        // not lend its pane to one this pane fetched, or the reverse.
+        let age = ago(now - newest.taken_at);
+        match newest.by {
             Some(pid) => format!("fetched {age} ago by pane {pid}"),
             None => format!("fetched {age} ago by this pane"),
         }
+    } else {
+        return Vec::new();
     };
     if let Some(pid) = asking.filter(|p| *p != 0) {
         text.push_str(&format!(" · pane {pid} asking now"));
@@ -1551,6 +1573,50 @@ mod tests {
         assert_eq!(b.shared.get("k").map(|s| s.1), Some(41));
     }
 
+    /// `cached`, agent-usage's call, says where its readings came from in
+    /// the same words as `take`: who fetched it, who is asking now, and a
+    /// refusal held in its older `{"why": ...}` shape (OPS-290).
+    #[test]
+    fn a_reading_held_by_cached_says_where_it_came_from() {
+        let (mut a, mut b) = two_panes("cached-provenance");
+        let rows = |c: &Cache, key: &str| {
+            let found: Vec<_> = provenance(c, key, now()).into_iter().collect();
+            provenance_rows(&found, now(), 80).join(" ")
+        };
+        // This pane's own, and fresh: nothing to say.
+        assert!(cached(&mut a, "k", 120.0, || Some(serde_json::json!({"u": 1}))).is_some());
+        assert_eq!(rows(&a, "k"), "");
+        // Another pane's.
+        assert!(cached(&mut b, "k", 120.0, || panic!("asked a fresh shared reading")).is_some());
+        let said = rows(&b, "k");
+        assert!(said.starts_with("fetched ") && said.ends_with(" ago by pane 41"), "{said}");
+
+        // Past its hold here, while pane 42 holds the lease: shown as it
+        // is, and said to be on its way.
+        let t = a.live["k"].0 - 500.0;
+        a.live.get_mut("k").unwrap().0 = t;
+        a.shared.get_mut("k").unwrap().0 = t;
+        let mut store = b.store.take().unwrap();
+        rusqlite::Connection::open(store.path_for_tests())
+            .unwrap()
+            .execute("UPDATE readings SET taken_at = ?1 WHERE key = 'k'", [t])
+            .unwrap();
+        assert_eq!(store.claim("k", Some(t), now()).unwrap(), Got::Mine);
+        assert!(cached(&mut a, "k", 120.0, || panic!("asked while pane 42 was asking")).is_some());
+        assert_eq!(rows(&a, "k"), "cached 8m ago · pane 42 asking now");
+        store.release("k").unwrap();
+
+        // Refused, with the reason written in after: every pane waits it
+        // out, and says when the next ask is.
+        let mut alone = Cache::default();
+        assert!(cached(&mut alone, "r", 120.0, || Some(serde_json::json!({"u": 2}))).is_some());
+        alone.live.get_mut("r").unwrap().0 -= 420.0;
+        alone.good.get_mut("r").unwrap().0 -= 420.0;
+        assert!(cached(&mut alone, "r", 120.0, || None).is_none());
+        remember_refusal(&mut alone, "r", "too many requests");
+        assert_eq!(rows(&alone, "r"), "cached 7m ago · too many requests, next ask in 1m");
+    }
+
     #[test]
     fn a_pane_that_took_the_lease_after_waiting_does_not_write_over_its_successor() {
         let (mut a, mut b) = two_panes("wait-late");
@@ -1739,6 +1805,20 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_refresh_dates_the_good_reading_still_on_screen() {
+        let mut c = Cache::default();
+        assert!(cached(&mut c, "plan", 3600.0, || Some(serde_json::json!({"plan": "fixture"}))).is_some());
+        c.good.get_mut("plan").unwrap().0 = crate::now() - 7200.0;
+        c.live.get_mut("plan").unwrap().0 = crate::now() - 3700.0;
+        assert!(cached(&mut c, "plan", 3600.0, || None).is_none());
+        let at = crate::now();
+        let p = provenance(&c, "plan", at).unwrap();
+        assert_eq!(p.taken_at, c.good["plan"].0);
+        assert!(p.stale);
+        assert_eq!(provenance_rows(&[p], at, 80), ["cached 2h00m ago"]);
+    }
+
+    #[test]
     fn a_reading_this_pane_could_not_share_is_not_credited_to_the_last_fetcher() {
         let mut c = Cache::default();
         let now = 10_000.0;
@@ -1750,11 +1830,42 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_reading_is_dated_by_the_pane_that_fetched_it() {
+    fn the_reading_a_line_names_a_fetcher_of_is_dated_by_that_fetcher() {
         let now = 10_000.0;
         let mine = Provenance { taken_at: now - 300.0, by: None, stale: false, asking: None, refused: None, unshared: None };
         let theirs = Provenance { taken_at: now - 10.0, by: Some(42), ..mine.clone() };
-        assert_eq!(provenance_rows(&[mine, theirs], now, 80), ["fetched 5m ago by this pane"]);
+        assert_eq!(provenance_rows(&[mine.clone(), theirs.clone()], now, 80), ["fetched 10s ago by pane 42"]);
+        // An older reading of another pane's does not lend its pane, or
+        // its age, to this pane's newer one.
+        let older = Provenance { taken_at: now - 600.0, ..theirs };
+        let newer = Provenance { taken_at: now - 20.0, ..mine };
+        assert_eq!(provenance_rows(&[newer, older], now, 80), ["fetched 10m ago by pane 42"]);
+    }
+
+    /// A plan read hourly and a quota read every minute, both from pane 42
+    /// and both inside their holds: the line dates the newest, not the
+    /// plan, so a tab whose numbers are fresh does not read 26 minutes old.
+    #[test]
+    fn a_long_hold_inside_its_time_does_not_make_the_line_read_old() {
+        let now = 10_000.0;
+        let quota = Provenance { taken_at: now - 30.0, by: Some(42), stale: false, asking: None, refused: None, unshared: None };
+        let plan = Provenance { taken_at: now - 26.0 * 60.0, ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), quota.clone()], now, 80), ["fetched 30s ago by pane 42"]);
+        // Once something is behind, the line is about that one: the oldest
+        // reading that is stale, refused or being fetched elsewhere.
+        let stale = Provenance { taken_at: now - 7.0 * 60.0, stale: true, ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), quota.clone(), stale], now, 80), ["cached 7m ago"]);
+        let asked = Provenance { taken_at: now - 3.0 * 60.0, asking: Some(43), ..quota.clone() };
+        assert_eq!(provenance_rows(&[plan.clone(), asked], now, 80), ["cached 3m ago · pane 43 asking now"]);
+        let refused = Provenance {
+            taken_at: now - 9.0 * 60.0,
+            refused: Some(("too many requests".into(), now + 120.0)),
+            ..quota.clone()
+        };
+        assert_eq!(
+            provenance_rows(&[plan, quota, refused], now, 80),
+            ["cached 9m ago · too many requests, next ask in 2m"]
+        );
     }
 
     #[test]
