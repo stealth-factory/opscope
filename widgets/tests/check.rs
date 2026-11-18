@@ -4320,34 +4320,273 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
     );
 }
 
-/// A catalogue is wired to a field by name, and nothing else ties them.
+/// A picker table or discovery hook is wired to its schema by field name.
 ///
-/// `catalogues: &[("rates", LIST_RATES)]` says "offer this table on the field
-/// called rates". Write `"rate"` and it compiles, every test passes, and the
-/// settings screen quietly goes on showing a JSON box - the exact failure
-/// this file exists for, since the only symptom is a feature that is simply
-/// not there.
+/// The source is lexed, so comments, strings and nested brackets are tokens
+/// rather than characters. A name that is not a literal `&[ ... ]` is an
+/// error: skipping it would leave its fields unchecked.
+fn picker_fields(source: &str, member: &str) -> Result<Vec<String>, String> {
+    let tokens = match TokenStream::from_str(source) {
+        Ok(tokens) => tokens.into_iter().collect::<Vec<_>>(),
+        Err(error) => return Err(format!("{member} could not be read ({error})")),
+    };
+    let mut fields = Vec::new();
+    let mut named = false;
+    let mut unreadable = false;
+    walk_picker_fields(
+        &tokens,
+        true,
+        member,
+        &mut fields,
+        &mut named,
+        &mut unreadable,
+    );
+    if named {
+        return Err(format!(
+            "{member} is not a literal slice, so its fields are not checked"
+        ));
+    }
+    if unreadable {
+        return Err(format!(
+            "{member} has an entry whose name is not a string literal"
+        ));
+    }
+    Ok(fields)
+}
+
+fn walk_picker_fields(
+    tokens: &[TokenTree],
+    fields_here: bool,
+    member: &str,
+    fields: &mut Vec<String>,
+    named: &mut bool,
+    unreadable: &mut bool,
+) {
+    if fields_here {
+        note_picker_fields(tokens, member, fields, named, unreadable);
+    }
+    for token in tokens {
+        let TokenTree::Group(group) = token else {
+            continue;
+        };
+        let nested: Vec<TokenTree> = group.stream().into_iter().collect();
+        walk_picker_fields(
+            &nested,
+            group.delimiter() == Delimiter::Brace,
+            member,
+            fields,
+            named,
+            unreadable,
+        );
+    }
+}
+
+fn note_picker_fields(
+    tokens: &[TokenTree],
+    member: &str,
+    fields: &mut Vec<String>,
+    named: &mut bool,
+    unreadable: &mut bool,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        if !ident_is(ident, member) || !is_punct(tokens.get(index + 1), ':') {
+            continue;
+        }
+        match slice_fields(&tokens[index + 2..]) {
+            SliceRead::Keys(keys) => fields.extend(keys),
+            SliceRead::NotSlice => *named = true,
+            SliceRead::Unreadable => *unreadable = true,
+        }
+    }
+}
+
+/// `r#discover` is the same field as `discover`. This proc-macro2 prints the
+/// raw prefix, so a plain string compare would skip the declaration.
+fn ident_is(ident: &proc_macro2::Ident, name: &str) -> bool {
+    let text = ident.to_string();
+    text == name || text.strip_prefix("r#") == Some(name)
+}
+
+enum SliceRead {
+    Keys(Vec<String>),
+    NotSlice,
+    Unreadable,
+}
+
+/// The field names of a literal `&[("name", value), ...]`, if this is one.
+fn slice_fields(tokens: &[TokenTree]) -> SliceRead {
+    let mut index = 0;
+    if !is_punct(tokens.get(index), '&') {
+        return SliceRead::NotSlice;
+    }
+    index += 1;
+    if is_punct(tokens.get(index), '\'') {
+        index += 2;
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(index) else {
+        return SliceRead::NotSlice;
+    };
+    if group.delimiter() != Delimiter::Bracket {
+        return SliceRead::NotSlice;
+    }
+    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+    let mut keys = Vec::new();
+    let mut entry = Vec::new();
+    for token in inner {
+        if is_punct(Some(&token), ',') && entry.is_empty() {
+            continue;
+        }
+        if is_punct(Some(&token), ',') {
+            match entry_key(&entry) {
+                Some(key) => keys.push(key),
+                None if !entry.is_empty() => return SliceRead::Unreadable,
+                None => {}
+            }
+            entry.clear();
+            continue;
+        }
+        entry.push(token);
+    }
+    match entry_key(&entry) {
+        Some(key) => keys.push(key),
+        None if !entry.is_empty() => return SliceRead::Unreadable,
+        None => {}
+    }
+    SliceRead::Keys(keys)
+}
+
+/// The first string of a top-level `("name", callback)` entry.
+fn entry_key(entry: &[TokenTree]) -> Option<String> {
+    let token = entry.first()?;
+    let TokenTree::Group(group) = token else {
+        return literal_string(token);
+    };
+    if group.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+    for token in group.stream() {
+        if is_punct(Some(&token), ',') {
+            break;
+        }
+        if let Some(key) = literal_string(&token) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn literal_string(token: &TokenTree) -> Option<String> {
+    let TokenTree::Literal(literal) = token else {
+        return None;
+    };
+    rust_string(&literal.to_string())
+}
+
+fn rust_string(text: &str) -> Option<String> {
+    if let Some(raw) = text.strip_prefix('r') {
+        let hashes = raw.bytes().take_while(|byte| *byte == b'#').count();
+        let rest = raw[hashes..].strip_prefix('"')?;
+        let suffix = format!("\"{}", "#".repeat(hashes));
+        return rest.strip_suffix(&suffix).map(str::to_string);
+    }
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    Some(unescape_rust_string(body))
+}
+
+fn unescape_rust_string(body: &str) -> String {
+    let mut out = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                out.push(char::from(
+                    u8::from_str_radix(&hex, 16).unwrap_or(b'?'),
+                ));
+            }
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    continue;
+                }
+                let hex: String = chars
+                    .by_ref()
+                    .take_while(|ch| *ch != '}')
+                    .filter(|ch| *ch != '_')
+                    .collect();
+                if let Some(code) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(code);
+                }
+            }
+            // A backslash at the end of a line is not a character. Rust
+            // drops the break and the indentation that follows it.
+            Some('\n') => skip_string_indent(&mut chars),
+            Some('\r') => {
+                if chars.clone().next() == Some('\n') {
+                    chars.next();
+                }
+                skip_string_indent(&mut chars);
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+
+fn skip_string_indent(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.peek().is_some_and(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r') {
+        chars.next();
+    }
+}
+
+/// Why a discovery field is not a string array, when it is not.
+fn discovery_field_error(settings: &serde_json::Value, field: &str) -> Option<String> {
+    let value = settings.get(field)?;
+    let items = settings
+        .get("_schema")
+        .and_then(|schema| schema.get(field))
+        .and_then(|rule| rule.get("items"))
+        .and_then(|kind| kind.as_str());
+    let strings = value
+        .as_array()
+        .is_some_and(|items| items.iter().all(serde_json::Value::is_string));
+    if value.is_array() && items == Some("string") && strings {
+        return None;
+    }
+    Some(format!(
+        "discovery names {field:?}, which must be an array of strings (`items`: \"string\")"
+    ))
+}
+
 #[test]
 fn every_catalogue_names_a_field_its_widget_actually_declares() {
     let dir = root().join("widgets/src/widgets");
     let mut wrong = Vec::new();
     for name in widgets().keys() {
         let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
-        let Some(rest) = source.split("catalogues: &[").nth(1) else {
-            continue;
-        };
-        let Some(list) = rest.split("],").next() else {
-            continue;
-        };
-        // Each entry opens ("field-name", TABLE.
-        let declared: Vec<String> = list
-            .match_indices("(\"")
-            .filter_map(|(at, _)| {
-                let after = &list[at + 2..];
-                after.find('"').map(|end| after[..end].to_string())
-            })
-            .collect();
-        if declared.is_empty() {
+        let mut fields = Vec::new();
+        for (member, picker) in [("catalogues", "catalogue"), ("discover", "discovery")] {
+            match picker_fields(&source, member) {
+                Ok(keys) => fields.extend(keys.into_iter().map(|key| (key, picker))),
+                Err(why) => wrong.push(format!("{name}: {why}")),
+            }
+        }
+        let mut fields = fields.into_iter().peekable();
+        if fields.peek().is_none() {
             continue;
         }
         let settings =
@@ -4355,21 +4594,120 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
         let parsed: serde_json::Value = match serde_json::from_str(&settings) {
             Ok(v) => v,
             Err(_) => {
-                wrong.push(format!("{name}: declares a catalogue and has no settings.json"));
+                wrong.push(format!("{name}: declares a picker and has no valid settings.json"));
                 continue;
             }
         };
-        for field in declared {
-            if !parsed.as_object().is_some_and(|o| o.contains_key(&field)) {
-                wrong.push(format!(
-                    "{name}: catalogue names {field:?}, which is not a key in its settings.json"
-                ));
+        for (field, picker) in fields {
+            match parsed.get(field.as_str()) {
+                None => wrong.push(format!(
+                    "{name}: {picker} names {field:?}, which is not a key in its settings.json"
+                )),
+                Some(_) if picker == "discovery" => {
+                    if let Some(why) = discovery_field_error(&parsed, field.as_str()) {
+                        wrong.push(format!("{name}: {why}"));
+                    }
+                }
+                Some(_) => {}
             }
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+#[test]
+fn picker_fields_ignore_a_commented_entry() {
+    let source = r#"
+        catalogues: &[
+            // ("retired", OLD),
+            ("models", MODELS),
+        ],
+        discover: &[
+            // ("retired", old_hook),
+            ("properties", discover_properties),
+        ],
+    "#;
+    assert_eq!(picker_fields(source, "catalogues").unwrap(), vec!["models"]);
+    assert_eq!(picker_fields(source, "discover").unwrap(), vec!["properties"]);
+    let wrapped = r#"
+        discover: &[
+            // Retired choices: []
+            (
+                "split",
+                discover_split
+            ),
+            ("properties", discover_properties),
+        ],
+    "#;
+    assert_eq!(
+        picker_fields(wrapped, "discover").unwrap(),
+        vec!["split".to_string(), "properties".to_string()]
+    );
+    let trailing = r#"
+        discover: &[
+            ("properties", discover_properties), // ("retired", old_hook)
+        ],
+    "#;
+    assert_eq!(picker_fields(trailing, "discover").unwrap(), vec!["properties"]);
+    let broken = r#"
+        // Example: discover: &[],
+        discover:
+            &[
+                ("properties", discover_properties),
+            ],
+    "#;
+    assert_eq!(picker_fields(broken, "discover").unwrap(), vec!["properties"]);
+    assert!(picker_fields("discover: &[],", "discover").unwrap().is_empty());
+    assert_eq!(
+        picker_fields(r#"discover: & [("missing", hook)]"#, "discover").unwrap(),
+        vec!["missing".to_string()]
+    );
+    let nested = r#"
+        /* disabled: discover: &[] */
+        discover: &[
+            ("properties", { let _ = [0]; let _ = '"'; hook }),
+            ("missing", ("retired", 0)),
+        ] // ]
+    "#;
+    assert_eq!(
+        picker_fields(nested, "discover").unwrap(),
+        vec!["properties".to_string(), "missing".to_string()]
+    );
+    let hidden = r#"const EXAMPLE: &str = "discover: &[]"; discover: &[("properties", hook)]"#;
+    assert_eq!(picker_fields(hidden, "discover").unwrap(), vec!["properties"]);
+    assert!(picker_fields("discover: DISCOVERY", "discover").is_err());
+    assert!(picker_fields("discover: &[(FIELD, hook)]", "discover").is_err());
+    assert_eq!(
+        picker_fields("r#discover: &[(\"missing\", hook)]", "discover").unwrap(),
+        vec!["missing".to_string()]
+    );
+    let escaped = "discover: &[(\"\\u{0_070}roperties\", hook), (\"pro\\\n    perties\", hook)]";
+    assert_eq!(
+        picker_fields(escaped, "discover").unwrap(),
+        vec!["properties".to_string(), "properties".to_string()]
+    );
+}
+
+#[test]
+fn discovery_fields_must_be_string_arrays() {
+    let integer = serde_json::json!({
+        "ports": [22],
+        "_schema": { "ports": { "items": "integer" } }
+    });
+    assert!(discovery_field_error(&integer, "ports").is_some());
+    let bare = serde_json::json!({ "properties": [] });
+    assert!(discovery_field_error(&bare, "properties").is_some());
+    let strings = serde_json::json!({
+        "properties": [],
+        "_schema": { "properties": { "items": "string" } }
+    });
+    assert!(discovery_field_error(&strings, "properties").is_none());
+    let mixed = serde_json::json!({
+        "properties": [42],
+        "_schema": { "properties": { "items": "string" } }
+    });
+    assert!(discovery_field_error(&mixed, "properties").is_some());
+}
 
 /// The `token_env` default on screen is the one the code falls back to.
 ///

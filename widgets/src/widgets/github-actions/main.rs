@@ -46,6 +46,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: Some("gha"),
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 const WINDOWS: &[i64] = &[12, 24, 48, 168];

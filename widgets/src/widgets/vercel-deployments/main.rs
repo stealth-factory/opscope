@@ -33,6 +33,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: Some("deployments"),
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 const API: &str = "https://api.vercel.com";

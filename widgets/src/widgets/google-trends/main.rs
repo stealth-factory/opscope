@@ -45,6 +45,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 const FEED: &str = "https://trends.google.com/trending/rss?geo=";

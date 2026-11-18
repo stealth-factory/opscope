@@ -50,7 +50,7 @@ pub use dependencies::{
     unsatisfied_required,
 };
 pub use aliases::{alias_problems, resolve_widget};
-pub use settings::{register_settings, run_settings, Catalogue, SettingsSpec};
+pub use settings::{register_settings, run_settings, Catalogue, Choice, Discover, SettingsSpec};
 pub use theme::{ink, ink_between, ink_on, lift, tint, tint_toward, Role};
 /// The footer hint for the command palette, beside `[,] settings` in
 /// every widget: one wording, kept here.

@@ -22,7 +22,9 @@
 //! `load_config` actually reads and patch only the selected value, so key
 //! order, comments-as-keys, and concurrent unrelated edits survive.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -46,7 +48,18 @@ pub struct SettingsSpec {
     /// the table over and the settings screen offers it as a picker, which
     /// keeps one record of the fact and leaves core drawing the screen.
     pub catalogues: &'static [(&'static str, Catalogue)],
+    /// Runtime choices for top-level array fields, by field name.
+    pub discover: &'static [(&'static str, Discover)],
 }
+
+/// An option discovered by a widget. Only its value is written to config.
+pub struct Choice {
+    pub value: String,
+    pub label: String,
+}
+
+/// List a field's options using the widget's own configuration and API.
+pub type Discover = fn() -> Result<Vec<Choice>, String>;
 
 /// A table a widget owns, as `(key, who publishes it, the numbers each field
 /// defaults to)`.
@@ -951,6 +964,8 @@ struct App {
     legacy_section: Option<&'static str>,
     schema: &'static str,
     catalogues: &'static [(&'static str, Catalogue)],
+    discover: &'static [(&'static str, Discover)],
+    discoveries: HashMap<&'static str, Discovery>,
     constraints: serde_json::Map<String, Value>,
     fields: Vec<Field>,
     live: Value,
@@ -961,6 +976,10 @@ struct App {
     selected: usize,
     scroll: usize,
     chase: bool,
+    /// A typed entry started while discovery was still listing. It stays a
+    /// manual entry until it is added or cleared, so a result arriving
+    /// mid-draft cannot turn the same keystrokes into a filter.
+    composing: bool,
     mode: Mode,
     status: Option<String>,
     /// The screens left behind while standing inside a declared object: the
@@ -1040,6 +1059,8 @@ fn load(spec: SettingsSpec) -> App {
         legacy_section: spec.legacy_section,
         schema: spec.schema,
         catalogues: spec.catalogues,
+        discover: spec.discover,
+        discoveries: HashMap::new(),
         wrote: false,
         constraints,
         fields,
@@ -1051,6 +1072,7 @@ fn load(spec: SettingsSpec) -> App {
         selected: 0,
         scroll: 0,
         chase: true,
+        composing: false,
         mode: Mode::List,
         status: None,
         stack: Vec::new(),
@@ -1248,6 +1270,13 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
         )
     };
     let (fresh_raw, fresh_live) = fresh_config(app)?;
+    let field = &app.fields[index];
+    if discovery_hook(app, &key).is_some()
+        && current_of(&fresh_live, field, app.legacy_section)
+            != current_of(&app.live, field, app.legacy_section)
+    {
+        return Err("refusing to overwrite an updated list · reload settings".into());
+    }
     let section = live_section(&fresh_live, &schema_section, app.legacy_section).to_string();
     let mut path = vec![section.as_str()];
     path.extend(steps.iter().map(String::as_str));
@@ -1295,11 +1324,20 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         return write_field(app, index, Value::String(String::new()));
     }
     let field = app.fields.get(index).ok_or("no such field")?;
+    let key = field.key.clone();
     let steps: Vec<String> = field.steps().iter().map(|s| s.to_string()).collect();
     let schema_path = field.path();
     let schema_section = field.section.clone();
     let shown_default = summary(&field.default, false);
+    let loaded = current_of(&app.live, field, app.legacy_section).cloned();
     let (fresh_raw, fresh_live) = fresh_config(app)?;
+    // The same refusal as a toggle. Resetting from the list is still a
+    // write, and a list another process changed is not this screen's to drop.
+    if discovery_hook(app, &key).is_some()
+        && current_of(&fresh_live, &app.fields[index], app.legacy_section) != loaded.as_ref()
+    {
+        return Err("refusing to overwrite an updated list · reload settings".into());
+    }
     let section = live_section(&fresh_live, &schema_section, app.legacy_section).to_string();
     // section, then every key the field sits under, then the field itself.
     let mut full: Vec<&str> = vec![section.as_str()];
@@ -1519,6 +1557,8 @@ enum PickKind {
     Timezone,
     /// A finite set the schema names. Written as bare strings.
     Choices(Vec<String>),
+    /// A checklist returned by a widget's discovery hook.
+    Discovered,
     /// A map the reader keys themselves, each entry holding one string.
     /// Adding names a key; opening one edits its value. The rate card does
     /// the same with keys the widget owns.
@@ -1762,12 +1802,122 @@ fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
         .map(|(_, t)| *t)
 }
 
+enum Discovery {
+    Listing(Receiver<Result<Vec<Choice>, String>>),
+    Ready(Vec<Choice>),
+    Failed(String),
+}
+
+/// The hook for a top-level array of strings with no fixed length.
+///
+/// Discovered values are strings, added and removed one at a time. An
+/// integer array would show `"22"` beside the number `22` and then refuse
+/// the write. A fixed length cannot be edited that way either: both the
+/// add and the remove miss the length, so the field keeps the editor that
+/// writes the whole array at once.
+fn discovery_hook(app: &App, key: &str) -> Option<(&'static str, Discover)> {
+    let hook = app.discover.iter().find(|(field, _)| *field == key)?;
+    let rule = app.constraints.get(key).and_then(Value::as_object);
+    let string_array = rule
+        .and_then(|rule| rule.get("items"))
+        .and_then(Value::as_str)
+        == Some("string");
+    let fixed = rule.is_some_and(|rule| rule.contains_key("length"));
+    app.fields
+        .iter()
+        .any(|field| {
+            field.key == key
+                && field.section == app.section
+                && field.parents.is_empty()
+                && field.default.is_array()
+                && string_array
+                && !fixed
+        })
+        .then_some(*hook)
+}
+
+fn start_discovery(app: &mut App, index: usize) -> bool {
+    let Some((key, discover)) = app.fields.get(index).and_then(|f| discovery_hook(app, &f.key))
+    else {
+        return false;
+    };
+    if matches!(app.discoveries.get(key), Some(Discovery::Listing(_))) {
+        return false;
+    }
+    let (send, receive) = mpsc::channel();
+    crate::record_panics();
+    let worker = std::thread::Builder::new().spawn(move || {
+        let result = std::panic::catch_unwind(discover).unwrap_or_else(|_| {
+            let why = crate::take_panic_reason()
+                .unwrap_or_else(|| "panicked, with nothing recorded".into());
+            Err(format!("discovery stopped: {why}"))
+        });
+        let _ = send.send(result);
+    });
+    let state = match worker {
+        Ok(_) => Discovery::Listing(receive),
+        Err(why) => Discovery::Failed(format!("discovery stopped: {why}")),
+    };
+    app.discoveries.insert(key, state);
+    true
+}
+
+fn poll_discovery(app: &mut App) {
+    let Mode::Pick { index, .. } = app.mode else {
+        return;
+    };
+    let Some((key, _)) = discovery_hook(app, &app.fields[index].key) else {
+        return;
+    };
+    let Some(Discovery::Listing(receive)) = app.discoveries.get(key) else {
+        return;
+    };
+    let state = match receive.try_recv() {
+        Ok(Ok(mut choices)) => {
+            let mut seen = HashSet::new();
+            choices.retain(|choice| seen.insert(choice.value.clone()));
+            Discovery::Ready(choices)
+        }
+        Ok(Err(why)) => Discovery::Failed(why),
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Disconnected) => {
+            Discovery::Failed("discovery stopped: no answer from the worker".into())
+        }
+    };
+    if matches!(&state, Discovery::Ready(choices) if !choices.is_empty()) {
+        let drafting = matches!(&app.mode, Mode::Pick { query, .. } if !query.is_empty());
+        if drafting {
+            // They were typing an entry. Keep that meaning until the draft
+            // is added or cleared; the checklist waits.
+            app.composing = true;
+        } else {
+            if let Mode::Pick { sel, scroll, .. } = &mut app.mode {
+                *sel = 0;
+                *scroll = 0;
+            }
+            // A new list is a new selection. Follow it once, then leave the
+            // wheel free to move through a choice that wraps past the pane.
+            app.chase = true;
+        }
+    }
+    app.discoveries.insert(key, state);
+}
+
 fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     // A field the widget handed a table for needs no `picker` declaration:
     // offering the table *is* the picker, and asking settings.json to say so
     // as well would be a second place for the two to disagree.
     if let Some(table) = catalogue_for(app, key) {
         return Some(PickKind::Catalogue(table));
+    }
+    if discovery_hook(app, key).is_some() {
+        if app.composing {
+            return Some(PickKind::Free);
+        }
+        return Some(match app.discoveries.get(key) {
+            Some(Discovery::Ready(choices)) if !choices.is_empty() => PickKind::Discovered,
+            _ => PickKind::Free,
+        });
     }
     let rule = match app.constraints.get(key).and_then(Value::as_object) {
         Some(rule) => rule,
@@ -2272,6 +2422,27 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .to_string();
         return named.iter().map(|n| (n.clone(), *n == now)).collect();
     }
+    if let (PickKind::Discovered, Some(Discovery::Ready(choices))) =
+        (&kind, app.discoveries.get(field.key.as_str()))
+    {
+        let needle = query.to_lowercase();
+        let matches = |value: &str| value.to_lowercase().contains(&needle);
+        let offered: HashSet<&str> = choices.iter().map(|choice| choice.value.as_str()).collect();
+        let mut rows: Vec<_> = choices
+            .iter()
+            .filter(|choice| matches(&choice.value) || matches(&choice.label))
+            .map(|choice| (choice.value.clone(), picked.contains(&choice.value)))
+            .collect();
+        // A manually entered value remains removable when it is absent
+        // from the source's current list.
+        rows.extend(
+            picked
+                .into_iter()
+                .filter(|value| !offered.contains(value.as_str()) && matches(value))
+                .map(|value| (value, true)),
+        );
+        return rows;
+    }
     let mut out: Vec<(u8, String)> = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS
             .iter()
@@ -2283,7 +2454,7 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .filter_map(|one| zone_rank(one, query).map(|r| (r, one.clone())))
             .collect(),
         // Never reached: these return above, before any ranking.
-        PickKind::Free | PickKind::One(_) | PickKind::Map => Vec::new(),
+        PickKind::Free | PickKind::One(_) | PickKind::Map | PickKind::Discovered => Vec::new(),
         PickKind::Catalogue(table) => table
             .iter()
             .filter_map(|(name, group, _)| {
@@ -2837,6 +3008,12 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         *on_list,
         *cursor,
     );
+    let started_sel = s_;
+    let started_query = q.clone();
+    // Set when this key is about the view rather than the selection, or
+    // when focus lands on the list without the index changing. Anything
+    // else that moves the selection follows on the next draw.
+    let mut chase_after: Option<bool> = None;
     let catalogue = app
         .fields
         .get(index)
@@ -2857,14 +3034,25 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         .fields
         .get(index)
         .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::Map)));
-    // The two kinds whose box composes rather than filters, and which
-    // therefore have somewhere for focus to be other than the box.
-    let typed = free || map;
+    let discovery = app.fields.get(index)
+        .is_some_and(|f| discovery_hook(app, &f.key).is_some());
+    // Reload belongs to the rows so r can still be typed in the box.
+    let typed = free || map || discovery;
     let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
             app.mode = Mode::List;
             return false;
+        }
+        "r" | "R" if discovery && rows => {
+            if start_discovery(app, index) {
+                app.status = None;
+                q.clear();
+                cur = 0;
+                s_ = 0;
+                sc = 0;
+                rows = false;
+            }
         }
         // Only where the box is not taking letters. Guarding on an empty
         // box was not enough: empty is exactly when the first character of
@@ -2886,6 +3074,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "down" | "pgdn" if typed && !rows && total > 0 => {
             rows = true;
             s_ = 0;
+            chase_after = Some(true);
         }
         // And out again the way you came: up from the first entry is not a
         // selection that will not move, it is a request to go back to typing.
@@ -2907,8 +3096,16 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "home" => s_ = 0,
         "end" => s_ = total.saturating_sub(1),
         // The wheel moves the view and never the selection, as everywhere.
-        "ctrl-y" | "wheel-up" => sc = sc.saturating_sub(1),
-        "ctrl-e" | "wheel-down" => sc = sc.saturating_add(1),
+        // Leave the window where it was put: following on the next frame
+        // would drag it back to the first line of the choice.
+        "ctrl-y" | "wheel-up" => {
+            sc = sc.saturating_sub(1);
+            chase_after = Some(false);
+        }
+        "ctrl-e" | "wheel-down" => {
+            sc = sc.saturating_add(1);
+            chase_after = Some(false);
+        }
         "backspace" => {
             delete_before(&mut q, &mut cur);
             s_ = 0;
@@ -2978,7 +3175,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         }
         // Tab crosses between the box and the rows. It is the only key on
         // this screen that is not a character somebody might want typed.
-        "tab" if free => {
+        "tab" if free || discovery => {
             rows = !rows;
         }
         // What is typed is the entry. There is nothing to search, so enter
@@ -3141,6 +3338,17 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         _ => {}
     }
     let total = zone_choices(app, index, &q, all).len();
+    let sel_now = s_.min(total.saturating_sub(1));
+    // A filter can replace the choice at the same index. That is still a
+    // move of the cursor, so the window follows it on this frame.
+    if q.is_empty() {
+        app.composing = false;
+    }
+    app.chase = match chase_after {
+        Some(chase) => chase,
+        None if sel_now != started_sel || q != started_query => true,
+        None => app.chase,
+    };
     if let Mode::Pick {
         query,
         sel,
@@ -3156,8 +3364,8 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         *sel = s_.min(total.saturating_sub(1));
         *scroll = sc;
         *show_all = all;
-        // Nothing to stand on is nothing to focus.
-        *on_list = rows && total > 0;
+        // Discovery can reload with the list focused even when it is empty.
+        *on_list = rows && (total > 0 || discovery);
     }
     false
 }
@@ -3239,13 +3447,19 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         "r" | "R" => {
             let keep = app.selected;
             let wrote = app.wrote;
+            // Keep workers already running. Reopening a completed picker
+            // after a reload will discover against the reloaded config.
+            let mut discoveries = std::mem::take(&mut app.discoveries);
+            discoveries.retain(|_, state| matches!(state, Discovery::Listing(_)));
             *app = load(SettingsSpec {
                 widget: app.widget,
                 section: app.section,
                 legacy_section: app.legacy_section,
                 schema: app.schema,
                 catalogues: app.catalogues,
+                discover: app.discover,
             });
+            app.discoveries = discoveries;
             app.selected = keep.min(app.fields.len().saturating_sub(1));
             app.wrote = wrote;
             app.status = Some("reloaded from disk".into());
@@ -3300,6 +3514,15 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                         // came to type into.
                         on_list: false,
                     };
+                    // The first frame follows the selection. After that, only
+                    // a key that moves it does — the wheel keeps its place.
+                    app.chase = true;
+                    app.composing = false;
+                    if discovery_hook(app, &field.key)
+                        .is_some_and(|(key, _)| !app.discoveries.contains_key(key))
+                    {
+                        start_discovery(app, app.selected);
+                    }
                 } else {
                     let seed = edit_seed(field, current_of(&app.live, field, app.legacy_section));
                     let cursor = seed.chars().count();
@@ -3857,7 +4080,7 @@ fn input_row(
     )
 }
 
-fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
+fn draw_pick(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
     let lit = palette_on(true);
     let Mode::Pick {
         index,
@@ -3881,23 +4104,35 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     let field = &app.fields[*index];
     let choices = zone_choices(app, *index, query, *show_all);
     let kind = picker_kind(app, &field.key).unwrap_or(PickKind::Timezone);
+    let discovery = discovery_hook(app, &field.key)
+        .and_then(|(key, _)| app.discoveries.get(key));
+    let discovered = matches!(kind, PickKind::Discovered);
+    let labels: HashMap<&str, &str> = match discovery {
+        Some(Discovery::Ready(found)) => found
+            .iter()
+            .map(|choice| (choice.value.as_str(), choice.label.as_str()))
+            .collect(),
+        _ => HashMap::new(),
+    };
     let total_choices = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS.len(),
         PickKind::Choices(all) => all.len(),
         PickKind::Catalogue(table) => table.len(),
         PickKind::Free => choices.len(),
         PickKind::One(named) => named.len(),
-        PickKind::Map => choices.len(),
+        PickKind::Map | PickKind::Discovered => choices.len(),
     };
     // Counted from the configuration, not from the filtered list: counting
     // the visible ticks made a search that matched nothing report "0 of 597"
     // to someone with four cities configured, which reads as having none.
     let chosen = picked_zones(app, *index).len();
 
-    let mut body = vec![crate::title(
+    let tick = matches!(discovery, Some(Discovery::Listing(_))).then(crate::animation_tick);
+    let mut body = vec![crate::title_busy(
         &format!("{} settings", app.widget),
         w,
         &p.accent,
+        tick,
     )];
     say(
         &mut body,
@@ -3989,7 +4224,22 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         }
         _ => heading,
     };
-    say(&mut body, p.dim.as_str(), "  ", heading.trim(), w);
+    if let Some(discovery) = discovery {
+        if chosen > 0 {
+            say(&mut body, &p.dim, "  ", &format!("{chosen} configured."), w);
+        }
+        let (colour, status) = match discovery {
+            Discovery::Listing(_) => (&p.dim, "listing…".to_string()),
+            Discovery::Ready(found) if found.is_empty() => {
+                (&p.dim, "nothing found — type one to add it".to_string())
+            }
+            Discovery::Ready(found) => (&p.dim, format!("{} found", found.len())),
+            Discovery::Failed(why) => (&p.bad, crate::strip_escapes(why)),
+        };
+        say(&mut body, colour, " ", &status, w);
+    } else {
+        say(&mut body, &p.dim, "  ", heading.trim(), w);
+    }
     say_status(&mut body, app, w, p);
     // The field's own words, on the screen where the value is chosen. They
     // were on the list, one screen back, which is the wrong place for them:
@@ -4016,6 +4266,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
             Some("  Drawn west to east by each zone's offset, not in the order added.")
         }
         PickKind::Choices(_) => Some("  Shown in the order picked here."),
+        PickKind::Discovered => None,
         PickKind::Free => Some("  In the order you add them."),
         // A map's keys are a BTreeMap here - serde_json is taken without
         // preserve_order, which `a_round_trip_does_not_reorder` relies on -
@@ -4067,7 +4318,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     // fine until the field's help went above it: a long explanation could
     // then squeeze the list it explains down to a single row.
     let first_choice_row = body.len();
-    if choices.is_empty() {
+    if choices.is_empty() && (discovery.is_none() || !query.is_empty()) {
         let why = match (zones, query.is_empty()) {
             (true, true) => "  No cities yet. Type to search and add one.".to_string(),
             // A catalogue is never empty - the card is always there - so an
@@ -4097,8 +4348,8 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         };
         say(&mut body, p.dim.as_str(), "  ", why.trim(), w);
     }
-    // One row per choice, so the placements are the first choice's row plus
-    // the index - shifted by the pinned title where the frame is built.
+    // Record each choice's rows before the body is windowed. A long
+    // discovery result can wrap, and every line still selects that choice.
     let mut rows_at: Vec<(usize, usize)> = Vec::new();
     // Thirty-four columns is what a city needs, and it was the whole
     // budget: a row longer than that was cut on a pane with sixty columns
@@ -4114,11 +4365,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     // put `{"label":"main","path":"~/.claude"}` on screen in a list whose
     // whole job is to be read. The identity is still what `sel` and remove
     // work on; only the text changes.
+    let picked = picked_pairs(app, *index);
     let shown_at = |zone: &str| -> String {
-        picked_pairs(app, *index)
-            .into_iter()
+        picked
+            .iter()
             .find(|(id, _)| id == zone)
-            .map(|(_, text)| text)
+            .map(|(_, text)| text.clone())
             .unwrap_or_else(|| zone.to_string())
     };
     let widest = choices
@@ -4148,11 +4400,43 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         let lead = format!("{tint}{}", if here { &q.accent } else { &q.dim });
         let name = format!("{tint}{}", if *on { &q.txt } else { &q.dim });
         let note = format!("{tint}{}", q.dim);
+        let marker = format!(" {} {} ", if here { "▸" } else { " " }, mark);
+        if discovered {
+            let value = crate::escape_safe(&crate::strip_escapes(zone));
+            let label = labels.get(zone.as_str()).map_or_else(String::new, |label| {
+                crate::escape_safe(&crate::strip_escapes(label))
+            });
+            let label = if label.is_empty() { label } else { format!(" · {label}") };
+            let width = w.saturating_sub(1);
+            let room = width.saturating_sub(crate::display_width(&marker)).max(1);
+            let mut value_lines = wrap_help(&value, room, usize::MAX).into_iter();
+            let first = value_lines.next().unwrap_or_default();
+            let fits = crate::display_width(&value) + crate::display_width(&label) <= room;
+            let inline = if fits { label.clone() } else { String::new() };
+            body.push(crate::seg(&[
+                (&lead, marker.clone()),
+                (&name, first),
+                (&note, inline),
+                (&tint, " ".repeat(w)),
+            ], width));
+            let label_lines = if fits { Vec::new() } else { wrap_help(&label, room, usize::MAX) };
+            for (colour, line) in value_lines.map(|line| (&name, line))
+                .chain(label_lines.into_iter().map(|line| (&note, line)))
+            {
+                rows_at.push((body.len(), i));
+                body.push(crate::seg(&[
+                    (&tint, " ".repeat(crate::display_width(&marker))),
+                    (colour, line),
+                    (&tint, " ".repeat(w)),
+                ], width));
+            }
+            continue;
+        }
         body.push(crate::seg(
             &[
                 (
                     lead.as_str(),
-                    format!(" {} {} ", if here { "▸" } else { " " }, mark),
+                    marker,
                 ),
                 (name.as_str(), crate::pad(&shown_at(zone), column)),
                 (
@@ -4189,7 +4473,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Map) {
+    let mut hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Map) {
         let mut h: Vec<Vec<(&str, String)>> = Vec::new();
         if !query.is_empty() {
             h.push(vec![
@@ -4251,10 +4535,13 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
                     (p.dim.as_str(), " edit the entry".into()),
                 ]);
             }
-            h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
+            if !choices.is_empty() {
+                h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
+            }
+            let back = if choices.is_empty() { " to type an entry" } else { " to add another entry" };
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
-                (p.dim.as_str(), " to add another entry".into()),
+                (p.dim.as_str(), back.into()),
             ]);
         } else {
             if query.is_empty() {
@@ -4286,7 +4573,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
                 ]);
             }
         }
-        if *on_list {
+        if *on_list && !choices.is_empty() {
             h.push(vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " pick".into()),
@@ -4396,17 +4683,48 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
             vec![(p.dim.as_str(), "esc done".into())],
         ]
     };
+    if discovered || (discovery.is_some() && choices.is_empty() && !*on_list) {
+        hints.insert(hints.len() - 1, vec![
+            (p.accent.as_str(), "tab".into()),
+            (p.dim.as_str(), if *on_list { " to the box" } else { " to the list" }.into()),
+        ]);
+    }
+    // r retries a discovery, including an empty or failed one, but only
+    // while the rows have focus — in the box it is a letter. The hint is
+    // what makes that key clickable.
+    if discovery.is_some() && *on_list {
+        hints.insert(hints.len() - 1, vec![
+            (p.dim.as_str(), "[r] list again".into()),
+        ]);
+    }
     let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
     let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
     // Title pinned, the rest windowed - the same shape as the list, and for
     // the same reason: a pane too short is a pane you scroll.
     let head = body.remove(0);
+    // The title was body row 0. The indexes recorded above count it, and
+    // the window is the body with it removed, so each one moves up a row.
+    // `placed` then adds the pinned title back, the same way the list does.
+    let rows_at: Vec<(usize, usize)> = rows_at
+        .into_iter()
+        .map(|(row, i)| (row.saturating_sub(1), i))
+        .collect();
+    let first_choice_row = first_choice_row.saturating_sub(1);
     let room = h.saturating_sub(1 + foot.len()).max(1);
-    // Follow the selection through the whole screen, using the picker's
-    // own scroll: moving it brings the window along, and the wheel still
-    // moves the view by itself.
-    let want = first_choice_row + *sel;
-    let at = crate::follow(*scroll, want, room).min(body.len().saturating_sub(room));
+    // Follow only on the frame a key moved the selection. Doing it every
+    // frame anchors a wrapped choice to its first line, so wheel and
+    // ctrl-e cannot reach the rest of a label taller than the pane.
+    let want = rows_at
+        .iter()
+        .find_map(|(row, index)| (*index == *sel).then_some(*row))
+        .unwrap_or(first_choice_row);
+    let chasing = std::mem::replace(&mut app.chase, false);
+    let at = if chasing {
+        crate::follow(*scroll, want, room)
+    } else {
+        *scroll
+    }
+    .min(body.len().saturating_sub(room));
     let mut out = vec![head];
     out.extend(body.iter().skip(at).take(room).cloned());
     while out.len() + foot.len() < h {
@@ -4415,7 +4733,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
     let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
-    (
+    let frame = (
         out,
         Clickable {
             placed: rows_at.into_iter().map(|(row, i)| (row + 1, i)).collect(),
@@ -4425,7 +4743,13 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clicka
             foot_top,
             foot_indent: 1,
         },
-    )
+    );
+    // Keep the drawn window. The next wheel starts from what is on screen,
+    // including the lines below a wrapped choice's first row.
+    if let Mode::Pick { scroll: stored, .. } = &mut app.mode {
+        *stored = at;
+    }
+    frame
 }
 
 fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
@@ -4530,6 +4854,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         // list and takes a choice on the picker - the keys both screens
         // already answer. The two are separate arms because the picker
         // keeps its cursor inside its own mode rather than in `app`.
+        let mut picked = false;
         if matches!(app.mode, Mode::List) {
             if let Some(at) = crate::rows_clicked(
                 &mut keys,
@@ -4557,7 +4882,11 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
                 // both - and a cursor moved in an unfocused list would draw
                 // nowhere and answer to nothing.
                 *on_list = true;
+                picked = true;
             }
+        }
+        if picked {
+            app.chase = true;
         }
         for key in keys {
             let quit = match app.mode {
@@ -4577,6 +4906,8 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
                 return;
             }
         }
+        // Apply the answer after handling keys for the previous frame.
+        poll_discovery(&mut app);
         let (w, h) = crate::size();
         // Built each frame in the theme in force, and drawn as it is: the
         // lifted palette a selected row takes is built here too, and the
@@ -4586,7 +4917,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
-            Mode::Pick { .. } => draw_pick(&app, w, h, &p),
+            Mode::Pick { .. } => draw_pick(&mut app, w, h, &p),
         };
         crate::draw_current(&body, w, h, &[]);
         keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
@@ -4663,6 +4994,8 @@ mod tests {
             legacy_section: None,
             schema: "{}",
             catalogues: &[("rates", CARD)],
+            discover: &[],
+            discoveries: HashMap::new(),
             constraints: serde_json::Map::new(),
             fields: vec![Field {
                 section: "w".into(),
@@ -4680,6 +5013,7 @@ mod tests {
             selected: 0,
             scroll: 0,
             chase: false,
+            composing: false,
             mode: Mode::List,
             status: None,
             wrote: false,
@@ -4891,6 +5225,329 @@ mod tests {
             app.constraints.insert(key.to_string(), rule);
         }
         app
+    }
+
+    const DISCOVERY_SCHEMA: &str = r#"{"properties":[],"_schema":{"properties":{"items":"string"}}}"#;
+
+    fn example_choices() -> Result<Vec<Choice>, String> {
+        Ok(vec![
+            Choice { value: "123".into(), label: "Example Co".into() },
+            Choice { value: "sc-domain:example.com".into(), label: "Example site".into() },
+        ])
+    }
+
+    fn await_discovery(app: &mut App) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while matches!(app.discoveries.get("properties"), Some(Discovery::Listing(_))) {
+            poll_discovery(app);
+            assert!(std::time::Instant::now() < deadline, "discovery never returned");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn draw_discovery(app: &mut App) -> String {
+        crate::strip_escapes(&draw_pick(app, 100, 30, &palette()).0.join("\n"))
+    }
+
+    #[test]
+    fn discovery_opens_as_a_free_list_then_filters_and_reloads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counted_choices() -> Result<Vec<Choice>, String> {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            example_choices()
+        }
+
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", counted_choices)];
+        handle_list_key(&mut app, "enter");
+        assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+        let frame = draw_discovery(&mut app);
+        assert!(frame.contains("listing…") && frame.contains("Type an entry"), "{frame}");
+        assert!(draw_pick(&mut app, 100, 30, &palette()).0[0].contains(['⠖', '⠲', '⠴', '⠦']));
+        assert!(!app.wrote);
+
+        await_discovery(&mut app);
+        let frame = draw_discovery(&mut app);
+        assert!(frame.contains("2 found") && frame.contains("123 · Example Co"), "{frame}");
+        assert!(frame.contains("sc-domain:example.com · Example site"), "{frame}");
+        let (narrow, click) = draw_pick(&mut app, 24, 30, &palette());
+        assert!(narrow.iter().all(|line| crate::display_width(line) <= 24));
+        assert!(click.placed.iter().filter(|(_, choice)| *choice == 1).count() > 1);
+        assert_eq!(zone_choices(&app, 0, "CO", false), vec![("123".into(), false), ("sc-domain:example.com".into(), false)]);
+        assert_eq!(zone_choices(&app, 0, "example co", false), vec![("123".into(), false)]);
+        assert_eq!(zone_choices(&app, 0, "DOMAIN:", false), vec![("sc-domain:example.com".into(), false)]);
+
+        handle_pick_key(&mut app, "esc");
+        handle_list_key(&mut app, "enter");
+        assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+        assert!(draw_discovery(&mut app).contains("2 found"));
+        handle_pick_key(&mut app, "r");
+        assert!(matches!(&app.mode, Mode::Pick { query, .. } if query == "r"));
+        handle_pick_key(&mut app, "tab");
+        handle_pick_key(&mut app, "r");
+        assert!(draw_discovery(&mut app).contains("listing…"));
+        await_discovery(&mut app);
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
+        assert!(!app.wrote);
+    }
+
+    #[test]
+    fn discovery_reports_an_empty_answer_and_a_worker_panic() {
+        fn empty() -> Result<Vec<Choice>, String> {
+            Ok(Vec::new())
+        }
+        fn stopped() -> Result<Vec<Choice>, String> {
+            panic!("example discovery panic")
+        }
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", empty)];
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        assert!(draw_discovery(&mut app).contains("nothing found — type one to add it"));
+        assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+        app.discover = &[("properties", stopped)];
+        // Tab can focus even an empty list, so a refusal can be retried.
+        handle_pick_key(&mut app, "tab");
+        assert!(
+            draw_discovery(&mut app).contains("[r] list again"),
+            "the retry has to be on the footer, or it cannot be clicked"
+        );
+        handle_pick_key(&mut app, "r");
+        await_discovery(&mut app);
+        assert!(draw_discovery(&mut app).contains("discovery stopped: example discovery panic"));
+        assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+    }
+
+    #[test]
+    fn discovery_accepts_only_a_string_array() {
+        fn choices() -> Result<Vec<Choice>, String> {
+            Ok(vec![Choice {
+                value: "22".into(),
+                label: "ssh".into(),
+            }])
+        }
+        let mut numbers = field_app(
+            "ports",
+            serde_json::json!([22]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        numbers.discover = &[("ports", choices)];
+        assert!(discovery_hook(&numbers, "ports").is_none());
+        let mut bare = field_app("properties", serde_json::json!([]), None);
+        bare.discover = &[("properties", choices)];
+        assert!(discovery_hook(&bare, "properties").is_none());
+        let mut strings = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        strings.discover = &[("properties", choices)];
+        assert!(discovery_hook(&strings, "properties").is_some());
+        let mut fixed = field_app(
+            "properties",
+            serde_json::json!(["old"]),
+            Some(serde_json::json!({"items": "string", "length": 1})),
+        );
+        fixed.discover = &[("properties", choices)];
+        assert!(discovery_hook(&fixed, "properties").is_none());
+    }
+
+    /// A choice taller than the pane stays where the wheel put it.
+    ///
+    /// Following every frame pinned the window to the choice's first line,
+    /// so the rest of a wrapped label could not be read.
+    #[test]
+    fn a_wrapped_discovery_choice_scrolls_to_its_tail() {
+        fn long() -> Result<Vec<Choice>, String> {
+            Ok(vec![Choice {
+                value: "property-id".into(),
+                label: format!("{}TAILMARK", "pad ".repeat(40)),
+            }])
+        }
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", long)];
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        let p = palette();
+        let first = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            first.contains("property-id"),
+            "the choice's first line is on the opening frame:\n{first}"
+        );
+        assert!(
+            !first.contains("TAILMARK"),
+            "the tail is below a 12-row pane:\n{first}"
+        );
+        for _ in 0..80 {
+            handle_pick_key(&mut app, "ctrl-e");
+        }
+        let scrolled = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            scrolled.contains("TAILMARK"),
+            "ctrl-e reaches the wrapped tail:\n{scrolled}"
+        );
+        let stayed = crate::strip_escapes(&draw_pick(&mut app, 24, 12, &p).0.join("\n"));
+        assert!(
+            stayed.contains("TAILMARK"),
+            "the next frame keeps the wheel's place:\n{stayed}"
+        );
+    }
+
+    #[test]
+    fn a_draft_typed_while_listing_is_still_an_entry_when_results_arrive() {
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", example_choices)];
+        handle_list_key(&mut app, "enter");
+        handle_pick_key(&mut app, "e");
+        handle_pick_key(&mut app, "x");
+        await_discovery(&mut app);
+        assert!(matches!(picker_kind(&app, "properties"), Some(PickKind::Free)));
+        assert!(matches!(&app.mode, Mode::Pick { query, .. } if query == "ex"));
+        assert!(
+            !zone_choices(&app, 0, "ex", false).iter().any(|(value, _)| value == "123"),
+            "the draft became a filter"
+        );
+    }
+
+    #[test]
+    fn filtering_follows_the_choice_that_replaced_the_selection() {
+        fn many() -> Result<Vec<Choice>, String> {
+            let mut choices = Vec::new();
+            for i in 0..20 {
+                choices.push(Choice { value: format!("aaa-{i:02}"), label: String::new() });
+            }
+            for i in 0..20 {
+                choices.push(Choice { value: format!("zzz-{i:02}"), label: String::new() });
+            }
+            Ok(choices)
+        }
+        let mut app = field_app(
+            "properties",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        app.discover = &[("properties", many)];
+        app.discoveries.insert("properties", Discovery::Ready(many().unwrap()));
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 80,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        app.chase = false;
+        handle_pick_key(&mut app, "z");
+        let frame = crate::strip_escapes(&draw_pick(&mut app, 40, 12, &palette()).0.join("\n"));
+        assert!(
+            frame.contains("zzz-00"),
+            "the new first match has to be in view:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn discovery_writes_values_and_a_refusal_still_allows_typing() {
+
+        use std::fs;
+        const CHILD: &str = "OPSCOPE_TEST_DISCOVERY_WRITES";
+        // Give the writer a private config path without changing the
+        // environment used by the other settings tests.
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!(
+                "opscope-discovery-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("config.json");
+            fs::write(&path, r#"{"w":{"properties":["manual"],"other":true}}"#).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "settings::tests::discovery_writes_values_and_a_refusal_still_allows_typing"])
+                .env(CHILD, "1")
+                .env("OPSCOPE_CONFIG", &path)
+                .output();
+            fs::remove_dir_all(dir).unwrap();
+            let result = result.unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(result.status.success() && stdout.contains("1 passed"), "{stdout}\n{}",
+                String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+
+        fn refused() -> Result<Vec<Choice>, String> {
+            Err("example refusal".into())
+        }
+        let spec = SettingsSpec {
+            widget: "w",
+            section: "w",
+            legacy_section: None,
+            schema: DISCOVERY_SCHEMA,
+            catalogues: &[],
+            discover: &[("properties", example_choices)],
+        };
+        let mut app = load(spec);
+        let before = fs::read_to_string(&app.path).unwrap();
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        assert_eq!(fs::read_to_string(&app.path).unwrap(), before);
+        assert!(zone_choices(&app, 0, "", false).contains(&("manual".into(), true)));
+        handle_pick_key(&mut app, "enter");
+        assert!(zone_choices(&app, 0, "", false).contains(&("123".into(), true)));
+        let read = |app: &App| serde_json::from_str::<Value>(&fs::read_to_string(&app.path).unwrap()).unwrap();
+        assert_eq!(read(&app), serde_json::json!({"w":{"properties":["manual","123"],"other":true}}));
+        handle_pick_key(&mut app, "enter");
+        assert!(zone_choices(&app, 0, "", false).contains(&("123".into(), false)));
+        assert_eq!(read(&app), serde_json::json!({"w":{"properties":["manual"],"other":true}}));
+
+        let mut app = load(SettingsSpec { discover: &[("properties", refused)], ..spec });
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        let p = palette();
+        let frame = draw_pick(&mut app, 100, 30, &p).0.join("\n");
+        assert!(frame.contains(&format!("{} example refusal", p.bad)), "{frame}");
+        for ch in ["m", "o", "r", "e"] {
+            handle_pick_key(&mut app, ch);
+        }
+        handle_pick_key(&mut app, "enter");
+        assert_eq!(read(&app), serde_json::json!({"w":{"properties":["manual","more"],"other":true}}));
+
+        let mut app = load(spec);
+        handle_list_key(&mut app, "enter");
+        await_discovery(&mut app);
+        let concurrent = r#"{"w":{"properties":["manual","more","another"],"other":true}}"#;
+        fs::write(&app.path, concurrent).unwrap();
+        handle_pick_key(&mut app, "enter");
+        assert_eq!(fs::read_to_string(&app.path).unwrap(), concurrent);
+        assert!(draw_discovery(&mut app).contains("refusing to overwrite an updated list"));
+        handle_pick_key(&mut app, "esc");
+        handle_list_key(&mut app, "d");
+        assert_eq!(fs::read_to_string(&app.path).unwrap(), concurrent);
+        assert!(
+            app.status.as_deref().unwrap_or("").contains("refusing to overwrite"),
+            "{:?}",
+            app.status
+        );
     }
 
     /// A list of strings is typed into, one entry at a time.
@@ -5426,7 +6083,7 @@ mod tests {
         assert_eq!(held_rows(&plain, 0), vec![serde_json::json!("1.1.1.1")]);
         // Nor is the edit offered. A hint bound to nothing says the
         // feature is there.
-        let footer = draw_pick(&plain, 60, 24, &palette()).0.join("\n");
+        let footer = draw_pick(&mut plain, 60, 24, &palette()).0.join("\n");
         assert!(
             !footer.contains("edit the entry"),
             "the footer offered an edit that does nothing:\n{footer}"
@@ -5807,7 +6464,7 @@ mod tests {
             cursor: 4,
         };
         assert!(!add_free_entry(&mut app, 0, "http"));
-        let drawn = draw_pick(&app, 60, 24, &palette()).0.join("\n");
+        let drawn = draw_pick(&mut app, 60, 24, &palette()).0.join("\n");
         assert!(
             drawn.contains("whole number"),
             "the refusal has to reach the screen:\n{drawn}"
@@ -5844,11 +6501,11 @@ mod tests {
             on_list: true,
             cursor: 0,
         };
-        let wide = draw_pick(&app, 120, 24, &palette()).0.join("\n");
+        let wide = draw_pick(&mut app, 120, 24, &palette()).0.join("\n");
         assert!(wide.contains(long), "cut on a wide pane:\n{wide}");
         // And narrow enough, it is cut at the edge rather than overflowing
         // it - every row of the frame still measures inside the width.
-        let narrow = draw_pick(&app, 44, 24, &palette()).0.join("\n");
+        let narrow = draw_pick(&mut app, 44, 24, &palette()).0.join("\n");
         assert!(!narrow.contains(long), "nothing to clip at 44:\n{narrow}");
         assert!(
             narrow.contains("/tmp/somewhere/deeper"),

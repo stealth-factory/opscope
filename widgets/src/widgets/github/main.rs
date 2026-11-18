@@ -45,6 +45,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 /// The two figures beside PR FLOW, and the only place their wording is

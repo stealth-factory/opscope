@@ -44,6 +44,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: Some("pr"),
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 
 const SORTS: &[&str] = &["updated", "created"];

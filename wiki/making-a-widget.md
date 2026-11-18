@@ -293,6 +293,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: None,
     schema: include_str!("settings.json"),
     catalogues: &[],
+    discover: &[],
 };
 ```
 
@@ -1009,6 +1010,7 @@ So the widget hands the table over instead:
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     ...
     catalogues: &[("rates", LIST_RATES)],
+    discover: &[],
 };
 ```
 
@@ -1053,6 +1055,24 @@ A row whose widget has no figure to offer takes a `null` default, and
 validation has to read that as "no type declared" rather than "null is the
 type wanted" — otherwise the one case config exists for is the one case that
 cannot be configured.
+
+### When the options are discovered at run time
+
+Declare a string array in `settings.json` with `items: "string"`. Supply a
+function with this signature and register it in the widget's `SettingsSpec`.
+
+```rust
+fn discover_properties() -> Result<Vec<tc::Choice>, String> { /* ... */ }
+discover: &[("properties", discover_properties)],
+```
+
+Read the widget's own settings with `load_config()` inside the function.
+Use the widget's existing curl timeout and return an error if listing fails.
+Core runs the function in the background and caches the result while the
+settings screen is open. The picker accepts typed values while listing or
+when there are no results. When choices arrive, it searches both value and
+label and writes only the value when a row is ticked. Use `tab` to focus the
+list and `r` to list again.
 
 ## Config
 

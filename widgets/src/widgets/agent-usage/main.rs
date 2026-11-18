@@ -35,6 +35,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     legacy_section: Some("usage"),
     schema: include_str!("settings.json"),
     catalogues: &[("rates", LIST_RATES)],
+    discover: &[],
 };
 use opscope_core::now;
 
