@@ -20,7 +20,8 @@
 //! the summary, explanation, and preview in its folder; the launcher
 //! compiles those same files rather than restating them.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 use opscope_core as tc;
 
@@ -369,14 +370,120 @@ fn rows_for(w: usize, selected: usize, p: &Palette) -> Vec<String> {
         .collect()
 }
 
+/// The first signal that should end the launcher and its current widget.
+///
+/// The handler only stores it. Forwarding, waiting and screen cleanup belong
+/// to ordinary code below, where allocation and a fallible wait are allowed.
+static CHILD_END_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn note_child_end_signal(sig: libc::c_int) {
+    // The first request decides the status and which signal the child sees.
+    let _ = CHILD_END_SIGNAL.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+}
+
+/// Restore the launcher's usual core handlers when a child leaves normally.
+struct ChildSignalHandlers(Vec<(libc::c_int, libc::sigaction)>);
+
+impl ChildSignalHandlers {
+    fn install() -> std::io::Result<Self> {
+        CHILD_END_SIGNAL.store(0, Ordering::Release);
+        let mut installed = Self(Vec::new());
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = note_child_end_signal as *const () as libc::sighandler_t;
+                // No SA_RESTART: a blocking OS wait, if one is introduced,
+                // must still observe the recorded request promptly.
+                action.sa_flags = 0;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(sig, &action, &mut previous) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                installed.0.push((sig, previous));
+            }
+        }
+        Ok(installed)
+    }
+}
+
+impl Drop for ChildSignalHandlers {
+    fn drop(&mut self) {
+        for (sig, previous) in &self.0 {
+            unsafe { libc::sigaction(*sig, previous, std::ptr::null_mut()); }
+        }
+    }
+}
+
+struct ChildEnd {
+    code: i32,
+    /// A launcher signal ended this run, rather than the widget alone.
+    signal: Option<libc::c_int>,
+}
+
+/// Start a widget and keep ownership of it until the launcher ends.
+///
+/// A plain `status()` let a killed launcher leave its child drawing on the
+/// same tty forever. The supervising loop forwards the first SIGINT, SIGTERM
+/// or SIGHUP, gives the widget one second to run its own clean exit, then
+/// uses SIGKILL. Its status remains the launcher's status, as it was before.
+fn supervise_child(command: &mut std::process::Command) -> std::io::Result<ChildEnd> {
+    let _handlers = ChildSignalHandlers::install()?;
+    // The child normally restores this itself. If it has to be SIGKILLed, the
+    // launcher's own saved copy is the only remaining route back to echo.
+    let original = unsafe {
+        let fd = libc::STDIN_FILENO;
+        let mut ios: libc::termios = std::mem::zeroed();
+        (libc::isatty(fd) == 1 && libc::tcgetattr(fd, &mut ios) == 0).then_some(ios)
+    };
+    let mut child = command.spawn()?;
+    let mut ending: Option<(libc::c_int, Instant)> = None;
+    let mut killed = false;
+    let status = loop {
+        if ending.is_none() {
+            let sig = CHILD_END_SIGNAL.load(Ordering::Acquire);
+            if sig != 0 {
+                unsafe { libc::kill(child.id() as libc::pid_t, sig); }
+                ending = Some((sig, Instant::now() + Duration::from_secs(1)));
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if !killed && ending.is_some_and(|(_, deadline)| Instant::now() >= deadline) {
+            let _ = child.kill();
+            killed = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if ending.is_some() {
+        if let Some(ios) = original {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &ios); }
+        }
+    }
+    Ok(ChildEnd {
+        code: child_exit(status),
+        signal: ending.map(|(sig, _)| sig),
+    })
+}
+
 /// Hand the terminal over, and take it back when the widget exits.
 fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
     keyboard.restore();
     tc::restore_screen();
     match beside(stem) {
         Some(path) => {
-            match std::process::Command::new(&path).status() {
-                Ok(_) => {}
+            match supervise_child(&mut std::process::Command::new(&path)) {
+                Ok(end) => {
+                    if end.signal.is_some() {
+                        // The terminal belonged to the child, including when
+                        // SIGKILL meant it could not run its own restore. Claim
+                        // and leave once here so that case cannot strand 1049.
+                        tc::claim_screen();
+                        tc::restore_screen();
+                        std::process::exit(end.code);
+                    }
+                }
                 Err(e) => {
                     tc::out(&format!("{}: {}\r\n", path.display(), e));
                     tc::flush();
@@ -391,12 +498,10 @@ fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
         }
     }
     // The widget left the terminal however it left it, so take it back
-    // rather than assuming: cbreak again, cursor away again, screen
-    // clear, and mouse reporting on again. restore_screen turned it off on
-    // the way out of the child, and without putting it back the menu's
-    // wheel does nothing after the first launch.
+    // rather than assuming: cbreak and the alternate screen again, cursor
+    // away again, screen clear, and mouse reporting on again. Without this
+    // the menu's wheel does nothing after the first launch.
     keyboard.reclaim();
-    tc::claim_screen();
 }
 
 /// The status a supervisor should see for a launched widget.
@@ -482,9 +587,15 @@ fn main() -> std::process::ExitCode {
             };
             // Replaced rather than wrapped: the menu is for browsing, not
             // something to sit between you and a widget you already named.
-            let status = std::process::Command::new(&path).args(&args[1..]).status();
-            std::process::exit(match status {
-                Ok(s) => child_exit(s),
+            let end = supervise_child(std::process::Command::new(&path).args(&args[1..]));
+            std::process::exit(match end {
+                Ok(end) => {
+                    if end.signal.is_some() {
+                        tc::claim_screen();
+                        tc::restore_screen();
+                    }
+                    end.code
+                }
                 Err(e) => {
                     eprintln!("{}: {}", path.display(), e);
                     2

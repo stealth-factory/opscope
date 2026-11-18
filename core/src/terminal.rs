@@ -1190,17 +1190,10 @@ pub(crate) fn apply_pending_cell_size() {
 
 pub(crate) fn cleanup_signal() {
     // Same hold as the push: the handler can itself be interrupted, and
-    // the flag clear and the pop bytes have to stay one transition.
+    // the flag clear and the pop bytes have to stay one transition. The
+    // shared SCREEN_RESTORE constant owns the synchronization end that
+    // follows this pop; duplicating it here would undo the one-exit-path rule.
     let _hold = block_handled_signals();
-    if SYNC_SUPPORTED.load(Ordering::Acquire) {
-        unsafe {
-            libc::write(
-                libc::STDOUT_FILENO,
-                SYNC_END.as_ptr().cast(),
-                SYNC_END.len(),
-            );
-        }
-    }
     if KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         unsafe {
             libc::write(
@@ -2260,4 +2253,3 @@ pub(crate) static SCHEME_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Ask the terminal to report light/dark switches (mode 2031). Harmless
 /// where it is not known; turned off again in `restore_screen`.
 pub(crate) const SCHEME_REPORTS_ON: &str = "\x1b[?2031h";
-pub(crate) const SCHEME_REPORTS_OFF: &str = "\x1b[?2031l";

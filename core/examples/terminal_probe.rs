@@ -58,7 +58,6 @@ fn main() {
                         .status()
                         .expect("run handoff fixture");
                     keyboard.reclaim();
-                    tc::claim_screen();
                 }
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),

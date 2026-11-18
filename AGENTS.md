@@ -510,6 +510,13 @@ Google sign-in, scopes and wording
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only
 their section name, optional legacy alias, and owned `settings.json`.
+Core owns the one terminal exit path too: `claim_screen` enters 1049, and
+`restore_screen`, `Keyboard::restore` and the signal writer all end with the
+same `SCREEN_RESTORE`. A panic is printed after that restore; a child handoff
+leaves and reclaims the alternate screen. Only a vanished pty skips the write.
+Widgets never construct exit escapes. The launcher forwards SIGINT, SIGTERM
+and SIGHUP to its widget and reaps it before leaving. See
+[`docs/terminal-rendering.md`](docs/terminal-rendering.md#leaving-the-terminal).
 And it owns the command palette (`tc::palette`, `ctrl-k` in every
 widget): one box whose modes — commands, theme picker, widgets — swap in
 place over the frame it was opened on, esc popping one level at a time.
