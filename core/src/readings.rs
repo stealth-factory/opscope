@@ -1222,6 +1222,14 @@ fn adopt_stored_gate(cache: &mut Cache, key: &str) {
         return;
     }
     cache.live.insert(key.to_string(), (row.taken_at, row.value, row.held));
+    // The longer deadline carries the higher strike count. This pane's own
+    // count stays lower otherwise, and the next unnamed limit waits the
+    // short step after the gate lifts.
+    if row.fails == 0 {
+        cache.fails.remove(key);
+    } else {
+        cache.fails.insert(key.to_string(), row.fails);
+    }
 }
 
 /// Where the reading on screen came from, and how fresh it is.
@@ -1818,6 +1826,20 @@ mod tests {
         let (until, why) = gate(&mut c, "core").unwrap();
         assert_eq!(why, "fresh");
         assert!(until < crate::now() + 50.0);
+    }
+
+    #[test]
+    fn adopting_a_longer_gate_keeps_its_strike_count() {
+        let (mut a, mut b) = two_panes("gate-strikes");
+        let key = "gate/core".to_string();
+        let now = crate::now();
+        a.fails.insert(key.clone(), 5);
+        shut(&mut a, "core", now + 600.0, "rate limit spent");
+        b.fails.insert(key.clone(), 1);
+        shut(&mut b, "core", now + 60.0, "too many requests");
+        assert_eq!(b.fails.get(&key).copied(), Some(5));
+        follow(&mut a);
+        assert_eq!(a.fails.get(&key).copied(), Some(5));
     }
 
     #[test]
