@@ -136,11 +136,11 @@ the screen says so instead of calling them today.
 
 **Properties** (when more than one is shown) - one row each: active users
 now, the change against the baseline, sessions and key events today against
-the same weekday, and the poller's state. One property on screen is the
-service account's access, not a filter: the key's `client_email` has to be
-added as Viewer on each property under Property access management. Account
-access management only attaches the email to the first property in the
-account, so the rest never appear.
+the same weekday, and the poller's state. If fewer properties appear than
+expected, check `properties` first: a list there is a filter. With it empty,
+the widget shows what the key's `client_email` can see, so a missing
+property means that email has no Viewer grant on it, either on the property
+or on its account.
 
 ## The baseline
 
@@ -303,8 +303,9 @@ Setup on Google's side - the Cloud project, the APIs, the service account and
 its Viewer access - is [Google setup](../../../../docs/google-setup.md). The
 widget shows only the GA4 properties that key's `client_email` can see. Add
 that email as Viewer on each property under Admin → Property access
-management. Do not add it under Account access management: that only
-attaches the email to the first property in the account, and the rest stay
-invisible. A personal Google login that can see more does not change the
-list. Quit and start the widget again after granting access; refresh
-re-reads the properties it already found. The settings screen opens with `,`.
+management. A Viewer grant under Account access management covers every
+property in that account instead. A personal Google login that can see more
+does not change the list. Quit and start the widget again after granting
+access; refresh re-reads the properties it already found. If `properties`
+lists ids, add the new id there too, or empty the list to use discovery,
+before restarting. The settings screen opens with `,`.

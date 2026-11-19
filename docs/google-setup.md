@@ -66,9 +66,11 @@ for this project; there is no keyless route that works on a wall display.
 **Google Analytics (GA4).** In GA, **Admin → Property access management →
 + → Add users**, enter the service account's email and give it **Viewer**.
 Viewer reads reports and nothing else. Repeat for each property the widget
-should show. Do not add the email under Account access management: that only
-attaches it to the first property in the account, and the rest stay
-invisible. Leaving a property out is reported as
+should show. A Viewer grant under Account access management covers every
+property in that account instead, so use it only if the widget should see
+all of them. With `properties` empty, a property the email cannot see is
+simply not listed. A property id listed in `properties` without a grant is
+reported as
 `403 no access: add <email> as Viewer under Property access management`.
 
 **Search Console.** In Search Console, pick the property, **Settings →
