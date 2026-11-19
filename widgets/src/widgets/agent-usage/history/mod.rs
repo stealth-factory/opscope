@@ -201,6 +201,29 @@ impl Observation {
     pub fn has_stable_id(&self) -> bool {
         !self.account_id.is_empty()
     }
+
+    /// This observation as the unified plan's copy is written (§3.4): the
+    /// same readings, with a vendor's own key for the weekly pool both
+    /// vendors draw on renamed to the plan's. Grok calls it `credits` on
+    /// its own plan and keeps that key when linked, so its own history is
+    /// one pool; under SpaceXSI it is the pool Cursor's reading fills.
+    pub fn for_spacexsi(&self) -> Observation {
+        let rename = |key: &str| -> Option<&'static str> {
+            (self.provider == "grok" && key == "credits").then_some(crate::shared::SPACEXSI_POOL_KEY)
+        };
+        let mut o = self.clone();
+        for lane in &mut o.lanes {
+            if let Some(k) = rename(&lane.pool_key) {
+                lane.pool_key = k.into();
+            }
+        }
+        for c in &mut o.charges {
+            if let Some(k) = rename(&c.pool_key) {
+                c.pool_key = k.into();
+            }
+        }
+        o
+    }
 }
 
 fn tc_account_tag(id: &str) -> String {

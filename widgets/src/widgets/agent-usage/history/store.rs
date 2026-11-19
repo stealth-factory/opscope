@@ -530,9 +530,10 @@ impl History {
             write_lanes(&tx, account, &o.lanes, sx, &mut refold)?;
             // On the unified plan the lanes are kept twice (§3.4): under the
             // vendor, and under SpaceXSI, where its cycles are derived.
-            if let Some(sk) = &o.spacexsi_account {
+            let copy = o.spacexsi_account.as_ref().map(|_| o.for_spacexsi());
+            if let (Some(sk), Some(u)) = (&o.spacexsi_account, &copy) {
                 let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
-                write_lanes(&tx, unified, &o.lanes, sx, &mut refold)?;
+                write_lanes(&tx, unified, &u.lanes, sx, &mut refold)?;
             }
             if let Some(b) = &o.bank {
                 // A bank event runs from the reading before this one, and
@@ -561,12 +562,10 @@ impl History {
             // and per-request charges - under the vendor and, on the unified
             // plan, under SpaceXSI as its lanes are. A link that is new folds
             // the overage pool's spans again from the start.
-            let mut owners = vec![account];
-            if let Some(sk) = &o.spacexsi_account {
-                owners.push(upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?);
-            }
-            for &owner in &owners {
-                overage::write_links_and_charges(&tx, owner, o, &mut refold)?;
+            overage::write_links_and_charges(&tx, account, o, &mut refold)?;
+            if let (Some(sk), Some(u)) = (&o.spacexsi_account, &copy) {
+                let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
+                overage::write_links_and_charges(&tx, unified, u, &mut refold)?;
             }
             // The Codex backfill is not written here: its rollouts can run to
             // gigabytes, so they are read off this transaction and written
@@ -2181,6 +2180,25 @@ mod tests {
         assert_eq!(unified.len(), 1);
         assert_eq!(vendor[0].spacexsi.as_deref(), Some("shared"));
         assert_eq!(h.since("spacexsi", &key), Some(5000.0));
+    }
+
+    #[test]
+    fn grok_keeps_one_vendor_pool_and_its_unified_copy_is_the_shared_weekly_pool() {
+        let p = temp("grok-link");
+        let mut h = History::open(&p).unwrap();
+        let mut o = obs(vec![lane("credits", 40.0, 5000.0, 600000.0, WEEK)]);
+        o.provider = "grok".into();
+        h.record(&[o.clone()], &Thresholds::default(), 5000.0).unwrap();
+        // Linked to the unified plan: same vendor pool, and SpaceXSI's copy
+        // in the pool Cursor's reading of it fills.
+        o.lanes = vec![lane("credits", 45.0, 9000.0, 600000.0, WEEK)];
+        o.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        o.spacexsi_account = Some(o.account_key());
+        h.record(&[o.clone()], &Thresholds::default(), 9000.0).unwrap();
+        let key = o.account_key();
+        assert_eq!(h.samples("grok", &key, "credits").unwrap().len(), 2);
+        assert!(h.samples("grok", &key, "weekly_pool").unwrap().is_empty());
+        assert_eq!(h.samples("spacexsi", &key, "weekly_pool").unwrap().len(), 1);
     }
 
     #[test]
