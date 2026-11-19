@@ -44,7 +44,7 @@ use super::fold::{
     self, Cycle, CycleModel, EndReason, FoldInput, PlanChange, Role, Sample, Source, StartSource, Thresholds,
 };
 use super::{BankReading, Observation, WatchReading, backfill, overage, resets};
-use crate::shared::Lane;
+use crate::shared::{Lane, Spacexsi};
 
 /// The file's name under `tc::state_dir()`.
 pub const FILE: &str = "agent-usage-history.sqlite";
@@ -489,6 +489,13 @@ impl History {
         tx.commit().map_err(sql)
     }
 
+    /// The key the unified plan's copy of `o` is kept under. See
+    /// [`spacexsi_key`].
+    pub fn spacexsi_key_of(&self, o: &Observation) -> Option<String> {
+        let own = self.account_key_of(o);
+        spacexsi_key(&self.conn, o, &own).ok().flatten()
+    }
+
     /// The key `o` is stored under. See [`key_of`].
     pub fn account_key_of(&self, o: &Observation) -> String {
         key_of(&self.conn, o).unwrap_or_else(|_| o.account_key())
@@ -526,12 +533,20 @@ impl History {
                 meta_set(&tx, &last_account(o), &key)?;
             }
             let account = upsert_account(&tx, &o.provider, &key, &o.heading, now)?;
+            // Where a shared plan was keyed this pass, remember it for a
+            // pass that cannot key it (`spacexsi_key`).
+            if let (Some(Spacexsi::Shared), Some(sk)) = (o.spacexsi, &o.spacexsi_account) {
+                if meta_get(&tx, &partner(o, &key))?.as_deref() != Some(sk.as_str()) {
+                    meta_set(&tx, &partner(o, &key), sk)?;
+                }
+            }
+            let spacexsi_account = spacexsi_key(&tx, o, &key)?;
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, &mut refold)?;
             // On the unified plan the lanes are kept twice (§3.4): under the
             // vendor, and under SpaceXSI, where its cycles are derived.
-            let copy = o.spacexsi_account.as_ref().map(|_| o.for_spacexsi());
-            if let (Some(sk), Some(u)) = (&o.spacexsi_account, &copy) {
+            let copy = spacexsi_account.as_ref().map(|_| o.for_spacexsi());
+            if let (Some(sk), Some(u)) = (&spacexsi_account, &copy) {
                 let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
                 write_lanes(&tx, unified, &u.lanes, sx, &mut refold)?;
             }
@@ -563,7 +578,7 @@ impl History {
             // plan, under SpaceXSI as its lanes are. A link that is new folds
             // the overage pool's spans again from the start.
             overage::write_links_and_charges(&tx, account, o, &mut refold)?;
-            if let (Some(sk), Some(u)) = (&o.spacexsi_account, &copy) {
+            if let (Some(sk), Some(u)) = (&spacexsi_account, &copy) {
                 let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
                 overage::write_links_and_charges(&tx, unified, u, &mut refold)?;
             }
@@ -745,6 +760,26 @@ fn key_of(c: &Connection, o: &Observation) -> Result<String, String> {
         .map(Option::flatten)
         .map_err(sql)?;
     Ok(last.unwrap_or_else(|| o.account_key()))
+}
+
+/// The `meta` key holding the unified plan's key a vendor account shared
+/// it under, the last time both vendors were read.
+fn partner(o: &Observation, own: &str) -> String {
+    format!("spacexsi_partner:{}:{own}", o.provider)
+}
+
+/// The key the unified plan's copy of `o` is written under: the one the
+/// pass named, or for a shared account read without its partner this pass,
+/// the one the two last shared. `None` when there is none to be had: the
+/// copy is then not written, rather than started under a key of its own.
+fn spacexsi_key(c: &Connection, o: &Observation, own: &str) -> Result<Option<String>, String> {
+    if o.spacexsi_account.is_some() || o.spacexsi != Some(Spacexsi::Shared) {
+        return Ok(o.spacexsi_account.clone());
+    }
+    c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [partner(o, own)], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)
 }
 
 /// What the derived tables were folded with: the thresholds, as text.
@@ -2199,6 +2234,43 @@ mod tests {
         assert_eq!(h.samples("grok", &key, "credits").unwrap().len(), 2);
         assert!(h.samples("grok", &key, "weekly_pool").unwrap().is_empty());
         assert_eq!(h.samples("spacexsi", &key, "weekly_pool").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_shared_grok_read_without_cursor_keeps_to_the_plans_one_history() {
+        let p = temp("shared-grok");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let shared = Some(crate::shared::Spacexsi::Shared);
+        let mut cursor = obs(vec![lane("weekly_pool", 40.0, 5000.0, 600000.0, WEEK)]);
+        cursor.provider = "cursor".into();
+        cursor.account_id = "cursor-acct".into();
+        cursor.spacexsi = shared;
+        cursor.spacexsi_account = Some(cursor.account_key());
+        let mut grok = obs(vec![lane("credits", 41.0, 5000.0, 600000.0, WEEK)]);
+        grok.provider = "grok".into();
+        grok.account_id = "grok-acct".into();
+        grok.spacexsi = shared;
+        grok.spacexsi_account = cursor.spacexsi_account.clone();
+        h.record(&[cursor.clone(), grok.clone()], &t, 5000.0).unwrap();
+        // Cursor not read this pass: Grok names no plan key of its own.
+        grok.lanes = vec![lane("credits", 48.0, 9000.0, 600000.0, WEEK)];
+        grok.spacexsi_account = None;
+        h.record(&[grok.clone()], &t, 9000.0).unwrap();
+        let plan = cursor.account_key();
+        let accounts: i64 = h
+            .conn
+            .query_row("SELECT COUNT(*) FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 1, "the unified plan's history forked");
+        let pcts: Vec<f64> = h
+            .samples("spacexsi", &plan, "weekly_pool")
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.pct)
+            .collect();
+        assert_eq!(pcts, vec![40.0, 48.0]);
+        assert_eq!(h.spacexsi_key_of(&grok), Some(plan));
     }
 
     #[test]

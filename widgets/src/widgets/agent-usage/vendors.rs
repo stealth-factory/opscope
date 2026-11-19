@@ -533,7 +533,11 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         }
         o.spacexsi_account = match place {
             Spacexsi::No => None,
-            Spacexsi::Shared => cursor_key.clone().or_else(|| Some(o.account_key())),
+            // Keyed by Cursor's account. With no Cursor reading this pass
+            // there is no key both vendors carry, and Grok's own would start
+            // a second history of the plan: the store writes the copy under
+            // the key it last saw the two share, or not at all.
+            Spacexsi::Shared => cursor_key.clone(),
             Spacexsi::Alone | Spacexsi::Separate => Some(o.account_key()),
         };
         out.push(o);
@@ -1252,6 +1256,26 @@ mod tests {
 
     fn present(names: &[&str]) -> HashMap<String, Presence> {
         names.iter().map(|n| (n.to_string(), Presence { present: true })).collect()
+    }
+
+    #[test]
+    fn a_shared_grok_with_no_cursor_reading_names_no_spacexsi_account_of_its_own() {
+        // Shared is keyed by Cursor; without Cursor's reading this pass,
+        // Grok's own key would start a second SpaceXSI history. The store
+        // writes the copy under the key it last saw them share.
+        let mut s = State {
+            grok: crate::grok::Data::unified_fixture(),
+            installed: present(&["grok"]),
+            ..State::default()
+        };
+        s.grok.spacexsi = Spacexsi::Shared;
+        let obs = observations(&s, now());
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].spacexsi, Some(Spacexsi::Shared));
+        assert_eq!(obs[0].spacexsi_account, None);
+        // Alone, it is the plan's only vendor and keys it itself.
+        s.grok.spacexsi = Spacexsi::Alone;
+        assert!(observations(&s, now())[0].spacexsi_account.is_some());
     }
 
     #[test]

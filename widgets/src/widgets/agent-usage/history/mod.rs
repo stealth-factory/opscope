@@ -426,8 +426,8 @@ impl Recorder {
             }
             for o in obs {
                 // A unified account's tab draws the plan's own history.
-                let at = match &o.spacexsi_account {
-                    Some(key) => h.since("spacexsi", key),
+                let at = match h.spacexsi_key_of(o) {
+                    Some(key) => h.since("spacexsi", &key),
                     None => h.since(&o.provider, &h.account_key_of(o)),
                 };
                 if let Some(at) = at {
