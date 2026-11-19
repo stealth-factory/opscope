@@ -28,7 +28,8 @@
 //! * Opens a cycle at the first sample, starting where the server's reset
 //!   instant and window put it (`reset_at - window_secs`).
 //! * Closes it on schedule (§5.4 rule 1) when a sample lands at or past its
-//!   `ends_at` (less [`tolerance`]); the new cycle's model is read off that
+//!   `ends_at` (less [`tolerance`], and never while it still states that
+//!   same end: [`rolled_over`]); the new cycle's model is read off that
 //!   boundary (§5.1): a start equal to the old end is `contiguous`, a later
 //!   one `use_anchored`.
 //! * Closes it on a plan change, a limit change and a window change
@@ -762,7 +763,7 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
         }
 
         // Rule 1: the scheduled end. Holds whatever the percentage did.
-        let due = b.cycle.ends_at.is_some_and(|end| s.at >= end - tol);
+        let due = b.cycle.ends_at.is_some_and(|end| rolled_over(end, s, tol, tol));
         // Rules 2 and 3: a change of plan, limit or window between readings.
         let plan_changed = plan_change_between(plans, p.at, s.at).map(|c| c.at);
         let limit_changed = differs(p.limit, s.limit, 1e-9);
@@ -1060,6 +1061,28 @@ mod tests {
                 assert_eq!(c.exhausted_at, None);
             }
         }
+    }
+
+    #[test]
+    fn a_reading_inside_the_tolerance_that_states_the_same_end_is_not_a_rollover() {
+        // Weekly tolerance is about 1.7 hours. The reading an hour before
+        // the end still states that end: it belongs to this week.
+        let a = 1_000_000.0;
+        let e = a + WEEK;
+        let samples = vec![
+            s(a + H, 10.0, Some(e), Some(WEEK)),
+            s(e - 2.0 * H, 50.0, Some(e), Some(WEEK)),
+            s(e - H, 95.0, Some(e), Some(WEEK)),
+            s(e + H, 1.0, Some(e + WEEK), Some(WEEK)),
+        ];
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        let c = &out.cycles[0];
+        assert_eq!(c.peak_pct, Some(95.0));
+        assert_eq!(c.closed_at, Some(e));
+        assert!(!c.end_is_lower_bound);
+        assert_eq!(out.cycles[1].starts_at, e);
+        assert_eq!(out.cycles[1].peak_pct, Some(1.0));
     }
 
     #[test]

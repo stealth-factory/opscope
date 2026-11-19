@@ -32,7 +32,8 @@
 //! Then, in the order of §5.4:
 //!
 //! 1. **Scheduled end**: `N` at or past the cycle's end less [`tolerance`]
-//!    is a rollover, whatever the figure did. If the gap also holds a
+//!    is a rollover, whatever the figure did - unless `N` still states
+//!    that same end ([`fold::rolled_over`]). If the gap also holds a
 //!    discontinuity - a credit spent, or a new window that began before the
 //!    old one was due to end - a reset is recorded too, with effect
 //!    `unknown`: the two cannot be separated.
@@ -290,7 +291,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
                     n,
                     watching,
                     tol,
-                    due_end: end.filter(|e| n.at >= e - tol),
+                    due_end: end.filter(|e| fold::rolled_over(*e, n, tol, tol)),
                     plan_changed: fold::plan_change_between(input.plans, p.at, n.at).is_some(),
                     limit_changed: differs(p.limit, n.limit, 1e-9),
                     window_changed: differs(p.window_secs, n.window_secs, 1.0),
@@ -730,6 +731,21 @@ mod tests {
             next_ordinal: 1,
             thresholds: Thresholds::default(),
         })
+    }
+
+    #[test]
+    fn a_reading_inside_the_tolerance_that_states_the_same_end_is_not_a_rollover() {
+        let e = A + WEEK;
+        let samples = vec![wk(A + H, 10.0), wk(e - 2.0 * H, 50.0), wk(e - H, 95.0), {
+            s(e + H, 1.0, Some(e + WEEK), Some(WEEK))
+        }];
+        let i = input(&samples, &[], &[]);
+        assert_eq!(
+            verdicts(&i),
+            vec![Verdict::Steady, Verdict::Steady, Verdict::Rollover],
+            "{:#?}",
+            judge(&i)
+        );
     }
 
     #[test]
