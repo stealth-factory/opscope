@@ -723,6 +723,37 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
 
     for s in input.samples {
         let Some(b) = cur.as_mut() else {
+            // Folding on from a kept cycle that closed for something other
+            // than its schedule: the sample after it is the one that closed
+            // it, and the next cycle starts where it closed, as a fold over
+            // everything opened it - never back at the server's start, which
+            // would overlap the kept cycle.
+            let seeded = input.prev.and_then(|p| {
+                let at = p.closed_at?;
+                let (source, seen) = match p.end_reason? {
+                    EndReason::PlanChanged | EndReason::LimitChanged => (StartSource::Inferred, false),
+                    EndReason::WindowChanged => (StartSource::Server, false),
+                    EndReason::Reset => (StartSource::Reset, true),
+                    EndReason::Scheduled | EndReason::PoolGone => return None,
+                };
+                Some((at, source, seen))
+            });
+            if let Some((start, source, seen)) = seeded {
+                let mut b = Building::new(Cycle::open(
+                    ordinal,
+                    start,
+                    s.reset_at,
+                    s.window_secs,
+                    CycleModel::Contiguous,
+                    source,
+                ));
+                ordinal += 1;
+                observed_model.push(seen);
+                b.observe(s, plans);
+                cur = Some(b);
+                prev_sample = Some(s);
+                continue;
+            }
             // The first cycle of this fold.
             let (start, mut source) = match (s.reset_at, s.window_secs) {
                 (Some(r), Some(w)) if w > 0.0 => (r - w, StartSource::Server),
@@ -1498,6 +1529,101 @@ mod tests {
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[1..].to_vec());
+    }
+
+    /// Fold `samples` once, then again from each closed, observed cycle
+    /// the store could keep, and check the tail lands where the whole did.
+    fn incremental_matches_full(samples: &[Sample], plans: &[PlanChange]) {
+        let whole = run_with(samples, plans, &[], Role::Included);
+        for (j, kept) in whole.cycles.iter().enumerate() {
+            let (Some(_), Some(last)) = (kept.closed_at, kept.last_obs_at) else {
+                continue;
+            };
+            let rest: Vec<Sample> = samples.iter().filter(|x| x.at > last).cloned().collect();
+            let tail = fold(&FoldInput {
+                role: Role::Included,
+                samples: &rest,
+                plans,
+                resets: &[],
+                prev: Some(kept),
+                next_ordinal: kept.ordinal + 1,
+                thresholds: Thresholds::default(),
+            });
+            assert_eq!(
+                tail.cycles,
+                whole.cycles[j + 1..].to_vec(),
+                "kept cycle {}\nsamples {samples:#?}\nplans {plans:?}",
+                kept.ordinal
+            );
+        }
+    }
+
+    #[test]
+    fn folding_on_from_a_cycle_a_plan_change_closed_matches_folding_at_once() {
+        let a = 1_000_000.0;
+        let day = 24.0 * H;
+        let samples: Vec<Sample> = (1..=6)
+            .map(|d| s(a + d as f64 * day, 10.0 * d as f64, Some(a + WEEK), Some(WEEK)))
+            .collect();
+        let plans = vec![
+            PlanChange { at: a, plan: "pro".into() },
+            PlanChange {
+                at: a + 2.5 * day,
+                plan: "max".into(),
+            },
+        ];
+        let whole = run_with(&samples, &plans, &[], Role::Included);
+        assert_eq!(whole.cycles[1].starts_at, a + 2.5 * day);
+        assert_eq!(whole.cycles[1].start_source, StartSource::Inferred);
+        incremental_matches_full(&samples, &plans);
+    }
+
+    #[test]
+    fn folding_on_from_any_kept_cycle_matches_folding_at_once() {
+        // Randomised sequences of 5h windows: contiguous and use-anchored
+        // rollovers, gaps, plan and limit changes.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..300 {
+            let a = 1_000_000.0;
+            let mut samples = Vec::new();
+            let mut plans = vec![PlanChange { at: a - H, plan: "p0".into() }];
+            let mut start = a;
+            let mut at = a + 60.0;
+            let mut limit = 100.0;
+            for _ in 0..(3 + rnd(5)) {
+                let end = start + W5;
+                let mut pct = 0.0;
+                while at < end {
+                    pct += rnd(20) as f64;
+                    let mut x = s(at, pct.min(100.0), Some(end), Some(W5));
+                    x.limit = Some(limit);
+                    samples.push(x);
+                    at += (10 + rnd(110)) as f64 * 60.0;
+                    match rnd(30) {
+                        0 => plans.push(PlanChange {
+                            at: at - 30.0,
+                            plan: format!("p{}", plans.len()),
+                        }),
+                        1 => limit += 50.0,
+                        _ => {}
+                    }
+                }
+                // Contiguous, use-anchored after idle, or a whole window unseen.
+                start = match rnd(3) {
+                    0 => end,
+                    1 => at + (rnd(60) as f64) * 60.0,
+                    _ => end + W5,
+                };
+                at = at.max(start + 60.0);
+            }
+            incremental_matches_full(&samples, &plans);
+        }
     }
 
     #[test]
