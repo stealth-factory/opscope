@@ -243,6 +243,9 @@ fn damaged(e: &rusqlite::Error) -> bool {
 struct Failure {
     error: OpenError,
     damaged: bool,
+    /// The device and inode of the file that failed, so it is that file,
+    /// and no other, that is set aside.
+    identity: Option<(u64, u64)>,
 }
 
 impl Failure {
@@ -250,6 +253,7 @@ impl Failure {
         Failure {
             damaged: damaged(&e),
             error: OpenError::Failed(e.to_string()),
+            identity: None,
         }
     }
 
@@ -257,6 +261,7 @@ impl Failure {
         Failure {
             error: OpenError::Failed(why),
             damaged: false,
+            identity: None,
         }
     }
 }
@@ -270,19 +275,78 @@ pub struct History {
     pub notice: Option<String>,
 }
 
-/// The file renamed out of the way: `<name>.damaged-<epoch>`, and its WAL
-/// and shared-memory files beside it under the same stem, so none of them
-/// is replayed into the new file.
-fn set_aside(path: &Path, at: i64) -> Result<PathBuf, String> {
-    let aside = PathBuf::from(format!("{}.damaged-{at}", path.display()));
-    std::fs::rename(path, &aside).map_err(|e| format!("cannot set the damaged file aside: {e}"))?;
+/// The device and inode of the file at `path`, or `None` when there is none.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Move `from` to `to` without ever replacing what `to` holds: a hard link
+/// that fails when `to` exists, then the old name removed. Where links are
+/// not supported, a rename to a name checked free under the lock.
+fn move_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => std::fs::remove_file(from),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) if !to.exists() => std::fs::rename(from, to),
+        Err(e) => Err(e),
+    }
+}
+
+/// The damaged file moved out of the way: `<name>.damaged-<epoch>-<pid>-<n>`,
+/// with its WAL and shared-memory files beside it under the same stem, so
+/// none of them is replayed into the new file. Never overwrites an earlier
+/// set-aside.
+///
+/// Two panes can find the same file damaged at once, so it is done under an
+/// exclusive lock on `<name>.lock`, and only while the file at `path` is still
+/// the one that failed (`failed`, its device and inode when it was opened):
+/// otherwise another pane has already set it aside and started a new file,
+/// and `None` says to open that one instead of moving it.
+fn set_aside(path: &Path, at: i64, failed: Option<(u64, u64)>) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot lock the damaged file: {e}"))?;
+    lock.lock().map_err(|e| format!("cannot lock the damaged file: {e}"))?;
+    let now = identity(path);
+    if now.is_none() || (failed.is_some() && now != failed) {
+        return Ok(None);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let mut n = 0u32;
+    let aside = loop {
+        let name = PathBuf::from(format!(
+            "{}.damaged-{at}-{}-{nanos}{}",
+            path.display(),
+            std::process::id(),
+            if n == 0 { String::new() } else { format!("-{n}") }
+        ));
+        match move_new(path, &name) {
+            Ok(()) => break name,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+            Err(e) => return Err(format!("cannot set the damaged file aside: {e}")),
+        }
+    };
     for side in ["-wal", "-shm"] {
         let from = PathBuf::from(format!("{}{side}", path.display()));
         if from.exists() {
-            let _ = std::fs::rename(&from, PathBuf::from(format!("{}{side}", aside.display())));
+            // A side file that cannot follow is removed rather than left to
+            // be replayed into the new file; the main file is already kept.
+            let to = PathBuf::from(format!("{}{side}", aside.display()));
+            if move_new(&from, &to).is_err() {
+                let _ = std::fs::remove_file(&from);
+            }
         }
     }
-    Ok(aside)
+    Ok(Some(aside))
 }
 
 impl History {
@@ -298,7 +362,16 @@ impl History {
                         OpenError::Failed(why) => why.clone(),
                         OpenError::Newer(v) => format!("version {v}"),
                     };
-                    let aside = set_aside(path, opscope_core::now() as i64).map_err(OpenError::Failed)?;
+                    let Some(aside) =
+                        set_aside(path, opscope_core::now() as i64, f.identity).map_err(OpenError::Failed)?
+                    else {
+                        // Another pane set it aside first: open what it made.
+                        tries += 1;
+                        if tries >= OPEN_TRIES {
+                            return Err(f.error);
+                        }
+                        continue;
+                    };
                     let mut h = History::open_once(path).map_err(|f| f.error)?;
                     let name = aside
                         .file_name()
@@ -338,6 +411,16 @@ impl History {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => true,
             Err(e) => return Err(Failure::other(format!("cannot create it: {e}"))),
         };
+        // The file as it is now, before SQLite opens it: what a damaged
+        // verdict below is about.
+        let id = identity(path);
+        History::open_conn(path, existed).map_err(|mut f| {
+            f.identity = id;
+            f
+        })
+    }
+
+    fn open_conn(path: &Path, existed: bool) -> Result<History, Failure> {
         let conn = Connection::open(path).map_err(Failure::from_sql)?;
         conn.busy_timeout(BUSY).map_err(Failure::from_sql)?;
         // The version first: a newer file is left exactly as it is, which
@@ -349,6 +432,7 @@ impl History {
             return Err(Failure {
                 error: OpenError::Newer(version),
                 damaged: false,
+                identity: None,
             });
         }
         // A file copied in, or left by an older build, keeps whatever mode
@@ -365,6 +449,7 @@ impl History {
             return Err(Failure {
                 error: OpenError::Failed(format!("quick_check said {ok}")),
                 damaged: true,
+                identity: None,
             });
         }
         let _: String = conn
@@ -652,6 +737,7 @@ fn migrate(conn: &Connection) -> Result<(), Failure> {
             return Err(Failure {
                 error: OpenError::Newer(v),
                 damaged: false,
+                identity: None,
             });
         }
         if v == SCHEMA_VERSION {
@@ -1412,6 +1498,55 @@ mod tests {
         drop(h);
         // Opened again, it is healthy and says nothing.
         assert_eq!(History::open(&p).unwrap().notice, None);
+    }
+
+    fn aside_files(p: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".damaged-"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn two_set_asides_in_one_second_never_overwrite_each_other() {
+        let p = temp("aside-twice");
+        std::fs::write(&p, b"first damaged copy").unwrap();
+        std::fs::write(format!("{}-wal", p.display()), b"first wal").unwrap();
+        set_aside(&p, 1_000, None).unwrap().unwrap();
+        std::fs::write(&p, b"second damaged copy").unwrap();
+        set_aside(&p, 1_000, None).unwrap().unwrap();
+        let aside = aside_files(&p);
+        let kept: Vec<Vec<u8>> = aside
+            .iter()
+            .filter(|n| !n.ends_with("-wal"))
+            .map(|n| std::fs::read(p.parent().unwrap().join(n)).unwrap())
+            .collect();
+        assert!(kept.contains(&b"first damaged copy".to_vec()), "{aside:?}");
+        assert!(kept.contains(&b"second damaged copy".to_vec()), "{aside:?}");
+        assert_eq!(aside.iter().filter(|n| n.ends_with("-wal")).count(), 1, "{aside:?}");
+    }
+
+    #[test]
+    fn a_pane_late_to_a_damaged_file_never_moves_the_new_one_aside() {
+        let p = temp("aside-late");
+        std::fs::write(&p, b"damaged").unwrap();
+        // Both panes found this file damaged.
+        let failed = identity(&p);
+        // The first sets it aside and starts a new file.
+        assert!(set_aside(&p, 1_000, failed).unwrap().is_some());
+        let h = History::open(&p).unwrap();
+        assert_eq!(h.notice, None);
+        drop(h);
+        let fresh = identity(&p);
+        // The second, late, finds a different file there and leaves it.
+        assert_eq!(set_aside(&p, 1_000, failed).unwrap(), None);
+        assert_eq!(identity(&p), fresh);
+        assert_eq!(aside_files(&p).len(), 1);
+        assert_eq!(History::open(&p).unwrap().count("sample"), 0);
     }
 
     #[test]
