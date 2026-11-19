@@ -416,6 +416,44 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     out
 }
 
+/// Lanes the history keeps and no screen draws (OPS-307): the premium
+/// requests past each metered pool's entitlement, `overage_count`, counted
+/// in requests on that pool's own monthly cycle. Not a summary lane - there
+/// is no ceiling for it to be a percentage of. Keyed `<pool>:overage`, so
+/// the history links it to the one pool it is overage of.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let Some(live) = d.live.as_ref() else {
+        return Vec::new();
+    };
+    let stamp = iso_epoch(&text(live, "quota_reset_date_utc"));
+    let span = quota_window(stamp).map(|(_, secs)| secs);
+    let mut out = Vec::new();
+    for (key, snap) in live["quota_snapshots"].as_object().into_iter().flatten() {
+        if snap["unlimited"].as_bool().unwrap_or(false) || snap["percent_remaining"].is_null() {
+            continue;
+        }
+        // Absent is "not sent", never zero.
+        let Some(over) = snap["overage_count"].as_f64().filter(|n| n.is_finite()) else {
+            continue;
+        };
+        out.push(Lane {
+            label: format!("{} over", key.replace('_', " ").replace("interactions", "reqs")),
+            pct: f64::NAN,
+            window_secs: span,
+            reset: stamp,
+            stale: d.live_kept.is_some(),
+            pool_key: format!("{key}:overage"),
+            unit: Unit::Requests,
+            role: PoolRole::Overage,
+            used: Some(over),
+            limit: None,
+            fetched_at: d.fetched_at,
+            ..Lane::default()
+        });
+    }
+    out
+}
+
 /// What the history needs from Copilot beyond its lanes: the GitHub login
 /// the quota belongs to, the plan, and why the call is not answering.
 pub fn history_facts(d: &Data) -> crate::history::Facts {

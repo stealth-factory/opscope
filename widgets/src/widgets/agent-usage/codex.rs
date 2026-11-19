@@ -1340,6 +1340,38 @@ pub(crate) fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank)
     soonest
 }
 
+/// Lanes the history keeps and no screen draws (OPS-307): the live credit
+/// balance, which has no ceiling and no cycle. A balance with no ceiling
+/// states what is left as its `limit`. Nothing for an unlimited balance,
+/// and nothing from the rollout snapshot, which is not this account's
+/// reading of now.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let Some(credits) = d.live.as_ref().map(|l| &l["credits"]).filter(|c| c.is_object()) else {
+        return Vec::new();
+    };
+    if credits["unlimited"].as_bool().unwrap_or(false) {
+        return Vec::new();
+    }
+    let balance = match &credits["balance"] {
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        v => v.as_f64(),
+    };
+    let Some(balance) = balance.filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "credits".into(),
+        pct: f64::NAN,
+        stale: false,
+        pool_key: "credits".into(),
+        unit: Unit::Credits,
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: d.fetched_at,
+        ..Lane::default()
+    }]
+}
+
 /// Plan type and a credit balance - all Codex publishes about the plan.
 ///
 /// Three lines rather than the section Copilot and Cursor get, because three

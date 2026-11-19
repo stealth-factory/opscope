@@ -263,7 +263,8 @@ impl Failure {
 
 /// The open history file.
 pub struct History {
-    conn: Connection,
+    /// `overage` reads it for phase 3's overage helpers.
+    pub(super) conn: Connection,
     pub path: PathBuf,
     /// Set when opening set a damaged file aside, to be said once.
     pub notice: Option<String>,
@@ -475,25 +476,15 @@ impl History {
                 write_watch(&tx, account, w)?;
             }
             // Phase 4's seams: which included pools an overage pool serves,
-            // and per-request charges.
-            for (over, inc) in overage::links_of(o) {
-                let (Some(oi), Some(ii)) = (pool_id(&tx, account, &over)?, pool_id(&tx, account, &inc)?) else {
-                    continue;
-                };
-                tx.execute(
-                    "INSERT OR IGNORE INTO pool_link(overage_id, included_id) VALUES (?1, ?2)",
-                    params![oi, ii],
-                )
-                .map_err(sql)?;
+            // and per-request charges - under the vendor and, on the unified
+            // plan, under SpaceXSI as its lanes are. A link that is new folds
+            // the overage pool's spans again from the start.
+            let mut owners = vec![account];
+            if let Some(sk) = &o.spacexsi_account {
+                owners.push(upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?);
             }
-            for c in overage::events_of(o) {
-                if let Some(pid) = pool_id(&tx, account, &c.pool_key)? {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO overage_event(overage_id, event_key, at, amount, model) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![pid, c.event_key, c.at, c.amount, c.model],
-                    )
-                    .map_err(sql)?;
-                }
+            for &owner in &owners {
+                overage::write_links_and_charges(&tx, owner, o, &mut refold)?;
             }
             // Phase 5's seam: the one-off Codex replay.
             if o.provider == "codex" {
@@ -526,6 +517,9 @@ impl History {
                 refold.push((pool, at));
             }
         }
+        // An included pool folded again moves what its overage pools'
+        // spans were exhausted against.
+        overage::refold_linked(&tx, &mut refold)?;
         // One re-fold per pool, from its earliest point.
         refold.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         refold.dedup_by_key(|x| x.0);
@@ -1181,8 +1175,9 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         )
         .map_err(sql)?;
     }
-    // Phase 4's seam: spend spans on an overage pool's own clock.
-    if role == Role::Overage {
+    // Phase 4's seam: spend spans on an overage pool's own clock, and a
+    // balance's spend.
+    if matches!(role, Role::Overage | Role::Balance) {
         let linked: Vec<i64> = {
             let mut st = tx
                 .prepare("SELECT included_id FROM pool_link WHERE overage_id = ?1")
@@ -1192,7 +1187,18 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         };
         let mut loaded: Vec<(i64, Vec<Sample>)> = Vec::new();
         for inc in linked {
-            loaded.push((inc, load_samples(tx, inc, after)?));
+            // From the reading in force at the re-fold point, not after it.
+            let from: Option<f64> = match after {
+                Some(at) => tx
+                    .query_row(
+                        "SELECT MAX(at) FROM sample WHERE pool_id = ?1 AND at <= ?2",
+                        params![inc, at],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql)?,
+                None => None,
+            };
+            loaded.push((inc, load_samples(tx, inc, from.map(|f| f - 1e-3).or(after))?));
         }
         let included: Vec<overage::Included> = loaded
             .iter()
@@ -1201,7 +1207,10 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
                 samples: s,
             })
             .collect();
-        for span in overage::spans(&samples, &included) {
+        // The last sample already folded opens the first delta.
+        let mut own: Vec<Sample> = before.iter().cloned().collect();
+        own.extend(samples.iter().cloned());
+        for span in overage::spans(role, &own, &included, t) {
             let exhausted = serde_json::to_string(&span.exhausted).unwrap_or_else(|_| "[]".into());
             tx.execute(
                 "INSERT OR REPLACE INTO overage_span(overage_id, at_lo, at_hi, amount, exhausted) VALUES (?1, ?2, ?3, ?4, ?5)",

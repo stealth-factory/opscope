@@ -400,6 +400,26 @@ fn token_lane(label: &str, pct: f64, end: Option<f64>, read_at: f64) -> Lane {
 
 /// What the history needs from Droid beyond its lanes: the Factory user id
 /// the key belongs to, the plan, and why the reading stopped.
+/// Lanes the history keeps and no screen draws (OPS-307): the extra usage
+/// balance (`extraUsageBalanceCents`, so US dollars), with no ceiling and
+/// no cycle. A balance with no ceiling states what is left as its `limit`.
+pub fn history_lanes(data: &Data) -> Vec<Lane> {
+    let Some(balance) = data.billing.as_ref().and_then(|b| b.balance).filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "extra usage balance".into(),
+        pct: f64::NAN,
+        stale: data.kept.is_some(),
+        pool_key: "extra_usage_balance".into(),
+        unit: Unit::Money { currency: "USD".into(), exponent: 2 },
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: data.read_at,
+        ..Lane::default()
+    }]
+}
+
 pub fn history_facts(data: &Data) -> crate::history::Facts {
     let auth = data.auth.as_ref();
     crate::history::Facts {

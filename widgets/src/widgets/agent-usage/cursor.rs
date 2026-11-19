@@ -1702,7 +1702,20 @@ fn event_report(
         "events": t.counted,
         "days": days,
         "start_ms": start_ms, "end_ms": end_ms,
+        // Each charged request at its own instant, for the history's
+        // overage_event rows (OPS-307): the same page, no request added.
+        "charges": crate::history::overage::parse_cursor_charge_rows(events),
     })
+}
+
+/// The charged requests in the events report, for the history: against
+/// the unified plan's usage limit, or the own plan's extra usage.
+pub fn history_charges(d: &Data) -> Vec<crate::history::overage::Charge> {
+    let pool = if unified(d) { "usage_limit" } else { "extra" };
+    d.events
+        .as_ref()
+        .map(|report| crate::history::overage::parse_cursor_charges(report, pool))
+        .unwrap_or_default()
 }
 
 fn cursor_events(tok: Option<&str>, days: i64) -> Result<serde_json::Value, String> {

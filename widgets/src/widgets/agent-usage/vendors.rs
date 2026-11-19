@@ -488,9 +488,17 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         if !present(name) {
             continue;
         }
-        let lanes = lanes_of(name, s);
+        let mut lanes = lanes_of(name, s);
         let facts = facts_of(s);
         if asked(&facts, &lanes) {
+            // Overage and balances the summary draws no bar for (OPS-307).
+            lanes.extend(match name {
+                "codex" => crate::codex::history_lanes(&s.codex),
+                "copilot" => crate::copilot::history_lanes(&s.copilot),
+                "devin" => crate::devin::history_lanes(&s.devin),
+                "droid" => crate::droid::history_lanes(&s.droid),
+                _ => Vec::new(),
+            });
             out.push(build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts));
         }
     }
@@ -521,6 +529,7 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         o.spacexsi = Some(place);
         if name == "cursor" {
             cursor_key = Some(o.account_key());
+            o.charges = crate::cursor::history_charges(&s.cursor);
         }
         o.spacexsi_account = match place {
             Spacexsi::No => None,
