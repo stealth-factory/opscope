@@ -489,6 +489,11 @@ impl History {
         tx.commit().map_err(sql)
     }
 
+    /// The key `o` is stored under. See [`key_of`].
+    pub fn account_key_of(&self, o: &Observation) -> String {
+        key_of(&self.conn, o).unwrap_or_else(|_| o.account_key())
+    }
+
     /// The first sample of any pool of one account, or `None` when it has
     /// none yet.
     pub fn since(&self, provider: &str, account_key: &str) -> Option<f64> {
@@ -516,7 +521,10 @@ impl History {
         let mut account_refold: Vec<(i64, f64)> = Vec::new();
         let mut banks_changed: Vec<i64> = Vec::new();
         for o in obs {
-            let key = o.account_key();
+            let key = key_of(&tx, o)?;
+            if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
+                meta_set(&tx, &last_account(o), &key)?;
+            }
             let account = upsert_account(&tx, &o.provider, &key, &o.heading, now)?;
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, &mut refold)?;
@@ -713,6 +721,31 @@ impl History {
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .unwrap_or(-1)
     }
+}
+
+/// The `meta` key holding the account key a provider's profile was last
+/// seen under with a stable id.
+fn last_account(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("last_account:{}:{profile}", o.provider)
+}
+
+/// The key `o` is stored under: its own stable id where it has one. Where it
+/// has none - a provider whose id comes in the live body, during an outage -
+/// the account this provider's profile was last seen under, so the outage's
+/// watch state lands on that account rather than on a `profile:` account
+/// nobody has. Never invented: a provider never seen with an id keeps the
+/// profile key it always had.
+fn key_of(c: &Connection, o: &Observation) -> Result<String, String> {
+    if o.has_stable_id() {
+        return Ok(o.account_key());
+    }
+    let last: Option<String> = c
+        .query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [last_account(o)], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)?;
+    Ok(last.unwrap_or_else(|| o.account_key()))
 }
 
 /// What the derived tables were folded with: the thresholds, as text.
@@ -1871,6 +1904,34 @@ mod tests {
             .collect();
         assert_eq!(before, after);
         assert_eq!(spans_before, spans(&h));
+    }
+
+    #[test]
+    fn an_outage_with_no_account_id_is_kept_under_the_last_account_seen() {
+        let p = temp("no-id");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let mut o = obs(vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        o.provider = "copilot".into();
+        h.record(&[o.clone()], &t, a).unwrap();
+        // The live call fails: no body, so no id, and the pane says why.
+        let mut down = o.clone();
+        down.account_id.clear();
+        down.lanes.clear();
+        down.watch = Some(super::super::WatchReading {
+            at: a + H,
+            state: "network".into(),
+            reason: "timed out".into(),
+        });
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.count("account"), 1, "an outage made an account of its own");
+        assert_eq!(h.count("watch_state"), 1);
+        assert_eq!(h.account_key_of(&down), o.account_key());
+        // A provider never seen with an id keeps its profile key.
+        let mut never = down.clone();
+        never.provider = "notion".into();
+        assert_eq!(h.account_key_of(&never), "profile:default");
     }
 
     #[test]

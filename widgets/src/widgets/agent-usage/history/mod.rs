@@ -405,7 +405,7 @@ impl Recorder {
                 // A unified account's tab draws the plan's own history.
                 let at = match &o.spacexsi_account {
                     Some(key) => h.since("spacexsi", key),
-                    None => h.since(&o.provider, &o.account_key()),
+                    None => h.since(&o.provider, &h.account_key_of(o)),
                 };
                 if let Some(at) = at {
                     let e = status.since.entry(o.tab.clone()).or_insert(at);
