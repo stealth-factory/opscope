@@ -386,6 +386,27 @@ fn lane(label: &str, window: &DevinWindow, window_secs: f64, data: &Data) -> Lan
     }
 }
 
+/// Lanes the history keeps and no screen draws (OPS-307): the extra usage
+/// balance, which has no ceiling and no cycle. A balance with no ceiling
+/// states what is left as its `limit`. Devin does not name the unit, so it
+/// is kept as credits rather than given a currency nobody sent.
+pub fn history_lanes(data: &Data) -> Vec<Lane> {
+    let Some(balance) = data.quota.as_ref().and_then(|q| q.balance).filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "extra usage balance".into(),
+        pct: f64::NAN,
+        stale: data.kept.is_some(),
+        pool_key: "extra_usage_balance".into(),
+        unit: Unit::Credits,
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: data.read_at,
+        ..Lane::default()
+    }]
+}
+
 /// What the history needs from Devin beyond its lanes: the organization
 /// the quota is read for, which is the account here.
 pub fn history_facts(data: &Data) -> crate::history::Facts {

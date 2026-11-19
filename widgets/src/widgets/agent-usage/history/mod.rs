@@ -26,7 +26,7 @@
 //! * [`store`] - the file: open, migrate, schema, writes, re-folds.
 //! * [`fold`] - the pure cycle fold, coverage, and where resets plug in.
 //! * [`resets`] - reset detection and bank events (phase 2, empty now).
-//! * [`overage`] - spend past an allowance (phase 4, empty now).
+//! * [`overage`] - spend past an allowance: spans, charges, links (phase 4).
 //! * [`backfill`] - the Codex rollout replay (phase 5, empty now).
 //!
 //! Every timestamp is wall-clock epoch seconds of a *fetch*, never of the
@@ -41,7 +41,6 @@ pub mod backfill;
 // The fold's types carry what phase 2 (resets) and phase 3 (charts) read.
 #[allow(dead_code)]
 pub mod fold;
-#[allow(dead_code)]
 pub mod overage;
 #[allow(dead_code)]
 pub mod resets;
@@ -180,6 +179,9 @@ pub struct Observation {
     pub bank: Option<BankReading>,
     pub plan: Option<PlanReading>,
     pub watch: Option<WatchReading>,
+    /// Per-request charges the provider published with this pass's
+    /// readings (Cursor's usage events, §6.3), for `overage_event`.
+    pub charges: Vec<overage::Charge>,
 }
 
 impl Observation {
