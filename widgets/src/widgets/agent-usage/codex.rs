@@ -719,7 +719,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
 }
 
 /// A window's length, said the way a reader would say it.
-fn window_name(secs: Option<f64>) -> String {
+pub(crate) fn window_name(secs: Option<f64>) -> String {
     let secs = secs.unwrap_or(0.0) as i64;
     if secs >= 86400 {
         format!("{}d", secs / 86400)
@@ -1975,6 +1975,50 @@ mod tests {
         assert_eq!(got[2].reset, Some(3000.0));
         // Live is live: nothing here is a cached reading.
         assert!(got.iter().all(|l| !l.stale));
+    }
+
+    #[test]
+    fn a_backfilled_snapshot_lands_in_the_pools_the_live_lanes_write() {
+        // The same windows, as the live endpoint sends them and as a rollout
+        // wrote them down: one pool each, not two (OPS-308).
+        let d = Data {
+            live: Some(
+                serde_json::from_str(
+                    r#"{"rate_limit":{
+                          "primary_window":{"used_percent":26.0,"limit_window_seconds":604800,"reset_at":1000},
+                          "secondary_window":{"used_percent":4.5,"limit_window_seconds":18000,"reset_at":2000}},
+                        "additional_rate_limits":[
+                          {"limit_name":"GPT-5.3-Codex-Spark",
+                           "rate_limit":{"primary_window":{"used_percent":12.0,"limit_window_seconds":86400,"reset_at":3000}}}]}"#,
+                )
+                .expect("a live reading"),
+            ),
+            ..Data::default()
+        };
+        let live: Vec<(String, String, f64, Option<f64>, Option<f64>)> = lanes(&d)
+            .into_iter()
+            .map(|l| (l.pool_key, l.label, l.pct, l.window_secs, l.reset))
+            .collect();
+        let main = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1000},"secondary":{"used_percent":4.5,"window_minutes":300,"resets_at":2000}}}}"#;
+        let spark = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":12.0,"window_minutes":1440,"resets_at":3000}}}}"#;
+        let mut replayed = Vec::new();
+        for line in [main, spark] {
+            match crate::history::backfill::parse_rollout_line(line) {
+                crate::history::backfill::RolloutLine::Limits(rows) => replayed.extend(rows),
+                other => panic!("{other:?}"),
+            }
+        }
+        let replayed: Vec<(String, String, f64, Option<f64>, Option<f64>)> = replayed
+            .into_iter()
+            .map(|r| (r.pool_key, r.label, r.sample.pct.unwrap(), r.sample.window_secs, r.sample.reset_at))
+            .collect();
+        assert_eq!(replayed, live);
+        // And the tab's own snapshot fallback agrees about the primary.
+        let fallback = Data {
+            limits: Some(serde_json::from_str(r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#).unwrap()),
+            ..Data::default()
+        };
+        assert_eq!(lanes(&fallback)[0].pool_key, replayed[0].0);
     }
 
     #[test]
