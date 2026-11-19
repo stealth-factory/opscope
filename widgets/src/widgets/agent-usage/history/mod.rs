@@ -301,6 +301,11 @@ pub struct Recorder {
     failed: Option<String>,
     /// The one-off Codex backfill, read on a thread of its own (§8).
     backfill: backfill::Runner,
+    /// Why the history stopped: a panic inside a pass. Kept and said.
+    stopped: Option<String>,
+    /// Makes the next pass panic, for the test that it is caught.
+    #[cfg(test)]
+    panic_next: bool,
 }
 
 impl Recorder {
@@ -317,11 +322,52 @@ impl Recorder {
             note: None,
             failed: None,
             backfill: backfill::Runner::new(roots),
+            stopped: None,
+            #[cfg(test)]
+            panic_next: false,
         }
     }
 
     /// Record one pass and say what the tab should draw.
+    ///
+    /// A panic in here is caught, not left to the poller's own catch: that
+    /// would throw away the readings the pass already fetched, and stop the
+    /// pane for a history it only keeps on the side. The history stops
+    /// instead, and says why on every pass after, so a history that is not
+    /// being written never looks like one with nothing new in it.
     pub fn pass(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Status {
+        if let Some(why) = &self.stopped {
+            return Status {
+                note: Some(why.clone()),
+                ..Status::default()
+            };
+        }
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_inner(obs, t, now)));
+        match caught {
+            Ok(status) => status,
+            Err(payload) => {
+                let why = opscope_core::take_panic_reason()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a panic with no message".into());
+                // The open file may be mid-transaction; it is dropped, which
+                // rolls that back, and not used again this run.
+                self.history = None;
+                let why = format!("history stopped: {why}");
+                self.stopped = Some(why.clone());
+                Status {
+                    note: Some(why),
+                    ..Status::default()
+                }
+            }
+        }
+    }
+
+    fn pass_inner(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Status {
+        #[cfg(test)]
+        if std::mem::take(&mut self.panic_next) {
+            panic!("a test asked for it");
+        }
         if self.history.is_none() && now - self.tried_at >= RETRY_OPEN {
             self.tried_at = now;
             match store::History::open_with(&self.path, t) {
@@ -469,6 +515,20 @@ mod tests {
         };
         assert_eq!(count_only.credits_json(), None);
         assert_eq!(BankReading::from_row(5.0, 3, None), count_only);
+    }
+
+    #[test]
+    fn a_panic_in_the_history_is_said_and_never_takes_the_pass_with_it() {
+        let dir = std::env::temp_dir().join(format!("opscope-history-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut r = Recorder::with_rollouts(dir.join(store::FILE), Vec::new());
+        r.panic_next = true;
+        let status = r.pass(&[], &Thresholds::default(), 1_000_000.0);
+        let note = status.note.unwrap_or_default();
+        assert!(note.starts_with("history stopped"), "{note}");
+        // Said on every pass after, and nothing more is written.
+        let again = r.pass(&[], &Thresholds::default(), 1_000_100.0);
+        assert_eq!(again.note, Some(note));
     }
 
     #[test]
