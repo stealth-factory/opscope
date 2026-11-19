@@ -315,6 +315,14 @@ pub struct Charge {
 /// so it is FNV-1a over the fields that make the event itself - timestamp,
 /// model, charged cents and token usage - each as the server wrote it, so
 /// the same event fetched twice, by two panes or two passes, gets one key.
+///
+/// Not keyed on the stable fields alone, deliberately. The events carry no
+/// id, and timestamp and model are the only fields known not to move; two
+/// requests on one model in the same millisecond would then be one charge,
+/// understating spend. Whether Cursor revises an event's `chargedCents` or
+/// `tokenUsage` after it is first listed is not known - nothing in the
+/// fixtures or the payloads seen shows it - and if it did, the revised
+/// event would be a second row. Kept as it is until a payload shows either.
 pub fn event_key(e: &serde_json::Value) -> String {
     let field = |k: &str| match &e[k] {
         serde_json::Value::String(s) => s.clone(),
