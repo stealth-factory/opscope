@@ -255,13 +255,16 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     if matches!(input.role, Role::Overage | Role::Balance) {
         return Vec::new();
     }
-    let all: Vec<&Sample> = input.before.into_iter().chain(input.samples.iter()).collect();
-    let dated = all.iter().any(|s| s.reset_at.is_some());
-    // Rule 4, decided exactly as the fold decides it.
-    if dated && fold::is_rolling(input.samples) {
-        return Vec::new();
-    }
     let t = &input.thresholds;
+    // Rule 4, decided exactly as the fold decides it: the readings of a
+    // rolling stretch are no evidence of anything, and are left out.
+    let mask = fold::rolling_mask(input.samples, t.near_zero_pct);
+    let all: Vec<&Sample> = input
+        .before
+        .into_iter()
+        .chain(input.samples.iter().zip(&mask).filter(|(_, m)| !**m).map(|(s, _)| s))
+        .collect();
+    let dated = all.iter().any(|s| s.reset_at.is_some());
     let near = t.near_zero_pct;
 
     let mut pairs: Vec<Pair> = Vec::new();

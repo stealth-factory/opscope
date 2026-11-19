@@ -1477,6 +1477,47 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_stretch_written_pass_by_pass_never_erases_the_pools_cycles() {
+        let p = temp("idle");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let w = 5.0 * H;
+        let key = obs(vec![]).account_key();
+        let pass = |h: &mut History, at: f64, pct: f64, reset: f64| {
+            h.record(&[obs(vec![lane("primary_window", pct, at, reset, w)])], &t, at)
+                .unwrap();
+        };
+        for k in 0..3 {
+            let start = a + k as f64 * w;
+            for i in 1..5 {
+                pass(&mut h, start + i as f64 * H, 10.0 * i as f64, start + w);
+            }
+        }
+        // Idle past the end: every reading an unstarted window.
+        let idle = a + 3.0 * w + 600.0;
+        for i in 0..6 {
+            let at = idle + i as f64 * 300.0;
+            pass(&mut h, at, 0.0, at + w);
+        }
+        let closed = |h: &History| {
+            h.cycles("codex", &key, "primary_window")
+                .unwrap()
+                .iter()
+                .filter(|c| c.closed_at.is_some())
+                .count()
+        };
+        assert_eq!(closed(&h), 3);
+        // Used again: the history carries on from there.
+        let used = idle + 2.0 * H;
+        pass(&mut h, used, 5.0, used + w - 60.0);
+        pass(&mut h, used + H, 15.0, used + w - 60.0);
+        assert_eq!(closed(&h), 3);
+        let cycles = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(cycles.last().unwrap().peak_pct, Some(15.0));
+    }
+
+    #[test]
     fn a_cached_reading_is_written_as_cached() {
         let p = temp("cached");
         let mut h = History::open(&p).unwrap();

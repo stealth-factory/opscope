@@ -500,34 +500,58 @@ pub fn rolled_over(end: f64, n: &Sample, tol: f64, early: f64) -> bool {
     }
 }
 
-/// Whether a pool's reset instant slides with the clock (§5.1 rolling):
-/// three readings in a row, each a window ahead of its own fetch time, the
-/// instant moving later each time, spanning more than two tolerances. A
-/// fixed window's instant stands still while the clock catches it up.
-pub fn is_rolling(samples: &[Sample]) -> bool {
+/// Which readings belong to a stretch where the pool's reset instant
+/// slides with the clock (§5.1 rolling): three readings in a row, each a
+/// window ahead of its own fetch time and in use (above `near` - an unused
+/// window states "now plus a window" too, and that is an unstarted window,
+/// not a rolling one), the instant moving later each time, spanning more
+/// than two tolerances. Once a stretch is established, readings that go on
+/// sliding belong to it even as the figure decays to zero. A fixed
+/// window's instant stands still while the clock catches it up.
+///
+/// Judged per stretch, never for the whole pool: a rolling stretch keeps no
+/// cycles, and the readings either side of it fold as they would without it.
+pub fn rolling_mask(samples: &[Sample], near: f64) -> Vec<bool> {
     let ahead = |s: &Sample| match (s.reset_at, s.window_secs) {
         (Some(r), Some(w)) if w > 0.0 => (r - s.at - w).abs() <= tolerance(Some(w)),
         _ => false,
     };
-    let mut run: Vec<&Sample> = Vec::new();
-    for s in samples {
-        let slid = run.last().is_some_and(|p| s.reset_at > p.reset_at);
-        if ahead(s) && (run.is_empty() || slid) {
-            run.push(s);
+    let used = |s: &Sample| s.pct.is_some_and(|p| p > near);
+    let mut mask = vec![false; samples.len()];
+    let mut run: Vec<usize> = Vec::new();
+    let mut established = false;
+    for (i, s) in samples.iter().enumerate() {
+        let slid = run.last().is_some_and(|&p| s.reset_at > samples[p].reset_at);
+        if ahead(s) && slid && (used(s) || established) {
+            run.push(i);
         } else {
             run.clear();
-            if ahead(s) {
-                run.push(s);
+            established = false;
+            if ahead(s) && used(s) {
+                run.push(i);
             }
         }
-        if run.len() >= 3 {
-            let (first, last) = (run[0], run[run.len() - 1]);
+        if established {
+            mask[i] = true;
+        } else if run.len() >= 3 {
+            let (first, last) = (&samples[run[0]], &samples[run[run.len() - 1]]);
             if last.at - first.at > 2.0 * tolerance(first.window_secs) {
-                return true;
+                established = true;
+                for &k in &run {
+                    mask[k] = true;
+                }
             }
         }
     }
-    false
+    mask
+}
+
+/// Whether every dated reading of `samples` is in a rolling stretch: the
+/// pool, as far as these readings show, keeps no cycles at all.
+pub fn is_rolling(samples: &[Sample], near: f64) -> bool {
+    let mask = rolling_mask(samples, near);
+    samples.iter().any(|s| s.reset_at.is_some())
+        && samples.iter().zip(&mask).all(|(s, m)| *m || s.reset_at.is_none())
 }
 
 /// The running state of the cycle being built.
@@ -660,16 +684,31 @@ pub fn fold(input: &FoldInput) -> FoldOutput {
         };
     }
     let dated = samples.iter().any(|s| s.reset_at.is_some());
-    if dated && is_rolling(samples) {
+    if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
+        return fold_undated(input);
+    }
+    let mask = rolling_mask(samples, input.thresholds.near_zero_pct);
+    if !mask.contains(&true) {
+        return fold_dated(input);
+    }
+    if is_rolling(samples, input.thresholds.near_zero_pct) {
         return FoldOutput {
             shape: PoolShape::Rolling,
             cycles: Vec::new(),
         };
     }
-    if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
-        return fold_undated(input);
-    }
-    fold_dated(input)
+    // A rolling stretch is left out; the readings either side fold as if
+    // it were a gap.
+    let fixed: Vec<Sample> = samples
+        .iter()
+        .zip(&mask)
+        .filter(|(_, m)| !**m)
+        .map(|(s, _)| s.clone())
+        .collect();
+    fold_dated(&FoldInput {
+        samples: &fixed,
+        ..input.clone()
+    })
 }
 
 fn fold_dated(input: &FoldInput) -> FoldOutput {
@@ -1286,6 +1325,51 @@ mod tests {
         let out = run(&samples);
         assert_eq!(out.shape, PoolShape::Rolling);
         assert!(out.cycles.is_empty());
+    }
+
+    /// Three real 5h windows read hourly, then the pool idle past its end,
+    /// read every five minutes: an unstarted window states "now plus five
+    /// hours" at 0% on every reading.
+    fn three_windows_then_idle(a: f64) -> Vec<Sample> {
+        let mut out = Vec::new();
+        for k in 0..3 {
+            let start = a + k as f64 * W5;
+            for h in 1..5 {
+                out.push(s(start + h as f64 * H, 10.0 * h as f64, Some(start + W5), Some(W5)));
+            }
+        }
+        let idle = a + 3.0 * W5 + 600.0;
+        for i in 0..4 {
+            let at = idle + i as f64 * 300.0;
+            out.push(s(at, 0.0, Some(at + W5), Some(W5)));
+        }
+        out
+    }
+
+    #[test]
+    fn an_idle_stretch_of_unstarted_windows_does_not_make_the_pool_rolling() {
+        let a = 1_000_000.0;
+        let out = run(&three_windows_then_idle(a));
+        assert_eq!(out.shape, PoolShape::Dated);
+        let closed: Vec<&Cycle> = out.cycles.iter().filter(|c| c.closed_at.is_some()).collect();
+        assert_eq!(closed.len(), 3, "{:#?}", out.cycles);
+        assert_eq!(closed[2].peak_pct, Some(40.0));
+    }
+
+    #[test]
+    fn a_rolling_stretch_keeps_the_cycles_either_side_of_it() {
+        let a = 1_000_000.0;
+        let w = 6.0 * H;
+        let mut samples = vec![s(a + H, 30.0, Some(a + w), Some(w)), s(a + 3.0 * H, 50.0, Some(a + w), Some(w))];
+        // Then, for a while, a window that slides with the clock in use.
+        for i in 0..4 {
+            let at = a + w + H + i as f64 * 0.5 * H;
+            samples.push(s(at, 20.0, Some(at + w), Some(w)));
+        }
+        let out = run(&samples);
+        assert_eq!(out.shape, PoolShape::Dated);
+        assert_eq!(out.cycles.len(), 1, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].peak_pct, Some(50.0));
     }
 
     #[test]
