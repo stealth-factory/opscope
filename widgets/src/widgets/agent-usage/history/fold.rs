@@ -60,7 +60,7 @@
 /// Bumped whenever a change here, or in [`super::resets`], would fold the
 /// same samples differently. A file stamped with another version is folded
 /// again from its samples when it is opened.
-pub const DETECTOR_VERSION: i64 = 2;
+pub const DETECTOR_VERSION: i64 = 3;
 
 /// A figure at or above this is "exhausted" (§3.6 `exhausted_at`, §6.2).
 pub const EXHAUSTED_PCT: f64 = 99.5;
@@ -482,6 +482,21 @@ pub fn plan_change_between(plans: &[PlanChange], lo: f64, hi: f64) -> Option<&Pl
 
 fn differs(a: Option<f64>, b: Option<f64>, by: f64) -> bool {
     matches!((a, b), (Some(a), Some(b)) if (a - b).abs() > by)
+}
+
+/// Whether reading `n` has passed the end of a cycle that was due at `end`
+/// (§5.4 rule 1). A reading that states the same instant, within `tol`, is
+/// still in that cycle: the server says the reset has not happened, so it
+/// is no rollover until it is well past the end. One that states a later
+/// instant rolls once it is within `early` of the end - a reset instant
+/// read as "now plus seconds left" jitters by the request's latency. One
+/// that states no instant rolls only once the end has passed.
+pub fn rolled_over(end: f64, n: &Sample, tol: f64, early: f64) -> bool {
+    match n.reset_at {
+        Some(r) if (r - end).abs() <= tol => n.at >= end + tol,
+        Some(r) if r > end => n.at >= end - early,
+        _ => n.at >= end,
+    }
 }
 
 /// Whether a pool's reset instant slides with the clock (§5.1 rolling):

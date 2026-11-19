@@ -144,7 +144,10 @@ fn rolled(p: &Sample, n: &Sample, t: &Thresholds) -> Option<Option<f64>> {
     let tol = tolerance(window);
     if let Some(r) = p.reset_at {
         let next = n.reset_at.filter(|nr| *nr > r + tol);
-        if n.at >= r - tol || next.is_some() {
+        // No tolerance before the end: a reading inside the last hours of a
+        // month that still states the same end is that month's, and booking
+        // it as a roll would count its whole cumulative spend again.
+        if next.is_some() || super::fold::rolled_over(r, n, tol, 0.0) {
             // The new cycle's own start where the reading says it, else the
             // old cycle's end.
             let start = match (next, window) {
@@ -1003,6 +1006,30 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].at_lo, r1);
         assert!((out[0].amount - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spend_read_in_the_last_hours_before_a_monthly_end_is_not_booked_again() {
+        // A monthly tolerance is 7.2 hours: readings inside it still state
+        // the same end, so they are the same month, not a roll each.
+        let e = 10_000_000.0;
+        let reading = |at: f64, used: f64| money(at, used, 100.0, Some(e), Some(MONTH));
+        let samples = vec![
+            reading(e - 20.0 * H, 0.0),
+            reading(e - 10.0 * H, 40.0),
+            reading(e - 3.0 * H, 41.0),
+            reading(e - 2.0 * H, 42.0),
+            reading(e - H, 43.0),
+        ];
+        let out = spans(Role::Overage, &samples, &[], &t());
+        let total: f64 = out.iter().map(|s| s.amount).sum();
+        assert!((total - 43.0).abs() < 1e-9, "{out:?}");
+        // The month that follows starts its own spend at the boundary.
+        let mut next = samples.clone();
+        next.push(money(e + H, 2.0, 100.0, Some(e + MONTH), Some(MONTH)));
+        let out = spans(Role::Overage, &next, &[], &t());
+        let last = out.last().unwrap();
+        assert_eq!((last.at_lo, last.amount), (e, 2.0));
     }
 
     #[test]
