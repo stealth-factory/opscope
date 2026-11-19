@@ -25,7 +25,7 @@
 //!
 //! * [`store`] - the file: open, migrate, schema, writes, re-folds.
 //! * [`fold`] - the pure cycle fold, coverage, and where resets plug in.
-//! * [`resets`] - reset detection and bank events (phase 2, empty now).
+//! * [`resets`] - reset detection and bank events (phase 2).
 //! * [`overage`] - spend past an allowance (phase 4, empty now).
 //! * [`backfill`] - the Codex rollout replay (phase 5, empty now).
 //!
@@ -43,7 +43,6 @@ pub mod backfill;
 pub mod fold;
 #[allow(dead_code)]
 pub mod overage;
-#[allow(dead_code)]
 pub mod resets;
 // Read helpers (`cycles`, `samples`) are phase 3's, for the charts.
 #[allow(dead_code)]
