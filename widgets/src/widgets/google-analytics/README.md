@@ -136,7 +136,11 @@ the screen says so instead of calling them today.
 
 **Properties** (when more than one is shown) - one row each: active users
 now, the change against the baseline, sessions and key events today against
-the same weekday, and the poller's state.
+the same weekday, and the poller's state. One property on screen is the
+service account's access, not a filter: the key's `client_email` has to be
+added as Viewer on each property under Property access management. Account
+access management only attaches the email to the first property in the
+account, so the rest never appear.
 
 ## The baseline
 
@@ -286,9 +290,9 @@ five minutes, and leaves the last data on screen under the banner.
 
 | key | default | |
 |---|---|---|
-| `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set |
+| `credentials` | `""` | the service-account JSON itself (secret). Wins over `credentials_file` when set. The widget signs in as that key's `client_email` |
 | `credentials_file` | `""` | path to that JSON, used when `credentials` is empty; a notice (`!`) warns if it is not `chmod 600` |
-| `properties` | `[]` | numeric GA4 property ids; empty lists every property the account can see |
+| `properties` | `[]` | numeric GA4 property ids; empty lists every property that email can see |
 | `realtime_refresh` | `120` | 120, 300 or 600 seconds; anything else means 120 |
 | `refresh` | `3600` | seconds between processed reports, at least 1800 |
 | `window_days` | `7` | movers and organic landing page window |
@@ -297,4 +301,10 @@ five minutes, and leaves the last data on screen under the banner.
 
 Setup on Google's side - the Cloud project, the APIs, the service account and
 its Viewer access - is [Google setup](../../../../docs/google-setup.md). The
-settings screen opens with `,`.
+widget shows only the GA4 properties that key's `client_email` can see. Add
+that email as Viewer on each property under Admin → Property access
+management. Do not add it under Account access management: that only
+attaches the email to the first property in the account, and the rest stay
+invisible. A personal Google login that can see more does not change the
+list. Quit and start the widget again after granting access; refresh
+re-reads the properties it already found. The settings screen opens with `,`.
