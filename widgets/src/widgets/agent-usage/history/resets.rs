@@ -104,6 +104,9 @@ pub struct DetectInput<'a> {
     /// effect to record for an event with no instant to read one from
     /// (§5.5). Written to the event's evidence as `source: config`.
     pub effect_override: Option<&'a str>,
+    /// As [`fold::FoldInput::rolling_seed`]: the reading before `samples`,
+    /// known to be in a rolling stretch. Never compared with them.
+    pub rolling_seed: Option<&'a Sample>,
 }
 
 /// The effect `history_reset_effect` may name for a provider.
@@ -258,7 +261,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     let t = &input.thresholds;
     // Rule 4, decided exactly as the fold decides it: the readings of a
     // rolling stretch are no evidence of anything, and are left out.
-    let mask = fold::rolling_mask(input.samples, t.near_zero_pct);
+    let mask = fold::rolling_mask(input.samples, t.near_zero_pct, input.rolling_seed);
     let all: Vec<&Sample> = input
         .before
         .into_iter()
@@ -707,6 +710,7 @@ mod tests {
             thresholds: Thresholds::default(),
             role: Role::Included,
             effect_override: None,
+            rolling_seed: None,
         }
     }
 
@@ -732,6 +736,7 @@ mod tests {
             resets,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         })
     }
@@ -1150,6 +1155,7 @@ mod tests {
             resets: &[e],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(out.cycles.len(), 2);

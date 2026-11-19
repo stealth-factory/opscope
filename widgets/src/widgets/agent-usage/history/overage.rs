@@ -952,6 +952,7 @@ mod tests {
             resets: &[],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t(),
         });
         assert_eq!(out.cycles.len(), 3);
@@ -986,6 +987,7 @@ mod tests {
             resets: &[],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t(),
         });
         assert_eq!(out.cycles.len(), 3);

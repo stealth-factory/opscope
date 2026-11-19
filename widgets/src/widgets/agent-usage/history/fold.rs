@@ -458,6 +458,9 @@ pub struct FoldInput<'a> {
     pub prev: Option<&'a Cycle>,
     /// The ordinal the first cycle produced takes.
     pub next_ordinal: u32,
+    /// The reading before `samples`, when it is known to be in an
+    /// established rolling stretch ([`rolling_mask`]).
+    pub rolling_seed: Option<&'a Sample>,
     pub thresholds: Thresholds,
 }
 
@@ -511,33 +514,38 @@ pub fn rolled_over(end: f64, n: &Sample, tol: f64, early: f64) -> bool {
 ///
 /// Judged per stretch, never for the whole pool: a rolling stretch keeps no
 /// cycles, and the readings either side of it fold as they would without it.
-pub fn rolling_mask(samples: &[Sample], near: f64) -> Vec<bool> {
+///
+/// `seed`, where given, is the reading just before `samples`, known to be
+/// in an established rolling stretch: the store folds a pool that has only
+/// ever been rolling on from its last reading rather than from its first.
+pub fn rolling_mask(samples: &[Sample], near: f64, seed: Option<&Sample>) -> Vec<bool> {
     let ahead = |s: &Sample| match (s.reset_at, s.window_secs) {
         (Some(r), Some(w)) if w > 0.0 => (r - s.at - w).abs() <= tolerance(Some(w)),
         _ => false,
     };
     let used = |s: &Sample| s.pct.is_some_and(|p| p > near);
     let mut mask = vec![false; samples.len()];
-    let mut run: Vec<usize> = Vec::new();
-    let mut established = false;
+    // The readings of the run so far, with their index (`None`: the seed).
+    let mut run: Vec<(Option<usize>, &Sample)> = seed.map(|s| (None, s)).into_iter().collect();
+    let mut established = seed.is_some();
     for (i, s) in samples.iter().enumerate() {
-        let slid = run.last().is_some_and(|&p| s.reset_at > samples[p].reset_at);
+        let slid = run.last().is_some_and(|(_, p)| s.reset_at > p.reset_at);
         if ahead(s) && slid && (used(s) || established) {
-            run.push(i);
+            run.push((Some(i), s));
         } else {
             run.clear();
             established = false;
             if ahead(s) && used(s) {
-                run.push(i);
+                run.push((Some(i), s));
             }
         }
         if established {
             mask[i] = true;
         } else if run.len() >= 3 {
-            let (first, last) = (&samples[run[0]], &samples[run[run.len() - 1]]);
+            let (first, last) = (run[0].1, run[run.len() - 1].1);
             if last.at - first.at > 2.0 * tolerance(first.window_secs) {
                 established = true;
-                for &k in &run {
+                for k in run.iter().filter_map(|(k, _)| *k) {
                     mask[k] = true;
                 }
             }
@@ -546,12 +554,12 @@ pub fn rolling_mask(samples: &[Sample], near: f64) -> Vec<bool> {
     mask
 }
 
-/// Whether every dated reading of `samples` is in a rolling stretch: the
-/// pool, as far as these readings show, keeps no cycles at all.
-pub fn is_rolling(samples: &[Sample], near: f64) -> bool {
-    let mask = rolling_mask(samples, near);
+/// Whether every dated reading of `samples` is in a rolling stretch (`mask`,
+/// from [`rolling_mask`]): the pool, as far as these readings show, keeps no
+/// cycles at all.
+pub fn is_rolling(samples: &[Sample], mask: &[bool]) -> bool {
     samples.iter().any(|s| s.reset_at.is_some())
-        && samples.iter().zip(&mask).all(|(s, m)| *m || s.reset_at.is_none())
+        && samples.iter().zip(mask).all(|(s, m)| *m || s.reset_at.is_none())
 }
 
 /// The running state of the cycle being built.
@@ -687,11 +695,11 @@ pub fn fold(input: &FoldInput) -> FoldOutput {
     if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
         return fold_undated(input);
     }
-    let mask = rolling_mask(samples, input.thresholds.near_zero_pct);
+    let mask = rolling_mask(samples, input.thresholds.near_zero_pct, input.rolling_seed);
     if !mask.contains(&true) {
         return fold_dated(input);
     }
-    if is_rolling(samples, input.thresholds.near_zero_pct) {
+    if is_rolling(samples, &mask) {
         return FoldOutput {
             shape: PoolShape::Rolling,
             cycles: Vec::new(),
@@ -1077,6 +1085,7 @@ mod tests {
             resets,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         })
     }
@@ -1526,6 +1535,7 @@ mod tests {
             resets: &[],
             prev: Some(&kept),
             next_ordinal: 2,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[1..].to_vec());
@@ -1547,6 +1557,7 @@ mod tests {
                 resets: &[],
                 prev: Some(kept),
                 next_ordinal: kept.ordinal + 1,
+                rolling_seed: None,
                 thresholds: Thresholds::default(),
             });
             assert_eq!(
@@ -1650,6 +1661,7 @@ mod tests {
             resets: &[],
             prev: Some(&kept),
             next_ordinal: 3,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[2..].to_vec());

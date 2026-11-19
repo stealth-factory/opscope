@@ -547,9 +547,18 @@ impl History {
                 write_lanes(&tx, unified, &o.lanes, sx, &mut refold)?;
             }
             if let Some(b) = &o.bank {
+                // A bank event runs from the reading before this one, and
+                // can be attributed to any pair of samples it overlaps.
+                let opened: Option<f64> = tx
+                    .query_row(
+                        "SELECT MAX(at) FROM bank_sample WHERE account_id = ?1 AND at < ?2",
+                        params![account, b.at],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql)?;
                 if write_bank(&tx, account, b)? {
                     banks_changed.push(account);
-                    account_refold.push((account, b.at));
+                    account_refold.push((account, opened.unwrap_or(b.at)));
                 }
             }
             if let Some(p) = &o.plan {
@@ -847,6 +856,13 @@ fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many samples [`load_samples`] has read on this thread, so a test
+    /// can bound what one write costs.
+    static SAMPLES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A pool's samples after `after` (all of them for `None`), oldest first.
 fn load_samples(conn: &Connection, pool: i64, after: Option<f64>) -> Result<Vec<Sample>, String> {
     let mut st = conn
@@ -857,7 +873,10 @@ fn load_samples(conn: &Connection, pool: i64, after: Option<f64>) -> Result<Vec<
     let rows = st
         .query_map(params![pool, after.unwrap_or(f64::NEG_INFINITY)], sample_row)
         .map_err(sql)?;
-    rows.collect::<Result<_, _>>().map_err(sql)
+    let out: Vec<Sample> = rows.collect::<Result<_, _>>().map_err(sql)?;
+    #[cfg(test)]
+    SAMPLES_READ.with(|n| n.set(n.get() + out.len()));
+    Ok(out)
 }
 
 /// Write one lane per pool, under the five-minute and change-or-heartbeat
@@ -1187,11 +1206,19 @@ fn insert_cycle(tx: &Transaction, pool: i64, c: &Cycle) -> Result<i64, String> {
 /// Fold one pool again from the cycle before `from` (from the start for
 /// `None`), replacing every derived row after the cycles it keeps (§3.5).
 ///
-/// Kept: the closed, observed cycles whose last observation is before
-/// `from`, less the last of them - the cycle before the point is folded
-/// again, since a sample just before a boundary can move it - and the
-/// hollow cycles between them. Everything after is deleted and rebuilt from
-/// the samples after the last kept observation.
+/// Kept: the closed, observed cycles whose last observation is before the
+/// second-last sample before `from` - so the sample that closed each of
+/// them is already behind the point, and a sample just before a boundary,
+/// which can move it, is folded again - and the hollow cycles between them.
+/// Everything after is deleted and rebuilt from the samples after the last
+/// kept observation.
+///
+/// Bounded, so a write does not re-read a pool's whole history: a balance
+/// has no cycle, and folds on from the sample before `from`; a pool that has
+/// only ever been rolling has no cycle either, and folds on from its last
+/// reading as a seed of its rolling stretch; and an overage or balance
+/// pool's linked included pools are read only over the stretch re-folded.
+/// What is still read whole is a pool's only cycle while it is open.
 fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -> Result<(), String> {
     let (account, role, provider): (i64, String, String) = tx
         .query_row(
@@ -1201,21 +1228,46 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         )
         .map_err(sql)?;
     let role = Role::from_name(&role);
-    // The second-latest closed, observed cycle seen before `from`: one
-    // query, so a pool with years of five-hour cycles does not load them
-    // all on every write.
-    let kept: Option<i64> = match from {
+    // The last sample before `from`: what the point is folded on from.
+    let s_prev: Option<f64> = match from {
         None => None,
         Some(from) => tx
             .query_row(
-                "SELECT ordinal FROM cycle
-                  WHERE pool_id = ?1 AND closed_at IS NOT NULL AND last_obs_at IS NOT NULL AND last_obs_at < ?2
-                  ORDER BY ordinal DESC LIMIT 1 OFFSET 1",
+                "SELECT MAX(at) FROM sample WHERE pool_id = ?1 AND at < ?2",
+                params![pool, from],
+                |r| r.get(0),
+            )
+            .map_err(sql)?,
+    };
+    // The latest closed, observed cycle whose last observation is before
+    // the second-last sample before `from`: one query, so a pool with years
+    // of five-hour cycles does not load them all on every write. Two
+    // samples, not one: the sample that closed it is behind the point, and
+    // a new reading can make the two before it the end of a rolling stretch
+    // (`fold::rolling_mask`), which a kept cycle must not have observed.
+    let s_prev2: Option<f64> = match from {
+        None => None,
+        Some(from) => tx
+            .query_row(
+                "SELECT at FROM sample WHERE pool_id = ?1 AND at < ?2 ORDER BY at DESC LIMIT 1 OFFSET 1",
                 params![pool, from],
                 |r| r.get(0),
             )
             .optional()
             .map_err(sql)?,
+    };
+    let kept: Option<i64> = match s_prev2 {
+        Some(at) if role != Role::Balance => tx
+            .query_row(
+                "SELECT ordinal FROM cycle
+                  WHERE pool_id = ?1 AND closed_at IS NOT NULL AND last_obs_at IS NOT NULL AND last_obs_at < ?2
+                  ORDER BY ordinal DESC LIMIT 1",
+                params![pool, at],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?,
+        _ => None,
     };
     let prev: Option<Cycle> = match kept {
         Some(ordinal) => load_cycles_from(tx, pool, ordinal)?.into_iter().next().map(|(_, c)| c),
@@ -1230,7 +1282,31 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         )
         .optional()
         .map_err(sql)?;
-    let after = prev.as_ref().and_then(|c| c.last_obs_at);
+    let any_cycle: bool = tx
+        .query_row("SELECT EXISTS (SELECT 1 FROM cycle WHERE pool_id = ?1)", [pool], |r| r.get(0))
+        .map_err(sql)?;
+    let at_prev: Option<Sample> = match s_prev {
+        Some(at) => tx
+            .query_row(
+                &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at = ?2"),
+                params![pool, at],
+                sample_row,
+            )
+            .optional()
+            .map_err(sql)?,
+        None => None,
+    };
+    // A dated pool folded before with no cycle at all has only ever been
+    // rolling: every reading so far is in its rolling stretch.
+    let seed: Option<Sample> = at_prev
+        .filter(|s| prev.is_none() && !any_cycle && role != Role::Balance && s.reset_at.is_some());
+    let after = match (&prev, role) {
+        (Some(c), _) => c.last_obs_at,
+        // A balance's moves are between consecutive readings: the one
+        // before the point opens the first.
+        (None, Role::Balance) => s_prev,
+        (None, _) => seed.as_ref().map(|s| s.at),
+    };
     let gone = "SELECT id FROM cycle WHERE pool_id = ?1 AND ordinal > ?2";
     tx.execute(
         &format!("DELETE FROM segment WHERE cycle_id IN ({gone})"),
@@ -1275,13 +1351,15 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     let banks = load_banks(tx, account)?;
     // Phase 2's seam: the resets in these samples.
     let found = resets::detect(&resets::DetectInput {
-        before: before.as_ref(),
+        // A rolling seed is never compared with what follows it.
+        before: before.as_ref().filter(|_| seed.is_none()),
         samples: &samples,
         banks: &banks,
         plans: &plans,
         thresholds: *t,
         role,
         effect_override: t.reset_effect.get(&provider).map(resets::EffectOverride::name),
+        rolling_seed: seed.as_ref(),
     });
     let out = fold::fold(&FoldInput {
         role,
@@ -1290,6 +1368,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         resets: &found,
         prev: prev.as_ref(),
         next_ordinal: keep_ordinal as u32 + 1,
+        rolling_seed: seed.as_ref(),
         thresholds: *t,
     });
     let mut ids: Vec<(i64, &Cycle)> = Vec::new();
@@ -1339,9 +1418,12 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
             rows.collect::<Result<_, _>>().map_err(sql)?
         };
         let mut loaded: Vec<(i64, Vec<Sample>)> = Vec::new();
+        // Only the stretch being re-folded: from the reading in force when
+        // its first span opens.
+        let open_at = after.or_else(|| samples.first().map(|s| s.at));
         for inc in linked {
             // From the reading in force at the re-fold point, not after it.
-            let from: Option<f64> = match after {
+            let from: Option<f64> = match open_at {
                 Some(at) => tx
                     .query_row(
                         "SELECT MAX(at) FROM sample WHERE pool_id = ?1 AND at <= ?2",
@@ -1351,7 +1433,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
                     .map_err(sql)?,
                 None => None,
             };
-            loaded.push((inc, load_samples(tx, inc, from.map(|f| f - 1e-3).or(after))?));
+            loaded.push((inc, load_samples(tx, inc, from.map(|f| f - 1e-3).or(open_at.map(|a| a - 1e-3)))?));
         }
         let included: Vec<overage::Included> = loaded
             .iter()
@@ -1652,6 +1734,97 @@ mod tests {
         assert_eq!(cycles.last().unwrap().peak_pct, Some(15.0));
     }
 
+    /// How many samples one `record` of `o` reads.
+    fn reads_of(h: &mut History, o: Observation, at: f64) -> usize {
+        SAMPLES_READ.with(|n| n.set(0));
+        h.record(&[o], &Thresholds::default(), at).unwrap();
+        SAMPLES_READ.with(|n| n.get())
+    }
+
+    #[test]
+    fn one_write_reads_a_bounded_number_of_samples_however_long_the_history() {
+        let p = temp("bounded");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let w = 5.0 * H;
+        let balance = |left: f64, at: f64| Lane {
+            label: "credits".into(),
+            pool_key: "credits".into(),
+            role: PoolRole::Balance,
+            unit: Unit::Credits,
+            limit: Some(left),
+            pct: f64::NAN,
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let rolling = |at: f64| Lane {
+            label: "rolling".into(),
+            pool_key: "rolling".into(),
+            pct: 20.0 + (at / 600.0) % 7.0,
+            window_secs: Some(w),
+            reset: Some(at + w),
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let pass = |at: f64| {
+            let start = a + ((at - a) / w).floor() * w;
+            let pct = 10.0 + (at - start) / w * 80.0;
+            obs(vec![
+                lane("primary_window", pct, at, start + w, w),
+                balance(1000.0 - (at - a) / H, at),
+                rolling(at),
+            ])
+        };
+        // Forty 5h windows read every half hour: four hundred samples a pool.
+        let mut at = a + 60.0;
+        while at < a + 40.0 * w {
+            h.record(&[pass(at)], &Thresholds::default(), at).unwrap();
+            at += 0.5 * H;
+        }
+        assert!(h.count("sample") >= 1200, "{}", h.count("sample"));
+        let read = reads_of(&mut h, pass(at), at);
+        // About two windows of the dated pool (twenty), two of the balance
+        // and its linked pool's few, and a couple of the rolling one.
+        assert!(read <= 40, "one write read {read} samples");
+        // And what those bounded writes folded is what one fold over
+        // everything gives.
+        let key = obs(vec![]).account_key();
+        let spans = |h: &History| -> Vec<(f64, f64, f64, String)> {
+            let mut st = h
+                .conn
+                .prepare("SELECT at_lo, at_hi, amount, exhausted FROM overage_span ORDER BY overage_id, at_hi")
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before: Vec<_> = ["primary_window", "rolling"]
+            .iter()
+            .map(|k| h.cycles("codex", &key, k).unwrap())
+            .collect();
+        let spans_before = spans(&h);
+        assert!(!spans_before.is_empty());
+        let tx = h.conn.transaction().unwrap();
+        let pools: Vec<i64> = tx
+            .prepare("SELECT id FROM pool")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for pool in pools {
+            refold_pool(&tx, pool, None, &Thresholds::default()).unwrap();
+        }
+        tx.commit().unwrap();
+        let after: Vec<_> = ["primary_window", "rolling"]
+            .iter()
+            .map(|k| h.cycles("codex", &key, k).unwrap())
+            .collect();
+        assert_eq!(before, after);
+        assert_eq!(spans_before, spans(&h));
+    }
+
     #[test]
     fn a_cached_reading_is_written_as_cached() {
         let p = temp("cached");
@@ -1741,6 +1914,7 @@ mod tests {
             thresholds: t,
             role: Role::Included,
             effect_override: None,
+            rolling_seed: None,
         });
         assert_eq!(found.len(), 1);
         let fresh = fold::fold(&FoldInput {
@@ -1750,6 +1924,7 @@ mod tests {
             resets: &found,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {
@@ -2011,6 +2186,7 @@ mod tests {
             resets: &[],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {
