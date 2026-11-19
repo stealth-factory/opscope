@@ -27,7 +27,7 @@
 //! * [`fold`] - the pure cycle fold, coverage, and where resets plug in.
 //! * [`resets`] - reset detection and bank events (phase 2).
 //! * [`overage`] - spend past an allowance: spans, charges, links (phase 4).
-//! * [`backfill`] - the Codex rollout replay (phase 5, empty now).
+//! * [`backfill`] - the one-off Codex rollout replay, read off the poller.
 //!
 //! Every timestamp is wall-clock epoch seconds of a *fetch*, never of the
 //! pass, so a pane that slept, or a reading another pane fetched, lands at
@@ -36,7 +36,6 @@
 // The seams are wired and called, but their bodies are later phases' and
 // return nothing yet, so the types they hand back are not built by this one.
 // Each phase removes its module's allowance when it fills the body.
-#[allow(dead_code)]
 pub mod backfill;
 // The fold's types carry what phase 2 (resets) and phase 3 (charts) read.
 #[allow(dead_code)]
@@ -199,7 +198,6 @@ impl Observation {
     }
 
     /// Whether the key came from the provider's own id.
-    #[allow(dead_code)]
     pub fn has_stable_id(&self) -> bool {
         !self.account_id.is_empty()
     }
@@ -262,6 +260,9 @@ pub struct Status {
     /// Why the history is not being written, or what happened to it - a
     /// newer file left alone, a damaged one set aside, a write that failed.
     pub note: Option<String>,
+    /// tab -> a few dim words about where its history came from: the Codex
+    /// backfill running, what it wrote, or why it stopped.
+    pub notes: HashMap<String, String>,
 }
 
 /// `history since 3 Sep 2026`, in the local calendar.
@@ -278,8 +279,8 @@ pub fn since_text(at: f64) -> String {
 /// `BEGIN IMMEDIATE` transaction that reads the previous state from the
 /// file. The seams it calls on the way are [`resets::detect`] and
 /// [`resets::bank_events`] (phase 2), [`overage::spans`],
-/// [`overage::events_of`] and [`overage::links_of`] (phase 4), and
-/// [`backfill::due`] / [`backfill::collect`] (phase 5).
+/// [`overage::events_of`] and [`overage::links_of`] (phase 4). The Codex
+/// backfill is not part of a pass: [`Recorder`] runs it beside them.
 ///
 /// An error naming a busy file ([`store::busy`]) is another pane holding
 /// it, and passes.
@@ -298,16 +299,24 @@ pub struct Recorder {
     note: Option<String>,
     /// A write that failed on the last pass, other than a busy file.
     failed: Option<String>,
+    /// The one-off Codex backfill, read on a thread of its own (§8).
+    backfill: backfill::Runner,
 }
 
 impl Recorder {
     pub fn new(path: std::path::PathBuf) -> Recorder {
+        Recorder::with_rollouts(path, backfill::rollout_roots())
+    }
+
+    /// A recorder that backfills Codex from the rollouts under `roots`.
+    pub fn with_rollouts(path: std::path::PathBuf, roots: Vec<std::path::PathBuf>) -> Recorder {
         Recorder {
             path,
             history: None,
             tried_at: f64::NEG_INFINITY,
             note: None,
             failed: None,
+            backfill: backfill::Runner::new(roots),
         }
     }
 
@@ -342,6 +351,9 @@ impl Recorder {
                 // recorded by the next pass that changes or heartbeats.
                 Err(why) if store::busy(&why) => {}
                 Err(why) => self.failed = Some(format!("history not recorded: {why}")),
+            }
+            if let Some((tab, words)) = self.backfill.tick(h, obs, t, now) {
+                status.notes.insert(tab, words);
             }
             for o in obs {
                 // A unified account's tab draws the plan's own history.

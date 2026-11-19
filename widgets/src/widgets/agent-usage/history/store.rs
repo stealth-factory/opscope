@@ -486,28 +486,9 @@ impl History {
             for &owner in &owners {
                 overage::write_links_and_charges(&tx, owner, o, &mut refold)?;
             }
-            // Phase 5's seam: the one-off Codex replay.
-            if o.provider == "codex" {
-                let mk = backfill::meta_key(&key);
-                if backfill::due(meta_get(&tx, &mk)?.as_deref()) {
-                    for r in backfill::collect(o) {
-                        let lane = Lane {
-                            label: r.label.clone(),
-                            pool_key: r.pool_key.clone(),
-                            unit: r.unit.clone(),
-                            role: r.role,
-                            ..Lane::default()
-                        };
-                        let pool = upsert_pool(&tx, account, &lane, r.sample.at)?;
-                        let mut sample = r.sample.clone();
-                        sample.source = Source::Backfill;
-                        if write_sample(&tx, pool, &sample)? {
-                            refold.push((pool, sample.at));
-                        }
-                    }
-                    meta_set(&tx, &mk, backfill::DONE)?;
-                }
-            }
+            // The Codex backfill is not written here: its rollouts can run to
+            // gigabytes, so they are read off this transaction and written
+            // by [`History::replay`] when they land (`backfill::Runner`).
         }
         for account in banks_changed {
             rebuild_bank_events(&tx, account)?;
@@ -527,6 +508,92 @@ impl History {
             refold_pool(&tx, pool, Some(from), t)?;
         }
         tx.commit().map_err(sql)
+    }
+
+    /// What `meta` holds under `k`.
+    pub fn meta(&self, k: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [k], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map(Option::flatten)
+            .map_err(sql)
+    }
+
+    /// Replace what `meta` holds under `k` with what `f` makes of it, in one
+    /// transaction, so two panes cannot both act on the same value. `f`
+    /// returning `None` leaves it alone. True when it was replaced.
+    pub fn meta_update(&mut self, k: &str, f: impl FnOnce(Option<&str>) -> Option<String>) -> Result<bool, String> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql)?;
+        let Some(v) = f(meta_get(&tx, k)?.as_deref()) else {
+            return Ok(false);
+        };
+        meta_set(&tx, k, &v)?;
+        tx.commit().map_err(sql)?;
+        Ok(true)
+    }
+
+    /// Write a backfill (§8) for one account: each replayed reading under
+    /// the same write rule as a live one, so nothing already stored is
+    /// written twice; [`backfill::done`] under its `meta` key; and a re-fold
+    /// of every pool it wrote to, from its earliest new sample - all in one
+    /// transaction. Returns how many backfilled samples the account holds
+    /// now, which is what `meta` records: a re-run that finds nothing new
+    /// still says what the history came from.
+    pub fn replay(
+        &mut self,
+        provider: &str,
+        account_key: &str,
+        heading: &str,
+        rows: &[backfill::Replayed],
+        t: &Thresholds,
+        now: f64,
+    ) -> Result<u64, String> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql)?;
+        let account = upsert_account(&tx, provider, account_key, heading, now)?;
+        let mut refold: Vec<(i64, f64)> = Vec::new();
+        for r in rows {
+            let lane = Lane {
+                label: r.label.clone(),
+                pool_key: r.pool_key.clone(),
+                unit: r.unit.clone(),
+                role: r.role,
+                ..Lane::default()
+            };
+            let pool = upsert_pool(&tx, account, &lane, r.sample.at)?;
+            let mut sample = r.sample.clone();
+            sample.source = Source::Backfill;
+            if write_sample(&tx, pool, &sample)? {
+                refold.push((pool, sample.at));
+            }
+        }
+        let held: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM sample s JOIN pool p ON p.id = s.pool_id
+                  WHERE p.account_id = ?1 AND s.source = 'backfill'",
+                [account],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        let held = held.max(0) as u64;
+        meta_set(&tx, &backfill::meta_key(account_key), &backfill::done(held))?;
+        // As in `record`: an included pool folded again moves what its
+        // overage pools' spans were exhausted against.
+        overage::refold_linked(&tx, &mut refold)?;
+        refold.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        refold.dedup_by_key(|x| x.0);
+        for (pool, from) in refold {
+            refold_pool(&tx, pool, Some(from), t)?;
+        }
+        tx.commit().map_err(sql)?;
+        Ok(held)
     }
 
     /// The cycles stored for one pool, oldest first. For the tab and tests.
@@ -1701,5 +1768,164 @@ mod tests {
         assert_eq!(open, 3, "one open cycle per pool");
         assert_eq!(h.cycles("codex", &key, "secondary_window").unwrap().len(), 1);
         assert_eq!(h.count("account"), 1);
+    }
+
+    fn replayed(at: f64, pct: f64, reset: f64) -> backfill::Replayed {
+        backfill::Replayed {
+            pool_key: "secondary_window".into(),
+            label: "7d".into(),
+            unit: Unit::Pct,
+            role: PoolRole::Included,
+            sample: Sample {
+                at,
+                pct: Some(pct),
+                used: None,
+                limit: None,
+                window_secs: Some(WEEK),
+                reset_at: Some(reset),
+                source: Source::Backfill,
+                spacexsi: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_backfill_older_than_the_live_samples_refolds_and_never_writes_twice() {
+        let p = temp("backfill");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        // Live readings from weeks three and four only.
+        let mut live_at = Vec::new();
+        for k in 2..4 {
+            let base = a + k as f64 * WEEK;
+            let at = base + WEEK - 2.0 * H;
+            live_at.push(at);
+            h.record(&[obs(vec![lane("secondary_window", 30.0, at, base + WEEK, WEEK)])], &t, at)
+                .unwrap();
+        }
+        let key = obs(vec![]).account_key();
+        assert_eq!(h.cycles("codex", &key, "secondary_window").unwrap().len(), 2);
+        // Weeks one and two from the rollouts, arriving after them, plus a
+        // snapshot at the very instant a live sample was fetched.
+        let rows = vec![
+            replayed(a + 2.0 * H, 10.0, a + WEEK),
+            replayed(a + WEEK - 2.0 * H, 60.0, a + WEEK),
+            replayed(a + WEEK + 2.0 * H, 5.0, a + 2.0 * WEEK),
+            replayed(a + 2.0 * WEEK - 2.0 * H, 80.0, a + 2.0 * WEEK),
+            replayed(live_at[0], 99.0, a + 3.0 * WEEK),
+        ];
+        assert_eq!(h.replay("codex", &key, "CODEX", &rows, &t, a + 4.0 * WEEK).unwrap(), 4);
+        let samples = h.samples("codex", &key, "secondary_window").unwrap();
+        assert_eq!(samples.len(), 6);
+        // The live sample kept its reading; the snapshot at its key did not
+        // replace it.
+        let kept = samples.iter().find(|s| s.at == live_at[0]).unwrap();
+        assert_eq!((kept.source, kept.pct), (Source::Live, Some(30.0)));
+        assert_eq!(samples[0].source, Source::Backfill);
+        // Re-folded: four weeks, the same as folding every sample at once.
+        let cycles = h.cycles("codex", &key, "secondary_window").unwrap();
+        assert_eq!(cycles.len(), 4);
+        assert_eq!(cycles[0].peak_pct, Some(60.0));
+        assert_eq!(cycles[1].peak_pct, Some(80.0));
+        let fresh = fold::fold(&FoldInput {
+            role: Role::Included,
+            samples: &samples,
+            plans: &[],
+            resets: &[],
+            prev: None,
+            next_ordinal: 1,
+            thresholds: t,
+        });
+        let strip = |v: Vec<Cycle>| -> Vec<Cycle> {
+            v.into_iter()
+                .map(|mut c| {
+                    c.segments.clear();
+                    c
+                })
+                .collect()
+        };
+        assert_eq!(strip(cycles), strip(fresh.cycles));
+        assert_eq!(h.since("codex", &key), Some(a + 2.0 * H));
+        // Recorded as run, with what the account holds.
+        let mk = backfill::meta_key(&key);
+        assert_eq!(h.meta(&mk).unwrap(), Some(backfill::done(4)));
+        // The same replay again writes nothing and still says four.
+        assert_eq!(h.replay("codex", &key, "CODEX", &rows, &t, a + 4.0 * WEEK).unwrap(), 4);
+        assert_eq!(h.samples("codex", &key, "secondary_window").unwrap().len(), 6);
+        assert_eq!(h.count("account"), 1, "the live account, not a second one");
+    }
+
+    #[test]
+    fn only_one_pane_claims_the_backfill() {
+        let p = temp("claim");
+        let mut one = History::open(&p).unwrap();
+        let mut two = History::open(&p).unwrap();
+        let mk = backfill::meta_key("k");
+        let claim = |h: &mut History, now: f64| {
+            h.meta_update(&mk, |v| backfill::due(v, now).then(|| backfill::running(now)))
+                .unwrap()
+        };
+        assert!(claim(&mut one, 1000.0));
+        assert!(!claim(&mut two, 1001.0));
+        // A claim nobody renewed runs out.
+        assert!(claim(&mut two, 1000.0 + backfill::LEASE));
+        assert_eq!(one.meta(&mk).unwrap(), Some(backfill::running(1000.0 + backfill::LEASE)));
+    }
+
+    #[test]
+    fn the_recorder_backfills_from_the_rollouts_off_the_pass_and_says_so() {
+        let p = temp("runner");
+        let roots = p.parent().unwrap().join("sessions");
+        std::fs::create_dir_all(&roots).unwrap();
+        let o = obs(vec![]);
+        let snap = |stamp: &str, pct: f64| {
+            format!(
+                r#"{{"timestamp":"{stamp}","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"limit_id":"codex","primary":{{"used_percent":{pct},"window_minutes":10080,"resets_at":1790000000}}}}}}}}"#
+            )
+        };
+        let body = [
+            format!(r#"{{"type":"session_meta","payload":{{"creator_account_id":"{}"}}}}"#, o.account_id),
+            snap("2026-09-10T08:00:00Z", 5.0),
+            "{\"rate_limits\" broken".to_string(),
+            snap("2026-09-10T09:00:00Z", 9.0),
+        ]
+        .join("\n");
+        std::fs::write(roots.join("rollout-1.jsonl"), body).unwrap();
+        let t = Thresholds::default();
+        let mut r = super::super::Recorder::with_rollouts(p.clone(), vec![roots.clone()]);
+        let now = opscope_core::now();
+        let first = r.pass(std::slice::from_ref(&o), &t, now);
+        assert_eq!(first.notes.get("codex").map(String::as_str), Some("backfilling from rollouts"));
+        // A second pane on the same file does not read them again.
+        let mut other = super::super::Recorder::with_rollouts(p.clone(), vec![roots.clone()]);
+        let said = other.pass(std::slice::from_ref(&o), &t, now);
+        assert_eq!(said.notes.get("codex").map(String::as_str), Some("backfilling from rollouts"));
+        let mut done = None;
+        for _ in 0..500 {
+            let s = r.pass(std::slice::from_ref(&o), &t, opscope_core::now());
+            let note = s.notes.get("codex").cloned().unwrap_or_default();
+            if note != "backfilling from rollouts" {
+                done = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let done = done.expect("the backfill landed");
+        assert_eq!(
+            done.notes.get("codex").map(String::as_str),
+            Some("2 backfilled from rollouts · 1 lines skipped")
+        );
+        let at = crate::iso_epoch("2026-09-10T08:00:00Z").unwrap();
+        assert_eq!(done.since.get("codex"), Some(&at));
+        // The other pane learns it from the file.
+        let later = other.pass(std::slice::from_ref(&o), &t, opscope_core::now());
+        assert_eq!(later.notes.get("codex").map(String::as_str), Some("2 backfilled from rollouts"));
+        // An account with no id of its own is never backfilled: nothing
+        // ties a rollout to it.
+        let mut anon = o.clone();
+        anon.account_id.clear();
+        let mut third = super::super::Recorder::with_rollouts(temp("anon"), vec![roots]);
+        assert!(third.pass(&[anon], &t, opscope_core::now()).notes.is_empty());
     }
 }

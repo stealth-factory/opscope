@@ -548,6 +548,9 @@ fn history_rows(name: &str, s: &State, w: usize, p: &Palette) -> Vec<String> {
     if let Some(at) = s.history.since.get(name) {
         words.push(crate::history::since_text(*at));
     }
+    if let Some(note) = s.history.notes.get(name) {
+        words.push(note.clone());
+    }
     if let Some(note) = &s.history.note {
         words.push(note.clone());
     }
@@ -1302,6 +1305,13 @@ mod tests {
             }
         }
         assert!(history_rows("cursor", &State::default(), 80, &p).is_empty());
+        // A tab's own note sits beside its date, and only on that tab.
+        s.history.note = None;
+        s.history.notes.insert("codex".into(), "1,234 backfilled from rollouts".into());
+        let rows = plain(&history_rows("codex", &s, 200, &p)).concat();
+        assert!(rows.contains(" · 1,234 backfilled from rollouts"), "{rows}");
+        s.history.since.insert("cursor".into(), 1_763_510_400.0);
+        assert!(!plain(&history_rows("cursor", &s, 200, &p)).concat().contains("backfilled"));
     }
 
     #[test]
