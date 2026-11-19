@@ -29,7 +29,13 @@
 //! backfilled. A snapshot under no `session_meta`, or under one that names
 //! no account, is counted and dropped: it may belong to an account this
 //! machine was signed in as before, and a guess would put another account's
-//! week into this one's history.
+//! week into this one's history. A later `session_meta` naming another
+//! account ends the attribution from that line on. What cannot be seen: a
+//! session resumed after an account switch that writes no new
+//! `session_meta`. Nothing else in a rollout names the account - checked
+//! against real rollouts, where only `session_meta` carries
+//! `creator_account_id` - so such a session's later snapshots are still
+//! read as its creator's.
 //!
 //! **Which pool.** The keys the live lanes use (`codex::lanes`): the main
 //! limit's `primary` is `primary_window` and its `secondary` is
