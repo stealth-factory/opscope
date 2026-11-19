@@ -1770,7 +1770,7 @@ pub fn extra_lane(state: &Extra) -> Option<(f64, String)> {
 /// is what ISO 4217 is for and is always readable. `SEK 50` costs one cell
 /// more than a symbol would and invents nothing; a symbol guessed at for a
 /// currency nobody checked is worth less than that cell.
-fn cap_prefix(currency: &str) -> String {
+pub(crate) fn cap_prefix(currency: &str) -> String {
     match currency {
         // An empty code is not USD. The tab used to write `$` for it and
         // the lane followed, which is a claim the server never made.

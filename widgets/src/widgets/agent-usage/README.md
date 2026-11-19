@@ -2049,10 +2049,60 @@ too. A reset that happened while nothing was watching, and was climbed back
 past before the next reading with no instant or bank to show it, leaves no
 trace and is not recorded.
 
-For now each agent's tab ends in one dim line, `history since 19 Nov 2026`.
-Charts come later. A file written by a newer opscope is left alone and the
-line says so; a damaged one is renamed beside it, never deleted, and the line
-says that too.
+### The HISTORY section
+
+Each agent's tab ends in a `── HISTORY ──` section, one chart per quota in
+the order the tab draws them, each titled with the quota and how far back it
+goes:
+
+```
+ ── HISTORY ── 7d · 11 cycles since 13 Oct
+ 100┤┆    ┆
+    │█┆┆  ▄ ┆┆
+  50┤█▅▇┆┆█┆▄▄▄
+    │███▄▄█▅███▂
+   0└───────────
+   ↺ ?????
+     10-13 11-18
+  last 11: avg at least 34% of allowance (6 closed; 4 cut short left out) · none hit 100% · at
+  least 74% peak with 1 unknown reset
+  resets ↺: 5 unknown
+  now: 6% so far · 4 cut short by a restart · 9 lower bounds (┆): latest 11-18 at least 37%, last
+  seen 86m before reset
+```
+
+- **One bar per cycle**, on a 0-100 scale of one allowance. A cycle that used
+  more than one allowance - a reset refilled it - carries on above 100 in a
+  second shade. Spend past the allowance (Claude's extra usage, Cursor's
+  on-demand) sits on top in its own colour and its own unit, with the money at
+  the top of the scale: it is never drawn as a percentage of an allowance it
+  is not part of.
+- **Marks.** Under a bar, `↺` with `B` for a banked reset, `I` for one the
+  provider issued and `?` for one nobody can tell; a cut-short cycle carries
+  the mark of the reset that restarted it. A hollow `·` is a cycle nobody saw.
+  An open top `┆` is "at least": the last reading came well before the cycle
+  ended. A thin `│` divides two plans, and the lines name them.
+- **The lines under each chart say everything it shows**, so text mode and a
+  reader who cannot see the colours lose nothing: the average share of an
+  allowance over the closed cycles shown (cut-short cycles left out and
+  counted, and "at least" where a lower bound is in it), how many hit 100%
+  and on which day of the cycle (hours in, for a 5-hour window), the peak and
+  the resets in it, resets by kind, banked resets that expired unused, the
+  spend past the allowance (each stretch of spend counted once, however many
+  cycles it is shown against), the cycle still running ("so far", never a
+  total), unseen cycles and lower bounds.
+- **A rolling quota** has no cycles, so it gets a line of each day's highest
+  reading instead, broken on a day with no reading.
+- **Spend past the plan** gets its own chart too, one bar per cycle on the
+  provider's own clock, in money or requests. **A balance** (Codex credits,
+  Devin and Droid's extra usage) has no cycle, so its chart is spend per
+  calendar month, and says so.
+
+A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
+file written by a newer opscope is left alone and the section says so in one
+line instead of drawing charts; a damaged one is renamed beside it, never
+deleted, and the line says that too. Until the first reading of an account is
+written, the section says nothing has been recorded yet.
 
 Four settings tune how resets are told from noise, and a fifth fills in what a
 reset did where nothing the provider sent says:

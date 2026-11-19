@@ -508,7 +508,20 @@ let states = tc::Plot::stacked_bar(x, y, width, &shares);
 // Smooth horizontal fills, keeping the same fractions and marker geometry.
 let smooth_quota = tc::Plot::gradient_meter(x, y, width, used, elapsed, &fill, &track, &marker);
 let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
+// Columns of stacked parts on one scale, with marks: a hollow `·` for a slot
+// nobody measured, a `┆` above a top that is only a lower bound, a `│` divider.
+let cycles = tc::Plot::stacked_columns(x, y, &[
+    tc::Column::Stack { parts: vec![(100.0, used), (40.0, past_one)], open: None },
+    tc::Column::Hollow(dim.clone()),
+    tc::Column::Divider(grid.clone()),
+], height, peak);
 ```
+
+`stacked_columns` is agent-usage's utilisation history (OPS-306). In text a cell
+two parts share is the lower one's eighth block on the upper one's colour as a
+background, as a stacked bar shares a cell; pixels draw each part at its exact
+height. The marks are glyphs in text and small strokes in pixels, and the
+widget states every one of them in its text lines too.
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
 Claude, Codex and Grok calendars all use the same gapless core heatmap renderer:

@@ -28,6 +28,8 @@
 //! * [`resets`] - reset detection and bank events (phase 2).
 //! * [`overage`] - spend past an allowance: spans, charges, links (phase 4).
 //! * [`backfill`] - the one-off Codex rollout replay, read off the poller.
+//! * [`chart`] - what a tab's HISTORY section draws, read once a pass.
+//! * [`draw`] - the HISTORY section itself: charts and their text lines.
 //!
 //! Every timestamp is wall-clock epoch seconds of a *fetch*, never of the
 //! pass, so a pane that slept, or a reading another pane fetched, lands at
@@ -37,6 +39,8 @@
 // return nothing yet, so the types they hand back are not built by this one.
 // Each phase removes its module's allowance when it fills the body.
 pub mod backfill;
+pub mod chart;
+pub mod draw;
 // The fold's types carry what phase 2 (resets) and phase 3 (charts) read.
 #[allow(dead_code)]
 pub mod fold;
@@ -263,15 +267,9 @@ pub struct Status {
     /// tab -> a few dim words about where its history came from: the Codex
     /// backfill running, what it wrote, or why it stopped.
     pub notes: HashMap<String, String>,
-}
-
-/// `history since 3 Sep 2026`, in the local calendar.
-pub fn since_text(at: f64) -> String {
-    use chrono::{Local, TimeZone};
-    match Local.timestamp_opt(at.trunc() as i64, 0).single() {
-        Some(t) => format!("history since {}", t.format("%-d %b %Y")),
-        None => "history since ?".into(),
-    }
+    /// tab -> its HISTORY section's charts, read off the file this pass, so
+    /// the draw thread never opens it.
+    pub charts: HashMap<String, chart::TabHistory>,
 }
 
 /// Record one pass (spec §4): every lane, bank, plan and watch state that
@@ -354,6 +352,11 @@ impl Recorder {
             }
             if let Some((tab, words)) = self.backfill.tick(h, obs, t, now) {
                 status.notes.insert(tab, words);
+            }
+            match chart::gather(h, obs) {
+                Ok(charts) => status.charts = charts,
+                Err(why) if store::busy(&why) => {}
+                Err(why) => self.failed = Some(format!("history not read: {why}")),
             }
             for o in obs {
                 // A unified account's tab draws the plan's own history.
@@ -469,12 +472,5 @@ mod tests {
         };
         assert_eq!(count_only.credits_json(), None);
         assert_eq!(BankReading::from_row(5.0, 3, None), count_only);
-    }
-
-    #[test]
-    fn the_since_line_names_a_day() {
-        let text = since_text(1_763_510_400.0);
-        assert!(text.starts_with("history since "), "{text}");
-        assert!(text.contains("2025"), "{text}");
     }
 }

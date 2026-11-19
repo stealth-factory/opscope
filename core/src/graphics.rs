@@ -483,6 +483,77 @@ impl Plot {
         Self::filled(x, y, columns.len(), height, rects, text)
     }
 
+    /// Columns of stacked parts on one scale, one cell each: a utilisation
+    /// history's bars, where a cycle is its use of the allowance, then what
+    /// it used past one allowance, then the spend past that, each in its own
+    /// colour. See [`Column`] for the marks a column can carry instead.
+    ///
+    /// In text a cell the stack passes through whole is `█`; the cell the
+    /// top lands in is an eighth block; a cell two parts share is the lower
+    /// one's eighth block on the upper one's colour as a background, the
+    /// way a stacked bar shares a cell, with the background cleared after
+    /// it. Without a truecolour pair the larger share takes the whole cell.
+    /// Pixels draw the same parts at their exact heights.
+    pub fn stacked_columns(x: usize, y: usize, columns: &[Column], height: usize, peak: f64) -> Self {
+        let peak = if peak.is_finite() && peak > 0.0 { peak } else { 1.0 };
+        let clean = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        let mut rects = Vec::new();
+        let h = height as f64;
+        for (i, column) in columns.iter().enumerate() {
+            let x = i as f64;
+            match column {
+                Column::Gap => {}
+                Column::Hollow(c) => rects.push(Rect { x: x + 0.35, y: h - 0.3, width: 0.3, height: 0.2, colour: c.clone() }),
+                Column::Divider(c) => rects.push(Rect { x: x + 0.45, y: 0.0, width: 0.1, height: h, colour: c.clone() }),
+                Column::Stack { parts, open } => {
+                    let mut base = 0.0f64;
+                    for (v, c) in parts {
+                        let lo = base.min(peak);
+                        base += clean(*v);
+                        let hi = base.min(peak);
+                        if hi > lo {
+                            rects.push(Rect { x, y: h - hi / peak * h, width: 1.0, height: (hi - lo) / peak * h, colour: c.clone() });
+                        }
+                    }
+                    if let Some(c) = open {
+                        let top = base.min(peak) / peak * h;
+                        if top < h {
+                            let bottom = (h - top - 0.15).max(0.0);
+                            let tall = 0.45f64.min(bottom);
+                            rects.push(Rect { x: x + 0.4, y: bottom - tall, width: 0.2, height: tall, colour: c.clone() });
+                        }
+                    }
+                }
+            }
+        }
+        let no_colour = super::theme::no_color();
+        let text = (0..height)
+            .map(|r| {
+                let top = peak * (height - r) as f64 / h;
+                let bottom = peak * (height - r - 1) as f64 / h;
+                let mut line: Vec<(String, String)> = Vec::new();
+                let mut background = false;
+                for column in columns {
+                    let (ink, ch) = column_cell(column, top, bottom, peak, r + 1 == height, no_colour);
+                    let painted = ink.contains("\x1b[48;");
+                    match line.last_mut() {
+                        Some((last, text)) if !painted && !background && *last == ink => text.push(ch),
+                        _ => {
+                            let reset = if background && !painted { super::NOBG } else { "" };
+                            line.push((format!("{reset}{ink}"), ch.to_string()));
+                        }
+                    }
+                    background = painted;
+                }
+                if background {
+                    line.push((super::NOBG.to_string(), String::new()));
+                }
+                line
+            })
+            .collect();
+        Self::filled(x, y, columns.len(), height, rects, text)
+    }
+
     /// A discrete calendar grid. `None` stays a blank missing-data cell, distinct
     /// from a measured zero (which the caller supplies with its zero colour).
     pub fn heatmap(
@@ -2019,6 +2090,80 @@ fn replace_cells(row: &str, x: usize, width: usize, replacement: &str) -> String
     out
 }
 
+/// One column of [`Plot::stacked_columns`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Column {
+    /// Parts stacked from the floor, each (height on the plot's scale,
+    /// colour). `open` marks the top as a lower bound - the figure is at
+    /// least this - with a short dashed stroke above it in that colour:
+    /// `┆` in text.
+    Stack { parts: Vec<(f64, String)>, open: Option<String> },
+    /// A slot with nothing measured in it: a dot on the floor, `·`.
+    Hollow(String),
+    /// A thin rule the full height of the plot, `│`: a boundary between two
+    /// runs of columns, such as a change of plan.
+    Divider(String),
+    /// Nothing at all.
+    Gap,
+}
+
+/// One text cell of a [`Column`] between `bottom` and `top` on the scale:
+/// its ink (with a background where two parts share it) and its glyph.
+fn column_cell(column: &Column, top: f64, bottom: f64, peak: f64, floor: bool, no_colour: bool) -> (String, char) {
+    match column {
+        Column::Gap => (String::new(), ' '),
+        Column::Hollow(c) => (c.clone(), if floor { '·' } else { ' ' }),
+        Column::Divider(c) => (c.clone(), '│'),
+        Column::Stack { parts, open } => {
+            // (lower edge, upper edge, colour) of each part, on the scale.
+            let mut spans = Vec::new();
+            let mut base = 0.0f64;
+            for (v, c) in parts {
+                let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+                if v > 0.0 {
+                    spans.push((base.min(peak), (base + v).min(peak), c.as_str()));
+                }
+                base += v;
+            }
+            let total = base.min(peak);
+            let cell = top - bottom;
+            if total <= bottom {
+                // The open mark sits in the first empty cell above the top.
+                return match open.as_ref().filter(|_| total > bottom - cell) {
+                    Some(c) => (c.clone(), '┆'),
+                    None => (String::new(), ' '),
+                };
+            }
+            let inside: Vec<(f64, f64, &str)> = spans
+                .iter()
+                .filter(|(lo, hi, _)| *hi > bottom && *lo < top)
+                .map(|(lo, hi, c)| (lo.max(bottom), hi.min(top), *c))
+                .collect();
+            let eighths = |v: f64| ((v / cell * 8.0).round() as usize).min(8);
+            match inside.as_slice() {
+                [] => (String::new(), ' '),
+                [(_, hi, c)] => (c.to_string(), super::EIGHTHS[eighths(hi - bottom).max(1)]),
+                [(_, lower_hi, lower), (upper_lo, upper_hi, upper), ..] => {
+                    let k = eighths(lower_hi - bottom);
+                    let upper_share = upper_hi - upper_lo;
+                    let behind = rgb(upper).filter(|_| !no_colour);
+                    match behind {
+                        // The upper part fills most of the rest of the cell:
+                        // the lower one's block on the upper one's colour.
+                        Some([r, g, b]) if (1..8).contains(&k) && upper_share >= (top - lower_hi) / 2.0 => {
+                            (format!("{lower}\x1b[48;2;{r};{g};{b}m"), super::EIGHTHS[k])
+                        }
+                        _ if upper_share > lower_hi - bottom => {
+                            (upper.to_string(), super::EIGHTHS[eighths(upper_hi - bottom).max(1)])
+                        }
+                        _ => (lower.to_string(), super::EIGHTHS[k.max(1)]),
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn rgb(colour: &str) -> Option<[u8; 3]> {
     let s = colour.strip_prefix("\x1b[38;2;")?.strip_suffix('m')?;
     let mut values = s.split(';').map(str::parse::<u8>);
@@ -3326,6 +3471,46 @@ mod tests {
         // A track that is no truecolour is left out.
         let bare = Plot::bars_on_track(0, 1, &columns, 2, 100.0, "");
         assert!(bare.text_row(0).iter().all(|(ink, _)| !ink.contains("48;2")));
+    }
+
+    #[test]
+    fn stacked_columns_share_a_cell_and_carry_their_marks() {
+        let low = super::super::rgb(220, 90, 80);
+        let high = super::super::rgb(240, 200, 60);
+        let dim = super::super::rgb(120, 120, 120);
+        let columns = vec![
+            // 0-100 then 100-150 on a 0-200 scale, four rows of 50.
+            Column::Stack { parts: vec![(100.0, low.clone()), (50.0, high.clone())], open: None },
+            // A part boundary inside a cell: 0-75 low, 75-100 high.
+            Column::Stack { parts: vec![(75.0, low.clone()), (25.0, high.clone())], open: None },
+            // "At least 60": the mark in the first empty cell above it.
+            Column::Stack { parts: vec![(60.0, low.clone())], open: Some(dim.clone()) },
+            Column::Hollow(dim.clone()),
+            Column::Divider(dim.clone()),
+            Column::Gap,
+        ];
+        let plot = Plot::stacked_columns(2, 1, &columns, 4, 200.0);
+        assert_eq!((plot.x, plot.y, plot.width, plot.height), (2, 1, 6, 4));
+        let cells = |r: usize| -> String { plot.text_row(r).iter().map(|(_, t)| t.as_str()).collect() };
+        assert_eq!(cells(0), "    │ ");
+        assert_eq!(cells(1), "█ ┆ │ ");
+        assert_eq!(cells(2), "█▄▂ │ ");
+        assert_eq!(cells(3), "███·│ ");
+        // Row 1 (100-150) is the upper part whole; row 2 (50-100) of the
+        // second column is the lower part's half block on the upper part.
+        assert_eq!(plot.text_row(1)[0], (high.clone(), "█".to_string()));
+        let shared = &plot.text_row(2)[1];
+        assert!(shared.0.starts_with(&low) && shared.0.contains("\x1b[48;2;240;200;60m"), "{shared:?}");
+        assert_eq!(shared.1, "▄");
+        // The background is cleared on the next cell.
+        assert!(plot.text_row(2)[2].0.starts_with(super::super::NOBG));
+        // Pixels: the parts at their exact heights.
+        let px = pixels(&plot);
+        let w = 6 * CELL_W;
+        let at = |x: usize, y: usize| &px[(y * w + x) * 4..(y * w + x) * 4 + 3];
+        assert_eq!(at(2, 4 * CELL_H - 1), &[220, 90, 80]);
+        assert_eq!(at(2, CELL_H + 2), &[240, 200, 60]);
+        assert_eq!(alpha_at(&px, w, 2, 2), 0, "nothing above 150");
     }
 
     #[test]

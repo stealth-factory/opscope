@@ -541,29 +541,24 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
     out
 }
 
-/// The dim line under a tab saying how far back its history goes, and why
-/// it is not being written when it is not. Nothing before the first sample.
-fn history_rows(name: &str, s: &State, w: usize, p: &Palette) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
-    if let Some(at) = s.history.since.get(name) {
-        words.push(crate::history::since_text(*at));
-    }
-    if let Some(note) = s.history.notes.get(name) {
-        words.push(note.clone());
-    }
-    if let Some(note) = &s.history.note {
-        words.push(note.clone());
-    }
-    if words.is_empty() {
+/// The tab's HISTORY section (OPS-306): a chart per pool with the lines
+/// that say what it shows, or one line saying why there is none - the file
+/// newer, damaged, or not yet written to for this account. Nothing before
+/// the poller's first pass has read the file: not having looked yet is not
+/// "nothing recorded".
+fn history_rows(name: &str, s: &State, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let h = &s.history;
+    if h.charts.is_empty() && h.note.is_none() && !h.notes.contains_key(name) {
         return Vec::new();
     }
-    // Wrapped at spaces, a word longer than the pane broken by hand, so a
-    // narrow pane wraps rather than cuts.
-    let room = w.saturating_sub(2).max(1);
-    tc::wrap_words(&words.join(" · "), room)
-        .into_iter()
-        .map(|line| tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w.saturating_sub(1).max(1)))
-        .collect()
+    crate::history::draw::section(
+        h.charts.get(name),
+        h.note.as_deref(),
+        h.notes.get(name).map(String::as_str),
+        w,
+        p,
+        plots,
+    )
 }
 
 /// Every agent's quotas on one screen, worst first.
@@ -1118,16 +1113,19 @@ fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let first = plots.len();
     let mut body = tab_rows(name, s, w, h, cfg, p, tabs, plots);
-    // The history so far, under everything else (OPS-304). Phase 3 draws
-    // its charts here.
+    // The history so far, under everything else (OPS-306).
     if name != SUMMARY_TAB {
-        let since = history_rows(name, s, w, p);
-        if !since.is_empty() {
+        let mut local = Vec::new();
+        let history = history_rows(name, s, w, p, &mut local);
+        if !history.is_empty() {
             // Appended only: a trailing blank row may be a plot's.
             if body.last().is_some_and(|r| !r.is_empty()) {
                 body.push(String::new());
             }
-            body.extend(since);
+            tc::append_plot_rows(&mut body, plots, |into| {
+                into.extend(local);
+                history
+            });
         }
     }
     // Where this tab's readings came from, above them: nothing when every
@@ -1288,30 +1286,39 @@ mod tests {
     }
 
     #[test]
-    fn the_history_line_sits_under_the_tab_and_never_outgrows_the_pane() {
+    fn the_history_section_says_why_in_one_line_and_never_outgrows_the_pane() {
         let p = palette();
         let mut s = State::default();
-        s.history.since.insert("codex".into(), 1_763_510_400.0);
+        let mut plots = Vec::new();
+        // Before the first pass has read the file: nothing, not "nothing
+        // recorded".
+        assert!(history_rows("codex", &s, 80, &p, &mut plots).is_empty());
         s.history.note = Some("history file was damaged (file is not a database); kept as agent-usage-history.sqlite.damaged-1763510400, started again".into());
         for w in [12usize, 26, 40, 80] {
-            let rows = history_rows("codex", &s, w, &p);
+            let rows = history_rows("codex", &s, w, &p, &mut plots);
             // Nothing dropped: every character of the line is on screen,
             // wrapped at spaces or, for a word wider than the pane, broken.
             let squeezed: String = plain(&rows).concat().chars().filter(|c| !c.is_whitespace()).collect();
-            assert!(squeezed.contains("historysince"), "width {w}: {squeezed}");
             assert!(squeezed.contains("agent-usage-history.sqlite.damaged-1763510400,startedagain"), "width {w}: {squeezed}");
+            // The reason, and no chart: a file not being read has nothing
+            // in it to draw.
+            assert!(!squeezed.contains("HISTORY"), "width {w}: {squeezed}");
             for r in plain(&rows) {
                 assert!(tc::display_width(&r) < w, "width {w}: {r:?}");
             }
         }
-        assert!(history_rows("cursor", &State::default(), 80, &p).is_empty());
-        // A tab's own note sits beside its date, and only on that tab.
+        assert!(plots.is_empty());
+        // Read, and nothing yet for this account: said in one line.
         s.history.note = None;
+        s.history.charts.insert("cursor".into(), Default::default());
+        let rows = plain(&history_rows("codex", &s, 80, &p, &mut plots));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("nothing recorded"), "{rows:?}");
+        // A tab's own note is on that tab only.
         s.history.notes.insert("codex".into(), "1,234 backfilled from rollouts".into());
-        let rows = plain(&history_rows("codex", &s, 200, &p)).concat();
-        assert!(rows.contains(" · 1,234 backfilled from rollouts"), "{rows}");
-        s.history.since.insert("cursor".into(), 1_763_510_400.0);
-        assert!(!plain(&history_rows("cursor", &s, 200, &p)).concat().contains("backfilled"));
+        let rows = plain(&history_rows("codex", &s, 200, &p, &mut plots)).concat();
+        assert!(rows.contains("1,234 backfilled from rollouts"), "{rows}");
+        assert!(!plain(&history_rows("cursor", &s, 200, &p, &mut plots)).concat().contains("backfilled"));
     }
 
     #[test]
