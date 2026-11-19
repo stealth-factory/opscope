@@ -949,7 +949,13 @@ fn load_cycles_from(conn: &Connection, pool: i64, from: i64) -> Result<Vec<(i64,
         .prepare(
             "SELECT id, ordinal, starts_at, ends_at, closed_at, window_secs, cycle_model, start_source, end_reason,
                     plan, peak_pct, consumed_pct, allowances, available_pct, end_is_lower_bound, used_amount,
-                    limit_amount, exhausted_at, first_obs_at, last_obs_at, coverage
+                    limit_amount, exhausted_at, first_obs_at, last_obs_at, coverage,
+                    -- Derived, not a column (§5.7): a reset that began in this
+                    -- cycle with no known figure before it.
+                    EXISTS (SELECT 1 FROM reset_event e
+                             WHERE e.pool_id = cycle.pool_id AND e.at_lo >= cycle.starts_at
+                               AND (cycle.closed_at IS NULL OR e.at_lo < cycle.closed_at)
+                               AND json_extract(e.evidence, '$.before_known') = 0)
                FROM cycle WHERE pool_id = ?1 AND ordinal >= ?2 ORDER BY ordinal",
         )
         .map_err(sql)?;
@@ -978,6 +984,7 @@ fn load_cycles_from(conn: &Connection, pool: i64, from: i64) -> Result<Vec<(i64,
                     first_obs_at: r.get(18)?,
                     last_obs_at: r.get(19)?,
                     coverage: r.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
+                    consumed_is_lower_bound: r.get::<_, i64>(21)? != 0,
                     segments: Vec::new(),
                 },
             ))
@@ -1039,10 +1046,12 @@ fn insert_cycle(tx: &Transaction, pool: i64, c: &Cycle) -> Result<i64, String> {
 /// hollow cycles between them. Everything after is deleted and rebuilt from
 /// the samples after the last kept observation.
 fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -> Result<(), String> {
-    let (account, role): (i64, String) = tx
-        .query_row("SELECT account_id, role FROM pool WHERE id = ?1", [pool], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let (account, role, provider): (i64, String, String) = tx
+        .query_row(
+            "SELECT p.account_id, p.role, a.provider FROM pool p JOIN account a ON a.id = p.account_id WHERE p.id = ?1",
+            [pool],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .map_err(sql)?;
     let role = Role::from_name(&role);
     // The second-latest closed, observed cycle seen before `from`: one
@@ -1066,6 +1075,14 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         None => None,
     };
     let keep_ordinal = prev.as_ref().map_or(0, |c| c.ordinal as i64);
+    let kept_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM cycle WHERE pool_id = ?1 AND ordinal = ?2",
+            params![pool, keep_ordinal],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
     let after = prev.as_ref().and_then(|c| c.last_obs_at);
     let gone = "SELECT id FROM cycle WHERE pool_id = ?1 AND ordinal > ?2";
     tx.execute(
@@ -1116,7 +1133,8 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         banks: &banks,
         plans: &plans,
         thresholds: *t,
-        effect_override: None,
+        role,
+        effect_override: t.reset_effect.get(&provider).map(resets::EffectOverride::name),
     });
     let out = fold::fold(&FoldInput {
         role,
@@ -1132,11 +1150,15 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         ids.push((insert_cycle(tx, pool, c)?, c));
     }
     for e in &found {
+        // The cycle it happened in: the one its earlier reading belongs to,
+        // which a restarted reset closed (§3.6) - the kept one when that
+        // reading is the kept cycle's last.
         let cycle = ids
             .iter()
             .rev()
-            .find(|(_, c)| c.starts_at <= e.at_hi)
-            .map(|(id, _)| *id);
+            .find(|(_, c)| c.starts_at <= e.at_lo)
+            .map(|(id, _)| *id)
+            .or(kept_id);
         tx.execute(
             "INSERT OR IGNORE INTO reset_event(pool_id, cycle_id, at_lo, at_hi, kind, cycle_effect, signals, pct_before,
                     pct_after, reset_at_before, reset_at_after, group_id, evidence)
@@ -1456,13 +1478,24 @@ mod tests {
         assert_eq!(cycles.len(), 3);
         assert_eq!(cycles[0].peak_pct, Some(95.0));
         assert_eq!(cycles[0].first_obs_at, Some(a + 2.0 * H));
-        // The same as folding every sample at once.
+        // The same as folding every sample at once. 95% then 30% in one
+        // week is a reset (phase 2), so the fresh fold is handed it too.
         let all = h.samples("codex", &key, "secondary_window").unwrap();
+        let found = resets::detect(&resets::DetectInput {
+            before: None,
+            samples: &all,
+            banks: &[],
+            plans: &[],
+            thresholds: t,
+            role: Role::Included,
+            effect_override: None,
+        });
+        assert_eq!(found.len(), 1);
         let fresh = fold::fold(&FoldInput {
             role: Role::Included,
             samples: &all,
             plans: &[],
-            resets: &[],
+            resets: &found,
             prev: None,
             next_ordinal: 1,
             thresholds: t,

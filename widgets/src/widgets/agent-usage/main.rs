@@ -2087,7 +2087,9 @@ struct Config {
     /// at or under `history_near_zero` points is "about zero"; after a
     /// longer gap a fall of `history_offline_fall` points or
     /// `history_offline_fall_pct` percent of the earlier figure, whichever
-    /// is larger, counts. Read by reset detection (OPS-305).
+    /// is larger, counts. `history_reset_effect` names, per provider, the
+    /// effect of a reset with no instant to read one from. Read by reset
+    /// detection (OPS-305).
     history: crate::history::Thresholds,
     /// Notion's `token_v2` session cookie. Empty reads `notion_token_env`.
     notion_token: String,
@@ -2174,6 +2176,9 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             near_zero_pct: tc::cfg_f64(&raw, "history_near_zero", 1.0).clamp(0.0, 100.0),
             offline_fall_pts: tc::cfg_f64(&raw, "history_offline_fall", 3.0).clamp(0.0, 100.0),
             offline_fall_share: tc::cfg_f64(&raw, "history_offline_fall_pct", 5.0).clamp(0.0, 100.0),
+            // Per provider, `{"droid": "restarted"}`; absent or unknown is
+            // no override, so an event with no instant stays `unknown`.
+            reset_effect: crate::history::resets::ResetEffects::from_config(&raw["history_reset_effect"]),
         },
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),

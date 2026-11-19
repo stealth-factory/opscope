@@ -60,7 +60,7 @@
 /// Bumped whenever a change here, or in [`super::resets`], would fold the
 /// same samples differently. A file stamped with another version is folded
 /// again from its samples when it is opened.
-pub const DETECTOR_VERSION: i64 = 1;
+pub const DETECTOR_VERSION: i64 = 2;
 
 /// A figure at or above this is "exhausted" (§3.6 `exhausted_at`, §6.2).
 pub const EXHAUSTED_PCT: f64 = 99.5;
@@ -289,6 +289,11 @@ pub struct ResetEvent {
     pub group_id: Option<i64>,
     /// JSON: the rules, thresholds and sources that decided it.
     pub evidence: String,
+    /// Whether the figure just before the reset is known: false when the
+    /// reset was found by the bank or the instant alone, or after an offline
+    /// gap, so the cycle's `consumed_pct` is only a lower bound (§5.7).
+    /// Kept in `evidence` as `before_known`, not a column of its own.
+    pub before_known: bool,
 }
 
 /// A stretch of a cycle between kept-boundary resets (`segment`).
@@ -337,6 +342,10 @@ pub struct Cycle {
     /// 0..1: how much of the cycle was watched (§5.8). For an open cycle,
     /// of the part up to its last observation.
     pub coverage: f64,
+    /// A reset in this cycle came with no known figure before it (§5.7), so
+    /// `consumed_pct` is "at least". Derived: the store reads it back from
+    /// the cycle's reset events rather than from a column.
+    pub consumed_is_lower_bound: bool,
     pub segments: Vec<Segment>,
 }
 
@@ -345,6 +354,13 @@ impl Cycle {
     /// through while nothing was watching.
     pub fn is_hollow(&self) -> bool {
         self.first_obs_at.is_none()
+    }
+
+    /// Cut short by a `restarted` reset (§5.7): a two-day "week" at 60% is
+    /// not comparable with a whole one, so it is left out of averages by
+    /// default and drawn at its true width.
+    pub fn cut_short(&self) -> bool {
+        self.end_reason == Some(EndReason::Reset)
     }
 
     fn open(
@@ -376,6 +392,7 @@ impl Cycle {
             first_obs_at: None,
             last_obs_at: None,
             coverage: 0.0,
+            consumed_is_lower_bound: false,
             segments: Vec::new(),
         }
     }
@@ -407,6 +424,9 @@ pub struct Thresholds {
     /// percent of the earlier figure.
     pub offline_fall_pts: f64,
     pub offline_fall_share: f64,
+    /// `history_reset_effect`: per provider, the effect recorded for a reset
+    /// with no instant to read one from (§5.5).
+    pub reset_effect: super::resets::ResetEffects,
 }
 
 impl Default for Thresholds {
@@ -416,6 +436,7 @@ impl Default for Thresholds {
             near_zero_pct: 1.0,
             offline_fall_pts: 3.0,
             offline_fall_share: 5.0,
+            reset_effect: super::resets::ResetEffects::default(),
         }
     }
 }
@@ -454,7 +475,7 @@ fn plan_at(plans: &[PlanChange], at: f64) -> Option<&str> {
 
 /// The first plan change strictly after `lo` and at or before `hi` that
 /// names a different plan from the one in force at `lo`.
-fn plan_change_between(plans: &[PlanChange], lo: f64, hi: f64) -> Option<&PlanChange> {
+pub fn plan_change_between(plans: &[PlanChange], lo: f64, hi: f64) -> Option<&PlanChange> {
     let before = plan_at(plans, lo)?;
     plans.iter().find(|p| p.at > lo && p.at <= hi && p.plan != before)
 }
@@ -467,7 +488,7 @@ fn differs(a: Option<f64>, b: Option<f64>, by: f64) -> bool {
 /// three readings in a row, each a window ahead of its own fetch time, the
 /// instant moving later each time, spanning more than two tolerances. A
 /// fixed window's instant stands still while the clock catches it up.
-fn is_rolling(samples: &[Sample]) -> bool {
+pub fn is_rolling(samples: &[Sample]) -> bool {
     let ahead = |s: &Sample| match (s.reset_at, s.window_secs) {
         (Some(r), Some(w)) if w > 0.0 => (r - s.at - w).abs() <= tolerance(Some(w)),
         _ => false,
@@ -648,7 +669,7 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
     for s in input.samples {
         let Some(b) = cur.as_mut() else {
             // The first cycle of this fold.
-            let (start, source) = match (s.reset_at, s.window_secs) {
+            let (start, mut source) = match (s.reset_at, s.window_secs) {
                 (Some(r), Some(w)) if w > 0.0 => (r - w, StartSource::Server),
                 _ => (s.at, StartSource::Inferred),
             };
@@ -673,6 +694,15 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
                 Some(end) if start > end => (CycleModel::UseAnchored, true),
                 _ => (input.prev.map_or(CycleModel::Contiguous, |p| p.model), false),
             };
+            // Folding on from the cycle a restarted reset closed: this one
+            // starts at that reset's instant, as a fold over everything has it.
+            if input
+                .resets
+                .iter()
+                .any(|e| e.at_hi == s.at && matches!(e.effect, CycleEffect::Restarted { .. }))
+            {
+                source = StartSource::Reset;
+            }
             let mut b = Building::new(Cycle::open(ordinal, start, s.reset_at, s.window_secs, model, source));
             ordinal += 1;
             observed_model.push(seen);
@@ -687,6 +717,11 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
 
         // A reset established at this sample (phase 2 fills `resets`).
         if let Some(ev) = input.resets.iter().find(|e| e.at_hi == s.at) {
+            // The figure before the reset is unknown: what this cycle used
+            // is "at least" (§5.7).
+            if !ev.before_known {
+                b.cycle.consumed_is_lower_bound = true;
+            }
             match ev.effect {
                 CycleEffect::KeptBoundary => b.split(ev.at_hi),
                 CycleEffect::Restarted { new_start } => {
@@ -858,25 +893,47 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
     let mut last_pct: Option<f64> = input.prev.and_then(|p| p.peak_pct);
     let mut prev_at: Option<f64> = None;
     for s in input.samples {
+        // A reset established at this sample (phase 2): only a bank fall or
+        // the configured effect makes one on a pool with no instant.
+        let ev = input.resets.iter().find(|e| e.at_hi == s.at).filter(|_| cur.is_some());
+        if let (Some(ev), Some(b)) = (ev, cur.as_mut()) {
+            if !ev.before_known {
+                b.cycle.consumed_is_lower_bound = true;
+            }
+            if ev.effect == CycleEffect::KeptBoundary {
+                b.split(s.at);
+            }
+        }
+        let restarted = ev.and_then(|e| match e.effect {
+            CycleEffect::Restarted { new_start } => Some(new_start),
+            _ => None,
+        });
         let fell = matches!((last_pct, s.pct), (Some(a), Some(b)) if a > near && b <= near);
         let limit_changed =
             matches!((cur.as_ref(), prev_at), (Some(b), Some(_)) if differs(b.cycle.limit_amount, s.limit, 1e-9));
-        if cur.is_none() || fell || limit_changed {
+        if cur.is_none() || fell || limit_changed || restarted.is_some() {
+            let start = restarted.unwrap_or(s.at);
             if let Some(b) = cur.take() {
                 let why = if limit_changed {
                     EndReason::LimitChanged
+                } else if restarted.is_some() {
+                    EndReason::Reset
                 } else {
                     EndReason::Scheduled
                 };
-                out.push(b.finish(Some((s.at, why))));
+                out.push(b.finish(Some((start, why))));
             }
             let mut b = Building::new(Cycle::open(
                 ordinal,
-                s.at,
+                start,
                 None,
                 None,
                 CycleModel::Undated,
-                StartSource::Inferred,
+                if restarted.is_some() {
+                    StartSource::Reset
+                } else {
+                    StartSource::Inferred
+                },
             ));
             ordinal += 1;
             b.observe(s, input.plans);
@@ -1245,6 +1302,7 @@ mod tests {
             reset_at_after: Some(a + WEEK),
             group_id: None,
             evidence: "{}".into(),
+            before_known: true,
         };
         let out = run_with(&samples, &[], &[reset], Role::Included);
         let c = &out.cycles[0];
@@ -1276,6 +1334,7 @@ mod tests {
             reset_at_after: Some(new_start + WEEK),
             group_id: None,
             evidence: "{}".into(),
+            before_known: true,
         };
         let out = run_with(&samples, &[], &[reset], Role::Included);
         assert_eq!(out.cycles.len(), 2);

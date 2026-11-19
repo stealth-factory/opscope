@@ -2032,13 +2032,30 @@ it was watched, and whether the last figure was taken so long before the end
 that it is only a lower bound. Windows nobody saw on a calendar-like quota are
 kept as empty cycles rather than guessed at.
 
+It also notices resets, wherever they were redeemed - another device, the
+provider's web app, or the provider itself - from what the server says
+afterwards: a reset instant that jumped, a figure that fell back to about zero
+while readings were flowing (or by a few points after a gap), or a banked
+reset credit that went from the list before its expiry. A new plan, limit or
+window, a scheduled end, and an idle window whose instant slid are ruled out
+first. Each reset is recorded between the two readings that bracket it, with
+what it did (kept the cycle's end and refilled the allowance, restarted the
+cycle, or unknown) and whether it was banked, issued by the provider, or
+unknown - "issued" only when the bank was read either side and nothing left it.
+A week used to 100%, reset, then used to 40% reads as 140% of one allowance and
+70% of the two that were available; a figure from before a reset nobody saw is
+kept as "at least". The bank's own grants, redemptions and expiries are logged
+too. A reset that happened while nothing was watching, and was climbed back
+past before the next reading with no instant or bank to show it, leaves no
+trace and is not recorded.
+
 For now each agent's tab ends in one dim line, `history since 19 Nov 2026`.
 Charts come later. A file written by a newer opscope is left alone and the
 line says so; a damaged one is renamed beside it, never deleted, and the line
 says that too.
 
-Four settings tune how resets will be told from noise, and are read once reset
-detection lands:
+Four settings tune how resets are told from noise, and a fifth fills in what a
+reset did where nothing the provider sent says:
 
 | key | default | what it does |
 |---|---|---|
@@ -2046,6 +2063,7 @@ detection lands:
 | `history_near_zero` | `1` | percentage points. While watching, a reset reads as a figure falling back to at most this |
 | `history_offline_fall` | `3` | percentage points. After an offline gap, a fall of at least this - or `history_offline_fall_pct` of the earlier figure, whichever is larger - counts |
 | `history_offline_fall_pct` | `5` | percent of the earlier figure, the other half of the offline fall |
+| `history_reset_effect` | `{}` | per agent, `kept_boundary` or `restarted`: the effect recorded for a reset with no reset date to read it from, e.g. `{"droid": "restarted"}`. Marked as configured, never as seen; a reset with dates ignores it |
 
 ## The thing this widget does not do
 
